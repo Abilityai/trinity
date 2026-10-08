@@ -7,6 +7,15 @@
 // would close one.
 import { draftedLandingFor } from './portalDrafts'
 
+// ent#621: the key map is the single declaration of every Workspace chord, so
+// the two hotkey helpers below delegate to it rather than keeping a second
+// definition of "⌘J". That closes a cycle with `portalKeymap.js` (which reuses
+// `isMacLike` and `nextActiveIndex` from here) — benign, and it must STAY
+// benign: neither module may touch an import of the other at module-evaluation
+// time. Both init orders are exercised, by `workspaceKeymap.spec.js` (map
+// first) and `portalChatTabsAndTitles.spec.js` (utils first).
+import { resolveWorkspaceKey, findBinding, chordLabel } from './portalKeymap'
+
 // Deterministic per-agent color — used for the avatar tint and the small thread
 // color dots in the sidebar so a thread visually ties to its agent.
 export function agentColor(name) {
@@ -152,7 +161,15 @@ export const AGENT_COLLAPSE_LIMIT = 5
 // trinity-enterprise#657: an agent holding an UNSENT DRAFT is lifted the same
 // way — "a Draft mark visible without opening the chat" is false for a row
 // hidden under "N more". Same append-not-float rule, same reason.
-export function visibleAgentRows(roster, { expanded = false, askCounts = {}, draftAgents = null, limit = AGENT_COLLAPSE_LIMIT } = {}) {
+//
+// ent#621: `keep` is one more member of the same family — the agent you are
+// LOOKING AT is never collapsed out. It is the belt rather than the braces: the
+// sidebar auto-expands when a key walk lands beyond the fold (Decision 27/37),
+// and this is what holds the active row visible in a list the person collapsed
+// by hand.
+export function visibleAgentRows(roster, {
+  expanded = false, askCounts = {}, draftAgents = null, limit = AGENT_COLLAPSE_LIMIT, keep = null,
+} = {}) {
   const list = Array.isArray(roster) ? roster : []
   if (expanded) return list
 
@@ -161,7 +178,7 @@ export function visibleAgentRows(roster, { expanded = false, askCounts = {}, dra
   const counts = askCounts || {}
   const drafted = draftAgents instanceof Set ? draftAgents : new Set()
   const waiting = list.filter((a) => a?.name && !shown.has(a.name)
-    && ((Number(counts[a.name]) || 0) > 0 || drafted.has(a.name)))
+    && ((Number(counts[a.name]) || 0) > 0 || drafted.has(a.name) || a.name === keep))
   return waiting.length ? [...head, ...waiting] : head
 }
 
@@ -282,6 +299,13 @@ export function shortDate(iso) {
 
 export function threadTitle(t) {
   return (t.title || '').trim() || 'New chat'
+}
+
+// A chat's name in a chat list. Main is named by its role (ent#523), as its tab,
+// the header and the Inbox name it; its stored title is whatever the generator
+// made of its first message.
+export function chatRowTitle(t) {
+  return t?.is_main ? MAIN_TAB_LABEL : threadTitle(t)
 }
 
 // --- Chat titles (ent#473) --------------------------------------------------
@@ -522,14 +546,16 @@ export function moreTabsLabel(n) {
   return `${n} more`
 }
 
-// --- New chat hotkey (ent#451) ----------------------------------------------
+// --- New chat hotkey (ent#451, now one entry in the ent#621 map) ------------
 // ⌘J on Mac, Ctrl+J elsewhere — ruled 2026-09-06 (⌘N is the browser's, ⌘⇧O
 // declined). Plain modifier only: Shift/Alt variants are someone else's.
+//
+// The predicate is kept (its callers and its truth table are the contract) but
+// the RULE now lives in `portalKeymap.js` with the other eight chords, so
+// "what ⌘J means" has one answer. The map adds the physical `KeyJ` arm, which
+// only widens the set: a layout whose `key` is not `j` now works too.
 export function isNewChatHotkey(e) {
-  if (!e || typeof e.key !== 'string') return false
-  if (e.key.toLowerCase() !== 'j') return false
-  if (e.shiftKey || e.altKey) return false
-  return !!(e.metaKey || e.ctrlKey) && !(e.metaKey && e.ctrlKey)
+  return resolveWorkspaceKey(e) === 'new-chat'
 }
 
 export function isMacLike(platform) {
@@ -564,7 +590,7 @@ export function titleGenerationNotice(health) {
 }
 
 export function newChatHotkeyLabel(platform) {
-  return isMacLike(platform) ? '⌘J' : 'Ctrl+J'
+  return chordLabel(findBinding('new-chat').chord, platform)
 }
 
 // #2101: bounded briefing hint grid. Order deterministically — a card with a
@@ -1151,9 +1177,12 @@ export function searchAgents(roster, query, {
   draftAgents = null,
   expanded = false,
   limit = SIDEBAR_AGENT_RESULT_LIMIT,
+  // ent#621: the active agent is held in its own result list for the same
+  // reason #2424 holds an asked one — see `visibleAgentRows`.
+  keep = null,
 } = {}) {
   const { items } = filterAgentCandidates(roster, query, { requireMentionable: false })
-  const visible = visibleAgentRows(items, { expanded, askCounts, draftAgents, limit })
+  const visible = visibleAgentRows(items, { expanded, askCounts, draftAgents, limit, keep })
   return {
     items,
     visible,
@@ -1315,11 +1344,17 @@ export function resolveComposerKey({
   // A faithful reproduction of Vue's `.exact`: any modifier falls through
   // unprevented and inserts a newline, exactly as today.
   const plainEnter = key === 'Enter' && !shiftKey && !ctrlKey && !metaKey && !altKey
+  // ent#621 (Decision 36): the popup owns BARE arrows only. Claiming `⌥↓` —
+  // and `preventDefault`ing it, which is what the caller does with `move-down`
+  // — was a handler claiming a chord it never declared, so the Workspace's
+  // switch-chat key died over an open @-popup. A modified arrow now falls
+  // through to `pass`, where the shell's declared binding can have it.
+  const bareArrow = !shiftKey && !ctrlKey && !metaKey && !altKey
 
   if (open) {
     if (key === 'Escape') return 'dismiss'
-    if (key === 'ArrowDown') return hasCandidates ? 'move-down' : 'close'
-    if (key === 'ArrowUp') return hasCandidates ? 'move-up' : 'close'
+    if (key === 'ArrowDown' && bareArrow) return hasCandidates ? 'move-down' : 'close'
+    if (key === 'ArrowUp' && bareArrow) return hasCandidates ? 'move-up' : 'close'
     if (key === 'Tab' && !shiftKey) return hasCandidates ? 'accept' : 'pass'
     if (plainEnter && hasCandidates && hasActive) return 'accept'
     if (CARET_KEYS.has(key)) return 'close'
@@ -1797,9 +1832,11 @@ export function feedbackAcknowledgement(captureFeedback) {
 // --- Agents at the centre (ent#523, landing rule replaced by ent#784) --------
 
 // Where opening an agent lands you. ONE rule, called by every door that has to
-// RESOLVE a landing (the sidebar/rail row via `landOnAgent`, and the `?agent=`
-// deep link via `resolveAgentLanding`). The gesture doors — New chat, the agent
-// picker, the switch-agent key — do not call this: they already mean "fresh".
+// RESOLVE a landing: the sidebar/rail row via `landOnAgent`, the `?agent=` deep
+// link via `resolveAgentLanding`, and — since ent#621 — the switch-agent KEYS,
+// which call `landOnAgent` with the `lastOpenSessionId` arm 2 reads. The gesture
+// doors still do not call this, because they already mean "fresh": New chat, the
+// agent picker, and ⌘J.
 //
 // ent#784 reverses ent#523's rule: the default is a NEW, empty chat
 // (`sessionId: null`), because most visits to an agent start new work and
@@ -2065,7 +2102,8 @@ export function agentRowTime(threads, agentName, now = Date.now()) {
 // truthiness test either way, but a row whose id is explicitly null says "this
 // was built without one" where a missing key says nothing at all.
 export function assistantRow({ content = '', id = null, my_rating = null,
-                               source = null, voice_call_id = null } = {}) {
+                               source = null, voice_call_id = null,
+                               execution_id = null } = {}) {
   return {
     role: 'assistant',
     content,
@@ -2073,6 +2111,8 @@ export function assistantRow({ content = '', id = null, my_rating = null,
     myRating: my_rating || null,
     source: source || null,
     voiceCallId: voice_call_id || null,
+    // #3166: the turn that wrote the row.
+    executionId: execution_id || null,
   }
 }
 
@@ -2130,8 +2170,24 @@ export async function readReplyBaseline(fetchHistory, sessionId) {
   }
 }
 
-export function replyFromHistory(messages, baseline) {
-  const last = latestTypedReply(messages)
+// #3166: `executionId` is the turn this caller is waiting on. Once the server
+// sends `execution_id` on its rows, only the row carrying that id is this
+// turn's reply: another turn on the same thread (the chat open in two tabs) can
+// land its reply first, and a row with no id (a completion report) belongs to
+// no turn. Without the field (an older backend) or without an id, the identity
+// and count rules below still apply.
+export function replyFromHistory(messages, baseline, executionId = null) {
+  const rows = Array.isArray(messages) ? messages : []
+  if (executionId && rows.some((m) => m && 'execution_id' in m)) {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const m = rows[i]
+      if (m && m.role === 'assistant' && m.source !== 'voice' && m.execution_id === executionId) {
+        return replyFields(m)
+      }
+    }
+    return null
+  }
+  const last = latestTypedReply(rows)
   if (!last) return null
   const base = baseline && typeof baseline === 'object'
     ? baseline
@@ -2140,14 +2196,44 @@ export function replyFromHistory(messages, baseline) {
     ? last.id !== base.id
     : typedReplyCount(messages) > (Number(base.count) || 0)
   if (!isNew) return null
+  return replyFields(last)
+}
+
+function replyFields(row) {
   return {
-    response: last.content,
-    id: last.id || null,
-    myRating: last.my_rating || null,
+    response: row.content,
+    id: row.id || null,
+    myRating: row.my_rating || null,
     // trinity-enterprise#610: the stored time, which places a chat-turn ask
     // before this reply without the browser's clock (`placeAsksInThread`).
-    at: last.created_at || null,
+    at: row.created_at || null,
   }
+}
+
+// #3166: history is stored in save order, so two turns that overlap on one
+// thread read Q_A, Q_B, R_A, R_B after a reload. Each typed reply that names
+// its turn is moved to directly after the question of the same turn (and that
+// turn's earlier replies). A reply stays where it is when its question is not
+// in the window or carries no id, or when the move would cross a voice call's
+// rows, whose folding depends on their position.
+export function pairRepliesWithQuestions(messages) {
+  const out = []
+  for (const m of Array.isArray(messages) ? messages : []) {
+    const eid = m && m.role === 'assistant' && !m.source ? m.execution_id : null
+    if (eid) {
+      const qi = out.findIndex((x) => x && x.role === 'user' && !x.source && x.execution_id === eid)
+      if (qi !== -1) {
+        let at = qi + 1
+        while (at < out.length && out[at]?.execution_id === eid) at += 1
+        if (at < out.length && out.slice(at).every((x) => !x?.source)) {
+          out.splice(at, 0, m)
+          continue
+        }
+      }
+    }
+    out.push(m)
+  }
+  return out
 }
 
 // trinity-enterprise#610 §3g S4 — the read's optimistic zero, and its rollback.

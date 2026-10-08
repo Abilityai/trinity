@@ -415,6 +415,7 @@ _SINK = "services/ask_service.py"
 _SET_CAS_ACCESSORS = (
     "bulk_cancel_operator_queue_items(",
     "mark_operator_queue_expired(",
+    "end_operator_queue_items_by_platform(",  # #3246 — the platform ending
     # #3247: the native create ends a replace's predecessor by compare-and-set
     # inside its own transaction; `predecessor` is the row AS THE CAS LEFT IT
     "create_native_operator_queue_item(",

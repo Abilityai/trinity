@@ -2992,6 +2992,33 @@ def _migrate_agent_ownership_a2a_exposed(cursor, conn):
     conn.commit()
 
 
+
+def _migrate_a2a_internal_scope(cursor, conn):
+    """trinity-enterprise#838 — A2A exposure scope and the keyless trusted caller.
+
+    ``agent_ownership.a2a_scope`` (``public`` | ``internal``, default
+    ``public`` — today's behaviour) and ``a2a_keyless_internal`` (default 1:
+    an internal-scope agent answers a trusted-network caller with no key), plus
+    ``schedule_executions.source_host``, the address a keyless trusted caller's
+    run is attributed to. Edition-agnostic OSS primitives the A2A server reads;
+    the scope WRITE is the entitled enterprise setter, like ``a2a_exposed``.
+    Mirrored by the Alembic revision 0096_a2a_internal_scope.
+    """
+    _safe_add_column(
+        cursor, "agent_ownership", "a2a_scope",
+        "ALTER TABLE agent_ownership ADD COLUMN a2a_scope TEXT DEFAULT 'public'",
+    )
+    _safe_add_column(
+        cursor, "agent_ownership", "a2a_keyless_internal",
+        "ALTER TABLE agent_ownership ADD COLUMN a2a_keyless_internal INTEGER DEFAULT 1",
+    )
+    _safe_add_column(
+        cursor, "schedule_executions", "source_host",
+        "ALTER TABLE schedule_executions ADD COLUMN source_host TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_operator_resume(cursor, conn):
     """ent#329 — owner opt-in: an operator answer re-triggers the agent.
 
@@ -3732,7 +3759,7 @@ def _migrate_operator_queue_replace(cursor, conn):
     of the pair still knows the other.
 
     No default and no backfill; nothing indexes them (nothing queries by them).
-    PostgreSQL twin: Alembic `0090_operator_queue_replace`.
+    PostgreSQL twin: Alembic `0097_operator_queue_replace`.
     """
     for column in ("replaces", "replaced_by"):
         _safe_add_column(
@@ -4394,6 +4421,45 @@ def _migrate_portal_messages_voice_source(cursor, conn):
     conn.commit()
 
 
+def _migrate_portal_messages_attachments(cursor, conn):
+    """#3265 — a sent Workspace message shows what was attached to it.
+
+    One nullable column on `enterprise_portal_messages`: `attachments`, a JSON
+    list on a user turn — `{filename, size_bytes, mime_type}` for an upload the
+    server found in the sender's inbox, `{filename, failed, error}` for one that
+    did not land. Without it the chips cleared at send and nothing on the row
+    said a file went with the message, so a reload could not show it either.
+
+    Additive, no backfill: no existing row recorded what it carried.
+    Mirrored by the Alembic revision 0092_portal_messages_attachments.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "attachments",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN attachments TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_portal_messages_execution_id(cursor, conn):
+    """#3166 — each Workspace message names the turn that wrote it.
+
+    One nullable column on `enterprise_portal_messages`. Two turns on one thread
+    (the chat open in two tabs) wrote replies the client could not tell apart,
+    so a tab could show the other turn's answer as its own. Additive, no
+    backfill: old rows stay NULL and the client keeps its old matching for them.
+    Mirrored by the Alembic revision 0095_portal_messages_execution_id.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "execution_id",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN execution_id TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_portal_session_main_chat(cursor, conn):
     """ent#523 — the pinned Main chat, and the tombstone Reset leaves behind.
 
@@ -4940,6 +5006,21 @@ def resolve_duplicate_emails(rows):
         members.sort()
         losers += [(uid, uname) for _, uid, uname in members[1:]]
     return losers
+def _migrate_chat_session_claude_id(cursor, conn):
+    """#3127 — per-user `/chat` memory on pull pilots.
+
+    `chat_sessions.cached_claude_session_id` holds the Claude session id the
+    session's next pulled `/chat` turn resumes. Nullable, no backfill: a session
+    without one starts a fresh conversation.
+    PostgreSQL half: Alembic `0091_chat_session_claude_id`.
+    """
+    _safe_add_column(
+        cursor,
+        "chat_sessions",
+        "cached_claude_session_id",
+        "ALTER TABLE chat_sessions ADD COLUMN cached_claude_session_id TEXT",
+    )
+    conn.commit()
 
 
 def _migrate_agent_skill_sets(cursor, conn):
@@ -5203,6 +5284,246 @@ def _migrate_supersede_queue_flood_backlog(cursor, conn):
     conn.commit()
 
 
+# #3246: the shared sweep — both tracks run this function over their own
+# connection (the Alembic revision imports it), so the survivor rule cannot
+# drift between them. `run(sql, params, fetch=False)` is the one driver seam:
+# sqlite3 and SQLAlchemy `text()` both bind `:name` parameters.
+# `raised_by IS NULL` is the platform-row discriminator: the agent file seam
+# writes 'agent' and gates write 'gate', and an agent can mint an id under a
+# reserved prefix on its own name (the git-token-scrub prefix was unreserved
+# before #3246), so the id shape alone must never pick a survivor.
+_PLATFORM_ALERT_SWEEP_SELECT = """
+SELECT id, agent_name, request_id, status, created_at, expires_at, context,
+       subject, disposed_by, disposed_at, raised_by
+FROM operator_queue
+WHERE raised_by IS NULL
+  AND (status = 'pending'
+       OR (disposed_by = 'person' AND subject IS NULL AND disposed_at >= :since))
+"""
+
+_PLATFORM_ALERT_SWEEP_END = """
+UPDATE operator_queue
+SET status = 'cancelled',
+    disposition = 'cancelled',
+    disposed_at = :now,
+    disposed_by = 'platform',
+    disposed_by_email = NULL,
+    disposition_reason = 'superseded',
+    batch_id = :batch_id
+WHERE status = 'pending' AND raised_by IS NULL AND id IN ({ids})
+"""
+
+_SWEEP_CHUNK = 400  # well under every driver's bound-parameter limit
+
+
+def run_platform_alert_sweep(run, *, now=None, batch_id=None) -> dict:
+    """#3246: collapse the platform-alert backlog to one pending row per subject.
+
+    Reads every pending row plus the person-ended rows inside the snooze
+    window, hands them to the leaf's pure ``plan_sweep`` (the ONE source of
+    per-kind id parsing — imported function-locally so neither migration
+    track pulls the service graph into ``init_database()``), then writes:
+
+    * survivors: ``subject``, ``last_seen_at``, ``context.seen_count = 1`` and
+      ``expires_at`` only where it was NULL;
+    * every other pending row of the subject: ended as ONE batch —
+      ``cancelled`` / ``platform`` / ``superseded`` / NULL email / ``batch_id``
+      — the ent#611 vocabulary, compare-and-set on ``status = 'pending'`` so a
+      row a person ends first is never overwritten;
+    * known kinds with no derivable subject: ``expires_at`` only (the row
+      leaves on its own; nothing is merged on a guess);
+    * person-ended rows inside the snooze window: ``subject`` only.
+
+    Agent-raised rows and gate rows (``raised_by IS NOT NULL``) are excluded
+    by the SELECT and skipped again by the planner; external prefixes never
+    derive. None of them is ever stamped or ended. Idempotent: a second run finds the survivors stamped
+    and plans nothing. Returns the write counts for the boot log.
+    """
+    import json as _json
+    import uuid as _uuid
+    from datetime import datetime as _dt, timezone as _tz
+
+    from services.platform_alerts import plan_sweep, snooze_window
+
+    now = now or _dt.now(_tz.utc)
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    since_iso = (now - snooze_window()).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    cols = ("id", "agent_name", "request_id", "status", "created_at", "expires_at",
+            "context", "subject", "disposed_by", "disposed_at", "raised_by")
+    rows = [dict(zip(cols, r)) for r in run(_PLATFORM_ALERT_SWEEP_SELECT, {"since": since_iso}, fetch=True)]
+    plan = plan_sweep(rows, now=now)
+    counts = {"survivors": 0, "ended": 0, "lifetime_only": 0, "snoozed": 0}
+    if plan.is_empty():
+        return counts
+
+    for stamp in plan.survivor_stamps:
+        # `expires_at` is only in the statement when the planner set one: an
+        # untyped NULL bound into COALESCE is driver-dependent on PostgreSQL,
+        # and a stamp that carries none has nothing to write there.
+        params = {"id": stamp.id, "subject": stamp.subject, "last_seen_at": stamp.last_seen_at,
+                  "context": _json.dumps(stamp.context) if stamp.context is not None else None}
+        expiry_sql = ""
+        if stamp.expires_at is not None:
+            expiry_sql = ", expires_at = COALESCE(expires_at, :expires_at)"
+            params["expires_at"] = stamp.expires_at
+        run(
+            "UPDATE operator_queue SET subject = :subject, last_seen_at = :last_seen_at, "
+            f"context = :context{expiry_sql} "
+            "WHERE id = :id AND status = 'pending' AND raised_by IS NULL",
+            params,
+        )
+        counts["survivors"] += 1
+
+    batch = batch_id or _uuid.uuid4().hex
+    ended = list(plan.ended_ids)
+    for start in range(0, len(ended), _SWEEP_CHUNK):
+        chunk = ended[start:start + _SWEEP_CHUNK]
+        params = {f"e{i}": id_ for i, id_ in enumerate(chunk)}
+        placeholders = ", ".join(f":{k}" for k in params)
+        params.update({"now": now_iso, "batch_id": batch})
+        run(_PLATFORM_ALERT_SWEEP_END.format(ids=placeholders), params)
+        counts["ended"] += len(chunk)
+
+    for stamp in plan.lifetime_stamps:
+        run("UPDATE operator_queue SET expires_at = :expires_at "
+            "WHERE id = :id AND status = 'pending' AND expires_at IS NULL AND raised_by IS NULL",
+            {"id": stamp.id, "expires_at": stamp.expires_at})
+        counts["lifetime_only"] += 1
+
+    for stamp in plan.snooze_stamps:
+        run("UPDATE operator_queue SET subject = :subject "
+            "WHERE id = :id AND subject IS NULL AND raised_by IS NULL",
+            {"id": stamp.id, "subject": stamp.subject})
+        counts["snoozed"] += 1
+    return counts
+
+
+# Both tracks create the same two indexes, by name (schema.py declares them too).
+PLATFORM_ALERT_INDEX_DDL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_operator_queue_pending_subject "
+    "ON operator_queue(agent_name, subject) WHERE status = 'pending' AND subject IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_operator_queue_agent_subject ON operator_queue(agent_name, subject)",
+)
+
+
+def _migrate_platform_alert_subjects(cursor, conn):
+    """#3246 — platform alerts: one pending row per subject.
+
+    Ordered columns → sweep → index, in ONE migration: the partial unique index
+    can only be created once the sweep has collapsed the duplicates an
+    installed backlog holds, so the three steps cannot be split across
+    migrations without breaking the upgrade of exactly the installs this is
+    for. Adds `subject TEXT` and `last_seen_at TEXT` (nullable, PRAGMA-guarded),
+    runs `run_platform_alert_sweep` (the leaf's `plan_sweep` decides; see its
+    docstring for the rules), then creates `uq_operator_queue_pending_subject`
+    (partial, pending + subject only) and `idx_operator_queue_agent_subject`.
+
+    No wake and no file write follow: these are platform-minted rows
+    (`is_platform_minted`), which take no part in either. Idempotent.
+
+    Mirrored by the Alembic revision 0090_platform_alert_subjects.
+    """
+    for column in ("subject", "last_seen_at"):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for platform alerts (#3246)",
+        )
+    conn.commit()
+
+    def _run(sql, params, fetch=False):
+        cursor.execute(sql, params)
+        return cursor.fetchall() if fetch else None
+
+    counts = run_platform_alert_sweep(_run)
+    conn.commit()
+    if any(counts.values()):
+        logger.info("Platform-alert backlog sweep (#3246): %s", counts)
+
+    for ddl in PLATFORM_ALERT_INDEX_DDL:
+        cursor.execute(ddl)
+    conn.commit()
+
+
+# #2372: the platform-minted prefixes on the day the heal shipped. Frozen on
+# purpose — a one-time fix of rows that already exist must not widen when a
+# prefix is reserved later (`operator_queue_service._RESERVED_ID_PREFIXES` stays
+# the live definition; a unit test pins the two equal at ship time).
+PLATFORM_ALERT_HEAL_PREFIXES = (
+    "queue-flood-", "poison-", "cb-dormant-", "sync-failing-", "git-bloat-",
+    "sync-diverged-", "skill-not-found-", "val_", "system-seed-",
+    "base-image-stale-", "alert-budget-", "effect-unguarded-", "db-backup-",
+    "log-archive-", "sub-headroom-", "skills-legacy-adoption-",
+    "workspace-problem-", "portal-inbox-collision-", "gitignore-untracked-",
+    "skills-reconcile-", "skills-fleet-reinject-", "retention-guard-",
+    "ent615-git-token-scrub-", "role-drift-", "gate-",
+)
+PLATFORM_ALERT_HEAL_SELECT_SQL = "SELECT id, request_id FROM operator_queue WHERE status = 'responded'"
+PLATFORM_ALERT_HEAL_UPDATE_SQL = (
+    "UPDATE operator_queue SET status = 'acknowledged', acknowledged_at = :now "
+    "WHERE id = :id AND status = 'responded'"
+)
+
+
+def platform_alert_heal_ids(rows):
+    """Ids of `responded` rows that are platform-minted — matched the way
+    `is_platform_minted` matches (strip + lowercase + prefix), in Python,
+    because SQL `LIKE` reads the `_` in `val_` as a wildcard."""
+    return [
+        row_id for row_id, request_id in rows
+        if str(request_id or "").strip().lower().startswith(PLATFORM_ALERT_HEAL_PREFIXES)
+    ]
+
+
+def _migrate_platform_alert_responded_heal(cursor, conn):
+    """#2372: platform alerts an operator acknowledged before the fix sat in
+    `responded` — no agent ever acknowledges them, so they stayed for the 90-day
+    floor and out of Clear All. Moves each to `acknowledged` (`acknowledged_at`
+    = now), the state an operator's answer now lands in. Agents' own asks and
+    non-`responded` rows are untouched. Idempotent.
+
+    Mirrored by the Alembic revision 0093_platform_alert_responded_heal.
+    """
+    from utils.helpers import utc_now_iso
+    cursor.execute(PLATFORM_ALERT_HEAL_SELECT_SQL)
+    now = utc_now_iso()
+    sql = PLATFORM_ALERT_HEAL_UPDATE_SQL.replace(":now", "?").replace(":id", "?")
+    for row_id in platform_alert_heal_ids(cursor.fetchall()):
+        cursor.execute(sql, (now, row_id))
+    conn.commit()
+
+
+def _migrate_agent_skill_gates(cursor, conn):
+    """trinity-enterprise#753 — the per-agent skill gate map.
+
+    One row per (agent, skill) that needs approval before it runs: the approver
+    kind and an optional deadline. The table the dispatch check (#751) and the
+    in-container hook (#752) read through ``skill_gate_service.list_skill_gates``.
+    See the DDL comment in db/schema.py. Additive: no row = ungated, so every
+    existing agent is unchanged on upgrade.
+
+    Mirrored by the Alembic revision 0094_agent_skill_gates.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_skill_gates (
+            agent_name TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            approver TEXT NOT NULL,
+            deadline_hours INTEGER,
+            origin TEXT NOT NULL,
+            set_by TEXT NOT NULL,
+            set_by_agent TEXT,
+            set_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, skill_name)
+        )
+        """
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5362,5 +5683,12 @@ MIGRATIONS = [
     ("pull_sync", _migrate_pull_sync),
     ("skill_gate_requests_table", _migrate_skill_gate_requests_table),
     ("supersede_queue_flood_backlog", _migrate_supersede_queue_flood_backlog),
+    ("platform_alert_subjects", _migrate_platform_alert_subjects),
+    ("chat_session_claude_id", _migrate_chat_session_claude_id),
+    ("portal_messages_attachments", _migrate_portal_messages_attachments),
+    ("platform_alert_responded_heal", _migrate_platform_alert_responded_heal),
+    ("agent_skill_gates", _migrate_agent_skill_gates),
+    ("portal_messages_execution_id", _migrate_portal_messages_execution_id),
+    ("a2a_internal_scope", _migrate_a2a_internal_scope),
     ("operator_queue_replace", _migrate_operator_queue_replace),
 ]

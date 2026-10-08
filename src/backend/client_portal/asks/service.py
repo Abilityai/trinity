@@ -108,7 +108,9 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
     """`(ended_at, ended_by)` for a client — COARSE on purpose.
 
     `ended_by` is `you` (the viewer answered), `operator` (another person
-    answered or cancelled), `agent` (the agent replaced it, #3247) or `timeout`; never an email and never the cancel
+    answered or cancelled), `platform` (the platform ended the row itself —
+    `disposed_by = 'platform'`, #3246: never a person's answer, never a
+    timeout), `agent` (the agent replaced it, #3247) or `timeout`; never an email and never the cancel
     reason (both are the operator's, not the client's). `ended_at` is the
     ledger's time, or a legacy answer's time — never `created_at`, which is when
     the ask was filed, not when it ended.
@@ -118,6 +120,8 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
         return None, None
     if status == "expired":
         return item.get("disposed_at"), "timeout"
+    if item.get("disposed_by") == "platform":
+        return item.get("disposed_at"), "platform"
     # #3247: the agent replaced it with a newer ask. Read BEFORE the email arm,
     # which would otherwise call an ending with no email the operator's.
     if item.get("disposed_by") == "agent":

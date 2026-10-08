@@ -593,10 +593,12 @@ class TestTheCallEndingLosesNothing:
         sig = inspect.signature(portal.portal_chat)
         assert "voice_call_id" in sig.parameters and sig.parameters["voice_call_id"].default is None
         src = inspect.getsource(portal.portal_chat)
-        assert "_persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id)" in src
+        # No closing paren: #3265 passes `attachments=` after the call id.
+        assert "_persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id," in src
         # trinity-enterprise#751 moved the reply write into `_persist_reply`, shared
         # by an answered turn and one the skill gate held.
-        assert "_persist_reply(agent_name, email, session_id, reply, cost, voice_call_id)" in src
+        # #3166 appended the turn's execution id.
+        assert "_persist_reply(agent_name, email, session_id, reply, cost, voice_call_id, execution_id)" in src
         reply_src = inspect.getsource(portal._persist_reply)
         reply_write = reply_src.split("db.add_portal_message(new_message_id", 1)[1].split("message_id = new_message_id", 1)[0]
         assert "**_voice_attribution(voice_call_id)" in reply_write

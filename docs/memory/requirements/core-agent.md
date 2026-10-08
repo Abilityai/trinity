@@ -1536,6 +1536,26 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   rule in `style.css` is untouched; the sidebar list and the conversation
   transcript are a follow-up once the feel is confirmed. Gated on a human feel
   check on the running instance before the PR.
+- **AC-10 — an Asks tab, a door into the Inbox (trinity-enterprise#836)**: when
+  an agent in the conversation has an open ask addressed to you, its rail
+  carries an **Asks** tab — last in the fixed order, so its coming and going
+  moves no other tab — listing that agent's pending asks one line each (kind by
+  shape, the start of the ask, when), in exactly the order the Inbox's Action
+  tab shows them narrowed to that agent (`actionItems` filtered to the
+  participants, nothing re-sorted). A row is a link that opens the Inbox on
+  Action, filtered to that agent, with that ask selected
+  (`?tab=action&from=<agent>&item=ask:<id>`); the tab answers nothing itself —
+  answering happens in the Inbox (the 2026-09-30 ruling on ent#610). The tab's
+  count and the agent row's "needs you" mark read ONE feed (`openAsks` through
+  `asksByAgent`), so they cannot disagree, and the mark is the same unfilled
+  orange circle in both places. With no open ask for a participant the tab is
+  not rendered at all (a `presence` rule on the registry entry, checked by the
+  one door gate `tabPassesDoor`), and an ask that is answered or expires leaves
+  it the moment it leaves Action. Door `AGENT`: clients and platform users
+  alike, since asks are addressed to both. It joins the rail's tab order, so
+  `⌥.` (ent#621) reaches it, the collapsed strip shows its dot and "Asks · 2
+  asks", and the open strip's tab carries the count. A room lists every
+  participant's asks grouped by agent, absence visible.
 - **Not in this slice (recorded on the issue)**: the Work tab's content
   (#457), re-homing Loops / Canvas / Files (#472's second child), the sidebar /
   thread tab strip / top band / Agent-details panel / drop target of the
@@ -1812,6 +1832,129 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   `src/frontend/e2e/workspace-chat-tabs.spec.js` (fixed width — no node-env
   source pin can execute it).
 - **Flow**: `docs/memory/feature-flows/workspace-chat-tabs-and-titles.md`
+
+### 5.21a Workspace key map (trinity-enterprise#621)
+
+- **Status**: ✅ Implemented (2026-10-05) · **ID**: `WORKSPACE_KEY_MAP`
+- **Description**: §5.21's ⌘J was the Workspace's only key and was matched
+  inline. This makes the keyboard a **declared map with one dispatcher**: nine
+  working chords for moving between agents and chats and for the rail, a
+  reserved chord for search, and the component-owned protocol keys (Esc and
+  friends) declared alongside them so collisions are visible across the whole
+  surface rather than within one owner's share.
+- **AC-1 — the keys**: `⌘J`/`Ctrl+J` new chat with this agent (§5.21,
+  unchanged); `⌥↓`/`⌥↑` next / previous **agent**; `⌥⇧↓`/`⌥⇧↑` next /
+  previous **chat with this agent**; `⌘.`/`Ctrl+.` show or hide the rail;
+  `⌥.` next rail tab; `⌘/`/`Ctrl+/` the cursor into the sidebar's search
+  field (AC-11); `⌥/` the keyboard-shortcuts list.
+- **AC-2 — one declaration**: every chord lives in
+  `src/frontend/src/components/portal/portalKeymap.js` (pure — no DOM, no
+  store), with its scope, its owner, and its label. `keymapCollisions(map)`
+  must be **empty**: matching is platform-free, so the checker takes no
+  platform argument and one call is the whole proof — not one per OS. A key
+  that exists without a map entry, or a shell chord that shadows a protocol
+  key, is the defect this prevents.
+- **AC-3 — one dispatcher**: `Portal.vue::onGlobalKeydown` is the Workspace's
+  single chord dispatcher, armed at mount above the bootstrap `await` and
+  removed on unmount (`PortalRail.vue`'s sheet-only Esc `window` listener
+  predates the map and dispatches no chord — it is the `close-top` protocol
+  entry). Its ladder: resolve → signed in → ⌘J's leave-the-call ask →
+  undispatched actions pass through → a focused `<select>` keeps its native
+  `Alt+↓` → suppression → `preventDefault` → act. The ⌘J step is the ONE
+  exception to "the ladder runs before any `preventDefault`": during an
+  active voice call it claims the event and routes to the leave-call guard
+  above the suppression rung, which is the pre-existing ent#534/551 ask kept
+  deliberately (ruling T8) rather than an oversight. On confirm the parked
+  event re-enters as the `resumed` pass after a tick, and the suppression
+  rung waives its `defaultPrevented` bail for that pass only — the mark is
+  the shell's own (merge-train 2026-10-06).
+- **AC-4 — every key works from the message field**: the conventional
+  "ignore an editable target" guard is deliberately **inverted**; the composer
+  is a textarea and the keys must work while typing. A nearer owner still wins
+  through `defaultPrevented` (the Esc protocol, the composer typeahead's bare
+  arrows, which claim bare arrows only).
+- **AC-5 — suppression**: anything modal (`[aria-modal="true"]`, with a
+  per-action exemption so `⌥/` can close its own dialog and the rail sheet
+  does not count as modal over the rail), the mobile drawer, and a live voice
+  call suppress the moving and rail keys **silently**; `⌘J` keeps its own ask
+  during a call, and `⌘/` and `⌥/` stay available. A held key does not walk the list
+  (`e.repeat` resolves to nothing) and an IME composition is never a chord.
+  The auto-repeat of a press the shell **claimed** is still swallowed
+  (`heldKey` + `workspaceChord`), so a held `⌥.` cannot type `≥` into the
+  message field and a held `Ctrl+J` cannot open the browser's Downloads; the
+  repeat of a press it did not claim stays the browser's.
+- **AC-6 — non-US layouts**: a chord matches by `key` **or** by physical
+  `code`, so the US position works on a non-Latin layout — the `code` arm
+  answers only when the printed key is not a single printable ASCII character,
+  so a Latin non-QWERTY layout (Dvorak: ⌘V on `Period`, ⌘Z on `Slash`) keeps
+  paste and undo (merge-train 2026-10-06); `Shift` is accepted
+  on a `key` match only, so DE's `Shift+7` → `/` and FR's shifted `.` reach
+  `⌘/` while macOS's `⌘?` stays the browser's Help search. Matching is
+  platform-free (`primary` = meta XOR ctrl everywhere); only labels take a
+  platform (`⌥↓` vs `Alt+↓`, and `Alt+ArrowDown` for `aria-keyshortcuts`).
+- **AC-7 — the walk follows the order the eye reads**: the sidebar roster is
+  ordered **once in the shell** and handed to every sidebar instance, so the
+  agent keys step through the list on screen rather than a second ordering. An
+  agent reached by key is shown rather than left behind "N more" (the block
+  expands), and the active row carries `aria-current`.
+- **AC-8 — switching agents returns you where you were**: the shell remembers,
+  per agent, the chat last open **in this Workspace session** (in memory; a
+  reload starts fresh) and each switch-agent press passes it to the one landing
+  rule, which honours it only while it still names a live, unarchived chat of
+  that agent. An unsent new chat records nothing, so its draft is reached
+  through the landing rule's own arms rather than a second rule. Every moving
+  key focuses the composer afterwards.
+- **AC-9 — discoverable**: `⌥/` opens a shortcuts dialog built **from the
+  map**, so a key cannot ship without a row (the reserved chord is excluded —
+  nothing binds it, and a dead row in a help dialog is worse than an
+  undocumented key). The sidebar footer offers the same dialog, and every
+  surface a key drives (agent rows, the rail expander and its tabs, chat tabs)
+  carries the chord in `title` and `aria-keyshortcuts`.
+- **AC-10 — reserved, not bound**: `⌘K`/`Ctrl+K` is declared and
+  **unhandled** — no `preventDefault`, no row in the list — so the browser's
+  own behaviour stands until the search surface ships.
+- **AC-11 — the search key**: `⌘/`/`Ctrl+/` puts the cursor in the sidebar's
+  "Search agents and chats" field and selects what is in it — the Dashboard's
+  `/` filter key (§ fleet filter), with the modifier a key needs to work from
+  inside a text field. Pressed again while the field has focus it hands the
+  caret back to the message field. Below `sm` the sidebar is the drawer, so the
+  key opens it and focuses that instance's field. The field shows the chord
+  (a key cap while it is empty and unfocused, plus `title` and
+  `aria-keyshortcuts`). It is NOT the reserved `⌘K` surface: it focuses the
+  search that exists and adds none. The shortcuts list moved to `⌥/` to free
+  the chord, keeping the `⌘.` / `⌥.` pairing (the primary key acts, the Option
+  key steps to its neighbour).
+- **AC-12 — the tips panel**: the open rail carries a small panel pinned to its
+  bottom edge listing four headline chords (switch agent, switch chat, search,
+  new chat) and a button that opens the shortcuts dialog. It is **two rows of
+  two** and nothing else — no heading line, no footer: the close and the
+  open-the-list controls stack beside the rows. A pair of chords prints its
+  modifiers once (`⌥↑↓`, `Alt+Shift+↑↓` — `keyHintCompact`), and when the rail
+  is dragged narrow a label shortens (full text on hover) while a key cap never
+  wraps and a row never becomes two. Rows are derived from the map (`KEY_TIPS`
+  → `keyTipRows`), never typed. The collapsed strip carries
+  the same door as one icon button at its foot; the mobile sheet carries
+  neither. The panel is dismissible, and the dismissal is remembered per
+  browser (`localStorage['trinity-workspace-key-tips']`, a per-viewer
+  convenience — nothing is stored server-side); the sidebar footer button stays
+  as the way back to the full list.
+- **Not this slice**: a search/spotlight surface behind `⌘K`; remapping or
+  disabling the chords in settings (they are modifier chords; nothing conflicts
+  with typing); the mobile drawer's own Esc/focus-trap contract (#1923).
+- **OSS-core by decision**: inherits §5.21's ruling for the client-portal
+  surface — deliberately ungated, no `requires_entitlement`, logic in the OSS
+  tree. Recorded so it is never inferred from the mere fact that it merged.
+- **Tests**: `src/frontend/tests/unit/workspaceKeymap.spec.js` (pure map,
+  collisions, labels, `keyListRows`, the ⌘J equivalence),
+  `workspaceKeymap.dom.spec.js` (the modal probe),
+  `workspaceKeymap.mount.spec.js` (the shell: dispatch, the walk, the memory,
+  the bails and suppression), `portalChatCycle.mount.spec.js`,
+  `portalKeyList.mount.spec.js`, `portalKeyHints.mount.spec.js`,
+  `portalKeyTips.mount.spec.js` (the tips panel, both rail forms),
+  `portalRosterRow.spec.js` (the bound and the handed-down order, mounted).
+- **Flow**: `docs/memory/feature-flows/workspace-chat-tabs-and-titles.md`
+  (→ The key map); the landing rule it calls is
+  `docs/memory/feature-flows/workspace-agents-at-the-centre.md`
 
 ### 5.22 Workspace work — the live execution card and the Work tab (trinity-enterprise#525, the visual half of ent#457)
 
@@ -3729,6 +3872,14 @@ to localStorage in the clear.
   that chat, and the viewer's own last three answers to this agent. A run is named only when
   it belongs to the ask's agent, was running when the ask was filed, and was a schedule, a
   manual run or the viewer's own — the agent writes the link, so it is checked, never trusted.
+- **A calmer "needs you" mark, and a door from the agent page (trinity-enterprise#836)**: the
+  agent row's mark in the sidebar is an **unfilled orange circle** (a ring, the count in
+  urgent ink — 700 light / 400 dark, AA on the sidebar ground), not a filled pill; it keeps
+  its count, its accessible name ("N asks are waiting on your answer") and its place beside
+  the unread mark, which stays a filled primary pill so the two obligations still differ by
+  shape as well as hue. The pinned Inbox row and the Inbox's own Action counter keep their
+  filled 700 pills. The agent's rail gains an **Asks** tab (§5.19 AC-10) that lists the
+  agent's open asks and opens each in the Inbox — the Inbox stays the only answer surface.
 - **The door (AC 7)**: nothing the Inbox adds carries cost, an execution id or run detail; the
   preview projection has no `cost` field; the ask-context read carries no `cost` and no
   execution id (a run's kind, label and start time only). The Inbox needs no capability flag — it reads the

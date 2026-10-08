@@ -78,6 +78,7 @@ Agents can post to their bound Slack channels without waiting to be mentioned �
 - MCP tools: `list_channel_groups(channel_type: "slack")` discovers the agent's bound channels; `send_group_message(channel_type: "slack", chat_id, message, thread_ts?)` posts to one, optionally into an existing thread via `thread_ts`.
 - REST: `GET /api/agents/{name}/slack/channels` lists bound channels; `POST /api/agents/{name}/slack/channels/{channel_id}/messages` posts (owner-gated).
 - Proactive posts carry the agent's identity (name + avatar icon), same as replies.
+- **Send once across runs.** A recurring agent can pass `idempotency_key` (and optionally `idempotency_ttl`, 60–86400 seconds, default 86400) so the same post reaches the same channel once, however many runs try. A repeat inside the window answers `sent: false` and posts nothing. See [MCP Server → Sending once across runs](mcp-server.md#sending-once-across-runs).
 
 #### Per-Channel Proactive Consent
 
@@ -122,6 +123,7 @@ Rate limit and tool values are configurable via settings (`channel_rate_limit_ma
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/api/settings/slack` | GET / PUT / DELETE | The Slack app's OAuth credentials (Client ID, Client Secret, Signing Secret), admin-only; a read returns masked values only |
 | `/api/settings/slack/status` | GET | Connection state |
 | `/api/settings/slack/connect` | POST | Start Socket Mode |
 | `/api/settings/slack/disconnect` | POST | Stop transport |
@@ -131,7 +133,7 @@ Rate limit and tool values are configurable via settings (`channel_rate_limit_ma
 | `/api/agents/{name}/slack/channel` | DELETE | Unbind channel |
 | `/api/agents/{name}/slack/channel/dm-default` | PUT | Set this agent as the DM default for its workspace |
 | `/api/agents/{name}/slack/channels` | GET | List channels bound to this agent (for proactive messaging) |
-| `/api/agents/{name}/slack/channels/{channel_id}/messages` | POST | Post a proactive message to a bound channel (owner-gated, rate-limited) |
+| `/api/agents/{name}/slack/channels/{channel_id}/messages` | POST | Post a proactive message to a bound channel (owner-gated, rate-limited; optional `idempotency_key` / `idempotency_ttl`) |
 | `/api/agents/{name}/slack/channels/{channel_id}/proactive` | PUT | Toggle per-channel proactive consent (owner-gated) |
 | `/api/settings/proactive-rate-limits` | GET | Read proactive rate-limit caps |
 | `/api/settings/proactive-rate-limits` | PUT | Update proactive rate-limit caps (admin; per-key integer `0..max`, `0` = unlimited) |

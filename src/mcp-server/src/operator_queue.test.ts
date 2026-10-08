@@ -550,6 +550,6 @@ describe("#3247 ask_operator replaces", () => {
   it("get_my_ask names who replaced an ask and the link both ways", () => {
     const d = tools.getMyAsk.description;
     assert.ok(d.includes("replaced_by"));
-    assert.ok(d.includes("person | timeout | agent"));
+    assert.ok(d.includes("person | timeout | platform | agent"));
   });
 });

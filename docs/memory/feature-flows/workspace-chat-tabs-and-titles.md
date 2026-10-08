@@ -1,7 +1,7 @@
-# Feature: Workspace chats as tabs, New chat hotkey, and renameable titles
+# Feature: Workspace chats as tabs, the key map, and renameable titles
 
-> **Status**: ✅ Implemented (2026-09-06; the four tab-strip defects and the pre-turn title spawn, #2579, 2026-09-07)
-> **Issues**: abilityai/trinity-enterprise#451 (remaining slice — #2430 shipped the fresh-thread half), abilityai/trinity-enterprise#473, [#2579](https://github.com/abilityai/trinity/issues/2579)
+> **Status**: ✅ Implemented (2026-09-06; the four tab-strip defects and the pre-turn title spawn, #2579, 2026-09-07; the key map, ent#621, 2026-10-05)
+> **Issues**: abilityai/trinity-enterprise#451 (remaining slice — #2430 shipped the fresh-thread half), abilityai/trinity-enterprise#473, [#2579](https://github.com/abilityai/trinity/issues/2579), abilityai/trinity-enterprise#621 (the key map)
 > **Requirement**: `docs/memory/requirements/core-agent.md` §5.21
 > **Related**: [workspace-absorbs-session.md](workspace-absorbs-session.md) (the ent#451 `new_thread` half), [workspace-sidebar-ia.md](workspace-sidebar-ia.md) (the row this extends), [workspace-agent-page.md](workspace-agent-page.md) (the full chat list), [workspace-agents-at-the-centre.md](workspace-agents-at-the-centre.md) (the pinned Main chat #2579 ensures is listed)
 
@@ -58,14 +58,135 @@ PortalConversation.vue
   (`emit('new-chat')` → `Portal.vue::newChatWithAgent(activeAgent.name)`); the
   sidebar's button remains the cross-agent picker. The label shows at `md`,
   the `<kbd>` at `lg`; `title` and `aria-keyshortcuts` carry the chord always.
-- `isNewChatHotkey(e)`: `j` with a **plain** ⌘ or Ctrl — never Shift/Alt,
-  never both modifiers (those are someone else's shortcuts). ⌘N is the
-  browser's; ⌘⇧O was declined.
-- Armed on `window` in `Portal.vue`'s `onMounted` **above** `bootstrap()`'s
-  `await` (contract #23: handlers are armed at mount, never behind fetched
-  data), removed in `onBeforeUnmount`, inert until signed in. It resolves the
-  agent in front of the person — the agent page's, or the open conversation's
-  — and opens the picker in a room or on the roster root.
+- The chord is `j` with a **plain** ⌘ or Ctrl — never Shift/Alt, never both
+  modifiers (those are someone else's shortcuts). ⌘N is the browser's;
+  ⌘⇧O was declined. `isNewChatHotkey(e)` survives as a thin delegate to the
+  key map below (`resolveWorkspaceKey(e) === 'new-chat'`), so the truth table
+  that shipped with ent#451 still describes it exactly.
+- It resolves the agent in front of the person — the agent page's, or the open
+  conversation's — and opens the picker in a room or on the roster root.
+
+## The key map (ent#621)
+
+⌘J was the Workspace's only key, matched inline. ent#621 made it one entry in
+a **declared map** with a **single dispatcher**, because the second and third
+chord is where a keyboard surface usually goes wrong: two handlers claiming one
+chord, a key that works everywhere except the message field, a chord that eats
+a modal's Esc.
+
+**One declaration — `components/portal/portalKeymap.js`** (pure, no DOM, no
+store). `WORKSPACE_KEYMAP` holds every key the Workspace answers *and* the keys
+it deliberately does not dispatch, so collisions are visible across the whole
+surface rather than only within one owner's share:
+
+| Keys | Does | Owner |
+|---|---|---|
+| ⌘J / Ctrl+J | New chat with this agent | shell |
+| ⌥↓ / ⌥↑ (Alt+↓ / Alt+↑) | Next / previous agent | shell |
+| ⌥⇧↓ / ⌥⇧↑ (Alt+Shift+↓ / ↑) | Next / previous chat with this agent | shell |
+| ⌘. / Ctrl+. | Show or hide the rail | shell |
+| ⌥. (Alt+.) | Next rail tab | shell |
+| ⌘/ / Ctrl+/ | Cursor into the sidebar's search field; again from the field, back to the message field | shell |
+| ⌥/ (Alt+/) | The keyboard-shortcuts list | shell |
+| Esc, the call's `M`, the preview's ←/→, tab roving, a dialog's Tab cycle, the composer typeahead's bare arrows | — | the component that owns the overlay |
+| ⌘K / Ctrl+K | nothing — **reserved** for search (ent#577) | nobody |
+
+Reserved means exactly that: no handler, no `preventDefault`, and no row in the
+key list. The browser's own ⌘K keeps working until search ships, and a help
+dialog never advertises a key that does nothing.
+
+**Matching is platform-free; only the LABELS are not.** `primary` is meta XOR
+ctrl on every platform (the shipped ⌘J semantics), and a chord matches by
+`key` **or** by physical `code`. The `code` arm is what makes the map work on a
+non-Latin layout — and on a US Mac it is the *only* arm for `⌥.`, which types
+`≥`. It answers **only when the printed key is not a single printable ASCII
+character** (merge-train 2026-10-06): on a Latin non-QWERTY layout the position
+and the character disagree on purpose — Dvorak's ⌘V arrives as `key: 'v'` on
+`Period`, ⌘Z as `key: 'z'` on `Slash` — and letting the position out-vote a
+key that names itself made the rail toggle eat paste and the key list eat
+undo. Shift is accepted on a `key` match only, so DE's `Shift+7` → `/` and
+FR's shifted `.` reach ⌘/ while macOS's `⌘?` stays the browser's Help search.
+`chordLabel` / `ariaKeyshortcuts` take the platform and render `⌥↓` vs
+`Alt+↓` and `Alt+ArrowDown`. `keymapCollisions(map)` does NOT take a platform
+— matching is platform-free, so one call is the whole proof — and it is
+asserted empty, which is the test that would have caught a new chord shadowing
+a protocol key.
+
+**One dispatcher — `Portal.vue::onGlobalKeydown`**, still the single chord
+dispatcher (`PortalRail.vue`'s sheet-only Esc `window` listener is the `close-top`
+protocol entry the map declares, not a second dispatcher), armed above `bootstrap()`'s `await` (contract #23) and removed in
+`onBeforeUnmount`. The ladder, in order, because the order is the design:
+
+0. a **key repeat** never dispatches (one press is one action), but the repeat
+   of the press the shell last claimed is `preventDefault`ed — `heldKey`,
+   matched with `workspaceChord(e)` — so a held `⌥.` cannot type `≥` into the
+   message field; the repeat of an unclaimed press is left to the browser;
+1. `resolveWorkspaceKey(e)` — a chord nobody owns or an IME composition returns
+   null and we return **without** `preventDefault`;
+2. signed in (the OTP form answers no keys);
+3. ⌘J keeps its place at the top and its own "leave the call?" ask — the one
+   key a live voice call answers rather than swallows. The ask parks the SAME
+   event and, on confirm, re-enters the ladder after a `nextTick` as the
+   **resumed** pass (`onGlobalKeydown(e, { resumed: true })`): step 3 has
+   already `preventDefault`ed that event, so rung 6 is told the mark is the
+   shell's own and not a nearer owner's (merge-train 2026-10-06 — read as a
+   claim, ⌘J was dead exactly when the person had said "end the call and
+   leave"), and the tick is what lets the confirm dialog leave the DOM before
+   the modal probe runs;
+4. an action with no dispatch entry (a protocol key, a reserved chord) is left
+   to the browser rather than silently eaten;
+5. a focused `<select>` keeps Alt+↓ (its native menu on Firefox/Windows) — the
+   one editable target the agent keys step aside for;
+6. `keymapSuppressed`: a nearer owner already claimed the event
+   (`defaultPrevented`, which is how the Esc protocol and the typeahead's bare
+   arrows win), anything modal (`[aria-modal="true"]`, with a per-action
+   exemption so ⌥/ can close its own dialog and the rail sheet does not count
+   as something modal over the rail), the mobile drawer, or a voice call —
+   which suppresses the moving and rail keys silently.
+
+Only then `preventDefault`, then the action. **Every key works from the message
+field**: the usual "bail out on an editable target" guard is deliberately
+inverted here, since the hands that want the next chat are already typing.
+
+**Two rules the map leans on.**
+
+- *The walk follows the order the eye reads.* The sidebar's roster order is
+  computed **once in the shell** (`orderedRoster`) and handed to both sidebar
+  instances, so the agent keys step through the same list the person sees
+  rather than a second ordering. An agent reached by key is never hidden
+  behind "N more" — the roster block expands, and the row says it is the one
+  you are in (`aria-current`).
+- *Switching agents returns you where you were.* The shell remembers, per
+  agent, the chat you last had open in this Workspace session, and each
+  switch-agent press passes it to the one landing rule
+  (`agentLanding`, see [workspace-agents-at-the-centre.md](workspace-agents-at-the-centre.md)),
+  which honours it only while it still names a live chat of that agent. An
+  unsent new chat records nothing, so you come back to its draft through the
+  rule's own arms rather than a second rule. Memory is in-memory and
+  session-scoped, as the acceptance criteria asked: a reload starts fresh.
+
+**Search key.** ⌘/ runs `Portal.vue::focusSearch`: at and above `sm` it calls
+the desktop `PortalSidebar`'s exposed `focusSearch()` (focus + select), or —
+when that field already has focus (`searchHasFocus()`) — hands the caret back
+through `focusConversationComposer`; below `sm` it opens the drawer and focuses
+that instance's field on the next tick. The field shows the chord in a
+`PortalKeyCap` while it is empty and unfocused.
+
+**Tips panel.** `PortalKeyTips.vue` is pinned to the bottom of the OPEN rail
+(`PortalRail`'s `keyTips` prop; an icon button at the foot of the collapsed
+strip is the same door; the sheet has neither). Its rows are
+`keyTipRows(platform)` over `KEY_TIPS`, laid out as two rows of two with the
+two controls stacked beside them (`keyHintCompact` packs a chord pair into one
+cap; labels truncate, caps never wrap). Its keyboard button emits `open-keys`, and its
+close emits `dismiss-key-tips`, which the shell persists with
+`saveKeyTipsDismissed` (`localStorage['trinity-workspace-key-tips']`).
+
+**Discoverability.** ⌥/ opens `PortalKeyList` — a `BaseModal` dialog built
+from `keyListRows(WORKSPACE_KEYMAP, platform)`, so a key cannot exist without
+appearing in the list (minus the reserved row). The sidebar footer has a
+"Keyboard shortcuts" button carrying the same chord, and the surfaces a key
+drives — agent rows, rail expander and rail tabs, chat tabs — each carry the
+chord in their `title` and in `aria-keyshortcuts`.
 
 ## Renaming (ent#473)
 
@@ -456,6 +577,21 @@ never-opened chat count at all.
   destructuring an array and re-checking the route after the ensure, the
   capped/deduped ensure and its sign-out clear, and the settle cycle's bails
   and three clear sites.
+- **ent#621 — the key map.** `workspaceKeymap.spec.js` (pure: the chord table,
+  the `e.repeat` / IME bails, `keymapCollisions` empty in its one
+  platform-free call, the label and `aria-keyshortcuts` spellings, `cycleIndex` / `nextRailTab`
+  wrapping, `keyListRows` minus the reserved row, and ⌘J answering exactly as
+  `isNewChatHotkey` does — the equivalence that makes the delegation safe);
+  `workspaceKeymap.dom.spec.js` (the `[aria-modal]` probe and its per-action
+  exemptions); `workspaceKeymap.mount.spec.js` (the shell: each key dispatched
+  for real, the agent walk over `orderedRoster`, the last-open memory and the
+  fresh-chat arm, the `<select>` and `defaultPrevented` bails, modal / drawer /
+  call suppression, and the composer focused after every moving key);
+  `portalChatCycle.mount.spec.js` (the conversation's chat walk emits exactly
+  what a tab click does); `portalKeyList.mount.spec.js` (rows, Esc, focus
+  return); `portalKeyHints.mount.spec.js` (the hints on the rows, the rail and
+  the tabs). `portalRosterRow.spec.js` mounts the sidebar for the bound and the
+  handed-down order — the lift's own regression.
 - `src/frontend/e2e/workspace-chat-tabs.spec.js` (**#2579**) — the geometry no
   node-env pin can execute: every visible tab exactly 160px (Main included), a
   long title clipped with its full text on `title=`, the counted "N more"

@@ -97,6 +97,8 @@ def _fake_db(*, exposed=True, enabled=True, key="sandbox:jwt", bindings=None):
     cfg = _config(enabled=enabled)
     return types.SimpleNamespace(
         get_a2a_exposed=lambda name: exposed and name == AGENT,
+        # ent#838: every agent here is public-scope — today's A2A behaviour.
+        get_a2a_scope=lambda name: {"scope": "public", "keyless": True},
         get_nevermined_config_with_key=lambda name: (
             {"config": cfg, "nvm_api_key": key} if name == AGENT else None
         ),
@@ -357,6 +359,8 @@ def client(monkeypatch):
 
     fake_db = types.SimpleNamespace(
         get_a2a_exposed=_exposed,
+        # ent#838: every agent here is public-scope — today's A2A behaviour.
+        get_a2a_scope=lambda name: {"scope": "public", "keyless": True},
         can_user_access_agent=lambda user, name: name in state["exposed"],
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=_cancel_queued,

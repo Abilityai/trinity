@@ -193,7 +193,11 @@ describe('#2579 — Main is listed from the first visit', () => {
     // with it that race — is gone from this function. The pinned Main is still
     // minted on the first visit; the watcher below owns it (T1).
     const src = codeOnly(PORTAL())
-    const fn = src.match(/function landOnAgent\(name\) \{[\s\S]*?\n\}/)
+    // ent#621 re-pin: the signature gained the options bag the switch-agent keys
+    // pass (`lastOpenSessionId`, `focus`). Pinned to that exact shape rather
+    // than loosened — the point of the pin is that a THIRD parameter list is a
+    // deliberate change someone has to come here and make.
+    const fn = src.match(/function landOnAgent\(name, \{[^)]*\} = \{\}\) \{[\s\S]*?\n\}/)
     expect(fn).not.toBeNull()
     expect(fn[0]).not.toMatch(/await/)
     expect(fn[0]).not.toMatch(/ensureMainListed/)
@@ -201,7 +205,10 @@ describe('#2579 — Main is listed from the first visit', () => {
     // ent#551 class (decision #13): back/forward and a typed URL reach the
     // landing without passing a click door, and `activeAgentName` feeds
     // `convKey` — so the call has to be guarded BEFORE anything is written.
-    expect(fn[0]).toMatch(/^function landOnAgent\(name\) \{\s*if \(!name\) return\s*if \(guardLeaveCall/)
+    // ent#621: the guard still comes first, and it now forwards the options bag —
+    // a recursive retry after the leave-call confirm that dropped
+    // `lastOpenSessionId` would land somewhere else than the key asked for.
+    expect(fn[0]).toMatch(/^function landOnAgent\(name, \{[^)]*\} = \{\}\) \{\s*if \(!name\) return\s*if \(guardLeaveCall\(\(\) => landOnAgent\(name, \{ lastOpenSessionId, focus \}\)\)\) return/)
     // T4: the landed chat keeps `/workspace/a/:name`, so a reload or a copied
     // link still names the agent. No escape to bare `/workspace` here.
     expect(fn[0]).not.toMatch(/escapeStage|router\.push/)
@@ -213,7 +220,7 @@ describe('#2579 — Main is listed from the first visit', () => {
     // watcher fires on the route param AND on the thread list arriving, and
     // this landing no longer navigates away, so the second fire must be a
     // no-op or it throws away what the person had started typing.
-    const fn = codeOnly(PORTAL()).match(/function landOnAgent\(name\) \{[\s\S]*?\n\}/)[0]
+    const fn = codeOnly(PORTAL()).match(/function landOnAgent\(name, \{[^)]*\} = \{\}\) \{[\s\S]*?\n\}/)[0]
     expect(fn).not.toMatch(/store\.fetchSessions|createSession|refreshThreads/)
     expect(fn).toMatch(/if \(activeAgentName\.value === name && startingNewChat\.value && !pendingSession\.value\) return[\s\S]*?convGen\.value\+\+/)
   })

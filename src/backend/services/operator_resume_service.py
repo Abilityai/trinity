@@ -546,6 +546,39 @@ def _schedule_on_loop(coro_factory: Callable[[], Awaitable[Any]]) -> None:
     task.add_done_callback(_inflight.discard)
 
 
+# The loop that hosts the app — captured at lifespan start (`main.py`) and
+# refreshed by every on-loop spawn, so a thread anyio does NOT own can still hop
+# back to it (#3246). Per process, like `_inflight`; a worker never shares it.
+_host_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+_CAPTURE_RUNNING = object()
+
+
+def remember_host_loop(loop: Any = _CAPTURE_RUNNING) -> None:
+    """Record the loop background work hops onto. With no argument the RUNNING
+    loop is captured (nothing changes when called off the loop thread);
+    ``None`` forgets it."""
+    global _host_loop
+    if loop is _CAPTURE_RUNNING:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+    _host_loop = loop
+
+
+def _live_host_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """The captured loop only while it can actually run the callback: a closed
+    loop raises on `call_soon_threadsafe`, and one that is not running (a test's
+    private loop between `run_until_complete` calls, a loop that already exited)
+    would queue the task forever — the `different loop` footgun."""
+    loop = _host_loop
+    if loop is None or loop.is_closed() or not loop.is_running():
+        return None
+    return loop
+
+
 def spawn_on_loop(coro_factory: Callable[[], Awaitable[Any]]) -> None:
     """Run ``coro_factory()`` as a background task on the event loop.
 
@@ -554,9 +587,10 @@ def spawn_on_loop(coro_factory: Callable[[], Awaitable[Any]]) -> None:
     broadcast. A factory, not a coroutine: the coroutine object has to be created
     ON the loop thread that awaits it.
 
-    WORKS FROM BOTH CALLER SHAPES, and that is not defensive padding — it is the
-    ent#430 defect. `asyncio.create_task` needs a RUNNING loop, and gets one only
-    when the caller is `async def`. The operator route is; the Workspace ask route
+    WORKS FROM EVERY CALLER SHAPE (the loop thread, an anyio worker thread, and
+    since #3246 any other thread while the host loop runs), and that is not
+    defensive padding — it is the ent#430 defect. `asyncio.create_task` needs a
+    RUNNING loop, and gets one only when the caller is `async def`. The operator route is; the Workspace ask route
     is a plain `def`, which FastAPI runs through `run_in_threadpool` — a worker
     thread with no loop — so `create_task` raised `RuntimeError: no running event
     loop`, the caller's `except` swallowed it, and every client answer recorded
@@ -580,17 +614,31 @@ def spawn_on_loop(coro_factory: Callable[[], Awaitable[Any]]) -> None:
 
         try:
             _run_sync_in_loop(_schedule_on_loop, coro_factory)
+            return
         except RuntimeError as e:
-            # Reached only from a thread anyio does not own — not a shape any
-            # production caller has (Starlette's threadpool IS anyio's), but it
-            # must not degrade into the silent no-op this whole fix removes.
-            # Re-raised with the cause named so the caller's `except` logs
-            # something actionable and reports `resume_requested: false`.
-            raise RuntimeError(
-                "background work could not be scheduled: called from a thread "
-                f"with neither a running loop nor an anyio portal ({e})"
-            ) from e
+            # A thread anyio does not own. Since #3246 that IS a production
+            # shape: `asyncio.to_thread` runs on the loop's DEFAULT executor,
+            # and the headroom sweep (`subscription_recovery_service`) and the
+            # skills reconcile (`skills_sync_service`, `routers/skills.py`) end
+            # platform alerts from exactly there — the ending committed with no
+            # audit row and no trigger, swallowed into a WARNING by
+            # `platform_alerts._spawn` / `ask_service._ended`. The host loop is
+            # captured at lifespan start and by every on-loop spawn, so hop to
+            # it with `call_soon_threadsafe`: the task is created ON the loop
+            # thread, as `_schedule_on_loop` requires, and the caller does not
+            # wait for the work.
+            loop = _live_host_loop()
+            if loop is None:
+                # Nothing to hop to. Must not degrade into the silent no-op this
+                # whole fix removes — re-raised with the cause named so the
+                # caller's `except` logs something actionable.
+                raise RuntimeError(
+                    "background work could not be scheduled: called from a thread "
+                    f"with neither a running loop, an anyio portal, nor a live host loop ({e})"
+                ) from e
+            loop.call_soon_threadsafe(_schedule_on_loop, coro_factory)
         return
+    remember_host_loop()
     _schedule_on_loop(coro_factory)
 
 

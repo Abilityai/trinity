@@ -175,6 +175,8 @@ The MCP loop tools check the calling agent's permission before they act:
 - **`run_agent_loop`** — an agent-scoped key that names an agent it may not call is refused before any loop starts, with the same reason `chat_with_agent` gives: `Permission denied: Agent '<caller>' is not permitted to communicate with '<target>'`.
 - **`get_loop_status` / `stop_loop`** — these take only a `loop_id`, so they look up the loop's agent first and apply the same rule. A refusal reads `Loop '<id>' not found or not accessible` and never names the agent. `stop_loop` sends no stop when it is refused.
 
+**Chain depth.** A loop started by an agent counts as one more hop in the agent-to-agent call chain, and every iteration keeps that depth. So an agent deep in a chain cannot reset the count by starting a loop. Past the chain-depth limit (default 8), `run_agent_loop` is refused before the loop is created, as a `retryable: false` result with `inter_agent_depth_exceeded` (`403` over REST). A loop started by a person is a new chain. See [Agent Network → Chain-Depth Limit](../collaboration/agent-network.md#concepts).
+
 If an agent started a loop and its permission to that agent was removed afterwards, it can no longer read or stop the loop. The agent's owner can still stop it from the **Loops** tab, the Workspace, or `POST /api/loops/{loop_id}/stop`. Refused calls are recorded in the [audit log](../operations/audit-trail.md) as refusals.
 
 ### From Claude Code: `/trinity:loop`
@@ -204,7 +206,7 @@ mcp__trinity__run_agent_loop({
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents/{name}/loops` | POST | Start a loop; returns 202 with `{loop_id, status, agent_name, max_runs}` |
+| `/api/agents/{name}/loops` | POST | Start a loop; returns 202 with `{loop_id, status, agent_name, max_runs}`. An agent-key start past the chain-depth limit returns `403` `inter_agent_depth_exceeded` |
 | `/api/agents/{name}/loops` | GET | List the agent's loops, most recent first (`?status=`, `?limit=` 1–200, default 50) |
 | `/api/loops/{loop_id}` | GET | Status, per-run summaries, last full response (404 unknown; 403 if the caller is neither the initiator nor has agent access) |
 | `/api/loops/{loop_id}/stop` | POST | Graceful stop → `{status: "stopping" \| "already_done"}` |

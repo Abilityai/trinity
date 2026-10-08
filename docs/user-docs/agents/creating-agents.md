@@ -1,6 +1,6 @@
 # Creating Agents
 
-Agents are created from templates or from scratch. Each agent runs as an isolated Docker container with its own filesystem, credentials, and MCP server configuration.
+Agents are created from templates or from scratch. Each agent runs as an isolated Docker container with its own filesystem, credentials, and MCP server configuration, on the runtime its template chooses: Claude Code, Gemini CLI, or OpenAI Codex.
 
 > 📺 **Watch:** [Build an AI Recruiter Agent](https://youtu.be/K7hFWyFIf-Y) *(Jun 2026)* · [Build and Deploy Agents in Cursor](https://youtu.be/amqiysdlEWY) *(Apr 2026)* · [From Zero to Deployed](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -139,7 +139,9 @@ When you create an agent from a repository you already have — rather than a cu
 | **Fork** | Trinity forks the repository into your own GitHub account first (requires the template to declare `fork_to_own`). | Yes — to your fork, with `upstream` pointing at the original |
 | **Copy** | Trinity takes a one-time snapshot of the files, strips the `.git` history, and gives the agent a standalone workspace. | **No** — no remote, no token, no sync |
 
-**Clone: agent or deployment.** A cloned repository is treated as an **agent** by default: it gets a working branch it alone writes, auto-sync, and paused schedules while sync fails — but only when your GitHub account owns the repository, the token is your own (not the platform-wide one), and it can push. Otherwise the agent is created pull-only, and the create response's `git_mode.reason` says why. Pass `kind: "deployment"` to run a codebase pull-only on purpose. Details: [GitHub Sync → Creating an agent with sync](../integrations/github-sync.md#creating-an-agent-with-sync).
+**Clone: agent or deployment.** A cloned repository is treated as an **agent** by default: it gets a working branch it alone writes, auto-sync, and paused schedules while sync fails — but only when your GitHub account owns the repository, the token is your own (not the platform-wide one), and it can push. A template picked from the list is a catalog entry and is always pull-only. Otherwise the agent is created pull-only, and the create response's `git_mode.reason` says why. Pass `kind: "deployment"` to run a codebase pull-only on purpose.
+
+In the create dialog, a custom repository with the **Clone** intent asks **What is this repository?** — **An agent** (the repository is the agent's memory, skills and state, saved to its own branch) or **A deployment of a codebase** (a product the agent runs, which only pulls). The question is not asked for list templates, local or blank agents, copy, fork, or fork-to-own. After a GitHub-backed create, the dialog shows what Trinity decided and why, and warns plainly when an agent you asked for was created **pull-only**. The agent's **Git** tab then carries a badge: **Agent · own branch**, **Agent · own repo**, or **Pull-only**. Details: [GitHub Sync → Creating an agent with sync](../integrations/github-sync.md#creating-an-agent-with-sync).
 
 **Copy** is the right choice when you want to start *from* someone's repository without staying attached to it. The agent gets the files and nothing else: no GitHub credentials are stored, no remote is configured, and the agent never appears on git-sync surfaces. If you later decide you do want a repository, use **Initialize GitHub Sync** on the agent's Git tab.
 
@@ -154,10 +156,10 @@ The check is advisory — the agent exists either way, and you can re-run the an
 ### UI Flow
 
 1. Click **Create Agent** in the Dashboard header, or **Use Template** on the Library page.
-2. Select a template source. GitHub templates display as cards with metadata from `template.yaml`. For a free-form repository, pick the import intent (clone / fork / copy).
+2. Select a template source. GitHub templates display as cards with metadata from `template.yaml`. For a free-form repository, pick the import intent (clone / fork / copy); a clone also asks **What is this repository?** (see above).
 3. Enter an agent name (lowercase, hyphens only) — this is the immutable slug.
 4. Optionally set a **display label** (max 120 characters) — the friendly name shown across the UI. Leave it blank to render under the slug.
-5. Click **Create**, then review the inline compatibility result.
+5. Click **Create**, then review the inline compatibility result and, for a GitHub-backed agent, the git-mode notice. The new agent appears on the Dashboard at once.
 
 ### API
 

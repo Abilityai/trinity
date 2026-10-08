@@ -1069,7 +1069,7 @@ Permission checks before any agent-to-agent communication:
 > **Design Limitation**: an MCP client gives up on a tool call at its own ceiling (30–60 seconds is typical). Trinity's MCP server stops waiting first — at `MCP_CHAT_TIMEOUT_MS`, 25 seconds by default — and answers a synchronous `chat_with_agent` with a receipt (`status: "queued_timeout"` plus the `execution_id`) while the work keeps running. `timeout_seconds` does not extend that wait.
 
 When designing agents that collaborate with other agents, ensure that:
-- A receipt is treated as "running", never as a failure: the outcome is read with `get_execution_result`, and the call is never re-sent. Every agent is taught this as the delegation contract in its platform prompt (§Agent Collaboration); the `chat_with_agent` tool description carries the same text
+- A receipt is treated as "running", never as a failure: the outcome is read with `get_execution_result`, and the call is never re-sent unless the outcome is a confirmed `failed` or `cancelled` — then it is re-sent word for word to retry. Every agent is taught this as the delegation contract in its platform prompt (§Agent Collaboration); the `chat_with_agent` tool description carries the same text
 - Complex tasks use the async pattern (`parallel=true, async=true`) from the start
 - Large data exchanges use shared folders instead of MCP return values
 

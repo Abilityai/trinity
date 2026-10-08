@@ -96,6 +96,7 @@ _MACHINE_ROW_FIELDS = (
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
     "replaces", "replaced_by",  # #3247 — uuids; the readback maps them to request_ids
     "aging", "aged_since",
+    "subject", "last_seen_at",  # #3246: a platform alert's condition key + latest reading
 )
 
 
@@ -151,33 +152,52 @@ async def list_queue_items(
     since: Optional[str] = Query(None, description="Items created after this ISO timestamp"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    agent_names: Optional[List[str]] = Query(
+        None,
+        description=(
+            "Narrow to these agents (repeat the parameter per name, at most 500). "
+            "Only ever narrows what the caller may see (trinity-enterprise#815)."
+        ),
+    ),
+    cursor: Optional[str] = Query(
+        None,
+        description=(
+            "Keyset walk: 'start' to begin, then each page's next_cursor. Within one "
+            "walk no item is returned twice or skipped while the queue changes "
+            "(trinity-enterprise#815). Omit for offset paging."
+        ),
+    ),
     current_user: User = Depends(get_current_user),
 ):
-    """List operator queue items with optional filters."""
-    accessible = _accessible_set(current_user)
-    items = db.list_operator_queue_items(
-        status=status,
-        type=type,
-        priority=priority,
-        agent_name=agent_name,
-        since=since,
-        limit=limit,
-        offset=offset,
-        accessible_agent_names=accessible,
-    )
-    # #2915: aging is computed once, here, from the operator's bound — the
-    # frontend renders `aging`/`aged_since`, it never recomputes them. The two
-    # counts are the visible escalation (undelivered answers, items the agent
-    # closed on its side) the Operations header shows instead of minting queue
-    # items about queue items.
-    items = _for_principal(operator_queue_service.annotate_aging(items), current_user)
-    flags = db.count_operator_queue_flags(accessible_agent_names=accessible)
-    return {
-        "items": items,
-        "count": len(items),
-        "undelivered_count": flags["undelivered"],
-        "closed_by_filer_count": flags["closed_by_filer"],
-    }
+    """List operator queue items with optional filters.
+
+    trinity-enterprise#815: complete within `limit` — every visibility filter
+    runs in SQL before the cut — and says so: `total`, `has_more`,
+    `next_offset` (see `operator_queue_service.list_for_principal`). An
+    agent-scoped key is narrowed to `{self} ∪ permitted` before the cut;
+    `agent_names` narrows any caller further.
+    """
+    try:
+        return operator_queue_service.list_for_principal(
+            current_user,
+            accessible=_accessible_set(current_user),
+            exclude_about_a_person=not is_person_principal(current_user),
+            # #2915: aging is computed once, here, from the operator's bound —
+            # the frontend renders `aging`/`aged_since`, it never recomputes
+            # them. The two flag counts are the visible escalation (undelivered
+            # answers, items the agent closed on its side) the Operations header
+            # shows instead of minting queue items about queue items.
+            project=lambda rows: _for_principal(
+                operator_queue_service.annotate_aging(rows), current_user),
+            filters=dict(status=status, type=type, priority=priority,
+                         agent_name=agent_name, since=since),
+            limit=limit,
+            offset=offset,
+            agent_names=agent_names,
+            cursor=cursor,
+        )
+    except operator_queue_service.QueueListError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
 
 
 @router.get("/stats")
@@ -455,6 +475,11 @@ async def get_agent_queue_items(
         agent_name=agent_name,
         status=status,
         limit=limit,
+        # trinity-enterprise#815: a machine's about-a-person exclusion runs in
+        # SQL, before the limit, so those rows can no longer empty the page.
+        exclude_request_id_prefixes=(
+            None if is_person_principal(current_user)
+            else operator_queue_service.ABOUT_A_PERSON_ID_PREFIXES),
     )
     items = _for_principal(operator_queue_service.annotate_aging(items), current_user)
     return {"agent_name": agent_name, "items": items, "count": len(items)}

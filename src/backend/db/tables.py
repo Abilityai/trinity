@@ -120,6 +120,8 @@ agent_ownership = Table(
     Column("circuit_breaker_enabled", Integer),
     Column("mcp_exposed", Integer),
     Column("a2a_exposed", Integer),                # ent#157: A2A inbound-server exposure opt-in (default OFF)
+    Column("a2a_scope", Text, server_default="public"),          # ent#838: public | internal (trusted networks only)
+    Column("a2a_keyless_internal", Integer, server_default="1"),  # ent#838: trusted callers need no key (internal scope)
     # ent#329: owner opt-in — an operator answer re-triggers the agent. Default OFF:
     # a dispatch on respond spends money, so it is never unconditional. Per-AGENT and
     # not per-request, so hosting asks cannot hand a client a spend button (ent#430 AC #3).
@@ -301,6 +303,7 @@ schedule_executions = Table(
     # ent#457 review: WHICH human the channel context belongs to. Only the
     # portal leg reads it today — see `_resolve_portal`'s recipient check.
     Column("source_channel_client", Text),
+    Column("source_host", Text),                   # ent#838: a keyless trusted-network A2A caller's address
     # ent#555 — the canvas the user had open for this turn (context, not authority).
     Column("open_canvas_id", Text),
     # #2806 — agent-to-agent hops from a non-agent root; NULL = root (0).
@@ -417,6 +420,8 @@ chat_sessions = Table(
     Column("total_context_max", Integer),
     Column("status", Text),
     Column("subscription_id", Text),
+    # #3127: the Claude session a pulled /chat turn resumes.
+    Column("cached_claude_session_id", Text),
 )
 
 chat_messages = Table(
@@ -548,6 +553,8 @@ enterprise_portal_messages = Table(
     Column("created_at", Text),
     Column("source", Text),         # ent#534: NULL typed | 'voice'
     Column("voice_call_id", Text),  # ent#534: groups one voice call's rows
+    Column("attachments", Text),    # #3265: JSON list on a user turn
+    Column("execution_id", Text),   # #3166: the turn that wrote the row
 )
 
 # ent#359 — per-user star + read cursor for a Workspace chat of either kind
@@ -1508,10 +1515,24 @@ operator_queue = Table(
     Column("resolved_to", Text),         # JSON list of person refs
     Column("proposal", Text),            # JSON — the frozen action
     Column("supersedes_expired", Text),  # the predecessor row's uuid
+    # #3246: a platform alert is a condition, not a message. `subject` is
+    # `kind:key`, the dedup key the seam keeps at most one pending row for;
+    # `last_seen_at` moves on every reading. Both nullable, no backfill beyond
+    # the upgrade sweep: agent-raised asks and gates never carry a subject.
+    Column("subject", Text),
+    Column("last_seen_at", Text),
     # #3247: an agent replaced one of its OWN pending asks. Both stamped in the
     # one locked transaction that ends the predecessor and inserts the successor.
     Column("replaces", Text),            # on the successor: the predecessor row's uuid
     Column("replaced_by", Text),         # on the predecessor: the successor row's uuid
+    Index(
+        "uq_operator_queue_pending_subject",
+        "agent_name", "subject",
+        unique=True,
+        sqlite_where=text("status = 'pending' AND subject IS NOT NULL"),
+        postgresql_where=text("status = 'pending' AND subject IS NOT NULL"),
+    ),
+    Index("idx_operator_queue_agent_subject", "agent_name", "subject"),
 )
 
 skill_gate_requests = Table(
@@ -1543,6 +1564,21 @@ skill_gate_requests = Table(
     Column("dispatched_at", Text),
     Column("notified_at", Text),
     UniqueConstraint("dispatched_execution_id"),
+)
+
+# trinity-enterprise#753 — the per-agent skill gate map. See the DDL comment in
+# db/schema.py. The primary key is the ON CONFLICT target of every write.
+agent_skill_gates = Table(
+    "agent_skill_gates",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("skill_name", Text, primary_key=True),      # lowercased
+    Column("approver", Text, nullable=False),          # primary | approver
+    Column("deadline_hours", _Integer),                # 1..168; NULL → the 24h default
+    Column("origin", Text, nullable=False),            # set | library_default | cleared
+    Column("set_by", Text, nullable=False),
+    Column("set_by_agent", Text),
+    Column("set_at", Text, nullable=False),
 )
 
 nevermined_agent_config = Table(

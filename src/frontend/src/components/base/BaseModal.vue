@@ -3,6 +3,7 @@
     <div
       v-if="modelValue"
       ref="overlay"
+      v-bind="$attrs"
       tabindex="-1"
       class="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-gray-900/60 p-4"
       role="dialog"
@@ -63,6 +64,14 @@ import {
   TABBABLE_SELECTOR, tabbable, nextFocusIndex, isDismissKey, isTabKey,
   initialFocusIndex, isBackdropClick, bodyScrollLock,
 } from '../../utils/focusTrap.js'
+
+// Attributes land on the DIALOG, not on `Teleport`. A consumer that needs the
+// overlay element itself marked — `PortalKeyList`'s `data-ws-key-list`, which
+// the Workspace key dispatcher excludes so `⌥/` can close the list it opened
+// — must put that attribute on the SAME element as `aria-modal`, because that
+// is the element the `:not(...)` exclusion matches. Without this the attribute
+// is dropped silently and the marker is a comment rather than a selector.
+defineOptions({ inheritAttrs: false })
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },

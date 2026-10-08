@@ -33,8 +33,8 @@ pytestmark = pytest.mark.unit
 # The two nullable link columns (T3): `replaces` on the successor (the
 # predecessor row's uuid), `replaced_by` on the predecessor (the successor's).
 LINK_COLUMNS = ("replaces", "replaced_by")
-ALEMBIC_REVISION = "0090_operator_queue_replace"
-ALEMBIC_PARENT = "0089_supersede_queue_flood_backlog"
+ALEMBIC_REVISION = "0097_operator_queue_replace"
+ALEMBIC_PARENT = "0096_a2a_internal_scope"
 
 
 @pytest.fixture

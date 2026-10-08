@@ -35,10 +35,17 @@
   >
     <div v-if="mode === 'sheet'" class="absolute inset-0 bg-black/30" @click="$emit('close')"></div>
 
+    <!-- ent#621: the shell's modal probe is a DOM query for
+         `[aria-modal="true"]`, and the rail's own sheet is one. The rail keys
+         must be able to act INSIDE it (⌘. closes it, ⌥. cycles its tabs) while
+         every other key still stops at it — so `data-ws-rail-sheet` goes on the
+         SAME element that carries `aria-modal`, which is the node the probe
+         matches: a marker on the wrapper would never exclude anything. -->
     <aside
       :class="ASIDE[mode]"
       :role="mode === 'sheet' ? 'dialog' : undefined"
       :aria-modal="mode === 'sheet' ? 'true' : undefined"
+      :data-ws-rail-sheet="mode === 'sheet' ? 'true' : undefined"
       aria-label="Conversation rail"
     >
       <!-- ============================ COLLAPSED ============================ -->
@@ -47,8 +54,9 @@
           <button
             type="button"
             :class="[ICON_BTN, 'text-gray-400']"
-            title="Open"
+            :title="`Open (${RAIL_KEY_HINT})`"
             aria-label="Open the conversation rail"
+            :aria-keyshortcuts="RAIL_KEY_SHORTCUTS"
             aria-expanded="false"
             data-testid="portal-rail-expand"
             @click="setOpen(true)"
@@ -66,8 +74,9 @@
             :key="s.id"
             type="button"
             :class="[ICON_BTN, 'relative', s.shape ? 'text-gray-600 dark:text-gray-300' : 'text-gray-400']"
-            :title="s.title"
+            :title="`${s.title} · ${TAB_KEY_HINT} next tab`"
             :aria-label="`Open ${s.title}`"
+            :aria-keyshortcuts="TAB_KEY_SHORTCUTS"
             :data-testid="`portal-rail-tab-${s.id}`"
             @click="openOn(s.id)"
           >
@@ -75,6 +84,10 @@
             <span v-if="s.shape" class="absolute top-1 right-1" :class="dotClass(s.shape)" aria-hidden="true"></span>
           </button>
         </div>
+        <!-- ent#621 (follow-up): 48px holds no panel, so the collapsed strip
+             carries the tips as ONE door at its foot — the same list the open
+             rail's panel opens, and gone with it once dismissed. -->
+        <PortalKeyTips v-if="keyTips" compact class="mt-auto" @open-keys="$emit('open-keys')" />
       </template>
 
       <!-- ========================== OPEN / SHEET ========================== -->
@@ -97,8 +110,9 @@
             <button
               type="button"
               :class="[ICON_BTN, 'text-gray-400']"
-              :title="mode === 'sheet' ? 'Close' : 'Collapse'"
+              :title="`${mode === 'sheet' ? 'Close' : 'Collapse'} (${RAIL_KEY_HINT})`"
               :aria-label="mode === 'sheet' ? 'Close the conversation rail' : 'Collapse the conversation rail'"
+              :aria-keyshortcuts="RAIL_KEY_SHORTCUTS"
               :aria-expanded="mode === 'sheet' ? undefined : 'true'"
               data-testid="portal-rail-collapse"
               @click="mode === 'sheet' ? $emit('close') : setOpen(false)"
@@ -167,6 +181,18 @@
             </div>
           </slot>
         </div>
+
+        <!-- ent#621 (follow-up): the tips panel, pinned to the bottom of the
+             OPEN column. After the body and outside it, so the body keeps its
+             own scroll axis and the panel never covers what it shows; `mt-auto`
+             holds it at the foot even when no tab body is mounted. Not on the
+             sheet: a phone has no keyboard to hint at. -->
+        <PortalKeyTips
+          v-if="keyTips && mode === 'open'"
+          class="mt-auto"
+          @open-keys="$emit('open-keys')"
+          @dismiss="$emit('dismiss-key-tips')"
+        />
       </template>
     </aside>
   </div>
@@ -178,6 +204,7 @@ import OverflowTabs from '../OverflowTabs.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalKeyTips from './PortalKeyTips.vue'
 import {
   RAIL_SIGNAL_LIVE,
   RAIL_SIGNAL_UPDATED,
@@ -190,6 +217,15 @@ import {
   signalShape,
   railTitle,
 } from './portalRail'
+// ent#621: the rail's two keys, derived from the map rather than typed here.
+import { keyHint, keyShortcutsFor, hostPlatform } from './portalKeymap'
+import { capCount } from '@/utils/tabTitle'
+
+const KEY_PLATFORM = hostPlatform()
+const RAIL_KEY_HINT = keyHint('rail-toggle', KEY_PLATFORM)
+const RAIL_KEY_SHORTCUTS = keyShortcutsFor('rail-toggle', KEY_PLATFORM)
+const TAB_KEY_HINT = keyHint('rail-tab-next', KEY_PLATFORM)
+const TAB_KEY_SHORTCUTS = keyShortcutsFor('rail-tab-next', KEY_PLATFORM)
 
 const props = defineProps({
   // The tabs THIS session may see — already filtered by `visibleTabs`. The
@@ -203,9 +239,13 @@ const props = defineProps({
   participants: { type: Array, default: () => [] },
   // The mobile bottom-sheet form. A sheet is always "open".
   sheet: { type: Boolean, default: false },
+  // ent#621 (follow-up): show the shortcut tips — the panel at the foot of the
+  // open column, the icon at the foot of the collapsed strip. The shell turns
+  // it off once the person has closed it; the rail holds no memory of its own.
+  keyTips: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['update:open', 'update:activeTab', 'close', 'see-hints'])
+const emit = defineEmits(['update:open', 'update:activeTab', 'close', 'see-hints', 'open-keys', 'dismiss-key-tips'])
 
 const mode = computed(() => (props.sheet ? 'sheet' : props.open ? 'open' : 'collapsed'))
 
@@ -223,7 +263,29 @@ const stripTabs = computed(() =>
     const signal = signalShape(sig)
     // The dot's meaning on hover ("Info · 2 suggestions"), so it is never an
     // unexplained circle (ent#610 sign-off).
-    return { id: t.id, label: t.label, signal, signalTitle: signal ? railTitle(t, sig) : undefined }
+    // The key hint rides the tooltip the dot already uses, so an open rail's
+    // tabs say what the collapsed strip's buttons say — one hint, two forms.
+    const title = signal ? railTitle(t, sig) : t.label
+    const out = {
+      id: t.id,
+      label: t.label,
+      signal,
+      signalTitle: `${title} · ${TAB_KEY_HINT} next tab`,
+      ariaKeyshortcuts: TAB_KEY_SHORTCUTS,
+    }
+    // ent#836 — a COUNTED tab (Asks) wears the count, not the dot: the same
+    // unfilled "needs you" mark the agent row wears, so the two read as one
+    // number. `OverflowTabs` draws the badge INSTEAD of the signal dot, and
+    // names the tab with the words ("Asks, 2 asks") so a reader never hears
+    // "Asks 2". The collapsed strip keeps the dot + tooltip, the design pass's
+    // own vocabulary for an icon with no room for a number.
+    if (sig.count) {
+      out.badge = capCount(sig.count)
+      out.badgeVariant = 'urgent-outline'
+      out.badgeLabel = `${t.label}, ${sig.note || sig.count}`
+      out.signal = null
+    }
+    return out
   })
 )
 const activeSignal = computed(() => signalFor(props.signals, active.value))
@@ -310,6 +372,9 @@ const ICONS = {
   // wears Work's lightning bolt in the collapsed strip AND in its empty state,
   // and nothing fails.
   info: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
+  // ent#836 — Asks: a speech bubble with a line (heroicons `annotation`), a
+  // thing said to you — distinct from Info's circle beside it in the strip.
+  asks: 'M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z',
 }
 const GLYPHS = {
   expand: 'M11 19l-7-7 7-7m8 14l-7-7 7-7',

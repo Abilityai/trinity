@@ -38,8 +38,7 @@ Dispatch topology, not policy. `pull_pilot.PULL_REACHABLE_TRIGGERS` is the sourc
 |---|---|---|
 | **On `dev` today** | `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop` | 6 of 9 |
 | **Adds with Phase 4** | `fan_out`, `a2a`, `operator_response` | → 9 of 9 |
-| **Interactive (#3114)** | `manual`, `mcp`, `session`, `public`, `voice`, `voip`, `room`, `user`, `paid`, `slack`, `telegram`, `whatsapp`, plus `validation` (`pull_pilot.PULL_REACHABLE_NON_AUTONOMOUS`) | routed on pilots; sync callers wait through `dispatch_and_await_terminal` |
-| **Pending** | `chat` — the UI `/chat` path (`dispatch_admission_service` → `chat_execution_service.run_chat_turn`) | still pushes on pilots; routed in a later change |
+| **Interactive (#3114, #3127)** | `manual`, `mcp`, `chat`, `session`, `public`, `voice`, `voip`, `room`, `user`, `paid`, `slack`, `telegram`, `whatsapp`, plus `validation` (`pull_pilot.PULL_REACHABLE_NON_AUTONOMOUS`) | routed on pilots; sync callers wait through `dispatch_and_await_terminal`. Every interactive path is pulled |
 | **Unreached, unclassified** | `retry` | in neither trigger set — #2845. 4.7% of `eu2` traffic; looks like an oversight, not a decision |
 
 `schedule` / `webhook` / `reminder` landed with #2391; `loop` with #2523. Before #2391 the pilot flag was
@@ -89,13 +88,21 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
    arrivals: one of N held idle is 33% of a 3-worker agent. Multi-container affinity (`replica_count > 1`,
    #927) is out of scope.
 
-   **Routed on pilots (#3114)** for every interactive trigger except `chat` (the UI `/chat` path, still
-   pushed). Sync callers (Session tab, Workspace, public links, channels, rooms, paid, MCP key auth,
-   validation, internal run-now) go through `task_execution_service.dispatch_and_await_terminal`: it waits up
-   to one agent execution timeout for a worker to claim the row (rooms: `ROOM_CLAIM_BUDGET_SECONDS`, 300s,
-   via `claim_budget`), stores it FAILED/`CAPACITY` if none does (a caller that went away leaves it
-   CANCELLED), then waits for the terminal. Each producer passes a `conversation_key` (`session:`, `public:`, `channel:`,
-   `room:`, `paid:`), which is what the claim guard serialises on. Images ride the queue in
+   **Routed on pilots (#3114, #3127)** for every interactive trigger. Sync callers (Session tab, Workspace,
+   `POST /chat`, public links, channels, rooms, paid, MCP key auth, validation, internal run-now) go through
+   `task_execution_service.dispatch_and_await_terminal`: it waits up to one agent execution timeout for a
+   worker to claim the row (rooms: `ROOM_CLAIM_BUDGET_SECONDS`, 300s, via `claim_budget`), stores it
+   FAILED/`CAPACITY` if none does (a caller that went away leaves it CANCELLED), then waits for the terminal.
+   Each producer passes a `conversation_key` (`session:`, `public:`, `channel:`, `room:`, `paid:`), which is
+   what the claim guard serialises on.
+
+   **`POST /chat` on a pilot (#3127)** (MCP `chat_with_agent`, the agent-to-agent connector, CLI
+   `trinity chat`) skips the slot acquire and runs through `session_turn_service.run_resumable_turn` with key
+   `session:chat:<chat_sessions.id>`. Memory is one Claude conversation per (agent, user): the chat session's
+   `cached_claude_session_id` is resumed, a second turn of the same user waits on the `ResumeLock` (30s, then
+   429), and other users run in parallel. `DELETE /chat/history` closes the sessions /chat used and forgets their ids; `GET /chat/history`
+   serves the caller's session from the database. Off a pilot `/chat` keeps the agent container's single
+   shared session. Images ride the queue in
    `backlog_metadata`, which the #1449 retention sweep NULLs once the row is terminal. Live-stream proxies hold the SSE connection
    while the row is queued.
 

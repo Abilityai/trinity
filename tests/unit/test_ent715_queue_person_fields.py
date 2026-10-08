@@ -62,6 +62,7 @@ MACHINE_ROW_KEYS = frozenset({
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
     "replaces", "replaced_by",  # #3247
     "aging", "aged_since",
+    "subject", "last_seen_at",
 })
 
 AGENT = "agent-715-reads"

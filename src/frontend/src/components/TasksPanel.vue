@@ -557,6 +557,7 @@ import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import ModelSelector from './ModelSelector.vue'
 import LoadFailed from './LoadFailed.vue'
 import { apiErrorMessage } from '../utils/apiError'
+import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
 
 // Template ref for highlighted task element
 const highlightedTaskRef = ref(null)
@@ -825,10 +826,18 @@ async function runNewTask() {
     })
 
     const durationMs = Date.now() - startMs
+    // trinity#3274: a gated skill — nothing ran and no execution exists, so the
+    // local row stays as the only record: the server's status and its notice.
+    const held = pendingApprovalMessage(response)
 
     // Update the local task with success
     const idx = pendingTasks.value.findIndex(t => t.id === taskId)
-    if (idx !== -1) {
+    if (idx !== -1 && held) {
+      pendingTasks.value[idx] = {
+        ...pendingTasks.value[idx], status: response.data.status, response: held, gateHeld: true
+      }
+      expandedTaskId.value = taskId
+    } else if (idx !== -1) {
       pendingTasks.value[idx] = {
         ...pendingTasks.value[idx],
         status: 'success',
@@ -841,6 +850,8 @@ async function runNewTask() {
     }
   } catch (error) {
     const durationMs = Date.now() - startMs
+    // A gate refusal creates no execution either: keep the row and its reason.
+    const refused = isGateRefusal(error)
 
     // Update the local task with failure
     const idx = pendingTasks.value.findIndex(t => t.id === taskId)
@@ -849,17 +860,20 @@ async function runNewTask() {
         ...pendingTasks.value[idx],
         status: 'failed',
         duration_ms: durationMs,
-        error: error.response?.data?.detail || error.message || 'Task failed'
+        error: refused ? apiErrorMessage(error) : (error.response?.data?.detail || error.message || 'Task failed'),
+        gateHeld: refused
       }
+      if (refused) expandedTaskId.value = taskId
     }
   } finally {
     taskLoading.value = false
     // Refresh server data - this will load the persisted execution
     await loadExecutions()
     loadQueueStatus()
-    // Remove the local pending task since it's now in server data
+    // Remove the local pending task since it's now in server data — unless the
+    // skill gate held it, which leaves no server row to replace it.
     const idx = pendingTasks.value.findIndex(t => t.id === taskId)
-    if (idx !== -1) {
+    if (idx !== -1 && !pendingTasks.value[idx].gateHeld) {
       pendingTasks.value.splice(idx, 1)
     }
   }

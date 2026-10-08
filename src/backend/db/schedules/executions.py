@@ -101,6 +101,7 @@ class ScheduleExecutionsMixin:
             # Binding-agent for channel report-back (ent#265)
             source_channel_agent=row["source_channel_agent"] if "source_channel_agent" in row_keys else None,
             source_channel_client=row["source_channel_client"] if "source_channel_client" in row_keys else None,
+            source_host=row["source_host"] if "source_host" in row_keys else None,
             open_canvas_id=row["open_canvas_id"] if "open_canvas_id" in row_keys else None,
             # Inter-agent chain depth (#2806); NULL = root.
             chain_depth=row["chain_depth"] if "chain_depth" in row_keys else None,
@@ -799,6 +800,22 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).first()
         return (row.agent_name, row.status) if row else None
+
+    def get_execution_failure_stamp(self, execution_id: str) -> Optional[tuple]:
+        """`(status, error, completed_at)` of one execution, or None (#3245).
+
+        The replay-liveness check reads this only after the gate-state read
+        said ``failed``, to tell a slot-reaper ``lease_expired`` FAILED (which
+        may still report success) from an ordinary one, and when it was
+        written. Three columns — never the row's response or log."""
+        stmt = select(
+            schedule_executions.c.status,
+            schedule_executions.c.error,
+            schedule_executions.c.completed_at,
+        ).where(schedule_executions.c.id == execution_id)
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).first()
+        return (row.status, row.error, row.completed_at) if row else None
 
     # ent#525 — the in-flight rows a Workspace chat is waiting on.
     _CHAT_INFLIGHT_STATUSES = ("running", "queued")

@@ -100,6 +100,8 @@ TABLES = {
             circuit_breaker_enabled INTEGER DEFAULT 0,
             mcp_exposed INTEGER DEFAULT 0,
             a2a_exposed INTEGER DEFAULT 0,
+            a2a_scope TEXT DEFAULT 'public',
+            a2a_keyless_internal INTEGER DEFAULT 1,
             operator_resume_enabled INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
@@ -289,6 +291,7 @@ TABLES = {
             source_channel_thread TEXT,
             source_channel_agent TEXT,
             source_channel_client TEXT,
+            source_host TEXT,
             -- ent#555: which canvas the user had OPEN when they sent this turn.
             -- Context, never authority — it says what is being discussed and
             -- never widens what the agent may read or write. Validated against
@@ -403,6 +406,7 @@ TABLES = {
             total_context_max INTEGER DEFAULT 200000,
             status TEXT DEFAULT 'active',
             subscription_id TEXT,
+            cached_claude_session_id TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """,
@@ -667,7 +671,14 @@ TABLES = {
             -- matter how many rows the history window returns or what typed
             -- rows landed between them.
             source TEXT,
-            voice_call_id TEXT
+            voice_call_id TEXT,
+            -- #3265: what a user turn carried, as a JSON list of
+            -- {filename, size_bytes, mime_type} (or {filename, failed, error}
+            -- for an upload that did not land). NULL for every other row.
+            attachments TEXT,
+            -- #3166: the execution (turn) that wrote the row. NULL on rows from
+            -- before the column and on rows no turn wrote (completion reports).
+            execution_id TEXT
         )
     """,
 
@@ -1744,6 +1755,8 @@ TABLES = {
             resolved_to TEXT,
             proposal TEXT,
             supersedes_expired TEXT,
+            subject TEXT,
+            last_seen_at TEXT,
             replaces TEXT,
             replaced_by TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
@@ -1781,6 +1794,28 @@ TABLES = {
             decided_at TEXT,
             dispatched_at TEXT,
             notified_at TEXT
+        )
+    """,
+
+    # trinity-enterprise#753 — the per-agent skill gate map: which skills on an
+    # agent need approval, and which kind of person approves. One row per
+    # (agent, skill); no row = ungated. `skill_name` is stored lowercased (skill
+    # names are ASCII and every matcher casefolds). `origin`: `set` (a person or
+    # an orchestrator), `library_default` (the library recommends approval) or
+    # `cleared` — a tombstone for a default the owner cleared, which gates
+    # nothing and stops the reconcile re-applying it. `agent_name` is a CASCADE
+    # AgentRef; `set_by_agent` is audit-only provenance and deliberately not.
+    "agent_skill_gates": """
+        CREATE TABLE IF NOT EXISTS agent_skill_gates (
+            agent_name TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            approver TEXT NOT NULL,
+            deadline_hours INTEGER,
+            origin TEXT NOT NULL,
+            set_by TEXT NOT NULL,
+            set_by_agent TEXT,
+            set_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, skill_name)
         )
     """,
 
@@ -2273,6 +2308,15 @@ INDEXES = [
     # platform-minted `id` (uuid) is the global handle; `request_id` carries the
     # agent's string, so two agents can reuse the same id without collision.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_queue_agent_request ON operator_queue(agent_name, request_id)",
+    # #3246: a platform alert is a condition, not a message — at most ONE
+    # pending row per (agent, subject). Partial: ended rows and subject-less
+    # rows (agent-raised asks, gates, not-yet-migrated emitters) stay outside
+    # it. Created by the migration only AFTER the backlog sweep collapsed
+    # duplicates, so an install holding them upgrades cleanly.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_operator_queue_pending_subject ON operator_queue(agent_name, subject) WHERE status = 'pending' AND subject IS NOT NULL",
+    # The seam's snooze lookup reads person-ended rows by subject — a partial
+    # index over pending rows cannot serve it.
+    "CREATE INDEX IF NOT EXISTS idx_operator_queue_agent_subject ON operator_queue(agent_name, subject)",
     # trinity-enterprise#751 — the gate's caps count pending rows per executor
     # and per requester; the sweep reads by state.
     "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_agent_state ON skill_gate_requests(agent_name, state)",

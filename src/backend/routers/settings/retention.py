@@ -129,7 +129,7 @@ async def acknowledge_retention_prune(
 
     Human-only. Admin-role alone is NOT sufficient today: an agent-scoped MCP
     key resolves to its owner *carrying the owner's role*, so on an install whose
-    agents are admin-owned (the default — see cornelius_agent_service.CORNELIUS_OWNER)
+    agents are admin-owned (the default — owned by `utils.admin_identity.admin_username()`)
     an agent key passes the admin check. `reject_agent_principal` is therefore
     applied explicitly here. See abilityai/trinity-ops-agent#232 for the
     underlying fix.

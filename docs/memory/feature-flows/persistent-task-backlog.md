@@ -207,13 +207,15 @@ WHERE status = 'running' AND conversation_key IS NOT NULL;
 
 `backlog_service.enqueue` stamps `conversation_key` on pilot agents only: the
 explicit key `execute_task` was given (`session:<key>`, `public:<id>`,
-`channel:<id>`, `room:<id>`, `paid:<id>`, #3114), else `chat_session_id`, else
+`channel:<id>`, `room:<id>`, `paid:<id>`, #3114; `session:chat:<id>` for
+`POST /chat`, #3127), else `chat_session_id`, else
 `resume_session_id`. The ordering expression cannot use
 `idx_executions_queued`; per-agent queues are small.
 
-**Interactive turns on a pilot (#3114).** `pull_pilot.pull_owns_dispatch`
-covers every interactive trigger except `chat` (the UI `/chat` path, which
-still pushes), plus `validation`. Their sync callers go through
+**Interactive turns on a pilot (#3114, #3127).** `pull_pilot.pull_owns_dispatch`
+covers every interactive trigger plus `validation`. `POST /chat` skips the
+admission acquire on a pilot and runs `chat_execution_service.run_pulled_chat_turn`
+through the resumable-turn engine, one Claude conversation per chat session. Their sync callers go through
 `task_execution_service.dispatch_and_await_terminal`: phase 1 polls the row
 while it is `queued`, for at most one agent execution timeout, and on expiry
 cancels it (`cancel_queued_execution`) and returns FAILED/`CAPACITY`; a cancel

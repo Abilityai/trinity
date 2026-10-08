@@ -9,14 +9,14 @@ ends the predecessor (``cancelled`` / ``disposed_by='agent'`` /
 No default, no backfill, no index. Mirrors the SQLite
 ``operator_queue_replace`` migration.
 
-Revision ID: 0090_operator_queue_replace
-Revises: 0089_supersede_queue_flood_backlog
+Revision ID: 0097_operator_queue_replace
+Revises: 0096_a2a_internal_scope
 """
 from alembic import op
 
 
-revision = "0090_operator_queue_replace"
-down_revision = "0089_supersede_queue_flood_backlog"
+revision = "0097_operator_queue_replace"
+down_revision = "0096_a2a_internal_scope"
 branch_labels = None
 depends_on = None
 

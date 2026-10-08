@@ -751,7 +751,7 @@ class TestProactiveChokepoint:
 
         captured = {}
 
-        async def _inner(self, agent_name, recipient, text, channel, reply):
+        async def _inner(self, agent_name, recipient, text, channel, reply, **_intent):
             captured["text"] = text
             return pms.DeliveryResult(success=True, channel="web", message_id="m1")
 

@@ -41,6 +41,11 @@ export const MERMAID_CONFIG = Object.freeze({
   securityLevel: 'strict',
   htmlLabels: false,
   flowchart: Object.freeze({ htmlLabels: false }),
+  // mermaid 12 defaults to the ELK layout and the `neo` look; pin the v11
+  // pair so existing canvas diagrams keep their layout and style across the
+  // upgrade (#3285). A diagram's own `%%{init}%%` may still opt in.
+  layout: 'dagre',
+  look: 'classic',
   // ent#537 /cso: an `%%{init: {themeCSS}}%%` directive in agent source is
   // honoured under `strict`. Mermaid namespaces every rule under the diagram
   // id, so it cannot reach the page — but `@keyframes` are deliberately left

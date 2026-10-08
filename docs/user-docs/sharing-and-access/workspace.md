@@ -7,6 +7,7 @@ Workspace lives at `/workspace` and ships in **every** build. The older `/portal
 ## Concepts
 
 - **Workspace** — The chat app at `/workspace`. Standalone: no operator navigation, no platform chrome. The top-left corner carries Trinity's mark and the name **Trinity Workspace**.
+- **Inbox** — The Workspace's landing page at `/workspace/inbox`: what your agents need from you and what came back, across every agent on your roster.
 - **Client** — An external person who signs in with a verified email. They have no Trinity account and never see the admin UI.
 - **Chat** — One ongoing conversation. A **1:1** chat is with a single agent; a **room** is a chat with two or more.
 - **Main** — The pinned chat every (you, agent) pair has. It is the first tab for every agent and the place the agent reaches you when nothing else names a chat: an agent-initiated message, a question it raises outside a conversation, or a scheduled brief.
@@ -47,12 +48,30 @@ Three columns on a desktop screen: the **sidebar** on the left, the **conversati
 
 Top to bottom:
 
-- **Trinity Workspace** — the wordmark, with two badges beside it: the number of open questions agents are waiting on you to answer, and the number of replies you haven't read.
+- **Trinity Workspace** — the wordmark. It links to the Inbox.
+- **Inbox** — a pinned row with two badges: the number of asks agents are waiting on you to answer, and the number of chats with something you haven't read. See [The Inbox](#the-inbox).
 - **New chat** — opens the agent picker.
-- **Search agents and chats…** — two characters or more. Agents filter in place; chat results replace the chat list below, and each half says separately when it matched nothing.
-- **Agents** — your roster, ordered by the agents you worked with most recently, then by name. Five rows show, with **Show all** to expand. A row carries the agent's display name, the title of your newest chat with it (or its slug when the name is a label), when you last heard from it, an availability chip when the agent is stopped or unreachable, and its own ask and unread badges. **Clicking an agent opens the chat you were last in with it** — Main when there is no other.
+- **Search agents and chats…** — two characters or more. **⌘/** / **Ctrl+/** puts the cursor there from anywhere; pressed again from the field, it returns you to the message field. Agents filter in place; chat results replace the chat list below, and each half says separately when it matched nothing.
+- **Agents** — your roster, ordered by the agents you worked with most recently, then by name. Five rows show, with **Show all** to expand. A row carries the agent's display name, the title of your newest chat with it (or its slug when the name is a label), when you last heard from it, an availability chip when the agent is stopped or unreachable, and its own ask and unread badges. **Clicking an agent opens a new, empty chat with it**, with the cursor in the message field — or returns you to a chat with that agent where you left unsent text. Your earlier chats are its tabs, one click away.
 - **Starred** — chats you've starred, lifted out of the date groups so each chat appears exactly once.
 - **Today / Yesterday / Previous 7 days / Older** — everything else. A Main you have never used is not listed here; the agent's row is the way into it.
+- **Keyboard shortcuts** — at the bottom, beside sign-out. It opens the list of keys (also **⌥/** / **Alt+/**).
+
+### The Inbox
+
+Signing in, or opening bare `/workspace`, lands you on the **Inbox** — *What needs you, and what came back, across your agents.* A link that names a chat, a room or an agent opens that instead. Three tabs:
+
+| Tab | Shows |
+|-----|-------|
+| **Action** | Asks addressed to you that are still waiting, most urgent first: asks that expire within 24 hours (soonest first), then by priority, then oldest first. While asks are waiting, a second strip narrows the list to one agent (**All agents** or an agent's name, with its count) |
+| **Unread** | Chats where something came back since you last read them — replies, completed runs delivered to you, deliverables addressed to you |
+| **All** | Every chat, read or not, plus waiting asks and asks that ended in the last 7 days |
+
+Click a row to open it in the reading pane beside the list (on a narrow screen the pane replaces the list, with **Back**). An ask is answered right there, with the same controls as in a chat, and below it the ask's context: **Where it came from** (the chat and the few messages before the ask, with a link to open it there), **Delivered in that chat**, and **Your recent answers** to this agent. A chat shows what arrived since you last read it and its deliverables, and is marked read once it has loaded; **Mark read**, **Reply in chat** and **Open in chat** sit in the pane's header, plus **Open canvas** when the agent has one. On **Unread** and **All**, **Mark N chats read** clears them in one go, after a confirmation when it covers more than one chat.
+
+Rows keep their place while you stay on a tab: a chat you read stays listed, drawn as read, and a poll never re-sorts the list under you. A tab shows 50 rows, then **Show more**. Rooms are not in the Inbox yet.
+
+**Discuss and Dismiss.** A question or approval card also offers **Discuss** — a chat with the asking agent about that ask, where for a question **Send as answer** answers it from the message field — and **Dismiss**, which ends the ask without answering after a 5-second **Undo**. Alerts offer neither. Who asks reach, the controls, and how long ended asks stay are all in [Approvals](../automation/approvals.md).
 
 ### Chats as tabs, and Main
 
@@ -66,8 +85,9 @@ Every other chat can be renamed in place — from the pencil beside its title in
 
 - **New chat** in the sidebar opens the picker — **Start a chat**: pick one agent for a 1:1, or several to put them in the same conversation.
 - **New chat** in the conversation header (or **⌘J** / **Ctrl+J**) starts a fresh chat with the agent in front of you.
-- Click an agent in the sidebar to return to the chat you were last in with it.
-- A direct link — `/workspace?agent=<name>` opens your most recent chat with that agent, and `?new=1` forces a fresh one. Linking to an agent you can't reach says so plainly rather than quietly opening a different one.
+- Click an agent in the sidebar to start a new chat with it. Nothing is created until you send, so opening an agent and leaving again leaves no empty chats behind. The address stays `/workspace/a/<name>` until the first send, so a reload or a copied link still names the agent. On a desktop the cursor lands in the message field; on a touch screen the on-screen keyboard is not raised until you tap the field.
+- **⌥↓** / **⌥↑** (**Alt+↓** / **Alt+↑**) steps to the next or previous agent in the sidebar. Walking the roster returns you to the chat you last had open with each agent in this browser tab, while it still exists; a reload starts fresh.
+- A direct link — `/workspace?agent=<name>` (or `/workspace/a/<name>`) opens a new chat with that agent the same way, and `?new=1` still works. A link to an agent that isn't shared with you shows *You don't have access to …* with **Back to your chats**, and a link to a chat that isn't yours shows *This chat isn't available* — neither offers a message field, and neither quietly opens a different chat.
 - On an empty chat, click a card under **Things you can ask** — it pre-fills the composer and never sends on its own. A platform user also sees up to three **Suggested for you** rows below the hints (see [Suggestions](#suggestions)).
 
 ### The composer
@@ -101,7 +121,8 @@ Closing the tab doesn't stop anything: the turn keeps running on the server and 
 ### Reading replies
 
 - Headings, lists and tables in a reply render as such. A code block is its own object with a language label and an always-visible **Copy**; it wraps at the edge rather than scrolling sideways.
-- Under every reply: **Copy message**, and **Helpful** / **Not helpful** thumbs. A thumbs-down opens a comment box; your rating feeds the tally in the agent's band.
+- Under every reply: **Copy message**, **Reply to this message**, and **Helpful** / **Not helpful** thumbs. A thumbs-down opens a comment box; your rating feeds the tally in the agent's band.
+- **Reply to this message** puts a *Replying to …* chip above the message field, and your next message tells the agent which of its messages you are answering. The **×** on the chip, or **Esc** in the message field, drops it. Reply is offered in 1:1 chats, and is disabled during a voice call.
 - If you have scrolled up to re-read something, an arriving message does not pull you back down. A **N new messages** control appears instead; sending, opening a chat or clicking it returns you to the bottom.
 - Reports the agent produced for this chat appear at the end of the thread under **Delivered here** — see [Agent Reports](../operations/agent-reports.md).
 - While anything is unread, the browser tab's title carries the count — `(3) Trinity — Workspace` — so a reply lands even when the Workspace is behind another tab. Opening the chat clears it. Unread counts replies you haven't read; an agent's questions are counted separately.
@@ -128,7 +149,7 @@ The rail sits beside the conversation, collapsed to a strip of icons by default;
 
 ### The agent's page is the conversation
 
-Clicking an agent no longer opens a report about it. Its numbers sit in a band under the header of every chat with it — tasks in the last 7 days, the share completed, the share that succeeded first try, a **Helpful / Not helpful** tally where people have rated it, and a small activity chart. Everything else is the rail's **Info** tab:
+Clicking an agent no longer opens a report about it. Its numbers sit in a band under the header of every chat with it — tasks in the last 7 days, the percentage completed, the percentage that succeeded first try (a rate with nothing to measure reads —), a **Helpful / Not helpful** tally where people have rated it, and a small activity chart. Everything else is the rail's **Info** tab:
 
 | Section | Shows |
 |---------|-------|
@@ -141,7 +162,9 @@ Clicking an agent no longer opens a report about it. Its numbers sit in a band u
 | **What it remembers about you** | The agent's notes about you, and a **Changes** list of the runs that rewrote them, with **Undo** |
 | **Decisions** | The seat's decision record — see [Decisions](#decisions) |
 
-It reports; it does not configure. There are no schedules, skills, logs, costs or model details here. A question the agent raised during a chat appears inside that chat, and answering it there tells you whether the agent is picking the work up; every question waiting on you is in the **Inbox**, and the agent's **Info** tab links there (*N asks waiting on you · Open in Inbox*) — see [Approvals](../automation/approvals.md). Everything is read from stored data, so a stopped agent still renders. The old address `/workspace/a/{agent}` still works and lands in the chat.
+An external client's band and Info tab count only the runs they can see: their own turns, the runs those turns started, and the agent's scheduled runs — except a scheduled brief delivered to someone else. Other people's runs of the same agent, and their timings, are never shown to a client. A platform user sees the agent's full activity.
+
+It reports; it does not configure. There are no schedules, skills, logs, costs or model details here. A question the agent raised during a chat appears inside that chat, and answering it there tells you whether the agent is picking the work up; every question waiting on you is in the **Inbox**, and the agent's **Info** tab links there (*N asks waiting on you · Open in Inbox*) — see [Approvals](../automation/approvals.md). Everything is read from stored data, so a stopped agent still renders. The agent's address, `/workspace/a/{agent}`, opens a new chat with it.
 
 ### Suggestions
 
@@ -213,17 +236,29 @@ Inside a room, **+ Add agent** recruits another, and only a person can do that. 
 
 ### Keyboard shortcuts
 
+The open rail carries a small **shortcut tips** panel at its foot with the most-used keys; close it with its **×** and this browser remembers. The collapsed rail shows a single keyboard icon instead, which opens the full list.
+
 | Keys | Where | Does |
 |------|-------|------|
 | **⌘J** / **Ctrl+J** | Anywhere in the Workspace | New chat with the agent in front of you (the picker when there is none) |
+| **⌥↓** / **⌥↑** (**Alt+↓** / **Alt+↑**) | Anywhere | Next / previous agent in the sidebar |
+| **⌥⇧↓** / **⌥⇧↑** (**Alt+Shift+↓** / **↑**) | Anywhere | Next / previous chat with this agent |
+| **⌘.** / **Ctrl+.** | Anywhere | Show or hide the rail |
+| **⌥.** (**Alt+.**) | Anywhere | Next rail tab |
+| **⌘/** / **Ctrl+/** | Anywhere | Cursor to the sidebar search; again, back to the message field. On a narrow screen it opens the sidebar first |
+| **⌥/** (**Alt+/**) | Anywhere | The keyboard-shortcuts list |
 | **Enter** / **Shift+Enter** | Composer | Send / new line |
 | **↓ ↑**, **Enter**, **Tab**, **Esc** | Composer, with the `/` or `@` list open | Move, insert the selected row, insert the top row, dismiss |
+| **Esc** | Composer, with a *Replying to* chip | Drop the reply |
 | **Esc** | A turn is running, nothing else open | Stop the turn and restore your words |
 | **Esc** | Room composer, with exactly one turn you can stop and no list or picker open | Stop that turn (with two or more, Esc does nothing — use the card's **Stop**) |
 | **Esc** | Theme menu open | Close the menu |
 | **Esc** | During a voice call | End the call |
+| **M** | During a voice call | Mute or unmute |
 | **Esc**, **←**, **→** | File preview | Close, previous file, next file |
 | **Enter** / **Esc** | Renaming a chat | Save / abandon |
+
+"Anywhere" includes the message field: the keys work while you type. They step aside while a dialog or the phone menu is open, and during a voice call only ⌘J answers (it asks whether to leave the call first); the moving and rail keys do nothing. Esc always closes the innermost thing first — a popup, the reply chip, a dialog, a sheet — before it stops a turn. **⌘K** / **Ctrl+K** is left to the browser. Agent rows, chat tabs and the rail's controls show their key in the tooltip.
 
 ### What an owner configures
 
@@ -268,12 +303,12 @@ Workspace is a client-facing shell over the platform's existing agent behavior, 
 | `/agents/{name}/decisions/{id}/actions` | POST | `close`, `reverse` (with a reason), `reconfirm` (with a new date) or `supersede` an active decision; a decision that is no longer active returns `409` |
 | `/agents/{name}/voice/start` | POST | Start a voice call bound to a chat (platform users) |
 | `/agents/{name}/stt` | POST | Transcribe a recorded clip for dictation — returns `{text}`. `404` when dictation is unavailable; a provider error returns a sentence naming the cause (`503` key, permission or credits; `429` rate limit; `422` unreadable recording; `502` provider failure) |
-| `/chat-state` | GET | Star and unread state for every chat |
+| `/chat-state` | GET | Star and unread state for every chat; `?previews=true` adds each unread chat's newest arrivals (the Inbox) |
 | `/chat-state/{kind}/{id}/star` | PUT / DELETE | Star or unstar a chat |
 | `/chat-state/{kind}/{id}/read` | POST | Advance the read cursor |
 | `/search?q=` | GET | Search the caller's chats |
 
-Asks and the Work tab have their own routes under the same prefix — see [Approvals](../automation/approvals.md) and [Executions](../operations/executions.md).
+Asks (`/asks`, with `/asks/{id}/answer`, `/discuss`, `/dismiss` and `/context`) and the Work tab have their own routes under the same prefix — see [Approvals](../automation/approvals.md) and [Executions](../operations/executions.md).
 
 **API Endpoints**: See [Backend API Docs](http://localhost:8000/docs) for full schemas.
 
@@ -293,6 +328,9 @@ Asks and the Work tab have their own routes under the same prefix — see [Appro
 - **No cost or model information** is shown on the agent's band or Info tab, and the chat history and chat reply routes return no turn cost to any caller.
 - **Suggestions are for platform users.** An external client sees no **Suggested for you** list. Suggestions are not offered in a room.
 - **Drafts stay in one browser.** Unsent text does not follow you to another device.
+- **Rooms are not in the Inbox yet**, and **Reply to this message** is offered in 1:1 chats only.
+- **Agent memory for the switch keys is per tab.** Which chat you last had open with each agent is forgotten on reload.
+- **Some Workspace surfaces need an entitlement.** A few platform-user features appear only on instances licensed for them; an external client never sees them.
 
 ## See Also
 

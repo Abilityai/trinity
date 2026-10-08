@@ -31,6 +31,7 @@ import {
   NEW_CHAT_TAB_ID, NEW_CHAT_TAB_LABEL, MAIN_TAB_LABEL,
   agentHasMain, titleSettling, shouldFetchTitleHealth, TITLE_SETTLE_DELAYS_MS,
 } from '../../src/components/portal/portalUtils'
+import { resolveWorkspaceKey } from '../../src/components/portal/portalKeymap'
 
 const src = (rel) => readFileSync(resolve(__dirname, '../../src', rel), 'utf8')
 
@@ -225,6 +226,26 @@ describe('the New chat hotkey', () => {
     expect(newChatHotkeyLabel('MacIntel')).toBe('⌘J')
     expect(newChatHotkeyLabel('Linux x86_64')).toBe('Ctrl+J')
     expect(newChatHotkeyLabel(undefined)).toBe('Ctrl+J')
+  })
+
+  // ent#621: the rule moved into the key map and this predicate delegates, so
+  // the truth table above is now also the map's. Asserting the EQUIVALENCE is
+  // what makes that safe: the day the two disagree, the hotkey every portal
+  // session has learned is the one that changed. This spec reaches both modules
+  // through `portalUtils` FIRST, which is the other half of the two modules'
+  // import-cycle check (`workspaceKeymap.spec.js` imports the map first).
+  it('is the map\'s new-chat entry, by construction (ent#621)', () => {
+    const cases = [
+      ev({ metaKey: true }), ev({ ctrlKey: true }), ev({ ctrlKey: true, key: 'J' }),
+      ev({}), ev({ metaKey: true, shiftKey: true }), ev({ ctrlKey: true, altKey: true }),
+      ev({ metaKey: true, ctrlKey: true }), ev({ metaKey: true, key: 'k' }),
+      ev({ metaKey: true, key: 'ArrowDown' }), ev({ altKey: true, key: 'ArrowDown' }),
+    ]
+    for (const e of cases) {
+      expect(isNewChatHotkey(e), JSON.stringify(e)).toBe(resolveWorkspaceKey(e) === 'new-chat')
+    }
+    // And it is still TRUE for the chord it has always been true for.
+    expect(isNewChatHotkey(ev({ metaKey: true }))).toBe(true)
   })
 })
 
