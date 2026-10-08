@@ -34,7 +34,17 @@ On the Agent Detail page, a runtime badge shows which runtime the agent is using
 | Cost reporting | Reported by the CLI | Estimated from tokens | Estimated from tokens |
 | CLI version | Pinned in the base image | Pinned in the base image | Pinned in the base image |
 
-Credential redaction applies to every runtime, because the backend scrubs execution output whichever CLI produced it. Read-only mode and the [guardrail](agent-guardrails.md) hooks are Claude Code tool hooks. Codex enforces read-only through its own sandbox (`--sandbox read-only`) instead. Gemini CLI turns are not covered by read-only mode or the hooks.
+Safety controls are not the same on every runtime. Platform controls (which credentials the agent holds, which agents and platform calls its key may reach) apply to all three, and so does credential redaction of stored results: the backend scrubs execution output whichever CLI produced it. The in-container controls differ:
+
+| In-container control | Claude Code | OpenAI Codex | Gemini CLI |
+|---|---|---|---|
+| [Guardrail](agent-guardrails.md) hooks (Bash deny-list, credential-file protection, leak scan) | Yes | No | No |
+| Read-only mode | Yes, through a hook | Yes, through Codex's own read-only sandbox (`--sandbox read-only`) | No |
+| Credential redaction of output | Yes, inside the container | Yes, inside the container | No; only the platform's pattern-based scrub when results are stored |
+| Turn limit | Yes | No; the execution timeout bounds the run | No; the execution timeout bounds the run |
+| Per-agent disallowed tools | Yes | No | No |
+
+See [How Trinity Keeps Agents in Bounds](../guides/keeping-agents-in-bounds.md#coverage-by-runtime) for where the boundary sits.
 
 ### Codex authentication
 

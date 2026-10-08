@@ -123,6 +123,7 @@
       <!-- Sidebar: persistent on desktop, drawer on mobile -->
       <div class="hidden sm:flex shrink-0 min-w-0 overflow-hidden sm:w-[var(--ws-sidebar,18rem)]">
         <PortalSidebar
+          ref="sidebarRef"
           :roster="orderedRoster"
           :active-agent-name="activeAgentName"
           :threads="sidebarThreads"
@@ -171,6 +172,7 @@
         <div class="absolute inset-0 bg-black/40" @click="mobileNav = false"></div>
         <div class="absolute inset-y-0 left-0">
           <PortalSidebar
+            ref="drawerSidebarRef"
             :roster="orderedRoster"
             :active-agent-name="activeAgentName"
             :threads="sidebarThreads"
@@ -720,9 +722,12 @@
         :open="railState.open"
         :signals="railSignals"
         :participants="railParticipants"
+        :key-tips="!keyTipsDismissed"
         @update:open="setRailOpen"
         @update:active-tab="setRailTab"
         @see-hints="seeHints"
+        @open-keys="keyListOpen = true"
+        @dismiss-key-tips="dismissKeyTips"
       >
         <!-- ent#475: the three re-homed tabs dock into the shell's slots. Each
              body READS a shell-owned store (`usePortalRailFeeds`) and never
@@ -757,6 +762,11 @@
             @use-playbook="usePlaybook"
             @focus-composer="focusConversationComposer"
           />
+        </template>
+        <!-- ent#836: Asks — the agent's open asks, each a door into the Inbox.
+             Reads the one asks feed; present only while something waits. -->
+        <template #tab-asks="{ participants }">
+          <PortalRailAsks :participants="participants" />
         </template>
       </PortalRail>
       <!-- Round 3: an open rail on the Inbox before anything is selected. It
@@ -820,6 +830,10 @@
           @focus-composer="() => { railSheetOpen = false; focusConversationComposer() }"
         />
       </template>
+      <!-- ent#836: the sheet's own `#tab-asks`; a row's navigation closes it. -->
+      <template #tab-asks="{ participants }">
+        <PortalRailAsks :participants="participants" @open="railSheetOpen = false" />
+      </template>
     </PortalRail>
 
     <!-- ent#551 QA: leaving the stage mid-call asks; End call itself never does -->
@@ -842,7 +856,7 @@
          unmount it mid-sentence. -->
     <p class="sr-only" aria-live="polite" data-testid="ws-key-announce">{{ keyAnnouncement }}</p>
 
-    <!-- ent#621: `⌘/`. ALWAYS mounted and v-model driven — a `v-if` toggle
+    <!-- ent#621: `⌥/`. ALWAYS mounted and v-model driven — a `v-if` toggle
          unmounts past `BaseModal`'s close branch and focus never comes back to
          the message field. Rows come from the map, never from this template. -->
     <PortalKeyList
@@ -882,6 +896,7 @@ import PortalWork from '@/components/portal/PortalWork.vue'
 import PortalRailFiles from '@/components/portal/PortalRailFiles.vue'
 import PortalProjects from '@/components/portal/projects/PortalProjects.vue'
 import PortalRailProjects from '@/components/portal/projects/PortalRailProjects.vue'
+import PortalRailAsks from '@/components/portal/PortalRailAsks.vue'
 import { useProjectsStore } from '@/stores/projects'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
@@ -927,6 +942,8 @@ import {
   visibleTabs,
   infoSignalFrom,
 } from '@/components/portal/portalRail'
+// ent#836: the Asks tab's signal — the agent row's own count, as a rail signal.
+import { asksSignalFrom } from '@/components/portal/portalRailAsks'
 import { stageZone } from '@/components/portal/portalBriefingState'
 import {
   resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage,
@@ -941,6 +958,10 @@ import {
   // trinity-enterprise#610 §3g S4: the read's optimistic zero and its rollback.
   optimisticRead, rollbackRead,
   asksHomeRoute,
+  // ent#836: the per-agent ask counts the sidebar's mark reads — handed to the
+  // rail's door gate (the Asks tab's presence) and its signal, so the tab and
+  // the mark cannot disagree.
+  asksByAgent,
   // ent#621 T6: the order the sidebar SHOWS is now computed here, once, and
   // passed down — so the switch-agent keys walk exactly what the eye reads.
   orderRosterAgents,
@@ -950,6 +971,7 @@ import {
 import {
   resolveWorkspaceKey, workspaceChord, keymapSuppressed, hasModalOpen, nextAgent, recordLastOpen,
   nextRailTab, keyListRows, hostPlatform, WORKSPACE_KEYMAP,
+  loadKeyTipsDismissed, saveKeyTipsDismissed,
 } from '@/components/portal/portalKeymap'
 // ent#557: the tab title's unread half. The router owns the label; this pushes
 // the count. See `utils/tabTitle.js` for why neither writes `document.title`.
@@ -1276,10 +1298,14 @@ const railParticipants = computed(() => railParticipantsFor({
 // sheet all read this list and never the registry, so a tab whose door this
 // session fails has no icon, no label and no mounted body — and therefore no
 // request for whatever that body would fetch.
+// ent#836: ONE projection of the asks feed for the rail — the same
+// `asksByAgent(openAsks)` the sidebar's "needs you" mark reads.
+const railAskCounts = computed(() => asksByAgent(store.openAsks))
 const railTabs = computed(() => visibleTabs(RAIL_TABS, {
   isPlatform: store.isPlatformSession,
   participants: railParticipants.value,
   capabilities: { projects: store.projectsAvailable },
+  askCounts: railAskCounts.value,
 }))
 // Keyed on the route and the stage VERDICT — synchronous facts — never on data
 // still arriving (a room's participants land with its own fetch), so a live
@@ -1406,9 +1432,12 @@ watch(
   (name) => { if (name) store.loadAgentSuggestions(name) },
   { immediate: true },
 )
+// ent#836: the Asks tab's count — the participants' share of the same feed.
+const asksSignal = computed(() => asksSignalFrom(railAskCounts.value, railParticipants.value))
 const railSignals = computed(() => ({
   ...rail.signals.value,
   ...(infoSignal.value ? { info: infoSignal.value } : {}),
+  ...(asksSignal.value ? { asks: asksSignal.value } : {}),
 }))
 
 function setRailOpen(open) { railState.value = { ...railState.value, open } }
@@ -2462,7 +2491,36 @@ function stepRailTab() {
 
 const railTabLabel = (id) => (railTabs.value.find((t) => t.id === id) || {}).label || 'Rail'
 
-// ⌘/ — the key list. It toggles rather than only opening, because the chord
+// ⌘/ — the cursor into the sidebar's search field (the Dashboard's `/` filter
+// key, with the modifier a key needs to work from inside a text field). The
+// shell has TWO sidebars and asks the one on screen: the column at and above
+// `sm`, the drawer below it — which the key opens first, since a field inside
+// a closed drawer cannot take focus. Pressed again from the field, it hands the
+// caret back to the message field: the chord that took you there is the one
+// your hand is still on.
+const sidebarRef = ref(null)
+const drawerSidebarRef = ref(null)
+function focusSearch() {
+  if (isWideViewport(typeof window !== 'undefined' ? window : null)) {
+    if (sidebarRef.value?.searchHasFocus?.()) { focusConversationComposer(); return }
+    sidebarRef.value?.focusSearch?.()
+    return
+  }
+  mobileNav.value = true
+  nextTick(() => drawerSidebarRef.value?.focusSearch?.())
+}
+
+// The rail's shortcut tips — on until the person closes them, and the close is
+// remembered for this browser (a per-viewer convenience, so `localStorage`; a
+// storage that refuses just shows them again next load). The ref lives here,
+// beside `railState`, so a chat switch never brings a closed panel back.
+const keyTipsDismissed = ref(loadKeyTipsDismissed(safeStorage()))
+function dismissKeyTips() {
+  keyTipsDismissed.value = true
+  saveKeyTipsDismissed(safeStorage(), true)
+}
+
+// ⌥/ — the key list. It toggles rather than only opening, because the chord
 // that showed you the list is the chord your hand is already on; `key-list` is
 // the one action allowed to see through its own dialog (`MODAL_IGNORE`).
 const keyListOpen = ref(false)
@@ -2498,6 +2556,7 @@ const KEY_DISPATCH = Object.freeze({
   'chat-prev': () => stepChat(-1),
   'rail-toggle': toggleRail,
   'rail-tab-next': stepRailTab,
+  'search-focus': focusSearch,
   'key-list': () => { keyListOpen.value = !keyListOpen.value },
 })
 

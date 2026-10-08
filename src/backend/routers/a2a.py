@@ -46,6 +46,7 @@ from models import A2ACallRequest, A2ACallResponse, A2ATaskRequest, User
 from routers.public import _get_client_ip
 from services import (
     a2a_gate,
+    a2a_trusted_networks,
     a2a_outbound_service,
     a2a_payment_gate,
     a2a_protocol,
@@ -266,7 +267,7 @@ async def get_agent_card(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     template_data = await _fetch_template_data(agent_name, container)
-    base_url = _card_base_url(request)
+    base_url = _card_base_url_for(agent_name, request)  # ent#838: internal agents show their internal URL
     card = _card_with_exposed_skills(
         agent_name=agent_name,
         template_data=template_data,
@@ -302,6 +303,14 @@ _A2A_UNSUPPORTED = a2a_protocol.A2A_UNSUPPORTED
 # files.py (_DOWNLOAD_RATE_LIMIT), webhooks.py (#1424).
 A2A_CARD_RATE_LIMIT = 60      # max card fetches per IP
 A2A_CARD_RATE_WINDOW = 60     # per minute
+
+# trinity-enterprise#838: a keyless caller from a trusted internal network. It
+# holds no key, so its budget is the source address and the agent, like the
+# paying door's; generous, because it is our own fleet, but bounded, because a
+# compromised host on the network is still a caller.
+A2A_INTERNAL_SOURCE_RATE_LIMIT = 120   # per source address
+A2A_INTERNAL_AGENT_RATE_LIMIT = 300    # per agent, all trusted sources
+A2A_INTERNAL_RATE_WINDOW = 60          # per minute
 
 # The anonymous (paying) branch's budgets live in `services/a2a_payment_gate.py`
 # next to the reason they exist — each hit there can cost a 15-second
@@ -416,7 +425,7 @@ def _a2a_state_for(status: str) -> str:
     return {"success": "completed", "cancelled": "canceled"}.get(status, "failed")
 
 
-def _a2a_idem_scope(agent_name: str, current_user: User) -> str:
+def _a2a_idem_scope(agent_name: str, current_user: User, source_host: Optional[str] = None) -> str:
     """Dedup scope for an inbound A2A `messageId`: per (agent, caller principal).
 
     `messageId` is a **peer-controlled** protocol field that A2A SDKs generate
@@ -432,12 +441,61 @@ def _a2a_idem_scope(agent_name: str, current_user: User) -> str:
     keys all resolve to the same owner user — the key id is what distinguishes
     two agents calling on the same owner's behalf.
     """
+    if source_host:
+        # trinity-enterprise#838: a keyless trusted caller's namespace is its
+        # address, so two hosts never share a messageId space.
+        return f"a2a:{agent_name}:host:{source_host}"
     principal = (
         getattr(current_user, "mcp_key_id", None)
         or getattr(current_user, "username", None)
         or "anonymous"
     )
     return f"a2a:{agent_name}:{principal}"
+
+
+class _InternalGate:
+    """trinity-enterprise#838 — what an agent's A2A scope says about THIS request.
+
+    * ``refuse`` — the agent is exposed with ``internal`` scope and the request
+      did not come from a trusted network (or came through the public tunnel):
+      answer exactly as for an unexposed agent.
+    * ``caller_source`` — internal scope, a trusted source, and the agent's
+      keyless switch on: the caller may run a task without a key, attributed to
+      this address.
+    * ``internal`` — the agent is internal-scope (whatever the source).
+    """
+
+    __slots__ = ("refuse", "caller_source", "internal")
+
+    def __init__(self, refuse=False, caller_source=None, internal=False):
+        self.refuse = refuse
+        self.caller_source = caller_source
+        self.internal = internal
+
+
+_UNSET = object()
+
+
+def _internal_gate(agent_name: str, request: Request, source=_UNSET) -> _InternalGate:
+    if not db.get_a2a_exposed(agent_name):
+        return _InternalGate()
+    scope = db.get_a2a_scope(agent_name)
+    if scope.get("scope") != "internal":
+        return _InternalGate()
+    if source is _UNSET:
+        source = a2a_trusted_networks.internal_source(request)
+    if source is None:
+        return _InternalGate(refuse=True, internal=True)
+    return _InternalGate(caller_source=source if scope.get("keyless") else None, internal=True)
+
+
+def _card_base_url_for(agent_name: str, request: Request) -> str:
+    """The card's origin: an internal-scope agent advertises the admin-set
+    internal base URL (trinity-enterprise#838), never the public one; with none
+    set it falls back to the host the card was read on."""
+    if db.get_a2a_scope(agent_name).get("scope") == "internal":
+        return a2a_trusted_networks.internal_base_url() or _base_url_from_request(request)
+    return _card_base_url(request)
 
 
 async def _serve_card(agent_name: str, request: Request) -> Optional[Dict[str, Any]]:
@@ -450,6 +508,8 @@ async def _serve_card(agent_name: str, request: Request) -> Optional[Dict[str, A
     """
     if not db.get_a2a_exposed(agent_name):
         return None
+    if _internal_gate(agent_name, request).refuse:
+        return None  # ent#838: an internal agent is unexposed to anyone else
     container = get_agent_container(agent_name)
     if not container:
         return None
@@ -457,7 +517,7 @@ async def _serve_card(agent_name: str, request: Request) -> Optional[Dict[str, A
     return _card_with_exposed_skills(
         agent_name=agent_name,
         template_data=template_data,
-        base_url=_card_base_url(request),
+        base_url=_card_base_url_for(agent_name, request),
     )
 
 
@@ -531,7 +591,8 @@ def _authorize_inbound(current_user: User, agent_name: str) -> None:
         raise HTTPException(status_code=403, detail="Caller not on the agent's A2A inbound allow-list")
 
 
-async def _run_a2a_task(agent_name: str, text: str, current_user: User):
+async def _run_a2a_task(agent_name: str, text: str, current_user: Optional[User],
+                        *, source_host: Optional[str] = None):
     """Bridge one inbound A2A message into the Trinity execution stack.
 
     #2524: goes through `dispatch_and_await_terminal`, not `execute_task`
@@ -552,6 +613,7 @@ async def _run_a2a_task(agent_name: str, text: str, current_user: User):
         source_user_id=getattr(current_user, "id", None),
         source_user_email=getattr(current_user, "email", None),
         source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+        source_host=source_host,
     )
 
 
@@ -662,7 +724,7 @@ async def _payer_for_task(
     return bool(db.nevermined_payer_owns_execution(agent_name, exec_id, verify.payer))
 
 
-async def _anonymous_jsonrpc(agent_name: str, request: Request):
+async def _anonymous_jsonrpc(agent_name: str, request: Request, *, unexposed: bool = False):
     """The JSON-RPC door for a caller holding no Trinity credential (ent#679).
 
     Order is load-bearing and each step is cheaper than the next:
@@ -693,6 +755,11 @@ async def _anonymous_jsonrpc(agent_name: str, request: Request):
         detail="Too many unauthenticated A2A requests for this agent.",
     )
 
+    # ent#838: an internal-scope agent takes no payment and, to anyone outside
+    # its trusted networks, answers as an unexposed agent does. Decided AFTER
+    # the limiter, like every other read on this door.
+    if unexposed or _internal_gate(agent_name, request, source=None).internal:
+        return _not_authenticated()
     priced = a2a_payment_gate.is_priced(agent_name, db=db)
     if priced is None:
         return _not_authenticated()
@@ -1040,17 +1107,41 @@ async def a2a_jsonrpc(
     a credential Trinity recognised and then REFUSED can never slide onto the
     payment path and buy its way in.
     """
+    # ent#838: an internal-scope agent answers only a trusted network, and
+    # anyone else — key or no key — gets the unexposed agent's answer.
+    caller_source: Optional[str] = None
     if current_user is None:
-        return await _anonymous_jsonrpc(agent_name, request)
-
-    _authorize_inbound(current_user, agent_name)
+        # No DB read before a limiter (ent#679's ordering): the source check
+        # reads only the cached trusted list, and an untrusted caller goes
+        # straight to the anonymous door, whose limiter runs first.
+        source = a2a_trusted_networks.internal_source(request)
+        if source is None:
+            return await _anonymous_jsonrpc(agent_name, request)
+        rate_limiter.enforce(
+            f"a2a_internal_src:{source}",
+            A2A_INTERNAL_SOURCE_RATE_LIMIT, A2A_INTERNAL_RATE_WINDOW,
+            detail="Too many A2A requests from this address.",
+        )
+        rate_limiter.enforce(
+            f"a2a_internal_agent:{agent_name}",
+            A2A_INTERNAL_AGENT_RATE_LIMIT, A2A_INTERNAL_RATE_WINDOW,
+            detail="Too many A2A requests for this agent.",
+        )
+        gate = _internal_gate(agent_name, request, source=source)
+        if not gate.caller_source:
+            return await _anonymous_jsonrpc(agent_name, request, unexposed=gate.internal)
+        caller_source = gate.caller_source
+    else:
+        if _internal_gate(agent_name, request).refuse:
+            raise HTTPException(status_code=404, detail="Not found")
+        _authorize_inbound(current_user, agent_name)
 
     parsed = await _parse_rpc_envelope(request)
     if isinstance(parsed, JSONResponse):
         return parsed
     method, params, rpc_id = parsed
 
-    caller_ip = request.client.host if request.client else None
+    caller_ip = caller_source or (request.client.host if request.client else None)
 
     # ---- message/send + message/stream ------------------------------------
     if method in ("message/send", "message/stream"):
@@ -1065,7 +1156,8 @@ async def a2a_jsonrpc(
         # with the same messageId must not double-execute. messageId absent →
         # dedup disabled (fail-open).
         message_id = message.get("messageId")
-        decision = idempotency_service.begin(_a2a_idem_scope(agent_name, current_user), message_id)
+        decision = idempotency_service.begin(
+            _a2a_idem_scope(agent_name, current_user, source_host=caller_source), message_id)
         if decision.replay and not decision.in_flight and decision.snapshot:
             # A streaming client can't parse a bare JSON body — replay in the
             # transport it asked for.
@@ -1077,10 +1169,11 @@ async def a2a_jsonrpc(
                               "A task for this messageId is already in progress", data={"retryable": True})
 
         if method == "message/stream":
-            return await _stream_task(agent_name, text, current_user, rpc_id, decision, caller_ip)
+            return await _stream_task(agent_name, text, current_user, rpc_id, decision, caller_ip,
+                                      source_host=caller_source)
 
         try:
-            result = await _run_a2a_task(agent_name, text, current_user)
+            result = await _run_a2a_task(agent_name, text, current_user, source_host=caller_source)
         except SkillGateError as exc:
             task = _gate_task(exc)
             if isinstance(exc, SkillApprovalRequired):
@@ -1105,7 +1198,8 @@ async def a2a_jsonrpc(
             actor_user=current_user, actor_ip=caller_ip,
             target_type="agent", target_id=agent_name,
             endpoint=request.scope["path"],
-            details={"execution_id": result.execution_id, "state": state},
+            details={"execution_id": result.execution_id, "state": state,
+                     **({"source_host": caller_source} if caller_source else {})},
         )
         return _rpc_result(rpc_id, task)
 
@@ -1117,7 +1211,8 @@ async def a2a_jsonrpc(
         row = db.get_execution(exec_id)
         # db.get_execution returns a ScheduleExecution object (not a dict) —
         # read via _exec_field so both the model and a dict work.
-        if not row or _exec_field(row, "agent_name") != agent_name:
+        if not row or _exec_field(row, "agent_name") != agent_name \
+                or not _keyless_owns(row, caller_source):
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
         status = _exec_field(row, "status")
         a2a_state = {
@@ -1136,7 +1231,8 @@ async def a2a_jsonrpc(
         if not isinstance(exec_id, str) or not exec_id:
             return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params.id is required")
         row = db.get_execution(exec_id)
-        if not row or _exec_field(row, "agent_name") != agent_name:
+        if not row or _exec_field(row, "agent_name") != agent_name \
+                or not _keyless_owns(row, caller_source):
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
 
         # Report what actually happened. Telling a caller "canceled" while the
@@ -1164,7 +1260,9 @@ async def a2a_jsonrpc(
             event_type=AuditEventType.EXECUTION, event_action="a2a_cancel", source="a2a",
             actor_user=current_user, actor_ip=caller_ip,
             target_type="agent", target_id=agent_name,
-            endpoint=request.scope["path"], details={"execution_id": exec_id},
+            endpoint=request.scope["path"],
+            details={"execution_id": exec_id,
+                     **({"source_host": caller_source} if caller_source else {})},
         )
         return _rpc_result(rpc_id, _task_object(exec_id, "canceled"))
 
@@ -1174,6 +1272,16 @@ async def a2a_jsonrpc(
                           "tasks/resubscribe is not yet supported on this server")
 
     return _rpc_error(rpc_id, _RPC_METHOD_NOT_FOUND, f"Method not found: {method}")
+
+
+def _keyless_owns(row, caller_source: Optional[str]) -> bool:
+    """A keyless trusted caller reads and cancels only the tasks IT started —
+    the ones stamped with its own address (trinity-enterprise#838). A keyed
+    caller is unaffected (owner/shared access already decided it)."""
+    if not caller_source:
+        return True
+    return (_exec_field(row, "triggered_by") == "a2a"
+            and _exec_field(row, "source_host") == caller_source)
 
 
 def _replay_stream(rpc_id: Any, task: Dict[str, Any]) -> StreamingResponse:
@@ -1189,8 +1297,9 @@ def _replay_stream(rpc_id: Any, task: Dict[str, Any]) -> StreamingResponse:
     return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
-async def _stream_task(agent_name: str, text: str, current_user: User,
-                       rpc_id: Any, decision, caller_ip: Optional[str]) -> StreamingResponse:
+async def _stream_task(agent_name: str, text: str, current_user: Optional[User],
+                       rpc_id: Any, decision, caller_ip: Optional[str],
+                       *, source_host: Optional[str] = None) -> StreamingResponse:
     """message/stream via SSE. Emits a `working` status event, runs the task,
     then a terminal task event. Non-incremental (the agent turn is atomic), but
     spec-shaped so a streaming A2A client attaches and receives the result."""
@@ -1203,7 +1312,7 @@ async def _stream_task(agent_name: str, text: str, current_user: User,
         }}
         yield f"data: {json.dumps(working)}\n\n"
         try:
-            result = await _run_a2a_task(agent_name, text, current_user)
+            result = await _run_a2a_task(agent_name, text, current_user, source_host=source_host)
         except asyncio.CancelledError:
             # A client disconnect cancels the generator, and CancelledError is a
             # BaseException (3.8+) — the `except Exception` below never sees it.
@@ -1237,7 +1346,9 @@ async def _stream_task(agent_name: str, text: str, current_user: User,
         await platform_audit_service.log(
             event_type=AuditEventType.EXECUTION, event_action="a2a_task_stream", source="a2a",
             actor_user=current_user, actor_ip=caller_ip,
-            target_type="agent", target_id=agent_name, details={"execution_id": result.execution_id},
+            target_type="agent", target_id=agent_name,
+            details={"execution_id": result.execution_id,
+                     **({"source_host": source_host} if source_host else {})},
         )
         final = {"jsonrpc": "2.0", "id": rpc_id, "result": {**task, "final": True}}
         yield f"data: {json.dumps(final)}\n\n"

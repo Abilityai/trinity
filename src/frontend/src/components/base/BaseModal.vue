@@ -67,7 +67,7 @@ import {
 
 // Attributes land on the DIALOG, not on `Teleport`. A consumer that needs the
 // overlay element itself marked — `PortalKeyList`'s `data-ws-key-list`, which
-// the Workspace key dispatcher excludes so `⌘/` can close the list it opened
+// the Workspace key dispatcher excludes so `⌥/` can close the list it opened
 // — must put that attribute on the SAME element as `aria-modal`, because that
 // is the element the `:not(...)` exclusion matches. Without this the attribute
 // is dropped silently and the marker is a comment rather than a selector.

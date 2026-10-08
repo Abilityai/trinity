@@ -264,9 +264,14 @@ export function holderLine(holder, { agentName = null, masked = false } = {}) {
  * 1:1 — a delegated child lives on the delegate, and the server found it by
  * the chat, not by the participant (review A2).
  */
+//
+// #3166: another person-sent turn on the same thread (the chat open in a
+// second tab) carries the same chat id but is not a child of this turn — it is
+// a sibling, and "held by <agent>" over its title read as this turn's work.
 export function childrenForChat(items, chatId, excludeId = null) {
   if (!chatId) return []
-  return liveItems(items).filter((it) => it.chat_id === chatId && it.id !== excludeId)
+  return liveItems(items).filter((it) => it.chat_id === chatId && it.id !== excludeId
+    && it.kind !== 'turn')
 }
 
 /**

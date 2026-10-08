@@ -38,10 +38,14 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from config import PORTAL_SOURCE_CHANNEL
 from database import db
+from db.skill_gates import ORIGIN_CLEARED
 from models import TaskExecutionStatus
 from services import rate_limiter, role_addressing
 from services.skill_gate_errors import (  # noqa: F401 — re-exported for entries and tests
     APPROVAL_PENDING_CODE,
+    OUTCOME_DELIVERY_AGENT_TASK,
+    OUTCOME_DELIVERY_INBOX,
+    OUTCOME_DELIVERY_NONE,
     SkillApprovalRequired,
     SkillGateError,
     SkillGateRefused,
@@ -98,12 +102,17 @@ class SkillGate:
 
 
 def list_skill_gates(agent_name: str) -> Dict[str, SkillGate]:
-    """The gated skills on `agent_name`, keyed by skill name.
+    """The gated skills on `agent_name`, keyed by (lowercased) skill name.
 
-    ent#753 owns the storage and replaces this body with its read. Until it
-    lands nothing is gated, so #751 ships inert.
+    Reads the gate map (trinity-enterprise#753, `agent_skill_gates`); a
+    `cleared` tombstone gates nothing. A failed read RAISES — never `{}`, which
+    reads as "nothing is gated" — so `read_gates` refuses instead (#752 note 1).
     """
-    return {}
+    return {
+        row["skill_name"]: SkillGate(approver=row["approver"], deadline_hours=row["deadline_hours"])
+        for row in db.list_agent_skill_gates(agent_name)
+        if row["origin"] != ORIGIN_CLEARED
+    }
 
 
 @dataclass(frozen=True)
@@ -162,6 +171,7 @@ async def enforce(
     dispatch: Optional[Mapping[str, Any]] = None,
     refuse_only: bool = False,
     gates: Optional[Mapping[str, SkillGate]] = None,
+    context_text: Optional[str] = None,
 ) -> GateDecision:
     """Decide whether a request to `agent_name` may be dispatched now.
 
@@ -173,6 +183,13 @@ async def enforce(
     `refuse_only` entries (no row, no identity) refuse a gated request instead
     of raising an approval. `gates` is the map a caller already read
     (`read_gates`), so the check stays one read per dispatch.
+
+    `context_text` (`requester_context_text`) is the free text the requester
+    controls that the executor's system prompt carries BESIDE the request — a
+    schedule's name, an MCP key's name, the requester's email (trinity#3274).
+    It is scanned on its own (never joined to the request, which could spell a
+    name neither part holds), shown on the card when it is what matched, and
+    never stored as the request or replayed.
     """
     if triggered_by == SKILL_GATE_TRIGGER:
         return GateDecision()
@@ -181,6 +198,8 @@ async def enforce(
         return GateDecision()
 
     names = find_gated_invocations(request_text, gates)
+    beside = [n for n in find_gated_invocations(context_text, gates) if n not in names]
+    names = names + beside
     if not names:
         return GateDecision()
 
@@ -202,12 +221,16 @@ async def enforce(
             f"{_skill_list(names)} on {agent_name} needs approval, which "
             "can't be requested from here. Ask in chat instead.", skills=names)
 
-    clean_text = sanitize_text(request_text or "")
-    if _json_bytes(clean_text) > CARD_INPUT_MAX_BYTES:
+    clean_text = _card_text(request_text, dispatch)
+    # The context lines go on the card only when a skill was named nowhere else
+    # — otherwise the approver would read a request that names no gated skill.
+    card_context = _card_context(context_text) if beside else ""
+    card_bytes = _json_bytes(clean_text + card_context)
+    if card_bytes > CARD_INPUT_MAX_BYTES:
         raise SkillGateRefused(
             422, "request_too_long",
             f"This request is too long for an approver to read in full "
-            f"({_json_bytes(clean_text)} > {CARD_INPUT_MAX_BYTES} bytes). Shorten it and ask again.",
+            f"({card_bytes} > {CARD_INPUT_MAX_BYTES} bytes). Shorten it and ask again.",
             limit=CARD_INPUT_MAX_BYTES)
 
     request_id = _request_id(agent_name, requester.key, occurrence_key)
@@ -241,7 +264,7 @@ async def enforce(
         raise _answer_for_record(record, role)
 
     ask = _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints,
-                    role, expires_at)
+                    role, expires_at, card_context=card_context)
     from services.ask_service import AskRejected
     try:
         receipt = _raise_ask(agent_name, ask)
@@ -258,7 +281,10 @@ async def enforce(
             "The approval could not be raised; nothing was run. Try again shortly.") from e
     db.attach_gate_ask(request_id, receipt["id"])
     raise SkillApprovalRequired(request_id=request_id, agent_name=agent_name, skills=names,
-                                approver_role=role, expires_at=receipt.get("expires_at"))
+                                approver_role=role, expires_at=receipt.get("expires_at"),
+                                outcome_delivery=outcome_delivery(
+                                    requester.kind, agent_name=requester.agent_name,
+                                    email=requester.email))
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +335,41 @@ def _skill_list(names: List[str]) -> str:
 
 def _json_bytes(text: str) -> int:
     return len(json.dumps(text).encode("utf-8"))
+
+
+# On the card, the caller's own system prompt is named as such: it reaches the
+# executor with system authority, not as the request's text.
+SYSTEM_PROMPT_LABEL = "With these instructions as its system prompt:"
+
+
+def _card_text(request_text: Optional[str], dispatch: Optional[Mapping[str, Any]]) -> str:
+    """What the card shows, and so what Approve runs (trinity#3274).
+
+    A request frozen with replay parts (`/task`, fan-out — `frozen_replay`)
+    shows exactly those parts, each already sanitised on its own. Sanitising the
+    JOIN again can redact across the line between them (a credential pattern
+    that ends one part and starts the next) and hide from the approver a part
+    the run still sends. Every other request shows its sanitised request text,
+    which is also what its approved run sends."""
+    replay = dispatch or {}
+    if REPLAY_MESSAGE not in replay:
+        return sanitize_text(request_text or "")
+    text = replay[REPLAY_MESSAGE]
+    if replay.get(REPLAY_SYSTEM_PROMPT):
+        text += f"\n\n{SYSTEM_PROMPT_LABEL}\n{replay[REPLAY_SYSTEM_PROMPT]}"
+    return text
+
+
+CARD_CONTEXT_LINE_CHARS = 200
+
+
+def _card_context(context_text: Optional[str]) -> str:
+    """`requester_context_text` as the card shows it: sanitised, one bounded
+    line per value (the scan reads the values whole)."""
+    lines = [line if len(line) <= CARD_CONTEXT_LINE_CHARS
+             else line[:CARD_CONTEXT_LINE_CHARS] + "…"
+             for line in sanitize_text(context_text or "").splitlines() if line.strip()]
+    return "\n".join(lines)
 
 
 def _request_id(agent_name: str, requester_key: str, occurrence_key: Optional[str]) -> str:
@@ -369,19 +430,22 @@ async def _fingerprints_or_refuse(agent_name: str, names: List[str]) -> Dict[str
     return out
 
 
-def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints, role, expires_at):
+def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints, role, expires_at,
+              card_context: str = ""):
     """The card: the WHOLE request in `proposal.input` (what Approve runs), a
-    short preview in the question."""
+    short preview in the question, and — when a skill was named only there —
+    the context the agent also receives (`requester_context_text`)."""
     skills = _skill_list(names)
     who = requester.display()
     preview = clean_text if len(clean_text) <= QUESTION_PREVIEW_CHARS \
         else clean_text[:QUESTION_PREVIEW_CHARS] + "… (the full request is shown below)"
+    beside = f"Also sent to {agent_name} with this request:\n{card_context}\n\n" if card_context else ""
     return {
         "request_id": request_id,
         "type": "approval",
         "priority": "high",
         "title": f"Approve {skills} on {agent_name}"[:300],
-        "question": (f"{who} asked {agent_name} to run {skills}.\n\nRequest:\n{preview}\n\n"
+        "question": (f"{who} asked {agent_name} to run {skills}.\n\nRequest:\n{preview}\n\n{beside}"
                      f"{APPROVE} runs it once, exactly as written. {REJECT} runs nothing."),
         "options": list(OPTIONS),
         "to": role,
@@ -431,7 +495,10 @@ def _pending_from_record(record: Dict[str, Any], role: str) -> SkillApprovalRequ
         expires_at = (row or {}).get("expires_at")
     return SkillApprovalRequired(request_id=record["request_id"], agent_name=record["agent_name"],
                                  skills=record.get("skills") or [], approver_role=role,
-                                 expires_at=expires_at)
+                                 expires_at=expires_at,
+                                 outcome_delivery=outcome_delivery(
+                                     record.get("requester_kind"), agent_name=record.get("source_agent"),
+                                     email=record.get("requester_email")))
 
 
 # ---------------------------------------------------------------------------
@@ -601,6 +668,33 @@ def requester_from_principal(current_user, *, source_agent: Optional[str] = None
         return Requester(kind=KIND_PERSON, key=f"person:{(email or username).casefold()}",
                          email=email, mcp_key_id=key_id, is_person=True)
     return Requester(kind=KIND_OTHER, key=f"principal:{key_id or username}", mcp_key_id=key_id)
+
+
+def requester_context_text(*, schedule_name: Optional[str] = None,
+                           mcp_key_name: Optional[str] = None,
+                           source_email: Optional[str] = None) -> str:
+    """The free text a requester sets that the executor's system prompt carries
+    beside the request — the schedule line and the `mcp key` / `user` parts of
+    the Triggered-by line (`platform_prompt_service`) — for
+    `enforce(context_text=...)` (trinity#3274). Every other `ExecutionContext`
+    field is platform-controlled (a parity test holds that list).
+
+    Each value as given AND as the prompt renders it: the renderer collapses
+    `---` and cuts at 80 characters with `…` (which matching reads as `...`),
+    and either can make a name appear that the value alone does not hold."""
+    from services.platform_prompt_service import render_context_field
+
+    lines = []
+    for label, value in (("Schedule name", schedule_name), ("MCP key name", mcp_key_name),
+                         ("Requester email", source_email)):
+        if not value:
+            continue
+        raw = " ".join(str(value).split())
+        lines.append(f"{label}: {raw}")
+        rendered = render_context_field(value)
+        if rendered and rendered != raw:
+            lines.append(f"{label}, as the agent reads it: {rendered}")
+    return "\n".join(lines)
 
 
 def requester_for_dispatch(*, triggered_by: str, source_user_email: Optional[str] = None,
@@ -934,28 +1028,47 @@ async def sync_gate_marker(agent_name: str) -> Optional[bool]:
     worker — the map is read under the lock — so a slow sync that read an
     older map cannot land after a newer one.
     """
+    async with marker_lock(agent_name):
+        return await sync_marker_locked(agent_name)
+
+
+async def sync_marker_locked(agent_name: str) -> Optional[bool]:
+    """`sync_gate_marker`'s body, for a caller that already holds
+    `marker_lock(agent_name)` — the gate-map writes (trinity-enterprise#753),
+    which must write the row and re-sync under ONE hold. The lock is not
+    reentrant: never call `sync_gate_marker` from inside it."""
+    try:
+        gates = read_gates(agent_name)
+    except SkillGateRefused:
+        return None
+    want = bool(gates)
+    return want if await write_marker(agent_name, want) else None
+
+
+async def write_marker(agent_name: str, create: bool) -> bool:
+    """One exec that writes (`create`) or removes the marker. True when it
+    completed; a failure is logged, never raised."""
+    from services.docker_service import execute_command_in_container
+    try:
+        result = await execute_command_in_container(
+            container_name=f"agent-{agent_name}", command=marker_command(create),
+            timeout=MARKER_TIMEOUT_SECONDS, user="root")
+    except Exception:  # noqa: BLE001
+        logger.warning("[SkillGate] gate marker sync on %s failed", agent_name, exc_info=True)
+        return False
+    if result.get("timed_out") or result.get("exit_code") != 0:
+        logger.warning("[SkillGate] gate marker sync on %s did not complete (exit %s, timed out %s)",
+                       agent_name, result.get("exit_code"), bool(result.get("timed_out")))
+        return False
+    return True
+
+
+def marker_lock(agent_name: str):
+    """The per-agent lock every marker write holds, in this worker."""
     import asyncio
 
     loop_key = (id(asyncio.get_running_loop()), agent_name)
-    async with _marker_locks.setdefault(loop_key, asyncio.Lock()):
-        try:
-            gates = read_gates(agent_name)
-        except SkillGateRefused:
-            return None
-        want = bool(gates)
-        from services.docker_service import execute_command_in_container
-        try:
-            result = await execute_command_in_container(
-                container_name=f"agent-{agent_name}", command=marker_command(want),
-                timeout=MARKER_TIMEOUT_SECONDS, user="root")
-        except Exception:  # noqa: BLE001
-            logger.warning("[SkillGate] gate marker sync on %s failed", agent_name, exc_info=True)
-            return None
-        if result.get("timed_out") or result.get("exit_code") != 0:
-            logger.warning("[SkillGate] gate marker sync on %s did not complete (exit %s, timed out %s)",
-                           agent_name, result.get("exit_code"), bool(result.get("timed_out")))
-            return None
-        return want
+    return _marker_locks.setdefault(loop_key, asyncio.Lock())
 
 
 # One lock per (event loop, agent): a worker has one loop; the loop id keeps a
@@ -1016,6 +1129,10 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "source_channel_chat_id": FREEZE,
     "source_channel_thread": FREEZE,
     "source_channel_client": FREEZE,
+    # trinity-enterprise#838: a keyless trusted-network caller's address — the
+    # run's attribution when there is no user or key, so an approved replay
+    # stays attributed to the same host.
+    "source_host": FREEZE,
     "system_prompt": DROP,
     "resume_session_id": DROP,
     "persist_session": DROP,
@@ -1035,6 +1152,8 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "request_text": RESET,
     "gate_checked": RESET,
     "gate_requester": DROP,
+    # Read by the backstop into the record (`frozen_replay`), never re-frozen.
+    "gate_replay": DROP,
 }
 
 
@@ -1045,6 +1164,25 @@ def frozen_dispatch(**fields: Any) -> Dict[str, Any]:
     if unknown:
         raise ValueError(f"frozen_dispatch: unclassified execute_task fields {unknown}")
     return {k: v for k, v in fields.items() if DISPATCH_FIELDS[k] == FREEZE and v is not None}
+
+
+# What an approved run SENDS, when that is not simply the scanned request text
+# (trinity#3274). `/task` and fan-out scan the caller's message and system prompt
+# together — both reach the executor — but the approved run gets each where the
+# requester put it, never their concatenation (which repeated the command and
+# turned a system prompt into user text). Stored in the record's `dispatch`
+# beside the frozen fields; a record without them replays `request_text`.
+REPLAY_MESSAGE = "replay_message"
+REPLAY_SYSTEM_PROMPT = "replay_system_prompt"
+
+
+def frozen_replay(message: Optional[str], system_prompt: Optional[str] = None) -> Dict[str, str]:
+    """The replay keys for one request, each sanitised the way the card's text
+    is (the approver reads the sanitised join), a missing system prompt left out."""
+    out = {REPLAY_MESSAGE: sanitize_text(message or "")}
+    if system_prompt:
+        out[REPLAY_SYSTEM_PROMPT] = sanitize_text(system_prompt)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1233,15 +1371,21 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
     agent = record["agent_name"]
     frozen = dict(record.get("dispatch") or {})
     triggered_by = frozen.get("triggered_by") or record.get("triggered_by") or "manual"
+    # The message and the caller's system prompt where the requester put them
+    # (`frozen_replay`); a record frozen without them replays its request text.
+    if REPLAY_MESSAGE in frozen:
+        message = frozen[REPLAY_MESSAGE]
+        system_prompt = frozen.get(REPLAY_SYSTEM_PROMPT)
+    else:
+        message, system_prompt = record["request_text"], None
     # A request from a public-facing surface keeps its caller prompt (the
     # owner's public-channel instructions, #1205) — re-derived now rather than
     # frozen, so no per-person memory is stored on the record.
-    system_prompt = None
-    if triggered_by in _PUBLIC_FACING_TRIGGERS:
+    if system_prompt is None and triggered_by in _PUBLIC_FACING_TRIGGERS:
         from services.platform_prompt_service import build_public_channel_caller_prompt
         system_prompt = build_public_channel_caller_prompt(agent)
     request = ParallelTaskRequest(
-        message=record["request_text"],
+        message=message,
         model=frozen.get("model"),
         allowed_tools=frozen.get("allowed_tools"),
         system_prompt=system_prompt,
@@ -1250,7 +1394,7 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
     )
     row = db.create_task_execution(
         agent_name=agent,
-        message=record["request_text"],
+        message=message,
         triggered_by=triggered_by,
         fields=TaskExecutionFields(
             source_user_id=frozen.get("source_user_id"),
@@ -1278,7 +1422,7 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
             agent_name=agent,
             execution_id=execution_id,
             max_concurrent=db.get_max_parallel_tasks(agent),
-            message_preview=record["request_text"][:100],
+            message_preview=message[:100],
             timeout_seconds=timeout,
             overflow_policy="queue_persistent",
             breaker_enabled=dispatch_breaker_active(agent),
@@ -1370,23 +1514,66 @@ def outcome_text(record: Dict[str, Any], outcome: str, *, decider: Optional[str]
 _SELF_EVIDENT_OUTCOMES = frozenset({"approved", "denied", "cancelled"})
 
 
+def outcome_delivery(kind: Optional[str], *, agent_name: Optional[str] = None,
+                     email: Optional[str] = None) -> str:
+    """How `_notify` tells a requester the outcome — the ONE rule, read by
+    `_notify` and by the pending answer, so the answer never promises what is
+    not sent (trinity#3233): a platform task to a requesting agent, an Inbox
+    notice to a person. Schedules, channels, public visitors, paid callers,
+    connectors and system keys get nothing after the request — their record and
+    the executor's Executions carry it."""
+    if kind == KIND_AGENT and agent_name:
+        return OUTCOME_DELIVERY_AGENT_TASK
+    if kind == KIND_PERSON and (email or "").strip():
+        return OUTCOME_DELIVERY_INBOX
+    return OUTCOME_DELIVERY_NONE
+
+
+# Who decided, as a requester reads it whenever no display name may be shown.
+APPROVER_LABEL = "the agent's approver"
+DECIDER_NAME_MAX_CHARS = 80
+
+
+def _decider_label(record: Dict[str, Any], decider: Optional[str]) -> Optional[str]:
+    """Who decided, for the requester's notice — never an email (trinity#3274).
+
+    The decider's display name only for a request a platform session or key
+    made (`source_user_id` frozen: only the `/chat` and `/task` seams and the
+    platform's own producers set it, never the Workspace, the inline connector
+    or a channel) and only when the name is usable; otherwise, and on any
+    lookup failure, "the agent's approver"."""
+    if not decider:
+        return None
+    frozen = record.get("dispatch") or {}
+    if frozen.get("source_user_id") is None or frozen.get("source_channel") == PORTAL_SOURCE_CHANNEL:
+        return APPROVER_LABEL
+    try:
+        user = db.get_user_by_email(decider)
+    except Exception:  # noqa: BLE001 — a label, never a reason to fail the notice
+        return APPROVER_LABEL
+    name = " ".join(str((user or {}).get("name") or "").split())[:DECIDER_NAME_MAX_CHARS]
+    return name if name and "@" not in name else APPROVER_LABEL
+
+
 async def _notify(record: Dict[str, Any], outcome: str, *, decider: Optional[str] = None,
                   execution_id: Optional[str] = None, detail: Optional[str] = None,
                   notify_decider: bool = False) -> None:
-    """Agent requester → a platform task to that agent; person requester → an
-    Inbox notice addressed to them. Schedules, channels, public visitors, paid
-    callers and connectors have no channel after the request — their record
-    and the executor's Executions carry it. Once per record."""
+    """Tell the requester, as `outcome_delivery` says: an agent by a platform
+    task, a person by an Inbox notice addressed to them, anyone else not at all.
+    Once per record. A person's notice names the decider by `_decider_label`,
+    never by email."""
     if not db.mark_gate_request_notified(record["request_id"]):
         return
     await _audit_outcome(record, outcome, decider=decider, execution_id=execution_id)
-    text = outcome_text(record, outcome, decider=decider, execution_id=execution_id,
-                        detail=detail, for_person=True)
-    kind = record.get("requester_kind")
-    asker = (record.get("requester_email") or "").strip().casefold() if kind == KIND_PERSON else ""
+    text = outcome_text(record, outcome, decider=_decider_label(record, decider),
+                        execution_id=execution_id, detail=detail, for_person=True)
+    delivery = outcome_delivery(record.get("requester_kind"), agent_name=record.get("source_agent"),
+                                email=record.get("requester_email"))
+    asker = (record.get("requester_email") or "").strip().casefold() \
+        if delivery == OUTCOME_DELIVERY_INBOX else ""
     decided_own = bool(asker) and asker == (decider or "").strip().casefold()
     try:
-        if kind == KIND_AGENT and record.get("source_agent"):
+        if delivery == OUTCOME_DELIVERY_AGENT_TASK:
             # #715: an agent learns the outcome, never which person decided it.
             await _wake_requester_agent(record, outcome_text(
                 record, outcome, execution_id=execution_id, detail=detail))

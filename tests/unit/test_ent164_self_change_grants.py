@@ -110,6 +110,8 @@ def test_a_non_holder_gets_a_named_refusal_that_says_how_to_ask(held, cap, code)
     assert got_code == code
     # The ask surface has no `ask_class`; the remedy names the grant route.
     assert "type 'question'" in message and "permission-request" not in message
+    # ent#756: the agent's Settings lists open asks whose title carries the id.
+    assert f"title includes '{cap}'" in message
     assert "/capability-grants/" in message
     assert capability_refusal(_principal("agent", HOLDER), cap) is None
     for human in (_principal(None), _principal("user"), _principal("system")):

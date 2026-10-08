@@ -120,7 +120,7 @@ Most visits to an agent start new work, so opening an agent now starts a new cha
 
 ## Does the Workspace have keyboard shortcuts?
 
-Yes, and they work while you are typing in the message field. **⌘J** / **Ctrl+J** starts a new chat, **⌥↓** / **⌥↑** moves between agents, **⌥⇧↓** / **⌥⇧↑** between chats with the current agent, **⌘.** / **Ctrl+.** shows or hides the rail, **⌥.** steps through the rail's tabs, and **⌘/** / **Ctrl+/** opens the full list (also the **Keyboard shortcuts** button at the bottom of the sidebar). Esc closes the innermost thing first, then stops a running turn. The keys pause while a dialog is open, and during a voice call only ⌘J answers. See [Workspace](../sharing-and-access/workspace.md#keyboard-shortcuts).
+Yes, and they work while you are typing in the message field. **⌘J** / **Ctrl+J** starts a new chat, **⌥↓** / **⌥↑** moves between agents, **⌥⇧↓** / **⌥⇧↑** between chats with the current agent, **⌘.** / **Ctrl+.** shows or hides the rail, **⌥.** steps through the rail's tabs, **⌘/** / **Ctrl+/** jumps to the sidebar search, and **⌥/** / **Alt+/** opens the full list (also the **Keyboard shortcuts** button at the bottom of the sidebar). Esc closes the innermost thing first, then stops a running turn. The keys pause while a dialog is open, and during a voice call only ⌘J answers. See [Workspace](../sharing-and-access/workspace.md#keyboard-shortcuts).
 
 ## How do I reply to one specific message from the agent?
 

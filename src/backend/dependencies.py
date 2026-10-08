@@ -1806,37 +1806,44 @@ def get_owned_agent_by_name(
 # trinity-enterprise#164: every refusal also tells the agent how to ASK for the
 # permission. Approving that ask is a notification only — the grant itself is
 # made by an admin in a signed-in session, never by answering a queue item.
-_ASK_FOR_IT = (
-    # #3236 review: the ask surface has no `ask_class` field (that exists only
-    # on seat decisions) and MCP `ask_operator` drops unknown fields, so the
-    # instruction must use the fields that exist. And there is no Settings UI
-    # for these grants yet (ent#756), so the remedy names the API.
-    " To request it, raise an ask to your operator (type 'question') whose title "
-    "names the permission; approving the ask does not grant it. An instance admin "
-    "grants it from a signed-in session: PUT /api/agents/{agent}/capability-grants/"
-    "{capability} with {\"granted\": true}."
-)
+def _ask_for_it(capability: str) -> str:
+    """How to ASK for `capability` (ent#164) — one sentence per refusal.
+
+    #3236 review: the ask surface has no `ask_class` field (that exists only on
+    seat decisions) and MCP `ask_operator` drops unknown fields, so the
+    instruction uses the fields that exist. The permission id goes in the title
+    VERBATIM: that is what the agent's Settings (ent#756) matches to list its
+    open permission requests. There is no grant through the queue — an admin
+    grants it from a signed-in session.
+    """
+    return (
+        f" To request it, raise an ask to your operator (type 'question') whose "
+        f"title includes '{capability}'; approving the ask does not grant it. An "
+        f"instance admin grants it in the agent's Settings \u2192 Permissions to "
+        f"change itself (or PUT /api/agents/{{agent}}/capability-grants/{capability})."
+    )
+
 
 _CAPABILITY_REFUSALS = {
     "skills.manage": (
         "skill_management_not_permitted",
         "This agent does not hold the skill-management permission, which changing "
         "any agent's skills requires \u2014 its own included. An instance admin can "
-        "grant it in Settings \u2192 Agents \u2192 Skill managers." + _ASK_FOR_IT,
+        "grant it in Settings \u2192 Agents \u2192 Skill managers." + _ask_for_it("skills.manage"),
     ),
     "schedules.manage": (
         "schedule_management_not_permitted",
         "This agent does not hold the schedule-management permission, which "
         "creating, changing, enabling, disabling or deleting ANOTHER agent's "
         "schedules (and their webhooks) requires. An agent's own schedules need "
-        "no grant." + _ASK_FOR_IT,
+        "no grant." + _ask_for_it("schedules.manage"),
     ),
     "instructions.manage": (
         "instruction_management_not_permitted",
         "This agent does not hold the instruction-management permission, which "
         "writing an agent's CLAUDE.md, AGENTS.md or .claude/ files (other than "
         "skills), or resetting it to main (reset-to-main-preserve-state), "
-        "requires \u2014 its own included." + _ASK_FOR_IT,
+        "requires \u2014 its own included." + _ask_for_it("instructions.manage"),
     ),
     "agents.manage": (
         "agent_management_not_permitted",
@@ -1844,7 +1851,7 @@ _CAPABILITY_REFUSALS = {
         "deleting, deploying or reconfiguring agents requires (spawning an "
         "ephemeral helper does not). Even with it, an agent reaches only agents "
         "its owner owns, deletes only agents it spawned, and cannot change its "
-        "own read-only mode or guardrails." + _ASK_FOR_IT,
+        "own read-only mode or guardrails." + _ask_for_it("agents.manage"),
     ),
 }
 
@@ -2058,6 +2065,47 @@ def require_person_or_capability(capability: str, *, self_person_only: bool = Fa
         return current_user
     dep.__name__ = f"require_person_or_{capability.replace('.', '_')}"
     return dep
+
+
+async def get_skill_gate_readable_agent_by_name(
+    agent_name: str = Path(..., description="Agent name from path"),
+    current_user: User = Depends(get_current_user),
+) -> str:
+    """Who may read an agent's skill gate map (trinity-enterprise#753).
+
+    An ALLOWlist decided on the principal first, so a refused scope learns
+    nothing about the target (403 before any lookup):
+
+    * a person (signed-in session or the person's own user-scoped key) and the
+      system key — anything they may access (`get_authorized_agent_by_name`,
+      uniform 404);
+    * an agent key — its OWN gates (the in-container hook pulls; nothing is
+      pushed into the workspace), or, holding `skills.manage`, an agent its
+      owner OWNS (the orchestrator reports drift). Never the admin
+      short-circuit an agent key's owner role would otherwise carry. Any other
+      target is the same 404 as an agent that does not exist;
+    * connector, portal delegate, any other scope and a principal with no scope
+      at all — refused.
+    """
+    scope = getattr(current_user, "mcp_scope", _SCOPE_ABSENT)
+    if ((scope in PERSON_SCOPES or scope == "system")
+            and not getattr(current_user, "connector_agent", None)
+            and not getattr(current_user, "portal_delegate", False)):
+        return get_authorized_agent_by_name(agent_name=agent_name, current_user=current_user)
+    own = getattr(current_user, "agent_name", None)
+    if scope == "agent" and own and not getattr(current_user, "vouched_source_agent", None):
+        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+        owner = db.get_agent_owner(agent_name) or {}
+        holder = capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is None
+        if owner and (agent_name == own
+                      or (holder and owner.get("owner_username") == current_user.username)):
+            return agent_name
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": "skill_gates_not_readable",
+                "message": "This key cannot read an agent's skill gates."},
+    )
 
 
 async def get_skill_managed_agent_by_name(

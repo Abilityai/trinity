@@ -100,6 +100,8 @@ TABLES = {
             circuit_breaker_enabled INTEGER DEFAULT 0,
             mcp_exposed INTEGER DEFAULT 0,
             a2a_exposed INTEGER DEFAULT 0,
+            a2a_scope TEXT DEFAULT 'public',
+            a2a_keyless_internal INTEGER DEFAULT 1,
             operator_resume_enabled INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
@@ -289,6 +291,7 @@ TABLES = {
             source_channel_thread TEXT,
             source_channel_agent TEXT,
             source_channel_client TEXT,
+            source_host TEXT,
             -- ent#555: which canvas the user had OPEN when they sent this turn.
             -- Context, never authority — it says what is being discussed and
             -- never widens what the agent may read or write. Validated against
@@ -672,7 +675,10 @@ TABLES = {
             -- #3265: what a user turn carried, as a JSON list of
             -- {filename, size_bytes, mime_type} (or {filename, failed, error}
             -- for an upload that did not land). NULL for every other row.
-            attachments TEXT
+            attachments TEXT,
+            -- #3166: the execution (turn) that wrote the row. NULL on rows from
+            -- before the column and on rows no turn wrote (completion reports).
+            execution_id TEXT
         )
     """,
 
@@ -1786,6 +1792,28 @@ TABLES = {
             decided_at TEXT,
             dispatched_at TEXT,
             notified_at TEXT
+        )
+    """,
+
+    # trinity-enterprise#753 — the per-agent skill gate map: which skills on an
+    # agent need approval, and which kind of person approves. One row per
+    # (agent, skill); no row = ungated. `skill_name` is stored lowercased (skill
+    # names are ASCII and every matcher casefolds). `origin`: `set` (a person or
+    # an orchestrator), `library_default` (the library recommends approval) or
+    # `cleared` — a tombstone for a default the owner cleared, which gates
+    # nothing and stops the reconcile re-applying it. `agent_name` is a CASCADE
+    # AgentRef; `set_by_agent` is audit-only provenance and deliberately not.
+    "agent_skill_gates": """
+        CREATE TABLE IF NOT EXISTS agent_skill_gates (
+            agent_name TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            approver TEXT NOT NULL,
+            deadline_hours INTEGER,
+            origin TEXT NOT NULL,
+            set_by TEXT NOT NULL,
+            set_by_agent TEXT,
+            set_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, skill_name)
         )
     """,
 

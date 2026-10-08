@@ -42,13 +42,31 @@
       <!-- Search -->
       <div class="relative">
         <svg class="w-4 h-4 text-gray-400 absolute left-3 top-2.5 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" /></svg>
+        <!-- ent#621 (follow-up): `⌘/` lands here (`focusSearch`, exposed for
+             the shell). The chord is shown three ways — `title`,
+             `aria-keyshortcuts`, and the key cap below — all read from the map. -->
         <input
+          ref="searchInput"
           :value="search"
           type="search"
+          :title="`${SEARCH_PLACEHOLDER} (${SEARCH_KEY_HINT})`"
+          :aria-keyshortcuts="SEARCH_KEY_SHORTCUTS"
           :placeholder="SEARCH_PLACEHOLDER"
           class="w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm pl-9 pr-3 py-2 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none"
           @input="$emit('update:search', $event.target.value)"
+          @focus="searchFocused = true"
+          @blur="searchFocused = false"
         />
+        <!-- Only while the field is empty and unfocused: it sits where the
+             field's own clear control appears, and a hint over what you are
+             typing is worse than none. Hidden below `sm`, where this sidebar is
+             the phone drawer and there is no keyboard to press it on. -->
+        <PortalKeyCap
+          v-if="!search && !searchFocused"
+          class="hidden sm:block absolute right-2.5 top-2 pointer-events-none"
+          data-testid="portal-sidebar-search-key"
+          aria-hidden="true"
+        >{{ SEARCH_KEY_HINT }}</PortalKeyCap>
       </div>
     </div>
 
@@ -175,9 +193,17 @@
                agent row's "needs you" mark — the same feed (`openAsks`) and
                the same hover words as the pinned Inbox row's, so the two read
                as one fact. -->
+          <!-- trinity-enterprise#836: an UNFILLED orange circle — a ring, the
+               count in urgent ink at the AA tier (700 light / 400 dark) — not
+               the filled pill (operator ask, 2026-10-07: "more alarming than it
+               needs to be"). Still a different SHAPE from the filled unread
+               pill beside it (principle 24), still counted, still named. The
+               pinned Inbox row and the Inbox's Action counter keep their filled
+               700 pills; the rail's Asks tab wears this same recipe
+               (`OverflowTabs` `urgent-outline`). -->
           <span
             v-if="askCountFor(a.name)"
-            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-700 text-white text-[11px] font-semibold flex items-center justify-center"
+            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full ring-1 ring-inset ring-status-urgent-600 dark:ring-status-urgent-400 text-status-urgent-700 dark:text-status-urgent-400 text-[11px] font-semibold tabular-nums flex items-center justify-center"
             :title="askBadgeTitle(askCountFor(a.name))"
             aria-hidden="true"
             data-testid="agent-ask-count"
@@ -323,7 +349,7 @@
       </div>
       <!-- ent#621: the keys are only discoverable if something shows them, and
            a key chord cannot show itself. Mouse and touch reach the same list
-           the `⌘/` chord opens (the ent#261 `<kbd>` precedent). -->
+           the `⌥/` chord opens (the ent#261 `<kbd>` precedent). -->
       <button
         type="button"
         :class="FOOTER_BTN"
@@ -352,6 +378,7 @@
 import PortalSidebarProjectsLink from './projects/PortalSidebarProjectsLink.vue'
 import { computed, ref, watch } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalKeyCap from './PortalKeyCap.vue'
 import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
 import PortalInboxRow from './PortalInboxRow.vue'
@@ -431,6 +458,26 @@ const AGENT_KEY_HINT = keyHint(['agent-prev', 'agent-next'], KEY_PLATFORM)
 const AGENT_KEY_SHORTCUTS = keyShortcutsFor(['agent-prev', 'agent-next'], KEY_PLATFORM)
 const KEY_LIST_HINT = keyHint('key-list', KEY_PLATFORM)
 const KEY_LIST_SHORTCUTS = keyShortcutsFor('key-list', KEY_PLATFORM)
+const SEARCH_KEY_HINT = keyHint('search-focus', KEY_PLATFORM)
+const SEARCH_KEY_SHORTCUTS = keyShortcutsFor('search-focus', KEY_PLATFORM)
+
+// ent#621 (follow-up) — the search key's two questions, answered by the
+// instance that owns the field (the shell has two sidebars and asks the one on
+// screen). `select()` so a second search replaces the first without a
+// backspace; `searchHasFocus` is what lets a repeat press hand the caret back.
+const searchInput = ref(null)
+const searchFocused = ref(false)
+function focusSearch() {
+  const el = searchInput.value
+  if (!el) return false
+  el.focus()
+  el.select?.()
+  return true
+}
+function searchHasFocus() {
+  return !!searchInput.value && typeof document !== 'undefined' && document.activeElement === searchInput.value
+}
+defineExpose({ focusSearch, searchHasFocus })
 
 // #2258: the accessible name of the footer button, per principal kind.
 const signOutLabel = computed(() => signOutLabelFor(props.isPlatformSession))

@@ -304,6 +304,7 @@ class ScheduleExecution(BaseModel):
     # executing agent.
     source_channel_agent: Optional[str] = None
     source_channel_client: Optional[str] = None
+    source_host: Optional[str] = None  # trinity-enterprise#838
     # ent#555 — the canvas the user had open for this turn. Context about what
     # is being discussed; never authority over what may be read or written.
     open_canvas_id: Optional[str] = None
@@ -802,6 +803,9 @@ class SkillInfo(BaseModel):
     # name, and is None unless `deprecated` is true.
     deprecated: bool = False
     superseded_by: Optional[str] = None
+    # trinity-enterprise#753: `recommended` — the skill is gated by default on
+    # every agent it is assigned to (the owner can clear it). None otherwise.
+    approval: Optional[str] = None
 
 
 class AgentSkillsUpdate(BaseModel):

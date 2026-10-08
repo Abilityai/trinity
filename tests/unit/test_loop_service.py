@@ -233,15 +233,19 @@ class _FakeDB:
         return rid
 
     def finalize_loop_run(self, run_id: str, **kwargs):
+        # CAS on status='running', as the real one (#3316).
         for runs in self.runs.values():
             for r in runs:
                 if r["id"] == run_id:
+                    if r["status"] != "running":
+                        return False
                     for k, v in kwargs.items():
                         if k == "execution_id" and v is None:
                             continue  # COALESCE: don't overwrite with None
                         r[k] = v
                     r["completed_at"] = "now"
-                    return
+                    return True
+        return False
 
     def list_loop_runs(self, loop_id: str):
         return [dict(r) for r in sorted(

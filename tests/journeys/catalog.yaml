@@ -275,3 +275,80 @@ journeys:
     # Mode, so the harness needs a bot with Privacy Mode off in a real group —
     # nothing in the invariant catalog covers a channel adapter yet.
     invariants: []
+
+# --- trinity-enterprise#794: the 1.0 system chains -----------------------------
+# A chain checks that a change in one part of a rolled-out system shows up in
+# another part, on records the system wrote. Harnesses live in
+# tests/system_chains/ (collected only under TRINITY_CHAIN_TESTS=1, run by
+# scripts/system/run_chains.sh against a release candidate) and every run writes
+# a per-chain report: passed / failed at a step / partial / not run. All
+# `built: false` until a release-candidate run shows them green.
+
+  - id: J15
+    issue: "abilityai/trinity-enterprise#794"
+    promise: "A fleet I roll out from one definition comes up holding its skills and its canon, and the orchestrator sees what I deployed."
+    actor: operator
+    lanes: [local]
+    tier: live-stack
+    harness: tests/system_chains/test_j15_rollout_chain.py
+    built: false
+    owner: trinity
+    # Skeleton: reports NOT RUN until the reference company (ent#793) exists.
+    # L-02: create is atomic; SK-02: assigned ⇒ delivered, per agent of the fleet.
+    invariants: [L-02, SK-02]
+
+  - id: J16
+    issue: "abilityai/trinity-enterprise#794"
+    promise: "A fact I publish to the canon reaches the agents that use it, and they say which version they read."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: tests/system_chains/test_j16_canon_fact_chain.py
+    built: false
+    owner: trinity
+    # Skeleton: NOT RUN until ent#793 and the change-propagation work (ent#804).
+    # No invariant covers canon-version provenance yet — an empty list, not an
+    # invented id.
+    invariants: []
+
+  - id: J17
+    issue: "abilityai/trinity-enterprise#794"
+    promise: "A fact that lands at the wrong agent reaches the agent that owns it, and I hold a receipt."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: tests/system_chains/test_j17_fact_routing_chain.py
+    built: false
+    owner: trinity
+    # Skeleton: NOT RUN until ent#793 and fact routing (ent#804).
+    invariants: []
+
+  - id: J18
+    issue: "abilityai/trinity-enterprise#794"
+    promise: "A change I make to a library skill reaches every agent that holds it, and an agent without the permission cannot change skills."
+    actor: operator
+    lanes: [local]
+    tier: live-stack
+    harness: tests/system_chains/test_j18_library_change_chain.py
+    built: false
+    owner: trinity
+    # Needs a github.com skills repo the run can push to (CHAIN_SKILLS_REPO /
+    # CHAIN_SKILLS_GITHUB_TOKEN); without one it reports NOT RUN.
+    # SK-01..03: the assignment resolves, the assigned skill is delivered, the
+    # source does not silently stop syncing.
+    invariants: [SK-01, SK-02, SK-03]
+
+  - id: J19
+    issue: "abilityai/trinity-enterprise#794"
+    promise: "My agent's objective reaches me: the number it records shows against the target, and reads stale when it stops."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: tests/system_chains/test_j19_objective_to_person_chain.py
+    built: false
+    owner: trinity
+    # Runs on any stack with Docker. The brief half reports NOT RUN: the platform
+    # puts no objective number in a brief (model-written only), so the chain is
+    # `partial` until it does.
+    # L-02: the declared metric is in the registry the create wrote.
+    invariants: [L-02]

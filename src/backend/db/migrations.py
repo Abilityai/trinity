@@ -2992,6 +2992,33 @@ def _migrate_agent_ownership_a2a_exposed(cursor, conn):
     conn.commit()
 
 
+
+def _migrate_a2a_internal_scope(cursor, conn):
+    """trinity-enterprise#838 — A2A exposure scope and the keyless trusted caller.
+
+    ``agent_ownership.a2a_scope`` (``public`` | ``internal``, default
+    ``public`` — today's behaviour) and ``a2a_keyless_internal`` (default 1:
+    an internal-scope agent answers a trusted-network caller with no key), plus
+    ``schedule_executions.source_host``, the address a keyless trusted caller's
+    run is attributed to. Edition-agnostic OSS primitives the A2A server reads;
+    the scope WRITE is the entitled enterprise setter, like ``a2a_exposed``.
+    Mirrored by the Alembic revision 0096_a2a_internal_scope.
+    """
+    _safe_add_column(
+        cursor, "agent_ownership", "a2a_scope",
+        "ALTER TABLE agent_ownership ADD COLUMN a2a_scope TEXT DEFAULT 'public'",
+    )
+    _safe_add_column(
+        cursor, "agent_ownership", "a2a_keyless_internal",
+        "ALTER TABLE agent_ownership ADD COLUMN a2a_keyless_internal INTEGER DEFAULT 1",
+    )
+    _safe_add_column(
+        cursor, "schedule_executions", "source_host",
+        "ALTER TABLE schedule_executions ADD COLUMN source_host TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_operator_resume(cursor, conn):
     """ent#329 — owner opt-in: an operator answer re-triggers the agent.
 
@@ -4389,6 +4416,25 @@ def _migrate_portal_messages_attachments(cursor, conn):
     )
     conn.commit()
 
+
+def _migrate_portal_messages_execution_id(cursor, conn):
+    """#3166 — each Workspace message names the turn that wrote it.
+
+    One nullable column on `enterprise_portal_messages`. Two turns on one thread
+    (the chat open in two tabs) wrote replies the client could not tell apart,
+    so a tab could show the other turn's answer as its own. Additive, no
+    backfill: old rows stay NULL and the client keeps its old matching for them.
+    Mirrored by the Alembic revision 0095_portal_messages_execution_id.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "execution_id",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN execution_id TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_portal_session_main_chat(cursor, conn):
     """ent#523 — the pinned Main chat, and the tombstone Reset leaves behind.
 
@@ -5376,6 +5422,83 @@ def _migrate_platform_alert_subjects(cursor, conn):
     conn.commit()
 
 
+# #2372: the platform-minted prefixes on the day the heal shipped. Frozen on
+# purpose — a one-time fix of rows that already exist must not widen when a
+# prefix is reserved later (`operator_queue_service._RESERVED_ID_PREFIXES` stays
+# the live definition; a unit test pins the two equal at ship time).
+PLATFORM_ALERT_HEAL_PREFIXES = (
+    "queue-flood-", "poison-", "cb-dormant-", "sync-failing-", "git-bloat-",
+    "sync-diverged-", "skill-not-found-", "val_", "system-seed-",
+    "base-image-stale-", "alert-budget-", "effect-unguarded-", "db-backup-",
+    "log-archive-", "sub-headroom-", "skills-legacy-adoption-",
+    "workspace-problem-", "portal-inbox-collision-", "gitignore-untracked-",
+    "skills-reconcile-", "skills-fleet-reinject-", "retention-guard-",
+    "ent615-git-token-scrub-", "role-drift-", "gate-",
+)
+PLATFORM_ALERT_HEAL_SELECT_SQL = "SELECT id, request_id FROM operator_queue WHERE status = 'responded'"
+PLATFORM_ALERT_HEAL_UPDATE_SQL = (
+    "UPDATE operator_queue SET status = 'acknowledged', acknowledged_at = :now "
+    "WHERE id = :id AND status = 'responded'"
+)
+
+
+def platform_alert_heal_ids(rows):
+    """Ids of `responded` rows that are platform-minted — matched the way
+    `is_platform_minted` matches (strip + lowercase + prefix), in Python,
+    because SQL `LIKE` reads the `_` in `val_` as a wildcard."""
+    return [
+        row_id for row_id, request_id in rows
+        if str(request_id or "").strip().lower().startswith(PLATFORM_ALERT_HEAL_PREFIXES)
+    ]
+
+
+def _migrate_platform_alert_responded_heal(cursor, conn):
+    """#2372: platform alerts an operator acknowledged before the fix sat in
+    `responded` — no agent ever acknowledges them, so they stayed for the 90-day
+    floor and out of Clear All. Moves each to `acknowledged` (`acknowledged_at`
+    = now), the state an operator's answer now lands in. Agents' own asks and
+    non-`responded` rows are untouched. Idempotent.
+
+    Mirrored by the Alembic revision 0093_platform_alert_responded_heal.
+    """
+    from utils.helpers import utc_now_iso
+    cursor.execute(PLATFORM_ALERT_HEAL_SELECT_SQL)
+    now = utc_now_iso()
+    sql = PLATFORM_ALERT_HEAL_UPDATE_SQL.replace(":now", "?").replace(":id", "?")
+    for row_id in platform_alert_heal_ids(cursor.fetchall()):
+        cursor.execute(sql, (now, row_id))
+    conn.commit()
+
+
+def _migrate_agent_skill_gates(cursor, conn):
+    """trinity-enterprise#753 — the per-agent skill gate map.
+
+    One row per (agent, skill) that needs approval before it runs: the approver
+    kind and an optional deadline. The table the dispatch check (#751) and the
+    in-container hook (#752) read through ``skill_gate_service.list_skill_gates``.
+    See the DDL comment in db/schema.py. Additive: no row = ungated, so every
+    existing agent is unchanged on upgrade.
+
+    Mirrored by the Alembic revision 0094_agent_skill_gates.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_skill_gates (
+            agent_name TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            approver TEXT NOT NULL,
+            deadline_hours INTEGER,
+            origin TEXT NOT NULL,
+            set_by TEXT NOT NULL,
+            set_by_agent TEXT,
+            set_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, skill_name)
+        )
+        """
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5538,4 +5661,8 @@ MIGRATIONS = [
     ("platform_alert_subjects", _migrate_platform_alert_subjects),
     ("chat_session_claude_id", _migrate_chat_session_claude_id),
     ("portal_messages_attachments", _migrate_portal_messages_attachments),
+    ("platform_alert_responded_heal", _migrate_platform_alert_responded_heal),
+    ("agent_skill_gates", _migrate_agent_skill_gates),
+    ("portal_messages_execution_id", _migrate_portal_messages_execution_id),
+    ("a2a_internal_scope", _migrate_a2a_internal_scope),
 ]

@@ -337,10 +337,25 @@ class LoopOperations:
         cost: Optional[float],
         duration_ms: Optional[int],
         execution_id: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
+        """Close a ``running`` run row; return True when this call closed it.
+
+        A CAS on ``status = 'running'`` (#3316). The loop-level
+        ``claim_loop_advance`` and this close are two writes, so a fault between
+        them leaves the loop claimed with the run still open — and the repair
+        path in ``loop_service.advance_on_terminal`` closes it from a later
+        delivery. Two callers can then race to close the same row (the original
+        claimer and a repairer); whoever wins this UPDATE owns the rest of the
+        advance, the loser returns without dispatching.
+        """
         stmt = (
             update(agent_loop_runs)
-            .where(agent_loop_runs.c.id == run_id)
+            .where(
+                and_(
+                    agent_loop_runs.c.id == run_id,
+                    agent_loop_runs.c.status == "running",
+                )
+            )
             .values(
                 status=status,
                 response=response,
@@ -352,7 +367,7 @@ class LoopOperations:
             )
         )
         with get_engine().begin() as conn:
-            conn.execute(stmt)
+            return conn.execute(stmt).rowcount > 0
 
     def list_runs(self, loop_id: str) -> List[dict]:
         stmt = (
