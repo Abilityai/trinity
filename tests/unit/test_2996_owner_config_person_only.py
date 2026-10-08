@@ -61,6 +61,8 @@ OWNER = "cfg2996-owner"
 ADMIN = "cfg2996-admin"
 AGENT = "cfg2996-agent"
 SYSTEM = "cfg2996-system"
+ORCH = "cfg2996-orch"              # a sibling the same owner owns
+ADMIN_ORCH = "cfg2996-admin-orch"  # an agent an ADMIN owns
 GHOST = "cfg2996-no-such-agent"
 
 
@@ -154,6 +156,12 @@ def _jwt(username: str) -> dict:
 
 def _agent_key(agent: str = AGENT) -> dict:
     return _auth(db.create_agent_mcp_api_key(agent, OWNER).api_key)
+
+
+def _admin_owned_agent_key() -> dict:
+    """The key that carries `role=admin` without being a person (#3236 review)."""
+    db.register_agent_owner(ADMIN_ORCH, ADMIN)
+    return _auth(db.create_agent_mcp_api_key(ADMIN_ORCH, ADMIN).api_key)
 
 
 def _system_key() -> dict:
@@ -366,6 +374,20 @@ CONFIG_WRITES = {
 }
 
 WRITE_IDS = sorted(CONFIG_WRITES)
+# trinity-enterprise#164: these five are `agents.manage`-grantable — an agent
+# holding the grant may change them; one without it gets the NAMED refusal.
+GRANTABLE = {"read-only", "resources", "timeout", "public-channel-model", "guardrails"}
+# #3236 review: grantable on a sibling, person-only on the holder itself.
+SELF_PERSON_ONLY = {"read-only", "guardrails"}
+
+
+def _is_capability_refusal(res) -> bool:
+    detail = res.json().get("detail")
+    return (
+        res.status_code == 403
+        and isinstance(detail, dict)
+        and detail.get("code") == "agent_management_not_permitted"
+    )
 
 
 def _seeded(name: str):
@@ -386,11 +408,79 @@ class TestConfigWritesRealKeys:
         pytest.param(lambda: _agent_key(), id="agent-key-own-agent"),
         pytest.param(lambda: _system_key(), id="system-key"),
     ])
-    def test_a_machine_key_is_refused_and_the_value_does_not_move(self, world, name, headers):
+    def test_a_machine_key_is_refused_and_the_value_does_not_move(self, world, name, headers, request):
         w, before = _seeded(name)
         res = _put(world, w, headers())
-        assert _is_human_only_refusal(res), res.text
+        if name in GRANTABLE - SELF_PERSON_ONLY and "agent-key" in request.node.callspec.id:
+            assert _is_capability_refusal(res), res.text      # ent#164: named, askable
+        else:
+            assert _is_human_only_refusal(res), res.text
         assert w.read() == before
+
+    @pytest.mark.parametrize("name", sorted(GRANTABLE))
+    def test_an_agent_holding_agents_manage_changes_the_stored_value(self, world, name):
+        """ent#164 through the REAL `get_current_user` and the real grant table:
+        a holder reconfigures a sibling its owner owns."""
+        w, before = _seeded(name)
+        db.register_agent_owner(ORCH, OWNER)
+        db.grant_agent_capability(ORCH, "agents.manage", "admin")
+        try:
+            res = _put(world, w, _agent_key(ORCH))
+            assert 200 <= res.status_code < 300, res.text
+            assert w.read() == w.expected_after
+        finally:
+            db.revoke_agent_capability(ORCH, "agents.manage")
+
+    @pytest.mark.parametrize("name", sorted(SELF_PERSON_ONLY))
+    def test_a_holder_cannot_lift_its_own_read_only_or_guardrails(self, world, name):
+        """#3236 review: the agent a setting constrains must not be the one that
+        lifts it — person-only when target == caller, grant or not."""
+        w, before = _seeded(name)
+        db.grant_agent_capability(AGENT, "agents.manage", "admin")
+        try:
+            res = _put(world, w, _agent_key())
+            assert _is_human_only_refusal(res), res.text
+            assert w.read() == before
+        finally:
+            db.revoke_agent_capability(AGENT, "agents.manage")
+
+    @pytest.mark.parametrize("name", sorted(GRANTABLE - SELF_PERSON_ONLY))
+    def test_a_holder_may_still_change_its_own_other_settings(self, world, name):
+        w, before = _seeded(name)
+        db.grant_agent_capability(AGENT, "agents.manage", "admin")
+        try:
+            res = _put(world, w, _agent_key())
+            assert 200 <= res.status_code < 300, res.text
+            assert w.read() == w.expected_after
+        finally:
+            db.revoke_agent_capability(AGENT, "agents.manage")
+
+    @pytest.mark.parametrize("name", sorted(GRANTABLE))
+    def test_an_admin_owned_holder_cannot_reach_another_users_agent(self, world, name):
+        """#3236 review: these handlers authorise through `can_user_share_agent`,
+        which admits any admin — and an admin-owned agent's key carries `admin`.
+        One grant reached every agent on the instance; now only its owner's."""
+        w, before = _seeded(name)
+        db.register_agent_owner(ADMIN_ORCH, ADMIN)
+        db.grant_agent_capability(ADMIN_ORCH, "agents.manage", "admin")
+        try:
+            res = world.client.put(f"/api/agents/{AGENT}/{w.path}", json=w.body,
+                                   headers=_auth(db.create_agent_mcp_api_key(ADMIN_ORCH, ADMIN).api_key))
+            assert res.status_code == 404, res.text
+            assert w.read() == before
+        finally:
+            db.revoke_agent_capability(ADMIN_ORCH, "agents.manage")
+
+    @pytest.mark.parametrize("name", sorted(set(WRITE_IDS) - GRANTABLE))
+    def test_the_grant_does_not_open_the_person_only_writes(self, world, name):
+        w, before = _seeded(name)
+        db.grant_agent_capability(AGENT, "agents.manage", "admin")
+        try:
+            res = _put(world, w, _agent_key())
+            assert _is_human_only_refusal(res), res.text
+            assert w.read() == before
+        finally:
+            db.revoke_agent_capability(AGENT, "agents.manage")
 
     @pytest.mark.parametrize("name", WRITE_IDS)
     @pytest.mark.parametrize("headers", [
@@ -417,10 +507,95 @@ class TestConfigWritesEveryOtherPrincipal:
 
 def test_every_write_in_the_file_is_person_gated():
     """The eight writes above plus autonomy are every PUT in agent_config.py —
-    a ninth would need a row here (and the route census names it too)."""
+    a ninth would need a row here (and the route census names it too). The
+    ent#164 grant route is admin-and-interactive, pinned by its own suite."""
     puts = sorted(
         r.path.rsplit("/", 1)[-1]
         for r in _CFG.router.routes
         if "PUT" in getattr(r, "methods", set())
+        and not r.path.endswith("/capability-grants/{capability}")
     )
     assert puts == sorted(WRITE_IDS + ["autonomy"])
+
+
+# ===========================================================================
+# trinity-enterprise#164 — the grant route: interactive admin only
+# ===========================================================================
+
+
+class TestFenceReachRealKeys:
+    """#3236 validation: the `capability_fence` routes (schedules, model, delete,
+    git reset) have no `owner_username` check of their own — their handlers go
+    through `can_user_access_agent`, which admits any admin. Through the REAL
+    `get_current_user` and grant table: an admin-owned holder reaches its own
+    agent and its owner's, and gets 404 on another user's."""
+
+    @pytest.fixture
+    def probe(self, world):
+        from fastapi import Depends
+        fence = dependencies.capability_fence("schedules.manage", own_agent_exempt=True)
+        world.app.add_api_route("/api/agents/{name}/probe", lambda name: {"ok": name},
+                                methods=["POST"], dependencies=[Depends(fence)])
+        return world
+
+    def test_an_admin_owned_holder_gets_404_on_another_users_agent(self, probe):
+        headers = _admin_owned_agent_key()
+        db.grant_agent_capability(ADMIN_ORCH, "schedules.manage", "admin")
+        try:
+            res = probe.client.post(f"/api/agents/{AGENT}/probe", headers=headers)
+            assert res.status_code == 404, res.text
+            assert probe.client.post(f"/api/agents/{GHOST}/probe", headers=headers).status_code == 404
+            assert probe.client.post(f"/api/agents/{ADMIN_ORCH}/probe", headers=headers).status_code == 200
+        finally:
+            db.revoke_agent_capability(ADMIN_ORCH, "schedules.manage")
+
+    def test_a_non_holder_is_refused_before_reach_is_decided(self, probe):
+        res = probe.client.post(f"/api/agents/{AGENT}/probe", headers=_admin_owned_agent_key())
+        assert res.status_code == 403, res.text
+        assert res.json()["detail"]["code"] == "schedule_management_not_permitted"
+        assert probe.client.post(f"/api/agents/{GHOST}/probe", headers=_admin_owned_agent_key()).status_code == 403
+
+    def test_a_person_is_never_bounded_by_the_fence(self, probe):
+        assert probe.client.post(f"/api/agents/{AGENT}/probe", headers=_jwt(ADMIN)).status_code == 200
+
+
+class TestCapabilityGrantRoute:
+    URL = f"/api/agents/{AGENT}/capability-grants"
+
+    def _held(self, world, headers):
+        res = world.client.get(self.URL, headers=headers)
+        assert res.status_code == 200, res.text
+        return {g["capability"] for g in res.json()["grants"] if g["granted"]}
+
+    def test_an_admin_session_grants_and_revokes(self, world, monkeypatch):
+        audit = []
+
+        async def log(**kw):
+            audit.append(kw)
+        monkeypatch.setattr(_CFG.platform_audit_service, "log", log)
+        res = world.client.put(f"{self.URL}/agents.manage", json={"granted": True}, headers=_jwt(ADMIN))
+        assert res.status_code == 200 and res.json()["changed"] is True, res.text
+        assert db.agent_has_capability(AGENT, "agents.manage")
+        assert self._held(world, _jwt(OWNER)) == {"agents.manage"}
+        again = world.client.put(f"{self.URL}/agents.manage", json={"granted": True}, headers=_jwt(ADMIN))
+        assert again.json()["changed"] is False                     # idempotent, one audit row
+        world.client.put(f"{self.URL}/agents.manage", json={"granted": False}, headers=_jwt(ADMIN))
+        assert not db.agent_has_capability(AGENT, "agents.manage")
+        assert [a["event_action"] for a in audit] == ["capability_grant", "capability_revoke"]
+
+    @pytest.mark.parametrize("headers", [
+        pytest.param(lambda: _jwt(OWNER), id="owner-non-admin"),
+        pytest.param(lambda: _agent_key(), id="agent-key"),
+        pytest.param(lambda: _system_key(), id="system-key"),
+        pytest.param(lambda: _admin_owned_agent_key(), id="admin-owned-agent-key"),
+        pytest.param(lambda: _auth(db.create_mcp_api_key(
+            ADMIN, McpApiKeyCreate(name="admin script")).api_key), id="admin-user-key"),
+    ])
+    def test_nobody_else_can_grant(self, world, headers):
+        res = world.client.put(f"{self.URL}/agents.manage", json={"granted": True}, headers=headers())
+        assert res.status_code == 403, res.text
+        assert not db.agent_has_capability(AGENT, "agents.manage")
+
+    def test_an_unknown_capability_is_a_named_422(self, world):
+        res = world.client.put(f"{self.URL}/autonomy.manage", json={"granted": True}, headers=_jwt(ADMIN))
+        assert res.status_code == 422, res.text

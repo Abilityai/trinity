@@ -28,6 +28,7 @@ from models import (
 )
 from dependencies import (
     agent_may_reach,
+    capability_fence,
     get_current_user,
     get_authorized_agent,
     AuthorizedAgent,
@@ -185,7 +186,7 @@ def _enforce_delivery_target_authority(current_user, name: str, email) -> None:
         )
 
 
-@router.post("/{name}/schedules", response_model=ScheduleResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/{name}/schedules", response_model=ScheduleResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def create_schedule(
     name: str,
     schedule_data: ScheduleCreate,
@@ -348,7 +349,7 @@ async def get_schedule(
     return ScheduleResponse(**schedule.model_dump())
 
 
-@router.put("/{name}/schedules/{schedule_id}", response_model=ScheduleResponse)
+@router.put("/{name}/schedules/{schedule_id}", response_model=ScheduleResponse, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def update_schedule(
     name: str,
     schedule_id: str,
@@ -437,7 +438,7 @@ async def update_schedule(
     return ScheduleResponse(**updated_schedule.model_dump())
 
 
-@router.delete("/{name}/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{name}/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def delete_schedule(
     name: str,
     schedule_id: str,
@@ -463,7 +464,7 @@ async def delete_schedule(
 
 # Schedule Control Endpoints
 
-@router.post("/{name}/schedules/{schedule_id}/enable")
+@router.post("/{name}/schedules/{schedule_id}/enable", dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def enable_schedule(
     # CSO M1 (#2081) intent kept — owner-tier, matching update/delete. The
     # variant must match the PATH PARAM: these routes declare `{name}`, and
@@ -486,7 +487,7 @@ async def enable_schedule(
     return {"status": "enabled", "schedule_id": schedule_id}
 
 
-@router.post("/{name}/schedules/{schedule_id}/disable")
+@router.post("/{name}/schedules/{schedule_id}/disable", dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def disable_schedule(
     # CSO M1 (#2081) intent kept — owner-tier, matching update/delete. The
     # variant must match the PATH PARAM: these routes declare `{name}`, and
@@ -676,7 +677,7 @@ def _build_webhook_url(request_base_url: str, token: str) -> str:
     return f"{base}/api/webhooks/{token}"
 
 
-@router.post("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse)
+@router.post("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def generate_webhook(
     name: AuthorizedAgent,
     schedule_id: str,
@@ -764,6 +765,7 @@ async def get_webhook_status(
 @router.post(
     "/{name}/schedules/{schedule_id}/webhook/secret",
     response_model=WebhookStatusResponse,
+    dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))],
 )
 async def generate_webhook_secret(
     name: AuthorizedAgent,
@@ -818,6 +820,7 @@ async def generate_webhook_secret(
 @router.delete(
     "/{name}/schedules/{schedule_id}/webhook/secret",
     response_model=WebhookStatusResponse,
+    dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))],
 )
 async def disable_webhook_secret(
     name: AuthorizedAgent,
@@ -847,7 +850,7 @@ async def disable_webhook_secret(
     )
 
 
-@router.delete("/{name}/schedules/{schedule_id}/webhook", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{name}/schedules/{schedule_id}/webhook", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def revoke_webhook(
     name: AuthorizedAgent,
     schedule_id: str,

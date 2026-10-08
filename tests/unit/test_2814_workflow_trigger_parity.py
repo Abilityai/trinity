@@ -119,6 +119,10 @@ ACCEPTED_UNTIL_RELEASE: dict[tuple[str, str], str] = {
     ("dev-nightly.yml", "schedule"): "new file; nightly on dev starts at the next release cut",
     ("dev-nightly.yml", "workflow_dispatch"): "new file; manual run available once on main",
     ("dev-ci-status.yml", "workflow_dispatch"): "new file; the push trigger is the live path, dispatch is re-evaluation only",
+    # trinity-enterprise#794: manual-only by design (it gates a release cut, never
+    # a PR), so it cannot be dispatched until the release cut carries it to
+    # `main`. Until then the same run is `scripts/system/run_chains.sh`.
+    ("system-chains.yml", "workflow_dispatch"): "new file; dispatchable once on main — run_chains.sh is the path until then",
 }
 
 

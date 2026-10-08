@@ -25,8 +25,13 @@ coverage debt is queryable rather than rediscovered.
 | **J12** | My agent's own declaration of what it measures is what Trinity actually knows about it. | user | local | live-stack | **no** | `tests/journeys/test_j12_declared_metrics_journey.py` | L-02, L-03 | #477, #478, #479, #666 |
 | **J13** | My agent tells me what I can do with it and what is waiting on me — and only things that are true. | user | local | live-stack | **no** | `tests/journeys/test_j13_suggestions_journey.py` | — | #465 |
 | **J14** | I can tag the agent in our group chat and it already knows what we've been talking about. | user | local | live-stack | **no** | — | — | abilityai/trinity-enterprise#600 |
+| **J15** | A fleet I roll out from one definition comes up holding its skills and its canon, and the orchestrator sees what I deployed. | operator | local | live-stack | **no** | `tests/system_chains/test_j15_rollout_chain.py` | L-02, SK-02 | abilityai/trinity-enterprise#794 |
+| **J16** | A fact I publish to the canon reaches the agents that use it, and they say which version they read. | user | local | live-stack | **no** | `tests/system_chains/test_j16_canon_fact_chain.py` | — | abilityai/trinity-enterprise#794 |
+| **J17** | A fact that lands at the wrong agent reaches the agent that owns it, and I hold a receipt. | user | local | live-stack | **no** | `tests/system_chains/test_j17_fact_routing_chain.py` | — | abilityai/trinity-enterprise#794 |
+| **J18** | A change I make to a library skill reaches every agent that holds it, and an agent without the permission cannot change skills. | operator | local | live-stack | **no** | `tests/system_chains/test_j18_library_change_chain.py` | SK-01, SK-02, SK-03 | abilityai/trinity-enterprise#794 |
+| **J19** | My agent's objective reaches me: the number it records shows against the target, and reads stale when it stops. | user | local | live-stack | **no** | `tests/system_chains/test_j19_objective_to_person_chain.py` | L-02 | abilityai/trinity-enterprise#794 |
 
-**0 of 14 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
+**0 of 19 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
 
 ## Variants
 

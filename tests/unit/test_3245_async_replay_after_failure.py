@@ -35,8 +35,11 @@ def store(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't3245.db'}")
     from db import engine as eng
     eng.dispose_engines()
-    from db.tables import metadata, idempotency_keys, schedule_executions
-    metadata.create_all(eng.get_engine(), tables=[idempotency_keys, schedule_executions])
+    from db.tables import metadata, idempotency_keys, schedule_executions, agent_skill_gates
+    # trinity-enterprise#753: the dispatch gate reads the skill gate map; an
+    # unreadable map refuses (503), so the table must exist (empty = ungated).
+    metadata.create_all(eng.get_engine(), tables=[idempotency_keys, schedule_executions,
+                                                  agent_skill_gates])
     from db.idempotency import IdempotencyOperations
     from db.schedules import ScheduleOperations
     yield SimpleNamespace(

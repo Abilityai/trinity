@@ -168,12 +168,45 @@ def _may_reach_for_path(current_user, agent_name, path, *, include_ancestors=Fal
     return capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is None
 
 
+# trinity-enterprise#164: the agent's INSTRUCTIONS — its top-level CLAUDE.md /
+# AGENTS.md and everything under `.claude/` except the skills dir (which is
+# `skills.manage`, one permission per file class). A platform write there
+# changes how the agent behaves, so it takes `instructions.manage`. Only the
+# agent's own top-level files count: a `docs/CLAUDE.md` is an ordinary file.
+_HOME = "/home/developer"
+_INSTRUCTION_FILES = (f"{_HOME}/CLAUDE.md", f"{_HOME}/AGENTS.md")
+_CLAUDE_DIR = f"{_HOME}/.claude"
+
+
+def _touches_instructions(path: str, *, include_ancestors: bool = False) -> bool:
+    """True for CLAUDE.md, AGENTS.md, or `.claude/**` outside the skills dir;
+    with `include_ancestors`, also for a directory ABOVE them (deleting `.claude`
+    or the home dir removes the instructions as surely)."""
+    normalized = _normalize_user_path(path)
+    if not normalized:
+        return False
+    if normalized in _INSTRUCTION_FILES:
+        return True
+    if normalized.startswith(_CLAUDE_DIR + "/") and not _touches_skills_dir(normalized):
+        return True
+    if normalized == _CLAUDE_DIR:
+        return include_ancestors
+    if include_ancestors:
+        return _CLAUDE_DIR.startswith(normalized.rstrip("/") + "/")
+    return False
+
+
 async def _require_skill_capability(path, current_user, request, agent_name, *, include_ancestors=False):
+    from dependencies import enforce_agent_capability
     if _touches_skills_dir(path, include_ancestors=include_ancestors):
-        from dependencies import enforce_agent_capability
         from db.capability_grants import CAPABILITY_SKILLS_MANAGE
         await enforce_agent_capability(
             request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
+        )
+    if _touches_instructions(path, include_ancestors=include_ancestors):
+        from db.capability_grants import CAPABILITY_INSTRUCTIONS_MANAGE
+        await enforce_agent_capability(
+            request, current_user, CAPABILITY_INSTRUCTIONS_MANAGE, target=agent_name
         )
 
 

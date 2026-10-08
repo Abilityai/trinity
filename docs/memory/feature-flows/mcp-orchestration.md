@@ -675,7 +675,7 @@ The receipts above only help a caller who knows what they mean. The rule is now
   `get_fan_out_result` or `set_reminder` and end the turn; an error without an
   `execution_id` is checked in `list_recent_executions` before a word-for-word
   re-send (`agent_busy` included — it is not "nothing ran", #3244); `pending_approval` is not
-  retried; `parallel=true, async=true` for long work, whose end fires
+  retried, and its `message` says whether the outcome will reach the caller (#3233); `parallel=true, async=true` for long work, whose end fires
   `agent.task.*` for a subscriber (a sequential `/chat` turn fires none).
   #3245 added: after a confirmed `failed` or `cancelled`, re-send word for word
   to retry; if the same `execution_id` comes back (a `lease_expired` failure is

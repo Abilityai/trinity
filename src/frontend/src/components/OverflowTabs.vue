@@ -131,6 +131,12 @@ const BADGE_TONES = {
   // A share of a count (the Inbox's per-agent facets, ent#610 A2): a fact about
   // the set, not the outcome of an event, so it is gray, never `status-*`.
   neutral: 'bg-gray-100 dark:bg-gray-750 text-gray-700 dark:text-gray-300',
+  // ent#836: the calmer "needs you" count — a ring, no fill, urgent ink at the
+  // AA tier (700 light / 400 dark). The agent row's mark in the Workspace
+  // sidebar is the same recipe (`PortalSidebar.vue`), so the rail's Asks tab
+  // and the row read as one number in one shape. `ring-inset` so the badge
+  // keeps the filled tones' exact footprint.
+  'urgent-outline': 'ring-1 ring-inset ring-status-urgent-600 dark:ring-status-urgent-400 text-status-urgent-700 dark:text-status-urgent-400 tabular-nums',
 }
 const badgeTone = (tab) => BADGE_TONES[tab.badgeVariant] || BADGE_TONES.success
 // #3060: the reserved badge's footprint — one literal, used by both rows.

@@ -840,8 +840,13 @@ def test_agent_start_reconciles_sets_before_reading_the_names(monkeypatch):
                         AsyncMock(side_effect=lambda *a, **k: calls.append("inject") or {"success": True}))
     monkeypatch.setattr(lifecycle.skill_service, "reconcile_agent_skills",
                         AsyncMock(side_effect=lambda *a, **k: calls.append("prune") or {}))
+    # trinity-enterprise#753: library-default gates follow the rows the set
+    # reconcile just wrote, before the names are read for injection.
+    from services import skill_gate_map_service
+    monkeypatch.setattr(skill_gate_map_service, "reconcile_library_gates",
+                        AsyncMock(side_effect=lambda *a, **k: calls.append("gates")))
     asyncio.run(lifecycle.inject_assigned_skills(AGENT))
-    assert calls[:3] == ["sets", "names", "inject"] and "prune" in calls
+    assert calls[:4] == ["sets", "gates", "names", "inject"] and "prune" in calls
 
 
 def test_manual_inject_reconciles_sets_then_injects_then_prunes(app_client, monkeypatch):
