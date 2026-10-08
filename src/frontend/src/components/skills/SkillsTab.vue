@@ -59,7 +59,7 @@
     <section data-testid="skills-own">
       <div class="flex items-baseline gap-2">
         <h4 class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">Own skills</h4>
-        <span class="text-[12.5px] tabular-nums text-gray-500 dark:text-gray-400">{{ ownCount }}</span>
+        <span class="text-[12.5px] tabular-nums text-gray-500 dark:text-gray-400" data-testid="skills-own-count">{{ ownCount }}</span>
       </div>
       <p class="mt-0.5 h-5 flex items-center gap-2 min-w-0 text-[12.5px] leading-5" data-testid="skills-own-meta">
         <span
@@ -195,7 +195,7 @@
             class="ml-2 text-status-warning-700 dark:text-status-warning-400"
           >{{ notice.deprecation }}</span>
         </template>
-        <span v-else class="text-gray-500 dark:text-gray-400">{{ syncMeta }}</span>
+        <span v-else class="text-gray-500 dark:text-gray-400" data-testid="skills-sync-meta">{{ syncMeta }}</span>
       </p>
 
       <div class="mt-3">
@@ -373,7 +373,8 @@ function matches(card) {
 
 const ownCards = computed(() => [...cards.value.own, ...cards.value.unmatchedGates].filter(matches))
 const sharedCards = computed(() => cards.value.shared.filter(matches))
-const ownCount = computed(() => cards.value.own.length)
+// What the section lists: own skills, and gates kept for skills no longer listed.
+const ownCount = computed(() => cards.value.own.length + cards.value.unmatchedGates.length)
 
 // A section draws once every read it is built from has answered — or failed,
 // which is a known state too. Own needs the assignments (which skills Shared
@@ -433,7 +434,9 @@ const syncNeedsAttention = computed(() => pendingSync.value && running.value && 
 
 const syncMeta = computed(() => {
   if (store.lastInjectionAt) return `Last sync ${new Date(store.lastInjectionAt).toLocaleString()}`
-  if (store.assigned.length) return 'Not synced from this screen yet: skills are also copied in when the agent starts.'
+  if (store.assigned.length) {
+    return 'Not synced from this screen yet: statuses appear after a sync. Skills are also copied in when the agent starts.'
+  }
   return ''
 })
 const sharedLineTitle = computed(() => (notice.value?.text
@@ -558,8 +561,9 @@ async function onUnassign(card, { fromConflict = false } = {}) {
 const unassignMessage = computed(() => {
   const c = unassignCard.value
   if (!c) return ''
-  const gate = c.gate ? ' Its approval requirement goes with it.' : ''
-  return `The library skill is removed from this agent.${gate} You can assign it again from Assign skills.`
+  // Said before anything happens, so in the future tense.
+  const gate = c.gate ? ', along with its approval requirement' : ''
+  return `The library skill will be removed from this agent${gate}. You can assign it again from Assign skills.`
 })
 
 function confirmUnassign() {

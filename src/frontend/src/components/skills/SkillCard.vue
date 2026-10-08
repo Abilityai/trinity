@@ -171,6 +171,7 @@
         />
         <BaseSelect
           class="ml-auto w-[150px]"
+          size="sm"
           :model-value="selectedKind"
           :disabled="busy || !card.gate"
           :aria-label="`Who approves /${card.name}`"

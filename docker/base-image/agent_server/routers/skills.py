@@ -376,11 +376,12 @@ async def list_skills():
     """
     home_dir = Path('/home/developer')
 
-    # Skills directories to scan
-    skill_paths = [
+    # Skills directories to scan. The server runs as `developer`, so in the
+    # agent container both are one folder: it is scanned and named once.
+    skill_paths = list(dict.fromkeys([
         home_dir / '.claude' / 'skills',
         Path.home() / '.claude' / 'skills'  # Personal skills
-    ]
+    ]))
 
     all_skills: List[SkillInfo] = []
     scanned_paths: List[str] = []

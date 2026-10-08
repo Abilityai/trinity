@@ -22,6 +22,7 @@ the parity table runs the SAME documents through the backend's real parser.
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -171,3 +172,32 @@ def test_vendored_constants_match_the_backend():
 
     assert skills_mod.PLATFORM_MARKER_FILENAME == skill_packaging.META_FILENAME
     assert set(skills_mod.APPROVAL_VALUES) == set(skill_packaging.APPROVAL_VALUES)
+
+
+# ---------------------------------------------------------------------------
+# skill_paths: each folder once
+# ---------------------------------------------------------------------------
+
+
+def _list_skills_with_home(monkeypatch, home: Path):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    scanned = []
+    monkeypatch.setattr(skills_mod, "scan_skills_directory", lambda d: scanned.append(d) or [])
+    return asyncio.run(skills_mod.list_skills()), scanned
+
+
+def test_the_agents_own_folder_is_scanned_and_named_once(monkeypatch):
+    """The image sets HOME=/home/developer and runs the server as `developer`,
+    so the project and personal folders are one. The localhost eyeball found the
+    Skills tab heading it "From .claude/skills, .claude/skills"."""
+    out, scanned = _list_skills_with_home(monkeypatch, Path("/home/developer"))
+
+    assert scanned == [Path("/home/developer/.claude/skills")]
+    assert out.skill_paths == [".claude/skills"]
+
+
+def test_a_different_home_keeps_both_folders(monkeypatch, tmp_path):
+    out, scanned = _list_skills_with_home(monkeypatch, tmp_path)
+
+    assert scanned == [Path("/home/developer/.claude/skills"), tmp_path / ".claude" / "skills"]
+    assert out.skill_paths == [".claude/skills", "~/.claude/skills"]

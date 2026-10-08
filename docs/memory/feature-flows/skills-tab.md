@@ -43,13 +43,13 @@ As an agent owner, I want to see, run and gate every skill my agent has — its 
 #### Layout (`SkillsTab.vue`)
 
 - **Header** (`:16-56`): title, a filter box (`:24-30`) that narrows both sections by name or description (`matches()`, `:368-372`), and the in-agent enforcement line (`:35-40`, below).
-- **Own skills** (`:59-121`): count of own cards (`ownCount`, `:376`), a meta line (`ownBanner`, `:406-423`), then by `viewState` (`ownView`, `:386-394`): skeleton / `LoadFailed` (retry → `store.loadAgentList()`) / empty text (`ownEmptyText`, `:396-404`) / a grid of own cards plus kept-gate cards.
-  - meta line, live: `From .claude/skills, ~/.claude/skills` (the agent's `skill_paths`);
+- **Own skills** (`:59-121`): count of the cards it lists, kept gates included (`ownCount`, `:376-377`), a meta line (`ownBanner`, `:407-424`), then by `viewState` (`ownView`, `:387-395`): skeleton / `LoadFailed` (retry → `store.loadAgentList()`) / empty text (`ownEmptyText`, `:397-405`) / a grid of own cards plus kept-gate cards.
+  - meta line, live: `From .claude/skills` (the agent's `skill_paths`, each folder once: in the agent container `.claude/skills/` and `~/.claude/skills/` are one folder, which an image older than this change lists twice; the store drops the repeat, `stores/skills.js:202-204`);
   - meta line, last-known (warning tone): "The agent is stopped. Start the agent to run. Showing its skills as of <relative time>." or "The agent isn't answering. Showing its skills as of …"; the absolute time is on hover (`Listed <date>`).
 - **Shared skills** (`:124-262`):
   - head: count (`store.assigned.length`); for the owner or an admin (not on the system agent), on a configured library: **Assign skills** (opens `SkillAssignModal`), **Manage sets** (opens `AgentSkillSets` in a `BaseModal`), **Sync now** (disabled while stopped; primary-styled while a save did not deliver — `pendingSync`, #2703; `store.inject()`);
   - set chips: up to 3 (`MAX_SET_CHIPS`) + "+N more"; purple when complete, warning with a dot when partial, unresolved or missing credentials (`setVariant` / `setTitle`), plus "Some sets need credentials" when any set lacks them; a failed sets read shows "Couldn't read this agent's sets" with a Retry (`store.loadSets()`) instead of an absent line; a click opens Manage sets;
-  - the shared line (`:189-199`): the last verb's outcome (save / unassign / sync error, plus the ent#672 deprecation note), else "Last sync <time>" or "Not synced from this screen yet: skills are also copied in when the agent starts.";
+  - the shared line (`:189-199`): the last verb's outcome (save / unassign / sync error, plus the ent#672 deprecation note), else "Last sync <time>" or "Not synced from this screen yet: statuses appear after a sync. Skills are also copied in when the agent starts.";
   - body: skeleton / `LoadFailed` / the named empty states by `store.emptyReason` (`library_unconfigured` with an admin link to `/settings?tab=agents`, `library_empty`, `none_assigned` worded by role) / "No shared skill matches the filter." / the grid.
 
 #### Exactly one section per skill (`utils/skillCards.js::buildSkillCards`, `:141-296`)
@@ -82,7 +82,7 @@ Every slot has a fixed height, so content never changes a card's size; long text
 | Note line (Shared) | `:81-98` | First match of: conflict → injection error → one delivery warning → "N delivery warnings" → "Superseded by …" → "No longer in the library" → "Not in the agent yet: sync now, or start it again". A note with detail is a button that opens `SkillDetailsModal` |
 | Gate line | `:101-113` | Shown to everyone (below) |
 | Verbs | `:116-155` | **Run**, **Edit & Run**, **Unassign** (Shared, owner/admin; disabled for a set-only member, with the reason); on a kept-gate card only **Clear gate** |
-| Approval row | `:158-188` | Owner/admin, not a ghost, not the system agent: `BaseToggle` "Requires approval" + `BaseSelect` approver kind; on a kept-gate card, "Gate set <date>" |
+| Approval row | `:158-189` | Owner/admin, not a ghost, not the system agent: `BaseToggle` "Requires approval" + `BaseSelect size="sm"` approver kind (BaseButton sm's box, 28.8px, so it sits inside the 40px row; disabled while approval is off, still a bordered box at .45); on a kept-gate card, "Gate set <date>" |
 
 **Mode chip** (`MODE_CHIPS` / `modeChip`, `:32-43`) — the author's `automation:` frontmatter, a declaration nothing enforces:
 
@@ -95,7 +95,7 @@ Every slot has a fixed height, so content never changes a card's size; long text
 
 The raw value is on hover (`automation: <value>`). "Approval" and "gated" belong only to the enforced gate.
 
-#### Run (`SkillsTab.vue::onRun`, `:494-522` → `stores/skills.js::runSkill`, `:232-241`)
+#### Run (`SkillsTab.vue::onRun`, `:497-525` → `stores/skills.js::runSkill`, `:234-243`)
 
 ```javascript
 const response = await api.post(`/api/agents/${agentName.value}/task`, {
@@ -111,7 +111,9 @@ const response = await api.post(`/api/agents/${agentName.value}/task`, {
 | Any other error | `InlineError` on the card: `Could not run /<name>` or the server's message |
 | Accepted `{status: "accepted", execution_id}` | `emit('run-with-instructions', '__NAVIGATE_TASKS__:<id>')` → `AgentDetail.vue:1568-1588` opens Tasks with `?execution=<id>` |
 
-**Edit & Run** (`onEditRun`, `:434-436`) emits `/<name> `, which prefills the Tasks input. It needs only `user_invocable`.
+**On the Tasks tab the run is still going.** The panel's 5 s poll re-reads the list while any loaded row is `queued`, `running` or `pending_retry`, and stops when none is (`TasksPanel.vue::shouldRereadExecutions`, `:762-770`; `IN_FLIGHT_STATUSES`, `:638-645`). It never stacks a read on one still out, and it holds off while a task typed into the panel is awaited, whose local row stands for it (a read meanwhile would list it twice). Only the latest read is applied (`loadExecutions`, `:719-746`), so a slow read for the agent the page left is dropped. The highlighted row is opened and scrolled to once, on the first read that answers, never again on a re-read. A row whose status changes drops the details read while it ran, and the open one re-reads them in place (`settleDetails`, `:748-760`).
+
+**Edit & Run** (`onEditRun`, `:527-529`) emits `/<name> `, which prefills the Tasks input. It needs only `user_invocable`.
 
 Run enablement (`runVerdict`, `skillCards.js:108-118`), checked in order:
 
@@ -139,15 +141,15 @@ Gate line (`gateLineFor`, `skillCards.js:120-134`). It names a **kind**, never a
 
 `recommended` reads the library entry's `approval` (Shared) or the agent server's `approval` field (both sections).
 
-Approval row (`SkillCard.vue:158-188`, `:218-247`):
+Approval row (`SkillCard.vue:158-189`, `:219-248`):
 - the picker lists `approvers` (fallback: `primary`); a kind nobody fills is listed as `(nobody yet)` and cannot be selected; a gate whose kind the install no longer offers is appended, disabled;
 - toggle on → `set-gate` with the shown kind: the gate's own, else the first reachable kind, else `primary` — never a bodiless PUT;
 - toggle off → `clear-gate`; changing the kind of a gated skill → `set-gate` with the new kind;
-- `SkillsTab.onSetGate` / `onClearGate` (`:457-465`) → `stores/skillGates.js::setGate` / `clearGate`.
+- `SkillsTab.onSetGate` / `onClearGate` (`:531-539`) → `stores/skillGates.js::setGate` / `clearGate`.
 
 **Kept gates** (ent#753: sticky until cleared): a gate whose skill is not in the listed skills renders as a dashed card under Own: "Not in this agent's skills list: gate kept", description "This gate stays until someone clears it.", **Clear gate** for the owner or an admin (it may guard a `.claude/commands/` entry). They render only once a list is known.
 
-#### In-agent enforcement line (`SkillsTab.vue:443-458`)
+#### In-agent enforcement line (`SkillsTab.vue:446-461`)
 
 Shown where the approval row is (owner or admin, not a ghost, not the system agent) and the agent has at least one gate (`enforcementSlot`). The slot is reserved as soon as gates exist, so the background probe swaps text in place.
 
@@ -161,7 +163,7 @@ Shown where the approval row is (owner or admin, not a ghost, not the system age
 #### Self-approved marker (`ExecutionGateMarker.vue`)
 
 A run that went through without approval because its requester is the approver (ent#752's `self_approved` record):
-- **Tasks row**: `TasksPanel.vue:244-247`, a `locked` badge "ran without approval" after the compacted chip, from `task.gate_self_approved` / `gate_self_approved_by_viewer` (list read `TasksPanel.vue:713`);
+- **Tasks row**: `TasksPanel.vue:244-247`, a `locked` badge "ran without approval" after the compacted chip, from `task.gate_self_approved` / `gate_self_approved_by_viewer` (list read `TasksPanel.vue:724`);
 - **Execution page**: `views/ExecutionDetail.vue:179,205-210`, a line in the Execution Origin card (the card also shows when the run has no other origin data);
 - **Workspace turn**: `components/portal/PortalConversation.vue:468-473`, a line under the agent bubble, from `assistantRow` (`portalUtils.js:2118-2136`). History rows map through it (`PortalConversation.vue:1501-1510`). A just-finished turn gets the flag from the reply poll (`replyFields`, `portalUtils.js:2221-2234` → `PortalConversation.vue:2155-2165`), as does a reattached turn (`PortalConversation.vue:1618-1619`).
 
@@ -172,8 +174,8 @@ Copy: "Ran without approval: you are the approver." for the requester, else "Ran
 **`stores/skills.js`** (agent-scoped, #235) gains the agent's own listing (`:85-98`):
 - `agentList`, `agentListPaths`, `agentListAt` (`captured_at`), `agentListReason` (`stopped` | `unreachable`), `agentListError`, `agentListLoaded`;
 - `agentListState`: `idle | live | last_known | none | failed`;
-- `loadAgentList(name)` (`:188-223`) has a sequence guard plus an agent check. A 404 / 503 / 504 is `none`, a known state (stopped or unreachable with no copy kept). Any other failure is `failed` only before the first success: a failed refresh keeps what is on screen;
-- `runSkill(name)` (`:232-241`) returns `{held}` (a 202) or `{executionId}`, and throws on any error, a gate refusal included.
+- `loadAgentList(name)` (`:188-225`) has a sequence guard plus an agent check. A 404 / 503 / 504 is `none`, a known state (stopped or unreachable with no copy kept). Any other failure is `failed` only before the first success: a failed refresh keeps what is on screen;
+- `runSkill(name)` (`:234-243`) returns `{held}` (a 202) or `{executionId}`, and throws on any error, a gate refusal included.
 
 **`stores/skillGates.js`** (new, agent-scoped):
 - holds `gates`, `approvers`, `approverKinds`, `hook`, and per-skill `busy` / `errors` keyed by the lower-cased gate key;
@@ -181,18 +183,18 @@ Copy: "Ran without approval: you are the approver." for the requester, else "Ran
 - `write()` (`:96-114`) re-reads the map for the agent it wrote to, and drops the answer if the page moved to another agent (KeepAlive);
 - the PUT's `warnings` (e.g. `approver_unassigned`) need no state of their own: the map is re-read after every write, and its `reachable: false` is what the card's "nobody fills it yet" says.
 
-**Refetch of the own list** (`SkillsTab.vue:594-639`):
+**Refetch of the own list** (`SkillsTab.vue:598-643`):
 - agent switch → full `loadAll()`;
 - status change → `loadAgentList()` plus, for the approval-row viewer, a re-probe;
 - the `agent_skills_changed` tick (`store.changedAt[agent]`, #2703);
 - the Manage sets dialog closing;
 - after save / unassign / sync (`onSaved`, `onUnassign`, `onSync`).
 
-`onUnmounted` (`:641-644`) clears both stores. Switching tab unmounts the tab; leaving the KeepAlive'd page does not.
+`onUnmounted` (`:645-648`) clears both stores. Switching tab unmounts the tab; leaving the KeepAlive'd page does not.
 
 ### API Calls
 
-On load (`loadAll`, `SkillsTab.vue:594-599`):
+On load (`loadAll`, `SkillsTab.vue:598-603`):
 
 ```javascript
 store.load(name)                 // GET /api/skills/library/status + GET /api/agents/{n}/skills;
@@ -209,14 +211,14 @@ Writes: `PUT /api/agents/{n}/skill-gates/{key}` `{approver}`, `DELETE /api/agent
 - **A section draws once every read it is built from has answered, or failed.** `SkillsTab.vue` computes `gatesKnown` (`skillGates.hasLoaded || error`) and `sharedKnown` (`skills.sharedLoaded || error`). Own needs the agent's list, the assignments and the gate map; Shared needs the assignments and the map. `stores/skills.js::sharedLoaded` is per agent: status, assignments, the library list when configured, then the sets read. `emptyReason` stays null until it is set. `buildSkillCards({assignmentsKnown, gatesKnown})` calls nothing "left from the library" and holds every approval toggle until both are known.
 - **Failures are named.** Shared shows `LoadFailed` with Retry, carrying the library read's own error. A failed gate map gets a line for everyone (`skills-gates-error`), with Retry. Own's 404/503/504 is the known "none" state; a running agent offers "Check again" (`skills-own-retry`). A failed refresh keeps the list behind the stale banner, with Retry. A 200 that is not a listing is a failure.
 - **Agent switch.** The tab outlives a switch. `resetView()` clears the outcome line, card errors, the pending-sync emphasis, the three dialogs, the Unassign confirm and the filter. Run, Unassign and Sync drop an answer for an agent the page has left. Every read and write in `stores/skills.js` checks its answer against the agent it was asked for, and a load also against a newer load. A write's follow-up read targets that agent. The per-agent busy flags reset with the agent, and `saveAssignments` answers `null` when superseded.
-- **Unassign** opens a `ConfirmDialog` that says the approval requirement goes with it when the card is gated; focus lands on Cancel. The details dialog's "Unassign library skill" and Manage sets' "Unassign set" carry `data-destructive`, so neither takes initial focus.
+- **Unassign** opens a `ConfirmDialog` that says, before anything happens, that the library skill will be removed from this agent, "along with its approval requirement" when the card is gated; focus lands on Cancel. The details dialog's "Unassign library skill" and Manage sets' "Unassign set" carry `data-destructive`, so neither takes initial focus.
 - **Gate writes.** A card's `gateKey` is the matched gate's own key when gated (it may be the directory), else `gateKeyFor` (the name, which is what a request types). `SkillCard`'s default kind is computed from the current map; a pick holds the select only until its write settles. Each switch is named "Requires approval for /<name>" (`BaseToggle` lets `aria-label` name a labelled switch).
 
 ### Roles, ghosts, the system agent
 
 `SkillsTab` props come from the agent payload: `can_share` (owner or admin, `routers/agents.py:493`), `is_system`, `ephemeral`.
 
-| Viewer / agent | Tab, Run, Edit & Run, gate line | Approval row, hook probe (`showOwnerRow`, `:279`) | Assign / Manage sets / Sync / Unassign / Clear gate (`showManage`, `:281`) |
+| Viewer / agent | Tab, Run, Edit & Run, gate line | Approval row, hook probe (`showOwnerRow`, `:347`) | Assign / Manage sets / Sync / Unassign / Clear gate (`showManage`, `:349`) |
 |---|---|---|---|
 | Owner or admin | yes | yes | yes |
 | Shared user, other viewer | yes | no | no |
@@ -297,7 +299,7 @@ Auth is unchanged (`get_skill_gate_readable_agent_by_name`). Models: `SkillGateA
 
 ## Agent Layer
 
-`docker/base-image/agent_server/routers/skills.py`, `GET /api/skills` (`:366-415`). `SkillInfo` (`:32-52`) gains three informational fields; the agent can write both the marker and its frontmatter, so none of them decides access or gating.
+`docker/base-image/agent_server/routers/skills.py`, `GET /api/skills` (`:366-416`). `SkillInfo` (`:32-52`) gains three informational fields; the agent can write both the marker and its frontmatter, so none of them decides access or gating.
 
 | Field | Source |
 |---|---|
@@ -307,7 +309,7 @@ Auth is unchanged (`get_skill_gate_readable_agent_by_name`). Models: `SkillGateA
 
 The name-only fallback for an unreadable `SKILL.md` still carries `source` and `dir` (`:359-360`). The two constants are duplicated from `skill_packaging` (`META_FILENAME`, `APPROVAL_VALUES`) because the image cannot import the backend. Existing agents get the fields only after `./scripts/deploy/build-base-image.sh` and a recreate; until then the frontend falls back (`skillDir()` from `path`, no own-skill `approval`).
 
-The scanner (`scan_skills_directory`, `:278-363`) walks one level of `.claude/skills/` and `~/.claude/skills/` (project skills win a duplicate name, sorted by name). **Per-field frontmatter normalization (#2850)**: each field is coerced on its own through `_field` (`:245`), so one bad field drops to `null` and the rest of the record survives; the outer `except` is for an unreadable file only.
+The scanner (`scan_skills_directory`, `:278-363`) walks one level of `.claude/skills/` and `~/.claude/skills/` (project skills win a duplicate name, sorted by name). The server runs as `developer` with `HOME=/home/developer`, so in the agent container the two are one folder: it is scanned and named once (`:379-384`). **Per-field frontmatter normalization (#2850)**: each field is coerced on its own through `_field` (`:245`), so one bad field drops to `null` and the rest of the record survives; the outer `except` is for an unreadable file only.
 
 | Field | Accepted forms | Result |
 |-------|----------------|--------|
@@ -426,11 +428,13 @@ Covered by unit tests:
 | `tests/unit/test_ent754_gate_map_viewer_and_hook.py` | The real `list_agent_skill_gates`: `approvers` per kind (OSS `primary`; both kinds with a provider), casefolded `viewer_fills`, another viewer / non-owner admin / emailless owner / agent key, agreement with `enforce`, no person data; `probe` ignored without manage rights, honoured for owner and admin, one `/health` with a short timeout, each state, `predates`, `unknown`; a system key and an agent key holding `skills.manage` pass the manage check but never get the probe; an unexpected probe failure is `unknown` and logged |
 | `tests/unit/test_ent754_execution_self_approved.py` | A record written through the real `record_self_approval`, read through the real list and detail routes: only that run is marked, "you" only for the approver, a machine key reads neither flag, no email in the payload, no cross-agent leak; a run someone else approved is not marked; a large page is read in statements under every bind limit |
 | `tests/unit/test_ent754_workspace_self_approved.py` | The real Workspace history read: only the self-approved reply is marked, the reply poll carries it, the route model keeps both fields and adds no email; through the route, a machine viewer (`is_person` false) reads neither flag; the synchronous fallback answers both flags (`test_2580_reply_message_id.py`) |
-| `tests/unit/test_ent754_agent_server_skillinfo.py` | The agent server loaded standalone: `source` follows the marker, `dir` reported, the unreadable-file fallback, `approval` closed set with `trinity:` precedence, a bad value keeps the rest, behavioural parity with `skill_packaging.extract_contract`, vendored constants equal |
+| `tests/unit/test_ent754_agent_server_skillinfo.py` | The agent server loaded standalone: `source` follows the marker, `dir` reported, the unreadable-file fallback, `approval` closed set with `trinity:` precedence, a bad value keeps the rest, behavioural parity with `skill_packaging.extract_contract`, vendored constants equal; the agent's folder scanned and named once (and two different folders kept) |
 | `src/frontend/tests/unit/skillCards.spec.js` | The pure rules: exactly one section (conflict in both), Run, gate-line variants, controls by role / ghost / system, Shared badges and the note line, mode chip and labels |
 | `src/frontend/tests/unit/skillsStoreAgentSwitch.spec.js` | The skills store across an agent switch: a load (and a failed one), a sync, a save and a set write that answer after the switch are dropped, and a save's follow-up read never re-reads the next agent |
 | `src/frontend/tests/unit/skillGatesStore.spec.js` | Load then background probe, no probe unless asked, a failed read, a failed probe is no answer, a stale answer dropped, writes send the kind and re-read, a refused write named on its skill, an agent left mid-write |
-| `src/frontend/tests/unit/skillsTab.mount.spec.js` | The tab mounted (only `@/api` mocked): sections and roles, the stopped agent (list and none), Run in async mode and each answer, Edit & Run, the approval toggle and picker, "you approve this", kept gates, the hook warning and no probe for a viewer, the filter; an agent switch carries nothing over; nothing drawn from an unanswered read and every failure named; writes go to the gate the card shows, with a current default; Unassign confirms; dialogs open on the safe action; hook states in words |
+| `src/frontend/tests/unit/skillsTab.mount.spec.js` | The tab mounted (only `@/api` mocked): sections and roles, the stopped agent (list and none), Run in async mode and each answer, Edit & Run, the approval toggle and picker, "you approve this", kept gates, the hook warning and no probe for a viewer, the filter; an agent switch carries nothing over; nothing drawn from an unanswered read and every failure named; writes go to the gate the card shows, with a current default; Unassign confirms in the future tense; dialogs open on the safe action; hook states in words; the Own count includes kept gates; the not-synced line; one folder named once; the approver picker is the small field select |
+| `src/frontend/tests/unit/tasksPanelRunRefresh.spec.js` | The Tasks panel mounted: a run that opened running settles without a Refresh and the re-reads stop; which statuses are re-read; no stacked reads; the highlighted row opened once; a typed task never listed twice; a slow read for the agent the page left dropped; a settled row shows its result |
+| `src/frontend/tests/unit/baseSelectSize.spec.js` | BaseSelect `size="sm"` mounted: the sm field recipe and chevron, `md` the default and unchanged, `ghost` takes no size, the shared field recipe byte-identical |
 | `src/frontend/tests/unit/executionGateMarker.mount.spec.js` | The marker itself, and wired into the Tasks row and the execution page's origin card |
 | `src/frontend/tests/unit/portalSelfApprovedTurn.spec.js` | `assistantRow` / `replyFields` carry the flags; the conversation marks only the self-approved reply; `turnGateFlags` reads either spelling (streaming row or the synchronous body) |
 | `src/frontend/tests/unit/skillGateSenders.spec.js` | Ported: the SkillsTab Run among the UI senders of a 202 / refusal (trinity#3274) |
@@ -446,7 +450,8 @@ Covered by unit tests:
 pytest tests/unit/test_ent754_*.py tests/unit/test_1560_agent_redis_key_parity.py tests/unit/test_2850_skill_allowed_tools_forms.py -q
 # frontend
 cd src/frontend && npx vitest run tests/unit/skillCards.spec.js tests/unit/skillGatesStore.spec.js \
-  tests/unit/skillsTab.mount.spec.js tests/unit/executionGateMarker.mount.spec.js tests/unit/portalSelfApprovedTurn.spec.js
+  tests/unit/skillsTab.mount.spec.js tests/unit/executionGateMarker.mount.spec.js tests/unit/portalSelfApprovedTurn.spec.js \
+  tests/unit/tasksPanelRunRefresh.spec.js tests/unit/baseSelectSize.spec.js
 ```
 
 ### Status
@@ -471,3 +476,4 @@ Known limits:
 |------|---------|
 | 2026-10-08 | Created for trinity-enterprise#754: the Playbooks tab and the library-only Skills tab merged into one Skills tab — the cards, Run (`async_mode`), Requires approval, the last-known list (`services/agent_skills_listing.py`, `?last_known=true`), `approvers` / `?probe=true` on the gate map, the self-approved marker (Tasks, execution page, Workspace), agent-server `source` / `dir` / `approval`, and "skills" in UI copy. Absorbs `playbooks-tab.md`. |
 | 2026-10-08 | Review round (ent#754): agent-switch guards in the tab and the skills store; sections wait for the reads they depend on and name each failure; gate writes keyed on the gate the card shows; a live default approver; Unassign confirms; dialogs focus the safe action; hook states in words. Backend: a container removed mid-read is a plain 404 (no Docker text, public link included); transport errors are unreachable; the connector keeps its wording; the self-approved read is chunked; a machine Workspace viewer is never "you"; the synchronous Workspace reply carries both flags; `GET /skills/library` names `approval`. |
+| 2026-10-08 | Eyeball round (ent#754): a Run's Tasks row settles without a Refresh (the poll re-reads while a row is in flight; the highlighted row opens once); the Own meta line names each folder once (store, and the agent server scans its folder once); the Unassign confirm speaks in the future tense; the approver picker is `BaseSelect size="sm"`, so it fits the 40px row; the Own count includes kept gates; the not-synced line says statuses appear after a sync. |

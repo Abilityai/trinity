@@ -530,6 +530,45 @@ describe('approval writes go to the gate the card shows', () => {
   })
 })
 
+describe('section heads', () => {
+  it('the Own count counts every card the section lists, a kept gate included', async () => {
+    respond({ map: MAP({ gates: [
+      { skill_name: 'pay-invoice', approver: 'primary', approver_reachable: true, origin: 'set' },
+      { skill_name: 'gone', approver: 'primary', approver_reachable: true, origin: 'set' },
+    ] }) })
+    const { w } = await mountTab()
+    expect(card(w, 'own', 'gone').exists()).toBe(true)          // "gate kept"
+    expect(tid(w, 'skills-own-count').text()).toBe('3')         // daily-report, pay-invoice, gone
+  })
+
+  it('before a sync, the Shared line says statuses appear after one', async () => {
+    const { w } = await mountTab()
+    expect(tid(w, 'skills-sync-meta').text()).toBe('Not synced from this screen yet: statuses appear after a sync. '
+      + 'Skills are also copied in when the agent starts.')
+  })
+})
+
+describe('the approval row', () => {
+  it('the approver picker is the small field select, so it fits the 40px row', async () => {
+    const { w } = await mountTab()
+    const picker = tid(w, 'skill-approver-pay-invoice')
+    expect(picker.classes()).toEqual(expect.arrayContaining(['py-1', 'text-[12.5px]', 'border']))
+    expect(picker.classes()).not.toContain('py-2')
+    // Approval off: disabled, still a bordered box (the recipe dims it to .45).
+    expect(tid(w, 'skill-approver-daily-report').element.disabled).toBe(true)
+    expect(tid(w, 'skill-approver-daily-report').classes()).toContain('disabled:opacity-45')
+  })
+})
+
+describe('the Own skills meta line', () => {
+  it('names each folder the agent scanned once', async () => {
+    // An image whose server runs as `developer` lists one folder under two names.
+    respond({ playbooks: { data: { ...LIVE, skill_paths: ['.claude/skills', '.claude/skills'] } } })
+    const { w } = await mountTab()
+    expect(tid(w, 'skills-own-meta').text()).toBe('From .claude/skills')
+  })
+})
+
 describe('in-agent enforcement warning wording', () => {
   it('names every hook state in words, never its code', async () => {
     // (`predates` is an English word its own sentence uses; pinned above.)
@@ -545,7 +584,7 @@ describe('in-agent enforcement warning wording', () => {
 
 
 describe('destructive verbs restate the consequence and focus the safe action (principle 19)', () => {
-  it('Unassign asks first, and says the approval requirement goes with it', async () => {
+  it('Unassign asks first, and says the approval requirement will go with it', async () => {
     respond({ map: MAP({ gates: [{ skill_name: 'shared-one', approver: 'primary', approver_reachable: true, origin: 'set' }] }) })
     api.put.mockResolvedValue({ data: { delivery: null } })
     const { w } = await mountTab()
@@ -555,7 +594,8 @@ describe('destructive verbs restate the consequence and focus the safe action (p
     expect(api.put).not.toHaveBeenCalled()
     const dialog = tid(w, 'confirm-dialog')
     expect(dialog.text()).toContain('Unassign /shared-one?')
-    expect(dialog.text()).toContain('approval requirement goes with it')
+    expect(tid(w, 'confirm-dialog-message').text()).toBe('The library skill will be removed from this agent, '
+      + 'along with its approval requirement. You can assign it again from Assign skills.')
     expect(document.activeElement?.dataset?.testid).toBe('confirm-dialog-cancel')
 
     await tid(w, 'confirm-dialog-cancel').trigger('click')
@@ -568,6 +608,14 @@ describe('destructive verbs restate the consequence and focus the safe action (p
     await flush()
     expect(api.put).toHaveBeenCalledTimes(1)
     expect(api.put.mock.calls[0][1]).toEqual({ skills: [] })
+  })
+
+  it('an ungated skill: the dialog says only what will be removed', async () => {
+    const { w } = await mountTab()
+    await tid(w, 'skill-unassign-shared-one').trigger('click')
+    await flush()
+    expect(tid(w, 'confirm-dialog-message').text())
+      .toBe('The library skill will be removed from this agent. You can assign it again from Assign skills.')
   })
 
   it("the details dialog opens on Close, not on 'Unassign library skill'", async () => {

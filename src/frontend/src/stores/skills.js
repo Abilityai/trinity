@@ -199,7 +199,9 @@ export const useSkillsStore = defineStore('skills', () => {
         return
       }
       agentList.value = data.skills
-      agentListPaths.value = Array.isArray(data?.skill_paths) ? data.skill_paths : []
+      // An image whose server runs as `developer` scans one folder under two
+      // names and lists it twice; each folder is named once.
+      agentListPaths.value = Array.isArray(data?.skill_paths) ? [...new Set(data.skill_paths)] : []
       agentListState.value = data?.last_known ? 'last_known' : 'live'
       agentListAt.value = data?.last_known?.captured_at || null
       agentListReason.value = data?.last_known?.reason || null

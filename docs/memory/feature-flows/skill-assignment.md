@@ -50,10 +50,10 @@ Since trinity-enterprise#754 the assignment surface is the **Shared skills** sec
 | Control | File | Call |
 |---|---|---|
 | **Assign skills** → tick → **Save assignments** | `components/skills/SkillAssignModal.vue:134-146` | `store.saveAssignments(draft)` → `PUT /api/agents/{name}/skills` |
-| **Unassign** on a Shared card | `components/skills/SkillsTab.vue:519-534` | `store.saveAssignments(individualNames − name)` → the same PUT |
+| **Unassign** on a Shared card | `components/skills/SkillsTab.vue:541-559`, after its confirm (`:561-573`) | `store.saveAssignments(individualNames − name)` → the same PUT |
 | **Unassign library skill** (#2914 conflict) | `components/skills/SkillDetailsModal.vue:31-41` → `SkillsTab.onUnassign` | the same PUT |
-| **Manage sets** | `components/skills/AgentSkillSets.vue` in a `BaseModal` (`SkillsTab.vue:248-253`) | `store.assignSet` / `unassignSet` → `POST` / `DELETE /api/agents/{name}/skill-sets/{set}` |
-| **Sync now** | `SkillsTab.vue:135-144,471-477` | `store.inject()` → `POST /api/agents/{name}/skills/inject` |
+| **Manage sets** | `components/skills/AgentSkillSets.vue` in a `BaseModal` (`SkillsTab.vue:266-271`) | `store.assignSet` / `unassignSet` → `POST` / `DELETE /api/agents/{name}/skill-sets/{set}` |
+| **Sync now** | `SkillsTab.vue:135-144,581-589` | `store.inject()` → `POST /api/agents/{name}/skills/inject` |
 
 The picker keeps its ent#235 / ent#530 / ent#672 / #2914 behaviour: the draft is the INDIVIDUAL list, a set-only member is ticked and locked, a deprecated skill is marked before it is ticked, and a draft survives a sync that re-reads the same assignment set. Package fact chips render through the shared seam `components/skills/{SkillContractChips.vue, contract.js}` (ent#263, shared with the Library page).
 
@@ -67,9 +67,9 @@ The picker keeps its ent#235 / ent#530 / ent#672 / #2914 behaviour: the draft is
 
 ### API Calls
 
-**`load(name)`** (`stores/skills.js:248-288`): `GET /api/skills/library/status` + `GET /api/agents/{name}/skills` together; only when the library is configured, `GET /api/skills/library` and `loadSets()` (`GET /api/agents/{name}/skill-sets?probe=true`, `GET /api/skills/library/sets`). A failed read is an error, never a confident empty.
+**`load(name)`** (`stores/skills.js:250-290`): `GET /api/skills/library/status` + `GET /api/agents/{name}/skills` together; only when the library is configured, `GET /api/skills/library` and `loadSets()` (`GET /api/agents/{name}/skill-sets?probe=true`, `GET /api/skills/library/sets`). A failed read is an error, never a confident empty.
 
-**`saveAssignments(names)`** (`stores/skills.js:367-389`):
+**`saveAssignments(names)`** (`stores/skills.js:369-391`):
 
 ```javascript
 const { data: saved } = await api.put(
@@ -81,7 +81,7 @@ const { data } = await api.get(`/api/agents/${agentName.value}/skills`)   // re-
 
 The dialog then emits `saved` with `deliveryText(lastDelivery, {saved: true})` and `deprecationText(lastDelivery)` (`SkillAssignModal.vue:134-146`); the tab shows it on the Shared line and arms the Sync emphasis only when delivery did not land.
 
-**`inject()`** (`stores/skills.js:401-430`): `POST /api/agents/{name}/skills/inject` (a repair: `force` server-side). Results are stored per skill (`injectionResults`), then the rows are re-read so a #2914 verdict that was set or cleared shows at once. A 409 reads "A skill sync is already running for this agent. Try again in a moment."
+**`inject()`** (`stores/skills.js:403-432`): `POST /api/agents/{name}/skills/inject` (a repair: `force` server-side). Results are stored per skill (`injectionResults`), then the rows are re-read so a #2914 verdict that was set or cleared shows at once. A 409 reads "A skill sync is already running for this agent. Try again in a moment."
 
 ---
 
