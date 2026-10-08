@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent841_close_chat.py",
+      "feature": "abilityai/trinity-enterprise#841",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "workspace",
+        "unit"
+      ],
+      "description": "ent#841: closing a chat archives it and keeps its messages; reopen clears the flag; closing twice keeps the first archived_at; the live Main is a named 409; a retired Main reopens with is_main = 0; another client's or an unknown id is the uniform 404; an off-roster agent is 404; PUT and DELETE archive routes are registered. Throwaway sqlite, no Docker."
+    },
+    {
       "file": "unit/test_runtime_process_ownership.py",
       "feature": "#3307",
       "added": "2026-10-06",

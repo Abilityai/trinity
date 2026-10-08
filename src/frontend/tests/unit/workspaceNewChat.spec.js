@@ -294,7 +294,7 @@ describe('#2579 — the title settle cycle', () => {
     // does, so it must seed agent recency the same way or an unranked agent
     // stays unranked for as long as the cycle keeps overwriting the list.
     const s = src()
-    expect(s).toMatch(/threads\.value = decorate\(list\)\s*store\.seedAgentRecency\(threads\.value\)/)
+    expect(s).toMatch(/threads\.value = decorate\(applyArchiveOverrides\(list, archiveGuard\.live\(archiveToken\)\)\)\s*store\.seedAgentRecency\(threads\.value\)/)
   })
 
   it('a vanished row stops the cycle WITHOUT a verdict', () => {
