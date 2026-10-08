@@ -1536,6 +1536,26 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   rule in `style.css` is untouched; the sidebar list and the conversation
   transcript are a follow-up once the feel is confirmed. Gated on a human feel
   check on the running instance before the PR.
+- **AC-10 — an Asks tab, a door into the Inbox (trinity-enterprise#836)**: when
+  an agent in the conversation has an open ask addressed to you, its rail
+  carries an **Asks** tab — last in the fixed order, so its coming and going
+  moves no other tab — listing that agent's pending asks one line each (kind by
+  shape, the start of the ask, when), in exactly the order the Inbox's Action
+  tab shows them narrowed to that agent (`actionItems` filtered to the
+  participants, nothing re-sorted). A row is a link that opens the Inbox on
+  Action, filtered to that agent, with that ask selected
+  (`?tab=action&from=<agent>&item=ask:<id>`); the tab answers nothing itself —
+  answering happens in the Inbox (the 2026-09-30 ruling on ent#610). The tab's
+  count and the agent row's "needs you" mark read ONE feed (`openAsks` through
+  `asksByAgent`), so they cannot disagree, and the mark is the same unfilled
+  orange circle in both places. With no open ask for a participant the tab is
+  not rendered at all (a `presence` rule on the registry entry, checked by the
+  one door gate `tabPassesDoor`), and an ask that is answered or expires leaves
+  it the moment it leaves Action. Door `AGENT`: clients and platform users
+  alike, since asks are addressed to both. It joins the rail's tab order, so
+  `⌥.` (ent#621) reaches it, the collapsed strip shows its dot and "Asks · 2
+  asks", and the open strip's tab carries the count. A room lists every
+  participant's asks grouped by agent, absence visible.
 - **Not in this slice (recorded on the issue)**: the Work tab's content
   (#457), re-homing Loops / Canvas / Files (#472's second child), the sidebar /
   thread tab strip / top band / Agent-details panel / drop target of the
@@ -3837,6 +3857,14 @@ to localStorage in the clear.
   that chat, and the viewer's own last three answers to this agent. A run is named only when
   it belongs to the ask's agent, was running when the ask was filed, and was a schedule, a
   manual run or the viewer's own — the agent writes the link, so it is checked, never trusted.
+- **A calmer "needs you" mark, and a door from the agent page (trinity-enterprise#836)**: the
+  agent row's mark in the sidebar is an **unfilled orange circle** (a ring, the count in
+  urgent ink — 700 light / 400 dark, AA on the sidebar ground), not a filled pill; it keeps
+  its count, its accessible name ("N asks are waiting on your answer") and its place beside
+  the unread mark, which stays a filled primary pill so the two obligations still differ by
+  shape as well as hue. The pinned Inbox row and the Inbox's own Action counter keep their
+  filled 700 pills. The agent's rail gains an **Asks** tab (§5.19 AC-10) that lists the
+  agent's open asks and opens each in the Inbox — the Inbox stays the only answer surface.
 - **The door (AC 7)**: nothing the Inbox adds carries cost, an execution id or run detail; the
   preview projection has no `cost` field; the ask-context read carries no `cost` and no
   execution id (a run's kind, label and start time only). The Inbox needs no capability flag — it reads the

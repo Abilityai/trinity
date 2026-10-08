@@ -280,8 +280,10 @@ describe('the composer is wired to the rules', () => {
     expect(CODE).toContain('const chosenModel = modelControl.value.enabled ? selectedModel.value : \'\'')
     expect(CODE).toMatch(/startPortalChat\([\s\S]{0,220}model: chosenModel/)
     expect(CODE).toMatch(/sendPortalChat\([\s\S]{0,220}model: chosenModel/)
-    expect(STORE).toMatch(/sendPortalChat\([\s\S]{0,400}model: model \|\| null/)
-    expect(STORE).toMatch(/startPortalChat\([\s\S]{0,400}model: model \|\| null/)
+    // 480, not 400: the window spans the options signature, which #3265 grew
+    // by one option (`attachments`). What it pins is unchanged.
+    expect(STORE).toMatch(/sendPortalChat\([\s\S]{0,480}model: model \|\| null/)
+    expect(STORE).toMatch(/startPortalChat\([\s\S]{0,480}model: model \|\| null/)
   })
 
   it('persists to the user’s SERVER record, not the browser', () => {

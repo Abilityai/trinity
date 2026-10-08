@@ -11,7 +11,7 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents` | GET | List all agents. Each row carries `readiness` (`{status, changed_at, source}` for an agent whose owner stamped it `ready` or `calibrating`, otherwise `null`) and `brief_held` — see [Dashboard](../operations/dashboard.md#grid-view) |
-| `/api/agents` | POST | Create agent |
+| `/api/agents` | POST | Create agent. On a `github:` template, optional `kind` (`agent` default, or `deployment`); the response's `git_mode` says whether the agent pushes and why — see [GitHub Sync](../integrations/github-sync.md#creating-an-agent-with-sync) |
 | `/api/agents/{name}` | GET | Get agent details |
 | `/api/agents/{name}` | DELETE | Delete agent |
 | `/api/agents/{name}/start` | POST | Start container |
@@ -53,11 +53,15 @@ See [Dynamic Dashboards → Declared Metrics](../advanced/dynamic-dashboards.md#
 | `/api/agents/{name}/circuit-breaker` | GET/PUT | Circuit breaker state / per-agent enable-disable (owner-only) — see [Agent Configuration](../agents/agent-configuration.md) |
 | `/api/agents/{name}/circuit-breaker/reset` | POST | Reset both breakers to closed (admin-only) |
 | `/api/agents/{name}/operator-resume` | GET/PUT | Wake the agent when an ask it raised ends — answered, cancelled or expired (`{"enabled": true}`). GET for anyone with access; PUT is owner or admin, and an agent-scoped key gets `403` — see [Agent Configuration](../agents/agent-configuration.md#wake-when-an-ask-ends) |
-| `/api/agents/{name}/operator-queue/{request_id}` | GET | The agent's own operator-queue item by the id it chose, with the agent's own key only — how it stands and how it ended (trinity-enterprise#611) |
-| `/api/agents/{name}/resources` | GET/PUT | Memory and CPU limits (applied on the next recreate) |
+| `/api/agents/{name}/operator-queue/{request_id}` | GET | The agent's own operator-queue item by the id it chose, with the agent's own key only — how it stands and how it ended |
+| `/api/agents/{name}/resources` | GET/PUT | Memory and CPU limits (applied on the next recreate). A CPU limit above the Docker host's CPU count runs capped at the host's count; the stored value is kept |
 | `/api/agents/{name}/capabilities` | GET/PUT | `full_capabilities` — Docker default capabilities (`apt-get` works) vs the restricted secure default — see [Agent Configuration](../agents/agent-configuration.md) |
 | `/api/agents/{name}/mcp-exposed` | GET/PUT | Publish the agent as its own `chat_with_<slug>` MCP tool — see [MCP Server](../integrations/mcp-server.md#dedicated-agent-tools-expose-via-mcp) |
 | `/api/agents/{name}/mcp-key` | GET | The agent's own MCP key health (never the secret); `POST …/mcp-key/verify` probes the container, `POST …/mcp-key/regenerate` rotates it — see [MCP Server](../integrations/mcp-server.md#each-agents-own-mcp-key) |
+
+### Git
+
+Git status, sync, pull, auto-sync, pull-sync, schedule-pause and per-agent GitHub token endpoints live under `/api/agents/{name}/git/…` and `/api/agents/{name}/github-pat` — see [GitHub Sync → For Agents](../integrations/github-sync.md#for-agents) and [GitHub PAT Setup](../integrations/github-pat-setup.md#per-agent-pat-override).
 
 ### Credentials
 

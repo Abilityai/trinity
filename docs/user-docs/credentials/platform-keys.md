@@ -46,7 +46,7 @@ The check reads your Resend account's domains and refuses an address whose domai
 
 A key saved here makes Resend the email provider, even if the server's `.env` says otherwise. **Remove** reverts email to the `.env` configuration.
 
-If you skip it, nobody can sign in with an email code — only the admin password works, and the codes are written to the server log instead of being sent.
+If you skip it, nobody can sign in with an email code — only the admin password works, and the codes are written to the server log instead of being sent. Confirming a new sign-in email needs a delivered code too: without a provider, only an admin can bind a sign-in email without one (audited as unverified), and anyone else is told email verification isn't available yet.
 
 ## Gemini
 

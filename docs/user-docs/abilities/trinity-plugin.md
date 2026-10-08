@@ -1,6 +1,6 @@
 # trinity Plugin
 
-Connect, deploy, operate, and sync agents on the Trinity platform. Seven skills covering the complete lifecycle — from a guided first journey through connection, deployment, remote loops, and instance provisioning.
+Connect, deploy, operate, and sync agents on Trinity — the operating system for the AI-native company: open source, self-hosted, that you own. Seven skills (trinity v2.11.3) covering the complete lifecycle — from a guided first journey through connection, deployment, remote loops, and instance provisioning.
 
 > 🧭 **New to Trinity? Start with `/trinity:start-here`** — a guided, resumable walkthrough that takes you from "what is Trinity?" to your first agent running on your own instance. [Jump to the section](#the-guided-journey-trinitystart-here).
 
@@ -78,7 +78,15 @@ After connecting, Trinity MCP tools become available:
 
 ### Step 2: Add your GitHub token (One-Time)
 
-Deployment is **repository-first**: Trinity clones the agent straight from its GitHub repo and tracks the branch. In the Trinity UI, go to **Settings → GitHub token** and add a fine-grained PAT with *Contents: Read* on the repos your agents live in. Public repos work without a token; private repos don't. See [GitHub PAT Setup](../integrations/github-pat-setup.md).
+Deployment is **repository-first**: Trinity clones the agent straight from its GitHub repo. What the agent can do with that repo depends on the token:
+
+| Token | Result |
+|-------|--------|
+| **Your own** token (**Settings → MCP Keys → Personal GitHub Token**), fine-grained PAT with *Contents: Read and write*, on a repo your GitHub account owns | The agent gets a **working branch** it alone writes, with auto-sync on, so its work lands back in git |
+| A read-only token, or the instance-wide token an admin set | The agent is **pull-only**: it tracks the branch and its own changes never reach git |
+| No token | Public repos clone pull-only; private repos fail |
+
+The create response's `git_mode` says which you got and why. See [GitHub Sync](../integrations/github-sync.md) and [GitHub PAT Setup](../integrations/github-pat-setup.md).
 
 ### Step 3: Onboard (Per Agent)
 
@@ -92,18 +100,20 @@ Run it in the agent's directory. It analyzes the current state, then:
 
 1. **Creates the Trinity files** it finds missing — `template.yaml` (with `plugins:`, `schedules:`, and credential declarations), `.env.example`, `.gitignore`, `.mcp.json.template`
 2. **Checks GitHub readiness** — the token tier and a pushed remote — before any deploy runs
-3. **Deploys** — from the repository by default (`create_agent` with `github:owner/repo@branch`); from a local archive as the fallback when the repo doesn't exist yet or the instance can't reach GitHub, with an offer to promote the agent onto the repo path afterwards
+3. **Deploys** — from the repository by default (`create_agent` with `github:owner/repo@branch`, as `kind: "agent"` unless you want a pull-only `deployment`); from a local archive as the fallback when the repo doesn't exist yet or the instance can't reach GitHub, with an offer to promote the agent onto the repo path afterwards
 4. **Injects** gitignored credentials (`.env`) after deploy, since they are never in the clone or the archive
 5. **Reconciles declared schedules** onto the instance, matching on schedule name
 6. **Verifies** with the platform's own compatibility report — the report, not the skill's checklist, is the definition of "compatible"
 
-Two things it will tell you and you cannot skip: declared schedules arm only on a literal `enabled: true`, and a newly created agent's **autonomy toggle is off** — until you turn it on in the UI, the scheduler skips every cron trigger for that agent.
+Two things it will tell you and you cannot skip: declared schedules arm only on a literal `enabled: true`, and a newly created agent's **autonomy toggle is off** — until you turn it on in the UI, the scheduler skips every cron trigger for that agent. Turning autonomy on is a person's act; an agent's own key cannot do it.
+
+The files it scaffolds follow current platform rules: `.gitignore` no longer ignores `.claude/settings.json` (project settings may be committed; Trinity keeps a copy out of a commit only when it carries platform hook paths or credential-bearing keys), a skill that needs a person raises an ask with `ask_operator` and reads the result with `get_my_ask`, and a call refused for exceeding the instance's chain-depth limit is never retried.
 
 There are three ways an agent gets onto Trinity:
 
 | Path | When | What happens |
 |------|------|--------------|
-| **From the GitHub repo** (default) | The agent is adapted and pushed | Trinity clones the repo, tracks the branch, materializes declared schedules and plugins at creation |
+| **From the GitHub repo** (default) | The agent is adapted and pushed | Trinity clones the repo — onto a working branch with auto-sync, or pull-only on the tracked branch, depending on the token (Step 2) — and materializes declared schedules and plugins at creation |
 | **From local files** (fallback) | No repo yet, air-gapped instance, or a throwaway | A snapshot of your directory is deployed; promote it onto the repo path with `initialize_github_sync` before it becomes long-lived |
 | **Deploy as-is, then onboard in place** | A repo you can't or shouldn't adapt locally — someone else's agent, a bare repo with no `template.yaml` | Create the agent from the bare repo first (Trinity tolerates a missing `template.yaml`), then run `/trinity:onboard` *inside* that agent — see [below](#onboarding-a-deployed-agent-in-place) |
 
@@ -129,7 +139,7 @@ When `/trinity:onboard` detects it is running *inside* a deployed Trinity agent 
 
 1. Writes the Trinity files — `template.yaml` (with `plugins:` declaring at least `trinity@abilityai`), `.env.example`, `.gitignore`, `.mcp.json.template` if the agent runs MCP servers of its own
 2. **Installs the declared plugins now**, with the same CLI calls the container's boot hook uses, so they are present from the next execution rather than the next restart
-3. **Commits and pushes the result back to the repo** — this step matters: a repo-deployed agent tracks its branch pull-only, so a file written in the container is lost on the next reset unless it reaches the repo. If the agent has no write credentials, the skill tries the platform's push path and, failing that, **stops and says so** — it prints the patch and states that the result is container-local, rather than pretending
+3. **Commits and pushes the result back to the repo** — this step matters: a pull-only agent tracks its branch read-only, so a file written in the container is lost on the next reset unless it reaches the repo. If the agent has no write credentials, the skill tries the platform's push path and, failing that, **stops and says so** — it prints the patch and states that the result is container-local, rather than pretending
 4. Reconciles declared schedules live
 5. Finishes with `get_agent_compatibility_report` — every HARD finding is yours to fix; SOFT and AI findings are advisory
 
@@ -173,6 +183,8 @@ Examples:
 ```
 
 After firing, the skill starts a lightweight local watch by default — it polls the loop and reports run-by-run progress, stalls, and the final result. Say "fire and forget" to skip the watch; the remote loop runs either way and also appears on the agent's **Loops** tab in the Trinity web UI. Inside a deployed Trinity agent there is no watch — the wake-up tools it relies on are denied there — so poll with `/trinity:loop status` or a `set_reminder` instead.
+
+**Raising the per-run timeout is the owner's act.** A loop's `timeout_per_run` cannot exceed the agent's execution timeout. The agent's owner raises that cap in the agent's settings; a loop launched from inside a deployed agent tells the owner instead of trying, because an agent key is refused.
 
 **A denial is a permission, not a typo.** The loop tools enforce the same agent-to-agent permissions as `chat_with_agent`. An agent-scoped key can loop itself and the agents it has been granted, nothing else; your own user key is unaffected. A refused status or stop call answers `Loop '<id>' not found or not accessible`, whether or not the loop exists. Do not retry under another name: ask the agent's owner to grant the permission.
 

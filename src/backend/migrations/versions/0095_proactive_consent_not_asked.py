@@ -11,14 +11,14 @@ allows it. Idempotent.
 
 Mirrors the SQLite ``proactive_consent_not_asked`` migration.
 
-Revision ID: 0092_proactive_consent_not_asked
-Revises: 0091_chat_session_claude_id
+Revision ID: 0095_proactive_consent_not_asked
+Revises: 0094_agent_skill_gates
 """
 from alembic import op
 
 
-revision = "0092_proactive_consent_not_asked"
-down_revision = "0091_chat_session_claude_id"
+revision = "0095_proactive_consent_not_asked"
+down_revision = "0094_agent_skill_gates"
 branch_labels = None
 depends_on = None
 

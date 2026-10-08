@@ -806,6 +806,9 @@ class SkillInfo(BaseModel):
     # name, and is None unless `deprecated` is true.
     deprecated: bool = False
     superseded_by: Optional[str] = None
+    # trinity-enterprise#753: `recommended` — the skill is gated by default on
+    # every agent it is assigned to (the owner can clear it). None otherwise.
+    approval: Optional[str] = None
 
 
 class AgentSkillsUpdate(BaseModel):

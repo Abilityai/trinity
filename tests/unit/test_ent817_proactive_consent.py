@@ -120,5 +120,5 @@ def test_the_migration_is_registered_on_both_tracks():
     names = [n for n, _ in migrations.MIGRATIONS]
     assert "proactive_consent_not_asked" in names
     rev = (Path(migrations.__file__).resolve().parents[1]
-           / "migrations" / "versions" / "0092_proactive_consent_not_asked.py").read_text()
+           / "migrations" / "versions" / "0095_proactive_consent_not_asked.py").read_text()
     assert "allow_proactive = NULL WHERE allow_proactive = 0" in rev

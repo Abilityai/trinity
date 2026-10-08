@@ -43,6 +43,7 @@ from services.agent_service.lifecycle import (
 )
 from services.agent_service.capabilities import normalize_cpu, normalize_memory
 from utils.credential_sanitizer import sanitize_text
+from utils.admin_identity import admin_username
 from utils.helpers import utc_now_iso
 from utils.safe_yaml import load_template_yaml  # ent#314
 
@@ -50,7 +51,6 @@ logger = logging.getLogger(__name__)
 
 # Constants
 SYSTEM_AGENT_TEMPLATE = "local:trinity-system"
-SYSTEM_AGENT_OWNER = "admin"  # System agent is owned by admin
 SYSTEM_AGENT_NETWORK = "trinity-agent-network"
 
 # #1816: the operator-facing vocabulary for `check_base_image_state`. The
@@ -163,7 +163,7 @@ class SystemAgentService:
             await container_reload(container)
 
             # Ensure database record has is_system=True (fixes regression if record exists without flag)
-            db.register_agent_owner(SYSTEM_AGENT_NAME, SYSTEM_AGENT_OWNER, is_system=True)
+            db.register_agent_owner(SYSTEM_AGENT_NAME, admin_username(), is_system=True)
 
             # #1816 — RUNNING: report, never act.
             #
@@ -328,11 +328,14 @@ class SystemAgentService:
         import yaml
         import json
 
-        # Ensure admin user exists for ownership
-        admin_user = db.get_user_by_username(SYSTEM_AGENT_OWNER)
+        # Ensure admin user exists for ownership. The platform's admin account,
+        # whatever ADMIN_USERNAME names it (#3262) — a literal "admin" never
+        # found the owner on an `ADMIN_USERNAME=root` install.
+        owner = admin_username()
+        admin_user = db.get_user_by_username(owner)
         if not admin_user:
-            logger.error(f"Admin user '{SYSTEM_AGENT_OWNER}' not found. Cannot create system agent.")
-            raise ValueError(f"Admin user '{SYSTEM_AGENT_OWNER}' not found")
+            logger.error(f"Admin user '{owner}' not found. Cannot create system agent.")
+            raise ValueError(f"Admin user '{owner}' not found")
 
         # Load template configuration
         templates_dir = Path("/agent-configs/templates")
@@ -364,7 +367,7 @@ class SystemAgentService:
         try:
             agent_mcp_key = db.create_agent_mcp_api_key(
                 agent_name=SYSTEM_AGENT_NAME,
-                owner_username=SYSTEM_AGENT_OWNER,
+                owner_username=owner,
                 description="Auto-generated system agent MCP key"
             )
             if agent_mcp_key:
@@ -520,10 +523,10 @@ class SystemAgentService:
         )
 
         # Register ownership with is_system=True
-        db.register_agent_owner(SYSTEM_AGENT_NAME, SYSTEM_AGENT_OWNER, is_system=True)
+        db.register_agent_owner(SYSTEM_AGENT_NAME, owner, is_system=True)
 
         # Grant default permissions (system agent can talk to everyone)
-        db.grant_default_permissions(SYSTEM_AGENT_NAME, SYSTEM_AGENT_OWNER)
+        db.grant_default_permissions(SYSTEM_AGENT_NAME, owner)
 
         return {
             "container_id": container.short_id,
