@@ -601,7 +601,6 @@ export function keyTipRows(platform, map = WORKSPACE_KEYMAP, tips = KEY_TIPS) {
     // kept for the hover, where there is room to spell it out.
     keys: keyHintCompact(t.actions, platform, map),
     fullKeys: keyHint(t.actions, platform, map),
-    ariaKeyshortcuts: keyShortcutsFor(t.actions, platform, map),
   })).filter((r) => r.keys)
 }
 

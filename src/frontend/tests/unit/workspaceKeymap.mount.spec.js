@@ -124,9 +124,9 @@ async function boot(path, { threads = THREADS, roster = ROSTER, stubs = {} } = {
     global: {
       plugins: [router],
       // `PortalKeyList` and `BaseModal` under it are NOT stubbed: what the
-      // ⌘/ cases prove is that a REAL `aria-modal` dialog appears, carrying
+      // ⌥/ cases prove is that a REAL `aria-modal` dialog appears, carrying
       // the `data-ws-key-list` marker on the same element — which is what lets
-      // ⌘/ close its own list while every other key is suppressed under it. A
+      // ⌥/ close its own list while every other key is suppressed under it. A
       // stub renders an empty tag and passes all of that with the dialog
       // unplugged and the marker on the wrong element.
       // `teleport: false` as well: `shallowMount` stubs `<Teleport>`, and

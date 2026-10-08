@@ -269,7 +269,7 @@ describe('keymapSuppressed', () => {
     for (const action of ['agent-next', 'agent-prev', 'chat-next', 'chat-prev', 'rail-tab-next', 'rail-toggle']) {
       expect(sup({ action, callActive: true }), action).toBe(true)
     }
-    // ⌘J keeps its own "leave the call?" ask; ⌘/ opens a dialog, which leaves
+    // ⌘J keeps its own "leave the call?" ask; ⌥/ opens a dialog, which leaves
     // nothing.
     expect(sup({ action: 'new-chat', callActive: true })).toBe(false)
     expect(sup({ action: 'key-list', callActive: true })).toBe(false)
@@ -459,7 +459,7 @@ describe('ent#621 — the search key and the tips panel (follow-up)', () => {
       expect(mac[i].keys).toBe(keyHintCompact(tip.actions, 'MacIntel'))
       expect(mac[i].fullKeys).toBe(keyHint(tip.actions, 'MacIntel'))
     }
-    expect(mac.every((r) => r.label && r.ariaKeyshortcuts)).toBe(true)
+    expect(mac.every((r) => r.label)).toBe(true)
   })
 
   it('packs a pair of chords only when nothing is lost by it', () => {

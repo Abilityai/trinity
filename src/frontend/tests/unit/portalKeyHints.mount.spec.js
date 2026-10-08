@@ -72,7 +72,7 @@ describe('ent#621 — the sidebar shows the agent keys', () => {
     w.unmount()
   })
 
-  it('has a button for the key list, so a mouse reaches what ⌘/ reaches', async () => {
+  it('has a button for the key list, so a mouse reaches what ⌥/ reaches', async () => {
     const w = mountSidebar()
     const btn = w.find('[data-testid="portal-sidebar-keys"]')
     expect(btn.exists()).toBe(true)
