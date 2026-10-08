@@ -22,7 +22,7 @@ PortalConversation.vue
   <header>  [agent picker] [title, renameable]        [+ New chat ⌘J] [★] [voice] [files]
   <slot #band>       [the agent's numbers]                             ← the shell mounts it
   <PortalChatTabs>   🔖 Main | New chat | Q3 invoi… | Onboardi… | 3 more ▾
-                     └─ OverflowTabs, dense + fixed-width (160px each)
+                     └─ OverflowTabs, dense + fixed-width (192px each)
   <slot #notice>     ⚠ Workspace chat titles aren't being generated …  [Dismiss]
                      └─ the shell mounts it; platform admins only (#2579)
   <thread>
@@ -360,7 +360,7 @@ has not listed yet would wear a "New chat" label over a real conversation.
 
 `OverflowTabs` takes an opt-in `fixedWidth` (default **false**; the three other
 consumers pass nothing and are byte-identical). Under it every tab is
-`FIXED_TAB_WIDTH` (`w-40`, 160px, **Main included** — the operator ruled the
+`FIXED_TAB_WIDTH` (`w-48`, 192px — widened from 160 on 2026-10-08 to carry the star, the unread count and the ×, **Main included** — the operator ruled the
 width uniform), the label clamps in a `min-w-0 truncate` span, and the full text
 rides `title=` on the button and on the overflow-menu row.
 
@@ -577,7 +577,7 @@ never-opened chat count at all.
   the tabs). `portalRosterRow.spec.js` mounts the sidebar for the bound and the
   handed-down order — the lift's own regression.
 - `src/frontend/e2e/workspace-chat-tabs.spec.js` (**#2579**) — the geometry no
-  node-env pin can execute: every visible tab exactly 160px (Main included), a
+  node-env pin can execute: every visible tab exactly 192px (Main included), a
   long title clipped with its full text on `title=`, the counted "N more"
   appearing as the column narrows, and no horizontal page overflow. Learning
   #1500 is why it exists — the last structural change to a shared tab strip

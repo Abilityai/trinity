@@ -2,7 +2,7 @@
 // The one knob for the fixed-tab width (#2579) — a companion `<script>` block
 // because `<script setup>` cannot carry a named export, and both rows plus the
 // spec have to be provably the same number.
-export const FIXED_TAB_WIDTH = 'w-40'
+export const FIXED_TAB_WIDTH = 'w-48'
 </script>
 
 <script setup>
@@ -75,6 +75,9 @@ const props = defineProps({
   // overflows one tab too late); the dropdown keeps its badge/signal chain
   // untouched (#2794) — a menu row's count moves nothing beside it. A tab
   // without it renders exactly what it did.
+  // `starred` draws a filled star before the label, in the tab's own ink — "this
+  // chat is starred" (the Workspace strip). Like `pinned`, it is drawn in the
+  // visible row, the menu AND the mirror, and is in the re-measure key.
   // `closable` (ent#841) draws an × on the tab — and on its overflow-menu row
   // — that emits `close` with the tab id. It is a SIBLING button laid over the
   // tab's right edge (a button nested in a button is invalid HTML), named by
@@ -226,7 +229,7 @@ const activeInOverflow = computed(() =>
 // Re-measure when the tab set OR any label/badge changes (widths shift).
 // `flush: 'post'` runs after the mirror row has rendered the new content.
 const tabsSignature = computed(() =>
-  props.tabs.map((t) => `${t.id}:${t.label}:${t.badge ?? ''}:${t.signal ?? ''}:${t.pinned ? 'p' : ''}:${t.hasDraft ? 'd' : ''}:${t.closable ? 'c' : ''}`).join('|')
+  props.tabs.map((t) => `${t.id}:${t.label}:${t.badge ?? ''}:${t.signal ?? ''}:${t.pinned ? 'p' : ''}:${t.hasDraft ? 'd' : ''}:${t.closable ? 'c' : ''}:${t.starred ? 's' : ''}`).join('|')
   + `#${moreMeasureText.value}`
 )
 watch(tabsSignature, () => measure(), { flush: 'post' })
@@ -361,6 +364,7 @@ onUnmounted(() => {
         ]"
       >
         <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
+        <svg v-if="tab.starred" class="w-3.5 h-3.5 mr-1 shrink-0" fill="currentColor" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true" data-tab-star><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M11.48 3.5a.56.56 0 011.04 0l2.13 4.82 5.24.53c.48.05.67.65.31.97l-3.94 3.5 1.12 5.16c.1.47-.4.84-.82.6L12 16.5l-4.56 2.58c-.42.24-.92-.13-.82-.6l1.12-5.16-3.94-3.5c-.36-.32-.17-.92.31-.97l5.24-.53 2.13-4.82z" /></svg>
         <span class="min-w-0 truncate">{{ tab.label }}</span>
         <DraftMark v-if="tab.hasDraft" class="ml-1.5" />
         <span
@@ -451,6 +455,7 @@ onUnmounted(() => {
         ]"
       >
         <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
+        <svg v-if="tab.starred" class="w-3.5 h-3.5 mr-1 shrink-0" fill="currentColor" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true" data-tab-star><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M11.48 3.5a.56.56 0 011.04 0l2.13 4.82 5.24.53c.48.05.67.65.31.97l-3.94 3.5 1.12 5.16c.1.47-.4.84-.82.6L12 16.5l-4.56 2.58c-.42.24-.92-.13-.82-.6l1.12-5.16-3.94-3.5c-.36-.32-.17-.92.31-.97l5.24-.53 2.13-4.82z" /></svg>
         <span :class="fixedWidth ? 'max-w-[20rem] truncate' : ''">{{ tab.label }}</span>
         <!-- Its own `v-if`, placed BEFORE the badge/signal pair below: that pair
              is a `v-if`/`v-else-if` chain, and an element inserted between its
@@ -498,6 +503,7 @@ onUnmounted(() => {
           class="border-b-2 font-medium whitespace-nowrap inline-flex items-center"
         >
           <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
+          <svg v-if="tab.starred" class="w-3.5 h-3.5 mr-1 shrink-0" fill="currentColor" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true" data-tab-star><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M11.48 3.5a.56.56 0 011.04 0l2.13 4.82 5.24.53c.48.05.67.65.31.97l-3.94 3.5 1.12 5.16c.1.47-.4.84-.82.6L12 16.5l-4.56 2.58c-.42.24-.92-.13-.82-.6l1.12-5.16-3.94-3.5c-.36-.32-.17-.92.31-.97l5.24-.53 2.13-4.82z" /></svg>
           {{ tab.label }}
           <DraftMark v-if="tab.hasDraft" class="ml-1.5" />
           <span

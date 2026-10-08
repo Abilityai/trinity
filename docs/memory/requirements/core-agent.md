@@ -3925,6 +3925,9 @@ to localStorage in the clear.
     shows the sidebar row's count on its tab, in the same solid blue
     (`badgeVariant: 'primary'`), and in the "N more" menu. The strip is
     fixed-width, so the count shortens that tab's label and moves nothing.
+  - **The star on the tab.** A starred chat's tab draws a filled star before its
+    label (the tab's own ink), in the strip and in the "N more" menu. Tabs are
+    192px (`w-48`, was 160) to carry the star, the count and the ×.
   - **A star sticks on the first click (#3356).** A chat-state read already in
     flight when the star is clicked used to answer with the pre-click state and
     overwrite it. Local star writes (and tab closes) are now held over any read

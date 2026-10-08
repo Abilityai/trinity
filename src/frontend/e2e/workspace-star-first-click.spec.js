@@ -89,6 +89,8 @@ test.describe('Workspace star — first click sticks (#3356)', () => {
 
     await expect(page.locator('main button[aria-label="Unstar this chat"]')).toHaveCount(1)
     await expect(page.locator('aside button[aria-label="Unstar this chat"]')).toHaveCount(1)
+    // The chat's tab says it is starred too.
+    await expect(page.locator('[data-testid="portal-chat-tabs"] nav [data-tab-star]:visible')).toHaveCount(1)
     // …and it is saved, not only shown.
     await page.reload()
     await expect(page.locator('main button[aria-label="Unstar this chat"]')).toHaveCount(1)

@@ -67,4 +67,12 @@ describe('ent#841 closable tabs', () => {
     expect(w.findAll('[data-tab-close]')).toHaveLength(0)
     expect(w.findAll('.group\\/tab')).toHaveLength(0)
   })
+
+  it('`starred` draws the star in the visible tab AND the mirror, and nowhere else', () => {
+    mk([{ id: 'a', label: 'A', starred: true }, { id: 'b', label: 'B' }])
+    const stars = w.findAll('[data-tab-star]')
+    expect(stars).toHaveLength(2)                       // visible + mirror
+    expect(w.find('[data-measure-tab] [data-tab-star]').exists()).toBe(true)
+    expect(stars[0].attributes('fill')).toBe('currentColor')
+  })
 })

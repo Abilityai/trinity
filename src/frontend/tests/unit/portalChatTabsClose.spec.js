@@ -47,3 +47,15 @@ describe('unread count on the tab', () => {
     expect(tabs[1]).toMatchObject({ badge: null, badgeLabel: '' })
   })
 })
+
+describe('the star on the tab', () => {
+  it('a starred chat is flagged, an unstarred one is not', () => {
+    const tabs = agentChatTabs([main(), chat('c1', { starred: true }), chat('c2')], 'a', { activeId: 'main' })
+    expect(tabs.map((t) => t.starred)).toEqual([false, true, false])
+  })
+
+  it('the accessible name of a starred tab with unread says both', () => {
+    const tabs = agentChatTabs([main(), chat('c1', { starred: true, unread: 2 })], 'a', { activeId: 'main' })
+    expect(tabs[1].badgeLabel).toBe('c1, starred, 2 unread')
+  })
+})

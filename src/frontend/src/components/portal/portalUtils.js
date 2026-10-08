@@ -390,7 +390,7 @@ function tabUnread(t, activeId) {
   return {
     badge: n > 0 ? capCount(n) : null,
     badgeVariant: 'primary',
-    badgeLabel: n > 0 ? `${t.is_main ? MAIN_TAB_LABEL : threadTitle(t)}, ${n} unread` : '',
+    badgeLabel: n > 0 ? `${t.is_main ? MAIN_TAB_LABEL : threadTitle(t)}${t.starred ? ', starred' : ''}, ${n} unread` : '',
   }
 }
 
@@ -435,6 +435,9 @@ export function agentChatTabs(threads, agentName, { activeId = null, draft = fal
       // ent#841: every chat but Main closes from its tab (Reset is Main's
       // retire action), and so does nothing already archived.
       closable: !t.is_main && !t.archived_at,
+      // The star, on the tab: the same per-viewer state the sidebar row and the
+      // header draw, so the strip says which of these chats you pinned.
+      starred: !!t.starred,
       // Unread replies in a chat that is not on screen — the sidebar row's own
       // count, in the same solid blue (`primary`), so the tab says WHERE the
       // new message is. The strip is `fixed-width`, so the count appearing
