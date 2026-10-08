@@ -278,17 +278,48 @@ async def test_headless_worker_finish_racing_waiter_cancellation_still_cleans_up
     process = Mock(pid=12345)
     process.poll.return_value = 0
     task_holder = []
+    worker_futures = []
+    cancel_delivered = threading.Event()
+    worker_finished_first = []
+    pool = ThreadPoolExecutor(max_workers=1)
+    real_submit = pool.submit
+
+    def submit(*args, **kwargs):
+        future = real_submit(*args, **kwargs)
+        worker_futures.append(future)
+        return future
+
+    def cancel_waiter_then_let_worker_finish():
+        # Runs on the loop, so the waiter is parked on a still-pending worker
+        # future: this cancel always lands before any result can.
+        task_holder[0].cancel()
+        cancel_delivered.set()
+        # Hold the loop until the worker has fully returned. The waiter cannot
+        # run its except clause meanwhile, so the worker never sees the flag.
+        worker_finished_first.append(worker_futures[0].exception(timeout=5) is None)
 
     def run(_ctx):
         registry.register("finish-race", process)
         # Worker finishes before it can observe the abandoned flag, but the
         # caller is cancelled before receiving its result. Its finally owns
         # cleanup in this ordering.
-        loop.call_soon_threadsafe(task_holder[0].cancel)
+        #
+        # The worker must not return until that cancel is delivered. A
+        # run_in_executor future whose worker already finished can be handed
+        # back completed (CPython 3.13.12+), and the caller then gets the
+        # result without ever yielding to a cancel merely queued behind it.
+        loop.call_soon_threadsafe(cancel_waiter_then_let_worker_finish)
+        assert cancel_delivered.wait(timeout=5)
 
+    monkeypatch.setattr(pool, "submit", submit)
+    monkeypatch.setattr(headless, "_HEADLESS_EXECUTOR", pool)
     monkeypatch.setattr(headless, "_run_headless_subprocess", run)
     task_holder.append(asyncio.create_task(headless.execute_headless_task("hello")))
-    with pytest.raises(asyncio.CancelledError):
-        await task_holder[0]
-    assert not registry.is_execution_running("finish-race")
-    assert registry.get_buffered_logs("finish-race") is None
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await task_holder[0]
+        assert worker_finished_first == [True], "control: the worker returned before the waiter's cleanup ran"
+        assert not registry.is_execution_running("finish-race")
+        assert registry.get_buffered_logs("finish-race") is None
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
