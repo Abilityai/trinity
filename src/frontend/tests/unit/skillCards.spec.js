@@ -68,6 +68,12 @@ describe('sections — every skill in exactly one, a conflict in both', () => {
     expect(r.own[0].badges.map((b) => b.label)).toContain('from library')
   })
 
+  it('with the assignments not known yet, nothing is called left over', () => {
+    const r = cards({ agentList: [live('maybe-assigned', { source: 'platform' })], assignmentsKnown: false })
+    expect(r.own[0].leftover).toBe(false)
+    expect(r.own[0].badges.map((b) => b.label)).not.toContain('from library')
+  })
+
   it('an old agent image (no source field) falls back to the assigned names', () => {
     const old = (n) => { const s = live(n); delete s.source; delete s.dir; return s }
     const r = cards({ agentList: [old('mine'), old('from-lib')], assigned: [row('from-lib')], library: [lib('from-lib')] })
@@ -196,6 +202,15 @@ describe('controls — role, ephemeral and system', () => {
     const r = cards({ agentList: [live('Has Space', { dir: 'also bad' })] })
     expect(r.own[0].gateKey).toBeNull()
     expect(r.own[0].controls.toggleDisabled).toMatch(/can't carry a gate/)
+  })
+
+  it('with the gate map unread, every approval toggle is held, with the reason', () => {
+    const r = cards({ agentList: [live('daily')], assigned: [row('shared-one')], library: [lib('shared-one')],
+      gatesKnown: false })
+    expect(r.own[0].controls.toggleDisabled).toMatch(/couldn't be read/)
+    expect(r.shared[0].controls.toggleDisabled).toMatch(/couldn't be read/)
+    const viewer = cards({ agentList: [live('daily')], gatesKnown: false, canManage: false })
+    expect(viewer.own[0].controls.toggleDisabled).toBeNull()      // no approval row to hold
   })
 })
 

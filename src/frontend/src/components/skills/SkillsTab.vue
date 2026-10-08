@@ -38,6 +38,21 @@
         :title="hookWarning || undefined"
         data-testid="skills-hook-warning"
       >{{ hookWarning }}</p>
+      <!-- The gate map could not be read: said to everyone (every card's gate
+           line depends on it), with its retry; the toggles are held meanwhile. -->
+      <p
+        v-if="gatesStore.error && !gatesStore.hasLoaded"
+        class="mt-2 h-5 flex items-center gap-2 text-[12.5px] leading-5 text-status-warning-700 dark:text-status-warning-400"
+        data-testid="skills-gates-error"
+      >
+        <span class="truncate" :title="gatesStore.error">Couldn't read which skills need approval</span>
+        <button
+          type="button"
+          class="flex-none text-action-primary-600 dark:text-action-primary-400 hover:underline"
+          data-testid="skills-gates-retry"
+          @click="gatesStore.load(agentName, { probe: showOwnerRow })"
+        >Retry</button>
+      </p>
     </header>
 
     <!-- ===================== Own skills ===================== -->
@@ -46,12 +61,20 @@
         <h4 class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">Own skills</h4>
         <span class="text-[12.5px] tabular-nums text-gray-500 dark:text-gray-400">{{ ownCount }}</span>
       </div>
-      <p
-        class="mt-0.5 h-5 text-[12.5px] leading-5 truncate"
-        :class="ownBanner.tone === 'warn' ? 'text-status-warning-700 dark:text-status-warning-400' : 'text-gray-500 dark:text-gray-400'"
-        :title="ownBanner.title || undefined"
-        data-testid="skills-own-meta"
-      >{{ ownBanner.text }}</p>
+      <p class="mt-0.5 h-5 flex items-center gap-2 min-w-0 text-[12.5px] leading-5" data-testid="skills-own-meta">
+        <span
+          class="truncate"
+          :class="ownBanner.tone === 'warn' ? 'text-status-warning-700 dark:text-status-warning-400' : 'text-gray-500 dark:text-gray-400'"
+          :title="ownBanner.title || undefined"
+        >{{ ownBanner.text }}</span>
+        <button
+          v-if="ownView.stale"
+          type="button"
+          class="flex-none text-action-primary-600 dark:text-action-primary-400 hover:underline"
+          data-testid="skills-own-refresh"
+          @click="store.loadAgentList()"
+        >Retry</button>
+      </p>
 
       <div class="mt-3">
         <SkeletonLoader v-if="ownView.state === 'loading'" :count="2" height="200px" gap="14px" />
@@ -65,7 +88,18 @@
           v-else-if="ownView.state === 'empty'"
           class="text-[12.5px] text-gray-600 dark:text-gray-300"
           data-testid="skills-own-empty"
-        >{{ ownEmptyText }}</p>
+        >
+          {{ ownEmptyText }}
+          <!-- A running agent can answer a moment later: nothing else re-asks
+               (no poll, no event), so the next step is offered here. -->
+          <button
+            v-if="store.agentListState === 'none' && running"
+            type="button"
+            class="ml-1 text-action-primary-600 dark:text-action-primary-400 hover:underline"
+            data-testid="skills-own-retry"
+            @click="store.loadAgentList()"
+          >Check again</button>
+        </p>
         <div v-else class="grid gap-3.5 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
           <SkillCard
             v-for="card in ownCards"
@@ -88,12 +122,14 @@
 
     <!-- ===================== Shared skills ===================== -->
     <section data-testid="skills-shared">
-      <div class="flex flex-wrap items-center justify-between gap-2">
+      <div class="flex flex-wrap items-center justify-between gap-2" :class="showManage ? 'min-h-[28px]' : ''">
         <div class="flex items-baseline gap-2">
           <h4 class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">Shared skills</h4>
           <span class="text-[12.5px] tabular-nums text-gray-500 dark:text-gray-400">{{ store.assigned.length }}</span>
         </div>
-        <div v-if="showManage && store.libraryStatus && store.libraryStatus.configured" class="flex items-center gap-1.5">
+        <!-- Only once this agent's assignments are known: a draft built from
+             an unanswered (or failed) read would save over the real list. -->
+        <div v-if="showManage && store.sharedLoaded && store.libraryStatus?.configured" class="flex items-center gap-1.5">
           <BaseButton size="sm" data-testid="skills-assign-open" @click="assignOpen = true">Assign skills</BaseButton>
           <BaseButton size="sm" variant="secondary" data-testid="skills-sets-open" @click="setsOpen = true">Manage sets</BaseButton>
           <BaseButton
@@ -261,7 +297,7 @@ import { useSkillsStore } from '../../stores/skills'
 import { useSkillGatesStore } from '../../stores/skillGates'
 import { useRole } from '../../composables/useRole'
 import { buildSkillCards } from '../../utils/skillCards'
-import { viewState } from '../../utils/loadingState'
+import { staleBannerMessage, viewState } from '../../utils/loadingState'
 import { apiErrorMessage } from '../../utils/apiError'
 import { isGateRefusal, PENDING_NOTICE_TOAST } from '../../utils/skillGate'
 import { formatLocalDateTime, formatRelativeTime } from '../../utils/timestamps'
@@ -311,6 +347,8 @@ const cards = computed(() => buildSkillCards({
   canManage: props.canManage,
   isSystem: props.isSystem,
   isEphemeral: props.isEphemeral,
+  assignmentsKnown: store.sharedLoaded,
+  gatesKnown: gatesStore.hasLoaded,
 }))
 
 function matches(card) {
@@ -323,15 +361,22 @@ const ownCards = computed(() => [...cards.value.own, ...cards.value.unmatchedGat
 const sharedCards = computed(() => cards.value.shared.filter(matches))
 const ownCount = computed(() => cards.value.own.length)
 
+// A section draws once every read it is built from has answered — or failed,
+// which is a known state too. Own needs the assignments (which skills Shared
+// renders instead) and the gate map (every card's gate line and toggle);
+// Shared needs the same map. So a skill never moves between sections, and no
+// toggle shows "off" before the gates are known.
+const gatesKnown = computed(() => gatesStore.hasLoaded || !!gatesStore.error)
+const sharedKnown = computed(() => store.sharedLoaded || (!!store.error && !store.loading))
+
 const ownView = computed(() => {
   // "none" (stopped/unreachable, no kept copy) is a known state with nothing to
   // list — rendered as its own empty text, never as a failure.
-  const view = viewState({
-    hasLoaded: store.agentListLoaded,
+  return viewState({
+    hasLoaded: store.agentListLoaded && sharedKnown.value && gatesKnown.value,
     error: store.agentListError,
     count: store.agentListState === 'none' ? 0 : ownCards.value.length,
   })
-  return view
 })
 
 const ownEmptyText = computed(() => {
@@ -345,6 +390,9 @@ const ownEmptyText = computed(() => {
 })
 
 const ownBanner = computed(() => {
+  if (ownView.value.stale) {
+    return { tone: 'warn', text: staleBannerMessage("this agent's skills", null), title: store.agentListError || '' }
+  }
   if (store.agentListState === 'last_known') {
     const when = formatRelativeTime(store.agentListAt)
     const title = `Listed ${formatLocalDateTime(store.agentListAt)}`
@@ -361,8 +409,8 @@ const ownBanner = computed(() => {
 })
 
 const sharedView = computed(() => viewState({
-  hasLoaded: store.libraryStatus !== null,
-  error: store.libraryStatus === null ? store.error : null,
+  hasLoaded: store.sharedLoaded && gatesKnown.value,
+  error: store.sharedLoaded ? null : store.error,
   count: 1,   // the empty cases are named by store.emptyReason below
 }))
 

@@ -17,6 +17,9 @@
  * - Approval controls go to the owner or an admin, never on an ephemeral or
  *   the system agent (ent#753 refuses gates on ghosts; the system agent keeps
  *   today's no-management rule).
+ * - Nothing is inferred from a read that has not answered: with the
+ *   assignments unknown no own skill is called "left over from the library",
+ *   and with the gate map unknown no approval toggle can be flipped.
  */
 import { DEPRECATED_TITLE } from '../components/skills/contract'
 import { isDeprecationCode } from './skillDelivery'
@@ -138,6 +141,7 @@ export function buildSkillCards({
   assigned = [], library = [], conflictNames = new Set(), injectionResults = {},
   gates = [], approvers = [],
   canManage = false, isSystem = false, isEphemeral = false,
+  assignmentsKnown = true, gatesKnown = true,
 } = {}) {
   const showApproval = Boolean(canManage) && !isSystem && !isEphemeral
   const showManage = Boolean(canManage) && !isSystem
@@ -231,7 +235,8 @@ export function buildSkillCards({
     }
   })
   for (const c of shared) {
-    if (!c.gateKey && c.controls.approval) c.controls.toggleDisabled = cantCarry
+    if (c.controls.approval && !gatesKnown) c.controls.toggleDisabled = gatesUnread
+    else if (!c.gateKey && c.controls.approval) c.controls.toggleDisabled = cantCarry
   }
 
   // ---- Own: everything the agent has that Shared does not render ---------
@@ -242,7 +247,7 @@ export function buildSkillCards({
     const isAssigned = assignedByName.has(k) || (d && assignedByName.has(d))
     const ownCopy = conflicts.has(k) || (d && conflicts.has(d)) || s.source === 'agent'
     if (isAssigned && !ownCopy) continue
-    const leftover = s.source === 'platform' && !isAssigned
+    const leftover = assignmentsKnown && s.source === 'platform' && !isAssigned
     const gate = findGate(s.name, skillDir(s))
     const userInvocable = s.user_invocable !== false
     const badges = []
@@ -261,7 +266,7 @@ export function buildSkillCards({
       canEditRun: userInvocable,
       controls: {
         approval: showApproval,
-        toggleDisabled: showApproval && !gateKey ? cantCarry : null,
+        toggleDisabled: !showApproval ? null : !gatesKnown ? gatesUnread : !gateKey ? cantCarry : null,
         unassign: { show: false, disabled: true, title: '' },
         clear: false,
       },
@@ -282,3 +287,4 @@ export function buildSkillCards({
 }
 
 const cantCarry = "This skill's name can't carry a gate: use letters, digits, dots, dashes or underscores (up to 64)"
+const gatesUnread = "The approval settings couldn't be read: retry above"

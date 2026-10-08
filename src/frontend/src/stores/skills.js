@@ -34,6 +34,11 @@ export const useSkillsStore = defineStore('skills', () => {
   const agentName = ref(null)
 
   const loading = ref(false)
+  // #754: this agent's Shared reads have all answered (status, assignments,
+  // the library list when configured, then the sets read). Until then nothing
+  // may be inferred from `assigned` being empty — not "No shared skills yet",
+  // not "left over from the library", not an Assign draft.
+  const sharedLoaded = ref(false)
   const saving = ref(false)
   const injecting = ref(false)
   const error = ref(null)
@@ -133,7 +138,7 @@ export const useSkillsStore = defineStore('skills', () => {
    * never renders a dead empty state (explicit AC).
    */
   const emptyReason = computed(() => {
-    if (!libraryStatus.value) return null
+    if (!sharedLoaded.value || !libraryStatus.value) return null
     if (!libraryStatus.value.configured) return 'library_unconfigured'
     if (library.value.length === 0) return 'library_empty'
     if (assigned.value.length === 0) return 'none_assigned'
@@ -144,6 +149,7 @@ export const useSkillsStore = defineStore('skills', () => {
     if (agentName.value !== name) {
       agentName.value = name
       assigned.value = []
+      sharedLoaded.value = false
       sets.value = []
       setsError.value = null
       setsLoaded.value = false
@@ -185,7 +191,14 @@ export const useSkillsStore = defineStore('skills', () => {
     try {
       const { data } = await api.get(`/api/agents/${name}/playbooks`, { params: { last_known: true } })
       if (seq !== agentListSeq || name !== agentName.value) return
-      agentList.value = Array.isArray(data?.skills) ? data.skills : []
+      if (!Array.isArray(data?.skills)) {
+        // Plan §3: a 200 that is not a listing is a failure to name, never an
+        // empty list ("this agent has no skills of its own").
+        agentListError.value = "The agent answered without a skills list"
+        if (!agentListLoaded.value) agentListState.value = 'failed'
+        return
+      }
+      agentList.value = data.skills
       agentListPaths.value = Array.isArray(data?.skill_paths) ? data.skill_paths : []
       agentListState.value = data?.last_known ? 'last_known' : 'live'
       agentListAt.value = data?.last_known?.captured_at || null
@@ -261,9 +274,11 @@ export const useSkillsStore = defineStore('skills', () => {
         if (!current()) return
         library.value = lib.data || []
         await loadSets()
+        if (!current()) return
       } else {
         library.value = []
       }
+      sharedLoaded.value = true
     } catch (e) {
       if (!current()) return
       error.value = e?.response?.data?.detail || 'Could not load skills'
@@ -417,6 +432,7 @@ export const useSkillsStore = defineStore('skills', () => {
   function clear() {
     agentName.value = null
     assigned.value = []
+    sharedLoaded.value = false
     sets.value = []
     librarySets.value = []
     setsError.value = null
@@ -435,7 +451,7 @@ export const useSkillsStore = defineStore('skills', () => {
 
   return {
     library, libraryStatus, assigned, agentName,
-    loading, saving, injecting, error,
+    loading, sharedLoaded, saving, injecting, error,
     injectionResults, lastInjectionAt, lastDelivery,
     changedAt, noteSkillsChanged,
     assignedNames, assignedSkills, conflictNames, emptyReason,

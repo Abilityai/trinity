@@ -40,17 +40,25 @@ const MAP = (over = {}) => ({
 })
 
 let state
+// An answer: a response, a rejection (`{response}` / Error), or a promise the
+// test settles by hand.
+const answer = (v) => (v instanceof Promise ? v
+  : v instanceof Error || v?.response ? Promise.reject(v) : Promise.resolve(v))
 function respond(over = {}) {
-  state = { playbooks: { data: LIVE }, map: MAP(), probe: MAP({ hook: 'ok' }), sets: { data: [] }, ...over }
+  state = {
+    playbooks: { data: LIVE }, map: MAP(), probe: MAP({ hook: 'ok' }), sets: { data: [] },
+    rows: { data: [{ skill_name: 'shared-one', individual: true, via_sets: [] }] },
+    library: { data: [{ name: 'shared-one', description: 'from the library' }] },
+    mapAnswer: null,
+    ...over,
+  }
   api.get.mockImplementation((url, cfg) => {
     if (url === '/api/skills/library/status') return Promise.resolve({ data: { configured: true, skill_count: 1 } })
-    if (url === '/api/skills/library') return Promise.resolve({ data: [{ name: 'shared-one', description: 'from the library' }] })
-    if (url === `/api/agents/${A}/skills`) return Promise.resolve({ data: [{ skill_name: 'shared-one', individual: true, via_sets: [] }] })
-    if (url === `/api/agents/${A}/playbooks`) {
-      const p = state.playbooks
-      return p instanceof Error || p?.response ? Promise.reject(p) : Promise.resolve(p)
-    }
+    if (url === '/api/skills/library') return answer(state.library)
+    if (url === `/api/agents/${A}/skills`) return answer(state.rows)
+    if (url === `/api/agents/${A}/playbooks`) return answer(state.playbooks)
     if (url === `/api/agents/${A}/skill-gates`) {
+      if (!cfg?.params?.probe && state.mapAnswer) return answer(state.mapAnswer)
       return Promise.resolve({ data: cfg?.params?.probe ? state.probe : state.map })
     }
     if (url === `/api/agents/${A}/skill-sets`) {
@@ -332,6 +340,24 @@ describe('an agent switch (AgentDetail is KeepAlive\'d: the tab stays open)', ()
     expect(card(w, 'own', 'daily-report').find('[data-testid="inline-error"]').exists()).toBe(false)
   })
 
+  it("the next agent's Shared section waits for its own assignments", async () => {
+    serveTwo()
+    const opsRows = deferred()
+    const inner = api.get.getMockImplementation()
+    api.get.mockImplementation((url, cfg) => (url === `/api/agents/${B}/skills` ? opsRows.promise : inner(url, cfg)))
+    const { w } = await mountTab()
+    expect(card(w, 'shared', 'shared-one').exists()).toBe(true)
+
+    await w.setProps({ agentName: B })
+    await flush()
+    expect(tid(w, 'skills-shared-empty').exists()).toBe(false)    // not "No shared skills yet" before B answers
+    expect(tid(w, 'skills-assign-open').exists()).toBe(false)
+
+    opsRows.resolve({ data: [] })
+    await flush()
+    expect(tid(w, 'skills-shared-empty').exists()).toBe(true)
+  })
+
   it('a run that answers after the switch neither opens Tasks nor toasts, and frees the button', async () => {
     serveTwo()
     const run = deferred()
@@ -348,5 +374,97 @@ describe('an agent switch (AgentDetail is KeepAlive\'d: the tab stays open)', ()
     await flush()
     expect(notify).not.toHaveBeenCalled()
     expect(w.emitted('run-with-instructions')).toBeUndefined()
+  })
+})
+
+
+describe('honest loading: nothing is drawn from a read that has not answered', () => {
+  function deferred() {
+    let resolve
+    let reject
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+  const skeleton = (w) => w.find('[role="status"][aria-busy="true"]')
+
+  it("until this agent's assignments answer, no skill is placed (and none is called left over)", async () => {
+    const rows = deferred()
+    respond({ rows: rows.promise })
+    const { w } = await mountTab()
+    expect(card(w, 'own', 'shared-one').exists()).toBe(false)     // not "from library: the next sync removes it"
+    expect(tid(w, 'skills-shared-empty').exists()).toBe(false)
+    expect(tid(w, 'skills-assign-open').exists()).toBe(false)     // no draft built from unknown assignments
+
+    rows.resolve({ data: [{ skill_name: 'shared-one', individual: true, via_sets: [] }] })
+    await flush()
+    expect(card(w, 'shared', 'shared-one').exists()).toBe(true)
+    expect(card(w, 'own', 'shared-one').exists()).toBe(false)
+  })
+
+  it('a failed assignments read is named with a retry, never "No shared skills yet"', async () => {
+    respond({ rows: { response: { status: 500, data: { detail: 'boom' } } } })
+    const { w } = await mountTab()
+    expect(tid(w, 'skills-shared-empty').exists()).toBe(false)
+    expect(w.find('[data-testid="skills-shared"] [data-testid="load-failed"]').exists()).toBe(true)
+    expect(card(w, 'own', 'daily-report').exists()).toBe(true)          // own skills still show
+    expect(card(w, 'own', 'shared-one').text()).not.toContain('from library')   // not called left over
+  })
+
+  it('a failed library read is named, never "the library has no skills yet"', async () => {
+    respond({ library: { response: { status: 500, data: { detail: 'git clone failed' } } } })
+    const { w } = await mountTab()
+    expect(w.text()).not.toContain('The library is configured but has no skills yet')
+    expect(w.find('[data-testid="skills-shared"] [data-testid="load-failed"]').text()).toContain('git clone failed')
+  })
+
+  it('cards wait for the approval map: no toggle shows "off" before the gates are known', async () => {
+    const map = deferred()
+    respond({ mapAnswer: map.promise })
+    const { w } = await mountTab()
+    expect(tid(w, 'skill-approval-pay-invoice').exists()).toBe(false)
+    expect(skeleton(w).exists()).toBe(true)
+
+    map.resolve({ data: MAP() })
+    await flush()
+    expect(tid(w, 'skill-gate-pay-invoice').text()).toBe('Needs approval from the primary contact')
+  })
+
+  it('a failed approval-map read is named for everyone, with a retry, and the toggles are held', async () => {
+    respond({ mapAnswer: { response: { status: 500, data: { detail: 'db down' } } } })
+    const { w } = await mountTab()
+    expect(tid(w, 'skills-gates-error').text()).toContain("Couldn't read which skills need approval")
+    expect(tid(w, 'skill-approval-daily-report').element.disabled).toBe(true)   // the switch itself
+
+    state.mapAnswer = null
+    await tid(w, 'skills-gates-retry').trigger('click')
+    await flush()
+    expect(tid(w, 'skills-gates-error').exists()).toBe(false)
+    expect(tid(w, 'skill-gate-pay-invoice').text()).toBe('Needs approval from the primary contact')
+  })
+
+  it('a running agent that is not answering yet offers to check again', async () => {
+    respond({ playbooks: { response: { status: 503, data: { detail: 'Could not connect to agent' } } } })
+    const { w } = await mountTab()
+    expect(tid(w, 'skills-own-empty').text()).toContain("isn't answering right now")
+    state.playbooks = { data: LIVE }
+    await tid(w, 'skills-own-retry').trigger('click')
+    await flush()
+    expect(card(w, 'own', 'daily-report').exists()).toBe(true)
+  })
+
+  it('a failed refresh keeps the list and says it could not refresh', async () => {
+    const { w } = await mountTab()
+    state.playbooks = { response: { status: 500, data: { detail: 'boom' } } }
+    await w.setProps({ agentStatus: 'exited' })          // any refresh trigger
+    await flush()
+    expect(card(w, 'own', 'daily-report').exists()).toBe(true)
+    expect(tid(w, 'skills-own-meta').text()).toContain("Couldn't refresh this agent's skills")
+  })
+
+  it('a 200 that is not a skills listing is a failure, never an empty list', async () => {
+    respond({ playbooks: { data: { detail: 'not a listing' } } })
+    const { w } = await mountTab()
+    expect(tid(w, 'skills-own-empty').exists()).toBe(false)
+    expect(w.find('[data-testid="skills-own"] [data-testid="load-failed"]').exists()).toBe(true)
   })
 })
