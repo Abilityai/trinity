@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_atomic_slot_admission.py",
+      "feature": "#3305",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "capacity",
+        "unit"
+      ],
+      "description": "Atomic push slot admission: independent-client contention, duplicate execution IDs, metadata and connection errors, and backlog sentinel handoff. Optional TEST_SLOT_REDIS_URL adds six-process contention against disposable Redis."
+    },
+    {
       "file": "unit/test_runtime_process_ownership.py",
       "feature": "#3307",
       "added": "2026-10-06",
