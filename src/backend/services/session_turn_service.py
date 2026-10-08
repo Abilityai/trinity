@@ -22,6 +22,7 @@ aliases, so the legacy surface — and the tests pinning it — see no change.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 from typing import Any, Callable, NamedTuple, Optional
@@ -430,6 +431,47 @@ class ResumableTurn(NamedTuple):
     resumed: bool = False
 
 
+@contextlib.asynccontextmanager
+async def _turn_lock(agent_name: str, resumed_with: Optional[str], session_key: str,
+                     ttl: int, wait_for_lock: bool, execution_id: Optional[str]):
+    """Hold the resume lock for one turn. Yields True when the turn was
+    cancelled while it waited, in which case the caller must not dispatch.
+
+    #3166: with ``wait_for_lock`` a turn may wait up to the lock's TTL, and its
+    execution row is already ``running`` while it waits. Two things keep that
+    wait from reading as an orphan or spending the run's own budget, the same
+    two the agent-call queue does (#2433): the wait is registered as an
+    in-flight dispatch, which the watchdog takes as proof of life, and once the
+    lock is held ``started_at`` is re-anchored.
+    """
+    lock = ResumeLock(agent_name, resumed_with, session_key, ttl_seconds=ttl,
+                      wait_seconds=ttl if wait_for_lock else None)
+    if not (wait_for_lock and execution_id):
+        async with lock:
+            yield False
+        return
+
+    from services import agent_call_limiter
+
+    started = asyncio.get_event_loop().time()
+    async with agent_call_limiter.track_inflight_dispatch(
+        execution_id, agent_name, http_timeout=ttl,
+    ) as entry:
+        await lock.__aenter__()
+    try:
+        cancelled = entry.cancel_requested or await asyncio.to_thread(
+            agent_call_limiter._cancel_requested_cross_worker_sync, execution_id)
+        waited = asyncio.get_event_loop().time() - started
+        if not cancelled and waited >= agent_call_limiter.DISPATCH_RESTAMP_THRESHOLD_SECONDS:
+            try:
+                await asyncio.to_thread(db.restamp_execution_dispatch, execution_id)
+            except Exception as e:  # noqa: BLE001 — bookkeeping never blocks the turn
+                logger.warning("[SessionTurn] restamp failed for %s: %s", execution_id, e)
+        yield cancelled
+    finally:
+        await lock.__aexit__(None, None, None)
+
+
 async def run_resumable_turn(
     *,
     agent_name: str,
@@ -440,6 +482,7 @@ async def run_resumable_turn(
     lock_ttl: Optional[int] = None,
     cold_message: Optional[str] = None,
     on_resume_failure: Optional[Callable[[], None]] = None,
+    wait_for_lock: bool = False,
     **execute_kwargs,
 ) -> ResumableTurn:
     """Run one turn that reattaches to ``cached_uuid`` when there is one.
@@ -467,6 +510,11 @@ async def run_resumable_turn(
     under ``WAITING_CONVERSATION_PREFIX``: on a pull pilot the claim orders it
     with interactive turns whatever its trigger (#3127).
 
+    ``wait_for_lock`` (#3166): wait for a held lock as long as it can live
+    (its TTL) rather than ``LOCK_WAIT_TOTAL_SECONDS``. The Workspace sets it: a
+    second message on a thread queues behind the first instead of being refused
+    whenever the first runs longer than 30s.
+
     Raises ``ResumeLockBusy`` (429) when another turn holds the lock. Never
     raises on an agent-side failure: that arrives as ``result.status``.
     """
@@ -490,7 +538,22 @@ async def run_resumable_turn(
     fallback_fired = False
     fallback_reason: Optional[str] = None
 
-    async with ResumeLock(agent_name, resumed_with, session_key, ttl_seconds=ttl):
+    async with _turn_lock(
+        agent_name, resumed_with, session_key, ttl, wait_for_lock,
+        execute_kwargs.get("execution_id"),
+    ) as cancelled_while_queued:
+        if cancelled_while_queued:
+            from models import TaskExecutionStatus
+            from services.execution_envelope import TaskExecutionResult
+            return ResumableTurn(
+                result=TaskExecutionResult(
+                    execution_id=execute_kwargs["execution_id"],
+                    status=TaskExecutionStatus.CANCELLED.value,
+                    response="",
+                    error="Execution cancelled while queued behind another turn on this thread",
+                ),
+                real_uuid=None,
+            )
         result = await dispatch_and_await_terminal(
             agent_name=agent_name,
             message=message,

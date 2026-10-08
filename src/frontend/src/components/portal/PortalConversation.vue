@@ -896,7 +896,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions } from './portalUtils'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
@@ -1488,7 +1488,8 @@ async function loadThread(sessionId) {
     // own role; only the assistant shape is shared.
     // trinity-enterprise#610: `at` is the row's persisted time, which is what
     // places a chat-turn ask among the messages (`threadRows`).
-    messages.value = (msgs || []).map((m) => ({
+    // #3166: each reply under its own question, when two turns overlapped.
+    messages.value = pairRepliesWithQuestions(msgs).map((m) => ({
       ...(m.role === 'assistant'
         ? assistantRow(m)
         // ent#534: spoken rows and the call they belong to — folded by `threadItems`.
@@ -2393,7 +2394,9 @@ async function awaitPersistedReply(sessionId, baseline, budgetSeconds,
     // caller's own rating out with the text. They were always in hand here —
     // this reads the row the server WROTE — and were being dropped, which is
     // the whole of the "not rateable until reload" defect.
-    const reply = replyFromHistory(data.messages, baseline)
+    // #3166: matched on THIS turn's id — another turn on the thread may have
+    // written its reply after our baseline was read.
+    const reply = replyFromHistory(data.messages, baseline, executionId)
     if (reply) return { ...reply, session_id: data.sessionId || sessionId }
     // #2320: the server told us how this turn ended. Authoritative regardless
     // of the marker — a verdict naming THIS execution means it is over — and
