@@ -23,6 +23,40 @@
       "description": "Cancelled or timed-out chat/headless waiters retain live subprocess ownership and executor completion closes log streams; queued headless cancellation does not spawn, queued chat readers reap existing children, result finalization ordering is preserved, and unconfirmed termination retains ownership. Disposable Python children only; no model, provider, or live-agent calls."
     },
     {
+      "file": "unit/test_ent839_seat_decisions_self_gate.py",
+      "feature": "trinity-enterprise#839",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "security",
+        "workspace"
+      ],
+      "description": "CWE-863: through the real seat_decisions router, a sibling agent key (resolving to an admin owner) gets the 403 on POST and GET /api/agents/{name}/decisions before the access check or the execution read; the key's own agent and a person pass the gate."
+    },
+    {
+      "file": "unit/test_ent838_a2a_trusted_networks.py",
+      "feature": "trinity-enterprise#838",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "a2a",
+        "security",
+        "unit"
+      ],
+      "description": "Trusted internal networks for A2A: the admin list refuses the platform's Docker networks, loopback/link-local, anything broader than /8, one-label wildcards and any range holding an attached Docker gateway; outbound accepts a trusted endpoint that is private/CGNAT and http:// but never metadata/loopback/platform, and refuses a trusted name resolving outside the declared CIDRs; the source is the peer or the named proxy's X-Real-IP, never a cloudflared request or a host-forwarded gateway; through the real router an internal-scope agent is unexposed outside (card 404, keyed 404, anonymous 401), a trusted caller runs a keyless task attributed to source_host and reads only its own tasks, keyless off needs a key, public scope is unchanged."
+    },
+    {
+      "file": "unit/test_ent841_close_chat.py",
+      "feature": "abilityai/trinity-enterprise#841",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "workspace",
+        "unit"
+      ],
+      "description": "ent#841: closing a chat archives it and keeps its messages; reopen clears the flag; closing twice keeps the first archived_at; the live Main is a named 409; a retired Main reopens with is_main = 0; another client's or an unknown id is the uniform 404; an off-roster agent is 404; PUT and DELETE archive routes are registered. Throwaway sqlite, no Docker."
+    },
+    {
       "file": "unit/test_2372_platform_alert_ack.py",
       "feature": "#2372",
       "added": "2026-10-07",
@@ -4088,29 +4122,6 @@
         "unit"
       ],
       "description": "`GET /api/agents/{name}/objectives` through a real TestClient with the service's edges stubbed. Gate order copied from `/metrics` and proved in order (the self-gate fires BEFORE the service is called and before the limiter), the route's own 60/min knob rather than the store read's 240 because this one drives the container, a store outage as 503 + `Retry-After`, and an unreachable agent as a 200 that SAYS so — an agent being stopped is an answer, not an error. The model-is-the-contract half walks the service's own dict against every model's fields recursively, so an additive service key fails the build instead of being silently filtered out by `response_model`; author-shaped targets (`.nan`, `.inf`, lists, bools, 4 KB strings) are pushed through the real route and parsed with `parse_constant` armed, since a bare `NaN` on the wire is what blanks the card."
-    },
-    {
-      "file": "unit/test_ent839_seat_decisions_self_gate.py",
-      "feature": "trinity-enterprise#839",
-      "added": "2026-10-08",
-      "categories": [
-        "backend",
-        "security",
-        "workspace"
-      ],
-      "description": "CWE-863: through the real seat_decisions router, a sibling agent key (resolving to an admin owner) gets the 403 on POST and GET /api/agents/{name}/decisions before the access check or the execution read; the key's own agent and a person pass the gate."
-    },
-    {
-      "file": "unit/test_ent838_a2a_trusted_networks.py",
-      "feature": "trinity-enterprise#838",
-      "added": "2026-10-08",
-      "categories": [
-        "backend",
-        "a2a",
-        "security",
-        "unit"
-      ],
-      "description": "Trusted internal networks for A2A: the admin list refuses the platform's Docker networks, loopback/link-local, anything broader than /8, one-label wildcards and any range holding an attached Docker gateway; outbound accepts a trusted endpoint that is private/CGNAT and http:// but never metadata/loopback/platform, and refuses a trusted name resolving outside the declared CIDRs; the source is the peer or the named proxy's X-Real-IP, never a cloudflared request or a host-forwarded gateway; through the real router an internal-scope agent is unexposed outside (card 404, keyed 404, anonymous 401), a trusted caller runs a keyless task attributed to source_host and reads only its own tasks, keyless off needs a key, public scope is unchanged."
     },
     {
       "file": "unit/test_ent638_seat_decisions.py",
