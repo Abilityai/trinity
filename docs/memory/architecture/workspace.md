@@ -1322,7 +1322,11 @@ each agent reply whose `execution_id` has an ent#752 `self_approved` record with
 against the record's requester key). Both are declared on `PortalHistoryMessage` (an undeclared
 key is stripped by `response_model`); no email is added. `assistantRow` / `replyFromHistory`
 carry them, so a just-landed reply shows `ExecutionGateMarker` under the bubble without a reload.
-Rows from before #3166 (NULL `execution_id`) read false.
+Rows from before #3166 (NULL `execution_id`) read false. The synchronous fallback (`POST .../chat`)
+answers the same pair from `_persist_reply`, declared on `PortalChatResponse`; the client reads either
+spelling through `portalUtils.turnGateFlags`. "You" is for a person only: the history route passes
+`principal.is_person` and the chat path `gate_is_person`, so a system key on the platform session
+sees the fact, never "you".
 
 **A reply names its turn (#3166).** `enterprise_portal_messages.execution_id` holds the
 execution that wrote the row: the dispatched id the client watches (never a cold retry's
