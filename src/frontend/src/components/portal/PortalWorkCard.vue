@@ -208,7 +208,8 @@ onBeforeUnmount(() => { if (_tick) clearInterval(_tick) })
 const statusWord = computed(() => workStatusLabel(props.item))
 const kindWord = computed(() => kindLabel(props.item.kind))
 const clock = computed(() => (live.value ? formatElapsed(props.elapsedSeconds) : null))
-const steps = computed(() => stepsLine(props.item.steps))
+// #3357: the live activity line and "could not be read" never share a card.
+const steps = computed(() => stepsLine(props.item.steps, { liveSignal: !!shownStep.value }))
 // #3001: `pending` and `none` say nothing — only stages or "could not be read".
 const stepsSilent = computed(() => steps.value.kind === 'pending' || steps.value.kind === 'none')
 const stages = computed(() => stageRows(props.item.steps))
