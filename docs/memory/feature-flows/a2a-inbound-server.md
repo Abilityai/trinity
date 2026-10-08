@@ -373,7 +373,7 @@ Requirements: `requirements/mcp.md` §32.7.
 ```
 caller instance (agent → call_a2a_agent)                 provider instance
   a2a_outbound_service.call_agent                          POST /a2a/{name}
-   └ validate_endpoint → validate_a2a_endpoint_url          │ anonymous → trusted_source(request)
+   └ validate_endpoint → validate_a2a_endpoint_url          │ anonymous → internal_source(request)
        public-HTTPS rule refuses (http / CGNAT)             │   cached list; CF headers → public; X-Real-IP
        └ _validate_trusted_a2a_url(entries)                 │   only from the proxy container
            name entry or CIDR; never metadata/              │   none → _anonymous_jsonrpc (limiter first;

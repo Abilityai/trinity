@@ -10,7 +10,7 @@ follow, and nothing else changes:
   keeps today's public-HTTPS rule, and the check still runs on every call, so a
   trusted name that later resolves outside the trusted set is refused.
 * **Inbound** — an agent whose A2A scope is ``internal`` answers only a request
-  whose source address is inside a trusted CIDR (``trusted_source``), and, when
+  whose source address is inside a trusted CIDR (``internal_source``), and, when
   its keyless switch is on, answers it without a key.
 
 Entries are a CIDR (``100.64.0.0/10``) or a host pattern (``host.example.net``
@@ -317,7 +317,7 @@ def _source_address(request) -> Optional[str]:
     return peer
 
 
-def trusted_source(request, entries: Optional[Sequence[str]] = None) -> Optional[str]:
+def internal_source(request, entries: Optional[Sequence[str]] = None) -> Optional[str]:
     """The caller's address when it is inside a trusted CIDR, else ``None``.
 
     * A request carrying cloudflared's headers came through the public tunnel:

@@ -9,7 +9,7 @@ Pins, in four layers:
 * **Outbound** (`validate_a2a_endpoint_url`): an untrusted endpoint is refused
   exactly as before; a trusted one may be private/CGNAT and `http://`; a trusted
   NAME that resolves outside the declared CIDRs, or onto metadata, is refused.
-* **The source** (`trusted_source`): a direct peer in a CIDR is trusted; the
+* **The source** (`internal_source`): a direct peer in a CIDR is trusted; the
   public tunnel's headers never are; `X-Real-IP` is read only from the platform
   proxy, so an agent on the bridge cannot name its own source.
 * **The A2A door**, through the real router: an internal-scope agent is
@@ -143,29 +143,29 @@ def _req(peer, headers=None):
 def test_a_direct_peer_inside_a_cidr_is_trusted(monkeypatch):
     monkeypatch.setattr(tn, "_proxy_ips", lambda: frozenset())
     monkeypatch.setattr(tn, "_local_gateways", lambda: frozenset())
-    assert tn.trusted_source(_req("100.70.1.2"), [TAILNET]) == "100.70.1.2"
-    assert tn.trusted_source(_req("8.8.8.8"), [TAILNET]) is None
+    assert tn.internal_source(_req("100.70.1.2"), [TAILNET]) == "100.70.1.2"
+    assert tn.internal_source(_req("8.8.8.8"), [TAILNET]) is None
 
 
 def test_the_public_tunnels_headers_are_never_trusted(monkeypatch):
     monkeypatch.setattr(tn, "_proxy_ips", lambda: frozenset())
     for h in ("CF-Connecting-IP", "Cf-Ray"):
-        assert tn.trusted_source(_req("100.70.1.2", {h: "x"}), [TAILNET]) is None
+        assert tn.internal_source(_req("100.70.1.2", {h: "x"}), [TAILNET]) is None
 
 
 def test_x_real_ip_is_read_only_from_the_platform_proxy(monkeypatch):
     monkeypatch.setattr(tn, "_proxy_ips", lambda: frozenset({"172.28.0.10"}))
     monkeypatch.setattr(tn, "_local_gateways", lambda: frozenset())
     # The proxy forwards a tailnet caller.
-    assert tn.trusted_source(_req("172.28.0.10", {"X-Real-IP": "100.70.1.2"}), [TAILNET]) == "100.70.1.2"
+    assert tn.internal_source(_req("172.28.0.10", {"X-Real-IP": "100.70.1.2"}), [TAILNET]) == "100.70.1.2"
     # An agent on the same bridge names its own source: not read.
-    assert tn.trusted_source(_req("172.28.0.44", {"X-Real-IP": "100.70.1.2"}), [TAILNET]) is None
+    assert tn.internal_source(_req("172.28.0.44", {"X-Real-IP": "100.70.1.2"}), [TAILNET]) is None
 
 
 def test_ipv4_mapped_peers_match_their_ipv4_cidr(monkeypatch):
     monkeypatch.setattr(tn, "_proxy_ips", lambda: frozenset())
     monkeypatch.setattr(tn, "_local_gateways", lambda: frozenset())
-    assert tn.trusted_source(_req("::ffff:100.70.1.2"), [TAILNET]) == "::ffff:100.70.1.2"
+    assert tn.internal_source(_req("::ffff:100.70.1.2"), [TAILNET]) == "::ffff:100.70.1.2"
 
 
 # The route table as /proc/net/route prints it: a default route via 172.28.0.1
@@ -188,8 +188,8 @@ def test_a_source_that_is_an_attached_gateway_is_never_trusted(monkeypatch):
     that network made the host itself a keyless caller."""
     monkeypatch.setattr(tn, "_proxy_ips", lambda: frozenset())
     monkeypatch.setattr(tn, "_local_gateways", lambda: frozenset({"172.31.238.1"}))
-    assert tn.trusted_source(_req("172.31.238.1"), ["172.31.238.0/24"]) is None
-    assert tn.trusted_source(_req("172.31.238.7"), ["172.31.238.0/24"]) == "172.31.238.7"
+    assert tn.internal_source(_req("172.31.238.1"), ["172.31.238.0/24"]) is None
+    assert tn.internal_source(_req("172.31.238.7"), ["172.31.238.0/24"]) == "172.31.238.7"
 
 
 def test_an_entry_containing_an_attached_gateway_is_refused_on_write(monkeypatch):

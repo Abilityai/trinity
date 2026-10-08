@@ -459,17 +459,17 @@ class _InternalGate:
     * ``refuse`` — the agent is exposed with ``internal`` scope and the request
       did not come from a trusted network (or came through the public tunnel):
       answer exactly as for an unexposed agent.
-    * ``trusted_caller`` — internal scope, a trusted source, and the agent's
+    * ``caller_source`` — internal scope, a trusted source, and the agent's
       keyless switch on: the caller may run a task without a key, attributed to
       this address.
     * ``internal`` — the agent is internal-scope (whatever the source).
     """
 
-    __slots__ = ("refuse", "trusted_caller", "internal")
+    __slots__ = ("refuse", "caller_source", "internal")
 
-    def __init__(self, refuse=False, trusted_caller=None, internal=False):
+    def __init__(self, refuse=False, caller_source=None, internal=False):
         self.refuse = refuse
-        self.trusted_caller = trusted_caller
+        self.caller_source = caller_source
         self.internal = internal
 
 
@@ -483,10 +483,10 @@ def _internal_gate(agent_name: str, request: Request, source=_UNSET) -> _Interna
     if scope.get("scope") != "internal":
         return _InternalGate()
     if source is _UNSET:
-        source = a2a_trusted_networks.trusted_source(request)
+        source = a2a_trusted_networks.internal_source(request)
     if source is None:
         return _InternalGate(refuse=True, internal=True)
-    return _InternalGate(trusted_caller=source if scope.get("keyless") else None, internal=True)
+    return _InternalGate(caller_source=source if scope.get("keyless") else None, internal=True)
 
 
 def _card_base_url_for(agent_name: str, request: Request) -> str:
@@ -1109,12 +1109,12 @@ async def a2a_jsonrpc(
     """
     # ent#838: an internal-scope agent answers only a trusted network, and
     # anyone else — key or no key — gets the unexposed agent's answer.
-    trusted_caller: Optional[str] = None
+    caller_source: Optional[str] = None
     if current_user is None:
         # No DB read before a limiter (ent#679's ordering): the source check
         # reads only the cached trusted list, and an untrusted caller goes
         # straight to the anonymous door, whose limiter runs first.
-        source = a2a_trusted_networks.trusted_source(request)
+        source = a2a_trusted_networks.internal_source(request)
         if source is None:
             return await _anonymous_jsonrpc(agent_name, request)
         rate_limiter.enforce(
@@ -1128,9 +1128,9 @@ async def a2a_jsonrpc(
             detail="Too many A2A requests for this agent.",
         )
         gate = _internal_gate(agent_name, request, source=source)
-        if not gate.trusted_caller:
+        if not gate.caller_source:
             return await _anonymous_jsonrpc(agent_name, request, unexposed=gate.internal)
-        trusted_caller = gate.trusted_caller
+        caller_source = gate.caller_source
     else:
         if _internal_gate(agent_name, request).refuse:
             raise HTTPException(status_code=404, detail="Not found")
@@ -1141,7 +1141,7 @@ async def a2a_jsonrpc(
         return parsed
     method, params, rpc_id = parsed
 
-    caller_ip = trusted_caller or (request.client.host if request.client else None)
+    caller_ip = caller_source or (request.client.host if request.client else None)
 
     # ---- message/send + message/stream ------------------------------------
     if method in ("message/send", "message/stream"):
@@ -1157,7 +1157,7 @@ async def a2a_jsonrpc(
         # dedup disabled (fail-open).
         message_id = message.get("messageId")
         decision = idempotency_service.begin(
-            _a2a_idem_scope(agent_name, current_user, source_host=trusted_caller), message_id)
+            _a2a_idem_scope(agent_name, current_user, source_host=caller_source), message_id)
         if decision.replay and not decision.in_flight and decision.snapshot:
             # A streaming client can't parse a bare JSON body — replay in the
             # transport it asked for.
@@ -1170,10 +1170,10 @@ async def a2a_jsonrpc(
 
         if method == "message/stream":
             return await _stream_task(agent_name, text, current_user, rpc_id, decision, caller_ip,
-                                      source_host=trusted_caller)
+                                      source_host=caller_source)
 
         try:
-            result = await _run_a2a_task(agent_name, text, current_user, source_host=trusted_caller)
+            result = await _run_a2a_task(agent_name, text, current_user, source_host=caller_source)
         except SkillGateError as exc:
             task = _gate_task(exc)
             if isinstance(exc, SkillApprovalRequired):
@@ -1199,7 +1199,7 @@ async def a2a_jsonrpc(
             target_type="agent", target_id=agent_name,
             endpoint=request.scope["path"],
             details={"execution_id": result.execution_id, "state": state,
-                     **({"source_host": trusted_caller} if trusted_caller else {})},
+                     **({"source_host": caller_source} if caller_source else {})},
         )
         return _rpc_result(rpc_id, task)
 
@@ -1212,7 +1212,7 @@ async def a2a_jsonrpc(
         # db.get_execution returns a ScheduleExecution object (not a dict) —
         # read via _exec_field so both the model and a dict work.
         if not row or _exec_field(row, "agent_name") != agent_name \
-                or not _keyless_owns(row, trusted_caller):
+                or not _keyless_owns(row, caller_source):
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
         status = _exec_field(row, "status")
         a2a_state = {
@@ -1232,7 +1232,7 @@ async def a2a_jsonrpc(
             return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params.id is required")
         row = db.get_execution(exec_id)
         if not row or _exec_field(row, "agent_name") != agent_name \
-                or not _keyless_owns(row, trusted_caller):
+                or not _keyless_owns(row, caller_source):
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
 
         # Report what actually happened. Telling a caller "canceled" while the
@@ -1262,7 +1262,7 @@ async def a2a_jsonrpc(
             target_type="agent", target_id=agent_name,
             endpoint=request.scope["path"],
             details={"execution_id": exec_id,
-                     **({"source_host": trusted_caller} if trusted_caller else {})},
+                     **({"source_host": caller_source} if caller_source else {})},
         )
         return _rpc_result(rpc_id, _task_object(exec_id, "canceled"))
 
@@ -1274,14 +1274,14 @@ async def a2a_jsonrpc(
     return _rpc_error(rpc_id, _RPC_METHOD_NOT_FOUND, f"Method not found: {method}")
 
 
-def _keyless_owns(row, trusted_caller: Optional[str]) -> bool:
+def _keyless_owns(row, caller_source: Optional[str]) -> bool:
     """A keyless trusted caller reads and cancels only the tasks IT started —
     the ones stamped with its own address (trinity-enterprise#838). A keyed
     caller is unaffected (owner/shared access already decided it)."""
-    if not trusted_caller:
+    if not caller_source:
         return True
     return (_exec_field(row, "triggered_by") == "a2a"
-            and _exec_field(row, "source_host") == trusted_caller)
+            and _exec_field(row, "source_host") == caller_source)
 
 
 def _replay_stream(rpc_id: Any, task: Dict[str, Any]) -> StreamingResponse:

@@ -720,9 +720,8 @@ async def get_a2a_trusted_networks(
     "ours" relaxes the outbound address rule for it and lets an internal-scope
     agent answer it without a key, so reading the list is part of the grant.
     """
-    from dependencies import reject_agent_principal
-
     assert_admin(current_user)
+    from dependencies import reject_agent_principal
     reject_agent_principal(current_user)
     return _trusted_networks_state()
 
@@ -740,9 +739,8 @@ async def set_a2a_trusted_networks(
     anything broader than /8 (IPv4) or /32 (IPv6), and a one-label wildcard.
     Audited with the list itself — it holds addresses and names, never a secret.
     """
-    from dependencies import reject_agent_principal
-
     assert_admin(current_user)
+    from dependencies import reject_agent_principal
     reject_agent_principal(current_user)
 
     from services import a2a_trusted_networks as tn
