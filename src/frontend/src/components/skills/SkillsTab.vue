@@ -427,10 +427,14 @@ function dismissCardError(card) {
 
 async function onRun(card) {
   if (runningId.value) return
+  const agent = props.agentName
   runningId.value = card.id
   setCardError(card, '')
   try {
     const out = await store.runSkill(card.name)
+    // The page moved to another agent meanwhile: this answer is the previous
+    // agent's run, so it neither opens this agent's Tasks nor toasts here.
+    if (props.agentName !== agent) return
     if (out.held) {
       // trinity#3274: a gated skill — nothing ran, an approval was raised.
       if (props.notify) props.notify(out.held, 'info', PENDING_NOTICE_TOAST)
@@ -438,6 +442,7 @@ async function onRun(card) {
     }
     emit('run-with-instructions', `__NAVIGATE_TASKS__:${out.executionId || ''}`)
   } catch (e) {
+    if (props.agentName !== agent) return
     // A gate refusal names something to act on: the page's toast keeps an
     // error until it is dismissed (principle 18). Anything else stays on the card.
     if (isGateRefusal(e) && props.notify) {
@@ -446,7 +451,7 @@ async function onRun(card) {
     }
     setCardError(card, apiErrorMessage(e, `Could not run /${card.name}`))
   } finally {
-    runningId.value = null
+    if (props.agentName === agent) runningId.value = null
   }
 }
 
@@ -466,9 +471,12 @@ async function onClearGate(card) {
 
 async function onUnassign(card, { fromConflict = false } = {}) {
   if (!card) return
+  const agent = props.agentName
   notice.value = null
   const next = [...store.individualNames].filter((n) => n !== card.name)
-  if (await store.saveAssignments(next)) {
+  const saved = await store.saveAssignments(next)
+  if (props.agentName !== agent || saved === null) return
+  if (saved) {
     notice.value = {
       text: fromConflict ? `Unassigned ${card.name} — the agent's own skill stays.` : `Unassigned ${card.name}.`,
       tone: 'ok',
@@ -488,8 +496,10 @@ function onSaved(verdict) {
 }
 
 async function onSync() {
+  const agent = props.agentName
   notice.value = null
   const result = await store.inject()
+  if (props.agentName !== agent) return
   if (result && !store.error) pendingSync.value = false
   else if (store.error) notice.value = { text: store.error, tone: 'bad', deprecation: '' }
   store.loadAgentList()
@@ -509,8 +519,26 @@ function loadAll() {
   gatesStore.load(name, { probe: showOwnerRow.value })
 }
 
+// The tab outlives an agent switch (AgentDetail is KeepAlive'd and Skills is
+// open to everyone), so nothing from the previous agent's verbs carries over:
+// its outcome line, card errors, a pending sync, an open dialog, a run still
+// starting, the filter.
+function resetView() {
+  filter.value = ''
+  runningId.value = null
+  cardErrors.value = {}
+  notice.value = null
+  pendingSync.value = false
+  assignOpen.value = false
+  setsOpen.value = false
+  detailsCard.value = null
+}
+
 onMounted(loadAll)
-watch(() => props.agentName, loadAll)
+watch(() => props.agentName, () => {
+  resetView()
+  loadAll()
+})
 
 // Started or stopped: the own list switches between live and last-known, and
 // the in-agent check can now (or no longer) answer.

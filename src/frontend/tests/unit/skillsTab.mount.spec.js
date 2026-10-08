@@ -289,3 +289,64 @@ describe('sets on the Shared head', () => {
     expect(tid(w, 'skills-sets-credentials').text()).toBe('Some sets need credentials')
   })
 })
+
+describe('an agent switch (AgentDetail is KeepAlive\'d: the tab stays open)', () => {
+  const B = 'ops'
+  function serveTwo() {
+    api.get.mockImplementation((url, cfg) => {
+      if (url === '/api/skills/library/status') return Promise.resolve({ data: { configured: true, skill_count: 1 } })
+      if (url === '/api/skills/library') return Promise.resolve({ data: [{ name: 'shared-one', description: 'from the library' }] })
+      const m = url.match(/^\/api\/agents\/([^/]+)\/(.+)$/)
+      if (!m) return Promise.resolve({ data: [] })
+      const [, who, what] = m
+      if (what === 'skills') {
+        return Promise.resolve({ data: who === A ? [{ skill_name: 'shared-one', individual: true, via_sets: [] }] : [] })
+      }
+      if (what === 'playbooks') return Promise.resolve({ data: LIVE })
+      if (what === 'skill-gates') return Promise.resolve({ data: MAP({ agent_name: who, hook: cfg?.params?.probe ? 'ok' : null }) })
+      return Promise.resolve({ data: [] })
+    })
+  }
+  function deferred() {
+    let resolve
+    const promise = new Promise((r) => { resolve = r })
+    return { promise, resolve }
+  }
+
+  it("the previous agent's outcome line and card errors do not follow", async () => {
+    serveTwo()
+    api.put.mockResolvedValue({ data: { delivery: null } })
+    api.post.mockRejectedValue({ response: { status: 500, data: { detail: 'Agent exploded' } } })
+    const { w } = await mountTab()
+    await tid(w, 'skill-unassign-shared-one').trigger('click')
+    await flush()
+    await tid(w, 'skill-run-daily-report').trigger('click')
+    await flush()
+    expect(tid(w, 'skills-saved-note').text()).toBe('Unassigned shared-one.')
+    expect(card(w, 'own', 'daily-report').find('[data-testid="inline-error"]').exists()).toBe(true)
+
+    await w.setProps({ agentName: B })
+    await flush()
+
+    expect(tid(w, 'skills-saved-note').exists()).toBe(false)
+    expect(card(w, 'own', 'daily-report').find('[data-testid="inline-error"]').exists()).toBe(false)
+  })
+
+  it('a run that answers after the switch neither opens Tasks nor toasts, and frees the button', async () => {
+    serveTwo()
+    const run = deferred()
+    api.post.mockImplementation(() => run.promise)
+    const { w, notify } = await mountTab()
+    await tid(w, 'skill-run-daily-report').trigger('click')
+    await nextTick()
+
+    await w.setProps({ agentName: B })
+    await flush()
+    expect(tid(w, 'skill-run-daily-report').element.disabled).toBe(false)   // B's card is not "Starting…"
+
+    run.resolve({ status: 202, data: { status: 'pending_approval', message: NOTICE } })
+    await flush()
+    expect(notify).not.toHaveBeenCalled()
+    expect(w.emitted('run-with-instructions')).toBeUndefined()
+  })
+})

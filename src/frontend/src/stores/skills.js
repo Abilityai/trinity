@@ -145,10 +145,19 @@ export const useSkillsStore = defineStore('skills', () => {
       agentName.value = name
       assigned.value = []
       sets.value = []
+      setsError.value = null
       setsLoaded.value = false
       lastSetResult.value = null
+      removalDeferred.value = null
+      setWriteError.value = null
       injectionResults.value = {}
       lastInjectionAt.value = null
+      lastDelivery.value = null
+      // #754: a verb still in flight for the previous agent is not this one's
+      // (its answer is dropped below), so its busy flags do not carry over.
+      saving.value = false
+      injecting.value = false
+      setBusy.value = null
       resetAgentList()
     }
   }
@@ -218,8 +227,15 @@ export const useSkillsStore = defineStore('skills', () => {
     return { executionId: data.execution_id ?? data.task_execution_id ?? null }
   }
 
+  // #754: the tab stays open across agents (AgentDetail is KeepAlive'd), so
+  // every answer below is checked against the agent it was asked for — an
+  // answer for a previous agent is dropped, never shown or written as this one's.
+  let loadSeq = 0
+
   async function load(name) {
     setAgent(name)
+    const seq = ++loadSeq
+    const current = () => seq === loadSeq && name === agentName.value
     loading.value = true
     error.value = null
     try {
@@ -229,6 +245,7 @@ export const useSkillsStore = defineStore('skills', () => {
         api.get('/api/skills/library/status'),
         api.get(`/api/agents/${name}/skills`),
       ])
+      if (!current()) return
       libraryStatus.value = status.data
       assigned.value = mine.data || []
 
@@ -241,15 +258,17 @@ export const useSkillsStore = defineStore('skills', () => {
       // failure and must say so.
       if (libraryStatus.value?.configured) {
         const lib = await api.get('/api/skills/library')
+        if (!current()) return
         library.value = lib.data || []
         await loadSets()
       } else {
         library.value = []
       }
     } catch (e) {
+      if (!current()) return
       error.value = e?.response?.data?.detail || 'Could not load skills'
     } finally {
-      loading.value = false
+      if (seq === loadSeq) loading.value = false
     }
   }
 
@@ -273,69 +292,84 @@ export const useSkillsStore = defineStore('skills', () => {
     }
   }
 
-  async function _refreshRows() {
+  async function _refreshRows(name) {
     try {
-      const { data } = await api.get(`/api/agents/${agentName.value}/skills`)
-      assigned.value = data || []
+      const { data } = await api.get(`/api/agents/${name}/skills`)
+      if (name === agentName.value) assigned.value = data || []
     } catch { /* keep the previous rows; loadSets reports its own failure */ }
-    await loadSets()
+    if (name === agentName.value) await loadSets()
   }
 
   async function assignSet(setName) {
+    const name = agentName.value
     setBusy.value = setName
     setWriteError.value = null
     try {
       const { data } = await api.post(
-        `/api/agents/${agentName.value}/skill-sets/${encodeURIComponent(setName)}`,
+        `/api/agents/${name}/skill-sets/${encodeURIComponent(setName)}`,
         {}, { timeout: ASSIGN_TIMEOUT_MS },
       )
+      if (name !== agentName.value) return null
       lastSetResult.value = data || null
       lastDelivery.value = data?.delivery ?? null
-      await _refreshRows()
+      await _refreshRows(name)
       return true
     } catch (e) {
+      if (name !== agentName.value) return null
       setWriteError.value = detailText(e, `Could not assign set ${setName}`)
       return false
     } finally {
-      setBusy.value = null
+      if (name === agentName.value) setBusy.value = null
     }
   }
 
   async function unassignSet(setName) {
+    const name = agentName.value
     setBusy.value = setName
     setWriteError.value = null
     try {
-      const { data } = await api.delete(`/api/agents/${agentName.value}/skill-sets/${encodeURIComponent(setName)}`)
+      const { data } = await api.delete(`/api/agents/${name}/skill-sets/${encodeURIComponent(setName)}`)
+      if (name !== agentName.value) return null
       if (lastSetResult.value?.set_name === setName) lastSetResult.value = null
       removalDeferred.value = data?.removal_deferred ? setName : null
-      await _refreshRows()
+      await _refreshRows(name)
       return true
     } catch (e) {
+      if (name !== agentName.value) return null
       setWriteError.value = detailText(e, `Could not unassign set ${setName}`)
       return false
     } finally {
-      setBusy.value = null
+      if (name === agentName.value) setBusy.value = null
     }
   }
 
-  /** Bulk save — the whole assignment set in one PUT (AC: bulk save supported). */
+  /**
+   * Bulk save — the whole assignment set in one PUT (AC: bulk save supported).
+   * @returns {Promise<boolean|null>} true saved, false failed, null when the
+   *   page moved to another agent meanwhile (the save may have landed on the
+   *   previous agent; nothing about it is shown on this one).
+   */
   async function saveAssignments(names) {
+    const name = agentName.value
     saving.value = true
     error.value = null
     try {
       const { data: saved } = await api.put(
-        `/api/agents/${agentName.value}/skills`, { skills: names }, { timeout: ASSIGN_TIMEOUT_MS },
+        `/api/agents/${name}/skills`, { skills: names }, { timeout: ASSIGN_TIMEOUT_MS },
       )
+      if (name !== agentName.value) return null
       // #2703: the PUT now delivers; `null` means nothing was added.
       lastDelivery.value = saved?.delivery ?? null
-      const { data } = await api.get(`/api/agents/${agentName.value}/skills`)
+      const { data } = await api.get(`/api/agents/${name}/skills`)
+      if (name !== agentName.value) return null
       assigned.value = data || []
       return true
     } catch (e) {
+      if (name !== agentName.value) return null
       error.value = e?.response?.data?.detail || 'Could not save skill assignments'
       return false
     } finally {
-      saving.value = false
+      if (name === agentName.value) saving.value = false
     }
   }
 
@@ -350,10 +384,12 @@ export const useSkillsStore = defineStore('skills', () => {
    * green check.
    */
   async function inject() {
+    const name = agentName.value
     injecting.value = true
     error.value = null
     try {
-      const { data } = await api.post(`/api/agents/${agentName.value}/skills/inject`)
+      const { data } = await api.post(`/api/agents/${name}/skills/inject`)
+      if (name !== agentName.value) return null
       injectionResults.value = data?.results || {}
       lastInjectionAt.value = new Date().toISOString()
       // #2914: the sync also rewrites each row's durable verdict (`conflict`
@@ -361,11 +397,12 @@ export const useSkillsStore = defineStore('skills', () => {
       // survives a reload — so re-read the rows, not just this run's results.
       // Best-effort: the results above are already the honest answer.
       try {
-        const { data: rows } = await api.get(`/api/agents/${agentName.value}/skills`)
-        assigned.value = rows || []
+        const { data: rows } = await api.get(`/api/agents/${name}/skills`)
+        if (name === agentName.value) assigned.value = rows || []
       } catch { /* keep the previous rows; the injection results still render */ }
       return data
     } catch (e) {
+      if (name !== agentName.value) return null
       // 409 = an injection is already running (SkillInjectionBusy). Say so
       // rather than reporting a generic failure the operator can't act on.
       error.value = e?.response?.status === 409
@@ -373,7 +410,7 @@ export const useSkillsStore = defineStore('skills', () => {
         : (e?.response?.data?.detail || 'Skill sync failed')
       return null
     } finally {
-      injecting.value = false
+      if (name === agentName.value) injecting.value = false
     }
   }
 

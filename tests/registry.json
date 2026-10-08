@@ -5062,7 +5062,17 @@
         "frontend",
         "unit"
       ],
-      "description": "trinity-enterprise#754: the agent-scoped gate store — the map loads before the hook probe, a write sends the selected kind and re-reads the map for the agent it wrote to (never the one the cached page moved to), per-skill busy/error/warning. Mutation-proven."
+      "description": "trinity-enterprise#754: the agent-scoped gate store — the map loads before the hook probe, a write sends the selected kind and re-reads the map for the agent it wrote to (never the one the cached page moved to), per-skill busy/error. Mutation-proven."
+    },
+    {
+      "file": "frontend/tests/unit/skillsStoreAgentSwitch.spec.js",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#754: the skills store survives an agent switch — a load, a sync, a save or a set write that answers after the KeepAlive'd page moved to another agent is dropped, never shown as that agent's state, and a write's follow-up read never re-reads the next agent. Mutation-proven."
     },
     {
       "file": "frontend/tests/unit/skillsTab.mount.spec.js",
