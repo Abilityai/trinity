@@ -191,7 +191,7 @@ def test_r10_agents_are_isolated():
 
 
 def test_r11_reacquire_same_id_under_cap_does_not_double_count():
-    """ZADD on an existing member updates the score; the member is counted once."""
+    """Re-acquiring a held id under the cap is idempotent: True, counted once."""
     svc = _svc()
     assert _run(svc.acquire_slot("a", "e1", 3))
     assert _run(svc.acquire_slot("a", "e1", 3))
@@ -216,26 +216,22 @@ def test_r13_acquire_does_not_reap_live_long_slot_with_short_own_timeout(clock):
     assert svc.redis.zscore(svc._slots_key("a"), "long") is not None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: acquire_slot is ZCARD-then-ZADD (two round-trips), not the "
-        "'atomic N-ary counter' execution.md:15 / capacity_manager.py:367 claim; "
-        "two backend workers (docker-compose.prod.yml:511 --workers 2) admitting "
-        "concurrently both see count<cap and both ZADD, overshooting "
-        "max_parallel_tasks — #3318"
-    ),
-)
-def test_r14_concurrent_acquire_across_workers_never_overshoots_cap():
+def test_r14_concurrent_acquire_across_workers_never_overshoots_cap(monkeypatch):
+    """#3318 / #3305: two backend workers (docker-compose.prod.yml --workers 2)
+    admitting concurrently must not both pass a stale count<cap read. The other
+    worker admits right after this worker's capacity read; WATCH invalidates
+    that read, so the retry sees the cap as full."""
     server = fakeredis.FakeServer()
     worker_a = _svc(server)
     worker_b = _svc(server)
 
-    real_zcard = worker_a.redis.zcard
+    # The capacity read happens on the WATCHed pipeline, so hook it there.
+    pipeline_cls = type(worker_a.redis.pipeline())
+    real_zcard = pipeline_cls.zcard
     fired = []
 
-    def zcard_then_other_worker_admits(key):
-        n = real_zcard(key)
+    def zcard_then_other_worker_admits(self, key):
+        n = real_zcard(self, key)
         if not fired:
             fired.append(True)
             t = threading.Thread(
@@ -245,9 +241,11 @@ def test_r14_concurrent_acquire_across_workers_never_overshoots_cap():
             t.join()
         return n
 
-    worker_a.redis.zcard = zcard_then_other_worker_admits
-    _run(worker_a.acquire_slot("a", "eA", 1))
-    assert worker_b.redis.zcard("agent:slots:a") <= 1
+    monkeypatch.setattr(pipeline_cls, "zcard", zcard_then_other_worker_admits)
+    admitted_a = _run(worker_a.acquire_slot("a", "eA", 1))
+    assert fired, "the interleaving hook never ran — the test would be vacuous"
+    assert not admitted_a
+    assert worker_b.redis.zrange("agent:slots:a", 0, -1) == ["eB"]
 
 
 # ===========================================================================

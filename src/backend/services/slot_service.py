@@ -117,7 +117,8 @@ class SlotService:
             timeout_seconds: Agent's execution timeout (TIMEOUT-001). Slot TTL = timeout + 5min buffer.
 
         Returns:
-            True only for a new admission; False if at capacity or already held
+            True if the execution holds a slot (new admission, or an idempotent
+            re-acquire of an id already held under the cap); False if at capacity
         """
         slots_key = self._slots_key(agent_name)
         # TIMEOUT-001: Dynamic slot TTL based on agent timeout + buffer
@@ -130,15 +131,15 @@ class SlotService:
         metadata_key = self._metadata_key(agent_name, execution_id)
         # A count followed by ZADD races across backend workers. WATCH makes
         # count + membership + metadata one admission decision. Retrying a
-        # conflicted transaction does not dispatch work; only its winner may
-        # return True. In particular, a duplicate ID is NOT an idempotent
-        # success: callers interpret True as permission to start an execution.
+        # conflicted transaction does not dispatch work. Re-acquiring an id that
+        # is already held under the cap is idempotent: it returns True (False
+        # would read as capacity-full to CapacityManager) but is counted once
+        # and neither renews the slot nor overwrites its metadata.
         while True:
             with self.redis.pipeline() as pipe:
                 try:
                     pipe.watch(slots_key, metadata_key)
-                    if pipe.zscore(slots_key, execution_id) is not None:
-                        return False
+                    already_held = pipe.zscore(slots_key, execution_id) is not None
                     # EXEC isolates commands but does not roll back a command
                     # error. Reject malformed metadata before queuing ZADD;
                     # watching this key prevents a type change before EXEC.
@@ -152,6 +153,15 @@ class SlotService:
                             f"rejecting execution {execution_id}"
                         )
                         return False
+                    if already_held:
+                        # Same watched decision as a new admission: EXEC
+                        # succeeds only if the ZSET is unchanged since WATCH,
+                        # so "held and under the cap" is one consistent
+                        # snapshot. Nothing is written.
+                        pipe.multi()
+                        pipe.zscore(slots_key, execution_id)
+                        pipe.execute()
+                        return True
                     slot_number = current_count + 1
                     pipe.multi()
                     pipe.zadd(slots_key, {execution_id: time.time()})

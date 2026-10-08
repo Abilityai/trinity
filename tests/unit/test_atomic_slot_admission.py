@@ -25,14 +25,20 @@ def slots(monkeypatch):
     return SlotService("redis://unused")
 
 
-def test_duplicate_cannot_authorize_dispatch_or_replace_metadata(slots):
+def test_duplicate_is_idempotent_and_cannot_recount_or_replace_metadata(slots):
     assert asyncio.run(slots.acquire_slot("test-agent", "first", 3, "original", 900))
     before = slots.redis.hgetall("agent:slot:test-agent:first")
     score = slots.redis.zscore("agent:slots:test-agent", "first")
-    assert not asyncio.run(slots.acquire_slot("test-agent", "first", 3, "replacement", 60))
+    # Held under the cap: True (False reads as capacity-full to CapacityManager),
+    # counted once, slot and metadata untouched.
+    assert asyncio.run(slots.acquire_slot("test-agent", "first", 3, "replacement", 60))
+    assert slots.redis.zcard("agent:slots:test-agent") == 1
     assert slots.redis.hgetall("agent:slot:test-agent:first") == before
     assert slots.redis.zscore("agent:slots:test-agent", "first") == score
     assert slots.redis.ttl("agent:slot:test-agent:first") > 1190
+    # At the cap a held id still counts itself, so it is not re-admitted.
+    assert not asyncio.run(slots.acquire_slot("test-agent", "first", 1))
+    assert slots.redis.zcard("agent:slots:test-agent") == 1
 
 
 def test_wrong_type_metadata_rejects_without_partial_admission(slots):
@@ -129,10 +135,11 @@ def test_independent_clients_never_over_admit(monkeypatch, same_id, limit):
         return asyncio.run(SlotService("redis://unused").acquire_slot("contended", ident, limit))
     with ThreadPoolExecutor(max_workers=6) as pool:
         admitted = list(pool.map(acquire, range(6)))
-    assert sum(admitted) == (1 if same_id else limit)
+    # One shared id is idempotent: every caller holds it, and it is counted once.
+    assert sum(admitted) == (6 if same_id else limit)
     # Avoid the admission rendezvous when inspecting the final state.
     client = fakeredis.FakeRedis(server=server, decode_responses=True)
-    assert len(client.zrange("agent:slots:contended", 0, -1)) == sum(admitted)
+    assert len(client.zrange("agent:slots:contended", 0, -1)) == (1 if same_id else limit)
 
 
 def _contend(url, agent, execution, limit, barrier, output):
@@ -173,7 +180,7 @@ def test_concurrent_processes_never_over_admit(same_id, limit):
             assert child.exitcode == 0
         admitted = [output.get(timeout=2) for _ in children]
         expected = 1 if same_id else limit
-        assert sum(admitted) == expected
+        assert sum(admitted) == (count if same_id else limit)
         assert client.zcard(f"agent:slots:{agent}") == expected
         for ident in set(ids):
             present = client.zscore(f"agent:slots:{agent}", ident) is not None
