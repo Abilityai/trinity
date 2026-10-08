@@ -272,3 +272,94 @@ def test_run_resumable_turn_waits_as_long_as_the_lock_lives(monkeypatch):
                                            cached_uuid=None, triggered_by="public",
                                            lock_ttl=900, wait_for_lock=flag))
     assert locks == [{"ttl": 900, "wait": 900}, {"ttl": 900, "wait": None}]
+
+
+# --- a turn waiting on the thread's lock is not an orphan (#3166 review) ------
+#
+# The row is `running` from before the wait. The watchdog orphans a running row
+# older than 60s that the agent does not know unless a live dispatcher owns it,
+# so a second turn queued behind a >60s first turn must be registered in-flight
+# for the whole wait, and its clock re-anchored once it holds the lock.
+
+
+@pytest.fixture()
+def queued_turn(monkeypatch):
+    import importlib
+
+    from services import agent_call_limiter as acl
+    from services import session_turn_service as sts
+
+    # The module `run_resumable_turn` imports from, which another test in this
+    # run may have re-registered under the same name.
+    tes = importlib.import_module("services.task_execution_service")
+
+    acl._reset_for_testing(client_factory=lambda: None, slot_renewer=lambda a, e: False)
+    state = types.SimpleNamespace(during_wait=None, dispatched=0, restamped=[], released=0,
+                                  on_wait=None)
+
+    class _Lock:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            # What the watchdog decides while this turn waits on a first turn
+            # that has run 120s: the row is past the 60s floor.
+            from services import cleanup_service as cs
+            verdict = (await cs._inflight_verdict_map(["e-queued"]))["e-queued"]
+            state.during_wait = cs._inflight_skip(verdict, 120.0)
+            if state.on_wait:
+                state.on_wait()
+            return self
+
+        async def __aexit__(self, *a):
+            state.released += 1
+
+    async def _dispatch(**kwargs):
+        state.dispatched += 1
+        return _Result()
+
+    monkeypatch.setattr(sts, "ResumeLock", _Lock)
+    monkeypatch.setattr(tes, "dispatch_and_await_terminal", _dispatch)
+    monkeypatch.setattr(sts, "supports_session_resume", lambda a: True)
+    monkeypatch.setattr(acl, "DISPATCH_RESTAMP_THRESHOLD_SECONDS", 0.0)
+    monkeypatch.setattr(sts.db, "restamp_execution_dispatch",
+                        lambda eid: state.restamped.append(eid) or True, raising=False)
+
+    def run(wait_for_lock=True):
+        return asyncio.run(sts.run_resumable_turn(
+            agent_name=AGENT, session_key="k", message="m", cached_uuid=None,
+            triggered_by="public", lock_ttl=900, wait_for_lock=wait_for_lock,
+            execution_id="e-queued"))
+
+    yield state, run, acl
+    acl._reset_for_testing()
+
+
+def test_watchdog_leaves_a_turn_waiting_on_the_lock_alone(queued_turn):
+    state, run, acl = queued_turn
+    turn = run()
+    assert state.during_wait is True
+    assert state.dispatched == 1 and turn.result.status == "success"
+    assert acl.inflight_entry("e-queued") is None  # the wait's registration is gone
+    assert state.released == 1
+
+
+def test_a_turn_that_waited_is_reanchored_at_lock_grant(queued_turn):
+    state, run, _ = queued_turn
+    run()
+    assert state.restamped == ["e-queued"]
+
+
+def test_without_wait_for_lock_nothing_changes(queued_turn):
+    state, run, _ = queued_turn
+    run(wait_for_lock=False)
+    assert state.during_wait is False and state.restamped == []
+
+
+def test_a_turn_cancelled_while_queued_is_not_dispatched(queued_turn):
+    state, run, acl = queued_turn
+    state.on_wait = lambda: acl.cancel_inflight("e-queued", agent_name=AGENT)
+    turn = run()
+    assert state.dispatched == 0 and state.restamped == []
+    assert turn.result.status == "cancelled"
+    assert state.released == 1

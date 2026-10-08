@@ -1328,6 +1328,13 @@ queues behind the first: `portal_chat` runs the turn with `wait_for_lock=True`, 
 lock is waited for up to its TTL instead of `LOCK_WAIT_TOTAL_SECONDS` (30s, still the rule
 for the Session surface), and `portal_wait_budget_seconds` adds that TTL to the marker and
 the client's wait budget. A first turn over 30s no longer turns the second into a 429.
+Every `portal_chat` caller waits this way: the synchronous `POST .../chat` and the voice
+path hold their request open for up to the lock TTL (about agent timeout + 30s) where they
+held 30s. The queued turn's row is already `running`, so the wait is registered with
+`track_inflight_dispatch` (the watchdog's proof of life; without it a turn queued behind a
+first turn over 60s is orphaned), `started_at` is re-anchored once the lock is held (the
+#2433 rule, so the wait does not spend the run's timeout), and a cancel that lands during
+the wait finalizes the row without dispatching.
 
 **Flow**: [workspace-agents-at-the-centre.md](../feature-flows/workspace-agents-at-the-centre.md) ·
 **Requirements**: `requirements/core-agent.md` §5.23, §5.30
