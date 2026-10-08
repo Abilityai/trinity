@@ -18,13 +18,9 @@ import json
 import re
 from typing import List, Optional
 
-import httpx
 from fastapi import HTTPException
 
 from models import ConnectorClientSnippet, ConnectorPlaybook
-from services.agent_auth import agent_httpx_client
-from services.docker_service import get_agent_container
-from services.docker_utils import container_reload
 
 
 def connector_name(agent_name: str) -> str:
@@ -117,23 +113,16 @@ async def fetch_live_playbooks(agent_name: str) -> List[dict]:
     the same HTTP mapping both callers already relied on: 404 no container, 503
     not running / unreachable, 504 starting up.
     """
-    container = get_agent_container(agent_name)
-    if not container:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    await container_reload(container)
-    if container.status != "running":
-        raise HTTPException(status_code=503, detail="Agent is not running.")
+    # trinity-enterprise#754: the one proxy (it also refreshes the agent's
+    # last-known listing); the HTTP mapping above is unchanged.
+    from services import agent_skills_listing
+
     try:
-        url = f"http://agent-{agent_name}:8000/api/skills"
-        async with agent_httpx_client(agent_name, timeout=10.0) as client:
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                return resp.json().get("skills", [])
-            raise HTTPException(status_code=resp.status_code, detail=f"Agent error: {resp.text}")
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Agent is starting up, please try again")
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Could not connect to agent")
+        body = await agent_skills_listing.fetch_live(agent_name)
+    except agent_skills_listing.SkillsListUnavailable as e:
+        detail = "Agent is not running." if e.reason == "not_running" else e.detail
+        raise HTTPException(status_code=e.status_code, detail=detail)
+    return body.get("skills", []) if isinstance(body, dict) else []
 
 
 def resolve_exposed_playbooks(

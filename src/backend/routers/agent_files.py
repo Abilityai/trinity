@@ -12,6 +12,7 @@ from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, is_interactive_principal
 from services.agent_auth import agent_httpx_client
 from services import (
+    agent_skills_listing,
     metric_access_service,
     metric_read_service,
     objective_join_service,
@@ -78,42 +79,25 @@ METRICS_READ_RATE_WINDOW = 60  # seconds
 @router.get("/{agent_name}/playbooks")
 async def get_agent_playbooks_endpoint(
     agent_name: AuthorizedAgentByName,
-    request: Request
+    request: Request,
+    last_known: bool = Query(
+        False,
+        description="trinity-enterprise#754: when the agent is stopped or "
+                    "unreachable, answer with its last successful listing, "
+                    "labelled `last_known: {captured_at, reason}`",
+    ),
 ):
     """
     Get available skills (playbooks) from an agent's .claude/skills/ directory.
 
-    Returns skill metadata parsed from SKILL.md YAML frontmatter.
+    Returns skill metadata parsed from SKILL.md YAML frontmatter. Every live
+    answer is also kept as the agent's last-known listing; `last_known=true`
+    opts into it for a stopped agent (`services/agent_skills_listing.py`).
     """
-    import httpx
-
-    container = get_agent_container(agent_name)
-    if not container:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    await container_reload(container)
-
-    if container.status != "running":
-        raise HTTPException(
-            status_code=503,
-            detail="Agent is not running. Start the agent to view playbooks."
-        )
-
     try:
-        agent_url = f"http://agent-{agent_name}:8000/api/skills"
-        async with agent_httpx_client(agent_name, timeout=10.0) as client:
-            response = await client.get(agent_url)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Agent returned error: {response.text}"
-                )
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Agent is starting up, please try again")
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Could not connect to agent")
+        return await agent_skills_listing.list_skills(agent_name, last_known=last_known)
+    except agent_skills_listing.SkillsListUnavailable as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
     except HTTPException:
         raise
     except Exception as e:
