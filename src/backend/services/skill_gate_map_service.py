@@ -188,10 +188,16 @@ def self_approved_flags(agent_name: str, execution_ids: Iterable[str],
     to it). `by_viewer` is true only for a person whose casefolded email is
     the record's requester key, so the email itself never leaves the server.
     Runs with no record are absent (false). Never raises: a marker is a hint,
-    never a reason to fail the executions read."""
+    never a reason to fail the executions read.
+
+    For people only (operator ruling, the ent#754 review): beside a row's
+    `source_user_email` the marker says that person fills the gate's approver
+    kind, so a machine principal (an agent, MCP, connector or system key)
+    reads no flag at all — the rule the gate map applies to `set_by` (#715)."""
     requester = skill_gate_service.requester_from_principal(principal)
-    mine = (f"person:{requester.email.strip().casefold()}"
-            if requester.is_person and requester.email else None)
+    if not requester.is_person:
+        return {}
+    mine = f"person:{requester.email.strip().casefold()}" if requester.email else None
     return _self_approved_flags_for_key(agent_name, execution_ids, mine)
 
 
@@ -209,7 +215,7 @@ def _self_approved_flags_for_key(agent_name: str, execution_ids: Iterable[str],
 
 
 def annotate_self_approved_turns(agent_name: str, messages: List[Dict[str, Any]],
-                                 viewer_email: Optional[str]) -> None:
+                                 viewer_email: Optional[str], *, viewer_is_person: bool = True) -> None:
     """trinity-enterprise#754 (C9): mark, in place, each Workspace agent reply
     whose turn went through without approval because its requester is the
     approver. A Workspace message names the turn that wrote it (#3166's
@@ -217,9 +223,11 @@ def annotate_self_approved_turns(agent_name: str, messages: List[Dict[str, Any]]
     The viewer is the portal session's person — the same identity the
     Workspace gate requester carries — compared casefolded; no email is added
     to the payload. Questions, rows no turn wrote and older rows (no
-    `execution_id`) read false. One read per thread; never raises."""
+    `execution_id`) read false, and so does every row for a machine viewer
+    (people only, as `self_approved_flags`). One read per thread; never raises."""
     viewer = (viewer_email or "").strip().casefold()
-    replies = [m for m in messages if m.get("role") == "assistant" and m.get("execution_id")]
+    replies = [m for m in messages if m.get("role") == "assistant" and m.get("execution_id")
+               and viewer_is_person]
     flags = _self_approved_flags_for_key(
         agent_name, [m["execution_id"] for m in replies], f"person:{viewer}" if viewer else None)
     for m in messages:

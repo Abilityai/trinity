@@ -3435,10 +3435,10 @@ def _persist_reply(agent_name: str, email: str, session_id: str, reply: str, cos
     # that every service-layer test would still pass.
     # trinity-enterprise#754: on this fallback the answer is all the bubble has
     # before a reload, so it says, like the history read, whether the turn
-    # skipped approval because the asker is the approver ("you" for a person only).
+    # skipped approval because the asker is the approver — for a person only.
     turn = {"role": "assistant", "execution_id": execution_id}
     skill_gate_map_service.annotate_self_approved_turns(
-        agent_name, [turn], email if viewer_is_person else None)
+        agent_name, [turn], email, viewer_is_person=viewer_is_person)
     return {"response": reply, "cost": cost, "session_id": session_id,
             "message_id": message_id,
             "gate_self_approved": turn["gate_self_approved"],
@@ -4595,9 +4595,10 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     _attach_own_ratings(messages, email, is_platform=include_owned)
     # trinity-enterprise#754: a reply whose turn skipped approval because the
     # asker IS the approver says so (one read for the thread; no email added).
-    # A machine principal (a system key on the platform session) is never "you".
+    # People only: a machine principal (a system key on the platform session)
+    # reads no flag (the executions rule).
     skill_gate_map_service.annotate_self_approved_turns(
-        agent_name, messages, email if viewer_is_person else None)
+        agent_name, messages, email, viewer_is_person=viewer_is_person)
     # #3265: the stored JSON becomes the list the bubble renders.
     for m in messages:
         m["attachments"] = decode_turn_attachments(m.get("attachments"))

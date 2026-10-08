@@ -177,7 +177,7 @@ def test_message_id_is_declared_on_the_response_model():
 def test_ent754_the_sync_reply_says_whether_it_skipped_approval(chat, monkeypatch):
     """trinity-enterprise#754: on the synchronous fallback the reply's answer is
     all the bubble has before a reload, so it carries the same two flags the
-    history read does — and "you" only for a person. Declared on the model too,
+    history read does — for a person only (a machine caller reads both false). Declared on the model too,
     or the route would drop them in silence (the lesson above)."""
     svc, state = chat
     from client_portal.models import PortalChatResponse
@@ -191,4 +191,4 @@ def test_ent754_the_sync_reply_says_whether_it_skipped_approval(chat, monkeypatc
 
     shaped = PortalChatResponse.model_validate(person).model_dump()
     assert (shaped["gate_self_approved"], shaped["gate_self_approved_by_viewer"]) == (True, True)
-    assert (machine["gate_self_approved"], machine["gate_self_approved_by_viewer"]) == (True, False)
+    assert (machine["gate_self_approved"], machine["gate_self_approved_by_viewer"]) == (False, False)

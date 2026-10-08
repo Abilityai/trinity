@@ -121,9 +121,9 @@ def test_the_route_model_keeps_both_fields_and_adds_no_email(thread):
     assert "ana@example.com" not in str({k: paid[k] for k in new_keys}).lower()
 
 
-def test_through_the_route_a_machine_viewer_sees_the_fact_but_is_never_you(thread):
+def test_through_the_route_a_machine_viewer_sees_neither(thread):
     """A system-scoped key on the platform session is admitted (`is_person`
-    False); like the executions path, it never reads "you"."""
+    False); as on the executions path, the marker is for people only."""
     from client_portal import router as portal_router
     from client_portal.portal_auth import PortalPrincipal
 
@@ -133,4 +133,4 @@ def test_through_the_route_a_machine_viewer_sees_the_fact_but_is_never_you(threa
         return m["gate_self_approved"], m["gate_self_approved_by_viewer"]
 
     assert paid(PortalPrincipal(ANA, True, is_person=True)) == (True, True)
-    assert paid(PortalPrincipal(ANA, True, is_person=False)) == (True, False)
+    assert paid(PortalPrincipal(ANA, True, is_person=False)) == (False, False)

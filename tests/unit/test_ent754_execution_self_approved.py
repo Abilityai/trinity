@@ -95,11 +95,16 @@ def test_the_list_says_you_only_to_the_approver(world):
     assert _get(_list(world, OTHER)[world["self"]], "gate_self_approved_by_viewer") is False
 
 
-def test_a_machine_key_sees_the_fact_but_is_never_you(world):
+def test_a_machine_key_sees_neither(world):
+    """Operator ruling (review round): the marker is for people. Beside the
+    row's `source_user_email` it says that person fills the gate's approver
+    kind; the gate map withholds `set_by` from machine keys for the same
+    reason (#715), so an agent or MCP key reads both flags false."""
     row = _list(world, AGENT_KEY)[world["self"]]
+    detail = _detail(world, AGENT_KEY, world["self"])
 
-    assert _get(row, "gate_self_approved") is True
-    assert _get(row, "gate_self_approved_by_viewer") is False
+    assert (_get(row, "gate_self_approved"), _get(row, "gate_self_approved_by_viewer")) == (False, False)
+    assert (detail.gate_self_approved, detail.gate_self_approved_by_viewer) == (False, False)
 
 
 def test_the_detail_carries_the_same_two_flags(world):
