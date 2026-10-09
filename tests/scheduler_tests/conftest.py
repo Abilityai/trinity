@@ -137,6 +137,7 @@ def initialized_db(temp_db_path: str) -> Generator[str, None, None]:
             source_agent_name TEXT,
             source_mcp_key_id TEXT,
             source_mcp_key_name TEXT,
+            chain_depth INTEGER,
             model_used TEXT,
             skip_reason TEXT,
             attempt_number INTEGER DEFAULT 1,
