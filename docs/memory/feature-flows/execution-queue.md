@@ -456,7 +456,7 @@ async def _execute_schedule_with_lock(self, schedule_id: str):
 - Runs in **dedicated scheduler container** (not backend)
 - Uses Redis distributed locks to prevent duplicate executions
 - Checks autonomy before execution
-- Activity tracking via internal API (`POST /api/internal/activities/track`)
+- Dispatches via `POST /api/internal/execute-task`; `TaskExecutionService` creates and closes the activity rows in-process
 - Uses `AgentClient.task()` for stateless execution with raw log format
 - Execution log stored in raw Claude Code `stream-json` format for log viewer compatibility
 

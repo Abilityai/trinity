@@ -404,7 +404,6 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 |--------|------|------|-------------|
 | GET | `/api/files/{file_id}` | Token (`?sig=`) | Public download: 401 bad/missing sig, 404 unknown id, 410 revoked/expired, 416 unsatisfiable range; disposition is the server's `is_inline_safe` allowlist (ent#461) — optional **one-way** `?download=1` may only force `attachment` (#2582); `X-Content-Type-Options: nosniff`, `Accept-Ranges: bytes`; per-IP rate limit; audit `file_share_download` (a ranged prefix read is audited `ranged_prefix: true` and does NOT bump `download_count`) |
 | HEAD | `/api/files/{file_id}` | Token (`?sig=`) | Same validation and same headers as GET, no body, no counter, no audit row. Accepts the same `?download=1`, because a disposition that disagrees with GET mis-plans the player that probed |
-| POST | `/api/internal/agent-files/share` | `X-Internal-Secret` | Agent-server path to mint a download URL |
 
 ### MCP Inline Email Auth (#848 — flag-gated, default OFF)
 

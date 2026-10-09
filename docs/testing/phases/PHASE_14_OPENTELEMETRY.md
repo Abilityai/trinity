@@ -13,7 +13,7 @@
 - Backend healthy at http://localhost:8000
 - Frontend accessible at http://localhost
 - At least one running agent (for generating metrics)
-- **OTEL_ENABLED=1** in backend .env (or verify with `/api/observability/status`)
+- **OTEL_ENABLED=1** in backend .env (or verify with `GET /api/ops/costs` — admin token)
 
 ---
 
@@ -24,22 +24,14 @@
 **Action**: Check if OpenTelemetry is enabled in the backend
 
 ```bash
-# Via API
-curl http://localhost:8000/api/observability/status \
+# Via API (admin token, or an ops-scope key)
+curl http://localhost:8000/api/ops/costs \
   -H "Authorization: Bearer $TOKEN"
-```
-
-OR check via browser DevTools Console:
-```javascript
-fetch('/api/observability/status', {
-  headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-}).then(r => r.json()).then(console.log)
 ```
 
 **Expected**:
 - [ ] Returns JSON with `enabled: true` (OTel is on)
-- [ ] `collector_configured: true` (endpoint is set)
-- [ ] `collector_reachable: true` (collector responding)
+- [ ] `available: true` (collector responding; `available: false` plus an `error` string when it is unreachable or times out)
 
 **If `enabled: false`**:
 - OTel is not enabled in backend
@@ -154,10 +146,10 @@ trinity_claude_code_token_usage_tokens_total{model="claude-sonnet-4-20250514",pl
 
 ### Step 7: Verify Metrics API Response Structure
 
-**Action**: Call the full metrics API
+**Action**: Call the cost rollup API
 
 ```bash
-curl http://localhost:8000/api/observability/metrics \
+curl http://localhost:8000/api/ops/costs \
   -H "Authorization: Bearer $TOKEN" | jq
 ```
 
@@ -166,21 +158,22 @@ curl http://localhost:8000/api/observability/metrics \
 {
   "enabled": true,
   "available": true,
-  "metrics": {
-    "cost_by_model": { "claude-sonnet": 0.0234 },
-    "tokens_by_model": {
-      "claude-sonnet": { "input": 1523, "output": 892, "cacheRead": 45678 }
-    },
-    "lines_of_code": { "added": 42, "removed": 15 },
-    "sessions": 5,
-    "active_time_seconds": 3600,
-    "commits": 3,
-    "pull_requests": 1
-  },
-  "totals": {
+  "timestamp": "2026-01-01T00:00:00Z",
+  "summary": {
     "total_cost": 0.0234,
     "total_tokens": 48093,
-    "tokens_by_type": { "input": 1523, "output": 892, "cacheRead": 45678 }
+    "daily_limit": 50.0,
+    "cost_percent_of_limit": 0.0
+  },
+  "alerts": [],
+  "cost_by_model": [
+    { "model": "Claude Sonnet", "model_id": "claude-sonnet-4-20250514", "cost": 0.0234,
+      "input_tokens": 1523, "output_tokens": 892, "cache_read_tokens": 45678, "cache_creation_tokens": 0 }
+  ],
+  "tokens_by_type": { "input": 1523, "output": 892, "cacheRead": 45678 },
+  "productivity": {
+    "sessions": 5, "active_time_seconds": 3600, "active_time_formatted": "1h",
+    "commits": 3, "pull_requests": 1, "lines_added": 42, "lines_removed": 15
   }
 }
 ```
@@ -188,31 +181,12 @@ curl http://localhost:8000/api/observability/metrics \
 **Verify**:
 - [ ] `enabled: true`
 - [ ] `available: true` (or false with error message)
-- [ ] `metrics` object contains expected fields
-- [ ] `totals` aggregates all models
+- [ ] `cost_by_model` lists every model with cost
+- [ ] `summary.total_cost` aggregates all models
 
 ---
 
-### Step 8: Verify Auto-Refresh (Optional)
-
-**Action**:
-- Keep Dashboard open with Observability panel expanded
-- Generate more agent activity (send another chat message)
-- Wait 60 seconds for next polling cycle
-- Watch for values to update
-
-**Expected**:
-- [ ] Metrics update automatically without page refresh
-- [ ] "Last Updated" timestamp changes
-- [ ] New activity reflected in token/cost counts
-
-**Verify** (browser DevTools Network tab):
-- [ ] `/api/observability/metrics` called every 60 seconds
-- [ ] Response returns 200 with updated values
-
----
-
-### Step 9: Verify Agent OTel Environment Variables
+### Step 8: Verify Agent OTel Environment Variables
 
 **Action**: Check that running agents have OTel env vars injected
 
@@ -233,7 +207,7 @@ docker exec agent-YOUR_AGENT_NAME env | grep -E "(OTEL|CLAUDE_CODE_ENABLE)"
 
 ---
 
-### Step 10: Test Dark Mode Support
+### Step 9: Test Dark Mode Support
 
 **Action**:
 - Toggle dark mode (if available in UI, or via browser dev tools)
@@ -310,7 +284,7 @@ Phase 14 is **PASSED** when:
 **OTel not enabled**:
 - Check `.env` has `OTEL_ENABLED=1`
 - Restart backend: `docker-compose restart backend`
-- Re-check `/api/observability/status`
+- Re-check `GET /api/ops/costs`
 
 **Collector not running**:
 - Check docker-compose.yml includes otel-collector service
@@ -324,8 +298,7 @@ Phase 14 is **PASSED** when:
 
 **Dashboard not showing stats**:
 - Check browser console for errors
-- Verify observability store is loaded
-- Force refresh: `observabilityStore.fetchMetrics()`
+- Call `GET /api/ops/costs` directly to confirm the backend returns data
 
 **Yellow warning in header**:
 - Collector is configured but unreachable
@@ -338,8 +311,7 @@ Phase 14 is **PASSED** when:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/observability/status` | Quick status check (enabled, available) |
-| GET | `/api/observability/metrics` | Full metrics with breakdown |
+| GET | `/api/ops/costs` | Cost rollup (admin or `ops`-scope key): `enabled` / `available` status, summary totals, cost per model, tokens by type, productivity, daily-limit alerts. Replaces the removed `/api/observability/{metrics,status}` (#3434) |
 
 ---
 
@@ -356,7 +328,7 @@ After testing:
 - Feature Flow: `docs/memory/feature-flows/opentelemetry-integration.md`
 - Requirements: `requirements.md` section 10.8
 - Collector Config: `config/otel-collector.yaml`
-- Observability Store: `src/frontend/src/stores/observability.js`
+- Observability Store: `src/frontend/src/stores/observability.js` (removed in #3434 — it had no importer)
 - Observability Panel: `src/frontend/src/components/ObservabilityPanel.vue` (deleted in #2492 — the panel was unreferenced; observability data is verified via the API below)
 
 ---

@@ -932,63 +932,17 @@ def _parse_cron(self, cron_expression: str) -> Dict:
 **Implemented**: 2025-12-02
 **Updated**: 2026-01-11 - `related_execution_id` now a top-level field for structured SQL queries
 **Updated**: 2026-02-11 - Activity tracking moved to internal API for dedicated scheduler
+**Updated**: 2026-10-09 - Activity rows are created and closed in-process by `TaskExecutionService` on `execute-task`; internal activity endpoints removed (#3434)
 
-Schedule executions now create persistent activity records in the unified activity stream for cross-platform observability. The dedicated scheduler tracks activities via internal API endpoints.
+Schedule executions now create persistent activity records in the unified activity stream for cross-platform observability. Activity rows are written in-process by `TaskExecutionService` for each run the scheduler dispatches via `POST /api/internal/execute-task`.
 
 ### Activity Tracking Flow
 
-**Internal API Endpoints** (used by dedicated scheduler):
-- `POST /api/internal/activities/track` - Start tracking an activity
-- `POST /api/internal/activities/{id}/complete` - Mark activity as completed/failed
+The dedicated scheduler makes no activity-tracking calls of its own (the former `POST /api/internal/activities/track` and `/complete` endpoints had no callers and were removed in #3434):
 
-**Schedule Start** (dedicated scheduler calls internal API):
-```python
-# Dedicated scheduler makes HTTP call to backend
-response = await httpx.post(
-    f"{BACKEND_URL}/api/internal/activities/track",
-    json={
-        "agent_name": schedule.agent_name,
-        "activity_type": "schedule_start",
-        "user_id": schedule.owner_id,
-        "triggered_by": "schedule",  # or "manual"
-        "related_execution_id": execution.id,
-        "details": {
-            "schedule_id": schedule.id,
-            "schedule_name": schedule.name,
-            "cron_expression": schedule.cron_expression
-        }
-    }
-)
-activity_id = response.json()["activity_id"]
-```
-
-**Schedule Completion** (dedicated scheduler calls internal API):
-```python
-# Dedicated scheduler makes HTTP call to backend
-await httpx.post(
-    f"{BACKEND_URL}/api/internal/activities/{activity_id}/complete",
-    json={
-        "status": "completed",
-        "details": {
-            "context_used": task_response.metrics.context_used,
-            "context_max": task_response.metrics.context_max,
-            "cost_usd": task_response.metrics.cost_usd,
-            "tool_count": len(execution_log) if execution_log else 0
-        }
-    }
-)
-```
-
-**Schedule Failure** (dedicated scheduler calls internal API):
-```python
-await httpx.post(
-    f"{BACKEND_URL}/api/internal/activities/{activity_id}/complete",
-    json={
-        "status": "failed",
-        "error": error_msg
-    }
-)
-```
+1. The scheduler dispatches each run with `POST /api/internal/execute-task` (`X-Internal-Secret` auth), carrying `triggered_by="schedule"` (cron) or `"manual"` plus the `execution_id`.
+2. `TaskExecutionService.execute_task()` creates the activity row in-process via `activity_service.track_activity()` (`activity_type=chat_start`, `related_execution_id=execution_id`).
+3. The same service completes it in-process via `activity_service.complete_activity()` when the run reaches a terminal state.
 
 ### Database Records
 
@@ -996,7 +950,7 @@ Each schedule execution creates:
 1. **schedule_executions** record (existing): Full execution details, response, error, cost, tool_calls
    - ID format: `token_urlsafe(16)` - permanent, used for API and UI navigation
 2. **agent_activities** record (NEW): Unified activity stream with:
-   - `activity_type`: "schedule_start"
+   - `activity_type`: "chat_start" with `triggered_by` = "schedule" / "manual" (written by `TaskExecutionService`; historical rows may carry "schedule_start")
    - `related_execution_id`: Links to `schedule_executions.id` - enables structured SQL queries
    - `duration_ms`: Calculated on completion
    - Parent-child relationships with tool calls (future)
@@ -1036,9 +990,9 @@ Activity events broadcast in addition to existing schedule events:
 
 ### Query Examples
 
-**Get all schedule activities for an agent**:
+**Get recent schedule activities** (the per-agent `GET /api/agents/{name}/activities` was removed in #3434):
 ```bash
-curl "http://localhost:8000/api/agents/my-agent/activities?activity_type=schedule_start&limit=20"
+sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_activities WHERE agent_name='my-agent' AND triggered_by IN ('schedule','manual') ORDER BY started_at DESC LIMIT 20"
 ```
 
 **Get schedule activity with execution details**:

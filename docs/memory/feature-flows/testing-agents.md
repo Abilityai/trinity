@@ -149,7 +149,6 @@ tests/
   test_executions.py             # Execution history (25 tests)
   test_execution_termination.py  # Execution cancel (13 tests)
   test_execution_streaming.py    # SSE streaming (8 tests)
-  test_observability.py          # OTel/metrics (13 tests)
   test_telemetry.py              # Host telemetry (16 tests)
   test_ops.py                    # Fleet operations (41 tests)
   test_public_links.py           # Public agent sharing (15 tests)

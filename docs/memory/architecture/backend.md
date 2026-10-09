@@ -85,7 +85,6 @@
 - `operator_queue.py` - Operating Room queue (OPS-001)
 - `ops.py` - Operating Room sync routes; the fleet-restart handler moved to `services/fleet_ops_service.py` (#1028)
 - `logs.py` - Container log endpoints
-- `observability.py` - Observability data
 - `audit.py` - Platform audit log (SEC-001)
 
 *Public Access & Monetization:*
