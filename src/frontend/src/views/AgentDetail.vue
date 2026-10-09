@@ -419,6 +419,7 @@ import { useAgentTerminal } from '../composables/useAgentTerminal'
 import { useGitSync } from '../composables/useGitSync'
 import { useAgentSettings } from '../composables/useAgentSettings'
 import { useSessionActivity } from '../composables/useSessionActivity'
+import { useTabRoute } from '../composables/useTabRoute'
 
 // Setup
 const route = useRoute()
@@ -449,6 +450,21 @@ function resolveDeepLinkTab(requested) {
   const resolved = TAB_ALIASES[requested] || requested
   return ALL_TAB_IDS.includes(resolved) ? resolved : null
 }
+
+// #2900: the tab is in the URL. A change to `activeTab` (a tab click, or any
+// handler below that assigns it) pushes `?tab=`, so Back steps through tabs and
+// a reload keeps the one showing; a Back/Forward step on this page writes the
+// ref. `selectTab(…, { replace: true })` and `syncTabUrl()` are for the
+// normalising writes, which must not add a history entry. See the composable
+// for why this does not reopen #2130.
+const { selectTab, syncUrl: syncTabUrl } = useTabRoute({
+  activeTab,
+  route,
+  router,
+  routeName: 'AgentDetail',
+  defaultTab: 'overview',
+  resolveTab: resolveDeepLinkTab,
+})
 
 // What the deep link selected, so visibility can be reconciled once the agent
 // loads. Null once reconciled or once the user has moved.
@@ -482,9 +498,11 @@ let skipNextActivation = false
 // two hooks can't drift again.
 //
 function applyDeepLinkRouting() {
-  if (!route.query.tab) return
-  const resolvedTab = resolveDeepLinkTab(route.query.tab)
-  if (!resolvedTab) return
+  const resolvedTab = route.query.tab ? resolveDeepLinkTab(route.query.tab) : null
+  // #2900: no tab named (or one that names nothing). The view is KeepAlive-
+  // cached, so it may be showing a tab remembered from the last visit — make
+  // the URL say so, or a reload would land somewhere else.
+  if (!resolvedTab) { syncTabUrl(); return }
   // `brain` is the one id that NAVIGATES when selected (a watcher pushes
   // /agents/:name/brain). Applying it before the agent loads would bounce a
   // caller off the page and back when the capability turns out to be absent, so
@@ -511,7 +529,10 @@ function reconcileDeepLinkVisibility() {
     return
   }
   // Not visible to this viewer — fall back, but never over a later choice.
-  if (activeTab.value === requested) activeTab.value = 'overview'
+  // #2900: by `replace`, so Back does not return to a tab that is not there.
+  if (activeTab.value === requested) selectTab('overview', { replace: true })
+  // The deferred `brain` link never became the tab; stop the URL claiming it.
+  else syncTabUrl()
 }
 
 // ent#358: a `?tab=session` link (or any older session deep link) asked for the
@@ -1330,7 +1351,7 @@ watch(() => route.params.name, async (newName, oldName) => {
     nextTick(() => {
       const validTabIds = visibleTabs.value.map(t => t.id)
       if (!validTabIds.includes(activeTab.value)) {
-        activeTab.value = 'overview'
+        selectTab('overview', { replace: true })  // #2900: a correction, not a step
       }
     })
     startAllPolling()
@@ -1540,8 +1561,9 @@ const handleOverviewNavigate = (tabId) => {
 }
 
 const handleOpenTask = (executionId) => {
-  activeTab.value = 'tasks'
-  router.replace({ query: { ...route.query, execution: executionId } })
+  // #2900: one navigation for both keys — a tab write and a separate
+  // `execution` write would cancel each other.
+  selectTab('tasks', { query: { execution: executionId } })
 }
 
 // Handle item click from Info tab - switch to Tasks tab with prefilled message
@@ -1576,9 +1598,9 @@ const handlePlaybookRunWithInstructions = (prefillText) => {
   if (prefillText.startsWith('__NAVIGATE_TASKS__:')) {
     const executionId = prefillText.replace('__NAVIGATE_TASKS__:', '')
     // Navigate to Tasks tab with execution highlighted via query param
-    activeTab.value = 'tasks'
     // The TasksPanel will pick up the execution via the highlight-execution-id prop
-    router.replace({ query: { ...route.query, execution: executionId } })
+    // (#2900: tab and execution in one navigation, as in handleOpenTask).
+    selectTab('tasks', { query: { execution: executionId } })
     return
   }
 
