@@ -589,17 +589,16 @@ class TestGuardFailOpenArms:
 # ---------------------------------------------------------------------------
 
 class TestRoomsInFlightBoundary:
-    """``POST /api/rooms/{id}/messages`` — the one ``begin()`` caller whose
-    ``in_flight`` branch sits AFTER the generic ``replay`` return, so it can
-    never run (``shared_sessions/router.py:217-223``). Every other boundary
-    nests ``if in_flight`` inside ``if replay``."""
+    """``POST /api/rooms/{id}/messages`` — ``begin()`` reports an in-flight
+    claim as ``replay=True, in_flight=True``, so the ``in_flight`` check must
+    run BEFORE the generic ``replay`` return or it never runs (#3320). Every
+    other boundary nests ``if in_flight`` inside ``if replay``."""
 
-    def _drive(self, monkeypatch, decision):
+    def _drive(self, monkeypatch, decision, posted):
+        # ``posted`` is passed in so a test can read it after the handler raises.
         import asyncio
         import services.idempotency_service as real_idem
         import shared_sessions.router as rooms_router
-
-        posted = []
 
         async def _post(*a, **k):
             posted.append(a)
@@ -612,27 +611,32 @@ class TestRoomsInFlightBoundary:
             "room-1", RoomMessageCreate(content="hello"),
             idempotency_key="room-1:opt-1700000000000", current_user=object(),
         ))
-        return out, posted
+        return out
 
     def test_completed_replay_returns_snapshot_without_posting(self, monkeypatch):
         import services.idempotency_service as real_idem
         d = real_idem.IdempotencyDecision(enabled=True, replay=True, in_flight=False,
                                           scope="room:room-1", key="k", snapshot={"seq": 7})
-        out, posted = self._drive(monkeypatch, d)
+        posted = []
+        out = self._drive(monkeypatch, d, posted)
         assert out == {"seq": 7, "replayed": True} and posted == []
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "BUG: rooms post_message checks decision.replay before decision.in_flight, so an "
-        "in-flight duplicate gets 200 {'replayed': True} (no message) instead of the 409 — "
-        "#3320"))
     def test_in_flight_duplicate_is_409_not_a_silent_success(self, monkeypatch):
         from fastapi import HTTPException
         import services.idempotency_service as real_idem
         d = real_idem.IdempotencyDecision(enabled=True, replay=True, in_flight=True,
                                           scope="room:room-1", key="k")
+        posted = []
         with pytest.raises(HTTPException) as exc:
-            self._drive(monkeypatch, d)
+            self._drive(monkeypatch, d, posted)
         assert exc.value.status_code == 409
+        assert posted == []  # the duplicate dispatched nothing
+        # Same detail shape as /chat, fan-out and the portal (#3320).
+        assert exc.value.detail == {
+            "error": "request_in_progress",
+            "message": "A post with this Idempotency-Key is still being processed.",
+            "execution_id": None,
+        }
 
 
 # ---------------------------------------------------------------------------
