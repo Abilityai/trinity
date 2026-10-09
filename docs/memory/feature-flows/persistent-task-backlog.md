@@ -302,8 +302,7 @@ queued ──(drain)──▶ running ──(success)──▶ success
 
 ```python
 if not slot_acquired:
-    from services.backlog_service import get_backlog_service
-    backlog = get_backlog_service()
+    backlog = BacklogService()  # live: CapacityManager owns its instance (capacity_manager.py)
     enqueued = await backlog.enqueue(
         agent_name=name,
         execution_id=execution_id,
@@ -389,8 +388,8 @@ work on the next tick).
 
 ```python
 from services.slot_service import get_slot_service
-from services.backlog_service import get_backlog_service
-_backlog = get_backlog_service()
+from services.backlog_service import BacklogService
+_backlog = BacklogService()  # live: CapacityManager constructs and wires it
 get_slot_service().register_on_release(_backlog.on_slot_released)
 
 async def _backlog_maintenance_loop():

@@ -917,7 +917,7 @@ class TestConcurrentTransportDrops:
 
         # Pre-warm the pool so we can install a raising .request method on
         # the pooled client object.
-        pooled = _ac_http_pool._get_http_client(base_url)
+        pooled, _ = _ac_http_pool._acquire_client(base_url)
 
         async def _raise(*_a, **_kw):
             raise exc_factory()

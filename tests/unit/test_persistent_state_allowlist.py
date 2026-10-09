@@ -9,9 +9,9 @@ Verifies the allowlist primitive in services/git_service.py:
 - `materialize_persistent_state(agent_name, patterns)` — writes
   `.trinity/persistent-state.yaml` inside the agent container at creation
   time via `execute_command_in_container`.
-- `_persistent_state_for(agent_name)` — reads the on-disk YAML back,
-  falling back to the default list when the file is missing, empty, or
-  malformed.
+- `_read_trinity_yaml_list(...)` over the persistent-state file — reads the
+  on-disk YAML back, falling back to the default list when the file is
+  missing, empty, or malformed.
 
 These tests mock `execute_command_in_container` so they can run without
 Docker, a database, or a backend process. They also pin the observed
@@ -150,8 +150,17 @@ async def test_template_allowlist_overrides_default():
 
 
 # ---------------------------------------------------------------------------
-# _persistent_state_for
+# _read_trinity_yaml_list over the persistent-state file
 # ---------------------------------------------------------------------------
+
+
+async def _read_persistent_state(gs, agent_name):
+    return await gs._read_trinity_yaml_list(
+        agent_name,
+        path=gs._PERSISTENT_STATE_PATH,
+        key="persistent_state",
+        default=gs.DEFAULT_PERSISTENT_STATE,
+    )
 
 
 @pytest.mark.asyncio
@@ -162,7 +171,7 @@ async def test_reader_returns_on_disk_list():
     fake = _RecordingExec({"exit_code": 0, "output": on_disk_yaml})
 
     with patch.object(gs, "execute_command_in_container", fake):
-        result = await gs._persistent_state_for("agentC")
+        result = await _read_persistent_state(gs, "agentC")
 
     assert result == ["custom/**"]
     _, command = fake.calls[0]
@@ -176,7 +185,7 @@ async def test_reader_falls_back_to_default_when_file_missing():
     fake = _RecordingExec({"exit_code": 0, "output": ""})
 
     with patch.object(gs, "execute_command_in_container", fake):
-        result = await gs._persistent_state_for("agentD")
+        result = await _read_persistent_state(gs, "agentD")
 
     assert result == gs.DEFAULT_PERSISTENT_STATE
     # Must return a fresh list, not a reference to the module constant —
@@ -191,7 +200,7 @@ async def test_reader_falls_back_when_yaml_invalid():
     fake = _RecordingExec({"exit_code": 0, "output": "not: : valid: yaml:"})
 
     with patch.object(gs, "execute_command_in_container", fake):
-        result = await gs._persistent_state_for("agentE")
+        result = await _read_persistent_state(gs, "agentE")
 
     assert result == gs.DEFAULT_PERSISTENT_STATE
 
@@ -203,6 +212,6 @@ async def test_reader_falls_back_when_patterns_key_missing():
     fake = _RecordingExec({"exit_code": 0, "output": "other_key: value\n"})
 
     with patch.object(gs, "execute_command_in_container", fake):
-        result = await gs._persistent_state_for("agentF")
+        result = await _read_persistent_state(gs, "agentF")
 
     assert result == gs.DEFAULT_PERSISTENT_STATE

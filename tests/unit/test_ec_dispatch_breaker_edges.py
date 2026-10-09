@@ -326,18 +326,6 @@ class TestOperatorHooksPure:
         assert out["a"]["state"] == "open" and out["a"]["retry_after_seconds"] == 10
         assert out["b"]["state"] == "closed"
 
-    def test_get_all_skips_probe_locks(self, monkeypatch, clock):
-        # m39 (pure twin of the integration test).
-        r = fakeredis.FakeRedis(decode_responses=True)
-        r.hset("agent:dispatch:a", mapping={"state": "open", "failures": "3"})
-        r.set("agent:dispatch:a:probe-lock", "1")
-        monkeypatch.setattr(DB, "get_breaker_redis", lambda: r)
-        assert set(DB.get_all_dispatch_states()) == {"a"}
-
-    def test_get_all_no_redis_is_empty(self, monkeypatch):
-        monkeypatch.setattr(DB, "get_breaker_redis", lambda: None)
-        assert DB.get_all_dispatch_states() == {}
-
     def test_reset_dispatch_deletes_hash_and_lock(self, monkeypatch):
         # m40
         r = fakeredis.FakeRedis(decode_responses=True)

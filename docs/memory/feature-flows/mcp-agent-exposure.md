@@ -103,7 +103,6 @@ No new agent-server route — this is a backend + MCP-server feature only.
 - **`services/agent_service/mcp_tool_names.py`** (new) — **pure** (no Docker/DB imports), the single source of truth for the tool name:
   - `_slugify(name)` — lowercase, non-`[a-z0-9_]` → `_`, collapse runs, trim `_`.
   - `compute_tool_names(names)` — deterministic `{agent_name: chat_with_<slug>}` over the **sorted, de-duped full set**. On a base-slug collision (`my-agent` vs `my_agent`), every colliding name (and any empty-slug name) gets a stable `_<sha1(name)[:4]>` suffix.
-  - `compute_tool_name(name)` — single-agent convenience for the per-agent GET (the internal poll endpoint is authoritative for the final name).
   - `build_tool_description(name, template_label)` — container-read-free description from the agent's `trinity.template` Docker label (works for stopped agents; missing → name-only).
 - **`services/agent_service/helpers.py`** — `get_accessible_agents` surfaces `mcp_exposed` per agent.
 

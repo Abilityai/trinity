@@ -81,17 +81,6 @@ def compute_tool_names(names: Iterable[str]) -> Dict[str, str]:
     return result
 
 
-def compute_tool_name(name: str) -> str:
-    """Single-agent convenience — the tool name when ``name`` is the only agent.
-
-    Note: a name that collides with another exposed agent gets a hash suffix only
-    in the full-set computation (``compute_tool_names``). The per-agent GET/PUT use
-    ``resolve_tool_name`` (which folds in the live exposed set) so the UI never
-    shows a bare name that differs from the suffixed tool actually registered.
-    """
-    return compute_tool_names([name])[name]
-
-
 def resolve_tool_name(agent_name: str, exposed_names: Iterable[str]) -> str:
     """The tool name ``agent_name`` resolves to within the live exposed set (#846).
 

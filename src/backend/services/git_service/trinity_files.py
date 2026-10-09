@@ -168,23 +168,6 @@ async def materialize_persistent_state(
     )
 
 
-async def _persistent_state_for(agent_name: str) -> list[str]:
-    """Read the persistent-state allowlist for an agent.
-
-    Returns the on-disk list when `.trinity/persistent-state.yaml` is
-    present and valid; otherwise returns a fresh copy of
-    `DEFAULT_PERSISTENT_STATE`. Consumers of this helper (e.g. the future
-    reset-preserve-state operation from #384) must not mutate the default
-    constant, hence the defensive `list(...)` copies on every fallback.
-    """
-    return await _read_trinity_yaml_list(
-        agent_name,
-        path=_PERSISTENT_STATE_PATH,
-        key="persistent_state",
-        default=DEFAULT_PERSISTENT_STATE,
-    )
-
-
 def _is_safe_data_path(path: str) -> bool:
     """True if `path` is a shell-safe glob over the data root (#1169 L1)."""
     return bool(path) and _SAFE_DATA_PATH_RE.fullmatch(path) is not None
