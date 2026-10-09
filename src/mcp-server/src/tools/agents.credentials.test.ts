@@ -75,6 +75,7 @@ describe("#3435 credential tools: advertisement", () => {
   it("each description names who may call it, and stays under the 2,048 cap", () => {
     for (const t of TOOLS) {
       assert.match(byName[t].description, /agent-scoped keys? (?:can never|cannot)/i, `${t}: no caller class`);
+      assert.match(byName[t].description, /user-scoped or system-scoped key/i, `${t}: must name both admitted key scopes`);
       assert.ok(byName[t].description.length <= 2048, `${t}: ${byName[t].description.length} chars`);
     }
     assert.match(byName.get_credential_encryption_key.description, /administrator/i);

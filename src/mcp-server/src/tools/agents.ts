@@ -658,7 +658,7 @@ export function createAgentTools(
         "to the agent's workspace. This file can be committed to git for portable credential storage. " +
         "Requires CREDENTIAL_ENCRYPTION_KEY to be configured on the backend. " +
         "The agent must be running. " +
-        "WHO MAY CALL: the agent's owner or an admin, with a user-scoped key or a signed-in session; " +
+        "WHO MAY CALL: the agent's owner or an admin, with a user-scoped or system-scoped key, or a signed-in session; " +
         "agent-scoped keys can never call it (human-only), so agent sessions are not shown it. " +
         "A refusal returns {success:false, error, human_only|not_authorized}.",
       parameters: z.object({
@@ -692,7 +692,7 @@ export function createAgentTools(
         "This is useful after cloning an agent's git repo. " +
         "Requires CREDENTIAL_ENCRYPTION_KEY to be configured on the backend (the same key " +
         "that encrypted the file). The agent must be running. " +
-        "WHO MAY CALL: the agent's owner or an admin, with a user-scoped key or a signed-in session; " +
+        "WHO MAY CALL: the agent's owner or an admin, with a user-scoped or system-scoped key, or a signed-in session; " +
         "agent-scoped keys can never call it (human-only), so agent sessions are not shown it. " +
         "A refusal returns {success:false, error, human_only|not_authorized}.",
       parameters: z.object({
@@ -782,7 +782,7 @@ export function createAgentTools(
         "enabling portable agents that work both locally and on Trinity. " +
         "Returns the key as a hex string (64 chars for AES-256). " +
         "SECURITY: Store securely and never commit to git. " +
-        "WHO MAY CALL: an administrator only, with a user-scoped key or a signed-in session; " +
+        "WHO MAY CALL: an administrator only, with a user-scoped or system-scoped key, or a signed-in session; " +
         "agent-scoped keys can never call it (human-only), so agent sessions are not shown it. " +
         "A refusal returns {success:false, error, admin_only|human_only}.",
       parameters: z.object({}),
