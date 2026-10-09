@@ -4266,6 +4266,20 @@ class DatabaseManager:
             agent_name, metric, since_iso, until_iso, limit
         )
 
+    def metric_series_points_for_dims(
+        self,
+        agent_name: str,
+        metric: str,
+        dims,
+        absent_keys,
+        since_iso: str,
+        limit: int,
+    ):
+        """One dimension series' newest points since `since_iso` (#3293)."""
+        return self._metric_point_ops.series_points_for_dims(
+            agent_name, metric, dict(dims), list(absent_keys), since_iso, limit
+        )
+
     def count_metric_points_candidates(self, retention_days: int, limit: int) -> int:
         """Bounded count of points older than the window (#1644 guard)."""
         return self._metric_point_ops.count_metric_points_candidates(

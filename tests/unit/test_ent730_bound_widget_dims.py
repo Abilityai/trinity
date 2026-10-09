@@ -15,7 +15,8 @@ the bug returned under `last`.
 The fake store honours the SQL contract of `latest_metric_points` (per metric,
 newest-first by `ts` then `idempotency_key`, sliced to `per_metric_limit`);
 the ent#479 fake ignores the limit, which would make the 200-point window
-untestable. `test_the_fake_store_matches_the_real_store` pins that.
+untestable. `test_the_fake_store_matches_the_real_store` pins that, and the
+per-series read a `dims:` selector makes (#3293).
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ from services.metric_points_service import point_identity  # noqa: E402
 
 AGENT = "dims-agent"
 HOUR = 3600
+DAY_SECONDS = 24 * HOUR
 NOW = datetime(2026, 10, 6, 12, 0, 0, tzinfo=timezone.utc)
 
 NEW_CODES = {
@@ -140,6 +142,21 @@ class _Db:
 
     def metric_series_points(self, *a, **k):
         return []
+
+    def metric_series_points_for_dims(
+        self, name, metric, dims, absent_keys, since_iso, limit
+    ):
+        rows = [
+            p
+            for p in self.points
+            if p["metric"] == metric
+            and p["ts"] >= since_iso
+            and p["dims"]
+            and all(p["dims"].get(k) == v for k, v in dims.items())
+            and not any(k in p["dims"] for k in absent_keys)
+        ]
+        rows.sort(key=lambda p: (p["ts"], p["idempotency_key"]), reverse=True)
+        return [dict(r) for r in rows[:limit]]
 
     def calculate_widget_stats(self, values):
         nums = [v["v"] for v in values if isinstance(v.get("v"), (int, float))]
@@ -241,8 +258,7 @@ def test_T4_no_matching_series_refuses_by_name(store):
             {"channel": "linkedin"},
         ],
         "more": 0,
-        "window_points": mrs.LATEST_POINTS_PER_METRIC,
-        "series_cap": None,
+        "lookback_days": mrs.SELECTED_SERIES_LOOKBACK_HOURS // 24,
         "near": [],
     }
 
@@ -300,13 +316,14 @@ def test_T8_a_selected_sum_tile_draws_its_own_series_not_the_total(monkeypatch):
     assert google["history"]["values"] == [{"t": _ts(120), "v": 410.0}]
 
 
-@pytest.mark.parametrize("meta_points,google_seen", [(197, 3), (198, 2)])
-def test_T8_the_window_is_the_200_newest_points_of_the_metric(
+@pytest.mark.parametrize("meta_points,google_seen", [(197, 3), (198, 3)])
+def test_T8_a_selected_history_does_not_depend_on_the_other_series(
     monkeypatch, meta_points, google_seen
 ):
     """Three google points older than every meta point. With 200 points in
-    all, google draws all three; one more meta point pushes google's oldest
-    out of the read (the documented 200-point limit)."""
+    all, google draws all three; one more meta point used to push google's
+    oldest out of the shared 200-point read. The selected series is read on
+    its own now (#3293), so it still draws all three."""
     google = [
         _point(400.0 + i, 20 * HOUR + i * HOUR, {"channel": "google"}) for i in range(3)
     ]
@@ -728,15 +745,29 @@ def test_parse_dims_selector_is_the_one_answer(store):
 # ---------------------------------------------------------------------------
 
 
-def test_T15_a_series_outside_the_50_listed_is_refused_with_the_cap(monkeypatch):
+def test_T15_a_series_outside_the_50_listed_still_binds(monkeypatch):
+    """#3293: the selected series is read on its own, so the 50-series
+    listing no longer decides whether a tile can name it."""
     points = [
         _point(float(i), 60 + i * 10, {"channel": f"c{i:02d}"}) for i in range(55)
     ]
     monkeypatch.setattr(database_mod, "db", _Db([_definition()], points))
     (widget,) = _bind(_w({"channel": "c54"}))  # the oldest: 55th of 55
+    assert widget["bound"] is True
+    assert widget["value"] == 54.0
+    assert widget["bound_series"]["dims"] == {"channel": "c54"}
+
+
+def test_T15_a_refusal_beside_many_series_lists_five_and_counts_the_rest(
+    monkeypatch,
+):
+    points = [
+        _point(float(i), 60 + i * 10, {"channel": f"c{i:02d}"}) for i in range(55)
+    ]
+    monkeypatch.setattr(database_mod, "db", _Db([_definition()], points))
+    (widget,) = _bind(_w({"channel": "nope"}))
     assert widget["binding_error_code"] == "metric_series_not_found"
     detail = widget["binding_detail"]
-    assert detail["series_cap"] == mrs.MAX_SERIES_PER_METRIC
     assert len(detail["recent_series"]) == 5
     assert detail["more"] == 50
 
@@ -805,11 +836,24 @@ def _crowded_out():
     return meta + google
 
 
-def test_T18_a_series_crowded_out_of_the_window_refuses_and_says_so(monkeypatch):
+def test_T18_a_series_crowded_out_of_the_shared_read_still_binds(monkeypatch):
+    """#3293 (was: refused, and said the 200-point window was why)."""
     monkeypatch.setattr(database_mod, "db", _Db([_definition()], _crowded_out()))
     (widget,) = _bind(_w({"channel": "google"}))
+    assert widget["bound"] is True
+    assert widget["value"] == 410.0
+    assert widget["last_point_at"] == _ts(20 * HOUR)
+
+
+def test_T18_a_refusal_states_its_lookback_and_never_says_does_not_exist(
+    monkeypatch,
+):
+    monkeypatch.setattr(database_mod, "db", _Db([_definition()], _crowded_out()))
+    (widget,) = _bind(_w({"channel": "tiktok"}))
     assert widget["binding_error_code"] == "metric_series_not_found"
-    assert widget["binding_detail"]["window_points"] == (mrs.LATEST_POINTS_PER_METRIC)
+    assert widget["binding_detail"]["lookback_days"] == (
+        mrs.SELECTED_SERIES_LOOKBACK_HOURS // 24
+    )
     assert "does not exist" not in widget["binding_error"]
 
 
@@ -829,6 +873,9 @@ class _RealPoints:
     def metric_series_points(self, *a, **k):
         return []
 
+    def metric_series_points_for_dims(self, *a, **k):
+        return self._real.metric_series_points_for_dims(*a, **k)
+
     def calculate_widget_stats(self, values):
         return None
 
@@ -844,14 +891,15 @@ def test_T18_against_the_real_store(db_backend, monkeypatch):
     _seed_real(real, _crowded_out())
     monkeypatch.setattr(database_mod, "db", _RealPoints(real, [_definition()]))
     (widget,) = _bind(_w({"channel": "google"}))
-    assert widget["binding_error_code"] == "metric_series_not_found"
-    assert widget["binding_detail"]["window_points"] == (mrs.LATEST_POINTS_PER_METRIC)
+    assert widget["bound"] is True
+    assert widget["value"] == 410.0
 
 
 def test_the_fake_store_matches_the_real_store(db_backend):
     """The fake's `latest_metric_points` is what T8's window variant and T18
     rest on, so pin it to the real SQL: same rows, same order, same slice,
-    including a `ts` tie broken by `idempotency_key`."""
+    including a `ts` tie broken by `idempotency_key`. The per-series read
+    (#3293) is pinned the same way."""
     real = database_mod.db
     tie = _ts(500)
     points = _crowded_out()[:20] + [
@@ -865,6 +913,13 @@ def test_the_fake_store_matches_the_real_store(db_backend):
     for limit in (5, 21, 200):
         got = real.latest_metric_points(AGENT, ["ad_spend"], limit)
         want = fake.latest_metric_points(AGENT, ["ad_spend"], limit)
+        assert [r["idempotency_key"] for r in got] == [
+            r["idempotency_key"] for r in want
+        ]
+    for dims in ({"channel": "meta"}, {"channel": "b"}, {"channel": "nope"}):
+        args = (AGENT, "ad_spend", dims, [], _ts(DAY_SECONDS), 7)
+        got = real.metric_series_points_for_dims(*args)
+        want = fake.metric_series_points_for_dims(*args)
         assert [r["idempotency_key"] for r in got] == [
             r["idempotency_key"] for r in want
         ]

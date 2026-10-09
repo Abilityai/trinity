@@ -84,7 +84,8 @@ _WINDOW_HOURS: Dict[str, int] = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30,
                                  "90d": 24 * 90}
 
 #: How deep the latest-per-metric seek goes. A dimension whose series has not
-#: reported inside this many points is treated as gone (documented in §49).
+#: reported inside this many points is treated as gone by the FOLD (documented
+#: in §49); a `dims:` selector reads its one series on its own (#3293).
 LATEST_POINTS_PER_METRIC = 200
 
 #: Buckets in the default (all-metrics) read. A fixed count keeps the payload
@@ -102,6 +103,13 @@ MAX_SERIES_PER_METRIC = 50
 _AUTO_MIN_HOURS = 24
 _AUTO_MAX_HOURS = 24 * 90
 _AUTO_CADENCE_MULTIPLE = 12
+
+#: How far back a `dims:` selector looks for its series' newest point when the
+#: series has none inside the tile's window (#3293). The widest window the read
+#: serves: a bound on the series' OWN silence, never on how many points the
+#: metric's other series recorded, and what keeps a selector that matches
+#: nothing from walking the metric's whole retained history on every poll.
+SELECTED_SERIES_LOOKBACK_HOURS = _AUTO_MAX_HOURS
 
 STALE_RULE = "2x cadence"
 
@@ -1070,8 +1078,50 @@ def _fold_source(entry: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _selected_series_rows(
+    entry: Dict[str, Any],
+    clean: Dict[str, str],
+    *,
+    agent_name: str,
+    window: Dict[str, Any],
+    now: datetime,
+    db: Any,
+) -> List[Dict[str, Any]]:
+    """The selected series' own newest rows, newest first (#3293).
+
+    Read for this series alone, so it does not matter how many points the
+    metric's other series recorded since. First the tile's window (latest and
+    history in one read); only when that is empty, the series' single newest
+    point back to `SELECTED_SERIES_LOOKBACK_HOURS`, so a series that last
+    reported before the window still shows its number, stale.
+    """
+    name = entry.get("name")
+    key = canonical_dims(clean)
+    absent = [d for d in entry.get("dimensions") or [] if d not in clean]
+
+    def read(since: str, limit: int) -> List[Dict[str, Any]]:
+        rows = db.metric_series_points_for_dims(
+            agent_name, name, clean, absent, since, limit)
+        # The store filters per key; identity is `canonical_dims`.
+        return [r for r in rows if canonical_dims(_row_dims(r)) == key]
+
+    rows = read(window["since"], LATEST_POINTS_PER_METRIC)
+    if rows:
+        return rows
+    floor = to_utc_iso(now - timedelta(hours=SELECTED_SERIES_LOOKBACK_HOURS))
+    if floor < window["since"]:
+        rows = read(floor, 1)
+    return rows
+
+
 def _select_series(
-    entry: Dict[str, Any], raw: Any
+    entry: Dict[str, Any],
+    raw: Any,
+    *,
+    agent_name: str,
+    window: Dict[str, Any],
+    now: datetime,
+    db: Any,
 ) -> Tuple[Optional[Dict[str, Any]],
            Optional[Tuple[str, str, Optional[Dict[str, Any]]]]]:
     """`(source, None)` or `(None, (code, message, binding_detail))`.
@@ -1080,6 +1130,11 @@ def _select_series(
     matching series OR a named refusal. No branch with a non-empty selector
     reaches the fold, so a failed selector can never show the total under a
     per-channel label (the ent#730 harm).
+
+    The selected series is read on its own (`_selected_series_rows`), not
+    picked out of the metric's shared read: that read is the 200 newest points
+    across ALL series, so a series reporting rarely beside a busy one is not
+    in it (#3293). The fold keeps reading the shared read, untouched.
     """
     name = entry.get("name")
     clean, error = parse_dims_selector(raw, entry.get("dimensions") or [])
@@ -1088,6 +1143,43 @@ def _select_series(
     if clean is None:
         return (_fold_source(entry), None)
 
+    selected = {
+        "basis": "selected",
+        "aggregation": str(entry.get("aggregation") or "last").lower(),
+        "series_count": entry.get("series_count"),
+        "dimensions": list(entry.get("dimensions") or []),
+    }
+    rows: List[Dict[str, Any]] = []
+    # No series at all means no points at all: nothing to look up.
+    if entry.get("series_count"):
+        try:
+            rows = _selected_series_rows(
+                entry, clean, agent_name=agent_name, window=window, now=now,
+                db=db)
+        except Exception as exc:  # noqa: BLE001 — one tile, never the dashboard
+            # This runs per widget, outside the bind's store `try`.
+            logger.warning("[Metrics] Series lookup failed for %s/%s: %s",
+                           agent_name, name, exc)
+            return (None, ("metric_store_unavailable",
+                           "metric store unavailable", None))
+    if rows:
+        newest = rows[0]
+        fresh = freshness(entry.get("cadence_seconds"), newest["ts"], now)
+        points = [{"ts": r["ts"], "value": _row_value(r)}
+                  for r in reversed(rows)]  # oldest-first for the chart
+        return ({
+            "has_value": True,
+            "value": _row_value(newest),
+            "last_point_at": newest["ts"],
+            "stale": fresh["stale"],
+            "freshness": fresh["freshness"],
+            "buckets": _bucket(points, window, entry.get("aggregation")),
+            "bound_series": {**selected, "dims": _row_dims(newest)},
+            "clear_author_overrides": True,
+        }, None)
+
+    # Not found on its own: a series silent for longer than the lookback can
+    # still sit in the shared read of a slow metric, and binds as it always did.
     key = canonical_dims(clean)
     listed = entry.get("latest_by_series") or []
     row = next((r for r in listed if canonical_dims(r.get("dims")) == key),
@@ -1097,9 +1189,9 @@ def _select_series(
          if canonical_dims(s.get("dims")) == key), None)
     if row is None or series_row is None:
         # Facts, not prose: the browser writes the second line, so the copy can
-        # change without an API change. Never "does not exist": the read is
-        # bounded (200 newest points, 50 series), so all it can say is that no
-        # RECENT point matched.
+        # change without an API change. Never "does not exist": the lookup is
+        # bounded (`lookback_days`), so all it can say is that no RECENT point
+        # matched.
         recent = [dict(r.get("dims") or {})
                   for r in listed[:_RECENT_SERIES_LISTED]]
         series_count = entry.get("series_count") or 0
@@ -1110,9 +1202,7 @@ def _select_series(
             "selector": clean,
             "recent_series": recent,
             "more": max(series_count - len(recent), 0),
-            "window_points": LATEST_POINTS_PER_METRIC,
-            "series_cap": (MAX_SERIES_PER_METRIC
-                           if series_count > MAX_SERIES_PER_METRIC else None),
+            "lookback_days": SELECTED_SERIES_LOOKBACK_HOURS // 24,
             "near": near[:_RECENT_SERIES_LISTED],
         }
         return (None, ("metric_series_not_found",
@@ -1125,13 +1215,7 @@ def _select_series(
         "stale": row.get("stale"),
         "freshness": row.get("freshness"),
         "buckets": list(series_row.get("buckets") or []),
-        "bound_series": {
-            "basis": "selected",
-            "aggregation": str(entry.get("aggregation") or "last").lower(),
-            "series_count": entry.get("series_count"),
-            "dims": row.get("dims"),
-            "dimensions": list(entry.get("dimensions") or []),
-        },
+        "bound_series": {**selected, "dims": row.get("dims")},
         "clear_author_overrides": True,
     }, None)
 
@@ -1277,7 +1361,9 @@ def bind_dashboard_widgets(
             widget.pop("value", None)
             widget.pop("history", None)
             continue
-        source, refusal = _select_series(entry, widget.get("dims"))
+        source, refusal = _select_series(
+            entry, widget.get("dims"), agent_name=agent_name,
+            window=payload["window"], now=now, db=db)
         if refusal is not None:
             _refuse_widget(widget, *refusal)
             continue

@@ -312,7 +312,9 @@ export function boundSeriesNote(widget = {}) {
  * The second line of a `metric_series_not_found` refusal, from the backend's
  * `binding_detail` facts — or `null` without them. Deterministic hints only:
  * a partial selector's real series, a casing mismatch, "no points yet", and
- * otherwise the recent values and the read window. No fuzzy matching.
+ * otherwise the recent values and how far back the series was looked for
+ * (it is read on its own, so other series cannot crowd it out, #3293). No
+ * fuzzy matching.
  */
 export function refusalHint(widget = {}) {
   const detail = widget.binding_detail
@@ -342,11 +344,8 @@ export function refusalHint(widget = {}) {
   const rest = recent.length - shown.length + (detail.more || 0)
   const list = `${shown.join(single ? ', ' : '; ')}${rest > 0 ? `, +${rest}` : ''}`
   const lead = `Check the selector or confirm this ${noun} reports. Recent ${noun}: ${list}`
-  if (detail.series_cap) {
-    return `${lead}. Only the ${detail.series_cap} newest series are read, so this one may be outside them.`
-  }
-  return `${lead} (among the ${detail.window_points} newest points; a ${noun} that reports rarely `
-    + 'can fall outside them).'
+  if (!detail.lookback_days) return `${lead}.`
+  return `${lead}. This ${noun} has no point in the last ${detail.lookback_days} days.`
 }
 
 const VERDICTS = {
