@@ -375,7 +375,11 @@ def _reject_embedded_credentials_stub(url: str) -> None:
     """
     from urllib.parse import urlparse
 
-    parsed = urlparse(url if "://" in url else f"https://{url}")
+    # Same `had_authority` rule as the real function (#3323): a protocol-relative
+    # `//tok@host` must not get an assumed scheme, or its token parses as a path.
+    text = url.strip()
+    had_authority = "://" in text or text.startswith("//")
+    parsed = urlparse(text if had_authority else f"https://{text}")
     if parsed.username or parsed.password:
         raise ValueError("Repository URL must not embed a token or password.")
 
