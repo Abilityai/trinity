@@ -82,11 +82,13 @@ DEFAULT_MAX_BYTES = 256 * 1024
 # alias were written out — exactly the quantity that explodes.
 DEFAULT_MAX_EXPANDED_NODES = 100_000
 
-# Bounds NESTING DEPTH (#3324). PyYAML's composer recurses ~3 Python frames per
-# level, so 6 KB of `[` (~330 levels) exhausted the default 1000-frame stack
-# well under the byte cap and escaped as a bare RecursionError. The deepest
-# document Trinity actually loads is ~9 levels (`dashboard.yaml`); 64 is ~6x
-# that while leaving ~800 frames for the caller's own stack. A level is one
+# Bounds NESTING DEPTH (#3324). PyYAML's composer recurses per level, so 6 KB
+# of `[` (~330 levels) exhausted the default 1000-frame stack well under the
+# byte cap and escaped as a bare RecursionError. With the `compose_node`
+# override below it is 4 Python frames per level (measured, PyYAML 6.0.3):
+# ~265 frames at 64, leaving ~725 of the default 1000 for the caller's own
+# stack. The deepest document Trinity actually loads is ~9 levels
+# (`dashboard.yaml`); 64 is ~6x that. A level is one
 # nested mapping or sequence; the scalar leaf inside the deepest is not one.
 DEFAULT_MAX_DEPTH = 64
 
