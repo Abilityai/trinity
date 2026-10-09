@@ -88,7 +88,7 @@ class TestGate:
 
     @pytest.mark.parametrize("user,whitelisted,expected", [
         (None, False, True),                     # outsider keeps codes
-        ({"username": "m@x.com"}, False, False),  # platform user refused
+        ({"username": "m@example.com"}, False, False),  # platform user refused
         (None, True, False),                     # whitelisted, no account yet: refused
     ])
     def test_allowed_for_splits_members_from_outsiders(self, policy, user, whitelisted, expected):
@@ -98,14 +98,14 @@ class TestGate:
         db.get_user_by_email.return_value = user
         db.is_email_whitelisted.return_value = whitelisted
         with patch("database.db", db):
-            assert login_policy_gate.email_code_allowed_for("M@x.com ") is expected
+            assert login_policy_gate.email_code_allowed_for("M@example.com ") is expected
 
     def test_allowed_for_skips_lookup_when_policy_allows(self, policy):
         from services import login_policy_gate
         policy(allowed=True)
         db = MagicMock()
         with patch("database.db", db):
-            assert login_policy_gate.email_code_allowed_for("m@x.com") is True
+            assert login_policy_gate.email_code_allowed_for("m@example.com") is True
         db.get_user_by_email.assert_not_called()
 
     def test_allowed_for_lookup_error_fails_open(self, policy):
@@ -114,7 +114,7 @@ class TestGate:
         db = MagicMock()
         db.get_user_by_email.side_effect = RuntimeError("db down")
         with patch("database.db", db):
-            assert login_policy_gate.email_code_allowed_for("m@x.com") is True
+            assert login_policy_gate.email_code_allowed_for("m@example.com") is True
 
 
 # ------------------------------------------------------------- web login

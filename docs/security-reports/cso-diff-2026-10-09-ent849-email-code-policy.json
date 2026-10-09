@@ -34,7 +34,7 @@
   "out_of_scope_preexisting": ["POST /api/access/request reports already_registered, revealing whitelist membership when self-signup is enabled; unrelated to this policy."],
   "checks": {
     "secrets_in_diff": "none (prefix grep over added lines; fixtures use example.com / x.com)",
-    "enterprise_docs_guard": "new seam file added to SEAM_FILES; no pattern hit",
+    "docs_disclosure_guard": "new seam file added to SEAM_FILES; no pattern hit",
     "independent_verifier": "fresh-context adversarial agent; findings 1-2 came from it and were reproduced",
     "mutation": "each fix reverted from a scratch copy: its test went red; restored byte-identical"
   },
