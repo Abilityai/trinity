@@ -65,7 +65,7 @@
           Keep email-code sign-in available for users
           <span class="block text-xs">
             Unchecked, with at least one provider enabled: users sign in with SSO only. Emailed
-            codes stop working on the login page, Workspace, public links, Telegram, WhatsApp and MCP sign-in.
+            codes stop working on the login page, Workspace, public links, Telegram, WhatsApp, Slack and MCP sign-in.
             People with no account who use a shared agent keep email codes. Admin password login
             always stays available.
           </span>

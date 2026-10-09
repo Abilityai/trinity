@@ -9,7 +9,8 @@ Surfaces covered:
 * web login        ``POST /api/auth/email/request`` + ``/verify``  → 403 for everyone
 * MCP inline auth  ``mcp_auth_service``                            → no code, no redeem
 * Workspace guest  ``client_portal.service.portal_signin_*``       → refused for members
-* Telegram/WhatsApp ``/login``                                     → refused for members
+* Telegram/WhatsApp ``/login``, Slack ``require_email``            → refused for members
+* public-link email verification ``/api/public/verify/*``          → refused for members
 * ``POST /api/token`` (admin break-glass) never consults the gate.
 
 "Member" = a platform user or a whitelisted address. Outsiders (shared-agent
@@ -351,6 +352,83 @@ class TestChannels:
         assert member.replace("m@example.com", "X") == outsider.replace("o@example.com", "X")
 
 
+# ---------------------------------------------------------- Slack require_email
+
+class TestSlackRequireEmail:
+    def _setup(self, pending):
+        import adapters.slack_adapter as mod
+        db = MagicMock()
+        db.get_slack_workspace_bot_token.return_value = "xoxb-test"
+        db.get_slack_connection_by_team.return_value = {"require_email": True, "link_id": "L1"}
+        db.get_slack_user_verification.return_value = None
+        db.get_slack_pending_verification.return_value = pending
+        db.get_user_by_email.side_effect = lambda e: {"username": e} if e.startswith("m@") else None
+        db.is_email_whitelisted.return_value = False
+        return mod, db
+
+    def _msg(self, text):
+        from adapters.base import NormalizedMessage
+        return NormalizedMessage(
+            sender_id="U1", text=text, channel_id="D1", thread_id=None, timestamp="0",
+            files=[], metadata={"team_id": "T1"},
+        )
+
+    def test_email_step_is_uniform_while_policy_refuses(self, policy):
+        mod, db = self._setup({"state": "awaiting_email"})
+        policy(allowed=False)
+        sent, emailed = [], []
+
+        async def _send_message(token, channel, text, *a, **k):
+            sent.append(text)
+
+        async def _send_code(email, code, *a, **k):
+            emailed.append(email)
+            return True
+
+        async def _both():
+            adapter = mod.SlackAdapter()
+            await adapter.handle_verification(self._msg("m@example.com"))
+            await adapter.handle_verification(self._msg("o@example.com"))
+            inline = len(emailed)
+            await asyncio.gather(*list(mod._verification_code_tasks))
+            return inline
+
+        with patch.object(mod, "db", db), patch("database.db", db), \
+             patch.object(mod.slack_service, "send_message", _send_message), \
+             patch.object(mod.email_service, "send_verification_code", _send_code):
+            inline = _run(_both())
+        assert inline == 0, "the reply must not wait on the mint or the send"
+        assert emailed == ["o@example.com"]
+        assert sent[0].replace("m@example.com", "X") == sent[1].replace("o@example.com", "X")
+
+    def test_code_refused_for_member_like_a_wrong_code(self, policy):
+        mod, db = self._setup({"state": "awaiting_code", "email": "m@example.com", "code": "123456"})
+        policy(allowed=False)
+        sent = []
+
+        async def _send_message(token, channel, text, *a, **k):
+            sent.append(text)
+
+        with patch.object(mod, "db", db), patch("database.db", db), \
+             patch.object(mod.slack_service, "send_message", _send_message):
+            ok = _run(mod.SlackAdapter().handle_verification(self._msg("123456")))
+        assert ok is False
+        assert "doesn't match" in sent[0]
+        db.create_slack_user_verification.assert_not_called()
+
+    def test_code_admits_outsider(self, policy):
+        mod, db = self._setup({"state": "awaiting_code", "email": "o@example.com", "code": "123456"})
+        policy(allowed=False)
+
+        async def _send_message(*a, **k):
+            return None
+
+        with patch.object(mod, "db", db), patch("database.db", db), \
+             patch.object(mod.slack_service, "send_message", _send_message):
+            _run(mod.SlackAdapter().handle_verification(self._msg("123456")))
+        db.create_slack_user_verification.assert_called_once()
+
+
 # ------------------------------------------------------- public-link verification
 
 class _PubReq:
@@ -400,6 +478,37 @@ class TestPublicLink:
         assert inline == 0
         assert [c.kwargs["email"] for c in db.create_verification.call_args_list] == ["o@example.com"]
 
+    def test_request_rate_limit_is_uniform_while_policy_refuses(self, policy, public, monkeypatch):
+        """The per-email row count sees only addresses that got a code; the
+        429 must still land on the same request for member and outsider."""
+        from fastapi import HTTPException
+        from db_models import VerificationRequest
+        from services import rate_limiter
+        rp, db = public
+        policy(allowed=False)
+        monkeypatch.setattr(rate_limiter, "_get_redis", lambda: None)
+        rate_limiter.clear_inprocess()
+        db.count_recent_verification_requests.side_effect = lambda e, minutes=10: sum(
+            1 for c in db.create_verification.call_args_list if c.kwargs["email"] == e)
+
+        async def _statuses(email):
+            out = []
+            for _ in range(rp.MAX_VERIFICATION_REQUESTS_PER_EMAIL + 1):
+                try:
+                    await rp.request_verification_code(VerificationRequest(token="t", email=email), _PubReq())
+                    out.append(200)
+                except HTTPException as e:
+                    out.append((e.status_code, e.detail))
+                await asyncio.gather(*list(rp._verification_tasks))
+            return out
+
+        with patch("database.db", db):
+            member = _run(_statuses("m@example.com"))
+            outsider = _run(_statuses("o@example.com"))
+        rate_limiter.clear_inprocess()
+        assert member == outsider
+        assert member[-1][0] == 429
+
     def test_confirm_refuses_member_like_a_wrong_code(self, policy, public):
         from db_models import VerificationConfirm
         rp, db = public
@@ -423,16 +532,23 @@ class TestPublicLink:
 
 # ------------------------------------------------------------- caller guard
 
-_CODE_CALLS = {"create_login_code", "verify_login_code", "create_verification", "verify_code"}
+_CODE_CALLS = {"create_login_code", "verify_login_code", "create_verification", "verify_code",
+               "send_verification_code"}
 _GATE_CALLS = {"email_code_allowed", "email_code_allowed_for"}
 
-# Functions that mint/redeem an emailed code but sign nobody in, each with why.
+# Functions that mint, redeem or send an emailed code without asking the gate, each with why.
 _EXEMPT = {
     # Binds an email to an ALREADY signed-in user; purpose-scoped code.
     ("routers/users.py", "request_email_bind_code"),
     ("routers/users.py", "update_my_email"),
     # Thin router over mcp_auth_service, whose functions hold the gate.
     ("routers/mcp_auth.py", "verify_inline_login"),
+    # Deliver a code the enclosing gated function already minted.
+    ("routers/auth.py", "_dispatch_code"),
+    ("services/mcp_auth_service.py", "_dispatch_code_email"),
+    # Sends what service.portal_signin_request returns; that function holds the gate.
+    ("client_portal/router.py", "portal_auth_request"),
+    ("client_portal/router.py", "_issue_and_send"),
 }
 
 
@@ -460,6 +576,6 @@ def test_every_login_code_caller_asks_the_gate():
     # The scan is not blind: every known surface is found.
     for expected in ("routers/auth.py", "client_portal/service.py", "routers/public.py",
                      "adapters/telegram_adapter.py", "adapters/whatsapp_adapter.py",
-                     "services/mcp_auth_service.py"):
+                     "adapters/slack_adapter.py", "services/mcp_auth_service.py"):
         assert expected in seen, f"guard scan missed {expected}"
     assert not offenders, f"emailed-code sign-in without login_policy_gate: {offenders}"

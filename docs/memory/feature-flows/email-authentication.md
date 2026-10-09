@@ -672,10 +672,12 @@ SSO provider list is known. `POST /token` never asks the gate.
 
 The same gate covers the other email-code sign-in surfaces: MCP inline auth
 (no code minted, redeem refused), Workspace guest sign-in, Telegram/WhatsApp
-`/login` and public-link email verification (refused for platform users and
+`/login`, the Slack `require_email` check and public-link email verification (refused for platform users and
 whitelisted addresses only; outsiders keep codes; refusals read like a normal
 send or a wrong code, and while codes are refused every request step sends in a
-detached task so timing does not reveal membership). A stale login page that
+detached task so timing does not reveal membership; the public-link request
+step also counts every request per address, so its 429 lands on the same
+request for both). A stale login page that
 gets `email_code_disabled` re-reads `/api/auth/mode` and says to sign in with
 SSO; the CLI prints the same next step.
 

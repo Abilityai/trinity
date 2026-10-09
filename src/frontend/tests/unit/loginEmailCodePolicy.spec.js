@@ -13,7 +13,10 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import axios from 'axios'
 
-vi.mock('vue-router', () => ({ useRouter: () => ({ push: vi.fn() }) }))
+vi.mock('vue-router', () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRoute: () => ({ query: {}, path: '/login' }),
+}))
 
 import Login from '../../src/views/Login.vue'
 import { useAuthStore } from '../../src/stores/auth'

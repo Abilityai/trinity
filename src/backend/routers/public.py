@@ -27,7 +27,7 @@ from database import (
 from dependencies import get_current_user, get_optional_user, assert_owns
 from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
-from services import canvas_share_service, login_policy_gate
+from services import canvas_share_service, login_policy_gate, rate_limiter
 from services.agent_auth import agent_httpx_client
 from services.chat_execution_service import terminate_execution as _terminate_execution
 from services.chat_signals import ChatDispatchError
@@ -488,6 +488,16 @@ async def request_verification_code(
     # the same background path: members of the organisation get no code, and
     # neither the response nor its timing tells a member from an outsider.
     if not login_policy_gate.email_code_allowed():
+        # The row count above sees only addresses that were sent a code, so
+        # count every request here too, or the 429 would tell them apart.
+        if not rate_limiter.check(
+            f"public_verify_req_email:{verification.email.lower()}",
+            MAX_VERIFICATION_REQUESTS_PER_EMAIL, 10 * 60,
+        ).allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many verification requests. Please wait 10 minutes."
+            )
         task = asyncio.create_task(_send_verification_if_allowed(
             link["id"], verification.email, link["agent_name"]))
         _verification_tasks.add(task)

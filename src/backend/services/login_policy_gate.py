@@ -15,17 +15,17 @@ Two questions, because the sign-in surfaces serve two audiences:
   Those paths create or resolve a platform account, so the policy applies to
   every address.
 * :func:`email_code_allowed_for` — surfaces that also serve outsiders
-  (Workspace guest sign-in, Telegram / WhatsApp identity binding, public-link
-  email verification). People with
+  (Workspace guest sign-in, Telegram / WhatsApp identity binding, the Slack
+  ``require_email`` check, public-link email verification). People with
   no platform account and no whitelist entry are not in the organisation's
   identity provider and keep email-code sign-in; platform users are refused.
 
 ``/token`` (admin password) never consults this gate: it is the break-glass
 path when the identity provider is down or misconfigured.
 
-Every function that mints or redeems an emailed code (``create_login_code``,
-``verify_login_code``, ``create_verification``, ``verify_code``) must ask this
-gate. ``tests/unit/test_ent849_email_code_policy.py`` fails the build when a new
+Every function that mints, redeems or sends an emailed code
+(``create_login_code``, ``verify_login_code``, ``create_verification``,
+``verify_code``, ``send_verification_code``) must ask this gate. ``tests/unit/test_ent849_email_code_policy.py`` fails the build when a new
 one does not. The codes share one table, so the
 verify step is the real control; the request step only stops the email.
 """
