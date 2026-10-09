@@ -192,7 +192,6 @@ Slack sessions use the existing `public_chat_sessions` table with:
 
 | Method | Line | Description |
 |--------|------|-------------|
-| `verify_slack_signature()` | 52-86 | HMAC-SHA256 signature verification |
 | `get_oauth_url()` | 92-106 | Generate OAuth URL with scopes |
 | `exchange_oauth_code()` | 108-146 | Exchange code for access token |
 | `encode_oauth_state()` | 148-170 | Create signed state token |
@@ -620,7 +619,6 @@ from services.settings_service import (
 ```
 
 **Usage in methods**:
-- `verify_slack_signature()` line 65: `signing_secret = get_slack_signing_secret()`
 - `get_oauth_url()` line 103: `"client_id": get_slack_client_id()`
 - `exchange_oauth_code()` lines 127-128: Uses both `get_slack_client_id()` and `get_slack_client_secret()`
 

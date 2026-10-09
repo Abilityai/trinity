@@ -48,16 +48,6 @@ class GitHubError(Exception):
     pass
 
 
-class GitHubAuthError(GitHubError):
-    """GitHub authentication failed."""
-    pass
-
-
-class GitHubPermissionError(GitHubError):
-    """Insufficient permissions for operation."""
-    pass
-
-
 class GitHubService:
     """
     Service for GitHub API interactions.
@@ -345,15 +335,3 @@ class GitHubService:
 # ============================================================================
 # Factory Function
 # ============================================================================
-
-def get_github_service(pat: str) -> GitHubService:
-    """
-    Factory function to create a GitHubService.
-
-    Args:
-        pat: GitHub Personal Access Token
-
-    Returns:
-        GitHubService instance
-    """
-    return GitHubService(pat)

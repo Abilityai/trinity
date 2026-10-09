@@ -354,24 +354,3 @@ class TestRedisMetadataStorage:
         # `expires_at` remains the TRUE deadline — grace touches only the Redis TTL.
         expires_at = datetime.fromisoformat(stored_data["expires_at"].replace("Z", "+00:00"))
         assert timedelta(hours=3, minutes=59) < (expires_at - datetime.now(timezone.utc)) < timedelta(hours=4, minutes=1)
-
-    def test_list_active_keys_returns_all_credentials(self):
-        """list_active_keys() returns all active credentials from Redis."""
-        ssh_service, mocks = get_ssh_service()
-
-        # #1616: scan_iter, not keys (KEYS blocked for the backend ACL user).
-        mocks['redis_client'].scan_iter.return_value = [
-            "ssh_access:agent1:key1",
-            "ssh_access:agent2:key2"
-        ]
-        mocks['redis_client'].get.side_effect = [
-            json.dumps({"agent_name": "agent1", "auth_type": "key"}),
-            json.dumps({"agent_name": "agent2", "auth_type": "password"})
-        ]
-
-        service = ssh_service.SshService()
-        keys = service.list_active_keys()
-
-        assert len(keys) == 2
-        assert keys[0]["agent_name"] == "agent1"
-        assert keys[1]["agent_name"] == "agent2"

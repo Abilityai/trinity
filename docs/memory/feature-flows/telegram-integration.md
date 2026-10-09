@@ -139,8 +139,6 @@ Two routers are registered in `main.py:523-524`:
 ### Media Service: `src/backend/services/telegram_media.py`
 
 - `download_telegram_file(bot_token, file_id)` (line 29) — Two-step download: `getFile` → download from file path. **SSRF prevention**: hostname must be `api.telegram.org` (line 71). **Size limit**: 20MB (line 58).
-- `process_photo(bot_token, photo_sizes)` (line 93) — Downloads largest photo, saves to temp file, returns size description. Temp file always cleaned up.
-- `process_document(bot_token, document)` (line 127) — Downloads and extracts text from plain text files (.txt, .md, .csv, .json, .py, etc.). Truncates at 10,000 chars. Non-text files get metadata-only description.
 - `process_voice(bot_token, voice)` (line 170) — **NEW (Issue #318)**: Downloads OGG voice message and transcribes via Gemini API. **Limits**: 5 minutes max duration, 10MB max size. Returns `🎙️ "transcribed text"` or error placeholder. Falls back to placeholder if GEMINI_API_KEY not configured.
 - `_transcribe_audio_gemini(audio_data, mime_type)` (line 220) — Internal: Calls the configured Gemini model (`GEMINI_TRANSCRIPTION_MODEL`, default `gemini-3.5-flash`, env-overridable — #1130) with inline audio for transcription.
 

@@ -322,13 +322,12 @@ def get_github_pat(self) -> str:
 | 19-22 | `OwnerType` enum | USER or ORGANIZATION |
 | 25-34 | `GitHubRepoInfo` dataclass | Repository existence info |
 | 37-42 | `GitHubCreateResult` dataclass | Repo creation result |
-| 45-57 | Exception classes | `GitHubError`, `GitHubAuthError`, `GitHubPermissionError` |
+| 45-57 | Exception class | `GitHubError` (the only one raised; callers catch it) |
 | 60-265 | `GitHubService` class | GitHub API client |
 | 101-118 | `validate_token()` | Validate PAT and get username |
 | 120-139 | `get_owner_type()` | Detect user vs organization |
 | 141-175 | `check_repo_exists()` | Check if repo exists |
 | 177-264 | `create_repository()` | Create new repo (user or org) |
-| 271-281 | `get_github_service()` | Factory function |
 
 **Key Class**:
 
@@ -890,14 +889,6 @@ class GitInitResult:
 
 class GitHubError(Exception):
     """Base exception for GitHub API errors."""
-    pass
-
-class GitHubAuthError(GitHubError):
-    """GitHub authentication failed."""
-    pass
-
-class GitHubPermissionError(GitHubError):
-    """Insufficient permissions for operation."""
     pass
 ```
 

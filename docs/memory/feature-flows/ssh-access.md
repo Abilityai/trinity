@@ -382,7 +382,7 @@ which blocks `KEYS` — a live probe of the wired sweep raised
 `NoPermissionError: User backend has no permissions to run the 'keys' command`,
 which the fail-open handler would have swallowed to 0-cleaned every cycle, leaving
 the fix **inert**. `SCAN` is allowed and is the production-safe incremental scan
-anyway. The same fix applies to `list_active_keys()` and
+anyway. The same fix applies to
 `cleanup_agent_credentials()` (agent stop/delete), which were silently broken by
 the identical ACL cause. A mocked unit test can't see this (it stubs the Redis
 client), so `test_1616_ssh.py` carries a static guard that `redis_client.keys(`
