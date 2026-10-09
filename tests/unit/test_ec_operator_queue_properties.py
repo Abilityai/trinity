@@ -17,10 +17,11 @@ TWO TIERS
   FRESH agent name (rows never collide, nothing is deleted); the fixture
   asserts the engine points at the per-process unit-test SQLite.
 
-  The strategy EXCLUDES the inputs of the three strict-xfail bugs in the edges
-  file (falsy-but-not-null `options`, non-string `title`/`question`, a null
-  `type`) — they are pinned there with reachability evidence; leaving them in
-  would make this property permanently red instead of guarding the rest.
+  The strategy EXCLUDES the input of the remaining strict-xfail bug in the
+  edges file (a null `type`, #3315/#3385) — it is pinned there with
+  reachability evidence; leaving it in would make this property permanently
+  red instead of guarding the rest. Falsy-but-not-null `options` and
+  non-string `title`/`question` (#3314) are fixed and generated here.
 """
 from __future__ import annotations
 
@@ -328,13 +329,15 @@ def real_db():
 
 
 short = st.text(max_size=150)
+non_str_text = st.one_of(st.integers(-10**6, 10**6), st.booleans(),
+                         st.floats(allow_nan=True, allow_infinity=True), st.just([]), st.just({}))
 entries = st.fixed_dictionaries(
     {"status": st.just("pending")},
     optional={
-        "title": st.one_of(st.none(), short, st.text(min_size=290, max_size=320)),
-        "question": st.one_of(st.none(), short),
-        # falsy-non-null options are the r88/r89 xfail — excluded here
-        "options": st.one_of(st.none(), st.lists(st.text(max_size=20), min_size=1, max_size=5),
+        # #3314: non-string scalars and empty containers are generated too
+        "title": st.one_of(st.none(), short, st.text(min_size=290, max_size=320), non_str_text),
+        "question": st.one_of(st.none(), short, non_str_text),
+        "options": st.one_of(st.none(), st.sampled_from([[], "", {}, 0, False]), st.lists(st.text(max_size=20), min_size=1, max_size=5),
                              st.lists(st.dictionaries(st.text(max_size=5), st.integers(), max_size=2),
                                       min_size=1, max_size=3),
                              st.just(["x" * 5000])),
@@ -360,6 +363,8 @@ entries = st.fixed_dictionaries(
 @example(entry={"status": "pending", "context": {"workspace_session_id": "forged", "k": 1}})
 @example(entry={"status": "pending", "context": {"blob": "y" * 9000, "execution_id": "e-1"}})
 @example(entry={"status": "pending", "title": "t" * 310})
+@example(entry={"status": "pending", "options": []})
+@example(entry={"status": "pending", "title": 123})
 def test_an_untouched_entry_never_reads_as_changed(real_db, entry):
     agent = f"ec-oq-prop-{next(_seq)}-{os.getpid()}"
     entry = {"id": "p-1", **entry}
