@@ -867,6 +867,11 @@ async def public_stream_execution(
     )
 
 
+# #3461 — what a visitor is told about a failed turn. Same words as the
+# synchronous path's 502 in `services/public_chat_service.py`.
+_PUBLIC_FAILURE_MESSAGE = "Failed to process your request. Please try again."
+
+
 @router.get("/executions/{token}/{execution_id}/status")
 async def public_execution_status(
     token: str,
@@ -898,7 +903,16 @@ async def public_execution_status(
         # "cancelled by user" error; surface both like failed/success so the
         # public poller gets a reason instead of a silent null body.
         "response": execution.response if execution.status in ("success", "failed", "cancelled") else None,
-        "error": execution.error if execution.status in ("failed", "cancelled") or gate else None,
+        # #3461: a FAILED row's error is the operator's diagnosis (exit code,
+        # where to fix the credential) and this route is unauthenticated — the
+        # visitor gets the fixed line the synchronous path already answers
+        # (`run_public_chat`); the detail stays on the row for the operator. A
+        # cancel reason and a gate's notice are written for the visitor.
+        "error": (
+            _PUBLIC_FAILURE_MESSAGE if execution.status == "failed"
+            else execution.error if execution.status == "cancelled" or gate
+            else None
+        ),
         "gate": gate,
     }
 
