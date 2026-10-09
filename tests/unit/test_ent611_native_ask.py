@@ -251,6 +251,8 @@ _FACADE = [
     ("create_native_operator_queue_item", "create_native_item"),
     ("create_operator_queue_item_with_outcome", "create_item_with_outcome"),
     ("list_expired_operator_queue_proposals", "list_expired_proposals_for_agent"),
+    ("list_pending_operator_queue_proposals", "list_pending_proposals_for_agent"),  # #3247 T8
+    ("list_pending_operator_queue_asks", "list_pending_asks_for_agent"),  # #3247 pending line
 ]
 
 
@@ -274,7 +276,8 @@ def test_the_facade_signature_matches_the_operation(facade_name, ops_name):
 OWNER = "owner-611b@example.com"
 RECEIPT_KEYS = {"status", "id", "request_id", "raised_by", "channel", "type", "to_role",
                 "resolved", "ask_status", "disposition", "disposed_at", "expires_at",
-                "wakes_on_ending", "supersedes_expired"}
+                "wakes_on_ending", "supersedes_expired",
+                "replaces", "replaced_by", "disposed_by"}  # #3247
 
 
 def _in(minutes):
@@ -350,9 +353,11 @@ async def _drain():
 
 
 def _body(request_id, **over):
+    # #3247 (T8): the SAME proposal pending twice under one agent is refused
+    # `already_pending`, so each unrelated ask here proposes its own action.
     b = {"request_id": request_id, "type": "approval", "title": "Pay invoice",
          "question": "Release 500 USDC to the vendor?", "options": ["approve", "reject"],
-         "proposal": {"pay": 500, "to": "vendor-7"}}
+         "proposal": {"pay": 500, "to": f"vendor-{request_id}"}}
     b.update(over)
     return b
 
@@ -378,7 +383,7 @@ class TestRaiseAsk:
         assert (row["raised_by"], row["channel"], row["to_role"]) == ("agent", "mcp", "primary")
         assert row["resolved_to"] == [OWNER] and row["addressed_to_email"] == OWNER
         assert row["context"]["workspace_session_id"] == f"thread-{OWNER}"   # the owner's Main chat
-        assert row["proposal"] == {"pay": 500, "to": "vendor-7"}
+        assert row["proposal"] == {"pay": 500, "to": "vendor-ra-2"}
 
     @pytest.mark.parametrize("kind, role", [("alert", "operator"), ("question", "primary")])
     def test_the_default_role_follows_the_kind(self, ask, kind, role):
@@ -779,7 +784,7 @@ class TestTheWorkspaceShowsTheProposal:
         from client_portal.asks.service import _project
         r = _raise(ask, self.AGENT, _body("ws-1", context={"internal_path": "/srv/agent-scratch"}))
         view = _project(ask.db.get_operator_queue_item(r["id"])).model_dump()
-        assert view["proposal"] == {"pay": 500, "to": "vendor-7"}
+        assert view["proposal"] == {"pay": 500, "to": "vendor-ws-1"}
         assert "context" not in view and "/srv/agent-scratch" not in repr(view)
 
     def test_an_ask_without_a_proposal_projects_none(self, ask):

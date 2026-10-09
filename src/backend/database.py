@@ -3831,15 +3831,19 @@ class DatabaseManager:
 
     def create_native_operator_queue_item(self, agent_name, item, *, max_pending, channel,
                                           raised_by, to_role, resolved_to, proposal,
-                                          supersedes_expired, exclude_request_id_prefixes=None):
+                                          supersedes_expired, exclude_request_id_prefixes=None,
+                                          replaces=None, guard_pending_proposal=False):
         # trinity-enterprise#611: an agent-raised ask — replay, depth cap and insert
         # in one per-agent serialized step. #3130: the prefixes leave platform
-        # rows out of the depth cap.
+        # rows out of the depth cap. #3247: `replaces` ends one of the agent's
+        # own pending asks in the same transaction.
         return self._operator_queue_ops.create_native_item(
             agent_name, item, max_pending=max_pending, channel=channel,
             raised_by=raised_by, to_role=to_role, resolved_to=resolved_to,
             proposal=proposal, supersedes_expired=supersedes_expired,
             exclude_request_id_prefixes=exclude_request_id_prefixes,
+            replaces=replaces,
+            guard_pending_proposal=guard_pending_proposal,
         )
 
     def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
@@ -3858,6 +3862,15 @@ class DatabaseManager:
     def list_expired_operator_queue_proposals(self, agent_name, limit, raised_by=None):
         # trinity-enterprise#611: the native create's re-ask guard (C6).
         return self._operator_queue_ops.list_expired_proposals_for_agent(agent_name, limit, raised_by)
+
+    def list_pending_operator_queue_proposals(self, agent_name, limit, raised_by=None):
+        # #3247 T8: the native create's pending-proposal guard (`already_pending`).
+        return self._operator_queue_ops.list_pending_proposals_for_agent(agent_name, limit, raised_by)
+
+    def list_pending_operator_queue_asks(self, agent_name, limit, exclude_request_id_prefixes=None):
+        # #3247: the agent's own pending asks for the Execution Context line.
+        return self._operator_queue_ops.list_pending_asks_for_agent(
+            agent_name, limit, exclude_request_id_prefixes)
 
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):
