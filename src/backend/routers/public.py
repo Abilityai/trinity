@@ -400,6 +400,11 @@ async def get_public_link_info(token: str, request: Request):
     )
 
 
+# trinity-enterprise#754: what an anonymous visitor reads when the agent could
+# not list its skills — one fixed sentence, whatever the agent answered.
+PUBLIC_SKILLS_UNREADABLE = "The agent could not list its skills"
+
+
 @router.get("/playbooks/{token}")
 async def get_public_playbooks(token: str, request: Request):
     """
@@ -418,18 +423,27 @@ async def get_public_playbooks(token: str, request: Request):
     # last-known listing). A visitor only ever gets the live list, and only the
     # per-skill fields this link has always carried — `public_view` keeps to a
     # fixed list, so `source` / `dir` / `approval` never reach an anonymous one.
+    # An anonymous caller only ever reads fixed sentences: never an exception's
+    # own text, and never the agent's error body (a traceback, a path). The
+    # cause is in the log.
     try:
         body = await agent_skills_listing.fetch_live(agent_name)
     except agent_skills_listing.SkillsListUnavailable as e:
         if e.reason in ("not_found", "not_running"):
             raise HTTPException(status_code=503, detail="Agent is not running")
-        raise HTTPException(status_code=e.status_code, detail=e.detail)
+        if e.reason == "agent_error":
+            logger.warning("[public] playbooks for %s: the agent answered %s: %s",
+                           agent_name, e.status_code, e.agent_text[:500])
+            raise HTTPException(status_code=e.status_code, detail=PUBLIC_SKILLS_UNREADABLE)
+        raise HTTPException(status_code=e.status_code, detail=e.detail)   # the platform's own sentences
     except Exception:
-        # An anonymous caller gets a fixed sentence, never an exception's own
-        # text (it can carry internals); the cause is in the log.
         logger.warning("[public] playbooks for %s failed", agent_name, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to fetch playbooks")
-    return agent_skills_listing.public_view(body)
+    view = agent_skills_listing.public_view(body)
+    if view is None:
+        logger.warning("[public] playbooks for %s: the agent's answer is not a skills list", agent_name)
+        raise HTTPException(status_code=502, detail=PUBLIC_SKILLS_UNREADABLE)
+    return view
 
 
 @router.post("/verify/request")

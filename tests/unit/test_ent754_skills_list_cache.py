@@ -143,12 +143,16 @@ def env(monkeypatch):
     agent = FakeAgent()
     state = {"container": FakeContainer("running"), "redis": redis}
 
-    async def _reload(_c):
-        return None
+    def _container_state(name):
+        # docker_service.agent_container_state's answers; the real helper is
+        # driven through a fake daemon in section 7.
+        c = state["container"]
+        if c is None:
+            return "missing"
+        return "running" if c.status == "running" else "stopped"
 
     monkeypatch.setattr(redis_breaker_util, "get_breaker_redis", lambda: state["redis"])
-    monkeypatch.setattr(listing, "get_agent_container", lambda name: state["container"])
-    monkeypatch.setattr(listing, "container_reload", _reload)
+    monkeypatch.setattr(listing, "agent_container_state", _container_state)
     monkeypatch.setattr(listing, "agent_httpx_client", agent.client)
 
     app = FastAPI()
@@ -429,13 +433,18 @@ def test_the_public_link_never_sees_the_new_fields(env, monkeypatch):
 
 
 def test_the_public_link_on_a_stopped_agent_keeps_its_503(env, monkeypatch):
+    """Even with a kept copy in place: the public link reads live only, so a
+    visitor never gets the stopped agent's last-known list (PR review: without
+    a copy first, a public link reading `last_known=True` passed too)."""
     client = _public_client(monkeypatch)
+    assert client.get("/api/public/playbooks/tok").status_code == 200   # keeps a copy
+    assert _cached(env) is not None
     env.state["container"] = FakeContainer("exited")
 
     r = client.get("/api/public/playbooks/tok")
 
     assert r.status_code == 503
-    assert r.json()["detail"] == "Agent is not running"
+    assert r.json() == {"detail": "Agent is not running"}
 
 
 @pytest.mark.asyncio
@@ -450,9 +459,12 @@ async def test_the_connector_read_returns_the_list_and_refreshes_the_copy(env):
 
 @pytest.mark.asyncio
 async def test_the_connector_read_on_a_stopped_agent_keeps_its_503(env):
+    """Even with a kept copy in place: the connector reads live only."""
     from fastapi import HTTPException
     from services import connector_service
 
+    await connector_service.fetch_live_playbooks(AGENT)          # keeps a copy
+    assert _cached(env) is not None
     env.state["container"] = FakeContainer("exited")
 
     with pytest.raises(HTTPException) as exc:
@@ -467,18 +479,35 @@ async def test_the_connector_read_on_a_stopped_agent_keeps_its_503(env):
 # ---------------------------------------------------------------------------
 
 
+class _FakeDaemon:
+    """A Docker client whose container lookup raises ``exc``."""
+
+    def __init__(self, exc):
+        self.containers = self
+        self._exc = exc
+
+    def get(self, _name):
+        raise self._exc
+
+
+def _real_lookup(monkeypatch, exc):
+    """The REAL tri-state lookup (`docker_service.agent_container_state`), with
+    the Docker daemon answering ``exc``."""
+    from services import docker_service
+
+    monkeypatch.setattr(listing, "agent_container_state", docker_service.agent_container_state)
+    monkeypatch.setattr(docker_service, "docker_client", _FakeDaemon(exc))
+
+
 def _vanish(monkeypatch):
-    """The container is removed between the lookup and the reload."""
+    """The daemon answers: there is no such container."""
     import docker
 
-    async def _gone(_c):
-        raise docker.errors.NotFound(
-            "404 Client Error for http+docker://localhost/v1.47/containers/0123abcd/json: Not Found")
-
-    monkeypatch.setattr(listing, "container_reload", _gone)
+    _real_lookup(monkeypatch, docker.errors.NotFound(
+        "404 Client Error for http+docker://localhost/v1.47/containers/0123abcd/json: Not Found"))
 
 
-def test_a_container_removed_mid_read_is_not_found_without_dockers_words(env, monkeypatch):
+def test_a_missing_container_is_not_found_without_dockers_words(env, monkeypatch):
     _vanish(monkeypatch)
 
     r = _get(env)
@@ -501,19 +530,17 @@ _DAEMON_TEXT = "500 Server Error for http+docker://localhost/v1.47/containers/01
 
 
 def _daemon_fault(monkeypatch):
-    """The Docker daemon answers the reload with a 500 (or drops the socket)."""
+    """The Docker daemon answers the lookup with a 500 (or drops the socket)."""
     import docker
 
-    async def _fault(_c):
-        raise docker.errors.APIError(_DAEMON_TEXT)
-
-    monkeypatch.setattr(listing, "container_reload", _fault)
+    _real_lookup(monkeypatch, docker.errors.APIError(_DAEMON_TEXT))
 
 
-def test_a_daemon_fault_mid_read_is_unreachable_without_dockers_words(env, monkeypatch):
-    """cso-diff 2026-10-08 finding 1: only NotFound was mapped, so any other
-    Docker error reached the caller's catch-all with the daemon URL, its API
-    version and the container id in the 500's text."""
+def test_a_daemon_fault_is_unreachable_and_serves_the_kept_copy(env, monkeypatch):
+    """A daemon that could not be asked is not an agent that is gone (PR
+    review; #2196's class): the lookup is tri-state, so the fault is
+    `unreachable`, the kept copy is served for it, and Docker's own text (the
+    daemon URL, the container id) reaches no caller (cso-diff 2026-10-08 #1)."""
     _get(env)                                   # a live read keeps a copy
     _daemon_fault(monkeypatch)
 
@@ -547,6 +574,48 @@ def test_the_public_link_names_no_exception_text(env, monkeypatch):
 
     assert r.status_code == 500
     assert r.json()["detail"] == "Failed to fetch playbooks"
+
+
+_TRACEBACK = 'Traceback (most recent call last):\n  File "/home/developer/.local/lib/python3.13/agent_server/x.py", line 9'
+
+
+def test_the_public_link_never_hands_on_the_agents_error_body(env, monkeypatch):
+    """PR review: an agent's non-200 body (here a traceback with a path) went to
+    the anonymous visitor word for word. The visitor gets one fixed sentence;
+    the agent page, which needs the agent's words, still gets them."""
+    env.agent.answer = FakeResponse(500, None, text=_TRACEBACK)
+    client = _public_client(monkeypatch)
+
+    r = client.get("/api/public/playbooks/tok")
+
+    assert r.status_code == 500
+    assert r.json() == {"detail": "The agent could not list its skills"}
+    assert "Traceback" not in r.text and "/home/developer" not in r.text
+    assert "Traceback" in _get(env).json()["detail"]
+
+
+def test_the_public_link_keeps_to_the_listing_keys_it_always_carried(env, monkeypatch):
+    """Fail-closed on the top level too: a key the agent server adds, or an
+    entry that is not a skill, never reaches an anonymous visitor."""
+    env.agent.answer = FakeResponse(200, {**LIVE, "skills": LIVE["skills"] + ["not-a-skill"],
+                                          "internal_note": "/home/developer/notes"})
+    client = _public_client(monkeypatch)
+
+    body = client.get("/api/public/playbooks/tok").json()
+
+    assert set(body) == {"skills", "count", "skill_paths"}
+    assert [s["name"] for s in body["skills"]] == [s["name"] for s in LIVE["skills"]]
+    assert body["count"] == len(LIVE["skills"])
+
+
+def test_the_public_link_refuses_a_200_that_is_not_a_skills_list(env, monkeypatch):
+    env.agent.answer = FakeResponse(200, {"error": "/home/developer/.claude/skills is unreadable"})
+    client = _public_client(monkeypatch)
+
+    r = client.get("/api/public/playbooks/tok")
+
+    assert r.status_code == 502
+    assert r.json() == {"detail": "The agent could not list its skills"}
 
 
 @pytest.mark.parametrize("exc", [httpx.ReadError("connection reset"), httpx.RemoteProtocolError("peer closed")],

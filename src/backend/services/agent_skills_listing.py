@@ -5,7 +5,8 @@ Three surfaces read the agent's `GET /api/skills`: the agent page
 (`GET /api/agents/{name}/playbooks`, which the Skills tab, the chat `/` menu,
 the dashboard and the exposed-skills panel all use), the public link and the
 MCP connector. They had three copies of the same proxy, and this is now the one
-place that talks to the container.
+proxy behind those three. (The Workspace's own skill read in
+`client_portal/service.py` still asks the agent directly: a known gap.)
 
 The **last-known copy** answers the Skills tab's "never an empty tab" rule for
 a stopped agent. Every successful live read keeps the listing in Redis under
@@ -34,12 +35,10 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
-import docker
 import httpx
 
 from services.agent_auth import agent_httpx_client
-from services.docker_service import get_agent_container
-from services.docker_utils import container_reload
+from services.docker_service import agent_container_state
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -60,6 +59,8 @@ PUBLIC_SKILL_FIELDS = (
     "name", "description", "path", "user_invocable", "automation",
     "allowed_tools", "argument_hint", "has_schedule",
 )
+# The top-level keys of that answer, held to the same rule.
+PUBLIC_LISTING_FIELDS = ("skills", "count", "skill_paths")
 
 
 class SkillsListUnavailable(Exception):
@@ -96,23 +97,17 @@ async def fetch_live(agent_name: str) -> Any:
     Raises :class:`SkillsListUnavailable`. A body that is not valid JSON
     raises as before; each caller maps that to its own 500.
     """
-    container = get_agent_container(agent_name)
-    if not container:
-        raise SkillsListUnavailable("not_found", 404, "Agent not found")
-    try:
-        await container_reload(container)
-    except docker.errors.NotFound:
-        # Removed between the lookup and the reload: gone, as a missed lookup
-        # says — never Docker's own text (its URL and container id), which a
-        # caller's catch-all would otherwise hand on, to the public link too.
-        raise SkillsListUnavailable("not_found", 404, "Agent not found")
-    except Exception:  # noqa: BLE001 — a daemon fault: the agent's state is unknown
-        # Any other Docker failure (a daemon 500, a dropped socket) carries the
-        # same text, so it is named, never echoed (cso-diff 2026-10-08 #1); a
-        # kept copy is served for it as for an agent that is not answering.
-        logger.warning("[skills_list] reading %s's container state failed", agent_name, exc_info=True)
+    # Tri-state, never collapsed (#2196's class): a container that is not there
+    # is `not_found`, but a Docker daemon that could not be asked leaves the
+    # agent's state unknown, so it is `unreachable` and a kept copy is served
+    # for it, as for an agent that is not answering. The read is fresh, and
+    # Docker's own text (its URL, the container id) never leaves it.
+    state = agent_container_state(agent_name)
+    if state is None:
         raise SkillsListUnavailable("unreachable", 503, "Could not read the agent's state")
-    if container.status != "running":
+    if state == "missing":
+        raise SkillsListUnavailable("not_found", 404, "Agent not found")
+    if state != "running":
         raise SkillsListUnavailable(
             "not_running", 503, "Agent is not running. Start the agent to view its skills.")
     try:
@@ -222,13 +217,16 @@ def forget(agent_name: str) -> None:
         logger.warning("[skills_list] clearing %s's listing failed: %s", agent_name, e)
 
 
-def public_view(body: Any) -> Any:
-    """The listing as the unauthenticated public link may see it: each skill
-    keeps only the fields that link has always carried."""
+def public_view(body: Any) -> Optional[Dict[str, Any]]:
+    """The listing as the unauthenticated public link may see it, or None when
+    the agent's answer is not a listing. Only the top-level keys and the
+    per-skill fields that link has always carried survive (fail-closed: a key or
+    field the agent server adds later never reaches an anonymous visitor)."""
     if not isinstance(body, dict) or not isinstance(body.get("skills"), list):
-        return body
-    skills = [
-        {k: s[k] for k in PUBLIC_SKILL_FIELDS if k in s} if isinstance(s, dict) else s
-        for s in body["skills"]
-    ]
-    return {**body, "skills": skills}
+        return None
+    skills = [{k: s[k] for k in PUBLIC_SKILL_FIELDS if k in s} for s in body["skills"] if isinstance(s, dict)]
+    paths = body.get("skill_paths")
+    view: Dict[str, Any] = {"skills": skills, "count": len(skills)}
+    if isinstance(paths, list):
+        view["skill_paths"] = [p for p in paths if isinstance(p, str)]
+    return view

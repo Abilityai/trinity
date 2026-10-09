@@ -112,13 +112,12 @@ playbooks.value = response.data.skills || []
 
 ### Business Logic
 1. Resolve agent name via `AuthorizedAgentByName` dependency
-2. Look up Docker container with `get_agent_container(agent_name)`; 404 if missing
-3. Reload container state via `container_reload(container)`
-4. Return 503 if container status is not `running`
-5. Forward request to agent-server: `GET http://agent-{agent_name}:8000/api/skills` (10s timeout)
-6. Return agent-server JSON response directly
+2. Read the container's state with `docker_service.agent_container_state(agent_name)` (tri-state, a fresh read): missing → 404; Docker unreadable → 503 "Could not read the agent's state"
+3. Return 503 if container status is not `running`
+4. Forward request to agent-server: `GET http://agent-{agent_name}:8000/api/skills` (10s timeout)
+5. Return agent-server JSON response directly
 
-Steps 2-6 live in `agent_skills_listing.fetch_live`. A live success also refreshes the agent's last-known list in Redis; this caller sends no `last_known`, so its answers are unchanged. See [skills-tab.md](skills-tab.md).
+Steps 2-5 live in `agent_skills_listing.fetch_live`. A live success also refreshes the agent's last-known list in Redis; this caller sends no `last_known`, so its answers are unchanged. See [skills-tab.md](skills-tab.md).
 
 ### Error Responses
 | Case | Status | Detail |

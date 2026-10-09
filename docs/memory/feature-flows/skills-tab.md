@@ -242,8 +242,10 @@ connector_service.fetch_live_playbooks       services/connector_service.py:108-1
         │
         ▼
 fetch_live(agent)                                                       :90-115
-  ├─ no container          → SkillsListUnavailable(not_found,   404, "Agent not found")
-  ├─ not running           → SkillsListUnavailable(not_running, 503, "Agent is not running. Start the agent to view its skills.")
+  ├─ docker_service.agent_container_state(agent)   (tri-state, a fresh read)
+  │    None (Docker unreadable) → SkillsListUnavailable(unreachable, 503, "Could not read the agent's state")
+  │    "missing"           → SkillsListUnavailable(not_found,   404, "Agent not found")
+  │    "stopped"           → SkillsListUnavailable(not_running, 503, "Agent is not running. Start the agent to view its skills.")
   ├─ GET http://agent-{n}:8000/api/skills   (agent_httpx_client, 10 s)
   │    timeout             → (unreachable, 504, "Agent is starting up, please try again")
   │    connect error       → (unreachable, 503, "Could not connect to agent")
@@ -258,8 +260,8 @@ list_skills(agent, last_known)          (the agent-page route only)     :118-142
 - **`remember`** (`:157-181`) keeps only a dict whose `skills` is a list, as `{skills, skill_paths, captured_at}`. A live EMPTY list replaces the copy. A JSON body over `MAX_CACHED_BYTES` (256 KB, `:54`) is not kept AND drops the older copy, which is never served as current. It writes through `redis_breaker_util.get_breaker_redis()` (1 s socket timeouts, `None` when down); a failed write is logged and the live answer still returns.
 - **`recall`** (`:184-205`) returns `None` for no key, Redis down, or a malformed value (shape-checked).
 - **`forget`** (`:208-216`) never raises.
-- **`public_view`** (`:219-228`) keeps each skill to `PUBLIC_SKILL_FIELDS` (`:59-62`), the eight fields the public link carried before #754, so `source` / `dir` / `approval` (and any later field) never reach an anonymous visitor.
-- Callers keep their own wording: `/playbooks` maps the exception's status and detail, and any other exception (e.g. a non-JSON body) to 500 `Failed to fetch playbooks: …`. The public route maps `not_found` / `not_running` to 503 "Agent is not running". The connector says "Agent is not running." for `not_running`.
+- **`public_view`** (`:219-228`) keeps each skill to `PUBLIC_SKILL_FIELDS` (`:59-62`), the eight fields the public link carried before #754, and the top level to `PUBLIC_LISTING_FIELDS` (`skills`, `count`, `skill_paths`), so `source` / `dir` / `approval`, and any later key or field, never reach an anonymous visitor. An entry that is not a skill is dropped; an answer that is not a skills list is `None`.
+- Callers keep their own wording: `/playbooks` maps the exception's status and detail, and any other exception (e.g. a non-JSON body) to 500 `Failed to fetch playbooks: …`. The public route maps `not_found` / `not_running` to 503 "Agent is not running"; for an `agent_error` it keeps the agent's status but answers one fixed sentence, "The agent could not list its skills" (the agent's body is logged, never handed to an anonymous visitor), and a 200 that is not a skills list is 502 with the same sentence. The connector says "Agent is not running." for `not_running`.
 - Not routed: the Workspace roster (`client_portal/service.py:1389`, `_read_skills`) reads the agent directly and keeps only title / description / starter, so it neither writes nor serves the copy.
 
 **Redis key** `agent:skills_list:{name}` (`KEY_PREFIX`, `:49`), no TTL:
@@ -339,7 +341,8 @@ A skipped field is warned once per `(file, field, value)` (`_SKIPPED_FIELD_WARNE
 | Running but unreachable, copy kept | 504 / 503 → 200 + `reason: "unreachable"` | "The agent isn't answering. Showing its skills as of …", Run disabled |
 | Running but unreachable, no copy | 504 / 503 | "The agent isn't answering right now; its own skills show here when it does." |
 | No container | 404 "Agent not found" (even with a copy) | Treated as `none` |
-| Agent answered non-200 | That status, "Agent returned error: …" — never masked by the copy | `LoadFailed` with retry on first load; a failed refresh keeps the list |
+| Docker unreadable (a daemon fault) | 503 "Could not read the agent's state" → with a copy, 200 + `reason: "unreachable"` | As unreachable; never "agent gone" (#2196's class) |
+| Agent answered non-200 | That status, "Agent returned error: …" — never masked by the copy (the public link: that status, "The agent could not list its skills") | `LoadFailed` with retry on first load; a failed refresh keeps the list |
 | Body not JSON | 500 "Failed to fetch playbooks: …" | `LoadFailed` |
 | Listing over 256 KB | 200 live; not kept, older copy dropped | Stopped later: no list |
 | Gate PUT/DELETE refused | 422 `invalid_skill_name` / `invalid_approver` / `invalid_deadline` / `approver_unavailable`; 409 `ephemeral_agent`; 403 `person_required` / `skill_management_not_permitted`; 404 | `InlineError` in that card's description slot |
@@ -356,7 +359,7 @@ A skipped field is warned once per `(file, field, value)` (`_SKIPPED_FIELD_WARNE
 ## Security Considerations
 
 1. **Last-known list**: served only on `?last_known=true` under the live route's own gate (`AuthorizedAgentByName`). It is display-only and never drives Run. The key is backend-only (agents are not on the platform network, #589), size-capped, and cleared on every lifecycle event that frees the name.
-2. **Public link**: `public_view` is an allow-list, so new per-skill fields stay off the unauthenticated route by default.
+2. **Public link**: `public_view` is an allow-list for the top-level keys and the per-skill fields, so anything new stays off the unauthenticated route by default; an anonymous visitor reads only fixed sentences, never the agent's own error body.
 3. **Gate map**: `approvers` carries booleans only; the gate line names a kind. `viewer_fills` reuses the enforce path's functions and is false for every machine principal.
 4. **Probe**: honoured only for a person who may manage the agent's skills; one `/health` read, no breaker side effects, so it is not a read amplifier.
 5. **Self-approved flags**: the viewer comparison happens on the server; no email is added to any payload (pinned by the response-key tests).
