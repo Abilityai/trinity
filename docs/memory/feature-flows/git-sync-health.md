@@ -621,7 +621,7 @@ backend    GET /api/internal/agents/{name}/sync-health-status
 
 `sync_freeze_reason` returns a string, never a `(bool, reason)` tuple — a tuple
 is truthy, and a caller left on the old `if db.should_freeze_...` shape would
-freeze the whole fleet. `should_freeze_schedules` is its bool view.
+freeze the whole fleet.
 
 ### 2a. Agent status handler (#2742)
 
@@ -802,7 +802,7 @@ the data-loss setup.
 | `db/sync_state.py` | ent#706: `KEEP` sentinel, the new upsert kwargs, `list_health_rows` (the shared reader) |
 | `services/operator_queue_service.py` | ent#706: `sync-diverged-` in `_RESERVED_ID_PREFIXES` |
 | `src/scheduler/sync_freeze_policy.py` | ent#706: byte-identical mirror of the policy |
-| `src/scheduler/database.py` | ent#706: `sync_freeze_reason` (+ `should_freeze_schedules` as its bool view); the threshold is imported from the mirror |
+| `src/scheduler/database.py` | ent#706: `sync_freeze_reason`; the threshold is imported from the mirror |
 | `src/scheduler/service.py` | ent#706: the gate writes `Git sync frozen: <reason>` into the skipped row |
 | `main.py` | Starts `SyncHealthService` (staggered +5 s, PERF-269); registers `fleet_router` |
 

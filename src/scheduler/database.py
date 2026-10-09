@@ -469,14 +469,6 @@ class SchedulerDatabase:
                 retry_of_execution_id=retry_of_execution_id
             )
 
-    def should_freeze_schedules(self, agent_name: str) -> bool:
-        """Is this agent's cron firing frozen by its git sync? (#389/#1808, ent#706)
-
-        A bool view of :meth:`sync_freeze_reason` — kept for callers that only
-        need the yes/no.
-        """
-        return self.sync_freeze_reason(agent_name) is not None
-
     def sync_freeze_reason(self, agent_name: str) -> Optional[str]:
         """Why this agent's cron firing is frozen, or None when it may fire.
 

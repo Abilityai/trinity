@@ -6,7 +6,6 @@ Covers the load-bearing correctness of the Twilio↔Gemini audio bridge:
   - outbound PCM16 24kHz → μ-law 8kHz (direct 3:1 decimation)
   - stateful `ratecv` continuity across chunk boundaries (no per-chunk reset →
     no audible click), the single most common failure mode of naïve bridges
-  - 160-byte/20ms frame slicing for Twilio Media Streams
 
 Module: src/backend/adapters/transports/voip_audio.py
 
@@ -29,9 +28,7 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 from adapters.transports.voip_audio import (  # noqa: E402
-    FRAME_BYTES,
     pcm24k_to_ulaw8k,
-    pop_frames,
     ulaw8k_to_pcm16k,
 )
 
@@ -108,17 +105,3 @@ class TestStatefulContinuity:
             mulaw, _ = pcm24k_to_ulaw8k(pcm24[i:i + self._MISALIGNED], None)  # reset each chunk
             out.extend(mulaw)
         assert bytes(out) != one
-
-
-class TestFraming:
-    def test_pop_frames_slices_160_byte_frames(self):
-        buf = bytearray(b"\x7f" * 400)  # 2 full frames + 80 remainder
-        frames = pop_frames(buf)
-        assert len(frames) == 2
-        assert all(len(f) == FRAME_BYTES for f in frames)
-        assert len(buf) == 80  # remainder carried for the next round
-
-    def test_pop_frames_empty_when_under_one_frame(self):
-        buf = bytearray(b"\x00" * 159)
-        assert pop_frames(buf) == []
-        assert len(buf) == 159

@@ -557,7 +557,6 @@ CREATE UNIQUE INDEX idx_schedules_webhook_token
 |--------|---------|
 | `generate_webhook_token(schedule_id)` | `secrets.token_urlsafe(32)` → UPDATE + set `webhook_enabled=1` |
 | `get_schedule_by_webhook_token(token)` | O(1) SELECT via partial index |
-| `set_webhook_enabled(schedule_id, enabled)` | Enable/disable without revoking token |
 | `revoke_webhook_token(schedule_id)` | NULL token, set `webhook_enabled=0` |
 | `get_webhook_status(schedule_id)` | Returns `{webhook_token, webhook_enabled, has_token}` |
 

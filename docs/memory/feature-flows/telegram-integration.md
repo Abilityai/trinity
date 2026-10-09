@@ -817,7 +817,7 @@ ChannelMessageRouter.handle_message()
     |     |- adapter.download_file(file, message)
     |     |- Size validation (TOCTOU)
     |     |- Magic-byte MIME validation (if available)
-    |     |- _sanitize_filename: NFKC + basename + safe-char regex +
+    |     |- sanitize_filename: NFKC + basename + safe-char regex +
     |     |    200-char truncation + collision dedup (-1, -2, …)
     |     |- container_put_archive → /home/developer/uploads/{session}/{name}
     |     |- Audit log (includes uploader and dest_path)
@@ -846,7 +846,7 @@ shared agents and keeps the workspace clean between turns. If users need
 file persistence across conversations, they re-upload the file (matches
 the Slack pattern).
 
-**Filename sanitization** (`_sanitize_filename` in `message_router.py`):
+**Filename sanitization** (`sanitize_filename` in `services/upload_service.py`):
 1. **NFKC unicode normalize** — collapses fullwidth/halfwidth and
    combining sequences so unicode-encoded path-traversal attempts (e.g.
    fullwidth `．．／`) cannot survive `os.path.basename`.

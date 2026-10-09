@@ -82,17 +82,6 @@ class ScheduleWebhooksMixin:
             return None
         return self._row_to_schedule(row)
 
-    def set_webhook_enabled(self, schedule_id: str, enabled: bool) -> bool:
-        """Enable or disable webhook triggering for a schedule."""
-        now = utc_now_iso()
-        with get_engine().begin() as conn:
-            result = conn.execute(
-                update(agent_schedules)
-                .where(agent_schedules.c.id == schedule_id)
-                .values(webhook_enabled=1 if enabled else 0, updated_at=now)
-            )
-            return result.rowcount > 0
-
     def revoke_webhook_token(self, schedule_id: str) -> bool:
         """Revoke a webhook token, immediately invalidating the URL.
 
@@ -122,18 +111,6 @@ class ScheduleWebhooksMixin:
         from services.credential_encryption import get_credential_encryption_service
         from services.webhook_signature import SECRET_ENVELOPE_KEY
         return get_credential_encryption_service().encrypt({SECRET_ENVELOPE_KEY: secret})
-
-    @staticmethod
-    def _decrypt_webhook_secret(encrypted: Optional[str]) -> Optional[str]:
-        if not encrypted:
-            return None
-        try:
-            from services.credential_encryption import get_credential_encryption_service
-            from services.webhook_signature import SECRET_ENVELOPE_KEY
-            return get_credential_encryption_service().decrypt(encrypted).get(SECRET_ENVELOPE_KEY)
-        except Exception as e:
-            logger.error(f"Failed to decrypt webhook secret: {e}")
-            return None
 
     def set_webhook_secret(self, schedule_id: str) -> Optional[str]:
         """Mint (or rotate) the HMAC signing secret and enable signature auth.

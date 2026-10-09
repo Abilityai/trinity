@@ -74,7 +74,7 @@ No frontend changes. File handling is entirely backend (Slack → adapter → ro
   `adapter.download_file()`, then delegates to `upload_service.process_file_uploads()` (#364)
   The inline validation/write logic was extracted to the shared service so web chat
   (ChatPanel, PublicChat) reuses the same path
-- `_sanitize_filename()` and `_format_file_size()` in this file delegate to
+- Filename sanitization and size formatting live in
   `services/upload_service.sanitize_filename()` / `format_file_size()`
 - Chat injection format: `[File uploaded by {uploader}]: {name} ({size}) saved
   to {path}` — `uploader` is the verified email (Issue #311) or

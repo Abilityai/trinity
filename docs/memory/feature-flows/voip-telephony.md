@@ -47,7 +47,7 @@ what we discussed (updates memory, creates tasks, sends follow-ups)."
   (`handle_media_stream`). Per-connection `_CallBridge`: inbound loop, outbound
   queue + paced 20ms 160-byte μ-law sender, `clear`-on-barge-in, teardown.
 - `src/backend/adapters/transports/voip_audio.py` — pure, dependency-free codec
-  helpers (`ulaw8k_to_pcm16k`, `pcm24k_to_ulaw8k`, `pop_frames`). Carries
+  helpers (`ulaw8k_to_pcm16k`, `pcm24k_to_ulaw8k`). Carries
   per-direction `audioop.ratecv` state across chunks (the anti-click guarantee).
 
 **Bridge no longer strictly "unmodified"**: codec work still lives entirely in
