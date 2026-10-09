@@ -555,7 +555,7 @@
 
 <script setup>
 import SkeletonLoader from './SkeletonLoader.vue'
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch, nextTick } from 'vue'
 import axios from 'axios'
 import { parseUTC } from '@/utils/timestamps'
 import { useAuthStore } from '../stores/auth'
@@ -1315,4 +1315,11 @@ onMounted(() => {
 onUnmounted(() => {
   stopPolling()
 })
+
+// trinity-enterprise#754 (PR review): AgentDetail is KeepAlive'd, so leaving
+// the page deactivates this panel without unmounting it. The poll (the queue
+// chip, and the list while a run is in flight) stops with the page and starts
+// again when the page is shown.
+onDeactivated(() => stopPolling())
+onActivated(() => startPolling())
 </script>

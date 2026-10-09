@@ -15,7 +15,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
-import { nextTick } from 'vue'
+import { nextTick, h, ref, defineComponent, KeepAlive } from 'vue'
 
 // The panel reads through raw axios (and the auth store through the api
 // client, whose `axios.create` returns the same instance).
@@ -66,6 +66,7 @@ function serve() {
   server.post = vi.fn(async () => ({ data: {} }))
 }
 
+const queueReads = (agent) => axios.get.mock.calls.filter(([u]) => u === `/api/agents/${agent}/queue`).length
 const listReads = (agent) => axios.get.mock.calls.filter(([u]) => u === `/api/agents/${agent}/executions?limit=100`).length
 const detailReads = (id) => axios.get.mock.calls.filter(([u]) => u.endsWith(`/executions/${id}`)).length
 
@@ -263,5 +264,35 @@ describe('a row that settles', () => {
     await flush()
     expect(detailReads('exec-1')).toBe(2)
     expect(listText(w)).toContain('hello from the run')
+  })
+})
+
+describe('the poll belongs to the page on screen (PR review)', () => {
+  it('stops while the kept-alive page is away, and resumes when it is shown again', async () => {
+    lists = { fin: [row('exec-1', 'running')] }
+    // AgentDetail is KeepAlive'd: leaving it deactivates the panel inside, it
+    // does not unmount it.
+    const Page = defineComponent({ name: 'Page', render: () => h(TasksPanel, { agentName: 'fin', agentStatus: 'running' }) })
+    const Away = defineComponent({ name: 'Away', render: () => h('div', 'elsewhere') })
+    const onPage = ref(true)
+    const Host = defineComponent({ render: () => h(KeepAlive, null, [onPage.value ? h(Page) : h(Away)]) })
+    wrapper = mount(Host, {
+      global: { stubs: { ModelSelector: true, SkeletonLoader: true, LoadFailed: true, 'router-link': true } },
+    })
+    await flush()
+    await tick()
+    expect(listReads('fin')).toBe(2)               // the mount read and one re-read
+
+    onPage.value = false
+    await flush()
+    const queueBefore = queueReads('fin')
+    for (let i = 0; i < 12; i++) await tick()      // a minute elsewhere
+    expect(listReads('fin')).toBe(2)
+    expect(queueReads('fin')).toBe(queueBefore)
+
+    onPage.value = true
+    await flush()
+    await tick()
+    expect(listReads('fin')).toBe(3)               // back on the page: polling again
   })
 })
