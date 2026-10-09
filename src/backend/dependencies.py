@@ -1855,6 +1855,14 @@ _CAPABILITY_REFUSALS = {
         "its owner owns, deletes only agents it spawned, and cannot change its "
         "own read-only mode or guardrails." + _ask_for_it("agents.manage"),
     ),
+    "projects.manage": (
+        "project_management_not_permitted",
+        "This agent does not hold the project-management permission, which creating "
+        "a Workspace project on its owner's behalf, or importing one of its own "
+        "folder projects, requires. Working on a project it is already on needs no "
+        "grant; adding people or changing who can see a project is never granted."
+        + _ask_for_it("projects.manage"),
+    ),
 }
 
 

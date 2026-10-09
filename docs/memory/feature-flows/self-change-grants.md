@@ -28,6 +28,7 @@ People (JWT, their own `user` key) and the system agent are never fenced.
 | `schedules.manage` | create / update / delete / enable / disable a schedule; its webhook and webhook secret | the agent's **own** schedules (#2996); `trigger` |
 | `instructions.manage` | `CLAUDE.md`, `AGENTS.md`, `.claude/**` except `.claude/skills/**` through the file routes; `git/reset-to-main-preserve-state` | — |
 | `agents.manage` | create a durable agent, delete, `deploy-local`, `systems/deploy`, `PUT /model`, and `read-only` / `resources` / `timeout` / `public-channel-model` / `guardrails` | spawning or discarding an **ephemeral** agent (ent#69) |
+| `projects.manage` (ent#588) | start a Workspace project for its owner (owner = creator and first member, agent = steward, members-only) and import one of its own folder projects — MCP `create_project` / `import_project`, checked by the projects module before any read | working on a project it is already active on; adding people or changing visibility is never granted |
 
 Bounds on a holder:
 - **Reach** (every capability): on every fenced route that names a target —
