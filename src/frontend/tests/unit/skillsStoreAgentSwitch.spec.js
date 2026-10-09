@@ -37,12 +37,15 @@ function serve(slow = {}) {
     if (url === '/api/skills/library/status') return Promise.resolve({ data: { configured: true } })
     if (url === '/api/skills/library') return Promise.resolve({ data: [{ name: 'shared-one' }, { name: 'shared-two' }] })
     if (url === '/api/skills/library/sets') return Promise.resolve({ data: [] })
-    const m = url.match(/^\/api\/agents\/([^/]+)\/(skills|skill-sets)$/)
+    const m = url.match(/^\/api\/agents\/([^/]+)\/(skills|skill-sets|playbooks)$/)
+    if (m && m[2] === 'playbooks') return Promise.resolve(LISTING(`${m[1]}-only`))
     if (m) return Promise.resolve({ data: m[2] === 'skills' ? ROWS[m[1]] : [] })
     return Promise.reject(new Error(`unexpected GET ${url}`))
   })
 }
 
+// The agent's own listing (`GET /playbooks`): one skill named after the agent.
+const LISTING = (name) => ({ data: { skills: [{ name }], skill_paths: ['.claude/skills'] } })
 const readsOf = (url) => api.get.mock.calls.filter(([u]) => u === url).length
 
 beforeEach(() => {
@@ -136,5 +139,37 @@ describe('an answer for the previous agent is dropped', () => {
     expect(s.lastDelivery).toBeNull()
     expect(s.setBusy).toBeNull()
     expect(s.assigned).toEqual(ROWS.ops)
+  })
+})
+
+describe("the agent's own listing (PR review: the agent check in loadAgentList)", () => {
+  it("a slow listing for the previous agent never replaces the next agent's", async () => {
+    const finList = deferred()
+    serve({ '/api/agents/fin/playbooks': finList })
+    const s = useSkillsStore()
+    s.setAgent('fin')
+    const first = s.loadAgentList('fin')
+
+    s.setAgent('ops')
+    await s.loadAgentList('ops')
+    finList.resolve(LISTING('fin-only'))
+    await first
+
+    expect(s.agentList.map((k) => k.name)).toEqual(['ops-only'])
+  })
+
+  it('nor lands before the next agent has asked for its own', async () => {
+    const finList = deferred()
+    serve({ '/api/agents/fin/playbooks': finList })
+    const s = useSkillsStore()
+    s.setAgent('fin')
+    const first = s.loadAgentList('fin')
+
+    s.setAgent('ops')
+    finList.resolve(LISTING('fin-only'))
+    await first
+
+    expect(s.agentList).toEqual([])
+    expect(s.agentListLoaded).toBe(false)
   })
 })
