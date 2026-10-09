@@ -468,6 +468,14 @@
                 :initial-rating="item.message.myRating"
               />
             </PortalAgentBubble>
+            <!-- trinity-enterprise#754: this turn went through without approval
+                 because the person who asked IS the approver (server-decided). -->
+            <ExecutionGateMarker
+              class="mt-1"
+              variant="line"
+              :self-approved="!!item.message.selfApproved"
+              :by-viewer="!!item.message.selfApprovedByViewer"
+            />
           </div>
         </div>
         </div>
@@ -914,7 +922,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags } from './portalUtils'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
@@ -940,6 +948,7 @@ import PortalDeliverables from './PortalDeliverables.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import { workSignalFrom } from './portalRail'
 import PortalRating from './PortalRating.vue'
+import ExecutionGateMarker from '../skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
 import {
   deliveryFailureReason,
   mentionedAgents,
@@ -1629,7 +1638,9 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
     if (data?.response) {
       // #2580: `id` + `myRating` from the persisted row, so a reattached reply is
       // rateable the moment it lands rather than on the next load.
-      messages.value.push({ ...assistantRow({ content: data.response, id: data.id, my_rating: data.myRating }), at: data.at || null })
+      messages.value.push({ ...assistantRow({ content: data.response, id: data.id, my_rating: data.myRating,
+        ...turnGateFlags(data) }),
+      at: data.at || null })
       refreshAsksAfterTurn()
       // A reattached reply is still a reply the user just watched land, so it
       // has to announce itself like `deliver()` does. Without this the thread
@@ -1881,7 +1892,7 @@ watch(typeaheadBound, (b) => { activeIndex.value = clampActiveIndex(activeIndex.
 // promising something the build cannot do is the #2128 dead end in text form.
 const composerPlaceholder = computed(() => {
   if (listening.value) return 'Listening…'
-  const base = `Message ${agentDisplayName(props.agent)}…  ·  / for playbooks`
+  const base = `Message ${agentDisplayName(props.agent)}…  ·  / for skills`
   return store.multiAgentChatAvailable ? `${base}  ·  @ to add an agent` : base
 })
 
@@ -2169,6 +2180,9 @@ async function deliver(text, { replyId = null, attachments = null } = {}) {
         content: data.response || '(no response)',
         id: data.id || data.message_id,
         my_rating: data.myRating,
+        // trinity-enterprise#754: read off the persisted reply, like the id —
+        // either spelling, since the synchronous body is snake_case.
+        ...turnGateFlags(data),
       }),
       at: data.at || null,
     })

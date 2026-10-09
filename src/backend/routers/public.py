@@ -27,7 +27,7 @@ from database import (
 from dependencies import get_current_user, get_optional_user, assert_owns
 from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
-from services import canvas_share_service
+from services import agent_skills_listing, canvas_share_service
 from services.agent_auth import agent_httpx_client
 from services.chat_execution_service import terminate_execution as _terminate_execution
 from services.chat_signals import ChatDispatchError
@@ -400,6 +400,11 @@ async def get_public_link_info(token: str, request: Request):
     )
 
 
+# trinity-enterprise#754: what an anonymous visitor reads when the agent could
+# not list its skills — one fixed sentence, whatever the agent answered.
+PUBLIC_SKILLS_UNREADABLE = "The agent could not list its skills"
+
+
 @router.get("/playbooks/{token}")
 async def get_public_playbooks(token: str, request: Request):
     """
@@ -414,30 +419,31 @@ async def get_public_playbooks(token: str, request: Request):
 
     agent_name = link["agent_name"]
 
-    # Check if agent is available
-    container = get_agent_container(agent_name)
-    if not container or container.status != "running":
-        raise HTTPException(status_code=503, detail="Agent is not running")
-
+    # trinity-enterprise#754: the one proxy (it also refreshes the agent's
+    # last-known listing). A visitor only ever gets the live list, and only the
+    # per-skill fields this link has always carried — `public_view` keeps to a
+    # fixed list, so `source` / `dir` / `approval` never reach an anonymous one.
+    # An anonymous caller only ever reads fixed sentences: never an exception's
+    # own text, and never the agent's error body (a traceback, a path). The
+    # cause is in the log.
     try:
-        agent_url = f"http://agent-{agent_name}:8000/api/skills"
-        async with agent_httpx_client(agent_name, timeout=10.0) as client:
-            response = await client.get(agent_url)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Agent returned error: {response.text}"
-                )
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Agent is starting up, please try again")
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Could not connect to agent")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch playbooks: {str(e)}")
+        body = await agent_skills_listing.fetch_live(agent_name)
+    except agent_skills_listing.SkillsListUnavailable as e:
+        if e.reason in ("not_found", "not_running"):
+            raise HTTPException(status_code=503, detail="Agent is not running")
+        if e.reason == "agent_error":
+            logger.warning("[public] playbooks for %s: the agent answered %s: %s",
+                           agent_name, e.status_code, e.agent_text[:500])
+            raise HTTPException(status_code=e.status_code, detail=PUBLIC_SKILLS_UNREADABLE)
+        raise HTTPException(status_code=e.status_code, detail=e.detail)   # the platform's own sentences
+    except Exception:
+        logger.warning("[public] playbooks for %s failed", agent_name, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch playbooks")
+    view = agent_skills_listing.public_view(body)
+    if view is None:
+        logger.warning("[public] playbooks for %s: the agent's answer is not a skills list", agent_name)
+        raise HTTPException(status_code=502, detail=PUBLIC_SKILLS_UNREADABLE)
+    return view
 
 
 @router.post("/verify/request")
