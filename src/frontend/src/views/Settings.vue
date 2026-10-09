@@ -1462,6 +1462,7 @@ Example:
                     Add Email
                   </button>
                 </div>
+                <InlineError :message="whitelistAddError" data-testid="whitelist-add-error" @dismiss="whitelistAddError = ''" />
 
                 <!-- Whitelist Table -->
                 <div class="mt-4 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
@@ -1494,7 +1495,7 @@ Example:
                         </td>
                       </tr>
                       <tr v-else v-for="entry in emailWhitelist" :key="entry.id" class="hover:bg-gray-50 dark:hover:bg-gray-700">
-                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
+                        <td class="px-6 py-4 break-all text-sm font-medium text-gray-900 dark:text-gray-100">
                           {{ entry.email }}
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
@@ -3502,19 +3503,19 @@ async function loadEmailWhitelist() {
   }
 }
 
+// #3455: why the last add was refused — by the client-side rule or by the
+// server — shown beside the field until dismissed or the next attempt.
+const whitelistAddError = ref('')
+
 async function addEmailToWhitelist() {
   if (!newEmail.value) return
 
   addingEmail.value = true
-  error.value = null
+  whitelistAddError.value = ''
 
   try {
-    await axios.post('/api/settings/email-whitelist', {
-      email: newEmail.value,
-      source: 'manual'
-    }, {
-      headers: authStore.authHeader
-    })
+    // The store refuses a value that is not one address before any request.
+    await settingsStore.addWhitelistEmail(newEmail.value)
 
     newEmail.value = ''
     await loadEmailWhitelist()
@@ -3523,7 +3524,10 @@ async function addEmailToWhitelist() {
       showSuccess.value = false
     }, 3000)
   } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to add email to whitelist'
+    whitelistAddError.value = apiErrorMessage(
+      e,
+      'Could not add that address. Check it is one email address, for example user@example.com, and try again.'
+    )
   } finally {
     addingEmail.value = false
   }
@@ -3536,9 +3540,8 @@ async function removeEmailFromWhitelist(email) {
   error.value = null
 
   try {
-    await axios.delete(`/api/settings/email-whitelist/${encodeURIComponent(email)}`, {
-      headers: authStore.authHeader
-    })
+    // #3456: addressed by its exact stored value, as one encoded segment.
+    await settingsStore.removeWhitelistEmail(email)
 
     await loadEmailWhitelist()
     showSuccess.value = true
