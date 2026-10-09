@@ -522,14 +522,39 @@ class TestSubscriptionAutoAssign:
         """Helper to delete a subscription."""
         api_client.delete(f"/api/subscriptions/{sub_id}")
 
+    # Every subscription this suite registers is named `test-…`. Anything else
+    # on the target instance belongs to its operator (#2420).
+    SUITE_PREFIX = "test-"
+
+    def _foreign_subscriptions(self, api_client):
+        """Names of subscriptions this suite did not create."""
+        response = api_client.get("/api/subscriptions")
+        assert_status(response, 200)
+        return [
+            sub["name"] for sub in response.json()
+            if not sub["name"].startswith(self.SUITE_PREFIX)
+        ]
+
     def test_create_agent_no_subscriptions(self, api_client: TrinityApiClient):
         """Agent created with no subscriptions uses platform API key."""
-        # Clear ALL subscriptions first to ensure clean state
-        # (prior tests may have left subscriptions that would auto-assign)
+        # Clear the suite's OWN leftovers (prior tests may have left
+        # subscriptions that would auto-assign) — never the operator's. This
+        # used to delete every subscription on the instance, which dropped a
+        # developer's whole fleet to API-key auth mid-run and could not be
+        # undone: the token is not readable back through the API (#2420).
         subs_response = api_client.get("/api/subscriptions")
-        if subs_response.status_code == 200:
-            for sub in subs_response.json():
+        assert_status(subs_response, 200)
+        for sub in subs_response.json():
+            if sub["name"].startswith(self.SUITE_PREFIX):
                 api_client.delete(f"/api/subscriptions/{sub['id']}")
+
+        foreign = self._foreign_subscriptions(api_client)
+        if foreign:
+            pytest.skip(
+                "target instance has operator-owned subscriptions "
+                f"({len(foreign)}); the no-subscription precondition needs a "
+                "disposable stack and this suite will not delete them (#2420)"
+            )
 
         agent_name = f"test-noauto-{uuid.uuid4().hex[:8]}"
         try:
@@ -543,12 +568,16 @@ class TestSubscriptionAutoAssign:
         """Agent created with subscription registered is auto-assigned."""
         sub_name = f"test-auto-sub-{uuid.uuid4().hex[:8]}"
         agent_name = f"test-auto-{uuid.uuid4().hex[:8]}"
+        # An operator-owned subscription is a legitimate auto-assign candidate
+        # too (the ranking is by headroom, #2409), so the exact name is only
+        # determined when this test's subscription is the only one.
+        foreign = self._foreign_subscriptions(api_client)
         sub_id = self._create_subscription(api_client, sub_name)
         try:
             self._create_agent(api_client, agent_name)
             auth = self._get_auth(api_client, agent_name)
             assert auth["auth_mode"] == "subscription"
-            assert auth["subscription_name"] == sub_name
+            assert auth["subscription_name"] in [sub_name, *foreign]
         finally:
             self._cleanup_agent(api_client, agent_name)
             self._cleanup_subscription(api_client, sub_id)
