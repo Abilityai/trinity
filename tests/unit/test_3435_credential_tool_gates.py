@@ -21,16 +21,14 @@ an agent key, and a stand-in lacking `mcp_scope` fails closed at the admin gate
 literal "human-only" in the 403 detail, so that string is pinned exactly.
 """
 
+import importlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import dependencies
 import routers.credentials as rc
-import services.credential_encryption as ce
-from dependencies import get_current_user
 from models import User
 
 _AGENT = "acme-bot"
@@ -77,15 +75,24 @@ def _ops_key_of_admin():
 @pytest.fixture
 def harness(monkeypatch):
     """Real router, real owner/admin dependencies; only the principal, the DB
-    ownership lookups, Docker and the encryption service are stubbed."""
+    ownership lookups, Docker and the encryption service are stubbed.
+
+    Every stub lands on the object the running route actually reads, never on
+    a name this file bound at import: sibling unit files replace
+    `sys.modules["services.credential_encryption"]` at collection time, and the
+    handlers resolve that module by a function-local import at request time —
+    patching an import-time alias then leaves the real service running."""
     state = {"user": _owner_jwt()}
     app = FastAPI()
     app.include_router(rc.router)
-    app.dependency_overrides[get_current_user] = lambda: state["user"]
+    # The exact dependency object the router's Depends() holds.
+    app.dependency_overrides[rc.get_current_user] = lambda: state["user"]
 
-    monkeypatch.setattr(dependencies.db, "get_agent_owner", lambda name: "owner" if name == _AGENT else None)
+    # The `db` the ownership dependency closes over.
+    owner_db = rc.get_owned_agent_by_name.__globals__["db"]
+    monkeypatch.setattr(owner_db, "get_agent_owner", lambda name: "owner" if name == _AGENT else None)
     monkeypatch.setattr(
-        dependencies.db, "can_user_share_agent", lambda username, name: username in ("owner", "admin")
+        owner_db, "can_user_share_agent", lambda username, name: username in ("owner", "admin")
     )
     container = MagicMock()
     monkeypatch.setattr(rc, "get_agent_container", lambda name: container)
@@ -97,6 +104,9 @@ def harness(monkeypatch):
     service = MagicMock()
     service.export_to_agent = AsyncMock(return_value=("/home/developer/.credentials.enc", 2))
     service.import_to_agent = AsyncMock(return_value={".env": "K=V", ".mcp.json": "{}"})
+    # The module object `from services.credential_encryption import ...` inside
+    # the handlers resolves to now (sys.modules), not an import-time alias.
+    ce = importlib.import_module("services.credential_encryption")
     monkeypatch.setattr(ce, "get_credential_encryption_service", lambda: service)
     monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "ab" * 32)
 
