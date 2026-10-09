@@ -289,14 +289,14 @@ import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } 
 
 | Endpoint | File:Line | Handler |
 |----------|-----------|---------|
-| `GET /api/public/link/{token}` | `public.py:43` | `get_public_link_info()` |
-| `POST /api/public/verify/request` | `public.py:73` | `request_verification_code()` |
-| `POST /api/public/verify/confirm` | `public.py:130` | `confirm_verification_code()` |
-| `POST /api/public/chat/{token}` | `public.py:215` | `public_chat()` (supports `async_mode` for THINK-001) |
-| `GET /api/public/intro/{token}` | `public.py:374` | `get_agent_intro()` |
-| `GET /api/public/playbooks/{token}` | `public.py:403` | `get_public_playbooks()` — the agent's live skills for the chat's `/` menu (placeholder "Type your message or / for skills..."), read through `services/agent_skills_listing.py::fetch_live`. `public_view` keeps each skill to the pre-#754 fields (`name`, `description`, `path`, `user_invocable`, `automation`, `allowed_tools`, `argument_hint`, `has_schedule`) and the top level to `skills` / `count` / `skill_paths`, so `source` / `dir` / `approval` never reach a visitor; never the last-known list; stopped → 503 "Agent is not running"; an agent error keeps its status with one fixed sentence, "The agent could not list its skills", and a 200 that is not a skills list is 502 with it" (trinity-enterprise#754, [skills-tab.md](skills-tab.md)) |
-| `GET /api/public/executions/{token}/{execution_id}/stream` | `public.py:674` | `public_stream_execution()` (THINK-001 SSE proxy) |
-| `GET /api/public/executions/{token}/{execution_id}/status` | `public.py:733` | `public_execution_status()` (THINK-001 polling) |
+| `GET /api/public/link/{token}` | `public.py:334` | `get_public_link_info()` |
+| `POST /api/public/verify/request` | `public.py:450` | `request_verification_code()` |
+| `POST /api/public/verify/confirm` | `public.py:507` | `confirm_verification_code()` |
+| `POST /api/public/chat/{token}` | `public.py:547` | `public_chat()` (supports `async_mode` for THINK-001) |
+| `GET /api/public/intro/{token}` | `public.py:577` | `get_agent_intro()` |
+| `GET /api/public/playbooks/{token}` | `public.py:409` | `get_public_playbooks()` — the agent's live skills for the chat's `/` menu (placeholder "Type your message or / for skills..."), read through `services/agent_skills_listing.py::fetch_live`. `public_view` keeps each skill to the pre-#754 fields (`name`, `description`, `path`, `user_invocable`, `automation`, `allowed_tools`, `argument_hint`, `has_schedule`) and the top level to `skills` / `count` / `skill_paths`, so `source` / `dir` / `approval` never reach a visitor; never the last-known list; stopped → 503 "Agent is not running"; an agent error keeps its status with one fixed sentence, "The agent could not list its skills", and a 200 that is not a skills list is 502 with it" (trinity-enterprise#754, [skills-tab.md](skills-tab.md)) |
+| `GET /api/public/executions/{token}/{execution_id}/stream` | `public.py:805` | `public_stream_execution()` (THINK-001 SSE proxy) |
+| `GET /api/public/executions/{token}/{execution_id}/status` | `public.py:877` | `public_execution_status()` (THINK-001 polling) |
 | `GET /api/public/sessions/{token}` | `public.py` | `list_public_sessions()` — JWT required; returns caller's last 20 sessions for this agent link with `preview` field (#587) |
 | `GET /api/public/sessions/{token}/{session_id}` | `public.py` | `get_public_session()` — JWT required; returns session detail with messages; validates session belongs to caller and correct agent (#587) |
 
@@ -1089,9 +1089,9 @@ Return {response, session_id (for anonymous), message_count}
 
 | Endpoint | Method | File:Line | Description |
 |----------|--------|-----------|-------------|
-| `/api/public/chat/{token}` | POST | `public.py:214` | Chat with persistence (updated) |
-| `/api/public/history/{token}` | GET | `public.py:463` | Get chat history |
-| `/api/public/session/{token}` | DELETE | `public.py:539` | Clear session (New Conversation) |
+| `/api/public/chat/{token}` | POST | `public.py:547` | Chat with persistence (updated) |
+| `/api/public/history/{token}` | GET | `public.py:657` | Get chat history |
+| `/api/public/session/{token}` | DELETE | `public.py:734` | Clear session (New Conversation) |
 
 ### Request/Response Models
 

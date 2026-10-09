@@ -29,7 +29,7 @@ As an agent owner, I want to assign platform skills to my agents so that they fo
 ## Entry Points
 
 ### User Configuration (UI)
-- **Component**: `src/frontend/src/components/skills/SkillAssignModal.vue:75-77` - "Save assignments" (bulk PUT), opened by **Assign skills** in the Skills tab's Shared section (`SkillsTab.vue:133`)
+- **Component**: `src/frontend/src/components/skills/SkillAssignModal.vue:75-77` - "Save assignments" (bulk PUT), opened by **Assign skills** in the Skills tab's Shared section (`SkillsTab.vue:136`)
 - **Tab Access**: Agent Detail page -> Skills tab, visible to everyone with access since trinity-enterprise#754; the assignment controls (Assign skills, Manage sets, Sync now, Unassign) are for the owner or an admin, never on the system agent. See [skills-tab.md](skills-tab.md)
 
 ### Backend API
@@ -50,10 +50,10 @@ Since trinity-enterprise#754 the assignment surface is the **Shared skills** sec
 | Control | File | Call |
 |---|---|---|
 | **Assign skills** → tick → **Save assignments** | `components/skills/SkillAssignModal.vue:134-146` | `store.saveAssignments(draft)` → `PUT /api/agents/{name}/skills` |
-| **Unassign** on a Shared card | `components/skills/SkillsTab.vue:541-559`, after its confirm (`:561-573`) | `store.saveAssignments(individualNames − name)` → the same PUT |
+| **Unassign** on a Shared card | `components/skills/SkillsTab.vue:546-564`, after its confirm (`:566-578`) | `store.saveAssignments(individualNames − name)` → the same PUT |
 | **Unassign library skill** (#2914 conflict) | `components/skills/SkillDetailsModal.vue:31-41` → `SkillsTab.onUnassign` | the same PUT |
-| **Manage sets** | `components/skills/AgentSkillSets.vue` in a `BaseModal` (`SkillsTab.vue:266-271`) | `store.assignSet` / `unassignSet` → `POST` / `DELETE /api/agents/{name}/skill-sets/{set}` |
-| **Sync now** | `SkillsTab.vue:135-144,581-589` | `store.inject()` → `POST /api/agents/{name}/skills/inject` |
+| **Manage sets** | `components/skills/AgentSkillSets.vue` in a `BaseModal` (`SkillsTab.vue:271-276`) | `store.assignSet` / `unassignSet` → `POST` / `DELETE /api/agents/{name}/skill-sets/{set}` |
+| **Sync now** | `SkillsTab.vue:138-147,586-594` | `store.inject()` → `POST /api/agents/{name}/skills/inject` |
 
 The picker keeps its ent#235 / ent#530 / ent#672 / #2914 behaviour: the draft is the INDIVIDUAL list, a set-only member is ticked and locked, a deprecated skill is marked before it is ticked, and a draft survives a sync that re-reads the same assignment set. Package fact chips render through the shared seam `components/skills/{SkillContractChips.vue, contract.js}` (ent#263, shared with the Library page).
 

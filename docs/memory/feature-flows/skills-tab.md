@@ -42,14 +42,14 @@ As an agent owner, I want to see, run and gate every skill my agent has — its 
 
 #### Layout (`SkillsTab.vue`)
 
-- **Header** (`:16-56`): title, a filter box (`:24-30`) that narrows both sections by name or description (`matches()`, `:368-372`), and the in-agent enforcement line (`:35-40`, below).
-- **Own skills** (`:59-121`): count of the cards it lists, kept gates included (`ownCount`, `:376-377`), a meta line (`ownBanner`, `:407-424`), then by `viewState` (`ownView`, `:387-395`): skeleton / `LoadFailed` (retry → `store.loadAgentList()`) / empty text (`ownEmptyText`, `:397-405`) / a grid of own cards plus kept-gate cards.
+- **Header** (`:16-57`): title, a filter box (`:24-30`) that narrows both sections by name or description (`matches()`, `:373-377`), and the in-agent enforcement line (`:35-40`, below).
+- **Own skills** (`:60-124`): count of the cards it lists, kept gates included (`ownCount`, `:381-382`), a meta line (`ownBanner`, `:412-429`), then by `viewState` (`ownView`, `:392-400`): skeleton / `LoadFailed` (retry → `store.loadAgentList()`) / empty text (`ownEmptyText`, `:402-410`) / a grid of own cards plus kept-gate cards.
   - meta line, live: `From .claude/skills` (the agent's `skill_paths`, each folder once: in the agent container `.claude/skills/` and `~/.claude/skills/` are one folder, which an image older than this change lists twice; the store drops the repeat, `stores/skills.js:202-204`);
   - meta line, last-known (warning tone): "The agent is stopped. Start the agent to run. Showing its skills as of <relative time>." or "The agent isn't answering. Showing its skills as of …"; the absolute time is on hover (`Listed <date>`).
-- **Shared skills** (`:124-262`):
+- **Shared skills** (`:127-267`):
   - head: count (`store.assigned.length`); for the owner or an admin (not on the system agent), on a configured library: **Assign skills** (opens `SkillAssignModal`), **Manage sets** (opens `AgentSkillSets` in a `BaseModal`), **Sync now** (disabled while stopped; primary-styled while a save did not deliver — `pendingSync`, #2703; `store.inject()`);
   - set chips: up to 3 (`MAX_SET_CHIPS`) + "+N more"; purple when complete, warning with a dot when partial, unresolved or missing credentials (`setVariant` / `setTitle`), plus "Some sets need credentials" when any set lacks them; a failed sets read shows "Couldn't read this agent's sets" with a Retry (`store.loadSets()`) instead of an absent line; a click opens Manage sets;
-  - the shared line (`:189-199`): the last verb's outcome (save / unassign / sync error, plus the ent#672 deprecation note), else "Last sync <time>" or "Not synced from this screen yet: statuses appear after a sync. Skills are also copied in when the agent starts.";
+  - the shared line (`:194-204`): the last verb's outcome (save / unassign / sync error, plus the ent#672 deprecation note), else "Last sync <time>" or "Not synced from this screen yet: statuses appear after a sync. Skills are also copied in when the agent starts.";
   - body: skeleton / `LoadFailed` / the named empty states by `store.emptyReason` (`library_unconfigured` with an admin link to `/settings?tab=agents`, `library_empty`, `none_assigned` worded by role) / "No shared skill matches the filter." / the grid.
 
 #### Exactly one section per skill (`utils/skillCards.js::buildSkillCards`, `:141-296`)
@@ -95,7 +95,7 @@ Every slot has a fixed height, so content never changes a card's size; long text
 
 The raw value is on hover (`automation: <value>`). "Approval" and "gated" belong only to the enforced gate.
 
-#### Run (`SkillsTab.vue::onRun`, `:497-525` → `stores/skills.js::runSkill`, `:234-243`)
+#### Run (`SkillsTab.vue::onRun`, `:502-530` → `stores/skills.js::runSkill`, `:234-243`)
 
 ```javascript
 const response = await api.post(`/api/agents/${agentName.value}/task`, {
@@ -113,7 +113,7 @@ const response = await api.post(`/api/agents/${agentName.value}/task`, {
 
 **On the Tasks tab the run is still going.** The panel's 5 s poll re-reads the list while any loaded row is `queued`, `running` or `pending_retry`, and stops when none is (`TasksPanel.vue::shouldRereadExecutions`, `:762-770`; `IN_FLIGHT_STATUSES`, `:638-645`). It never stacks a read on one still out, and it holds off while a task typed into the panel is awaited, whose local row stands for it (a read meanwhile would list it twice). Only the latest read is applied (`loadExecutions`, `:719-746`), so a slow read for the agent the page left is dropped. The highlighted row is opened and scrolled to once, on the first read that answers, never again on a re-read. A row whose status changes drops the details read while it ran, and the open one re-reads them in place (`settleDetails`, `:748-760`).
 
-**Edit & Run** (`onEditRun`, `:527-529`) emits `/<name> `, which prefills the Tasks input. It needs only `user_invocable`.
+**Edit & Run** (`onEditRun`, `:532-534`) emits `/<name> `, which prefills the Tasks input. It needs only `user_invocable`.
 
 Run enablement (`runVerdict`, `skillCards.js:108-118`), checked in order:
 
@@ -145,11 +145,11 @@ Approval row (`SkillCard.vue:158-189`, `:219-248`):
 - the picker lists `approvers` (fallback: `primary`); a kind nobody fills is listed as `(nobody yet)` and cannot be selected; a gate whose kind the install no longer offers is appended, disabled;
 - toggle on → `set-gate` with the shown kind: the gate's own, else the first reachable kind, else `primary` — never a bodiless PUT;
 - toggle off → `clear-gate`; changing the kind of a gated skill → `set-gate` with the new kind;
-- `SkillsTab.onSetGate` / `onClearGate` (`:531-539`) → `stores/skillGates.js::setGate` / `clearGate`.
+- `SkillsTab.onSetGate` / `onClearGate` (`:536-544`) → `stores/skillGates.js::setGate` / `clearGate`.
 
 **Kept gates** (ent#753: sticky until cleared): a gate whose skill is not in the listed skills renders as a dashed card under Own: "Not in this agent's skills list: gate kept", description "This gate stays until someone clears it.", **Clear gate** for the owner or an admin (it may guard a `.claude/commands/` entry). They render only once a list is known.
 
-#### In-agent enforcement line (`SkillsTab.vue:446-461`)
+#### In-agent enforcement line (`SkillsTab.vue:451-466`)
 
 Shown where the approval row is (owner or admin, not a ghost, not the system agent) and the agent has at least one gate (`enforcementSlot`). The slot is reserved as soon as gates exist, so the background probe swaps text in place.
 
@@ -183,18 +183,18 @@ Copy: "Ran without approval: you are the approver." for the requester, else "Ran
 - `write()` (`:96-114`) re-reads the map for the agent it wrote to, and drops the answer if the page moved to another agent (KeepAlive);
 - the PUT's `warnings` (e.g. `approver_unassigned`) need no state of their own: the map is re-read after every write, and its `reachable: false` is what the card's "nobody fills it yet" says.
 
-**Refetch of the own list** (`SkillsTab.vue:598-643`):
-- agent switch → full `loadAll()`;
-- status change → `loadAgentList()` plus, for the approval-row viewer, a re-probe;
-- the `agent_skills_changed` tick (`store.changedAt[agent]`, #2703);
+**Refetch of the own list** (`SkillsTab.vue:609-658`):
+- agent switch → full `loadAll()`: one list read and one probe, even when the next agent is in another state or has a tick of its own (one watcher takes the agent and its state together);
+- status change on the same agent → `loadAgentList()` plus, for the approval-row viewer, a re-probe;
+- the `agent_skills_changed` tick (`store.changedAt[agent]`, #2703) on the same agent;
 - the Manage sets dialog closing;
 - after save / unassign / sync (`onSaved`, `onUnassign`, `onSync`).
 
-`onUnmounted` (`:645-648`) clears both stores. Switching tab unmounts the tab; leaving the KeepAlive'd page does not.
+`onUnmounted` (`:660-663`) clears both stores. Switching tab unmounts the tab; leaving the KeepAlive'd page does not.
 
 ### API Calls
 
-On load (`loadAll`, `SkillsTab.vue:598-603`):
+On load (`loadAll`, `SkillsTab.vue:609-614`):
 
 ```javascript
 store.load(name)                 // GET /api/skills/library/status + GET /api/agents/{n}/skills;
@@ -218,7 +218,7 @@ Writes: `PUT /api/agents/{n}/skill-gates/{key}` `{approver}`, `DELETE /api/agent
 
 `SkillsTab` props come from the agent payload: `can_share` (owner or admin, `routers/agents.py:493`), `is_system`, `ephemeral`.
 
-| Viewer / agent | Tab, Run, Edit & Run, gate line | Approval row, hook probe (`showOwnerRow`, `:347`) | Assign / Manage sets / Sync / Unassign / Clear gate (`showManage`, `:349`) |
+| Viewer / agent | Tab, Run, Edit & Run, gate line | Approval row, hook probe (`showOwnerRow`, `:352`) | Assign / Manage sets / Sync / Unassign / Clear gate (`showManage`, `:354`) |
 |---|---|---|---|
 | Owner or admin | yes | yes | yes |
 | Shared user, other viewer | yes | no | no |
@@ -237,11 +237,11 @@ The server enforces the same lines: gate writes need a person who owns the agent
 
 ```
 GET /api/agents/{n}/playbooks[?last_known]   routers/agent_files.py:79-102   (AuthorizedAgentByName)
-GET /api/public/playbooks/{token}            routers/public.py:403-429       (link token)
+GET /api/public/playbooks/{token}            routers/public.py:408-446       (link token)
 connector_service.fetch_live_playbooks       services/connector_service.py:108-129
         │
         ▼
-fetch_live(agent)                                                       :90-115
+fetch_live(agent)                                                       :94-128
   ├─ docker_service.agent_container_state(agent)   (tri-state, a fresh read)
   │    None (Docker unreadable) → SkillsListUnavailable(unreachable, 503, "Could not read the agent's state")
   │    "missing"           → SkillsListUnavailable(not_found,   404, "Agent not found")
@@ -251,16 +251,16 @@ fetch_live(agent)                                                       :90-115
   │    connect error       → (unreachable, 503, "Could not connect to agent")
   │    non-200             → (agent_error, <status>, "Agent returned error: …")
   └─ 200 → remember(agent, body) → body
-list_skills(agent, last_known)          (the agent-page route only)     :118-142
+list_skills(agent, last_known)          (the agent-page route only)     :131-155
   └─ not_running | unreachable, last_known=true, recall() has a copy →
        200 {skills, count, skill_paths, last_known: {captured_at, reason: "stopped" | "unreachable"}}
      anything else → the original error, unchanged
 ```
 
-- **`remember`** (`:157-181`) keeps only a dict whose `skills` is a list, as `{skills, skill_paths, captured_at}`. A live EMPTY list replaces the copy. A JSON body over `MAX_CACHED_BYTES` (256 KB, `:54`) is not kept AND drops the older copy, which is never served as current. It writes through `redis_breaker_util.get_breaker_redis()` (1 s socket timeouts, `None` when down); a failed write is logged and the live answer still returns.
-- **`recall`** (`:184-205`) returns `None` for no key, Redis down, or a malformed value (shape-checked).
-- **`forget`** (`:208-216`) never raises.
-- **`public_view`** (`:219-228`) keeps each skill to `PUBLIC_SKILL_FIELDS` (`:59-62`), the eight fields the public link carried before #754, and the top level to `PUBLIC_LISTING_FIELDS` (`skills`, `count`, `skill_paths`), so `source` / `dir` / `approval`, and any later key or field, never reach an anonymous visitor. An entry that is not a skill is dropped; an answer that is not a skills list is `None`.
+- **`remember`** (`:158-182`) keeps only a dict whose `skills` is a list, as `{skills, skill_paths, captured_at}`. A live EMPTY list replaces the copy. A JSON body over `MAX_CACHED_BYTES` (256 KB, `:53`) is not kept AND drops the older copy, which is never served as current. It writes through `redis_breaker_util.get_breaker_redis()` (1 s socket timeouts, `None` when down); a failed write is logged and the live answer still returns.
+- **`recall`** (`:185-206`) returns `None` for no key, Redis down, or a malformed value (shape-checked).
+- **`forget`** (`:209-217`) never raises.
+- **`public_view`** (`:220-232`) keeps each skill to `PUBLIC_SKILL_FIELDS` (`:58-61`), the eight fields the public link carried before #754, and the top level to `PUBLIC_LISTING_FIELDS` (`:63`: `skills`, `count`, `skill_paths`), so `source` / `dir` / `approval`, and any later key or field, never reach an anonymous visitor. An entry that is not a skill is dropped; an answer that is not a skills list is `None`.
 - Callers keep their own wording: `/playbooks` maps the exception's status and detail, and any other exception (e.g. a non-JSON body) to 500 `Failed to fetch playbooks: …`. The public route maps `not_found` / `not_running` to 503 "Agent is not running"; for an `agent_error` it keeps the agent's status but answers one fixed sentence, "The agent could not list its skills" (the agent's body is logged, never handed to an anonymous visitor), and a 200 that is not a skills list is 502 with the same sentence. The connector says "Agent is not running." for `not_running`.
 - Not routed: the Workspace roster (`client_portal/service.py:1389`, `_read_skills`) reads the agent directly and keeps only title / description / starter, so it neither writes nor serves the copy.
 
@@ -274,11 +274,11 @@ list_skills(agent, last_known)          (the agent-page route only)     :118-142
 
 Auth is unchanged (`get_skill_gate_readable_agent_by_name`). Models: `SkillGateApproverStatus` / `SkillGateMapResponse` (`models.py:3877-3902`).
 
-- **`approvers: [{kind, reachable, viewer_fills}]`**, one entry per kind in `approver_kinds()` (`skill_gate_map_service.approver_status`, `:154-177`):
+- **`approvers: [{kind, reachable, viewer_fills}]`**, one entry per kind in `approver_kinds()` (`skill_gate_map_service.approver_status`, `:156-179`):
   - `reachable`: the kind resolves to at least one person (`skill_gate_service.approver_people`, `skill_gate_service.py:311-319`, which is `_approvers` without the refusal);
   - `viewer_fills`: `requester_from_principal(caller)` (`skill_gate_service.py:658-681`) is a person and its casefolded email is in that list. These are the functions `enforce` uses to decide self-approval, so the card cannot say "you approve this" for a run the gate would hold. An agent key, a connector or the event loopback never fills a kind;
   - booleans only: no name or email.
-- **`hook`** with `?probe=true` (`skill_gate_map_service.hook_status`, `:228-258`):
+- **`hook`** with `?probe=true` (`skill_gate_map_service._read_health` + `hook_status`, `:253-280`):
   - honoured only when `is_person_principal(caller)` and `can_manage_agent_skills(caller, agent)` (the #3052 `probe` precedent); anyone else gets `null`;
   - one direct `agent_httpx_client` `GET /health`, capped at 3 s for the whole probe (`asyncio.wait_for`; httpx's own timeout is per phase), no circuit-breaker bookkeeping;
   - the agent's `skill_gate_hook` (`agent_server/routers/info.py:135`) when it is one of `ok | missing | not_root_owned | writable | unsupported_runtime`; `predates` for a 200 without the field; `unknown` for no usable answer (stopped, timeout, non-200, not JSON, an unexpected value).
@@ -288,9 +288,9 @@ Auth is unchanged (`get_skill_gate_readable_agent_by_name`). Models: `SkillGateA
 
 - **Source**: ent#752's `self_approved` row in `skill_gate_requests`, written by `skill_gate_service.record_self_approval` at the `/task`, `/chat` and backstop seams; its UNIQUE `dispatched_execution_id` is the run the agent received.
 - **`db.get_self_approved_runs(agent, ids)`** (`db/skill_gate_requests.py:169-187`, facade `database.py:2321`): one `SELECT dispatched_execution_id, requester_key … WHERE agent_name = ? AND state = 'self_approved' AND dispatched_execution_id IN (…)`.
-- **`skill_gate_map_service.self_approved_flags(agent, ids, principal)`** (`:180-206`) → `{id: (True, by_viewer)}`. `by_viewer` is `requester_key == "person:" + casefold(email)` for a person principal, so the email never leaves the server. People only: a machine principal (an agent, connector or system key, or an agent-scoped MCP key) gets `{}`, since beside `source_user_email` the marker names who fills the approver kind (operator ruling; the `set_by` rule, #715). A person's own user-scoped MCP key is that person (`PERSON_SCOPES`, as in `enforce`) and reads the flags. The Workspace twin takes `viewer_is_person` for the same rule. It never raises: a failed read means no flags.
+- **`skill_gate_map_service.self_approved_flags(agent, ids, principal)`** (`:182-204`) → `{id: (True, by_viewer)}`. `by_viewer` is `requester_key == "person:" + casefold(email)` for a person principal, so the email never leaves the server. People only: a machine principal (an agent, connector or system key, or an agent-scoped MCP key) gets `{}`, since beside `source_user_email` the marker names who fills the approver kind (operator ruling; the `set_by` rule, #715). A person's own user-scoped MCP key is that person (`PERSON_SCOPES`, as in `enforce`) and reads the flags. The Workspace twin takes `viewer_is_person` for the same rule. It never raises: a failed read means no flags.
 - **Executions**: `routers/schedules.py:891-917` (`get_agent_executions`, one batch read per page) and `:920-938` (`get_execution`) take `current_user` and add `gate_self_approved` / `gate_self_approved_by_viewer` (`ExecutionSummary` `models.py:4121-4122`, `ExecutionResponse` `:4178-4179`). The PERF-001 summary column list is unchanged.
-- **Workspace**: `client_portal/router.py:1653-1678` (`portal_history`) → `service.get_history(agent, principal.email, …)` → `annotate_self_approved_turns` (`client_portal/service.py:4629`; `skill_gate_map_service.py:217-235`). Only assistant rows with an `execution_id` (#3166) are looked up, the viewer is the portal session's email, and questions, report rows and pre-#3166 rows read false. `PortalHistoryMessage` gains both fields (`client_portal/models.py:1012-1013`).
+- **Workspace**: `client_portal/router.py:1653-1678` (`portal_history`) → `service.get_history(agent, principal.email, …)` → `annotate_self_approved_turns` (`client_portal/service.py:4629`; `skill_gate_map_service.py:220-238`). Only assistant rows with an `execution_id` (#3166) are looked up, the viewer is the portal session's email, and questions, report rows and pre-#3166 rows read false. `PortalHistoryMessage` gains both fields (`client_portal/models.py:1012-1013`).
 
 ### Database Operations
 
@@ -463,7 +463,9 @@ Implemented (2026-10-08).
 
 Known limits:
 - the Overview tab's "N skills" button counts library assignments only;
-- canon roles in the approver picker are follow-up trinity-enterprise#848.
+- canon roles in the approver picker are follow-up trinity-enterprise#848;
+- a renamed agent that is stopped shows no own skills until it starts: rename clears the last-known copy under both names rather than moving it (PR review, deferred);
+- Shared cards show no file count or size, which the old rows did; both stay in the Assign dialog (PR review, kept).
 
 ## Related Flows
 
@@ -480,3 +482,4 @@ Known limits:
 | 2026-10-08 | Created for trinity-enterprise#754: the Playbooks tab and the library-only Skills tab merged into one Skills tab — the cards, Run (`async_mode`), Requires approval, the last-known list (`services/agent_skills_listing.py`, `?last_known=true`), `approvers` / `?probe=true` on the gate map, the self-approved marker (Tasks, execution page, Workspace), agent-server `source` / `dir` / `approval`, and "skills" in UI copy. Absorbs `playbooks-tab.md`. |
 | 2026-10-08 | Review round (ent#754): agent-switch guards in the tab and the skills store; sections wait for the reads they depend on and name each failure; gate writes keyed on the gate the card shows; a live default approver; Unassign confirms; dialogs focus the safe action; hook states in words. Backend: a container removed mid-read is a plain 404 (no Docker text, public link included); transport errors are unreachable; the connector keeps its wording; the self-approved read is chunked; a machine Workspace viewer is never "you"; the synchronous Workspace reply carries both flags; `GET /skills/library` names `approval`. |
 | 2026-10-08 | Eyeball round (ent#754): a Run's Tasks row settles without a Refresh (the poll re-reads while a row is in flight; the highlighted row opens once); the Own meta line names each folder once (store, and the agent server scans its folder once); the Unassign confirm speaks in the future tense; the approver picker is `BaseSelect size="sm"`, so it fits the 40px row; the Own count includes kept gates; the not-synced line says statuses appear after a sync. |
+| 2026-10-09 | PR review (#3412): an unsaved Assign draft no longer carries to the next agent; the Tasks poll stops while the page is away; the public link answers fixed sentences and keeps to its listing keys; a Docker daemon fault serves the kept copy (tri-state lookup); the probe is capped at 3 s overall; a switch reads the next agent once; the text links take the focus ring; "people only" includes a person's user-scoped key; line citations re-pointed. |
