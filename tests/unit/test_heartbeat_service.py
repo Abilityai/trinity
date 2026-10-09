@@ -255,6 +255,10 @@ def test_bulk_mixed_states_single_round_trip(fake_redis, monkeypatch):
     assert created["count"] == 1  # one pipeline for all agents
     assert result["alive-agent"]["heartbeat_state"] == "alive"
     assert result["alive-agent"]["heartbeat_alive"] is True
+    assert result["alive-agent"]["heartbeat_memory_mb"] == 5
+    assert result["alive-agent"]["heartbeat_active_executions"] == 1
+    assert result["alive-agent"]["last_heartbeat_age_s"] is not None
+    assert 0 <= result["alive-agent"]["last_heartbeat_age_s"] < 5
     assert result["stale-agent"]["heartbeat_state"] == "stale"
     assert result["stale-agent"]["heartbeat_alive"] is False
     assert result["new-agent"]["heartbeat_state"] == "unsupported"
