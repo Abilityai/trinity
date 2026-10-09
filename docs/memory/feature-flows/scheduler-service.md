@@ -82,7 +82,6 @@ As a **platform administrator**, I want **scheduled tasks to execute exactly onc
 | Config | `src/scheduler/config.py` | Environment-based configuration |
 | Models | `src/scheduler/models.py` | Schedule, ScheduleExecution, ProcessSchedule, ProcessScheduleExecution |
 | Database | `src/scheduler/database.py` | SQLite read/write operations |
-| HTTP | `src/scheduler/agent_client.py` | Agent container communication (legacy, unused in main path) |
 | Locking | `src/scheduler/locking.py` | Redis distributed locks |
 | Docker | `docker/scheduler/Dockerfile` | Container definition |
 | Docker | `docker/scheduler/requirements.txt` | Python dependencies |

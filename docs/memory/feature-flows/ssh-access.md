@@ -383,8 +383,10 @@ which blocks `KEYS` — a live probe of the wired sweep raised
 which the fail-open handler would have swallowed to 0-cleaned every cycle, leaving
 the fix **inert**. `SCAN` is allowed and is the production-safe incremental scan
 anyway. The same fix applies to
-`cleanup_agent_credentials()` (agent stop/delete), which were silently broken by
-the identical ACL cause. A mocked unit test can't see this (it stubs the Redis
+`cleanup_agent_credentials()`, which was silently broken by the identical ACL
+cause. That helper exists, but no agent stop or delete path calls it today, so
+an agent's SSH credential metadata is not purged when the agent stops or is
+deleted. A follow-up bug tracks this. A mocked unit test can't see this (it stubs the Redis
 client), so `test_1616_ssh.py` carries a static guard that `redis_client.keys(`
 never reappears in `ssh_service.py`.
 
@@ -497,7 +499,11 @@ async def inject_ssh_key(self, agent_name, public_key, skip_if_present=True) -> 
     return result.exit_code == 0
 ```
 
-### Agent Stop/Delete Cleanup (Lines 441-484) - SshService.cleanup_agent_credentials()
+### Per-Agent Cleanup Helper - SshService.cleanup_agent_credentials()
+
+**No production caller.** The docstring below says "called on agent stop/delete", but
+no lifecycle path invokes this method; only its definition exists in `src/`. A
+follow-up bug tracks wiring it into stop/delete.
 
 ```python
 async def cleanup_agent_credentials(self, agent_name: str) -> int:

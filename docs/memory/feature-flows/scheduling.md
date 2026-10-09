@@ -729,39 +729,37 @@ stored-invalid rows — the backend 400 is no longer the first feedback (design-
 - `croniter==5.0.1` - Cron expression parsing
 - `pytz==2024.2` - Timezone support. **Not the authoritative resolver** — pytz bundles its own complete tz database, while APScheduler's `astimezone()` re-resolves the zone through the stdlib `zoneinfo` (#1823)
 - `tzdata==2026.3` (+ the `tzdata-legacy` apt package) - The IANA database `zoneinfo` reads. `tzdata-legacy` carries the *backward-compatibility links* (`Europe/Kiev` → `Europe/Kyiv`), split out of `tzdata` in Debian trixie; without it every schedule stored under a legacy alias fails to register (#1823). Guarded by `tests/unit/test_1823_tz_capability_parity.py`
-- `httpx` - Async HTTP client (used by AgentClient)
+- `httpx` - Async HTTP client (used by `SchedulerService._call_backend_execute_task`)
 
 ---
 
 ## Agent HTTP Client Service
 
 **Added**: 2025-12-31 (Plan 03 refactoring)
-**Updated**: 2026-02-11 - Dedicated scheduler has its own `AgentClient` at `src/scheduler/agent_client.py`
 
-The dedicated scheduler uses `AgentClient` from `src/scheduler/agent_client.py` for all HTTP communication with agent containers. This centralizes URL construction, timeout handling, and response parsing.
+The dedicated scheduler does **not** talk to agent containers. Each fire goes through
+`SchedulerService._call_backend_execute_task` (`src/scheduler/service.py`), which POSTs to the
+backend's `/api/internal/execute-task` (`async_mode: true`, `Idempotency-Key: sched:{execution_id}`).
+The backend's `TaskExecutionService` then POSTs the agent's `/api/task` (`agent_post_with_retry`
+in `services/task_execution_service.py`). There is no `src/scheduler/agent_client.py`; it was removed in v0.7.0.
 
-### Usage in Dedicated Scheduler
+### Dispatch from the Dedicated Scheduler
 
-**Location**: `src/scheduler/agent_client.py`
+**Location**: `src/scheduler/service.py`
 
 ```python
-from scheduler.agent_client import get_agent_client, AgentNotReachableError
-
-# Send task to agent using AgentClient.task() for raw log format
-client = get_agent_client(schedule.agent_name)
-task_response = await client.task(schedule.message, execution_id=execution.id)
-
-# Update execution status with parsed response
-self.db.update_execution_status(
+result = await self._call_backend_execute_task(
+    agent_name=schedule.agent_name,
+    message=effective_message,
+    triggered_by=triggered_by,
+    model=schedule.model,
+    timeout_seconds=schedule.timeout_seconds,
+    allowed_tools=schedule.allowed_tools,
     execution_id=execution.id,
-    status="success",
-    response=task_response.response_text,
-    context_used=task_response.metrics.context_used,
-    context_max=task_response.metrics.context_max,
-    cost=task_response.metrics.cost_usd,
-    tool_calls=task_response.metrics.tool_calls_json,
-    execution_log=task_response.metrics.execution_log_json  # Raw Claude Code format
+    deliver_to_workspace_email=schedule.deliver_to_workspace_email,
 )
+# result is a dict: status 'dispatched' (async hand-off, completion polled from the DB),
+# 'success', or a failure.
 ```
 
 ### AgentClient API
@@ -813,19 +811,11 @@ class AgentChatMetrics:
 | `AgentRequestError` | Agent returned error status | 4xx/5xx from agent |
 | `AgentClientError` | Base exception | General failure |
 
-**Scheduler error handling** (dedicated scheduler `src/scheduler/service.py:295-313`):
-```python
-try:
-    client = get_agent_client(schedule.agent_name)
-    task_response = await client.task(schedule.message, execution_id=execution.id)
-    # ... success handling
-except AgentNotReachableError as e:
-    error_msg = f"Agent not reachable: {str(e)}"
-    # ... failure handling with specific message
-except Exception as e:
-    error_msg = str(e)
-    # ... generic failure handling
-```
+**Scheduler error handling**: the agent-client exceptions above are raised inside the backend,
+not the scheduler. `_call_backend_execute_task` raises a plain `Exception` when the backend
+returns a non-200 or the dispatch deadline passes (the message names the threshold, and the
+outcome is unknown). The caller records the fire as failed, unless the backend has already
+finalized that execution (the SCHED-ASYNC-001 anti-overwrite guard).
 
 ---
 
@@ -838,7 +828,6 @@ except Exception as e:
 | **Scheduler** | `src/scheduler/service.py` | APScheduler service (execution, sync) |
 | **Scheduler** | `src/scheduler/main.py` | Service entry point, health endpoints, manual trigger |
 | **Scheduler** | `src/scheduler/database.py` | Schedule/execution DB operations |
-| **Scheduler** | `src/scheduler/agent_client.py` | Agent HTTP client for scheduler |
 | **Scheduler** | `src/scheduler/locking.py` | Redis distributed locks |
 | Backend | `src/backend/routers/schedules.py` | REST API endpoints (CRUD, proxies trigger) |
 | Backend | `src/backend/routers/internal.py` | Internal API for activity tracking |
@@ -1516,47 +1505,40 @@ if "allowed_tools" in row_keys and row["allowed_tools"]:
     allowed_tools = json.loads(row["allowed_tools"])
 ```
 
-### Agent Client
+### Scheduler Dispatch
 
-**task() method** (`src/scheduler/agent_client.py:101-153`):
+**`_call_backend_execute_task()`** (`src/scheduler/service.py`) forwards the schedule's config
+to the backend in the dispatch payload. The scheduler makes no agent call itself.
 ```python
-async def task(
-    self,
-    message: str,
-    timeout: float = None,
-    execution_id: Optional[str] = None,
-    allowed_tools: Optional[list] = None,
-    model: Optional[str] = None          # MODEL-001
-) -> dict:
-    timeout = timeout or self.timeout
-
-    payload = {"message": message, "timeout_seconds": int(timeout)}
-    if execution_id:
-        payload["execution_id"] = execution_id
-    if allowed_tools is not None:
-        payload["allowed_tools"] = allowed_tools
-    if model:
-        payload["model"] = model           # MODEL-001
-
-    response = await self._request(
-        "POST", "/api/task",
-        json=payload,
-        timeout=timeout + 10  # Add buffer to agent timeout
-    )
+payload = {
+    "agent_name": agent_name,
+    "message": message,
+    "triggered_by": triggered_by,
+    "timeout_seconds": timeout_seconds,
+    "async_mode": True,
+}
+if model:
+    payload["model"] = model             # MODEL-001
+if allowed_tools:
+    payload["allowed_tools"] = allowed_tools
+if execution_id:
+    payload["execution_id"] = execution_id
+# POST {backend_url}/api/internal/execute-task
 ```
 
 ### Scheduler Service
 
-**Execution with config** (`src/scheduler/service.py:591-598`):
+**Execution with config** (`src/scheduler/service.py`):
 ```python
-# Send task to agent with schedule-specific timeout, allowed_tools, and model
-client = get_agent_client(schedule.agent_name)
-task_response = await client.task(
-    schedule.message,
-    timeout=schedule.timeout_seconds,
-    execution_id=execution.id,
+result = await self._call_backend_execute_task(
+    agent_name=schedule.agent_name,
+    message=effective_message,
+    triggered_by=triggered_by,
+    model=schedule.model,                   # MODEL-001
+    timeout_seconds=schedule.timeout_seconds,
     allowed_tools=schedule.allowed_tools,
-    model=schedule.model                    # MODEL-001
+    execution_id=execution.id,
+    deliver_to_workspace_email=schedule.deliver_to_workspace_email,
 )
 ```
 
@@ -1602,7 +1584,7 @@ task_response = await client.task(
 | `src/backend/db/schedules.py` | 66-91, 165-168, 283, 289-291 | JSON serialization, row mapping |
 | `src/scheduler/models.py` | 45-46 | `Schedule` dataclass fields |
 | `src/scheduler/database.py` | Row mapping | Parse `timeout_seconds`, `allowed_tools` |
-| `src/scheduler/agent_client.py` | 101-149 | Accept/forward `allowed_tools` param |
+| `src/scheduler/agent_client.py` | (removed in v0.7.0) | Originally accepted/forwarded `allowed_tools`; today `_call_backend_execute_task` in `src/scheduler/service.py` puts it in the backend dispatch payload |
 | `src/scheduler/service.py` | 473-480 | Pass config to `client.task()` |
 | `src/frontend/src/components/SchedulesPanel.vue` | 99-152, 244-255, 599-672, 875-880 | UI components, helpers |
 
