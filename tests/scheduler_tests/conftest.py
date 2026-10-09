@@ -142,7 +142,8 @@ def initialized_db(temp_db_path: str) -> Generator[str, None, None]:
             skip_reason TEXT,
             attempt_number INTEGER DEFAULT 1,
             retry_of_execution_id TEXT,
-            retry_scheduled_at TEXT
+            retry_scheduled_at TEXT,
+            claim_token TEXT
         )
     """)
 
