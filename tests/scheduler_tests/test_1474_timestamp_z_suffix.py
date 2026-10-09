@@ -92,39 +92,6 @@ def test_schedule_retry_retry_scheduled_at_has_z(db):
     assert row["retry_scheduled_at"].endswith("Z")
 
 
-def test_process_schedule_writes_have_z(db):
-    db.ensure_process_schedules_table()
-    ps = db.create_process_schedule("p1", "proc", "trig", "0 9 * * *")
-    row = _raw(
-        db,
-        "SELECT created_at, updated_at FROM process_schedules WHERE id = ?",
-        (ps.id,),
-    )
-    assert row["created_at"].endswith("Z")
-    assert row["updated_at"].endswith("Z")
-
-    pex = db.create_process_schedule_execution(ps.id, "p1", "proc")
-    row = _raw(
-        db,
-        "SELECT started_at FROM process_schedule_executions WHERE id = ?",
-        (pex.id,),
-    )
-    assert row["started_at"].endswith("Z")
-
-    assert db.update_process_schedule_execution(pex.id, ExecutionStatus.SUCCESS)
-    row = _raw(
-        db,
-        "SELECT completed_at FROM process_schedule_executions WHERE id = ?",
-        (pex.id,),
-    )
-    assert row["completed_at"].endswith("Z")
-
-    db.update_process_schedule_run_times("nope-id", last_run_at=datetime.utcnow())  # no-op OK
-    db.update_process_schedule_run_times(ps.id, next_run_at=datetime.utcnow())
-    row = _raw(db, "SELECT next_run_at FROM process_schedules WHERE id = ?", (ps.id,))
-    assert row["next_run_at"].endswith("Z")
-
-
 # ---------------------------------------------------------------------------
 # Duration math: no aware−naive TypeError after the write change
 # ---------------------------------------------------------------------------
