@@ -703,10 +703,9 @@
   activity types have no owning closer and can be arbitrarily old — the §10.15 class) or
   `voip_call_logs` (`VOIP_MAX_CALL_DURATION` is an unvalidated env int). So the helper is required
   **regardless of column width**, and widening is an independent, optional hardening — deferred, not
-  an alternative. Widening would also fix neither the poison-transaction property above nor
-  `process_schedule_executions.duration_ms`, which exists in no migration track at all. Four OSS
+  an alternative. Widening would also not fix the poison-transaction property above. Four OSS
   tables carry the column (`schedule_executions`, `agent_loop_runs`, `agent_activities`,
-  `voip_call_logs`), not the six the issue names, plus that scheduler-only fifth.
+  `voip_call_logs`), not the six the issue names.
 - **Hostile input path closed in the same change**: `models.TaskResultPayload.execution_time_ms` is
   agent-supplied and was unbounded, arriving on the #1083 async result callback and landing in two
   `Integer` columns — bounded to `ge=0, le=2**31-1`.
