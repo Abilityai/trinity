@@ -49,6 +49,7 @@
         <button
           type="button"
           class="flex-none text-action-primary-600 dark:text-action-primary-400 hover:underline"
+          :class="TEXT_LINK_FOCUS"
           data-testid="skills-gates-retry"
           @click="gatesStore.load(agentName, { probe: showOwnerRow })"
         >Retry</button>
@@ -71,6 +72,7 @@
           v-if="ownView.stale"
           type="button"
           class="flex-none text-action-primary-600 dark:text-action-primary-400 hover:underline"
+          :class="TEXT_LINK_FOCUS"
           data-testid="skills-own-refresh"
           @click="store.loadAgentList()"
         >Retry</button>
@@ -96,6 +98,7 @@
             v-if="store.agentListState === 'none' && running"
             type="button"
             class="ml-1 text-action-primary-600 dark:text-action-primary-400 hover:underline"
+            :class="TEXT_LINK_FOCUS"
             data-testid="skills-own-retry"
             @click="store.loadAgentList()"
           >Check again</button>
@@ -156,6 +159,7 @@
           <button
             type="button"
             class="flex-none text-[12.5px] text-action-primary-600 dark:text-action-primary-400 hover:underline"
+            :class="TEXT_LINK_FOCUS"
             data-testid="skills-sets-retry"
             @click="store.loadSets()"
           >Retry</button>
@@ -175,6 +179,7 @@
           v-if="hiddenSetCount"
           type="button"
           class="flex-none text-[12.5px] text-gray-600 dark:text-gray-300 hover:underline"
+          :class="TEXT_LINK_FOCUS"
           @click="setsOpen = true"
         >+{{ hiddenSetCount }} more</button>
         <span
@@ -217,7 +222,7 @@
             Skills come from a git repository shared across the fleet. Once it's configured,
             every agent can be assigned skills from it.
           </p>
-          <router-link v-if="isAdmin" to="/settings?tab=agents" class="mt-3 inline-block text-action-primary-600 dark:text-action-primary-400 hover:underline">
+          <router-link v-if="isAdmin" to="/settings?tab=agents" class="mt-3 inline-block text-action-primary-600 dark:text-action-primary-400 hover:underline" :class="TEXT_LINK_FOCUS">
             Configure the library
           </router-link>
           <p v-else class="mt-3 text-gray-600 dark:text-gray-300">Ask an admin to configure it in Settings.</p>
@@ -593,6 +598,12 @@ function noticeClass(tone) {
   if (tone === 'pending') return 'text-status-warning-700 dark:text-status-warning-400'
   return 'text-status-success-700 dark:text-status-success-400'
 }
+
+// The design system's focus ring (BaseButton's recipe) for the tab's inline
+// text links, which are not BaseButtons (PR review).
+const TEXT_LINK_FOCUS = 'rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 '
+  + 'ring-offset-white dark:ring-offset-gray-800 '
+  + 'focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40'
 
 // ---- Loading --------------------------------------------------------------
 function loadAll() {

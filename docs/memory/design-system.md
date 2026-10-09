@@ -127,7 +127,7 @@ Shared primitives are the unit of consistency: **compose them, never re-implemen
 | BaseSelect | `components/base/BaseSelect.vue` | `ResourceModal.vue` memory/CPU (`field`) · `PortalConversation.vue` model picker (`ghost`, #2662) · `SkillCard.vue` approver picker (`field`, `size="sm"`, trinity-enterprise#754) |
 | BaseToggle | `components/base/BaseToggle.vue` | TemplateRegistryPanel enable switch |
 | BaseTextarea | `components/base/BaseTextarea.vue` | `SystemInstallPanel.vue` manifest editor (mono) |
-| BaseBadge | `components/base/BaseBadge.vue` | TemplateRegistryPanel status + Default chips |
+| BaseBadge | `components/base/BaseBadge.vue` | TemplateRegistryPanel status + Default chips · `SkillCard.vue` author-mode chip (`size="sm"`, trinity-enterprise#754) |
 | BaseCard | `components/base/BaseCard.vue` | `CredentialSetupChecklist.vue` surface |
 
 The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16` because the config extends the opacity scale with `16` — before #2122 those classes silently compiled to **nothing** (16 is not in Tailwind's default scale), so the dark chips that used them shipped without a background. The behavioral/state primitives were already shipped and keep their homes: `ConfirmDialog.vue`, `OverflowTabs.vue`, `LoadFailed.vue`/`InlineError.vue`, `ScanlineReveal.vue`.
@@ -203,6 +203,7 @@ Textareas are a primitive, not a styled `<textarea>` in place (design session, 2
 
 Driven directly by the token families — the badge variant *is* the token family name.
 **Recipe:** pill (radius full), 11.5/550, letter-spacing .01em, padding 2.5×9, `white-space: nowrap`; optional 6px status dot in `currentColor`.
+**Sizes:** `md` (default) — the recipe above · `sm` (trinity-enterprise#754) — 11/550, padding 1.5×7, 4px icon gap: the 11px step of the type scale, for a card's small fact chip (the Skills card's author-mode chip). One fact per badge at either size. Guarded by `tests/unit/baseBadgeSize.spec.js`.
 
 | Theme | Ground | Text |
 |---|---|---|

@@ -84,6 +84,13 @@ async function mountTab(props = {}) {
   return { w, notify }
 }
 
+// The design system's focus ring on every inline text link the tab renders
+// (PR review: they are hand-rolled, not BaseButtons).
+function expectTextLinksRinged(w) {
+  const links = w.findAll('button, a').filter((el) => el.classes().includes('hover:underline'))
+  expect(links.length).toBeGreaterThan(0)
+  for (const el of links) expect(el.classes(), el.text()).toContain('focus-visible:ring-2')
+}
 const card = (w, section, name) => w.find(`[data-testid="skill-card-${section}-${name}"]`)
 const tid = (w, id) => w.find(`[data-testid="${id}"]`)
 
@@ -286,6 +293,7 @@ describe('sets on the Shared head', () => {
     respond({ sets: { response: { status: 500, data: { detail: 'boom' } } } })
     const { w } = await mountTab({ canManage: false })
     expect(tid(w, 'skills-sets-error').text()).toContain("Couldn't read this agent's sets")
+    expectTextLinksRinged(w)
     const before = api.get.mock.calls.filter(([u]) => u === `/api/agents/${A}/skill-sets`).length
     await tid(w, 'skills-sets-retry').trigger('click')
     await flush()
@@ -506,6 +514,7 @@ describe('honest loading: nothing is drawn from a read that has not answered', (
     const { w } = await mountTab()
     expect(tid(w, 'skills-gates-error').text()).toContain("Couldn't read which skills need approval")
     expect(tid(w, 'skill-approval-daily-report').element.disabled).toBe(true)   // the switch itself
+    expectTextLinksRinged(w)
 
     state.mapAnswer = null
     await tid(w, 'skills-gates-retry').trigger('click')
@@ -518,6 +527,7 @@ describe('honest loading: nothing is drawn from a read that has not answered', (
     respond({ playbooks: { response: { status: 503, data: { detail: 'Could not connect to agent' } } } })
     const { w } = await mountTab()
     expect(tid(w, 'skills-own-empty').text()).toContain("isn't answering right now")
+    expectTextLinksRinged(w)
     state.playbooks = { data: LIVE }
     await tid(w, 'skills-own-retry').trigger('click')
     await flush()
@@ -531,6 +541,8 @@ describe('honest loading: nothing is drawn from a read that has not answered', (
     await flush()
     expect(card(w, 'own', 'daily-report').exists()).toBe(true)
     expect(tid(w, 'skills-own-meta').text()).toContain("Couldn't refresh this agent's skills")
+    expect(tid(w, 'skills-own-refresh').classes()).toContain('focus-visible:ring-2')
+    expectTextLinksRinged(w)
   })
 
   it('a 200 that is not a skills listing is a failure, never an empty list', async () => {
