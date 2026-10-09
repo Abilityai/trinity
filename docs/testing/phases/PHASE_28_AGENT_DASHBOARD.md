@@ -1,428 +1,230 @@
 # Phase 28: Agent Dashboard
 
-> **Purpose**: Validate agent-defined dashboard widget system via dashboard.yaml
+> **Purpose**: Validate the per-agent Dashboard tab — when it appears, what it shows without a `dashboard.yaml`, and widget rendering from a `dashboard.yaml` written through the files API.
 > **Duration**: ~15 minutes
-> **Assumes**: Phase 2 PASSED (agent running), dashboard.yaml in agent workspace
-> **Output**: Widget rendering and auto-refresh verified
+> **Assumes**: the fixture trio is running and you are logged in as admin
+> **Output**: tab gating matches the API flags; a written `dashboard.yaml` renders its widgets; removing the file falls back to the cached dashboard with a visible banner
+> **Last verified**: 2026-10-09 against source (not yet browser-run)
 
 ---
 
 ## Background
 
-**Agent Dashboard** (DASH-001 to DASH-003):
-- Agents define custom dashboards in `dashboard.yaml`
-- 11 widget types: metric, status, progress, text, markdown, table, list, link, image, divider, spacer
-- Auto-refresh configurable per widget or globally
-- Dashboard tab replaces generic Metrics tab
+The agent Dashboard tab (tab id `dashboard`, `components/DashboardPanel.vue`) is **hidden**
+unless `GET /api/agent-dashboard/{name}/exists` reports `has_dashboard` or
+`has_declared_metrics` (`utils/agentTabs.js`). The agent serves `/home/developer/dashboard.yaml`
+(top-level `title` + `sections[].widgets[]`); the backend adds a "Platform Metrics" section and
+caches the last valid dashboard.
 
-**User Stories**:
-- DASH-001: See agent-defined dashboards
-- DASH-002: Define widgets in dashboard.yaml
-- DASH-003: Auto-refresh dashboards
+Replaces the January flow that wrote the file through a Terminal tab (there is no Terminal tab)
+with a flat `widgets:` list, and used host `docker exec`. The file is now written with
+`PUT /api/agents/{name}/files?path=…`.
 
----
+Because the backend keeps serving the **cached** dashboard after the file is deleted, writing
+one to a fixture would leave a permanent Dashboard tab on it. The write steps therefore use ONE
+throwaway agent, `sweep-tmp-28`; the fixtures are only read. No messages are sent to any agent.
 
 ## Prerequisites
 
-- [ ] Phase 2 PASSED (agent running)
-- [ ] Agent has `dashboard.yaml` file OR ability to create one
-- [ ] Access to agent Terminal for file creation
+- [ ] Logged in to `http://localhost` as `admin` with `ADMIN_PASSWORD` from `.env`
+- [ ] `$TOKEN` holds an admin Bearer token
+- [ ] `test-echo` and `test-counter` are `running`
 
----
+## Test: Tab gating on the fixtures (read-only)
 
-## Test: Create Dashboard Configuration
-
-### Step 1: Create dashboard.yaml via Terminal
+### Step 1: API flags
 **Action**:
-- Navigate to agent detail page
-- Open Terminal tab
-- Send message: "Create a file at ~/dashboard.yaml with comprehensive widget examples"
-
-**Or create manually**:
-- Create file with this content:
-
-```yaml
-title: "Agent Status Dashboard"
-description: "Real-time metrics and status"
-config:
-  refresh: 30  # seconds
-
-widgets:
-  - type: metric
-    title: "Total Tasks"
-    value: "42"
-    unit: "tasks"
-    trend: "up"
-    icon: "chart"
-
-  - type: status
-    title: "Agent Health"
-    status: "healthy"
-    message: "All systems operational"
-
-  - type: progress
-    title: "Daily Progress"
-    value: 75
-    max: 100
-    label: "75% complete"
-
-  - type: text
-    title: "Last Updated"
-    content: "2026-01-14 10:30:00"
-
-  - type: markdown
-    content: |
-      ## Quick Stats
-      - **Uptime**: 99.9%
-      - **Response Time**: 1.2s
-      - **Active Sessions**: 5
-
-  - type: table
-    title: "Recent Activity"
-    headers: ["Time", "Action", "Status"]
-    rows:
-      - ["10:30", "Task completed", "Success"]
-      - ["10:25", "API call", "Success"]
-      - ["10:20", "Schedule triggered", "Success"]
-
-  - type: list
-    title: "Pending Items"
-    items:
-      - "Review pull request"
-      - "Update documentation"
-      - "Run test suite"
-
-  - type: link
-    title: "Documentation"
-    url: "https://docs.example.com"
-    label: "View Docs"
-
-  - type: divider
-
-  - type: image
-    title: "Architecture Diagram"
-    url: "/api/agents/{name}/files/workspace/diagram.png"
-    alt: "System architecture"
-
-  - type: spacer
-    height: 20
+```bash
+for a in test-counter test-echo; do
+  curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agent-dashboard/$a/exists | jq -c --arg a $a '{agent: $a} + .'
+done
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agent-dashboard/test-counter \
+  | jq -c '{agent_name, has_dashboard, status, settled, stale, error}'
 ```
+**Expected**:
+- [ ] Each `exists` line has boolean `has_dashboard` and `has_declared_metrics` — **record all four values**
+- [ ] The third line has `agent_name: "test-counter"` and `status: "running"`; if `has_dashboard` is `false` it also has `settled: true` and `error: "No dashboard.yaml found at /home/developer/dashboard.yaml"`
 
+### Step 2: Tab presence matches the flags
+**Action**:
+- Navigate to `http://localhost/agents/test-counter`, wait for the tab strip to settle (up to 10 s), and read the tab labels.
+- Navigate to `http://localhost/agents/test-echo` and do the same.
+**Expected**:
+- [ ] For each agent a "Dashboard" tab (between "Chat" and "Reports") is present **if and only if** one of its two Step 1 flags is `true`
+- [ ] There is no "Terminal" tab on either agent
+
+### Step 3: Dashboard tab without a dashboard.yaml
+**Action**:
+- If `test-echo` has `has_declared_metrics: true` and `has_dashboard: false`: open `http://localhost/agents/test-echo?tab=dashboard`.
+- Otherwise record `SKIPPED (fixture flags differ)` with the flags, and continue.
+**Expected**:
+- [ ] The "Dashboard" tab is selected
+- [ ] A declared-metrics block leads the tab (tiles, or its own empty message — record which)
+- [ ] Below it: "No Dashboard Defined" with "The declared metrics above are this agent's numbers. A dashboard.yaml adds tables, lists and links around them." and a hint mentioning `~/dashboard.yaml`
+- [ ] No "Dashboard Error" card and no endless loading state
+
+### Step 4: Deep link to a hidden tab falls back
+**Action**:
+- Pick a fixture whose two Step 1 flags are both `false` (normally `test-counter`) and navigate to `http://localhost/agents/<that agent>?tab=dashboard`. If neither fixture qualifies, record `SKIPPED (no fixture without the tab)`.
+**Expected**:
+- [ ] No "Dashboard" tab appears; record which tab ends up selected (source drops a deep link to a tab the viewer cannot see)
+- [ ] No blank content area and no console errors
+
+## Setup
+
+### Step 5: Create the throwaway agent
+**Action**:
+- Create it from the counter fixture template; if the plain name answers `409` (still reserved by an earlier run's soft delete), use a timestamped name:
+```bash
+TMP=sweep-tmp-28
+mk() { curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/api/agents \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"name\": \"$TMP\", \"template\": \"local:test-counter\"}"; }
+code=$(mk); if [ "$code" = "409" ]; then TMP=sweep-tmp-28-$(date +%s); code=$(mk); fi
+echo "$TMP $code"
+```
+- Poll every 5 s (at most 60 s) until `curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/$TMP | jq -r .status` prints `running`.
+**Expected**:
+- [ ] Final create status `200`; **record `$TMP`**
+- [ ] Status `running` within 60 s
+- [ ] `GET /api/agent-dashboard/$TMP/exists` returns both flags `false`
+
+## Test: Write and render a dashboard
+
+### Step 6: Write dashboard.yaml through the files API
+**Action**:
+```bash
+BODY=$(jq -Rs '{content: .}' <<'YAML'
+title: "Sweep 28 Dashboard"
+description: "Written by the UI sweep"
+refresh: 30
+sections:
+  - title: "Sweep Section"
+    layout: grid
+    columns: 2
+    widgets:
+      - type: metric
+        label: "Sweep Metric"
+        value: 42
+      - type: status
+        label: "Sweep Status"
+        value: "OK"
+        color: green
+      - type: text
+        content: "sweep-28 text widget"
+      - type: list
+        title: "Sweep List"
+        items: ["alpha", "beta"]
+YAML
+)
+curl -s -o /dev/null -w '%{http_code}\n' -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "$BODY" "http://localhost:8000/api/agents/$TMP/files?path=/home/developer/dashboard.yaml"
+```
+- If it returns `5xx` because the agent's internal server is still starting, retry every 5 s for at most 60 s.
+**Expected**:
+- [ ] `200`
 **Verify**:
 ```bash
-docker exec agent-{name} cat /home/developer/dashboard.yaml
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agent-dashboard/$TMP \
+  | jq -c '{has_dashboard, title: .config.title, sections: [.config.sections[].title], error}'
+# has_dashboard true, title "Sweep 28 Dashboard", sections include "Sweep Section" and "Platform Metrics"
 ```
 
----
-
-### Step 2: Verify File Created
+### Step 7: The tab appears and the widgets render
 **Action**:
-- Check file exists in agent workspace
-
+- Navigate to `http://localhost/agents/<$TMP>` (a fresh page load), wait up to 10 s for the tab strip, then click "Dashboard".
 **Expected**:
-- [ ] File created at ~/dashboard.yaml or ~/workspace/dashboard.yaml
-- [ ] YAML syntax valid
-- [ ] All widget types included
+- [ ] A "Dashboard" tab is now present
+- [ ] Heading "Sweep 28 Dashboard" with "Written by the UI sweep" and an "Updated …" relative time
+- [ ] Section "Sweep Section" containing: `42` with the label "Sweep Metric"; "Sweep Status" with the value "OK"; the text "sweep-28 text widget"; "Sweep List" with items "alpha" and "beta"
+- [ ] A second section "Platform Metrics" with an "Auto" badge and at least a "Tasks (24h)" tile
+- [ ] No "widgets skipped due to validation errors" banner and no "Showing cached dashboard" banner
 
----
-
-## Test: View Dashboard Tab
-
-### Step 3: Navigate to Dashboard Tab
+### Step 8: Manual refresh keeps the content in place
 **Action**:
-- In agent detail page
-- Click "Dashboard" tab
-
+- Click the round-arrow button with tooltip "Refresh dashboard".
 **Expected**:
-- [ ] Dashboard tab loads
-- [ ] Title displayed: "Agent Status Dashboard"
-- [ ] Description shown
-- [ ] Widgets rendered
+- [ ] The same title, section and four widgets are shown afterwards; the layout does not collapse to an empty state in between
+- [ ] A `GET /api/agent-dashboard/<$TMP>` request with status `200` in the network log
 
-**Verify**:
-- [ ] No YAML parse errors
-- [ ] Layout renders correctly
-
----
-
-### Step 4: Verify Widget Types
-
-**Check each widget renders:**
-
-**Metric Widget**:
-- [ ] Title: "Total Tasks"
-- [ ] Value: "42"
-- [ ] Unit displayed
-- [ ] Trend indicator (up arrow)
-
-**Status Widget**:
-- [ ] Title: "Agent Health"
-- [ ] Status: "healthy" with green indicator
-- [ ] Message text displayed
-
-**Progress Widget**:
-- [ ] Title: "Daily Progress"
-- [ ] Progress bar at 75%
-- [ ] Label: "75% complete"
-
-**Text Widget**:
-- [ ] Title: "Last Updated"
-- [ ] Content displayed as plain text
-
-**Markdown Widget**:
-- [ ] Markdown rendered (headers, bold, lists)
-- [ ] Proper formatting
-
-**Table Widget**:
-- [ ] Title: "Recent Activity"
-- [ ] Headers displayed
-- [ ] 3 rows of data
-- [ ] Proper table formatting
-
-**List Widget**:
-- [ ] Title: "Pending Items"
-- [ ] 3 bullet items
-- [ ] List formatting
-
-**Link Widget**:
-- [ ] Title: "Documentation"
-- [ ] Clickable link
-- [ ] Opens in new tab
-
-**Divider Widget**:
-- [ ] Horizontal line rendered
-- [ ] Visual separation
-
-**Image Widget** (if image exists):
-- [ ] Title: "Architecture Diagram"
-- [ ] Image displayed or placeholder
-
-**Spacer Widget**:
-- [ ] Vertical space added
-- [ ] Height: 20px
-
----
-
-## Test: Widget Validation
-
-### Step 5: Test Invalid YAML
+### Step 9: Narrow width and dark theme
 **Action**:
-- Create invalid dashboard.yaml:
-```yaml
-widgets:
-  - type: invalid_type
-    title: "Bad Widget"
+- Resize the viewport to 390 px wide.
+- Click the theme button in the top nav (tooltip ends "(click to switch)") until the page is dark; record the starting tooltip first.
+**Expected**:
+- [ ] At 390 px all four widgets and the "Platform Metrics" tiles remain visible with no horizontal page scrollbar
+- [ ] In dark theme widget cards have dark backgrounds with readable values; the "Sweep Status" value keeps a visible colour
+
+### Step 10: Removing the file falls back to the cache
+**Action**:
+- Restore the viewport, then delete the file:
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X DELETE -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/agents/$TMP/files?path=/home/developer/dashboard.yaml"
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agent-dashboard/$TMP \
+  | jq -c '{has_dashboard, stale, stale_reason, title: .config.title}'
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agent-dashboard/$TMP/exists
 ```
-
+- Reload `http://localhost/agents/<$TMP>?tab=dashboard`.
 **Expected**:
-- [ ] Dashboard shows error message
-- [ ] "Unknown widget type: invalid_type"
-- [ ] Graceful degradation
+- [ ] Delete returns `200`
+- [ ] The dashboard call reports `stale: true`, `stale_reason: "No dashboard.yaml found at /home/developer/dashboard.yaml"` and still the title "Sweep 28 Dashboard"
+- [ ] `exists` still reports `has_dashboard: true` (it reads the cache)
+- [ ] In the UI the Dashboard tab is still present and shows a banner "Showing cached dashboard" with that reason, above the cached widgets
+- [ ] Record this as observed behaviour: deleting `dashboard.yaml` does not remove the tab
 
----
+## Cleanup / Restore
 
-### Step 6: Test Missing Required Fields
+### Step 11: Delete the throwaway and confirm the fixtures are unchanged
 **Action**:
-- Create widget missing required fields:
-```yaml
-widgets:
-  - type: metric
-    # missing: value
+- Click the theme button until its tooltip matches the one recorded in Step 9.
+- Delete the throwaway (only this name, never a fixture) and re-read the fixture flags:
+```bash
+curl -s -X DELETE -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/$TMP
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/$TMP   # 404
+for a in test-counter test-echo; do
+  curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agent-dashboard/$a/exists
+done
 ```
-
 **Expected**:
-- [ ] Validation error shown
-- [ ] "Required field 'value' missing"
-- [ ] Widget skipped or placeholder shown
+- [ ] Delete returns `{"message": "Agent <$TMP> deleted"}` and the follow-up `GET` is `404`
+- [ ] Both fixtures report the same four flag values recorded in Step 1
+- [ ] **Record the throwaway name in the report**: its workspace volume `agent-<$TMP>-workspace` persists after the delete and must be removed by whoever maintains the host
 
----
+## Manual-only (not run unattended)
 
-## Test: Auto-Refresh
-
-### Step 7: Check Auto-Refresh
-**Action**:
-- Watch the dashboard for 30+ seconds
-- Or check config.refresh value
-
-**Expected**:
-- [ ] Dashboard refreshes automatically
-- [ ] Data updated without manual refresh
-- [ ] Refresh interval: 30 seconds (as configured)
-
-**Verify**:
-- [ ] Network requests visible in DevTools
-- [ ] Timestamps update if dynamic
-
----
-
-### Step 8: Test Custom Refresh Rate
-**Action**:
-- Update dashboard.yaml refresh to 10 seconds
-- Reload page
-
-**Expected**:
-- [ ] Dashboard refreshes every 10 seconds
-- [ ] Minimum refresh: 5 seconds (enforced)
-
----
-
-## Test: Dynamic Dashboard Data
-
-### Step 9: Update Widget Values
-**Action**:
-- Via Terminal, update dashboard.yaml:
-- Change metric value from "42" to "50"
-- Wait for auto-refresh
-
-**Expected**:
-- [ ] After refresh, value shows "50"
-- [ ] Changes reflected automatically
-
----
-
-### Step 10: Agent-Generated Dashboard
-**Action**:
-- Send message: "Update the dashboard to show current date and a random number"
-
-**Expected**:
-- [ ] Agent modifies dashboard.yaml
-- [ ] Dashboard reflects agent's changes
-- [ ] Dynamic values possible
-
----
-
-## Test: Dashboard Without Configuration
-
-### Step 11: Check Default Behavior
-**Action**:
-- Use agent without dashboard.yaml
-- Click Dashboard tab
-
-**Expected**:
-- [ ] Empty state displayed
-- [ ] "No dashboard configured"
-- [ ] Instructions to create dashboard.yaml
-
----
-
-## Test: Widget Styling
-
-### Step 12: Verify Visual Styling
-**Action**:
-- Review overall dashboard appearance
-
-**Expected**:
-- [ ] Consistent styling
-- [ ] Dark mode support
-- [ ] Mobile responsive
-- [ ] Widget cards well-separated
-- [ ] Icons render correctly
-
----
+- **Invalid YAML / invalid widgets**: write a `dashboard.yaml` with no `title` (expect "Dashboard
+  Error" on an agent with no cache, or "Showing cached dashboard" on one with a cache), or a
+  widget missing a required field (expect "N widget(s) skipped due to validation errors").
+  Left out of the unattended run to keep the throwaway's cache state deterministic.
+- **Remaining widget types** (`progress`, `markdown`, `table`, `link`, `image`, `divider`,
+  `spacer`) and bound `metric:` widgets.
+- **Auto-refresh on the `refresh` interval** (30 s default, minimum 5) and the "Update
+  Dashboard" button, which appears only when the agent has an `update-dashboard` playbook.
+- **"Agent Not Running"** ("Start the agent to view its dashboard.") requires stopping an agent
+  that has a Dashboard tab.
 
 ## Critical Validations
 
-### YAML Parsing
-**Validation**: Backend correctly parses dashboard.yaml
-
-```bash
-curl -H "Authorization: Bearer {token}" \
-  http://localhost:8000/api/agent-dashboard/{name}
-```
-
-Expected: Widget definitions returned as JSON
-
-### Widget Type Coverage
-**Validation**: All 11 widget types supported
-
-- [ ] metric
-- [ ] status
-- [ ] progress
-- [ ] text
-- [ ] markdown
-- [ ] table
-- [ ] list
-- [ ] link
-- [ ] image
-- [ ] divider
-- [ ] spacer
-
-### Error Handling
-**Validation**: Graceful handling of:
-- [ ] Missing dashboard.yaml
-- [ ] Invalid YAML syntax
-- [ ] Unknown widget types
-- [ ] Missing required fields
-
----
+1. The Dashboard tab is present exactly when `…/exists` reports `has_dashboard` or `has_declared_metrics`.
+2. A `dashboard.yaml` written via `PUT /api/agents/{name}/files` makes the tab appear and all four widgets render with their exact labels and values.
+3. A "Platform Metrics" section is appended by the platform.
+4. After the file is deleted the UI says "Showing cached dashboard" rather than silently showing stale data as current.
+5. The fixtures' dashboard flags are identical before and after the phase.
 
 ## Success Criteria
 
-Phase 28 is **PASSED** when:
-- [ ] Dashboard tab loads for agents with dashboard.yaml
-- [ ] All 11 widget types render correctly
-- [ ] Metric widget shows value, unit, trend
-- [ ] Status widget shows health indicator
-- [ ] Progress widget shows bar and percentage
-- [ ] Text widget displays content
-- [ ] Markdown widget renders formatting
-- [ ] Table widget displays rows and headers
-- [ ] List widget shows bullet items
-- [ ] Link widget is clickable
-- [ ] Divider widget separates content
-- [ ] Image widget displays images
-- [ ] Spacer widget adds vertical space
-- [ ] Auto-refresh works at configured interval
-- [ ] Dashboard updates reflect file changes
-- [ ] Invalid YAML shows error gracefully
-- [ ] Agents without dashboard.yaml show empty state
-
----
+- [ ] All five critical validations hold
+- [ ] Only `sweep-tmp-28` (or its timestamped fallback) was created, written to and deleted
+- [ ] The throwaway name is recorded in the report for volume removal
 
 ## Troubleshooting
 
-**Dashboard tab not visible**:
-- Feature may be disabled
-- Check feature flag
-- Verify tab configuration in AgentDetail
-
-**YAML parse errors**:
-- Check YAML syntax (indentation, quotes)
-- Validate with online YAML validator
-- Check backend logs for parse errors
-
-**Widgets not rendering**:
-- Check widget type spelling
-- Verify required fields present
-- Check browser console for errors
-
-**Auto-refresh not working**:
-- Check config.refresh value
-- Minimum is 5 seconds
-- Verify API calls in Network tab
-
-**Images not loading**:
-- Check image path is accessible
-- Verify agent has the image file
-- Check CORS if external URL
-
-**Table not displaying**:
-- Verify headers array
-- Verify rows array of arrays
-- Check data types match
-
----
-
-## Next Phase
-
-Once Phase 28 is **PASSED**, the gap analysis phases are complete.
-
-Consider running:
-- **Full Test Suite**: Phases 0-28
-- **Cleanup**: Phase 12
-
----
-
-**Status**: Ready for Testing
-**Last Updated**: 2026-01-14
-**User Stories**: DASH-001, DASH-002, DASH-003
+- **PUT returns `400` "Agent must be running to update files"**: the throwaway has not finished
+  starting; keep polling within the 60 s budget.
+- **PUT returns `403` "Cannot edit protected path"**: the path is wrong — it must be exactly
+  `/home/developer/dashboard.yaml`.
+- **Tab does not appear after Step 6**: the page was not reloaded (the probe runs on page
+  load), or Step 6's Verify shows `has_dashboard: false` with an `error` — record the error.
+- **Create returns `409` twice**: record the response `detail` and skip Steps 5–11 as
+  `BLOCKED (could not create throwaway)`; Steps 1–4 still count.

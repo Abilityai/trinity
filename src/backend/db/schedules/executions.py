@@ -910,6 +910,26 @@ class ScheduleExecutionsMixin:
             rows = conn.execute(stmt).mappings().all()
         return [self._row_to_schedule_execution(r) for r in rows]
 
+    def set_execution_subscription(
+        self, execution_id: str, subscription_id: Optional[str]
+    ) -> bool:
+        """Re-point an execution's SUB-004 usage attribution (#3470).
+
+        `subscription_id` is snapshotted at INSERT as the agent's assignment.
+        When a SUB-003 walk completes the turn on ANOTHER subscription (a
+        trial that then served), the spend belongs to that one; writing it
+        here keeps the per-subscription usage windows honest. Unconditional
+        on status — it is called by the dispatcher that owns the turn, before
+        the terminal write. Returns whether a row was updated.
+        """
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(schedule_executions)
+                .where(schedule_executions.c.id == execution_id)
+                .values(subscription_id=subscription_id)
+            )
+            return result.rowcount > 0
+
     def stamp_execution_channel_context(
         self,
         execution_id: str,

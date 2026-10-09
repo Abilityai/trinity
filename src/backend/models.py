@@ -3875,15 +3875,32 @@ class SkillGateEntry(BaseModel):
     approver_reachable: Optional[bool] = None
 
 
+class SkillGateApproverStatus(BaseModel):
+    """One approver kind as the caller sees it (trinity-enterprise#754): does it
+    reach anyone now, and is the caller one of its people. Booleans only — the
+    map is readable by every viewer and by agent keys, so it names no person."""
+    kind: str
+    reachable: bool
+    viewer_fills: bool
+
+
 class SkillGateMapResponse(BaseModel):
     """`GET /api/agents/{agent_name}/skill-gates`. `approver_kinds` is what this
     install can resolve — `primary` only on OSS. `cleared_defaults` are library
-    defaults the owner cleared; they gate nothing while the skill stays assigned."""
+    defaults the owner cleared; they gate nothing while the skill stays assigned.
+
+    trinity-enterprise#754: `approvers` is `approver_kinds` with each kind's
+    reach and whether the caller fills it. `hook` is the in-agent gate check's
+    state (`ok`, `missing`, `not_root_owned`, `writable`, `unsupported_runtime`,
+    `predates` or `unknown`), read only on `?probe=true` by a person who may
+    manage the agent's skills; null otherwise."""
     agent_name: str
     gates: List[SkillGateEntry]
     cleared_defaults: List[str] = Field(default_factory=list)
     approver_kinds: List[str]
     default_deadline_hours: int
+    approvers: List[SkillGateApproverStatus] = Field(default_factory=list)
+    hook: Optional[str] = None
 
 
 class SkillGateWriteResponse(BaseModel):
@@ -4099,6 +4116,11 @@ class ExecutionSummary(BaseModel):
     compact_metadata: Optional[str] = None
     # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
+    # trinity-enterprise#754: the run went through without approval because its
+    # requester is the approver (ent#752's `self_approved` record); and the caller
+    # is that person. Booleans only — the email stays on the server.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
     # EXCLUDED (large fields - fetch via /executions/{id}):
     # - response: Optional[str]      # Full response text
@@ -4153,6 +4175,9 @@ class ExecutionResponse(BaseModel):
     compact_metadata: Optional[str] = None
     # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
+    # trinity-enterprise#754 — as on ExecutionSummary.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
     class Config:
         from_attributes = True

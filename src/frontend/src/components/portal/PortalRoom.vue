@@ -124,7 +124,7 @@
           </p>
 
           <div v-else-if="isMine(m)" class="flex justify-end">
-            <div class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white">{{ m.content }}</div>
+            <div class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white" :class="BUBBLE_WRAP_CLASS">{{ m.content }}</div>
           </div>
 
           <div v-else class="flex items-start gap-2.5">
@@ -391,6 +391,7 @@ import { useClientPortalStore } from '@/stores/clientPortal'
 import { budgetNotice } from '@/utils/roomBudgets'
 import InlineError from '@/components/InlineError.vue'
 import PortalAgentBubble from './PortalAgentBubble.vue'
+import { BUBBLE_WRAP_CLASS } from './portalBubble'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
 import { liveElapsedSeconds, liveItemsForRoom, soleStoppableItem } from './portalWork'

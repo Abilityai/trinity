@@ -25,7 +25,7 @@
  * regression itself.
  */
 import { describe, it, expect } from 'vitest'
-import { buildTabs } from '../../src/utils/agentTabs'
+import { buildTabs, TAB_ALIASES } from '../../src/utils/agentTabs'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 
@@ -41,7 +41,9 @@ const OWNER = {
 const NON_OWNER = { ...OWNER, canShare: false }
 
 // The five the old list forgot. Named individually so a regression says which.
-const PREVIOUSLY_UNREACHABLE = ['a2a', 'loops', 'playbooks', 'access', 'nevermined']
+// trinity-enterprise#754 retired the fifth, `playbooks`: it merged into Skills
+// and is now an alias (asserted below), never a tab of its own.
+const PREVIOUSLY_UNREACHABLE = ['a2a', 'loops', 'access', 'nevermined']
 
 describe('#2153 the deep-link superset', () => {
   for (const id of PREVIOUSLY_UNREACHABLE) {
@@ -60,13 +62,23 @@ describe('#2153 the deep-link superset', () => {
   it('derives the superset from the builder rather than restating it', () => {
     expect(source).toMatch(/const ALL_TAB_IDS = buildTabs\(/)
   })
+
+  it("an old ?tab=playbooks link lands on Skills (trinity-enterprise#754)", () => {
+    expect(TAB_ALIASES.playbooks).toBe('skills')
+    expect(idsFor(OWNER)).toContain('skills')
+    expect(idsFor(OWNER)).not.toContain('playbooks')
+    // Every alias resolves to a tab that exists for someone.
+    for (const target of Object.values(TAB_ALIASES)) expect(idsFor(OWNER)).toContain(target)
+  })
 })
 
 describe('#2153 a non-owner still cannot reach owner-only tabs', () => {
   // The question #2130 deferred as "needs a non-owner blank-panel decision".
   // Resolving against what the viewer can see answers it without one: the
   // fallback for a non-owner is unchanged, and no blank panel is ever rendered.
-  const ownerOnly = ['access', 'sharing', 'permissions', 'a2a', 'folders', 'skills', 'settings']
+  // trinity-enterprise#754: `skills` left this list — the merged tab is for
+  // everyone with access; its management controls are role-gated inside it.
+  const ownerOnly = ['access', 'sharing', 'permissions', 'a2a', 'folders', 'settings']
 
   for (const id of ownerOnly) {
     it(`omits '${id}' when can_share is false`, () => {
@@ -76,7 +88,7 @@ describe('#2153 a non-owner still cannot reach owner-only tabs', () => {
 
   it('still offers the shared tabs to a non-owner', () => {
     const ids = idsFor(NON_OWNER)
-    for (const id of ['overview', 'tasks', 'chat', 'reports', 'schedules', 'loops', 'info']) {
+    for (const id of ['overview', 'tasks', 'chat', 'reports', 'schedules', 'loops', 'skills', 'info']) {
       expect(ids).toContain(id)
     }
   })
@@ -85,6 +97,7 @@ describe('#2153 a non-owner still cannot reach owner-only tabs', () => {
     const ids = idsFor({ ...OWNER, isSystem: true })
     expect(ids).not.toContain('sharing')
     expect(ids).not.toContain('permissions')
+    expect(ids).toContain('skills')     // its Run surface, as the Playbooks tab had
   })
 })
 

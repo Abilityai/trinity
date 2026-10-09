@@ -13,6 +13,7 @@ import httpx
 from typing import List, Dict, Any
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,22 @@ from services.subscription_headroom_alerts import (
 router = APIRouter()
 
 
+def _refusal_reason(exc: ValidationError) -> str:
+    """The first validation failure as one sentence that names its field.
+
+    A model validator's own message already names it ("email must be …");
+    Pydantic prefixes those with "Value error, ". A built-in failure ("Field
+    required") carries the field only in `loc`.
+    """
+    err = exc.errors()[0]
+    msg = str(err.get("msg", "Invalid request"))
+    prefix = "Value error, "
+    if msg.startswith(prefix):
+        return msg[len(prefix):]
+    loc = err.get("loc") or ()
+    return f"{loc[-1]}: {msg}" if loc else msg
+
+
 @router.get("/email-whitelist")
 async def list_email_whitelist(
     request: Request,
@@ -144,10 +161,23 @@ async def add_email_to_whitelist(
 
     assert_admin(current_user)
 
-    # Parse request
-    body = await request.json()
-    add_request = EmailWhitelistAdd(**body)
-    email = add_request.email.lower()
+    # Parse request. The body is validated here rather than by FastAPI so a
+    # refusal is one sentence the Settings field can show as-is (#3455) — and
+    # so a body that is not a JSON object is a 422 too, not a 500.
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise TypeError("not a JSON object")
+        add_request = EmailWhitelistAdd(**body)
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=_refusal_reason(e))
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=422,
+            detail='Request body must be a JSON object like {"email": "user@example.com"}',
+        )
+    # Trimmed and lower-cased by the model.
+    email = add_request.email
 
     # Add to whitelist
     try:
@@ -170,7 +200,7 @@ async def add_email_to_whitelist(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.delete("/email-whitelist/{email}")
+@router.delete("/email-whitelist/{email:path}")
 async def remove_email_from_whitelist(
     email: str,
     request: Request,
@@ -180,6 +210,14 @@ async def remove_email_from_whitelist(
     Remove an email from the whitelist.
 
     Admin-only endpoint.
+
+    `:path` because the stored value may contain `/` (#3456): it is a legal
+    local-part character, and rows that predate #3455's validation hold
+    arbitrary text. The router decodes `%2F` before matching, so a plain
+    `{email}` matched no route for such a row and it could never be removed.
+    Nothing else is registered under `/email-whitelist/`, so the wider match
+    claims no sibling (Invariant #4; pinned by
+    `tests/unit/test_3455_email_whitelist_validation.py`).
     """
     assert_admin(current_user)
 

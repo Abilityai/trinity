@@ -3,7 +3,7 @@
     <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">MCP Connector</h3>
     <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
       Let someone add this agent to their AI client (Claude Code, Cursor, Claude Desktop) in one line.
-      The agent's playbooks become tools they can run; the agent keeps all credentials server-side.
+      The agent's skills become tools they can run; the agent keeps all credentials server-side.
       Only a scoped, revocable key reaches the client.
     </p>
 

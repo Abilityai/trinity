@@ -62,6 +62,13 @@ def _load_public_router(monkeypatch):
     fastapi_mod.HTTPException = Exception
     fastapi_mod.Request = MagicMock()
     fastapi_mod.Depends = MagicMock()
+    # `routers/public.py` now imports `services.rate_limiter`, which does
+    # `from fastapi import HTTPException, status` at module load. The stub had
+    # no `status`, so all 14 tests here errored at setup with "cannot import
+    # name 'status' from 'fastapi'". The real constants module is a leaf
+    # (plain ints), so hand it through rather than mocking status codes.
+    from starlette import status as _status
+    fastapi_mod.status = _status
     fastapi_mod.exceptions = types.ModuleType("fastapi.exceptions")
     fastapi_mod.routing = types.ModuleType("fastapi.routing")
     monkeypatch.setitem(sys.modules, "fastapi", fastapi_mod)
