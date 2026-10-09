@@ -690,8 +690,13 @@ def _scalar_text(value):
     """#3314: a JSON number/bool title or question is stored as its text, so the
     stored value is the same on every DB backend and the fingerprint can match it.
     Anything else is returned unchanged (str, None, and containers — a non-empty
-    container still fails the insert, as today)."""
-    if isinstance(value, (bool, int, float)):
+    container still fails the insert, as today). A FALSY scalar (0, 0.0, False)
+    is also returned unchanged: `create_item` stores the `or`-default for it
+    ("Agent request" / "(no details provided)"), and rows ingested before this
+    fix carry that default too, so stringifying it here would fingerprint "0"
+    against a row that says "Agent request" and flip every such pre-fix row to
+    409 `item_diverged` on the next sync."""
+    if isinstance(value, (bool, int, float)) and value:
         return str(value)
     return value
 
