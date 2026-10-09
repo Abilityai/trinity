@@ -30,7 +30,7 @@ If your admin has enabled inline authentication, you can connect with **no API k
 2. Call `request_login(email)` — a 6-digit code is emailed to you.
 3. Call `verify_login(code)`.
 
-You can then use the exposed playbooks of every agent shared with that email. This mirrors the `/login` flow that Telegram and WhatsApp already use.
+You can then use the exposed skills of every agent shared with that email. This mirrors the `/login` flow that Telegram and WhatsApp already use.
 
 Two things to know: the login binds a **session**, not a key — nothing is written to disk and you are never handed a `trinity_mcp_*` token. And MCP sessions are per-connection, so restarting your client means logging in again.
 

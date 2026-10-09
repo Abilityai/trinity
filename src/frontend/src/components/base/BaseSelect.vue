@@ -21,6 +21,11 @@
     not own, so it belongs in its own issue with its own review — not smuggled
     in behind a composer fix.
 
+    `size="sm"` (trinity-enterprise#754) sizes the `field` recipe to
+    BaseButton sm's box — 12.5 ink, padding 4×10, the ghost's 12px chevron —
+    for a select inside a card row. `ghost` is the composer's 44px box by
+    definition, so it takes no size.
+
     `variant="ghost"` (#2662) swaps the field recipe for the borderless,
     content-width one — the same control where a select is a lightweight
     preference beside a conversation rather than a field in a form. The native
@@ -68,6 +73,7 @@
 import { computed, useAttrs, useId } from 'vue'
 import {
   FIELD_CLASS,
+  FIELD_SM_CLASS,
   FIELD_VALID_CLASS,
   FIELD_INVALID_CLASS,
   FIELD_GHOST_CLASS,
@@ -113,6 +119,15 @@ const props = defineProps({
     default: 'field',
     validator: (v) => ['field', 'ghost'].includes(v),
   },
+  /**
+   * 'md' (default) is the form field; 'sm' is BaseButton sm's box, for a select
+   * inside a card row (trinity-enterprise#754). Sizes `field` only.
+   */
+  size: {
+    type: String,
+    default: 'md',
+    validator: (v) => ['md', 'sm'].includes(v),
+  },
 })
 
 defineEmits(['update:modelValue'])
@@ -140,10 +155,10 @@ const recipe = computed(() =>
         flip: '[&:open~svg]:rotate-180',
       }
     : {
-        field: FIELD_CLASS,
+        field: props.size === 'sm' ? FIELD_SM_CLASS : FIELD_CLASS,
         valid: FIELD_VALID_CLASS,
-        pad: 'pr-8',
-        chevron: 'right-[10px] h-3.5 w-3.5',
+        pad: props.size === 'sm' ? 'pr-7' : 'pr-8',
+        chevron: props.size === 'sm' ? 'right-2 h-3 w-3' : 'right-[10px] h-3.5 w-3.5',
         flip: '',
       }
 )
