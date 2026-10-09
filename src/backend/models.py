@@ -1649,16 +1649,6 @@ class GithubPatPropagationResult(BaseModel):
 # Outbound File Sharing (FILES-001)
 # =============================================================================
 
-class ShareFileRequest(BaseModel):
-    """Body for POST /api/internal/agent-files/share (internal, agent-server path)."""
-    agent_name: str = Field(..., max_length=128)
-    filename: str = Field(..., min_length=1, max_length=255)
-    display_name: Optional[str] = Field(default=None, max_length=255)
-    expires_in: Optional[int] = None
-    # NOTE: `one_time` is deferred — the schema retains the columns
-    # so we can re-enable it later without a migration.
-
-
 class ShareFileMcpRequest(BaseModel):
     """Body for POST /api/agents/{agent_name}/shared-files (MCP path).
 
@@ -3280,23 +3270,6 @@ class ImageGenerateRequest(BaseModel):
 # =============================================================================
 # Internal Models (routers/internal.py)
 # =============================================================================
-
-
-class ActivityTrackRequest(BaseModel):
-    """Request model for tracking activity start."""
-    agent_name: str
-    activity_type: str  # e.g., "schedule_start"
-    user_id: Optional[int] = None
-    triggered_by: str = "schedule"  # schedule, manual, user, agent, system
-    related_execution_id: Optional[str] = None
-    details: Optional[Dict] = None
-
-
-class ActivityCompleteRequest(BaseModel):
-    """Request model for completing an activity."""
-    status: str = ActivityState.COMPLETED  # ActivityState: completed, failed, cancelled
-    details: Optional[Dict] = None
-    error: Optional[str] = None
 
 
 class InternalTaskExecutionRequest(BaseModel):

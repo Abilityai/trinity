@@ -192,16 +192,6 @@ class TestAdminOnlyEndpoints:
         response = regular_user_client.post("/api/ops/alerts/fake-id/acknowledge")
         assert_status(response, 403)
 
-    # -- observability.py endpoints --
-
-    def test_observability_metrics_requires_admin(self, regular_user_client):
-        response = regular_user_client.get("/api/observability/metrics")
-        assert_status(response, 403)
-
-    def test_observability_status_requires_admin(self, regular_user_client):
-        response = regular_user_client.get("/api/observability/status")
-        assert_status(response, 403)
-
     # -- system_agent.py endpoints --
 
     def test_system_agent_status_requires_admin(self, regular_user_client):

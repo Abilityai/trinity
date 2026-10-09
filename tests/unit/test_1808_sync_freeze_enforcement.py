@@ -159,17 +159,23 @@ def test_fails_open_when_the_query_breaks(tmp_path):
 
 
 def test_threshold_matches_the_backend(tmp_path):
-    """The scheduler's threshold must stay in step with the backend endpoint.
+    """The scheduler's threshold must stay in step with the backend's.
 
-    trinity-enterprise#706: both now read it from ONE policy module (vendored
-    byte-identically; parity in test_ent706_sync_policy_parity.py), and the
-    backend endpoint delegates to that module instead of restating the rule.
+    trinity-enterprise#706: both read it from ONE policy module (vendored
+    byte-identically; parity in test_ent706_sync_policy_parity.py). The
+    backend's internal sync-health endpoint that once restated it was removed
+    in #3434 (no caller); the backend verdict is `sync_health_view`, which
+    delegates to the canonical policy module checked here.
     """
+    import re
+
     threshold = _scheduler_database_module().SYNC_FAILURE_FREEZE_THRESHOLD
     assert threshold == 3
-    backend = (_REPO / "src" / "backend" / "routers" / "internal.py").read_text()
-    assert "sync_health_view" in backend or "sync_freeze_policy" in backend
-    assert ">= 3" not in backend  # no second copy of the rule
+    policy = (_REPO / "src" / "backend" / "services" / "sync_freeze_policy.py").read_text()
+    m = re.search(r"^SYNC_FAILURE_FREEZE_THRESHOLD = (\d+)", policy, re.M)
+    assert m and int(m.group(1)) == threshold
+    view = (_REPO / "src" / "backend" / "services" / "sync_health_view.py").read_text()
+    assert "sync_freeze_policy" in view
 
 
 def test_mapping_only_rows_still_freeze(tmp_path, monkeypatch):

@@ -3,7 +3,7 @@ Internal endpoints with shared-secret authentication (C-003).
 
 These endpoints are called by:
 - Agent containers on the Docker network to communicate back to the backend
-- Dedicated scheduler service (trinity-scheduler) for task execution and activity tracking
+- Dedicated scheduler service (trinity-scheduler) for task execution
 
 Security: Requires X-Internal-Secret header matching INTERNAL_API_SECRET env var.
 Falls back to SECRET_KEY if INTERNAL_API_SECRET is not set.
@@ -17,14 +17,9 @@ import logging
 
 from database import db
 from models import (
-    ActivityCompleteRequest,
-    ActivityTrackRequest,
-    ActivityType,
     InternalAuditRequest,
     InternalTaskExecutionRequest,
     PullTaskResultRequest,
-    ShareFileRequest,
-    ShareFileResponse,
     TaskExecutionStatus,
     ValidateExecutionRequest,
 )
@@ -122,12 +117,6 @@ def _pull_authorized(request: Request, agent_name: str) -> bool:
     if not is_pull_pilot_agent(agent_name):
         return False
     return heartbeat_service.authorize_heartbeat(_validated_agent_key(request), agent_name)
-
-
-@router.get("/health")
-async def internal_health():
-    """Internal health check for agent containers."""
-    return {"status": "ok"}
 
 
 # =============================================================================
@@ -280,133 +269,6 @@ async def internal_agent_brief_readiness(agent_name: str):
     except AgentNotFound:
         raise HTTPException(status_code=404, detail="Agent not found")
     return {"agent_name": agent_name, "fire": verdict.fire, "reason": verdict.reason, "basis": verdict.basis}
-
-
-@router.get("/agents/{agent_name}/sync-health-status")
-async def internal_agent_sync_health(agent_name: str):
-    """#389: the per-agent freeze decision, as the backend computes it.
-
-    Returns the per-agent `freeze_schedules_if_sync_failing` flag, whether sync
-    is failing, and `should_freeze`. Since trinity-enterprise#706 the decision
-    is `sync_freeze_policy.classify` — the same module the scheduler vendors —
-    so `should_freeze` also covers a work agent diverged from origin for more
-    than 24 h, and `freeze_reason` / `divergence_age_s` / `work_agent` say why.
-
-    The dedicated scheduler does NOT call this endpoint: it reads the database
-    directly (`SchedulerDatabase.sync_freeze_reason`) with the vendored copy of
-    the same policy. This is the backend's read of the same decision.
-    """
-    from database import db as _db
-    from services.sync_health_view import sync_view
-
-    freeze_flag = _db.get_freeze_schedules_if_sync_failing(agent_name)
-    config = _db.get_git_config(agent_name)
-    state = _db.get_sync_state(agent_name) or {}
-    view = sync_view(state or None, config)
-    return {
-        "agent_name": agent_name,
-        "freeze_schedules_if_sync_failing": bool(freeze_flag),
-        "sync_failing": bool(view["sync_failing"]),
-        "should_freeze": bool(freeze_flag and view["freeze"]),
-        "consecutive_failures": state.get("consecutive_failures") or 0,
-        "freeze_reason": view["freeze_reason"] if freeze_flag else None,
-        "divergence_age_s": view["divergence_age_s"],
-        "work_agent": bool(config is not None and view["work_agent"]),
-    }
-
-
-# =============================================================================
-# Activity Tracking Endpoints (for dedicated scheduler)
-# =============================================================================
-
-
-@router.post("/activities/track")
-async def track_activity(request: ActivityTrackRequest):
-    """
-    Track the start of a new activity.
-
-    Called by the dedicated scheduler when a cron-triggered execution starts.
-    Creates an activity record and broadcasts via WebSocket.
-
-    Returns:
-        activity_id: UUID of the created activity
-    """
-    try:
-        # Map string to ActivityType enum
-        activity_type_map = {
-            "schedule_start": ActivityType.SCHEDULE_START,
-            "schedule_end": ActivityType.SCHEDULE_END,
-            "chat_start": ActivityType.CHAT_START,
-            "chat_end": ActivityType.CHAT_END,
-            "agent_collaboration": ActivityType.AGENT_COLLABORATION,
-        }
-
-        activity_type = activity_type_map.get(request.activity_type)
-        if not activity_type:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid activity_type: {request.activity_type}"
-            )
-
-        activity_id = await activity_service.track_activity(
-            agent_name=request.agent_name,
-            activity_type=activity_type,
-            user_id=request.user_id,
-            triggered_by=request.triggered_by,
-            related_execution_id=request.related_execution_id,
-            details=request.details
-        )
-
-        logger.info(f"Activity tracked: {activity_id} for agent {request.agent_name} ({request.activity_type})")
-
-        return {
-            "activity_id": activity_id,
-            "agent_name": request.agent_name,
-            "activity_type": request.activity_type
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to track activity: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/activities/{activity_id}/complete")
-async def complete_activity(activity_id: str, request: ActivityCompleteRequest):
-    """
-    Mark an activity as completed or failed.
-
-    Called by the dedicated scheduler when an execution completes.
-    Updates the activity record and broadcasts via WebSocket.
-    """
-    try:
-        success = await activity_service.complete_activity(
-            activity_id=activity_id,
-            status=request.status,
-            details=request.details,
-            error=request.error
-        )
-
-        if not success:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Activity not found: {activity_id}"
-            )
-
-        logger.info(f"Activity completed: {activity_id} ({request.status})")
-
-        return {
-            "activity_id": activity_id,
-            "status": request.status,
-            "completed": True
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to complete activity: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================================
@@ -873,38 +735,6 @@ async def log_audit_entry(request: InternalAuditRequest):
     except Exception as e:
         logger.error(f"Failed to log audit entry: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# =============================================================================
-# Agent Shared Files (outbound — FILES-001 Step 3)
-# =============================================================================
-
-@router.post("/agent-files/share", response_model=ShareFileResponse)
-async def agent_files_share(payload: ShareFileRequest):
-    """
-    Mint a public download URL for a file the agent wrote to its publish dir.
-
-    Authentication: X-Internal-Secret (already enforced by router dependency).
-    Agent identity: carried by `payload.agent_name`. The agent server is
-    responsible for passing its own name here — same trust model as
-    /internal/execute-task (forging requires the internal secret).
-    """
-    from services.agent_shared_files_service import create_share
-    from services.idempotency_service import EffectUnguardedError
-
-    try:
-        result = await create_share(
-            agent_name=payload.agent_name,
-            filename=payload.filename,
-            display_name=payload.display_name,
-            expires_in=payload.expires_in,
-            created_by=payload.agent_name,
-        )
-    except EffectUnguardedError as e:
-        # #2392: this path carries no execution id, so a pull-mode agent's share
-        # is refused here; the MCP route (`/api/agents/{name}/shared-files`) is the one to use.
-        raise HTTPException(status_code=422, detail={"reason": "effect_unguarded", "message": str(e)})
-    return ShareFileResponse(**result)
 
 
 # ---------------------------------------------------------------------------

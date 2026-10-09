@@ -68,7 +68,6 @@ from routers.analytics import router as analytics_router  # #1107 — Agent Over
 from routers.activities import router as activities_router
 from routers.settings import router as settings_router
 from routers.systems import router as systems_router
-from routers.observability import router as observability_router
 from routers.system_agent import router as system_agent_router
 from routers.ops import router as ops_router
 from routers.public_links import router as public_links_router, set_websocket_manager as set_public_links_ws_manager
@@ -1355,7 +1354,6 @@ app.include_router(executions_router)  # EXEC-022 / Issue #18 — Unified Execut
 app.include_router(analytics_router)  # #1107 — Agent Detail Overview analytics
 app.include_router(settings_router)
 app.include_router(systems_router)
-app.include_router(observability_router)
 app.include_router(system_agent_router)
 app.include_router(ops_router)
 app.include_router(public_links_router)

@@ -19,6 +19,19 @@ from testkit.assertions import (
 )
 
 
+def _agent_activities(api_client, agent_name, limit=500):
+    """One agent's activity rows, or None when the timeline read fails.
+
+    #3434 removed `GET /api/agents/{name}/activities` (no product caller); read
+    the live cross-agent timeline and filter client-side by agent, as the MCP
+    tool `get_agent_activity_summary` does.
+    """
+    response = api_client.get(f"/api/activities/timeline?limit={limit}")
+    if response.status_code != 200:
+        return None
+    return [a for a in response.json().get("activities", []) if a.get("agent_name") == agent_name]
+
+
 class TestParallelTaskEndpoint:
     """REQ-PARALLEL-001: Parallel task endpoint tests."""
 
@@ -684,15 +697,8 @@ class TestAsyncModeActivities:
     ):
         """Async task creates TASK_STARTED activity."""
         # Get initial activity count
-        activities_before = api_client.get(
-            f"/api/agents/{created_agent['name']}/activities"
-        )
-
-        # Activities endpoint returns {"agent_name": ..., "count": ..., "activities": [...]}
-        initial_count = 0
-        if activities_before.status_code == 200:
-            data = activities_before.json()
-            initial_count = data.get("count", 0)
+        activities_before = _agent_activities(api_client, created_agent['name'])
+        initial_count = len(activities_before) if activities_before is not None else 0
 
         # Submit async task
         response = api_client.post(
@@ -714,12 +720,9 @@ class TestAsyncModeActivities:
         current_count = initial_count
 
         while time.time() - start < max_wait:
-            activities_after = api_client.get(
-                f"/api/agents/{created_agent['name']}/activities"
-            )
-            if activities_after.status_code == 200:
-                data = activities_after.json()
-                current_count = data.get("count", 0)
+            activities_after = _agent_activities(api_client, created_agent['name'])
+            if activities_after is not None:
+                current_count = len(activities_after)
                 if current_count > initial_count:
                     break
             time.sleep(2)
@@ -829,10 +832,10 @@ class TestAsyncModeUnifiedExecutor:
         found = None
         for _ in range(15):
             time.sleep(1)
-            acts_resp = api_client.get(f"/api/agents/{agent_name}/activities")
-            if acts_resp.status_code != 200:
+            acts = _agent_activities(api_client, agent_name)
+            if acts is None:
                 continue
-            for a in acts_resp.json().get("activities", []):
+            for a in acts:
                 if a.get("activity_type") != "chat_start":
                     continue
                 details = a.get("details")

@@ -24,6 +24,28 @@ from testkit.assertions import (
 from testkit.cleanup import cleanup_test_agent
 
 
+TIMELINE = "/api/activities/timeline"
+
+
+def _agent_activities(api_client, agent_name, *, activity_type=None, activity_state=None,
+                      limit=100, fetch_limit=500):
+    """One agent's activity rows, newest first.
+
+    #3434 removed `GET /api/agents/{name}/activities` (no product caller). The
+    live read is the cross-agent timeline; filter it client-side by agent, as
+    the MCP tool `get_agent_activity_summary` does.
+    """
+    path = f"{TIMELINE}?limit={fetch_limit}"
+    if activity_type:
+        path += f"&activity_types={activity_type}"
+    response = api_client.get(path)
+    assert_status(response, 200)
+    rows = [a for a in response.json().get("activities", []) if a.get("agent_name") == agent_name]
+    if activity_state:
+        rows = [a for a in rows if a.get("activity_state") == activity_state]
+    return rows[:limit]
+
+
 class TestActivityTimelineAuthentication:
     """Tests for activity timeline authentication requirements."""
 
@@ -32,11 +54,6 @@ class TestActivityTimelineAuthentication:
     def test_timeline_requires_auth(self, unauthenticated_client: TrinityApiClient):
         """GET /api/activities/timeline requires authentication."""
         response = unauthenticated_client.get("/api/activities/timeline", auth=False)
-        assert_status(response, 401)
-
-    def test_agent_activities_requires_auth(self, unauthenticated_client: TrinityApiClient):
-        """GET /api/agents/{name}/activities requires authentication."""
-        response = unauthenticated_client.get("/api/agents/test-agent/activities", auth=False)
         assert_status(response, 401)
 
 
@@ -118,51 +135,33 @@ class TestActivityTimeline:
 
 
 class TestAgentActivities:
-    """Tests for GET /api/agents/{name}/activities endpoint."""
+    """One agent's rows, read from GET /api/activities/timeline (#3434)."""
 
     def test_agent_activities_returns_structure(self, api_client: TrinityApiClient, created_agent: dict):
-        """GET /api/agents/{name}/activities returns expected structure."""
+        """Every row the agent filter keeps belongs to that agent."""
         agent_name = created_agent["name"]
-        response = api_client.get(f"/api/agents/{agent_name}/activities")
-        assert_status(response, 200)
-        data = assert_json_response(response)
-        assert_has_fields(data, ["agent_name", "count", "activities"])
-        assert data["agent_name"] == agent_name
-        assert isinstance(data["count"], int)
-        assert isinstance(data["activities"], list)
+        activities = _agent_activities(api_client, agent_name)
+        assert isinstance(activities, list)
+        for activity in activities:
+            assert activity["agent_name"] == agent_name
 
     def test_agent_activities_filter_by_type(self, api_client: TrinityApiClient, created_agent: dict):
-        """Agent activities can filter by activity_type."""
+        """The timeline's activity_types filter narrows one agent's rows."""
         agent_name = created_agent["name"]
-        response = api_client.get(f"/api/agents/{agent_name}/activities?activity_type=chat_start")
-        assert_status(response, 200)
-        data = response.json()
-
-        for activity in data.get("activities", []):
+        for activity in _agent_activities(api_client, agent_name, activity_type="chat_start"):
             assert activity["activity_type"] == "chat_start"
 
     def test_agent_activities_filter_by_state(self, api_client: TrinityApiClient, created_agent: dict):
-        """Agent activities can filter by activity_state."""
+        """activity_state is a client-side filter over the timeline rows."""
         agent_name = created_agent["name"]
-        response = api_client.get(f"/api/agents/{agent_name}/activities?activity_state=completed")
-        assert_status(response, 200)
-        data = response.json()
-
-        for activity in data.get("activities", []):
+        for activity in _agent_activities(api_client, agent_name, activity_state="completed"):
             assert activity["activity_state"] == "completed"
 
-    def test_agent_activities_respects_limit(self, api_client: TrinityApiClient, created_agent: dict):
-        """Agent activities respects limit parameter."""
-        agent_name = created_agent["name"]
-        response = api_client.get(f"/api/agents/{agent_name}/activities?limit=5")
+    def test_timeline_respects_limit(self, api_client: TrinityApiClient):
+        """The timeline honours its limit parameter."""
+        response = api_client.get(f"{TIMELINE}?limit=5")
         assert_status(response, 200)
-        data = response.json()
-        assert len(data.get("activities", [])) <= 5
-
-    def test_nonexistent_agent_returns_404(self, api_client: TrinityApiClient):
-        """GET /api/agents/{name}/activities returns 404 for nonexistent agent."""
-        response = api_client.get("/api/agents/nonexistent-agent-xyz123/activities")
-        assert_status(response, 404)
+        assert len(response.json().get("activities", [])) <= 5
 
 
 class TestActivityCreation:
@@ -179,8 +178,7 @@ class TestActivityCreation:
         agent_name = created_agent["name"]
 
         # Get initial activity count
-        initial_response = api_client.get(f"/api/agents/{agent_name}/activities?limit=100")
-        initial_count = initial_response.json().get("count", 0)
+        initial_count = len(_agent_activities(api_client, agent_name, limit=500))
 
         # Send a simple chat message
         chat_response = api_client.post(
@@ -195,15 +193,12 @@ class TestActivityCreation:
         time.sleep(2)
 
         # Check for new activities
-        response = api_client.get(f"/api/agents/{agent_name}/activities?limit=100")
-        assert_status(response, 200)
-        data = response.json()
+        activities = _agent_activities(api_client, agent_name, limit=500)
 
         # Should have at least one new activity
-        assert data["count"] > initial_count, "New activity should be created after chat"
+        assert len(activities) > initial_count, "New activity should be created after chat"
 
         # Check that chat_start activity exists
-        activities = data.get("activities", [])
         chat_activities = [a for a in activities if a["activity_type"] == "chat_start"]
         assert len(chat_activities) > 0, "Should have at least one chat_start activity"
 
@@ -222,9 +217,7 @@ class TestActivityCreation:
         time.sleep(2)
 
         # Get activities
-        response = api_client.get(f"/api/agents/{agent_name}/activities?limit=10")
-        assert_status(response, 200)
-        activities = response.json().get("activities", [])
+        activities = _agent_activities(api_client, agent_name, limit=10)
 
         if activities:
             activity = activities[0]
@@ -259,14 +252,10 @@ class TestActivityTypes:
         )
         time.sleep(2)
 
-        response = api_client.get(
-            f"/api/agents/{agent_name}/activities?activity_type=chat_start&limit=10"
-        )
-        assert_status(response, 200)
-        data = response.json()
+        activities = _agent_activities(api_client, agent_name, activity_type="chat_start", limit=10)
 
         # All returned activities should be chat_start
-        for activity in data.get("activities", []):
+        for activity in activities:
             assert activity["activity_type"] == "chat_start"
 
     @pytest.mark.slow
@@ -282,14 +271,10 @@ class TestActivityTypes:
         )
         time.sleep(5)  # Tool calls take longer
 
-        response = api_client.get(
-            f"/api/agents/{agent_name}/activities?activity_type=tool_call&limit=20"
-        )
-        assert_status(response, 200)
-        data = response.json()
+        activities = _agent_activities(api_client, agent_name, activity_type="tool_call", limit=20)
 
         # All returned activities should be tool_call
-        for activity in data.get("activities", []):
+        for activity in activities:
             assert activity["activity_type"] == "tool_call"
 
 
@@ -309,9 +294,7 @@ class TestActivityDetails:
         )
         time.sleep(2)
 
-        response = api_client.get(f"/api/agents/{agent_name}/activities?limit=10")
-        assert_status(response, 200)
-        activities = response.json().get("activities", [])
+        activities = _agent_activities(api_client, agent_name, limit=10)
 
         # At least some activities should have details
         activities_with_details = [a for a in activities if a.get("details")]
@@ -472,11 +455,7 @@ class TestActivityWithScheduleInfo:
         agent_name = created_agent["name"]
 
         # First check if there are any scheduled activities
-        response = api_client.get(
-            f"/api/agents/{agent_name}/activities?activity_type=schedule_start&limit=10"
-        )
-        assert_status(response, 200)
-        activities = response.json().get("activities", [])
+        activities = _agent_activities(api_client, agent_name, activity_type="schedule_start", limit=10)
 
         for activity in activities:
             # Scheduled activities should have schedule info
