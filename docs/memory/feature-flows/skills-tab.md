@@ -280,7 +280,7 @@ Auth is unchanged (`get_skill_gate_readable_agent_by_name`). Models: `SkillGateA
   - booleans only: no name or email.
 - **`hook`** with `?probe=true` (`skill_gate_map_service.hook_status`, `:228-258`):
   - honoured only when `is_person_principal(caller)` and `can_manage_agent_skills(caller, agent)` (the #3052 `probe` precedent); anyone else gets `null`;
-  - one direct `agent_httpx_client` `GET /health`, 3 s timeout, no circuit-breaker bookkeeping;
+  - one direct `agent_httpx_client` `GET /health`, capped at 3 s for the whole probe (`asyncio.wait_for`; httpx's own timeout is per phase), no circuit-breaker bookkeeping;
   - the agent's `skill_gate_hook` (`agent_server/routers/info.py:135`) when it is one of `ok | missing | not_root_owned | writable | unsupported_runtime`; `predates` for a 200 without the field; `unknown` for no usable answer (stopped, timeout, non-200, not JSON, an unexpected value).
 - MCP `list_skill_gates` (`src/mcp-server/src/tools/skills.ts:541-566`) passes the response through and sends no `probe`, so `hook` is `null` there.
 

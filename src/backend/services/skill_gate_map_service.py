@@ -250,18 +250,24 @@ HOOK_UNKNOWN = "unknown"
 HOOK_PROBE_TIMEOUT_SECONDS = 3.0
 
 
+async def _read_health(agent_name: str):
+    async with agent_httpx_client(agent_name, timeout=HOOK_PROBE_TIMEOUT_SECONDS) as client:
+        return await client.get(f"http://agent-{agent_name}:8000/health")
+
+
 async def hook_status(agent_name: str) -> str:
     """Is the gate enforced inside the agent? One direct `GET /health` with a
     short timeout and NO circuit-breaker bookkeeping — a probe from the Skills
     tab must never mark an agent unhealthy (the `gitignore_clone` pattern).
     Never raises."""
     try:
-        async with agent_httpx_client(agent_name, timeout=HOOK_PROBE_TIMEOUT_SECONDS) as client:
-            response = await client.get(f"http://agent-{agent_name}:8000/health")
+        # The cap is on the whole probe: httpx's timeout is per phase, so an
+        # agent trickling its answer held one read for 10 s (PR review).
+        response = await asyncio.wait_for(_read_health(agent_name), HOOK_PROBE_TIMEOUT_SECONDS)
         if response.status_code != 200:
             return HOOK_UNKNOWN
         data = response.json()
-    except (httpx.HTTPError, ValueError):  # stopped, slow, unreachable or not JSON: no answer
+    except (httpx.HTTPError, ValueError, asyncio.TimeoutError):  # stopped, slow, unreachable or not JSON
         return HOOK_UNKNOWN
     except Exception:  # noqa: BLE001 — no answer too, but one that may recur on every call
         logger.debug("[skill_gate_map] hook probe for %s failed", agent_name, exc_info=True)

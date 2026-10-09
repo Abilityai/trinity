@@ -21,6 +21,7 @@ provider and the agent's HTTP answer faked.
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -72,6 +73,7 @@ class FakeHealth:
     def __init__(self):
         self.answer = (200, {"status": "healthy", "skill_gate_hook": "ok"})
         self.calls = []
+        self.delay = 0.0                                   # an agent slow to answer
 
     def client(self, agent_name, **kw):
         probe = self
@@ -85,6 +87,8 @@ class FakeHealth:
 
             async def get(self, url):
                 probe.calls.append((url, kw.get("timeout")))
+                if probe.delay:
+                    await asyncio.sleep(probe.delay)
                 if isinstance(probe.answer, Exception):
                     raise probe.answer
                 status, body = probe.answer
@@ -292,6 +296,21 @@ def test_an_unexpected_probe_failure_is_unknown_and_says_why(env, caplog):
 
     assert body["hook"] == "unknown"
     assert any(r.exc_info for r in caplog.records if "hook probe" in r.getMessage())
+
+
+def test_the_probe_timeout_caps_the_whole_probe(env):
+    """httpx's timeout is per phase: an agent trickling its answer held one
+    probe far past it (PR review). The cap is on the whole probe."""
+    import time
+
+    env.monkeypatch.setattr(skill_gate_map_service, "HOOK_PROBE_TIMEOUT_SECONDS", 0.05)
+    env.health.delay = 1.0
+
+    started = time.monotonic()
+    body = _get(env, OWNER, probe="true")
+
+    assert body["hook"] == "unknown"
+    assert time.monotonic() - started < 0.5
 
 
 def test_probe_is_honoured_for_an_admin(env):
