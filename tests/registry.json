@@ -5326,6 +5326,17 @@
         "unit"
       ],
       "description": "#3406: the backend half of the contract the browser's 401 verdict reads. get_current_user rejects a dead token and OAuth2PasswordBearer rejects a missing one WITH `WWW-Authenticate: Bearer`; the five public-link session routes (intro, history, session clear, chat, terminate) answer an expired or missing visitor session with a bare 401. Handlers driven directly with the link check, rate limit and session lookup stubbed. No Docker."
+    },
+    {
+      "file": "unit/test_provider_pricing.py",
+      "feature": "#3489",
+      "added": "2026-10-09",
+      "categories": [
+        "agent-server",
+        "unit",
+        "cost"
+      ],
+      "description": "Turn cost behind an Anthropic-compatible proxy (#3489): turn_cost re-prices a Claude Code result from modelUsage against the OpenRouter price list (input/output/cache-read/cache-write, every model of the turn summed) and keeps total_cost_usd when it cannot: no proxy, unknown proxy host, model missing from the price list, no/empty modelUsage, price fetch failure (failure cached, no refetch per turn). Price list fetched once per TTL; proxy host read from the execution env's ANTHROPIC_BASE_URL; parse_stream_json_output wired to it."
     }
   ]
 }

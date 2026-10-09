@@ -38,6 +38,7 @@ from ..model_context import pick_context_window
 from ..models import CompactEvent, ExecutionLogEntry, ExecutionMetadata
 from .activity_tracking import complete_tool_execution, start_tool_execution
 from .error_classifier import _is_rate_limit_message
+from .provider_pricing import turn_cost
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +191,7 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
             # result.usage and modelUsage.inputTokens are CUMULATIVE — see the
             # module docstring's "Token-accounting invariant" section. Tokens
             # come from per-call usage on the assistant branch below.
-            metadata.cost_usd = msg.get("total_cost_usd")
+            metadata.cost_usd = turn_cost(msg)
             metadata.duration_ms = msg.get("duration_ms")
             metadata.num_turns = msg.get("num_turns")
             response_text = msg.get("result", response_text)
@@ -366,7 +367,7 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
 
     elif msg_type == "result":
         # Final result message with stats
-        metadata.cost_usd = msg.get("total_cost_usd")
+        metadata.cost_usd = turn_cost(msg)
         metadata.duration_ms = msg.get("duration_ms")
         metadata.num_turns = msg.get("num_turns")
         result_text = msg.get("result", "")
