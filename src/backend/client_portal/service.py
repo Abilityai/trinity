@@ -518,13 +518,17 @@ def _refusal_detail(availability: str) -> str:
     )
 
 
-def _usage_limit_detail(agent_name: str) -> str:
+def _usage_limit_detail(agent_name: str, subscription_ids=None) -> str:
     """The 502 body when NO subscription can serve and nothing was switched.
 
     Names the earliest reset instant the headroom sampler already knows (#2638
     AC#4). "Please try again later" is true and nearly useless: the person has
     no way to know whether later means ten minutes or two days, so they either
     give up or re-send in a loop that cannot succeed.
+
+    `subscription_ids` (#3470): every subscription the turn's walk ran on — the
+    reset the person is told about is the EARLIEST across all of them, not only
+    the assigned one.
 
     Degrades to the original sentence whenever the instant is unknown or
     unreadable — a fabricated time would be worse than a vague one, and this
@@ -539,10 +543,13 @@ def _usage_limit_detail(agent_name: str) -> str:
         from database import db as _db
         from services.subscription_auto_switch import earliest_known_reset
 
+        ids = {s for s in (subscription_ids or []) if s}
         sub_id = _db.get_agent_subscription_id(agent_name)
-        if not sub_id:
+        if sub_id:
+            ids.add(sub_id)
+        if not ids:
             return fallback
-        resets_at = earliest_known_reset([sub_id])
+        resets_at = earliest_known_reset(sorted(ids))
         if not resets_at:
             return fallback
         when = parse_iso_timestamp(resets_at).strftime("%H:%M UTC on %-d %b")
@@ -3302,8 +3309,25 @@ async def portal_chat(agent_name: str, message: str, email: str,
             # first refusal), in which case the sentence below was telling a
             # person their message could not be retried while the agent sat on
             # a fresh subscription that would have served it.
+            #
+            # #3470: the platform now WALKS the pool itself — every other
+            # subscription, then the API key — and re-issues the message, so a
+            # switch is no longer something the person has to act on. The only
+            # case that still hands the retry back is a turn whose time budget
+            # ran out before a re-issue could run (`budget_exhausted`): a fresh
+            # send gets a fresh budget. Everything else here means the pool
+            # really is exhausted.
             switch = getattr(result, "subscription_switch", None)
-            if isinstance(switch, dict) and switch.get("switched"):
+            if isinstance(switch, dict) and switch.get("budget_exhausted"):
+                raise ClientPortalError(
+                    503,
+                    "The agent hit its usage limit and ran out of time to retry on "
+                    "another subscription. Send that again and it should go through.",
+                    category="auth_switched", retryable=True)
+            if (
+                isinstance(switch, dict) and switch.get("switched")
+                and not switch.get("retried") and not switch.get("exhausted")
+            ):
                 where = switch.get("new_subscription")
                 moved = (
                     f"moved onto '{where}'" if where
@@ -3314,13 +3338,14 @@ async def portal_chat(agent_name: str, message: str, email: str,
                     f"The agent hit its usage limit, so it was {moved}. "
                     "Send that again and it should go through.",
                     category="auth_switched", retryable=True)
-            # Nothing changed: the pool really is exhausted. Say WHEN, if the
-            # provider told us — the headroom sampler already caches the reset
-            # instants, and "try again later" is the least useful true thing
-            # the platform can say when it knows the hour.
+            # The pool really is exhausted. Say WHEN, if the provider told us —
+            # the headroom sampler already caches the reset instants, and "try
+            # again later" is the least useful true thing the platform can say
+            # when it knows the hour. Earliest across EVERY credential tried.
+            tried = switch.get("tried_subscription_ids") if isinstance(switch, dict) else None
             raise ClientPortalError(
                 502,
-                _usage_limit_detail(agent_name),
+                _usage_limit_detail(agent_name, subscription_ids=tried),
                 category="auth", retryable=False)
         if code == "CAPACITY" or "at capacity" in err:
             # Admission refused before any agent work — unbilled, and the queue
