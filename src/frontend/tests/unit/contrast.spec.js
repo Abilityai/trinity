@@ -3,7 +3,7 @@ import colors from 'tailwindcss/colors.js'
 import {
   parseHex, relativeLuminance, contrastRatio, ratio, meetsAA, failures,
   AA_NORMAL, AA_LARGE,
-} from '../../src/utils/contrast.js'
+} from './helpers/contrast.js'
 
 /**
  * #2201 — the design system's colour pairings, checked rather than asserted in
