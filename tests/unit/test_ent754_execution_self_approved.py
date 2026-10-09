@@ -42,6 +42,8 @@ APPROVER = dict(id=1, username="ana", email="Ana@Example.com", role="user")
 OTHER = dict(id=2, username="bob", email="bob@example.com", role="user")
 AGENT_KEY = dict(id=1, username="ana", email="Ana@Example.com", role="user",
                  mcp_scope="agent", agent_name="sibling")
+USER_KEY = dict(id=1, username="ana", email="Ana@Example.com", role="user", mcp_scope="user")
+OTHER_USER_KEY = dict(id=2, username="bob", email="bob@example.com", role="user", mcp_scope="user")
 
 
 @pytest.fixture
@@ -99,12 +101,24 @@ def test_a_machine_key_sees_neither(world):
     """Operator ruling (review round): the marker is for people. Beside the
     row's `source_user_email` it says that person fills the gate's approver
     kind; the gate map withholds `set_by` from machine keys for the same
-    reason (#715), so an agent or MCP key reads both flags false."""
+    reason (#715), so an agent, connector or system key (or an agent-scoped
+    MCP key) reads both flags false."""
     row = _list(world, AGENT_KEY)[world["self"]]
     detail = _detail(world, AGENT_KEY, world["self"])
 
     assert (_get(row, "gate_self_approved"), _get(row, "gate_self_approved_by_viewer")) == (False, False)
     assert (detail.gate_self_approved, detail.gate_self_approved_by_viewer) == (False, False)
+
+
+def test_a_user_scoped_key_reads_as_its_person(world):
+    """The ruling's line is person vs machine, drawn where `enforce` draws it
+    (`PERSON_SCOPES`): a person's own user-scoped MCP key acts as that person,
+    so it reads what they read in the browser (PR review)."""
+    mine = _list(world, USER_KEY)[world["self"]]
+    theirs = _list(world, OTHER_USER_KEY)[world["self"]]
+
+    assert (_get(mine, "gate_self_approved"), _get(mine, "gate_self_approved_by_viewer")) == (True, True)
+    assert (_get(theirs, "gate_self_approved"), _get(theirs, "gate_self_approved_by_viewer")) == (True, False)
 
 
 def test_the_detail_carries_the_same_two_flags(world):

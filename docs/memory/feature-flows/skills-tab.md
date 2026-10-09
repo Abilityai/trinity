@@ -288,7 +288,7 @@ Auth is unchanged (`get_skill_gate_readable_agent_by_name`). Models: `SkillGateA
 
 - **Source**: ent#752's `self_approved` row in `skill_gate_requests`, written by `skill_gate_service.record_self_approval` at the `/task`, `/chat` and backstop seams; its UNIQUE `dispatched_execution_id` is the run the agent received.
 - **`db.get_self_approved_runs(agent, ids)`** (`db/skill_gate_requests.py:169-187`, facade `database.py:2321`): one `SELECT dispatched_execution_id, requester_key … WHERE agent_name = ? AND state = 'self_approved' AND dispatched_execution_id IN (…)`.
-- **`skill_gate_map_service.self_approved_flags(agent, ids, principal)`** (`:180-206`) → `{id: (True, by_viewer)}`. `by_viewer` is `requester_key == "person:" + casefold(email)` for a person principal, so the email never leaves the server. People only: a machine principal (agent, MCP, connector or system key) gets `{}`, since beside `source_user_email` the marker names who fills the approver kind (operator ruling; the `set_by` rule, #715). The Workspace twin takes `viewer_is_person` for the same rule. It never raises: a failed read means no flags.
+- **`skill_gate_map_service.self_approved_flags(agent, ids, principal)`** (`:180-206`) → `{id: (True, by_viewer)}`. `by_viewer` is `requester_key == "person:" + casefold(email)` for a person principal, so the email never leaves the server. People only: a machine principal (an agent, connector or system key, or an agent-scoped MCP key) gets `{}`, since beside `source_user_email` the marker names who fills the approver kind (operator ruling; the `set_by` rule, #715). A person's own user-scoped MCP key is that person (`PERSON_SCOPES`, as in `enforce`) and reads the flags. The Workspace twin takes `viewer_is_person` for the same rule. It never raises: a failed read means no flags.
 - **Executions**: `routers/schedules.py:891-917` (`get_agent_executions`, one batch read per page) and `:920-938` (`get_execution`) take `current_user` and add `gate_self_approved` / `gate_self_approved_by_viewer` (`ExecutionSummary` `models.py:4121-4122`, `ExecutionResponse` `:4178-4179`). The PERF-001 summary column list is unchanged.
 - **Workspace**: `client_portal/router.py:1653-1678` (`portal_history`) → `service.get_history(agent, principal.email, …)` → `annotate_self_approved_turns` (`client_portal/service.py:4629`; `skill_gate_map_service.py:217-235`). Only assistant rows with an `execution_id` (#3166) are looked up, the viewer is the portal session's email, and questions, report rows and pre-#3166 rows read false. `PortalHistoryMessage` gains both fields (`client_portal/models.py:1012-1013`).
 
@@ -360,7 +360,7 @@ A skipped field is warned once per `(file, field, value)` (`_SKIPPED_FIELD_WARNE
 
 1. **Last-known list**: served only on `?last_known=true` under the live route's own gate (`AuthorizedAgentByName`). It is display-only and never drives Run. The key is backend-only (agents are not on the platform network, #589), size-capped, and cleared on every lifecycle event that frees the name.
 2. **Public link**: `public_view` is an allow-list for the top-level keys and the per-skill fields, so anything new stays off the unauthenticated route by default; an anonymous visitor reads only fixed sentences, never the agent's own error body.
-3. **Gate map**: `approvers` carries booleans only; the gate line names a kind. `viewer_fills` reuses the enforce path's functions and is false for every machine principal.
+3. **Gate map**: `approvers` carries booleans only; the gate line names a kind. `viewer_fills` reuses the enforce path's functions: false for an agent, connector or system principal; a person's user-scoped MCP key is that person.
 4. **Probe**: honoured only for a person who may manage the agent's skills; one `/health` read, no breaker side effects, so it is not a read amplifier.
 5. **Self-approved flags**: the viewer comparison happens on the server; no email is added to any payload (pinned by the response-key tests).
 6. **Agent-reported `source` / `dir` / `approval`**: agent-controlled and informational; the platform gate map stays the authority.
@@ -420,7 +420,7 @@ Covered by unit tests:
 - a gate keyed on the dir rather than the frontmatter name;
 - a name `SKILL_NAME_RE` rejects;
 - an agent switch mid-load and mid-write;
-- a machine key never "fills" a kind, and reads no self-approved flag;
+- an agent, connector or system key never "fills" a kind and reads no self-approved flag (a person's user-scoped key reads as that person);
 - a record for another agent's run does not leak across.
 
 ### Test Files

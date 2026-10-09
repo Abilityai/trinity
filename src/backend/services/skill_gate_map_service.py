@@ -192,8 +192,11 @@ def self_approved_flags(agent_name: str, execution_ids: Iterable[str],
 
     For people only (operator ruling, the ent#754 review): beside a row's
     `source_user_email` the marker says that person fills the gate's approver
-    kind, so a machine principal (an agent, MCP, connector or system key)
-    reads no flag at all — the rule the gate map applies to `set_by` (#715)."""
+    kind, so a machine principal (an agent, connector or system key, or an
+    agent-scoped MCP key) reads no flag at all — the rule the gate map applies
+    to `set_by` (#715). A person's own user-scoped MCP key is that person
+    (`PERSON_SCOPES`, the line `enforce` draws to let them self-approve), so it
+    reads what they read in the browser."""
     requester = skill_gate_service.requester_from_principal(principal)
     if not requester.is_person:
         return {}
