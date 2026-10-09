@@ -216,6 +216,11 @@ class CredentialEncryptionService:
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid encrypted data format: {e}")
 
+        # .credentials.enc is agent-writable (#3325): a non-object document must
+        # fail as the documented ValueError, not as an AttributeError on .get().
+        if not isinstance(data, dict):
+            raise ValueError("Invalid encrypted data format: expected a JSON object envelope")
+
         # Validate format
         if data.get("version") != 1:
             raise ValueError(f"Unsupported encryption version: {data.get('version')}")
@@ -226,7 +231,7 @@ class CredentialEncryptionService:
         try:
             nonce = base64.b64decode(data["nonce"])
             ciphertext = base64.b64decode(data["ciphertext"])
-        except (KeyError, ValueError) as e:
+        except (KeyError, TypeError, ValueError) as e:
             raise ValueError(f"Invalid encrypted data structure: {e}")
 
         # Decrypt with the primary key; during rotation (#267) fall back to the

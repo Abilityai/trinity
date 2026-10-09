@@ -188,17 +188,36 @@ class MissingEncryptionKeyError(ValueError):
     """
 
 
+class SecretSettingValueError(ValueError):
+    """The VALUE of a credential setting cannot be stored (#3325).
+
+    Distinct from :class:`MissingEncryptionKeyError` (the key is fine) and from
+    :class:`SecretSettingWriteError` (a cleartext write refused). Still a
+    ``ValueError`` so every existing ``except ValueError`` keeps catching it.
+    The message names the key, never the value; the HTTP layer maps it to 422
+    (``error_handlers.secret_setting_value_error``).
+    """
+
+    def __init__(self, key: str, message: str):
+        super().__init__(message)
+        self.key = key
+
+
 def encrypt_secret_setting(key: str, value: str) -> str:
     """Wrap ``value`` in an AES-256-GCM envelope keyed by the setting name.
 
     Fail-CLOSED when ``CREDENTIAL_ENCRYPTION_KEY`` is unset or malformed —
     silently falling back to cleartext is the defect this module exists to fix.
-    Re-raised as :class:`MissingEncryptionKeyError` with upgrade context.
+    Re-raised as :class:`MissingEncryptionKeyError` with upgrade context. A
+    value that cannot be encoded raises :class:`SecretSettingValueError`.
     """
     from services.credential_encryption import CredentialEncryptionService
 
+    svc = CredentialEncryptionService()
+    # Probe the key on its own (#3325): it is the ONLY source of a key error, so
+    # nothing the VALUE does can be relabelled "add CREDENTIAL_ENCRYPTION_KEY".
     try:
-        return CredentialEncryptionService().encrypt({key: value})
+        _ = svc.aesgcm
     except ValueError as e:
         raise MissingEncryptionKeyError(
             f"Cannot encrypt the credential setting '{key}': {e}\n"
@@ -218,6 +237,19 @@ def encrypt_secret_setting(key: str, value: str) -> str:
             "\n"
             "Runbook: docs/migrations/SECRET_SETTINGS_ENCRYPTION_2026-08.md"
         ) from e
+    try:
+        return svc.encrypt({key: value})
+    except UnicodeEncodeError:
+        pass
+    # Raised OUTSIDE the except block, so neither __cause__ nor __context__
+    # holds the UnicodeEncodeError: its .object is the WHOLE secret and its
+    # str() echoes the offending character (#3325).
+    raise SecretSettingValueError(
+        key,
+        f"The value for '{key}' contains characters that cannot be stored "
+        f"(an unpaired UTF-16 surrogate). Re-enter the credential and try "
+        f"again.",
+    ) from None
 
 
 def decrypt_secret_setting(key: str, envelope: str) -> Optional[str]:
