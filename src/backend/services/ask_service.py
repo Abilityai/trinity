@@ -624,7 +624,11 @@ def raise_ask(
         if out.get("expired_now"):
             # T5b: the predecessor was still pending past its deadline and the
             # create's compare-and-set expired it — the normal expiry event,
-            # exactly as `expire()` announces its own per-id CAS winners.
+            # exactly as `expire()` announces its own per-id CAS winners. Plus
+            # a thin trigger: `expire()` leaves that to the poll cycle behind
+            # it, and this path has none, so without one an open page shows the
+            # ask as pending until its next poll. The agent-scoped "an ask
+            # ended, refetch" trigger — there is no expiry-specific type.
             pred = out["predecessor"]
             _ended(EndingEvent(EXPIRED, (pred,), None), [{
                 "event_action": "expired",
@@ -632,7 +636,8 @@ def raise_ask(
                 "target_type": "operator_queue",
                 "target_id": pred["id"],
                 "details": {"agent_name": pred["agent_name"]},
-            }], None)
+            }], _broadcast_payload({"type": "operator_queue_cancelled",
+                                    "data": {"id": pred["id"], "agent_name": pred["agent_name"]}}))
         _refuse_ended_predecessor(out["predecessor"])
     row = out["row"]
     if out["outcome"] == "replayed":   # a concurrent call with the same id won
@@ -956,9 +961,10 @@ def _replace_target(agent_name: str, request_id: Optional[str]) -> Optional[Dict
     (#3247). The security gate of the replace: the lookup is scoped to
     `(agent_name, request_id)` — another agent's row is not found — and the
     row must carry `raised_by == 'agent'` ON THE COLUMN. Never `_raiser_of`:
-    it calls an unreserved NULL-raiser row "agent", and the platform files
-    alarms under the agent's name with a NULL raiser and an unreserved prefix
-    (`skills-reconcile-`, `retention-guard-`, …) — an agent must never end the
+    it calls an unreserved NULL-raiser row "agent", and a row the platform
+    files under the agent's name with a NULL raiser is only kept apart by its
+    id prefix being on the reserved list (`skills-reconcile-` and
+    `retention-guard-` joined it in #3246) — an agent must never end the
     alarm about its own leaked credential and stop it counting. One uniform
     refusal for missing / another's / a gate's / a platform's / a pre-#611 row.
     An own row that has ENDED is not refused here: it reaches the

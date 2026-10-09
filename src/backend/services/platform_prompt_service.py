@@ -47,21 +47,11 @@ ENDED_ASKS_WINDOW_HOURS = 24
 # Pending asks (#3247): the agent's own still-open asks, oldest first — a
 # scheduled run that cannot see them re-asks what it already asked.
 MAX_PENDING_ASKS = 8
-MAX_PENDING_TITLE_LEN = 48
-# The trigger labels of a turn that serves the agent's owner or an operator.
-# The pending line shows the agent's own ask titles on these turns ONLY; on
-# every other one — a public link, a Workspace client, an x402 paid turn, a
-# channel turn (its label is the channel type: telegram / slack / whatsapp),
-# voip, a room, inbound a2a, no label at all — each entry is
-# `request_id (type, age)` and nothing more. An allowlist, named one by one
-# (the `canvas_service._OPERATOR_SIDE_TRIGGERS` shape): a label nobody has
-# classified yet is outside until someone adds it here.
-_OWNER_OR_OPERATOR_TRIGGERS = frozenset({
-    "manual", "chat", "user", "session", "schedule", "webhook", "mcp",
-    "loop", "reminder", "event", "retry", "validation", "operator_response",
-    "operator_ending", "skill_gate",
-    "agent",  # a fleet agent's own call, kept as #3247 shipped it
-})
+# An entry is `request_id (type, age)` and nothing more — never the ask's title.
+# A trigger label cannot say who reads the reply (an `operator_response` resume
+# answers the addressee in their Workspace chat, a `schedule` can deliver to a
+# Workspace seat, a delegated `agent` child reports into its parent's channel
+# thread), so no label is trusted with a title; `get_my_ask` returns it.
 
 # Static platform instructions — moved from agent-side trinity.py
 PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
@@ -872,38 +862,39 @@ def _coarse_age(created_at: Optional[str], now: Optional[datetime] = None) -> Op
     return f"{hours // 24}d"
 
 
-def _render_pending_asks(ctx: ExecutionContext, *, titles: bool = True) -> Optional[str]:
-    """The `Pending asks` line body (#3247): `request_id (type, age) "title"`,
-    oldest first, bounded, the rest as a count. The title is the agent's own,
-    sanitized and cut — never a question or anything a person wrote — and is
-    rendered only when `titles` is set: the caller clears it on a turn that
-    is not known to serve the owner or an operator (`_OWNER_OR_OPERATOR_TRIGGERS`),
-    so each entry is then `request_id (type, age)` alone."""
+def _render_pending_asks(ctx: ExecutionContext) -> Optional[str]:
+    """The `Pending asks` line body (#3247): `request_id (type, age)`, oldest
+    first, bounded, the rest as a count. Never a title, a question or anything
+    a person wrote — the turn's trigger label does not say who reads the reply,
+    and `get_my_ask` returns the title when the agent needs it. A row the agent
+    did not raise itself (a pre-#611 NULL raiser) spends the same budget, so it
+    stays on the line, marked `not replaceable`: a replace of it is refused."""
     if not ctx.pending_asks:
         return None
     entries: List[str] = []
+    replaceable = False
     for ask in ctx.pending_asks[:MAX_PENDING_ASKS]:
         rid = _sanitize_field(ask.get("request_id"), max_len=MAX_REQUEST_ID_LEN)
         if not rid:
             continue
+        own = ask.get("raised_by") == "agent"
+        replaceable = replaceable or own
         meta = ", ".join(x for x in (
             _sanitize_field(ask.get("type"), max_len=16),
             _coarse_age(ask.get("created_at")),
+            None if own else "not replaceable",
         ) if x)
-        entry = f"{rid} ({meta})" if meta else rid
-        title = _sanitize_field(ask.get("title"), max_len=MAX_PENDING_TITLE_LEN) if titles else None
-        if title:
-            entry += f' "{title.replace(chr(34), chr(39))}"'
-        entries.append(entry)
+        entries.append(f"{rid} ({meta})" if meta else rid)
     if not entries:
         return None
     total = max(ctx.pending_asks_total or 0, len(ctx.pending_asks))
     shown = min(len(ctx.pending_asks), MAX_PENDING_ASKS)
     more = (f", and {total - shown} more — list them with list_operator_queue"
             if total > shown else "")
-    return ("; ".join(entries) + more
-            + " — do not re-ask one of these; if the facts changed, replace it"
-              " (ask_operator, replaces)")
+    advice = " — do not re-ask one of these"
+    if replaceable:
+        advice += "; if the facts changed, replace it (ask_operator, replaces)"
+    return "; ".join(entries) + more + advice
 
 
 def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
@@ -1022,11 +1013,7 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         if collaborators:
             lines.append(f"- **Collaborators**: {collaborators}")
 
-        # The one place the turn's audience is known: titles only when the
-        # trigger is known to be the owner's or an operator's — never a public,
-        # paid or channel caller, and never a label this list has not met.
-        inside = (ctx.triggered_by or "").strip().lower() in _OWNER_OR_OPERATOR_TRIGGERS
-        pending_asks = _render_pending_asks(ctx, titles=inside)
+        pending_asks = _render_pending_asks(ctx)
         if pending_asks:
             lines.append(f"- **Pending asks**: {pending_asks}")
 

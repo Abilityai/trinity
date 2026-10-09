@@ -43,7 +43,7 @@ WALK_WATERMARK_MARGIN_S = 300
 def _note_commit_lag(stamp: str) -> None:
     """After a pending → ended write commits: if it landed more than the walk
     margin after the timestamp it stamped, say so at error (ent#815). Called by
-    the five writers that end an ask, once their transaction is committed."""
+    every writer that ends an ask, once its transaction is committed."""
     lag = (datetime.now(timezone.utc) - parse_iso_timestamp(stamp)).total_seconds()
     if lag > WALK_WATERMARK_MARGIN_S:
         logger.error(
@@ -441,6 +441,7 @@ class OperatorQueueOperations:
         )
         values["replaces"] = replaces
         predecessor = None
+        early = None
         try:
             with get_engine().begin() as conn:
                 self._lock_agent_for_create(conn, agent_name)
@@ -452,27 +453,28 @@ class OperatorQueueOperations:
                         conn, agent_name, replaces, values["id"])
                     if refusal is not None:
                         # commits: the only write on this path is the expire-now
-                        return {**refusal, "row": None, "predecessor": predecessor}
-                if guard_pending_proposal and proposal is not None:
-                    dup = self._pending_proposal_match(conn, agent_name, proposal)
-                    if dup is not None:
-                        raise _RollBack({"outcome": "already_pending", "row": None, "request_id": dup})
-                if max_pending is not None:
-                    pending = conn.execute(
-                        select(func.count()).where(and_(
-                            *_own_pending_conds(agent_name, exclude_request_id_prefixes)))
-                    ).scalar() or 0
-                    if pending >= max_pending:
-                        if replaces is not None:
-                            raise _RollBack({"outcome": "queue_full", "row": None})
-                        return {"outcome": "queue_full", "row": None}
-                inserted = bool(conn.execute(
-                    make_insert(operator_queue).values(**values).on_conflict_do_nothing(
-                        index_elements=["agent_name", "request_id"])
-                ).rowcount)
-                if not inserted and replaces is not None:
-                    raise _RollBack({"outcome": "replayed", "row": None})
-                row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+                        early = {**refusal, "row": None, "predecessor": predecessor}
+                if early is None:
+                    if guard_pending_proposal and proposal is not None:
+                        dup = self._pending_proposal_match(conn, agent_name, proposal)
+                        if dup is not None:
+                            raise _RollBack({"outcome": "already_pending", "row": None, "request_id": dup})
+                    if max_pending is not None:
+                        pending = conn.execute(
+                            select(func.count()).where(and_(
+                                *_own_pending_conds(agent_name, exclude_request_id_prefixes)))
+                        ).scalar() or 0
+                        if pending >= max_pending:
+                            if replaces is not None:
+                                raise _RollBack({"outcome": "queue_full", "row": None})
+                            return {"outcome": "queue_full", "row": None}
+                    inserted = bool(conn.execute(
+                        make_insert(operator_queue).values(**values).on_conflict_do_nothing(
+                            index_elements=["agent_name", "request_id"])
+                    ).rowcount)
+                    if not inserted and replaces is not None:
+                        raise _RollBack({"outcome": "replayed", "row": None})
+                    row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
         except _RollBack as rolled:
             # `Engine.begin()` rolled the CAS back with the exception (the PG
             # advisory xact lock released with it); the predecessor stands.
@@ -482,6 +484,12 @@ class OperatorQueueOperations:
                     winner = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
                 out["row"] = self._row_to_item(winner) if winner else None
             return out
+        if predecessor is not None and (early is None or early.get("expired_now")):
+            # the replace's compare-and-set, or the expire-now beside it, ended
+            # the predecessor and that write is committed (ent#815)
+            _note_commit_lag(predecessor["disposed_at"])
+        if early is not None:
+            return early
         out = {"outcome": "created" if inserted else "replayed", "row": self._row_to_item(row)}
         if replaces is not None:
             out["predecessor"] = predecessor
@@ -1004,14 +1012,14 @@ class OperatorQueueOperations:
         (`_own_pending_conds`), so the line and `queue_full` cannot disagree.
         Oldest first: the stale duplicates a scheduled run piles up are the
         oldest, and newest-first would hide them behind "and N more". The id,
-        type, the agent's own title and when it was filed — never a question,
+        type, who raised it and when it was filed — never a title, a question,
         an answer or anything a person wrote.
         """
         stmt = (
             select(
                 operator_queue.c.request_id,
                 operator_queue.c.type,
-                operator_queue.c.title,
+                operator_queue.c.raised_by,
                 operator_queue.c.created_at,
             )
             .where(and_(*_own_pending_conds(agent_name, exclude_request_id_prefixes)))

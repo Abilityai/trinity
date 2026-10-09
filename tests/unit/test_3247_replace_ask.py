@@ -99,6 +99,33 @@ class TestSchema:
         assert mod.down_revision == ALEMBIC_PARENT
         assert tuple(mod._COLUMNS) == LINK_COLUMNS
 
+    def test_the_alembic_upgrade_and_downgrade_issue_the_column_ddl(self, monkeypatch):
+        """`pg-migrations` cannot see an empty `upgrade()`: the baseline builds
+        the head schema, so on a fresh PostgreSQL this revision adds nothing.
+        Only an existing install runs the ALTER — so pin what it sends."""
+        import importlib.util
+        path = os.path.join(_BACKEND, "migrations", "versions", f"{ALEMBIC_REVISION}.py")
+        spec = importlib.util.spec_from_file_location("rev_3247_replace_run", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        class _Op:
+            def __init__(self):
+                self.sent = []
+
+            def execute(self, sql):
+                self.sent.append(" ".join(str(sql).split()))
+
+        up, down = _Op(), _Op()
+        monkeypatch.setattr(mod, "op", up)
+        mod.upgrade()
+        assert up.sent == [
+            f"ALTER TABLE operator_queue ADD COLUMN IF NOT EXISTS {c} TEXT" for c in LINK_COLUMNS]
+        monkeypatch.setattr(mod, "op", down)
+        mod.downgrade()
+        assert down.sent == [
+            f"ALTER TABLE operator_queue DROP COLUMN IF EXISTS {c}" for c in reversed(LINK_COLUMNS)]
+
     def test_the_schema_ddl_carries_both_columns(self):
         from db.schema import TABLES as SCHEMA
         ddl = SCHEMA["operator_queue"]
@@ -599,9 +626,16 @@ class TestSinkReplace:
                          .values(expires_at=_iso(-5)))
         await _drain()                       # the predecessor's `raised` row lands first
         ask.audit.clear()
+        ask.sent.clear()
         with _Rejected(ask.svc, 409, "replaces_ended") as info:
             _raise(ask, self.AGENT, _body("se-new", replaces="se-old"))
         await _drain()
+        # no poll cycle stands behind this expiry, so it sends its own thin
+        # trigger: ids only, scoped to the agent — an open page refetches
+        import json
+        assert [json.loads(m) if isinstance(m, str) else m for m in ask.sent] == [
+            {"type": "operator_queue_cancelled",
+             "data": {"id": old["id"], "agent_name": self.AGENT}}]
         assert info.value.extra["disposition"] == "expired"
         assert "supersedes_expired" in info.value.message
         row = ask.db.get_operator_queue_item(old["id"])
@@ -801,49 +835,76 @@ class TestPendingLine:
         real_db.cancel_operator_queue_item(gone, disposed_by_email="op@example.com")
         _pending(real_db, "agent-3247-line-other", "pl-other")
 
-    def test_the_line_lists_own_pending_asks_oldest_first_with_type_age_and_title(self, real_db):
+    def test_the_line_lists_own_pending_asks_oldest_first_with_type_and_age(self, real_db):
         from services.platform_prompt_service import ExecutionContext, compose_system_prompt
         self._seed(real_db)
         line = self._line(compose_system_prompt(
             ExecutionContext(agent_name=self.AGENT, triggered_by="schedule")))
         assert line is not None
         assert line.index("pl-old") < line.index("pl-mid") < line.index("pl-new")
-        assert 'pl-old (question, 2d) "Which vendor should receive the quarterly payou' in line
-        assert 'pl-mid (approval, 3h) "Approve payout"' in line
-        assert 'pl-new (approval, <1h) "Approve new' in line and "\n" not in line
+        assert "pl-old (question, 2d" in line and "pl-mid (approval, 3h" in line
+        assert "pl-new (approval, <1h" in line and "\n" not in line
         for absent in ("queue-flood", "gate-pl-1", "pl-gone", "pl-other"):
             assert absent not in line, absent
-        assert "replaces" in line
 
     @pytest.mark.parametrize("triggered_by", [
-        "public", "paid", "Public",
-        # a channel turn dispatches with the channel type as its label
-        "telegram", "slack", "whatsapp", "voip", "room", "a2a",
-        # ...and a label nobody has classified yet is outside until someone does
+        # the owner's and an operator's own triggers...
+        "chat", "user", "manual", "session", "mcp", "webhook", "loop",
+        # ...three whose reply can go to someone else: a resume answers the
+        # addressee in their Workspace chat, a schedule can deliver to a
+        # Workspace seat, a delegated child reports into its parent's thread
+        "operator_response", "schedule", "agent",
+        # ...and the outside ones
+        "public", "paid", "telegram", "slack", "whatsapp", "voip", "room", "a2a",
         "a-label-added-next-year", "", None,
     ])
-    def test_an_outside_turn_lists_ids_type_and_age_without_titles(self, real_db, triggered_by):
-        """I1: a turn serving someone other than the owner or an operator never
-        sees the agent's own ask titles — each entry is `request_id (type, age)`.
-        Titles are shown by ALLOWLIST: only a trigger known to be the owner's or
-        an operator's gets them, so a new or unknown label fails closed."""
+    def test_no_turn_ever_shows_an_ask_title(self, real_db, triggered_by):
+        """I1: the line never carries an ask's title, whatever the trigger. The
+        label does not say who reads the reply, so no label is trusted with one;
+        each entry is `request_id (type, age)` and `get_my_ask` has the rest."""
         from services.platform_prompt_service import ExecutionContext, compose_system_prompt
         self._seed(real_db)
         line = self._line(compose_system_prompt(
             ExecutionContext(agent_name=self.AGENT, triggered_by=triggered_by)))
         assert line is not None
-        assert "pl-old (question, 2d); pl-mid (approval, 3h); pl-new (approval, <1h)" in line
-        for title in ("Which vendor", "Approve payout", "Approve new", '"'):
-            assert title not in line.split("**Pending asks**:")[1], title
-        assert "replaces" in line
+        body = line.split("**Pending asks**:")[1]
+        for title in ("Which vendor", "Approve payout", "Approve new", "thing", '"'):
+            assert title not in body, title
 
-    @pytest.mark.parametrize("triggered_by", ["chat", "user", "manual", "schedule", "agent"])
-    def test_an_owner_or_operator_turn_keeps_the_titles(self, real_db, triggered_by):
-        from services.platform_prompt_service import ExecutionContext, compose_system_prompt
+    def test_the_title_never_leaves_the_database_for_the_line(self, real_db):
+        """The read behind the line does not select a title, a question or an
+        answer at all — nothing downstream can render what it was never given."""
+        from services import platform_prompt_service as pps
         self._seed(real_db)
-        line = self._line(compose_system_prompt(
-            ExecutionContext(agent_name=self.AGENT, triggered_by=triggered_by)))
-        assert 'pl-mid (approval, 3h) "Approve payout"' in line
+        rows, _ = pps._resolve_pending_asks(self.AGENT)
+        assert rows and all(
+            set(r) == {"request_id", "type", "raised_by", "created_at"} for r in rows)
+
+    def test_an_ask_the_agent_cannot_replace_is_marked_and_still_counted(self, real_db):
+        """A row with no raiser (a pre-#611 file row) spends the open-ask budget,
+        so it stays on the line — marked, because a replace of it is refused."""
+        from services import ask_service
+        from services.platform_prompt_service import ExecutionContext, compose_system_prompt
+        agent = "agent-3247-line-legacy"
+        _aged(real_db, _pending(real_db, agent, "legacy-1"), hours=30)
+        own = _native(real_db, agent, "own-1")["row"]
+        _aged(real_db, own["id"], hours=2)
+        line = self._line(compose_system_prompt(ExecutionContext(agent_name=agent, triggered_by="schedule")))
+        assert "legacy-1 (approval, 30h, not replaceable); own-1 (approval, 2h)" in line
+        assert "replace it (ask_operator, replaces)" in line
+        # the marker tells the truth: the sink's gate refuses exactly that row
+        assert ask_service._replace_target(agent, "own-1")["id"] == own["id"]
+        with pytest.raises(ask_service.AskRejected) as refused:
+            ask_service._replace_target(agent, "legacy-1")
+        assert refused.value.code == "invalid_replaces"
+
+    def test_a_line_with_nothing_replaceable_does_not_offer_a_replace(self, real_db):
+        from services.platform_prompt_service import ExecutionContext, compose_system_prompt
+        agent = "agent-3247-line-legacy-only"
+        _pending(real_db, agent, "legacy-2")
+        line = self._line(compose_system_prompt(ExecutionContext(agent_name=agent, triggered_by="schedule")))
+        assert "legacy-2 (approval," in line and "not replaceable)" in line
+        assert "do not re-ask one of these" in line and "replaces" not in line
 
     def test_the_line_is_drawn_from_the_budget_predicate(self, real_db):
         from services import platform_prompt_service as pps
@@ -885,7 +946,7 @@ class TestPendingLine:
         from services.pull_coordination_service import _compose_pull_system_prompt
         self._seed(real_db)
         prompt = _compose_pull_system_prompt(self.AGENT, "schedule", None, execution_id="e-3247")
-        assert 'pl-mid (approval, 3h) "Approve payout"' in self._line(prompt)
+        assert "pl-mid (approval, 3h" in self._line(prompt)
 
     def test_the_push_composer_carries_the_line(self, real_db):
         from services.task_execution_service import TaskExecutionService
@@ -895,7 +956,7 @@ class TestPendingLine:
             agent_name=self.AGENT, triggered_by="schedule", source_user_email=None,
             source_agent_name=None, source_mcp_key_name=None, model=None, timeout_seconds=None,
             attempt=None, schedule_context=None, execution_id="e-3247", system_prompt=None)
-        assert 'pl-mid (approval, 3h) "Approve payout"' in self._line(prompt)
+        assert "pl-mid (approval, 3h" in self._line(prompt)
 
     def test_an_ending_the_agent_authored_reads_replaced(self, real_db):
         from services.platform_prompt_service import ExecutionContext, compose_system_prompt
