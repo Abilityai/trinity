@@ -310,8 +310,8 @@ def portal_signin_verify(email: str | None, code: str | None) -> str | None:
         return None
     if not email_has_access(email):
         return None
-    from dependencies import create_portal_session_token
-    return create_portal_session_token(email)
+    from dependencies import PORTAL_MINT_OTP, create_portal_session_token
+    return create_portal_session_token(email, minted_by=PORTAL_MINT_OTP)
 
 
 def portal_exchange(email: str | None) -> str | None:
@@ -327,12 +327,16 @@ def portal_exchange(email: str | None) -> str | None:
     re-checks that at least one agent is actually shared with this address, so a
     delegate key cannot conjure a session for someone with no share. Returns
     None when it cannot; the router turns that into an explicit 403.
+
+    #3404: the token says it was minted here (`minted_by=delegate`), because
+    the person did not prove themselves to Trinity — such a session may not
+    self-approve a gated skill.
     """
     email = (email or "").strip().lower()
     if not email or not email_has_access(email):
         return None
-    from dependencies import create_portal_session_token
-    return create_portal_session_token(email)
+    from dependencies import PORTAL_MINT_DELEGATE, create_portal_session_token
+    return create_portal_session_token(email, minted_by=PORTAL_MINT_DELEGATE)
 
 
 # #2128 — the rooms substrate that backs a multi-agent Workspace chat used to be
@@ -2834,10 +2838,14 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       # request field.
                       reply_context: str = "",
                       # trinity-enterprise#751 — the ROUTE proved this caller is a
-                      # person (`PortalPrincipal.is_person`), so an approver may run
-                      # their own gated request. False for any caller that did not
-                      # (voice relays a model's paraphrase of the speech).
+                      # person (`PortalPrincipal.self_approves`), so an approver may
+                      # run their own gated request. False for any caller that did
+                      # not (voice relays a model's paraphrase of the speech; a
+                      # delegate-minted session, #3404).
                       gate_is_person: bool = False,
+                      # #3404 — which credential the route saw
+                      # (`PortalPrincipal.credential`), for the self-approval audit.
+                      gate_credential: str | None = None,
                       # #3265 — the turn's attachments, already resolved by
                       # `resolve_turn_attachments` (JSON). Stored on the user row.
                       attachments: str | None = None) -> dict:
@@ -3218,7 +3226,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
             # The quoted message is part of the request: a reply to the client's
             # own held `/x` would otherwise send it to the agent unread.
             request_text=reply_prefix + client_text,
-            gate_requester=_gate_requester(email, gate_is_person),
+            gate_requester=_gate_requester(email, gate_is_person, gate_credential),
             # #3166: a second message on this thread queues behind the first
             # for as long as the first can hold the lock, instead of a 429
             # after 30s. The wait budget below covers it.
@@ -3435,13 +3443,15 @@ def _persist_reply(agent_name: str, email: str, session_id: str, reply: str, cos
             "message_id": message_id}
 
 
-def _gate_requester(email: str, is_person: bool):
+def _gate_requester(email: str, is_person: bool, credential: str | None = None):
     """trinity-enterprise#751: who asked, for the skill gate — the Workspace
-    caller is a person; `is_person` says whether the route proved it."""
+    caller is a person; `is_person` says whether the route proved it, and
+    `credential` (#3404) which credential it saw."""
     from services import skill_gate_service
     return skill_gate_service.Requester(kind=skill_gate_service.KIND_PERSON,
                                         key=f"person:{email.casefold()}",
-                                        email=email, is_person=is_person)
+                                        email=email, is_person=is_person,
+                                        credential=credential)
 
 
 def _voice_attribution(voice_call_id: str | None) -> dict:
@@ -4011,6 +4021,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             reply_context: str = "",
                             # trinity-enterprise#751 — see `portal_chat`.
                             gate_is_person: bool = False,
+                            # #3404 — see `portal_chat`.
+                            gate_credential: str | None = None,
                             # #3265 — see `portal_chat`.
                             attachments: str | None = None) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
@@ -4122,7 +4134,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               model=model, resolved_model=resolved_model,
                               open_canvas_id=open_canvas_id,
                               reply_context=reply_context,
-                              gate_is_person=gate_is_person)
+                              gate_is_person=gate_is_person,
+                              gate_credential=gate_credential)
         except ClientPortalError as e:
             # There is no request left to raise into — the 202 went out long ago
             # — so the ONLY way this reaches the client is the record written

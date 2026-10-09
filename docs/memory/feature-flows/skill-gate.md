@@ -18,7 +18,7 @@ As the owner of a finance agent, I want "pay an invoice" to run only after the p
 
 - **`/chat`**: `routers/chat.py::chat_with_agent` → `dispatch_admission_service.admit_chat_request` (`src/backend/services/dispatch_admission_service.py:319`). Reached from the UI chat, MCP `chat_with_agent`, and connector `run_playbook` / `ask`.
 - **`/task`**: `routers/chat.py::execute_parallel_task` → `chat_execution_service.dispatch_parallel_task` (`src/backend/services/chat_execution_service.py:2125`). Covers parallel tasks, self-tasks and pull-routed tasks.
-- **The Workspace (the agent page's main chat)**: `client_portal/router.py::portal_chat` and `portal_chat_stream` → `client_portal/service.py::portal_chat`. The route passes `PortalPrincipal.is_person` through as `gate_is_person`.
+- **The Workspace (the agent page's main chat)**: `client_portal/router.py::portal_chat` and `portal_chat_stream` → `client_portal/service.py::portal_chat`. The route passes `PortalPrincipal.self_approves` through as `gate_is_person` (and `PortalPrincipal.credential` as `gate_credential`, #3404).
 - **Every other producer**: the backstop at step 1b of `TaskExecutionService.execute_task` (`src/backend/services/task_execution_service.py:1887`). This covers the scheduler, loops, fan-out, channels, rooms, sessions, A2A, public links, paid calls, operator resumes, validation and voice post-processing.
 - **Voice tool**: `gemini_voice._execute_tool` (`src/backend/services/gemini_voice.py:1483`) reaches the agent without `execute_task`, so it refuses a gated skill instead of raising an approval.
 - **Setting the map (trinity-enterprise#753)**: `GET/PUT/DELETE /api/agents/{agent_name}/skill-gates[/{skill_name}]` (`src/backend/routers/skill_gate.py` `agent_router`) → `services/skill_gate_map_service.py`; MCP `list_skill_gates` / `set_skill_gate` / `clear_skill_gate` (`src/mcp-server/src/tools/skills.ts`). The Skills tab UI is trinity-enterprise#754.
@@ -103,7 +103,7 @@ On `/task`, `message` is caller-supplied and may carry history, so an invocation
 
 **Self-approval needs a proven person**, from one of two places:
 - `is_person_principal` at the `/chat` and `/task` seams: a signed-in session or a user-scoped key, never an agent key, a system key, a connector, a portal delegate or the event loopback;
-- the Workspace caller its route verified: `PortalPrincipal.is_person` → `portal_chat(gate_is_person=…)` → `execute_task(gate_requester=…)`.
+- the Workspace caller its route verified: `PortalPrincipal.self_approves` → `portal_chat(gate_is_person=…)` → `execute_task(gate_requester=…)`. For a portal session that is narrower than `is_person` (#3404): the token's `minted_by` claim must be `otp` (the person's own emailed code). A session a `portal_delegate` key minted (`minted_by=delegate`), or a token with no claim (minted before the claim existed), is still a person for the ask routes but is unproven here — its own gated request is held for approval. The claim is carried through session rotation. The backstop's audit row has no principal to read, so it records the credential kind in `details.credential` (`portal_session:otp`, `platform_session`, `mcp_key:user`).
 
 The backstop never self-approves otherwise. Voice relays a model's paraphrase and stays unproven. Nothing is dispatched on a read that failed.
 

@@ -5326,6 +5326,17 @@
         "unit"
       ],
       "description": "#3406: the backend half of the contract the browser's 401 verdict reads. get_current_user rejects a dead token and OAuth2PasswordBearer rejects a missing one WITH `WWW-Authenticate: Bearer`; the five public-link session routes (intro, history, session clear, chat, terminate) answer an expired or missing visitor session with a bare 401. Handlers driven directly with the link check, rate limit and session lookup stubbed. No Docker."
+    },
+    {
+      "file": "unit/test_3404_delegate_session_self_approval.py",
+      "feature": "abilityai/trinity#3404",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#3404: a Workspace session minted through a portal_delegate key (minted_by=delegate) or carrying no minted_by claim is a person for the ask routes but may not self-approve a gated skill; an emailed-code session and a platform person may. Real mint -> get_portal_principal -> both chat routes -> the execute_task backstop over a real per-test database; rotation keeps the claim; the self-approval audit row names the credential kind; PortalPrincipal.is_person defaults False. Mutation-proven. No Docker, no network."
     }
   ]
 }

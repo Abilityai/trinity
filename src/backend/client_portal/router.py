@@ -1304,8 +1304,11 @@ async def portal_chat(
                                           model=requested_model,
                                           reply_context=reply_context,
                                           # trinity-enterprise#751: whether this
-                                          # route proved a person (self-approval).
-                                          gate_is_person=principal.is_person)
+                                          # route proved a person (self-approval);
+                                          # #3404: not `is_person` — a
+                                          # delegate-minted session is one, unproven.
+                                          gate_is_person=principal.self_approves,
+                                          gate_credential=principal.credential)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
@@ -2018,7 +2021,8 @@ async def portal_chat_stream(
                 is_platform=principal.is_platform),
             model=requested_model,   # ent#403, same rule as the flag above
             reply_context=reply_context,
-            gate_is_person=principal.is_person,   # trinity-enterprise#751, same rule
+            gate_is_person=principal.self_approves,   # trinity-enterprise#751, same rule
+            gate_credential=principal.credential,     # #3404, same rule
             # #3265 — same resolution as the sync path above.
             attachments=await service.resolve_turn_attachments(
                 agent_name, email, getattr(body, "attachments", None)),

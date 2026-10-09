@@ -1965,7 +1965,10 @@ class TaskExecutionService:
                 agent_name, decision, current_user=None,
                 endpoint=f"execute_task:{triggered_by}", execution_id=execution_id,
                 request_text=message if request_text is None else request_text,
-                triggered_by=triggered_by)
+                triggered_by=triggered_by,
+                # #3404: no principal reaches here, so the producer's own
+                # account of the credential is what the audit row carries.
+                credential=requester.credential)
         except SkillGateError as exc:
             if execution_id:
                 if isinstance(exc, SkillApprovalRequired):
