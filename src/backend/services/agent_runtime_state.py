@@ -123,6 +123,20 @@ EXEMPT_KEYSPACES: Dict[str, str] = {
         "agent:bind_op: reasoning). Fail-open on Redis down; the prepop "
         "attached-volume 409 is the destructive-collision backstop."
     ),
+    "agent:api_key_route:": (
+        "Transition-notification dedupe marker for the SUB-003 walk (#3470): set "
+        "when a turn was routed to the platform API key, read when a later turn "
+        "serves on a subscription again (the 'returned to its subscription' "
+        "notice), 24h TTL. Informational only — it never decides a credential, "
+        "so a stale or missing marker changes a notification and nothing else; "
+        "clearing it on a lifecycle event would only re-fire the same notice."
+    ),
+    "agent:pool_exhausted_notice:": (
+        "Once-per-hour dedupe marker for the 'no subscription could serve a turn' "
+        "operator alert (#3470), carrying its own TTL. A Workspace user re-sending "
+        "a message must not page the operator per message; clearing it on a "
+        "lifecycle event would only re-fire the alert."
+    ),
     "agent:mcp_key_regen:": (
         "Short-lived SETNX MCP-key rotation lock carrying its own TTL (#1854). "
         "Same shape as agent:data_op: above, and clearing it would be actively "
