@@ -5270,6 +5270,18 @@
         "skeleton"
       ],
       "description": "J17 skeleton: a fact reaches its owner — reports NOT RUN, blocked by ent#793 and fact routing (ent#804)."
+    },
+    {
+      "file": "unit/test_3406_bearer_challenge_contract.py",
+      "feature": "#3406",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "auth",
+        "public-links",
+        "unit"
+      ],
+      "description": "#3406: the backend half of the contract the browser's 401 verdict reads. get_current_user rejects a dead token and OAuth2PasswordBearer rejects a missing one WITH `WWW-Authenticate: Bearer`; the five public-link session routes (intro, history, session clear, chat, terminate) answer an expired or missing visitor session with a bare 401. Handlers driven directly with the link check, rate limit and session lookup stubbed. No Docker."
     }
   ]
 }

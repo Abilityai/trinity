@@ -50,8 +50,12 @@ every 20s, a stale Workspace tab could log a freshly re-established platform ses
 within seconds: its poll went out on the OLD token, 401'd, and the handler called
 `authStore.logout()`, deleting the NEW session's token. `utils/platformSession.js` is now
 the only reader (`readStoredToken`), the only verdict (`sessionLostVerdict` →
-`ignore | stale | logout`, where **stale** means *the credential that failed has already
-been replaced, so adopt the current session rather than destroy it*) and the only handler
+`ignore | stale | logout | logout-in-place`, where **stale** means *the credential that failed has already
+been replaced, so adopt the current session rather than destroy it*, and **logout-in-place**
+— #3406, the public token pages `/chat/:token` and `/canvas/s/:token` — ends a dead platform
+session without leaving a page that shows its own sign-in; on a chat link only a 401
+carrying `WWW-Authenticate: Bearer` counts as the platform's, since the operator's JWT rides
+the link's own requests) and the only handler
 registry; `main.js` installs a global axios **request** interceptor so every bare-`axios`
 caller derives the header per request, and a `storage` listener so a login or logout in
 one tab reaches every other. The `axios.defaults` copy is written nowhere — a **tree-wide**

@@ -1,0 +1,7 @@
+## 2026-10-08 — pattern — When an ambient credential rides every request, a 401's status cannot say whose credential failed; the `WWW-Authenticate` challenge can
+**Context**: #3406. `applyRequestCredential` attaches the operator's JWT to every bare-axios call, including a public chat link's own endpoints, whose 401 means "the visitor's 24 h link session expired". From the verdict's inputs (`failedToken === storedToken`, status 401) that was indistinguishable from "the JWT is dead", so the visitor was sent to the operator `/login` and a previewing operator was signed out. The obvious fix, a blanket `ignore` on the page, would have created an endless loop instead: `App.vue` mints a ws ticket whenever a token is stored and retries every 5 s, so a dead JWT 401s forever on a page that never ends the session.
+**Lesson**:
+- Before writing a path- or status-based rule for a 401, ask whether the request carried two credentials' worth of meaning.
+- If it did, discriminate on what the server says: every `get_current_user` rejection carries `WWW-Authenticate: Bearer`, and a route-local session check answers a bare 401 (`platformSession.js::isBearerChallenge`). Pin both halves server-side by driving the handlers (`tests/unit/test_3406_bearer_challenge_contract.py`).
+- Pick the failure direction: a missing challenge should fall back to *doing nothing*, never to signing someone out.
+- Then grep for background pollers (ws ticket, intervals) before choosing "ignore" for any 401 class: an ignored 401 with a retry loop behind it never ends.
