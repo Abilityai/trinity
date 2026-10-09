@@ -245,7 +245,7 @@ def test_objectives_are_the_ones_the_role_owns_or_this_agent_supports(monkeypatc
     assert objs["q4-close-rate"]["owned"] is True
     assert objs["q4-icp-demand"]["owned"] is False
     close = next(m for m in objs["q4-close-rate"]["metrics"] if m["name"] == "close_rate")
-    assert close == {"name": "close_rate", "type": "gauge", "unit": None, "target": 0.3,
+    assert close == {"name": "close_rate", "role": "primary", "type": "gauge", "unit": None, "target": 0.3,
                      "actual": 0.27, "last_point_at": fresh, "stale": False, "freshness": "fresh",
                      "gap": {"status": "behind"}, "finding": None}
 

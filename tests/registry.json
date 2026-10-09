@@ -4124,6 +4124,16 @@
       "description": "`GET /api/agents/{name}/objectives` through a real TestClient with the service's edges stubbed. Gate order copied from `/metrics` and proved in order (the self-gate fires BEFORE the service is called and before the limiter), the route's own 60/min knob rather than the store read's 240 because this one drives the container, a store outage as 503 + `Retry-After`, and an unreachable agent as a 200 that SAYS so — an agent being stopped is an answer, not an error. The model-is-the-contract half walks the service's own dict against every model's fields recursively, so an additive service key fails the build instead of being silently filtered out by `response_model`; author-shaped targets (`.nan`, `.inf`, lists, bools, 4 KB strings) are pushed through the real route and parsed with `parse_constant` armed, since a bare `NaN` on the wire is what blanks the card."
     },
     {
+      "file": "unit/test_ent731_guard_metrics.py",
+      "feature": "abilityai/trinity-enterprise#731",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "Guard metrics in the objective join: `guard_metrics:` parsed into the same `metrics` list tagged `role: guard` (own cap, cross-list duplicate keeps the primary, malformed sections and entries named), a guard always resolving as a hold whatever the registry or its own word says, never behind/ahead, `guard_target_unset` / `guard_direction_invalid` findings, served / stale / retired / undeclared / supporting-only guards, `summary.guards` counted apart with empty-path parity, the guard's number fetched through the whole read, and the portal projection carrying `role` as a fixed value only."
+    },
+    {
       "file": "unit/test_ent638_seat_decisions.py",
       "feature": "trinity-enterprise#638",
       "added": "2026-09-22",

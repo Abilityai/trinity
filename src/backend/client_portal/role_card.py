@@ -174,6 +174,8 @@ def portal_metric(row: dict) -> dict:
     target = row.get("target")
     return {
         "name": row.get("name"),
+        # ent#731: fixed values only — never the author's text.
+        "role": "guard" if row.get("role") == "guard" else "primary",
         "type": _text(row.get("type"), 32),
         "unit": _text(row.get("unit"), 32),
         "target": _value(target if target is not None else row.get("target_text")),

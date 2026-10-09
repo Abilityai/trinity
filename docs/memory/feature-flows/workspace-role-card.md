@@ -67,8 +67,10 @@ owner ──► Mark ready (ConfirmDialog) ──► POST …/role/readiness {st
   role file's `review_by` only (framework §3.5 governs files, not metrics). The import is
   function-local, so no portal suite loads the metrics stack.
 - **What a client sees is an allowlist (TD-4).** `portal_objective` and `portal_metric`
-  PICK fields: `id, statement, horizon, status, owned` and `name, type, unit, target,
-  actual, last_point_at, stale, freshness, gap.status, finding.code`. The operator's
+  PICK fields: `id, statement, horizon, status, owned` and `name, role, type, unit, target,
+  actual, last_point_at, stale, freshness, gap.status, finding.code`. `role` crosses as
+  the fixed value `guard` | `primary` only; a guard row shows a neutral "Guard" badge
+  (ent#731). The operator's
   sentences ("call `refresh_metric_definitions`"), objective file paths and `owner: role:<id>` stay
   on the operator door (the #78 auth-path invariant); a finding crosses as its code and
   `PortalAgentRole.vue` holds the client sentence for each. Card-level findings cross as

@@ -211,6 +211,8 @@ def objective_is_active(obj: dict) -> bool:
 def resolve_direction(
     registry_direction: Any,
     objective_direction: Any,
+    *,
+    guard: bool = False,
 ) -> Tuple[Optional[str], str, bool]:
     """(direction, direction_source, mismatch) — which way is good (TD-2).
 
@@ -230,7 +232,14 @@ def resolve_direction(
     Two directions that both speak and disagree is a `direction_mismatch`
     finding; the registry still wins. Neither speaking leaves `None`, which the
     gap reports as `no_direction` with a finding naming the one-line fix.
+
+    A guard metric (ent#731) is always a hold, whatever either side says: it is
+    a number that must not move while the objective's own metrics are pursued,
+    so it has no good side and its registry direction belongs to the metric's
+    OTHER uses, not this one.
     """
+    if guard:
+        return NEUTRAL_DIRECTION, "objective", False
     registry = registry_direction if registry_direction in _REGISTRY_DIRECTIONS else None
     declared = _OBJECTIVE_DIRECTIONS.get(
         (objective_direction or "").strip().lower()
@@ -309,6 +318,71 @@ def _finding(code: str, message: str, *, objective_id: Optional[str] = None,
             "path": path, "message": message}
 
 
+def _parse_metric_list(
+    items: List[Any],
+    role: str,
+    metrics: List[Dict[str, Any]],
+    seen: set,
+    findings: List[Dict[str, Any]],
+    *,
+    obj_id: str,
+    path: str,
+) -> None:
+    """Append one list's valid entries to `metrics`, tagged `role`.
+
+    Each list has its own `MAX_METRICS_PER_OBJECTIVE` cap, so a full set of
+    primaries cannot crowd the guards out. `seen` spans both lists, and
+    primaries are parsed first, so a name in both is kept as the primary.
+    """
+    key = "guard_metrics" if role == "guard" else "metrics"
+    taken = 0
+    for item in items:
+        if taken >= MAX_METRICS_PER_OBJECTIVE:
+            break
+        if not isinstance(item, dict):
+            findings.append(_finding(
+                "metric_name_invalid",
+                f"objective `{obj_id}` has a {key}: entry that is not a "
+                "mapping — each entry is {name, direction, target, by}.",
+                objective_id=obj_id, path=path))
+            continue
+        name = _safe_id(item.get("name"))
+        if not name:
+            findings.append(_finding(
+                "metric_name_invalid",
+                f"objective `{obj_id}` names a metric that is not a valid "
+                "metric name — use the name from the agent's template.yaml "
+                "`metrics:` block.",
+                objective_id=obj_id, path=path))
+            continue
+        if name in seen:
+            primary = next((m for m in metrics if m["name"] == name), None)
+            message = (
+                f"objective `{obj_id}` lists metric `{name}` as both a metric "
+                "and a guard — it is kept as a metric and the guard entry is "
+                "ignored."
+                if role == "guard" and primary and primary["role"] == "primary"
+                else f"objective `{obj_id}` lists metric `{name}` more than "
+                     "once — the first entry is used and the rest ignored.")
+            findings.append(_finding("metric_duplicate", message,
+                                     objective_id=obj_id, metric=name,
+                                     path=path))
+            continue
+        seen.add(name)
+        taken += 1
+        target_raw = item.get("target")
+        metrics.append({
+            "name": name,
+            "role": role,
+            "target": finite_number(target_raw),
+            "target_text": (None if finite_number(target_raw) is not None
+                            else _text(target_raw, 64)),
+            "tolerance": finite_number(item.get("tolerance")),
+            "by": _text(item.get("by"), 32),
+            "direction": _text(item.get("direction"), 16),
+        })
+
+
 def parse_objective(
     doc: Any,
     *,
@@ -355,46 +429,26 @@ def parse_objective(
     )
 
     metrics: List[Dict[str, Any]] = []
+    seen: set = set()
     raw_metrics = doc.get("metrics")
     raw_metrics = raw_metrics if isinstance(raw_metrics, list) else []
-    seen: set = set()
-    for item in raw_metrics:
-        if len(metrics) >= MAX_METRICS_PER_OBJECTIVE:
-            break
-        if not isinstance(item, dict):
-            findings.append(_finding(
-                "metric_name_invalid",
-                f"objective `{obj_id}` has a metrics: entry that is not a "
-                "mapping — each entry is {name, direction, target, by}.",
-                objective_id=obj_id, path=path))
-            continue
-        name = _safe_id(item.get("name"))
-        if not name:
-            findings.append(_finding(
-                "metric_name_invalid",
-                f"objective `{obj_id}` names a metric that is not a valid "
-                "metric name — use the name from the agent's template.yaml "
-                "`metrics:` block.",
-                objective_id=obj_id, path=path))
-            continue
-        if name in seen:
-            findings.append(_finding(
-                "metric_duplicate",
-                f"objective `{obj_id}` lists metric `{name}` more than once — "
-                "the first entry is used and the rest ignored.",
-                objective_id=obj_id, metric=name, path=path))
-            continue
-        seen.add(name)
-        target_raw = item.get("target")
-        metrics.append({
-            "name": name,
-            "target": finite_number(target_raw),
-            "target_text": (None if finite_number(target_raw) is not None
-                            else _text(target_raw, 64)),
-            "tolerance": finite_number(item.get("tolerance")),
-            "by": _text(item.get("by"), 32),
-            "direction": _text(item.get("direction"), 16),
-        })
+    _parse_metric_list(raw_metrics, "primary", metrics, seen, findings,
+                       obj_id=obj_id, path=path)
+
+    # ent#731: numbers that must not move. Same entry shape, appended to the
+    # SAME list — `read_objective_join` fetches, and ent#727 resolves, only
+    # what `metrics` names.
+    raw_guards = doc.get("guard_metrics")
+    if raw_guards is not None and not isinstance(raw_guards, list):
+        findings.append(_finding(
+            "guard_metrics_invalid",
+            f"objective `{obj_id}` has a guard_metrics: that is not a list — "
+            "each entry is {name, target, tolerance}; no guard of this "
+            "objective is read until it is.",
+            objective_id=obj_id, path=path))
+    raw_guards = raw_guards if isinstance(raw_guards, list) else []
+    _parse_metric_list(raw_guards, "guard", metrics, seen, findings,
+                       obj_id=obj_id, path=path)
 
     objective = {
         "id": obj_id,
@@ -407,7 +461,8 @@ def parse_objective(
         "review_by": _text(doc.get("review_by"), 32),
         "supporting_agents": supporting_agents,
         "metrics": metrics,
-        "metrics_truncated": len(raw_metrics) > MAX_METRICS_PER_OBJECTIVE,
+        "metrics_truncated": (len(raw_metrics) > MAX_METRICS_PER_OBJECTIVE
+                              or len(raw_guards) > MAX_METRICS_PER_OBJECTIVE),
     }
     return objective, findings
 
@@ -434,6 +489,19 @@ def select_objectives(
             if objective_is_active(o)
             and objective_concerns(o, role_id, agent_name)]
     return kept[:MAX_OBJECTIVES], len(kept) > MAX_OBJECTIVES
+
+
+def _new_summary() -> Dict[str, Any]:
+    """The summary shape, zeroed — one factory for the join and `_empty`."""
+    return {
+        "objectives": 0, "metrics": 0, "behind": 0, "ahead": 0,
+        "on_target": 0, "off_target": 0, "not_computable": 0, "stale": 0,
+        "undeclared": 0, "declared_elsewhere": 0, "served_elsewhere": 0,
+        # ent#731: guards are counted apart, so the counts above mean what
+        # they meant before an objective could carry guards.
+        "guards": {"total": 0, "on_target": 0, "off_target": 0,
+                   "not_computable": 0, "stale": 0},
+    }
 
 
 def join_objectives(
@@ -464,11 +532,7 @@ def join_objectives(
     by_name = {d["name"]: d for d in definitions if d.get("name")}
     findings: List[Dict[str, Any]] = []
     rows_out: List[Dict[str, Any]] = []
-    summary = {
-        "objectives": 0, "metrics": 0, "behind": 0, "ahead": 0,
-        "on_target": 0, "off_target": 0, "not_computable": 0, "stale": 0,
-        "undeclared": 0, "declared_elsewhere": 0, "served_elsewhere": 0,
-    }
+    summary = _new_summary()
 
     seen_ids: Dict[str, str] = {}
     for obj in objectives:
@@ -495,6 +559,13 @@ def join_objectives(
             )
             metrics_out.append(row)
             findings.extend(row_findings)
+            if row["role"] == "guard":
+                guards = summary["guards"]
+                guards["total"] += 1
+                guards[row["gap"]["status"]] += 1
+                if row["stale"]:
+                    guards["stale"] += 1
+                continue
             summary["metrics"] += 1
             summary[row["gap"]["status"]] += 1
             if row["stale"]:
@@ -560,9 +631,11 @@ def _metric_row(
         declared_elsewhere = False
     has_number = declared or served_by is not None
 
+    is_guard = spec.get("role") == "guard"
     direction, direction_source, mismatch = resolve_direction(
         definition.get("direction") if definition else None,
         spec.get("direction"),
+        guard=is_guard,
     )
 
     actual = None
@@ -572,12 +645,14 @@ def _metric_row(
 
     row = {
         "name": name,
+        "role": spec.get("role", "primary"),
         "target": spec.get("target"),
         "target_text": spec.get("target_text"),
         "tolerance": spec.get("tolerance"),
         "by": spec.get("by"),
         "horizon": obj.get("horizon"),
-        "objective_direction": spec.get("direction"),
+        "objective_direction": (spec.get("direction") or "hold"
+                                if is_guard else spec.get("direction")),
         "declared": declared,
         "declared_elsewhere": declared_elsewhere,
         "served_by": served_by,
@@ -670,6 +745,27 @@ def _metric_row(
 
     row["gap"] = gap(spec.get("target"), actual, direction,
                      tolerance=spec.get("tolerance"))
+
+    if is_guard:
+        guard_findings = []
+        if row["gap"]["reason"] == "no_target":
+            guard_findings.append(("guard_target_unset", (
+                f"objective `{obj_id}` guards metric `{name}` without a "
+                "target, so there is no level to hold it at. Set `target:` on "
+                "the guard entry once a baseline exists.")))
+        word = (spec.get("direction") or "").strip().lower()
+        if word and word != "hold":
+            guard_findings.append(("guard_direction_invalid", (
+                f"objective `{obj_id}` gives guard `{name}` the direction "
+                f"`{spec.get('direction')}` — a guard is always judged as a "
+                "hold, so the word is ignored. Remove it.")))
+        for code, message in guard_findings:
+            findings.append(_finding(code, message, objective_id=obj_id,
+                                     metric=name, path=obj["path"]))
+        if guard_findings:
+            code, message = guard_findings[0]
+            row["finding"] = {"code": code, "message": message}
+        return row, findings
 
     if mismatch:
         row["finding"] = {
@@ -971,11 +1067,7 @@ def _empty(agent_name: str, now: datetime, *, unavailable=None, role=None,
         },
         "objectives": [],
         "findings": findings or [],
-        "summary": {
-            "objectives": 0, "metrics": 0, "behind": 0, "ahead": 0,
-            "on_target": 0, "off_target": 0, "not_computable": 0, "stale": 0,
-            "undeclared": 0, "declared_elsewhere": 0, "served_elsewhere": 0,
-        },
+        "summary": _new_summary(),
         "message": message,
     }
 
