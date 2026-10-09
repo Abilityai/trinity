@@ -181,6 +181,22 @@ _ADDED_SINCE_SPLIT = {
 }
 
 
+# Routes whose PATH STRING changed since the fork point while the route itself
+# stayed — same handler, same method, same URLs answered, plus some the old
+# spelling could not reach. Kept apart from `_ADDED_SINCE_SPLIT` because the
+# claim is different and stronger: the pre-split signature is GONE on purpose,
+# which the frozen literal (a transcription of a historical blob, never
+# hand-edited) cannot express. Old signature -> the one mounted today.
+_RESHAPED_SINCE_SPLIT = {
+    # #3456 — `{email}` matched no route for a stored value containing `/`
+    # (the router decodes `%2F` before matching), so such a row could never be
+    # removed. `:path` widens the parameter only; every URL the old route
+    # answered, the new one answers identically.
+    ("/api/settings/email-whitelist/{email}", ("DELETE",), "remove_email_from_whitelist"):
+        ("/api/settings/email-whitelist/{email:path}", ("DELETE",), "remove_email_from_whitelist"),
+}
+
+
 def test_the_mounted_route_set_is_unchanged():
     """The API a caller sees is identical — no route lost, none invented.
 
@@ -189,7 +205,9 @@ def test_the_mounted_route_set_is_unchanged():
     """
     import routers.settings as new
 
-    before = _PRE_SPLIT_ROUTES
+    before = (_PRE_SPLIT_ROUTES - set(_RESHAPED_SINCE_SPLIT)) | set(
+        _RESHAPED_SINCE_SPLIT.values()
+    )
     after = {_sig(r) for r in new.router.routes}
     invented = after - before - _ADDED_SINCE_SPLIT
     assert invented == set(), f"routes invented by the split: {sorted(invented)}"
@@ -219,6 +237,26 @@ def test_the_post_split_allowlist_is_not_stale():
         "these _ADDED_SINCE_SPLIT entries no longer name a mounted route — "
         f"drop them: {sorted(stale)}"
     )
+
+
+def test_the_reshaped_map_is_not_stale():
+    """Same rule as the allowlist above, both directions: the old signature
+    must really be a fork-point route (else the entry excuses nothing and reads
+    as if it did), and the new one must really be mounted."""
+    import routers.settings as new
+
+    mounted = {_sig(r) for r in new.router.routes}
+    unknown = set(_RESHAPED_SINCE_SPLIT) - _PRE_SPLIT_ROUTES
+    assert unknown == set(), f"not fork-point routes: {sorted(unknown)}"
+    stale = set(_RESHAPED_SINCE_SPLIT.values()) - mounted
+    assert stale == set(), f"reshaped targets no longer mounted: {sorted(stale)}"
+    kept = set(_RESHAPED_SINCE_SPLIT) & mounted
+    assert kept == set(), f"old spellings still mounted: {sorted(kept)}"
+    for old, reshaped in _RESHAPED_SINCE_SPLIT.items():
+        assert old[1:] == reshaped[1:], (
+            "a reshaped route keeps its method and handler — otherwise it is a "
+            f"removal plus an addition: {old} -> {reshaped}"
+        )
 
 
 def _concrete(path: str) -> str:
