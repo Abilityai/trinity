@@ -51,16 +51,17 @@ const credentialToolAccess = (auth: any): boolean => CREDENTIAL_TOOL_SCOPES.has(
 /**
  * #3435: a backend 403 on a credential tool, as a typed envelope stamped
  * `denied` on the audit row (#2807). Only the backend `detail` is copied — never
- * a body. Every other failure (400/404/503, transport) is rethrown unchanged.
+ * a body: a 403 without a JSON `detail` (a proxy or WAF page) gets a fixed
+ * sentence. Every other failure (400/404/503, transport) is rethrown unchanged.
  */
 function credentialRefusal(error: unknown, context: { session?: McpAuthContext } | undefined): string {
   if (!(error instanceof ApiError) || error.status !== 403) throw error;
-  let detail = error.message;
+  let detail = "Access denied (HTTP 403)";
   try {
     const parsed = JSON.parse(error.body);
     if (typeof parsed?.detail === "string") detail = parsed.detail;
   } catch {
-    // not JSON — keep the message
+    // not JSON — keep the fixed sentence; the body is never echoed
   }
   const flag = /human-only/i.test(detail)
     ? "human_only"

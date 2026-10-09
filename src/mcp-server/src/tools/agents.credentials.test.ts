@@ -111,11 +111,20 @@ describe("#3435 credential tools: execution", () => {
     const out = JSON.parse(await admin.byName.get_credential_encryption_key.execute({}, { session: { scope: "user" } }));
     assert.deepEqual(out, { success: false, error: "Admin access required", admin_only: true });
 
-    const other = build(async () => { throw new ApiError(403, "not json"); });
+    const other = build(async () => { throw new ApiError(403, JSON.stringify({ detail: "Forbidden" })); });
     const o2 = JSON.parse(await other.byName.import_credentials.execute(args("import_credentials"), {}));
-    assert.equal(o2.success, false);
-    assert.equal(o2.not_authorized, true);
-    assert.match(o2.error, /not json/);
+    assert.deepEqual(o2, { success: false, error: "Forbidden", not_authorized: true });
+  });
+
+  it("a non-JSON 403 body is never copied into the envelope — a fixed sentence instead", async () => {
+    const MARKER = "PROXY-PAGE-MARKER-3435";
+    const body = `<html><body><h1>403 Forbidden</h1><p>${MARKER}</p></body></html>`;
+    const { byName } = build(async () => { throw new ApiError(403, body); });
+    for (const t of TOOLS) {
+      const raw = await byName[t].execute(args(t), { session: { scope: "user" } });
+      assert.ok(!raw.includes(MARKER), `${t}: the 403 body leaked into the envelope: ${raw}`);
+      assert.deepEqual(JSON.parse(raw), { success: false, error: "Access denied (HTTP 403)", not_authorized: true });
+    }
   });
 
   it("400, 404 and 503 stay thrown, and so does a non-API failure (TD-4)", async () => {
