@@ -581,10 +581,12 @@ def sanitize_dict(data: Dict[str, Any], depth: int = 0, max_depth: int = 10) -> 
         max_depth: Maximum recursion depth to prevent infinite loops
 
     Returns:
-        Sanitized dictionary with credentials replaced
+        Sanitized dictionary with credentials replaced. Past ``max_depth`` the
+        subtree is replaced with ``REDACTION_PLACEHOLDER``, not walked (fail
+        closed, #3312) — the root itself is never cut.
     """
     if depth > max_depth:
-        return data
+        return REDACTION_PLACEHOLDER
 
     result = {}
     for key, value in data.items():
@@ -609,10 +611,12 @@ def sanitize_list(data: List[Any], depth: int = 0, max_depth: int = 10) -> List[
         max_depth: Maximum recursion depth
 
     Returns:
-        Sanitized list with credentials replaced
+        Sanitized list with credentials replaced. Past ``max_depth`` the
+        subtree is replaced with ``REDACTION_PLACEHOLDER``, not walked (fail
+        closed, #3312) — the root itself is never cut.
     """
     if depth > max_depth:
-        return data
+        return REDACTION_PLACEHOLDER
 
     result = []
     for item in data:
@@ -649,8 +653,9 @@ def sanitize_json_string(json_str: str) -> str:
         else:
             return sanitize_text(json_str)
         return json.dumps(sanitized)
-    except json.JSONDecodeError:
-        # If not valid JSON, sanitize as plain text
+    except (json.JSONDecodeError, RecursionError):
+        # Not valid JSON, or nested too deep for json.loads (#3312):
+        # sanitize as plain text
         return sanitize_text(json_str)
 
 
@@ -700,7 +705,8 @@ def sanitize_subprocess_line(line: str) -> str:
             else:
                 return sanitize_text(line)
             return json.dumps(sanitized)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
+            # RecursionError: too deep for json.loads (#3312) — text pass below
             pass
 
     # Fall back to text sanitization

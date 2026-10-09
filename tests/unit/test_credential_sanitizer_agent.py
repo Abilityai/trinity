@@ -330,9 +330,11 @@ class TestNestedStructures:
             current = current["nested"]
         current["secret"] = "sk-1234567890abcdefghij1234567890ghij1234567890"
 
-        # Should not crash, should stop at max depth
+        # Should not crash, and must not hand the uncut subtree back raw (#3312)
         result = sanitize_dict(data, max_depth=10)
         assert isinstance(result, dict)
+        assert "sk-1234567890abcdefghij1234567890ghij1234567890" not in json.dumps(result)
+        assert REDACTION_PLACEHOLDER in json.dumps(result)
 
 
 @pytest.mark.unit
@@ -436,6 +438,43 @@ class TestSubprocessLineSanitization:
         parsed = json.loads(result)
         assert parsed[0] == REDACTION_PLACEHOLDER
         assert parsed[1] == "normal"
+
+
+@pytest.mark.unit
+class TestDepthFailsClosed:
+    """#3312 — the agent copy carries the same depth cap; past it the subtree
+    is replaced, and a JSON string too deep for `json.loads` falls back to the
+    linear text pass instead of raising RecursionError."""
+
+    SECRET = "ghp_" + "a" * 36
+
+    def test_dict_list_mix_past_max_depth_is_redacted(self):
+        leaf = "key " + self.SECRET
+        for i in range(14):
+            leaf = {"n": leaf} if i % 2 else [leaf]
+        result = sanitize_dict({"root": leaf})
+        assert self.SECRET not in json.dumps(result)
+        assert REDACTION_PLACEHOLDER in json.dumps(result)
+
+    def test_very_deep_object_does_not_recurse(self):
+        leaf = "key " + self.SECRET
+        for _ in range(2000):
+            leaf = [leaf]
+        result = sanitize_list([leaf])
+        assert self.SECRET not in json.dumps(result)
+
+    def _deep_json(self) -> str:
+        return "[" * 200_000 + json.dumps("key " + self.SECRET) + "]" * 200_000
+
+    def test_deep_json_string_does_not_raise(self):
+        out = sanitize_json_string(self._deep_json())
+        assert isinstance(out, str)
+        assert self.SECRET not in out
+
+    def test_deep_subprocess_line_does_not_raise(self):
+        out = sanitize_subprocess_line(self._deep_json())
+        assert isinstance(out, str)
+        assert self.SECRET not in out
 
 
 @pytest.mark.unit
