@@ -5185,6 +5185,10 @@ class ObjectiveMetricRead(BaseModel):
     the registry and the point store."""
 
     name: str
+    #: `primary` for an entry of the objective's `metrics:`, `guard` for one of
+    #: its `guard_metrics:` (ent#731) — a number that must not move, always
+    #: judged as a hold and counted in `summary.guards`, never in the buckets.
+    role: str = "primary"  # primary | guard
     target: Optional[float] = None
     #: A non-numeric target (a status label, a phrase) kept verbatim and
     #: bounded, so the card can show what the author wrote even though no gap
@@ -5238,6 +5242,8 @@ class ObjectiveRead(BaseModel):
     owned: bool
     supporting: bool
     metrics: List[ObjectiveMetricRead] = []
+    #: True when `metrics:` or `guard_metrics:` held more entries than the
+    #: per-list cap (each list has its own, ent#731).
     metrics_truncated: bool = False
 
 
@@ -5272,8 +5278,20 @@ class ObjectiveJoinSource(BaseModel):
     objectives_truncated: bool = False
 
 
+class ObjectiveJoinGuardSummary(BaseModel):
+    """Guard rows (ent#731), counted apart. A guard is a hold, so it is never
+    behind or ahead."""
+
+    total: int = 0
+    on_target: int = 0
+    off_target: int = 0
+    not_computable: int = 0
+    stale: int = 0
+
+
 class ObjectiveJoinSummary(BaseModel):
-    """Counts a consumer can act on without walking the rows."""
+    """Counts a consumer can act on without walking the rows. Every count but
+    `objectives` and `guards` is over PRIMARY rows only."""
 
     objectives: int = 0
     metrics: int = 0
@@ -5287,6 +5305,7 @@ class ObjectiveJoinSummary(BaseModel):
     declared_elsewhere: int = 0
     #: Rows whose number came from a granted agent (`served_by`, ent#727).
     served_elsewhere: int = 0
+    guards: ObjectiveJoinGuardSummary = ObjectiveJoinGuardSummary()
 
 
 class ObjectiveJoinRead(BaseModel):
