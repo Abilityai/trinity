@@ -308,7 +308,7 @@ fi
 ```python
 @router.post("/decrypt-and-inject")
 async def decrypt_and_inject(request: InternalDecryptInjectRequest):
-    """Internal endpoint for agent startup - no auth required."""
+    """Internal endpoint for agent startup - X-Internal-Secret via the router's verify_internal_secret dependency."""
     encryption_service = CredentialEncryptionService()
 
     # Read encrypted file from agent

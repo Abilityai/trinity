@@ -1367,7 +1367,7 @@ app.include_router(audit_log_router)  # SEC-001 / #20: Platform audit log (Phase
 app.include_router(canary_router)  # CANARY-001 / #411: Invariant violations
 app.include_router(compatibility_router)  # #668: Agent compatibility validation
 app.include_router(skills_router) # Skills Management System
-app.include_router(internal_router)  # Internal agent-to-backend endpoints (no auth)
+app.include_router(internal_router)  # Internal agent-to-backend endpoints (verify_internal_secret: X-Internal-Secret, not a user principal)
 app.include_router(internal_pull_router)  # #1081 pull seams — dual auth: internal secret OR agent's own scoped MCP key
 app.include_router(tags_router)  # Agent Tags (ORG-001)
 app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)
