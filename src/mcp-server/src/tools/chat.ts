@@ -176,12 +176,20 @@ function asyncReceipt<T extends object>(agent: string, response: T): T {
 /**
  * #3232: how a chat_with_* call runs, which decides whether it can carry a parent.
  * `task-async` = parallel+async, `task-sync` = parallel sync, `pull` = the #946
- * pull-routed sequential call (always an async receipt), `chat` = sequential /chat.
+ * pull-routed sequential call (always an async receipt), `chat` = sequential
+ * /chat, which carries its parent to the backend only when the call ends in a
+ * receipt (#3295: `armChatReportBack`, after the fact — the body never has it).
  */
 export type ReportBackRoute = "task-async" | "task-sync" | "pull" | "chat";
 
-/** Why an opted-in call sends no parent, in precedence order. */
-export type ReportBackReason = "disabled" | "manual_session" | "invalid_execution_id" | "sequential_chat";
+/**
+ * Why a call reports nothing, in precedence order. The first three are decided
+ * before the call; the last two only on the sequential `/chat` route, from its
+ * outcome (#3295): `answered_inline` — the reply came back, so there is nothing
+ * to report later; `not_armed` — a receipt came back but the backend refused
+ * to attach the report (or the agent was busy and nothing ran).
+ */
+export type ReportBackReason = "disabled" | "manual_session" | "invalid_execution_id" | "answered_inline" | "not_armed";
 
 /** The fields a result gains when a parent is (or, for an opted-in call, cannot be) sent. */
 export interface ReportBackFields {
@@ -223,7 +231,8 @@ export interface ReportBackDecision {
  */
 export const EXECUTION_ID_PARAM_DESCRIPTION =
   "Report-back to the Slack, Telegram or Workspace conversation you are serving. It is on by default " +
-  "for async delegation (parallel=true, async=true, or a sequential call this platform routes as a task): " +
+  "for async delegation (parallel=true, async=true, or a sequential call this platform routes as a task), " +
+  "and for a sequential call that comes back with a receipt instead of the reply: " +
   "when the delegated run ends, success or failure, it posts a note there, and runs it delegates onward may " +
   "post their own. An error from an async call, or from one you opted in, does not mean nothing will post: the run may have started. " +
   "Pass \"manual\" to turn it off for this call. For a sync " +
@@ -257,9 +266,12 @@ export const REPORT_BACK_OFF_NOTES: Record<ReportBackReason, string> = {
   invalid_execution_id:
     "The execution_id you passed is not an execution id, so nothing reports back. Next time pass your own " +
     "execution_id from your Execution Context. Do not re-send this one.",
-  sequential_chat:
-    "A sequential call that answers with the reply itself does not report back. For your next long " +
-    "delegation, use parallel=true, async=true. Do not re-send this one.",
+  answered_inline:
+    "This call answered with the reply itself, so nothing reports back later: you have the result. " +
+    "Do not re-send this one.",
+  not_armed:
+    "The platform could not attach a report to this run, so nothing reports back; read it with " +
+    "get_execution_result when you follow up. Do not re-send this one.",
 };
 
 /**
@@ -271,12 +283,18 @@ export const REPORT_BACK_OFF_NOTES: Record<ReportBackReason, string> = {
  *   send the platform header turn when it names a real turn — the caller's turn
  *   ends with a receipt, so the child's note is usually the person's only news.
  *   A self-task with `inject_result` is excluded (it already named a destination).
- * - **Sync is opt-in**: a typed id arms it (the caller answers inline, so a default
- *   would double-post). A typed `manual` opts out everywhere.
+ * - **Sequential /chat defaults on too (#3295)**, under the same rule — but its
+ *   parent never travels in the `/chat` body. `runAgentChat` sends it through
+ *   `armChatReportBack` only when the call ends in a `queued_timeout` receipt,
+ *   so a call that answers inline is never armed and cannot double-post. The
+ *   `fields` here are what a RECEIPT carries; `chatRouteFields` picks the
+ *   result fields from the outcome.
+ * - **Sync parallel is opt-in**: a typed id arms it (the caller answers inline,
+ *   so a default would double-post). A typed `manual` opts out everywhere.
  * - **Header first**: the header turn wins over a typed id (resumed sessions copy
  *   stale ids) — `resolveExecutionId`, the house rule. A typed id is forwarded only
  *   if it passes the header's own format check; `manual` is never forwarded.
- * - Sequential /chat never carries one; `enabled=false` sends nothing anywhere.
+ * - `enabled=false` sends nothing anywhere.
  *
  * Decides only the body field and the result fields — never `callerTurn`, the
  * turn header forwarded to the backend, which the skill gate reads.
@@ -284,17 +302,17 @@ export const REPORT_BACK_OFF_NOTES: Record<ReportBackReason, string> = {
 export function resolveReportBack(input: ReportBackInput): ReportBackDecision {
   const typed = input.typed?.trim() ?? "";
   const headerTurn = input.header && input.header !== MANUAL_EXECUTION_ID ? input.header : undefined;
-  const asyncRoute = input.route === "task-async" || input.route === "pull";
+  const defaultsOn = input.route === "task-async" || input.route === "pull" || input.route === "chat";
 
   let arm: ReportBackDecision["arm"];
   if (typed === MANUAL_EXECUTION_ID) arm = "opt_out";
   else if (typed !== "") arm = "typed";
-  else if (asyncRoute && headerTurn && !(input.isSelfTask && input.injectResult)) arm = "default";
+  else if (defaultsOn && headerTurn && !(input.isSelfTask && input.injectResult)) arm = "default";
   else arm = "none";
 
   const typedOk = arm === "typed" && isWellFormedExecutionId(typed);
   let parent: string | undefined;
-  if (input.enabled && input.route !== "chat") {
+  if (input.enabled) {
     if (arm === "default") {
       parent = headerTurn;
     } else if (arm === "typed") {
@@ -313,13 +331,14 @@ export function resolveReportBack(input: ReportBackInput): ReportBackDecision {
     if (parent !== undefined) {
       fields = { report_back: "requested" };
     } else {
+      // No parent on a typed call has exactly these causes, in this order:
+      // the switch is off; the session has no execution; the typed id is not
+      // one and no header could stand in for it.
       const reason: ReportBackReason = !input.enabled
         ? "disabled"
         : input.header === MANUAL_EXECUTION_ID
           ? "manual_session"
-          : !typedOk && !headerTurn
-            ? "invalid_execution_id"
-            : "sequential_chat";
+          : "invalid_execution_id";
       fields = { report_back: "off", report_back_reason: reason, report_back_note: REPORT_BACK_OFF_NOTES[reason] };
     }
   }
@@ -353,6 +372,40 @@ function withReportBack<T extends object>(result: T, fields: ReportBackFields | 
     return { ...result, ...rest };
   }
   return { ...result, ...fields };
+}
+
+/** How a sequential `/chat` call ended, which decides what it says about report-back (#3295). */
+export type ChatOutcome = "inline" | "receipt" | "busy";
+
+/**
+ * #3295: the result fields for the sequential `/chat` route, from the decision
+ * AND the outcome. `armed` is `armChatReportBack`'s answer for a receipt:
+ * `true`/`undefined` (unknown — the backend may have processed it) keep the
+ * decision's `requested`; an explicit `false` says `off`/`not_armed`.
+ *
+ * - **inline**: the caller has the reply. Default-armed → no fields (today's
+ *   result, byte-identical); typed with a parent → `off`/`answered_inline`.
+ * - **receipt**: the decision's fields, unless the backend refused the arm.
+ * - **busy**: nothing ran. Default-armed → no fields; typed → `off`/`not_armed`.
+ *
+ * A typed call that resolved to no parent (`disabled`, `manual_session`,
+ * `invalid_execution_id`) keeps that reason whatever the outcome; opt-out and
+ * `none` carry nothing, as everywhere else.
+ */
+export function chatRouteFields(
+  decision: ReportBackDecision,
+  outcome: ChatOutcome,
+  armed?: boolean,
+): ReportBackFields | undefined {
+  const { arm, parentExecutionId: parent, fields } = decision;
+  if (!fields) return undefined;
+  if (fields.report_back === "off") return fields;
+  if (outcome === "receipt") {
+    return armed === false ? { report_back: "off", report_back_reason: "not_armed" } : fields;
+  }
+  if (arm === "default" || parent === undefined) return undefined;
+  const reason: ReportBackReason = outcome === "inline" ? "answered_inline" : "not_armed";
+  return { report_back: "off", report_back_reason: reason, report_back_note: REPORT_BACK_OFF_NOTES[reason] };
 }
 
 /**
@@ -571,7 +624,23 @@ export async function runAgentChat(
   // Surface the structured receipt so the caller polls rather than retries.
   if ('status' in response && response.status === 'queued_timeout') {
     console.log(`[Chat Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#914)`);
-    return JSON.stringify(withReportBack(response, reportBack.fields), null, 2);
+    // #3295: the caller is NOT getting the reply, so this is the moment the
+    // run is asked to report into the caller's conversation when it ends. The
+    // backend inherits the destination through the same provenance guard a
+    // /task child uses; a refusal reads as `off`/`not_armed`, an unanswered arm
+    // as `requested` (it may well have landed).
+    let armed: boolean | undefined;
+    if (reportBack.parentExecutionId) {
+      armed = await apiClient.armChatReportBack(
+        agent_name, response.execution_id, reportBack.parentExecutionId, sourceAgent,
+      );
+      console.log(
+        `[Report-Back #3295] ${sourceAgent || authContext?.userId || "unknown"} -> ${agent_name} ` +
+        `execution_id=${response.execution_id} parent=${reportBack.parentExecutionId} ` +
+        `armed=${armed === undefined ? "unknown" : armed}`,
+      );
+    }
+    return JSON.stringify(withReportBack(response, chatRouteFields(reportBack, "receipt", armed)), null, 2);
   }
 
   // Check if response is a queue status (agent busy)
@@ -586,10 +655,10 @@ export async function runAgentChat(
         `Please wait ${response.retry_after} seconds before retrying, or try a different agent. ` +
         `Consider using parallel=true for independent tasks.`,
       details: response.details,
-    }, reportBack.fields), null, 2);
+    }, chatRouteFields(reportBack, "busy")), null, 2);
   }
 
-  return JSON.stringify(withReportBack(response, reportBack.fields), null, 2);
+  return JSON.stringify(withReportBack(response, chatRouteFields(reportBack, "inline")), null, 2);
 }
 
 /**

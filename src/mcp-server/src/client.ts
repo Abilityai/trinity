@@ -1273,6 +1273,21 @@ export class TrinityClient {
           return this.inFlightReplayReceipt(name, executionId);
         }
       }
+      // #3295: the backend's OWN wait ran out (a pull pilot's `/chat`, #3127)
+      // while the turn keeps running. That is the same situation as our abort
+      // above — the caller will not get the reply — so it gets the same receipt
+      // through the same lookup, and can be armed to report back. Only reached
+      // when MCP_CHAT_TIMEOUT_MS outlasts the backend's wait; the window is
+      // derived from how long THIS call waited, as the abort path's is.
+      if (response.status === 504) {
+        debugLog(`[chat] backend 504 after ${Date.now() - startTime}ms on '${name}'; attempting execution-id lookup (#3295)`);
+        const receipt = await this.findRecentMcpExecution(name, mcpKeyInfo?.keyId, {
+          triggers: CHAT_RECOVERY_TRIGGERS,
+          message,
+          windowMs: Date.now() - startTime + 10_000,
+        });
+        if (receipt) return this.queuedTimeoutReceipt(name, receipt.id, timeoutMs);
+      }
       const refusal = parseDepthRefusal(response.status, error, name);
       if (refusal) {
         debugLog(`[chat] chain-depth refusal on '${name}' (depth ${refusal.depth} > ${refusal.max_depth}) (#2806)`);
@@ -1610,6 +1625,65 @@ export class TrinityClient {
         `MCP-server timeout (${timeoutMs}ms) on chat_with_agent — the task is still running on '${name}'. ` +
         `${readNotResend(name, executionId)} A timeout is not a failure (#914).`,
     };
+  }
+
+  /**
+   * #3295: ask the backend to report a sequential `/chat` execution's terminal
+   * into the caller's conversation. Called only when `chat()` answered with a
+   * `queued_timeout` receipt — the one moment the caller is known NOT to get
+   * the reply, so a call that answers inline is never armed.
+   *
+   * Returns `true` (armed), `false` (the backend answered and refused: a 4xx,
+   * or 200 with `armed: false`), or `undefined` when the answer is unknown (own
+   * deadline hit, network error). The caller treats unknown as "requested":
+   * the backend may well have processed the arm after we stopped waiting, and
+   * the result's own wording already says requested is not a guarantee. Never
+   * throws — this rides the tail of a call that is already near the MCP
+   * gateway ceiling, so the deadline is short (`MCP_REPORT_BACK_ARM_TIMEOUT_MS`,
+   * default 2000).
+   */
+  async armChatReportBack(
+    name: string,
+    executionId: string,
+    parentExecutionId: string,
+    sourceAgent?: string,
+  ): Promise<boolean | undefined> {
+    if (!this.token) return undefined;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${this.token}`,
+      "X-Via-MCP": "true",
+    };
+    if (sourceAgent) headers["X-Source-Agent"] = sourceAgent;
+    const timeoutMs = Number(process.env.MCP_REPORT_BACK_ARM_TIMEOUT_MS || 2000);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/api/agents/${encodeURIComponent(name)}/executions/${encodeURIComponent(executionId)}/report-back`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ parent_execution_id: parentExecutionId }),
+          signal: controller.signal,
+        },
+      );
+      if (!response.ok) {
+        debugLog(`[chat] report-back arm refused for ${executionId} on '${name}': ${response.status} (#3295)`);
+        return false;
+      }
+      const body = (await response.json()) as { armed?: unknown; reason?: unknown };
+      if (body.armed !== true) {
+        debugLog(`[chat] report-back not armed for ${executionId} on '${name}': ${String(body.reason ?? "?")} (#3295)`);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      debugLog(`[chat] report-back arm for ${executionId} on '${name}' unresolved: ${(err as Error)?.message} (#3295)`);
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**

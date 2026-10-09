@@ -529,6 +529,16 @@ class ChatMessageRequest(BaseModel):
     model: Optional[str] = None  # Model alias: sonnet, opus, haiku, or full model name
 
 
+class ReportBackRequest(BaseModel):
+    """#3295: ask that a sequential ``/chat`` execution report its terminal into
+    the caller's conversation. Sent by the MCP server when a sequential call
+    ends in a receipt instead of the reply, naming the CALLER's own turn; the
+    row inherits that turn's channel context through the same provenance
+    guard a ``/task`` child uses (``_inherited_channel_context``)."""
+    model_config = ConfigDict(extra="forbid")
+    parent_execution_id: str = Field(min_length=1, max_length=128)
+
+
 class ModelChangeRequest(BaseModel):
     """Request model for changing agent's model."""
     model: str  # Model alias: sonnet, opus, haiku, or full model name

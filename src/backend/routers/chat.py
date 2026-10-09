@@ -12,7 +12,7 @@ import logging
 from datetime import datetime
 from typing import NoReturn, Optional
 
-from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, TaskExecutionStatus
+from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ReportBackRequest, TaskExecutionStatus
 from dependencies import (
     capability_fence,
     get_current_user,
@@ -981,6 +981,36 @@ async def terminate_agent_execution(
             name=name,
             execution_id=execution_id,
             task_execution_id=task_execution_id,
+            current_user=current_user,
+        )
+    except ChatDispatchError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
+
+
+@router.post("/{name}/executions/{execution_id}/report-back")
+async def arm_execution_report_back(
+    execution_id: str,
+    request: ReportBackRequest,
+    name: str = Depends(get_authorized_agent),
+    current_user: User = Depends(get_current_user),
+):
+    """#3295: ask that a sequential ``/chat`` execution report its terminal into
+    the caller's conversation (Slack / Telegram / Workspace).
+
+    Called by the MCP server at the moment it hands the caller a receipt instead
+    of the reply — so a call that answered inline is never armed and cannot
+    post twice. The body names the CALLER's own turn; the execution inherits
+    that turn's channel context through the same provenance guard a ``/task``
+    child uses. Agent-callable by design: the arming agent is the one that
+    dispatched the row (the service checks that), and the capability it uses
+    — reporting into a conversation it is already serving — is the ent#224
+    consent-gated completion report, never a new send path.
+    """
+    try:
+        return await chat_execution_service.arm_chat_report_back(
+            name=name,
+            execution_id=execution_id,
+            request=request,
             current_user=current_user,
         )
     except ChatDispatchError as e:

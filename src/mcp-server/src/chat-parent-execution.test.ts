@@ -15,7 +15,11 @@
  *   - async dispatches (parallel+async, #946 pull-routed) send the platform
  *     header turn by DEFAULT; a typed `manual` opts out; a self-task with
  *     `inject_result` is excluded;
- *   - sync parallel is opt-in by a typed id; sequential `/chat` never carries one;
+ *   - sync parallel is opt-in by a typed id;
+ *   - sequential `/chat` never carries one in its BODY; it defaults on like the
+ *     async routes, and the parent goes out through a separate
+ *     `POST …/executions/{id}/report-back` only when the call ends in a
+ *     `queued_timeout` receipt (#3295) — an inline reply is never armed;
  *   - the header turn wins over a typed id; a malformed or `manual` typed id is
  *     never forwarded;
  *   - `MCP_REPORT_BACK_ENABLED=false` stops all of it.
@@ -59,7 +63,10 @@ const PLACEHOLDER_ID = "<your execution_id>";
 
 const FIELDS = ["report_back", "report_back_reason", "report_back_note"] as const;
 
-type Mode = "ok" | "queued" | "gate" | "depth" | "error" | "busy" | "replay409";
+/** `chat504`: the backend's own wait ran out (#3127 pull pilot) — a 504, then the
+ *  recovery lookup finds the running row. `armRefused`: the report-back arm
+ *  answers 200 `armed: false`. */
+type Mode = "ok" | "queued" | "gate" | "depth" | "error" | "busy" | "replay409" | "chat504" | "armRefused";
 
 interface Dispatch {
   route: "task" | "chat";
@@ -69,11 +76,20 @@ interface Dispatch {
   key: string | undefined;
 }
 
+/** #3295: one `POST /api/agents/{agent}/executions/{id}/report-back` the MCP server made. */
+interface Arm {
+  agent: string;
+  executionId: string;
+  body: Record<string, unknown>;
+  sourceAgent: string | undefined;
+}
+
 interface CallResult {
   out: any;
   text: string;
   isError: boolean;
   rec: Dispatch | undefined;
+  arms: Arm[];
 }
 
 interface Harness {
@@ -101,7 +117,10 @@ function json(res: import("node:http").ServerResponse, status: number, payload: 
 async function boot(opts: { pull?: boolean; reportBackEnabled?: boolean } = {}): Promise<Harness> {
   let mode: Mode = "ok";
   const dispatches: Dispatch[] = [];
+  const arms: Arm[] = [];
   const unexpected: string[] = [];
+  /** The message of the last /chat dispatch — what the 504 recovery lookup must find. */
+  let lastChatMessage = "";
 
   const backend: Server = createHttpServer((req, res) => {
     let raw = "";
@@ -110,6 +129,35 @@ async function boot(opts: { pull?: boolean; reportBackEnabled?: boolean } = {}):
       const url = req.url ?? "";
       // The server's own startup probe of the backend.
       if (url === "/health" && req.method === "GET") return json(res, 200, { status: "healthy" });
+      // #3295: the report-back arm.
+      const arm = url.match(/^\/api\/agents\/([^/]+)\/executions\/([^/]+)\/report-back$/);
+      if (arm && req.method === "POST") {
+        const body = JSON.parse(raw) as Record<string, unknown>;
+        arms.push({
+          agent: decodeURIComponent(arm[1]),
+          executionId: decodeURIComponent(arm[2]),
+          body,
+          sourceAgent: one(req.headers, "x-source-agent"),
+        });
+        if (mode === "armRefused") {
+          return json(res, 200, { armed: false, execution_id: arm[2], reason: "no_inherited_context" });
+        }
+        return json(res, 200, { armed: true, execution_id: arm[2], status: "running" });
+      }
+      // #3295: the recovery lookup after a backend 504 (`findRecentMcpExecution`).
+      const recovery = url.match(/^\/api\/agents\/([^/]+)\/executions\?limit=\d+$/);
+      if (recovery && req.method === "GET") {
+        return json(res, 200, [{
+          id: "exec-child-504",
+          schedule_id: "",
+          agent_name: decodeURIComponent(recovery[1]),
+          status: "running",
+          started_at: new Date().toISOString(),
+          message: lastChatMessage,
+          triggered_by: "agent",
+          source_mcp_key_id: "key-agent-1",
+        }]);
+      }
       if (url === "/api/mcp/validate") {
         return json(res, 200, {
           valid: true,
@@ -139,7 +187,16 @@ async function boot(opts: { pull?: boolean; reportBackEnabled?: boolean } = {}):
         turn: one(req.headers, "x-trinity-execution-id"),
         key: one(req.headers, "idempotency-key"),
       });
+      if (route === "chat") lastChatMessage = String(body.message ?? "");
       switch (mode) {
+        case "chat504":
+          if (route === "chat") {
+            return json(res, 504, { detail: `Chat turn on agent '${agent}' did not complete in time. Execution exec-child-504 may still be running; poll GET /api/agents/${agent}/executions/exec-child-504.` });
+          }
+          break;
+        case "armRefused":
+          if (route === "chat") return json(res, 409, { detail: { execution_id: "exec-child-replay" } });
+          break;
         case "gate":
           return json(res, 202, {
             status: "pending_approval",
@@ -255,6 +312,7 @@ async function boot(opts: { pull?: boolean; reportBackEnabled?: boolean } = {}):
       assert.ok(tools.has(tool), `${tool} is not in tools/list (have ${tools.size})`);
       header = h;
       dispatches.length = 0;
+      arms.length = 0;
       try {
         const res = (await mcp.callTool({ name: tool, arguments: args })) as {
           content: Array<{ type: string; text: string }>;
@@ -265,7 +323,8 @@ async function boot(opts: { pull?: boolean; reportBackEnabled?: boolean } = {}):
         try { out = JSON.parse(text); } catch { out = undefined; }
         assert.deepEqual(unexpected, [], "the fake backend got a request it does not serve");
         assert.ok(dispatches.length <= 1, `one call dispatched ${dispatches.length} times`);
-        return { out, text, isError: res.isError === true, rec: dispatches[0] };
+        assert.ok(arms.length <= 1, `one call armed ${arms.length} times`);
+        return { out, text, isError: res.isError === true, rec: dispatches[0], arms: [...arms] };
       } finally {
         header = undefined;
         mode = "ok";
@@ -335,7 +394,7 @@ describe("#3232 parent_execution_id leaves the MCP server (real transport)", () 
     assert.equal(parentOf(noHeader), TYPED);
   });
 
-  it("T5: no typed id + header turn → async routes default to the header; sync parallel and /chat carry nothing", async () => {
+  it("T5: no typed id + header turn → async routes default to the header; sync parallel carries nothing; the /chat BODY carries nothing and an inline reply arms nothing", async () => {
     const asyncPar = await off.call("chat_with_agent", { agent_name: TARGET, message: "t5", ...PA }, HEADER);
     assert.equal(parentOf(asyncPar), HEADER);
     const pulled = await pull.call("chat_with_agent", { agent_name: TARGET, message: "t5" }, HEADER);
@@ -349,6 +408,8 @@ describe("#3232 parent_execution_id leaves the MCP server (real transport)", () 
     const seq = await off.call("chat_with_agent", { agent_name: TARGET, message: "t5" }, HEADER);
     assert.equal(seq.rec?.route, "chat");
     assert.deepEqual(seq.rec?.body, { message: "t5" });
+    assertNoFields(seq.out, "sequential inline reply, default-armed (#3295: today's result, byte-identical)");
+    assert.deepEqual(seq.arms, [], "an inline reply is never armed");
   });
 
   it("T16: no typed id, NO header → nothing (an old agent image keeps opt-in); the same call typed forwards", async () => {
@@ -396,10 +457,11 @@ describe("#3232 parent_execution_id leaves the MCP server (real transport)", () 
     assert.equal(parentOf(plain), HEADER);
   });
 
-  it("T6: sequential /chat (pull OFF) never carries a parent; the same call parallel does", async () => {
+  it("T6: the sequential /chat BODY never carries a parent (typed or not); the same call parallel does", async () => {
     const seq = await off.call("chat_with_agent", { agent_name: TARGET, message: "t6", execution_id: TYPED }, HEADER);
     assert.equal(seq.rec?.route, "chat");
     assert.deepEqual(seq.rec?.body, { message: "t6" });
+    assert.deepEqual(seq.arms, []);
     const par = await off.call("chat_with_agent", { agent_name: TARGET, message: "t6", ...PA, execution_id: TYPED }, HEADER);
     assert.equal(parentOf(par), HEADER);
   });
@@ -515,29 +577,33 @@ describe("#3232 parent_execution_id leaves the MCP server (real transport)", () 
     assert.equal(parentOf(b), HEADER_2);
   });
 
-  it("T13a: typed id on sequential /chat → off/sequential_chat with the future-only note", async () => {
+  it("T13a: typed id on sequential /chat answered inline → off/answered_inline with the future-only note; nothing armed", async () => {
     const r = await off.call("chat_with_agent", { agent_name: TARGET, message: "t13a", execution_id: TYPED }, HEADER);
     assert.equal(r.out.response, "done");
     assert.equal(r.out.report_back, "off");
-    assert.equal(r.out.report_back_reason, "sequential_chat");
-    assert.equal(r.out.report_back_note, chatMod.REPORT_BACK_OFF_NOTES?.sequential_chat);
-    assert.match(r.out.report_back_note, /parallel=true, async=true/);
+    assert.equal(r.out.report_back_reason, "answered_inline");
+    assert.equal(r.out.report_back_note, chatMod.REPORT_BACK_OFF_NOTES?.answered_inline);
     assert.match(r.out.report_back_note, /Do not re-send this one/);
+    assert.deepEqual(r.arms, [], "an inline reply is never armed");
   });
 
-  it("T13b: queued_timeout and agent_busy keep the reason but never the note", async () => {
+  it("T13b: typed id on sequential /chat — a receipt arms and says requested; agent_busy says off/not_armed with no note", async () => {
     off.setMode("replay409");
     const timeout = await off.call("chat_with_agent", { agent_name: TARGET, message: "t13b", execution_id: TYPED }, HEADER);
     assert.equal(timeout.out.status, "queued_timeout");
-    assert.equal(timeout.out.report_back, "off");
-    assert.equal(timeout.out.report_back_reason, "sequential_chat");
+    assert.equal(timeout.out.report_back, "requested");
     assert.equal("report_back_note" in timeout.out, false);
+    assert.equal(timeout.arms.length, 1);
+    assert.equal(timeout.arms[0].executionId, "exec-child-replay");
+    assert.equal(timeout.arms[0].body.parent_execution_id, HEADER, "the header turn wins over the typed id here too");
 
     off.setMode("busy");
     const busy = await off.call("chat_with_agent", { agent_name: TARGET, message: "t13b", execution_id: TYPED }, HEADER);
     assert.equal(busy.out.status, "agent_busy");
-    assert.equal(busy.out.report_back_reason, "sequential_chat");
+    assert.equal(busy.out.report_back, "off");
+    assert.equal(busy.out.report_back_reason, "not_armed");
     assert.equal("report_back_note" in busy.out, false);
+    assert.deepEqual(busy.arms, []);
   });
 
   it("T13c: a typed id in a manual session → off/manual_session", async () => {
@@ -602,10 +668,127 @@ describe("#3232 parent_execution_id leaves the MCP server (real transport)", () 
   });
 });
 
+describe("#3295 a sequential /chat call that ends in a receipt is armed to report back (real transport)", () => {
+  let off: Harness;
+
+  before(async () => {
+    off = await boot({ pull: false });
+  });
+  after(async () => {
+    await off?.stop();
+  });
+
+  it("T21: default-armed receipt (409 in-flight replay) → one arm with the header turn, result requested + the default note", async () => {
+    for (const tool of ["chat_with_agent", DEDICATED] as const) {
+      const args = tool === DEDICATED ? { message: "t21" } : { agent_name: TARGET, message: "t21" };
+      const agent = tool === DEDICATED ? HELPER : TARGET;
+      off.setMode("replay409");
+      const r = await off.call(tool, args, HEADER);
+      assert.equal(r.out.status, "queued_timeout", tool);
+      assert.equal(r.rec?.route, "chat", tool);
+      assert.deepEqual(r.rec?.body, { message: "t21" }, `${tool}: the body still carries nothing`);
+      assert.equal(r.arms.length, 1, tool);
+      assert.equal(r.arms[0].agent, agent, tool);
+      assert.equal(r.arms[0].executionId, "exec-child-replay", tool);
+      assert.deepEqual(r.arms[0].body, { parent_execution_id: HEADER }, tool);
+      assert.equal(r.arms[0].sourceAgent, CALLER, `${tool}: the arm names the caller like the dispatch does`);
+      assert.equal(r.out.report_back, "requested", tool);
+      assert.equal(r.out.report_back_note, chatMod.REPORT_BACK_DEFAULT_NOTE, tool);
+      assert.equal("report_back_reason" in r.out, false, tool);
+    }
+  });
+
+  it("T22: the backend's own 504 is a receipt too — recovered by the lookup, then armed", async () => {
+    off.setMode("chat504");
+    const r = await off.call("chat_with_agent", { agent_name: TARGET, message: "t22" }, HEADER);
+    assert.equal(r.isError, false, r.text);
+    assert.equal(r.out.status, "queued_timeout");
+    assert.equal(r.out.execution_id, "exec-child-504");
+    assert.equal(r.arms.length, 1);
+    assert.equal(r.arms[0].executionId, "exec-child-504");
+    assert.equal(r.arms[0].body.parent_execution_id, HEADER);
+    assert.equal(r.out.report_back, "requested");
+  });
+
+  it("T23: the backend refuses the arm → off/not_armed, no note (a receipt never carries the remedy note)", async () => {
+    off.setMode("armRefused");
+    const r = await off.call("chat_with_agent", { agent_name: TARGET, message: "t23" }, HEADER);
+    assert.equal(r.out.status, "queued_timeout");
+    assert.equal(r.arms.length, 1);
+    assert.equal(r.out.report_back, "off");
+    assert.equal(r.out.report_back_reason, "not_armed");
+    assert.equal("report_back_note" in r.out, false);
+  });
+
+  it("T24: typed `manual`, a `manual` header, or no header → a receipt arms nothing and carries no fields", async () => {
+    for (const [args, header, label] of [
+      [{ agent_name: TARGET, message: "t24", execution_id: "manual" }, HEADER, "typed manual"],
+      [{ agent_name: TARGET, message: "t24" }, "manual", "manual header"],
+      [{ agent_name: TARGET, message: "t24" }, undefined, "no header (old agent image)"],
+    ] as const) {
+      off.setMode("replay409");
+      const r = await off.call("chat_with_agent", args, header);
+      assert.equal(r.out.status, "queued_timeout", label);
+      assert.deepEqual(r.arms, [], label);
+      assertNoFields(r.out, label);
+    }
+  });
+
+  it("T25: the receipt is today's receipt plus the fields — nothing else changes", async () => {
+    off.setMode("replay409");
+    const armed = await off.call("chat_with_agent", { agent_name: TARGET, message: "t25" }, HEADER);
+    off.setMode("replay409");
+    const optedOut = await off.call("chat_with_agent", { agent_name: TARGET, message: "t25", execution_id: "manual" }, HEADER);
+    assert.deepEqual(withoutFields(armed.out), optedOut.out);
+  });
+});
+
+describe("#3295 chatRouteFields (the outcome rule)", () => {
+  const dflt = (): chatMod.ReportBackDecision =>
+    chatMod.resolveReportBack({ route: "chat", typed: undefined, header: HEADER, isSelfTask: false, injectResult: false, enabled: true, caller: CALLER, target: TARGET });
+  const typed = (): chatMod.ReportBackDecision =>
+    chatMod.resolveReportBack({ route: "chat", typed: TYPED, header: HEADER, isSelfTask: false, injectResult: false, enabled: true, caller: CALLER, target: TARGET });
+
+  it("inline: default → nothing; typed → off/answered_inline with its note", () => {
+    assert.equal(chatMod.chatRouteFields(dflt(), "inline"), undefined);
+    assert.deepEqual(chatMod.chatRouteFields(typed(), "inline"), {
+      report_back: "off", report_back_reason: "answered_inline", report_back_note: chatMod.REPORT_BACK_OFF_NOTES.answered_inline,
+    });
+  });
+
+  it("receipt: armed or unknown keeps the decision's fields; an explicit refusal is off/not_armed", () => {
+    assert.deepEqual(chatMod.chatRouteFields(dflt(), "receipt", true), dflt().fields);
+    assert.deepEqual(chatMod.chatRouteFields(dflt(), "receipt", undefined), dflt().fields);
+    assert.deepEqual(chatMod.chatRouteFields(typed(), "receipt", true), { report_back: "requested" });
+    assert.deepEqual(chatMod.chatRouteFields(dflt(), "receipt", false), { report_back: "off", report_back_reason: "not_armed" });
+  });
+
+  it("busy: default → nothing; typed → off/not_armed", () => {
+    assert.equal(chatMod.chatRouteFields(dflt(), "busy"), undefined);
+    assert.equal(chatMod.chatRouteFields(typed(), "busy")?.report_back_reason, "not_armed");
+  });
+
+  it("a decision that already says off, or carries nothing, is passed through whatever the outcome", () => {
+    const off = chatMod.resolveReportBack({ route: "chat", typed: TYPED, header: "manual", isSelfTask: false, injectResult: false, enabled: true, caller: CALLER, target: TARGET });
+    for (const outcome of ["inline", "receipt", "busy"] as const) {
+      assert.equal(chatMod.chatRouteFields(off, outcome)?.report_back_reason, "manual_session", outcome);
+    }
+    const none = chatMod.resolveReportBack({ route: "chat", typed: "manual", header: HEADER, isSelfTask: false, injectResult: false, enabled: true, caller: CALLER, target: TARGET });
+    for (const outcome of ["inline", "receipt", "busy"] as const) {
+      assert.equal(chatMod.chatRouteFields(none, outcome, true), undefined, outcome);
+    }
+  });
+});
+
 describe("#3232 kill switch MCP_REPORT_BACK_ENABLED", () => {
-  it("T14: reportBackEnabled:false sends no parent anywhere; typed → off/disabled, default → no fields", async () => {
+  it("T14: reportBackEnabled:false sends no parent anywhere; typed → off/disabled, default → no fields; a sequential receipt arms nothing", async () => {
     const h = await boot({ pull: false, reportBackEnabled: false });
     try {
+      h.setMode("replay409");
+      const seq = await h.call("chat_with_agent", { agent_name: TARGET, message: "t14" }, HEADER);
+      assert.equal(seq.out.status, "queued_timeout");
+      assert.deepEqual(seq.arms, [], "#3295: the switch stops the receipt-time arm too");
+      assertNoFields(seq.out, "sequential receipt, switched off");
       for (const [tool, base] of [
         ["chat_with_agent", { agent_name: TARGET, message: "t14", ...PA }],
         [DEDICATED, { message: "t14", ...PA }],
@@ -702,7 +885,8 @@ describe("#3232 resolveReportBack (the rule, table-tested)", () => {
       log: ["route=pull", "arm=default"] },
     { name: "sync never defaults", in: { route: "task-sync", header: HEADER }, arm: "none",
       log: ["route=task-sync", "arm=none", "parent=none", "source=none", "report_back=n/a"] },
-    { name: "chat never defaults", in: { route: "chat", header: HEADER }, arm: "none", log: ["route=chat", "arm=none"] },
+    { name: "chat defaults (#3295; the parent goes out only on a receipt)", in: { route: "chat", header: HEADER }, arm: "default", parent: HEADER, report: "requested", note: "default",
+      log: ["route=chat", "arm=default", `parent=${HEADER}`] },
     { name: "no header, no default", in: { route: "task-async" }, arm: "none", log: ["caller_turn=none", "arm=none"] },
     { name: "manual header, no default", in: { route: "task-async", header: "manual" }, arm: "none", log: ["caller_turn=manual", "arm=none"] },
     { name: "typed manual opts out", in: { route: "task-async", typed: "manual", header: HEADER }, arm: "opt_out", log: ["arm=opt_out", "parent=none", "report_back=n/a"] },
@@ -719,13 +903,13 @@ describe("#3232 resolveReportBack (the rule, table-tested)", () => {
     { name: "typed equal to header is not overridden", in: { route: "task-async", typed: HEADER, header: HEADER }, arm: "typed", parent: HEADER, report: "requested", note: "none", log: ["overridden=false"] },
     { name: "sync typed", in: { route: "task-sync", typed: TYPED }, arm: "typed", parent: TYPED, report: "requested", note: "none", log: ["route=task-sync", "arm=typed"] },
     { name: "pull typed", in: { route: "pull", typed: TYPED }, arm: "typed", parent: TYPED, report: "requested", note: "none", log: ["route=pull"] },
-    { name: "chat typed", in: { route: "chat", typed: TYPED, header: HEADER }, arm: "typed", report: "off", reason: "sequential_chat", note: "off",
-      log: ["parent=none", "report_back=off:sequential_chat"] },
-    { name: "manual_session beats sequential_chat", in: { route: "chat", typed: TYPED, header: "manual" }, arm: "typed", report: "off", reason: "manual_session", note: "off", log: ["report_back=off:manual_session"] },
+    { name: "chat typed", in: { route: "chat", typed: TYPED, header: HEADER }, arm: "typed", parent: HEADER, report: "requested", note: "none",
+      log: [`parent=${HEADER}`, "source=header", "report_back=requested"] },
+    { name: "chat typed, manual header → manual_session", in: { route: "chat", typed: TYPED, header: "manual" }, arm: "typed", report: "off", reason: "manual_session", note: "off", log: ["report_back=off:manual_session"] },
     { name: "manual header drops a typed id", in: { route: "task-async", typed: TYPED, header: "manual" }, arm: "typed", report: "off", reason: "manual_session", note: "off", log: ["parent=none"] },
     { name: "malformed typed, no header", in: { route: "task-async", typed: PLACEHOLDER_ID }, arm: "typed", report: "off", reason: "invalid_execution_id", note: "off", log: ["report_back=off:invalid_execution_id"] },
     { name: "malformed typed, header supplies the turn", in: { route: "task-async", typed: PLACEHOLDER_ID, header: HEADER }, arm: "typed", parent: HEADER, report: "requested", note: "none", log: ["source=header"] },
-    { name: "invalid_execution_id beats sequential_chat", in: { route: "chat", typed: PLACEHOLDER_ID }, arm: "typed", report: "off", reason: "invalid_execution_id", note: "off", log: [] },
+    { name: "chat malformed typed, no header → invalid_execution_id", in: { route: "chat", typed: PLACEHOLDER_ID }, arm: "typed", report: "off", reason: "invalid_execution_id", note: "off", log: [] },
     { name: "disabled typed", in: { route: "task-async", typed: TYPED, header: HEADER, enabled: false }, arm: "typed", report: "off", reason: "disabled", note: "off", log: ["parent=none", "report_back=off:disabled"] },
     { name: "disabled beats manual_session", in: { route: "chat", typed: TYPED, header: "manual", enabled: false }, arm: "typed", report: "off", reason: "disabled", note: "off", log: [] },
     { name: "disabled default: no parent, no fields", in: { route: "task-async", header: HEADER, enabled: false }, arm: "default", log: ["arm=default", "parent=none", "report_back=n/a"] },
@@ -764,7 +948,7 @@ describe("#3232 resolveReportBack (the rule, table-tested)", () => {
   it("every off note is future-only and never asks for this call again", () => {
     const notes = chatMod.REPORT_BACK_OFF_NOTES;
     assert.ok(notes, "REPORT_BACK_OFF_NOTES must be exported from chat.ts");
-    for (const reason of ["disabled", "manual_session", "invalid_execution_id", "sequential_chat"] as const) {
+    for (const reason of ["disabled", "manual_session", "invalid_execution_id", "answered_inline", "not_armed"] as const) {
       assert.match(notes[reason], /Do not re-send this one\.$/, reason);
     }
   });
@@ -805,28 +989,28 @@ describe("#3232 resolveReportBack over the full input product (independent oracl
     const headerKind = i.header === undefined ? "absent" : i.header === "manual" ? "manual" : "turn";
 
     // Route-table columns: typed `manual` is the opt-out; any other non-empty typed value
-    // is an opt-in; with nothing typed, only an async dispatch (parallel+async or
-    // pull-routed) from a real turn defaults on, unless a self-task already routes
-    // its result into its own chat (inject_result).
-    const asyncDispatch = i.route === "task-async" || i.route === "pull";
+    // is an opt-in; with nothing typed, an async dispatch (parallel+async or
+    // pull-routed) or a sequential /chat (#3295 — armed only on a receipt) from a
+    // real turn defaults on, unless a self-task already routes its result into
+    // its own chat (inject_result). Sync parallel never defaults.
+    const defaultsOn = i.route === "task-async" || i.route === "pull" || i.route === "chat";
     const ownChatDestination = i.isSelfTask && i.injectResult;
     let arm: Expect["arm"];
     if (typedKind === "manual") arm = "opt_out";
     else if (typedKind !== "nothing") arm = "typed";
-    else if (asyncDispatch && headerKind === "turn" && !ownChatDestination) arm = "default";
+    else if (defaultsOn && headerKind === "turn" && !ownChatDestination) arm = "default";
     else arm = "none";
 
-    // 2. Parent per route. Sequential /chat carries none; the kill switch sends
-    // none anywhere. A typed opt-in follows the header (Q3: a real turn wins; a
-    // `manual` header means no execution); only with no header does the typed id
-    // itself go, and only if it is well-formed.
+    // 2. Parent. The kill switch sends none anywhere. A typed opt-in follows the
+    // header (Q3: a real turn wins; a `manual` header means no execution); only
+    // with no header does the typed id itself go, and only if it is well-formed.
+    // (On the chat route the parent is what the receipt-time arm sends.)
     let parent: string | undefined;
     let source: "header" | "typed" | "none" = "none";
-    const routeCarriesParent = i.route !== "chat";
-    if (i.enabled && routeCarriesParent && arm === "default") {
+    if (i.enabled && arm === "default") {
       parent = i.header;
       source = "header";
-    } else if (i.enabled && routeCarriesParent && arm === "typed") {
+    } else if (i.enabled && arm === "typed") {
       if (headerKind === "turn") {
         parent = i.header;
         source = "header";
@@ -845,12 +1029,12 @@ describe("#3232 resolveReportBack over the full input product (independent oracl
     } else if (arm === "typed" && parent !== undefined) {
       fields = { report_back: "requested" };
     } else if (arm === "typed") {
-      // 4. Reason precedence: disabled > manual_session > invalid_execution_id > sequential_chat.
+      // 4. Reason precedence: disabled > manual_session > invalid_execution_id.
+      // (`answered_inline` / `not_armed` are outcome reasons — chatRouteFields, not here.)
       const candidates: Array<[boolean, string]> = [
         [!i.enabled, "disabled"],
         [headerKind === "manual", "manual_session"],
         [headerKind === "absent" && typedKind === "malformed", "invalid_execution_id"],
-        [i.route === "chat", "sequential_chat"],
       ];
       const reason = candidates.find(([applies]) => applies)?.[1];
       if (reason === undefined) throw new Error(`oracle: typed call with no parent and no reason: ${JSON.stringify(i)}`);
