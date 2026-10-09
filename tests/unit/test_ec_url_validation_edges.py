@@ -34,9 +34,10 @@ name goes through the `idna` codec first (which is where CPython raises
 `UnicodeError` on an empty or over-long label, BEFORE any network call).
 
 REAL BUGS (strict xfail; each reason names its GitHub issue):
-* D-xfail — `reject_embedded_credentials("//tok@github.com/o/r")` does not
-  raise, and `validate_skills_library_url` returns it verbatim, so the token is
-  persisted to `skill_sources.url` and to the audit row.
+* D3 — FIXED (#3323): `reject_embedded_credentials("//tok@github.com/o/r")`
+  did not raise, and `validate_skills_library_url` returns it verbatim, so the
+  token was persisted to `skill_sources.url` and to the audit row. Now a plain
+  regression test.
 * C-xfail — a host the `idna` codec refuses (`a..b`, a 64-char label) escapes
   `_validate_public_https_url` as a bare `UnicodeError`, not a
   `PublicUrlRefusal` carrying a `kind`.
@@ -570,15 +571,11 @@ def test_D2_an_at_outside_the_authority_is_not_a_credential(url):
         pytest.param("//tok@github.com/o/r", id="D3-protocol-relative"),
         pytest.param("  //tok@github.com/o/r", id="D3-protocol-relative-leading-space"),
         pytest.param("//:pw@github.com/o/r", id="D3-protocol-relative-password"),
+        pytest.param("//\ttok@github.com/o/r", id="D3-protocol-relative-tab-in-userinfo"),
+        pytest.param("//TOK@GITHUB.COM/o/r", id="D3-protocol-relative-uppercase"),
+        pytest.param("//a@b@github.com/o/r", id="D3-protocol-relative-double-at"),
+        pytest.param("//tok@[oops/x", id="D3-protocol-relative-unparseable-fallback"),
     ],
-)
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: reject_embedded_credentials misses protocol-relative userinfo "
-        "(`//tok@github.com/o/r`), which validate_skills_library_url then returns "
-        "verbatim, so the token is persisted — #3323"
-    ),
 )
 def test_D3_protocol_relative_userinfo_is_refused(url):
     """`reject_embedded_credentials` prefixes `https://` whenever `://` is absent,
@@ -595,6 +592,26 @@ def test_D3_protocol_relative_userinfo_is_refused(url):
     """
     with pytest.raises(uv.EmbeddedCredentialError):
         uv.reject_embedded_credentials(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        pytest.param("//github.com/o/r", id="D3-protocol-relative-no-userinfo"),
+        pytest.param("//[oops/x", id="D3-protocol-relative-unparseable-no-userinfo"),
+        pytest.param("//@github.com/o/r", id="D3-protocol-relative-empty-userinfo"),
+        pytest.param("///tok@github.com/o/r", id="D3-triple-slash-scope-boundary"),
+    ],
+)
+def test_D3_protocol_relative_without_a_credential_is_not_refused(url):
+    """The #3323 fix must not over-reach. A `//host` with no userinfo passes; an
+    unparseable `//[oops` keeps passing rather than becoming a NEW bare
+    ValueError (today's route would 500 on it — the #3322 class, which stays
+    owned by D4 for every non-`//` input); empty userinfo carries no secret and
+    is not refused, matching the `https://@host` form. `///tok@…` has an empty
+    authority — `strip_url_credentials` agrees it carries none — and is the
+    deliberate scope boundary of this fix."""
+    uv.reject_embedded_credentials(url)
 
 
 @pytest.mark.parametrize(
