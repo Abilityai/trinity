@@ -23,12 +23,13 @@
           >{{ syncBadge.label }}</BaseBadge>
           <!-- trinity-enterprise#611 (#627 AC6): a re-ask and the expired ask it
                re-raises name each other — one rule
-               (utils/operatorQueue.js::queueReaskBadges), one fact per badge. -->
+               (utils/operatorQueue.js::queueReaskBadges), one fact per badge. #3247:
+               a replaced ask and its successor name each other the same way. -->
           <BaseBadge
             v-for="b in reaskBadges"
             :key="b.key"
             :title="b.title"
-            :data-testid="b.key === 'reask-of' ? 'queue-reask-of' : 'queue-reasked-as'"
+            :data-testid="`queue-${b.key}`"
           >{{ b.prefix }} <span v-if="b.id" class="min-w-0 max-w-[12rem] truncate font-mono" :title="b.id" data-testid="queue-reask-id">{{ b.id }}</span></BaseBadge>
         </div>
 
@@ -107,8 +108,11 @@ const ending = computed(() => queueEnding(props.item))   // trinity-enterprise#6
 const endingText = computed(() => queueEndingText(ending.value))
 // #3246: a platform ending's reason is a token the ending text already words
 // (`queueEndingText`), never printed raw as though an operator wrote it.
+// #3247: likewise an ending the agent authored carries a closed token
+// (`replaced`), not a person's words.
 const note = computed(() => props.item.response_text
-  || (ending.value && ending.value.who === 'the platform' ? '' : props.item.disposition_reason) || '')
+  || ((ending.value && ending.value.who === 'the platform') || props.item.disposed_by === 'agent'
+    ? '' : props.item.disposition_reason) || '')
 const endedAtAbsolute = computed(() => (ending.value?.when ? formatLocalDateTime(ending.value.when) : ''))
 // An answer's "who" rides beside its time; a cancel / expiry names it in its label.
 const endingMeta = computed(() => {
