@@ -5326,6 +5326,18 @@
         "unit"
       ],
       "description": "#3406: the backend half of the contract the browser's 401 verdict reads. get_current_user rejects a dead token and OAuth2PasswordBearer rejects a missing one WITH `WWW-Authenticate: Bearer`; the five public-link session routes (intro, history, session clear, chat, terminate) answer an expired or missing visitor session with a bare 401. Handlers driven directly with the link check, rate limit and session lookup stubbed. No Docker."
+    },
+    {
+      "file": "unit/test_3443_public_chat_history_lookup.py",
+      "feature": "#3443",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "database",
+        "public-links",
+        "unit"
+      ],
+      "description": "#3443: an anonymous public-chat session finds its own row. get_session_by_identifier (behind GET /api/public/history and DELETE /api/public/session) matches the identifier verbatim, as get_or_create_session stores it, so a mixed-case anonymous token restores its history after a reload; two tokens differing only in case stay separate sessions; only an email row is reachable through its lowercased form. PublicChatOperations driven against an ephemeral DB (db_harness). No Docker."
     }
   ]
 }
