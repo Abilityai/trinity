@@ -5328,6 +5328,19 @@
       "description": "#3406: the backend half of the contract the browser's 401 verdict reads. get_current_user rejects a dead token and OAuth2PasswordBearer rejects a missing one WITH `WWW-Authenticate: Bearer`; the five public-link session routes (intro, history, session clear, chat, terminate) answer an expired or missing visitor session with a bare 401. Handlers driven directly with the link check, rate limit and session lookup stubbed. No Docker."
     },
     {
+      "file": "unit/test_3455_email_whitelist_validation.py",
+      "feature": "#3455",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "settings",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "#3455 + #3456: the email whitelist validates what it stores and can remove whatever it holds. Driven through the real composed settings router with the auth dependency overridden and the table replaced by an in-memory stand-in. POST refuses a@, @b.com, a 10 000-character string, whitespace and control characters with a 422 whose detail is ONE named sentence (never Pydantic's array, never the echoed value, never a 500 for a malformed or non-JSON body), and stores a valid address trimmed and lower-cased; the admin gate still answers first. DELETE removes a stored value containing a slash when sent URL-encoded (the {email:path} converter), including rows that predate validation, still 404s an absent value, keeps its admin gate, and claims no sibling settings route at any method (Invariant #4). No Docker."
+    },
+    {
       "file": "unit/test_3443_public_chat_history_lookup.py",
       "feature": "#3443",
       "added": "2026-10-09",
