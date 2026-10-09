@@ -73,7 +73,7 @@
               <span v-if="awaitingData" class="flex h-4 items-center" aria-hidden="true">
                 <span class="h-2.5 w-48 max-w-full rounded bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"></span>
               </span>
-              <span v-else class="block truncate" :title="facts[row.key].detail">{{ facts[row.key].detail }}</span>
+              <span v-else class="block break-words">{{ facts[row.key].detail }}</span>
             </dd>
           </div>
         </dl>
