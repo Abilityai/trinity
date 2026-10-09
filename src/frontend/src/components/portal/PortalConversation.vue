@@ -360,6 +360,7 @@
               <div
                 v-if="t.role === 'user'"
                 class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-2 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white"
+                :class="BUBBLE_WRAP_CLASS"
               >{{ t.content }}</div>
               <div v-else class="max-w-[85%]">
                 <PortalAgentBubble :content="t.content" />
@@ -402,7 +403,7 @@
             />
             <div
               class="rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap"
-              :class="item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white'"
+              :class="[BUBBLE_WRAP_CLASS, item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white']"
             >{{ item.message.content }}</div>
             <!-- ent#551: a task the agent ran during a voice call lands as an
                  ordinary turn (it was not spoken, so it is not in the block);
@@ -624,6 +625,17 @@
             <span v-else-if="attachmentState(f) === 'failed'" class="max-w-[16rem] truncate opacity-90">· {{ f.error }}</span>
           </span>
         </div>
+        <!-- #3460: the server bounds a message, so the composer says so FIRST —
+             a count for the last stretch, then a named refusal with Send held.
+             Before this the limit was first mentioned by a 422, after the words
+             had left the composer. One line, mutually exclusive ink arms. -->
+        <p
+          v-if="messageLimit.near"
+          class="mb-2 text-xs tabular-nums"
+          :class="messageLimit.over ? 'text-status-danger-700 dark:text-status-danger-400' : META_INK_CLASS"
+          :role="messageLimit.over ? 'alert' : undefined"
+          data-testid="portal-message-limit"
+        >{{ messageLimit.message }}</p>
         <!-- ent#534: the composer is visible but inert while a call is on —
              the orb has the conversation; typing resumes the moment it ends. -->
         <!-- ent#547: the inert class moved off the <form> and onto the WRAPPER
@@ -868,8 +880,8 @@
                     v-else
                     type="submit"
                     class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 disabled:hover:bg-action-primary-600 transition"
-                    :disabled="sending || !input.trim() || voiceCallActive"
-                    title="Send"
+                    :disabled="sending || !input.trim() || voiceCallActive || messageLimit.over"
+                    :title="messageLimit.over ? messageLimit.message : 'Send'"
                   >
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
                   </button>
@@ -892,6 +904,8 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, useId } fro
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { agentDisplayName } from '@/utils/agentName'
 import PortalAgentBubble from './PortalAgentBubble.vue'
+import { BUBBLE_WRAP_CLASS } from './portalBubble'
+import { messageLimitState, messageRefusalReason } from './portalMessageLimit'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
 import { askAboutItPrefill, childrenForChat, clockRestartsAt, itemById, pendingTurnOutcome, previewTitle } from './portalWork'
@@ -1131,6 +1145,8 @@ const draftKey = computed(() => draftKeyFor({
 }))
 const { restored: draftRestored } = useComposerDraft({ key: draftKey, input })
 const sending = ref(false)
+// #3460: measured on what `send()` sends — the trimmed text.
+const messageLimit = computed(() => messageLimitState(input.value.trim()))
 // ent#523 — Reset, offered on Main only.
 const resetting = ref(false)
 // ent#523 AC 10 — the same pure rule the sidebar chip and the details header
@@ -2181,6 +2197,12 @@ async function deliver(text, { replyId = null, attachments = null } = {}) {
     store.markUploadsCarried(props.agent?.name)
     return true
   } catch (err) {
+    // #3460: a validation refusal (a 422 carrying Pydantic's list) is said in
+    // words, never as a status code. It is also the one failure a Retry cannot
+    // fix — the same words earn the same answer — so the draft goes back to
+    // the composer to be edited instead (`settleDelivery`).
+    const refused = messageRefusalReason(err)
+    if (refused) return { error: refused, retryable: false, restoreText: text }
     return { error: deliveryFailureReason(err) }
   } finally {
     sending.value = false
@@ -2475,6 +2497,10 @@ const settlingUploads = ref(false)
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value || escalatingNow.value || settlingUploads.value) return
+  // #3460: over the server's limit, the message stays where it can be edited.
+  // Checked HERE as well as on the button — Enter reaches `send()` directly —
+  // and before anything below clears the composer.
+  if (messageLimit.value.over) return
   // The composer is about to be cleared programmatically, which fires no input
   // event — so the popup and its Esc sentinel are cleared here rather than left
   // armed against a message that no longer exists.
@@ -2641,6 +2667,12 @@ function settleDelivery(index, text, res) {
   // AFTER `markFailed` deliberately: `turnCancel.spec.js` pins the adjacency of
   // the cancel check to `markFailed`, and that rule is the more important one.
   clearModelChoiceOnFailure(res)
+  // #3460: a message the server refused as invalid is handed back to edit.
+  // `restoreDraft` prepends, so anything typed meanwhile is kept.
+  if (res?.restoreText) {
+    input.value = restoreDraft(res.restoreText, input.value)
+    autoGrowAfterUpdate()
+  }
   terminalOutcome.value = { category: res?.category || (res?.lost ? 'lost' : 'failed'),
                             message: res?.error || 'Something went wrong.',
                             retryable: res?.retryable ?? !res?.lost, execution_id: lastDeliveredExecutionId.value }
