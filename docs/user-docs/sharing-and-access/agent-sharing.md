@@ -1,23 +1,23 @@
 # Agent Sharing & Access
 
-Two owner-only tabs on the Agent Detail page control who can reach an agent: the **Access** tab manages *Trinity operators* (platform users — your teammates), and the **Sharing** tab manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
+Two owner-only tabs on the Agent Detail page control who can reach an agent: the **Access** tab manages the *people the agent is shared with* (they use it in the Workspace), and the **Sharing** tab manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
 
 ## Concepts
 
-- **Operator** — A Trinity platform user. Operators log into the Trinity UI and get interact-level access to agents shared with them.
+- **Operator** — A Trinity platform account with role `operator` or above. Operators log into the Trinity UI and get interact-level access to agents shared with them. A platform account with role `user` works in the [Workspace](workspace.md) only — see [Roles and Permissions](../getting-started/roles-and-permissions.md).
 - **External client** — Someone without a Trinity account who reaches the agent through a channel (Slack, Telegram, WhatsApp, a phone call) or a public link. Identified by verified email.
 - **Workspace roster** — Every email an agent is shared with can sign in to the [Workspace](workspace.md) and chat with it there. Sharing an agent to an email *is* that person's Workspace account; unsharing removes the agent from their roster.
 - **Access policy** — The per-agent Restricted/Open switch controlling whether unknown verified users may chat. See [Access Control](access-control.md) for the cross-channel verification model.
 
 ## Access Tab — Trinity Operators
 
-The **Access** tab lists platform users with access to this agent.
+The **Access** tab lists the people this agent is shared with.
 
 1. Open the agent detail page and click the **Access** tab (owner only).
-2. Enter a teammate's email and click **Add operator**. The email is also added to the platform login whitelist.
+2. Enter an email and click **Add person**. The person can sign in to the [Workspace](workspace.md) with a code emailed to them. Sharing does **not** create a platform account or add the email to the login whitelist; whether someone also gets the operator UI is their platform role, which an admin sets in **Settings → Access**.
 3. Each row shows a status badge:
    - **Active** — the email resolved to an existing Trinity account (shows username, role, and last-active time).
-   - **Pending** — no account yet ("Invited — no account yet"); the entry activates automatically once the person logs in for the first time.
+   - **Pending** — no platform account ("No platform account — uses the Workspace"). The row turns Active if an admin gives the person an account and they sign in.
 4. Each operator row also carries a **proactive-messaging toggle** — "allow this operator to receive proactive DMs from the agent." It is off by default; turn it on per operator to let the agent message that person unprompted. This is a **per-recipient** DM permission (`PUT /api/agents/{name}/shares/proactive`, body `{email, allow_proactive}`).
 5. Click **Remove** on a row to revoke access.
 

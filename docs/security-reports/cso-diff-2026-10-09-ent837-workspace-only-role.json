@@ -1,0 +1,195 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-09",
+  "mode": "daily",
+  "scope": "diff",
+  "base": "origin/dev",
+  "issue": "abilityai/trinity-enterprise#837",
+  "phases_run": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_skipped": {
+    "3": "no dependency change",
+    "4": "no workflow changed",
+    "5": "no Dockerfile or compose change"
+  },
+  "stack_cve_quicklist": [
+    {
+      "component": "Starlette (BadHost CVE-2026-48710)",
+      "verdict": "not exposed by the diff: the new matcher reads scope['path']; @workspace_route reads scope['route']"
+    },
+    {
+      "component": "other rows",
+      "verdict": "not in diff scope (no pin changed)"
+    }
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_auth": [
+      "get_current_user gains the operator floor",
+      "11 routes marked @workspace_route",
+      "4 Workspace doors on resolve_platform_user_unfloored",
+      "/ws/events and the agent terminal refuse the rung",
+      "/ws kind allowlist and field projection",
+      "sharing and access-request approval stop writing the login whitelist"
+    ],
+    "new_mcp_tools": 0,
+    "agent_context_ingress": "none new"
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "high",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "vuln-disclosure-public-text",
+      "owasp_2025": "A02",
+      "asi": null,
+      "llm": null,
+      "title": "Added passages describe a privately tracked, unfixed weakness",
+      "files": [
+        "docs/memory/architecture/security.md",
+        "docs/memory/feature-flows/workspace-only-role.md",
+        "tests/unit/test_837_workspace_route_census.py"
+      ],
+      "exploit_scenario": "A reader of the public PR history learns how to reach the weakness before it is fixed.",
+      "resolution": "fixed: reworded; the unpushed branch collapsed to one commit so the wording never reached public history",
+      "verifier": "independent agent (the underlying weakness confirmed; detail kept private)"
+    },
+    {
+      "id": 2,
+      "severity": "medium",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "authz-agent-confinement",
+      "owasp_2025": "A01",
+      "asi": "ASI03",
+      "llm": null,
+      "title": "Rooms door admitted an agent of a Workspace-only owner",
+      "files": [
+        "src/backend/shared_sessions/router.py"
+      ],
+      "function": "get_room_principal",
+      "exploit_scenario": "An agent whose owner was lowered to `user` creates a room with a sibling agent its owner can reach and wakes it by mentioning it, although POST /api/agents/{sibling}/chat answers 403 workspace_only.",
+      "resolution": "fixed: the door refuses `agent_name` + Workspace-only owner with 403 workspace_only; room wakes run in-process",
+      "tests": [
+        "tests/unit/test_837_workspace_only_floor.py::TestTheWorkspaceDoors::test_the_room_principal_refuses_an_agent_of_a_user_owner"
+      ],
+      "verifier": "independent agent"
+    },
+    {
+      "id": 3,
+      "severity": "low",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "info-disclosure-ws-payload",
+      "owasp_2025": "A01",
+      "asi": "ASI07",
+      "llm": "LLM02",
+      "title": "/ws kind allowlist left full payloads (prompt/reply previews, cost, session ids)",
+      "files": [
+        "src/backend/services/event_bus.py",
+        "src/backend/services/ws_identity_service.py"
+      ],
+      "exploit_scenario": "A member with one share mints a /ws ticket and reads the first 100 characters of every prompt on the shared agent.",
+      "resolution": "fixed: allowed_fields projects each delivered copy to type/event/agent_name/activity_state + _eid on fan-out and replay (payload itself predates the branch)",
+      "tests": [
+        "tests/unit/test_837_ws_workspace_event_kinds.py::test_live_fanout_cuts_a_members_payload_to_the_fields_the_workspace_reads",
+        "tests/unit/test_837_ws_workspace_event_kinds.py::test_reconnect_replay_cuts_the_payload_the_same_way"
+      ],
+      "verifier": "independent agent (PARTIAL: mechanism confirmed, not a regression)"
+    },
+    {
+      "id": 4,
+      "severity": "low",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "authz-route-binding",
+      "owasp_2025": "A01",
+      "asi": "ASI03",
+      "llm": null,
+      "title": "Self-route matcher bound the name from the raw path, not the matched route",
+      "files": [
+        "src/backend/dependencies.py"
+      ],
+      "function": "_is_own_runtime_route",
+      "exploit_scenario": "An agent named `slots` whose creator was lowered to `user` reads GET /api/agents/slots (a static, fleet-wide route registered before /{agent_name}).",
+      "resolution": "fixed: the bound name must be a path parameter of the matched route (closes the floor and the ghost-agent fence alike)",
+      "tests": [
+        "tests/unit/test_837_workspace_only_floor.py::TestAgentNeverExceedsItsOwner::test_a_static_route_that_spells_the_agents_name_is_not_its_own",
+        "tests/unit/test_69_ephemeral_agents.py::test_a_static_route_that_spells_the_ghosts_name_is_not_its_own"
+      ],
+      "verifier": "independent agent"
+    },
+    {
+      "id": 5,
+      "severity": "low",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "client-navigation-integrity",
+      "owasp_2025": "A06",
+      "asi": "ASI09",
+      "llm": null,
+      "title": "SPA moved the tab on a 403 workspace_only body without checking the role",
+      "files": [
+        "src/frontend/src/utils/workspaceOnly.js",
+        "src/frontend/src/main.js"
+      ],
+      "function": "reactToWorkspaceOnly",
+      "exploit_scenario": "A compromised agent answers a proxied file delete with that 403 body; an operator's tab moves to /workspace?agent=<name>.",
+      "resolution": "fixed: the reaction awaits the profile re-read and moves the tab only when the re-read role is Workspace-only",
+      "tests": [
+        "src/frontend/tests/unit/workspaceOnly.spec.js"
+      ],
+      "verifier": "sequential (in-context reading of the reviewer's file:line evidence)"
+    }
+  ],
+  "hypotheses": [],
+  "coverage_gaps": [],
+  "checks": {
+    "secrets_in_diff": "none",
+    "invisible_unicode": "none (all changed files)",
+    "v_html_innerHTML": "none added",
+    "enterprise_docs_guard": "no hit",
+    "guards": "test_293, test_2996, test_1310, test_186 green",
+    "open_redirect": "held (34 crafted values x 4 roles)",
+    "whitelist_default_role": "admin-only, validated, default user",
+    "keys_on_marks": "refused (interactive JWT only)",
+    "floor_failure_direction": "closed; stated in the comment above the floor"
+  },
+  "supply_chain_summary": {
+    "scanner": "n/a: no dependency change in diff"
+  },
+  "filter_stats": {
+    "candidates": 10,
+    "withdrawn": 1,
+    "below_gate": 1,
+    "out_of_scope_pre_existing": 7,
+    "reported": 5
+  },
+  "totals": {
+    "critical": 0,
+    "high": 1,
+    "medium": 1,
+    "low": 3
+  },
+  "out_of_scope": "7 pre-existing observations routed for triage; security-class ones to the private tracker (not described here)",
+  "trend": "first diff run for this issue",
+  "counts_as_full_run": false
+}

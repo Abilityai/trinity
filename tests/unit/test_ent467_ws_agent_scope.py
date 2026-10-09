@@ -384,16 +384,20 @@ def test_a_non_admin_without_an_email_is_resolved_with_an_empty_roster(fake_db):
     is keyed on it, so this user can access no agent. The empty set is the
     exact answer, and the frontend never retries a 4001 — refusing would leave
     a legacy row permanently dark instead of merely agent-less."""
-    fake_db(user={"role": "user", "email": ""}, agents=["should-not-be-read"])
+    # `operator`: any non-admin rung with no kind filter. The Workspace-only
+    # `user` is covered in test_837_ws_workspace_event_kinds.py.
+    fake_db(user={"role": "operator", "email": ""}, agents=["should-not-be-read"])
     assert resolve_ws_identity("someone") == {
         "email": "", "is_admin": False, "accessible_agents": [],
+        "allowed_types": None, "allowed_fields": None,
     }
 
 
 def test_a_non_admin_gets_only_its_accessible_agents(fake_db):
-    fake_db(user={"role": "user", "email": "u@e.com"}, agents=["mine"])
+    fake_db(user={"role": "operator", "email": "u@e.com"}, agents=["mine"])
     identity = resolve_ws_identity("someone")
-    assert identity == {"email": "u@e.com", "is_admin": False, "accessible_agents": ["mine"]}
+    assert identity == {"email": "u@e.com", "is_admin": False, "accessible_agents": ["mine"],
+                        "allowed_types": None, "allowed_fields": None}
 
 
 def test_an_admin_is_flagged_and_carries_no_roster(fake_db):
@@ -425,8 +429,13 @@ def test_connect_defaults_are_fail_closed():
         n for n in ast.walk(tree)
         if isinstance(n, ast.AsyncFunctionDef) and n.name == "connect"
     )
-    assert [a.arg for a in fn.args.kwonlyargs] == ["email", "is_admin", "accessible_agents"]
-    assert [getattr(d, "value", "sentinel") for d in fn.args.kw_defaults] == ["", False, None]
+    assert [a.arg for a in fn.args.kwonlyargs] == [
+        "email", "is_admin", "accessible_agents", "allowed_types", "allowed_fields",
+    ]
+    # `allowed_types` / `allowed_fields` (#837): the empty set — nothing usable.
+    assert [ast.unparse(d) for d in fn.args.kw_defaults] == [
+        "''", "False", "None", "frozenset()", "frozenset()",
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -131,6 +131,7 @@
           :current-session-id="activeSessionId"
           :current-room-id="activeRoomIdFromRoute"
           :is-platform-session="store.isPlatformSession"
+          :workspace-only="workspaceOnly"
           :projects-available="store.projectsAvailable"
           :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
@@ -180,6 +181,7 @@
             :current-session-id="activeSessionId"
             :current-room-id="activeRoomIdFromRoute"
             :is-platform-session="store.isPlatformSession"
+            :workspace-only="workspaceOnly"
             :projects-available="store.projectsAvailable"
             :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
@@ -363,7 +365,7 @@
           :threads-loaded="threadsLoaded"
           :threads-failed="store.sessionsFailed || previewsFailed"
           :labels="inboxAgentLabels"
-          :is-platform="store.isPlatformSession"
+          :is-platform="store.isPlatformSession && !workspaceOnly"
           :mark-read="markRead"
           :rail-allowance="inboxRailAllowance"
           :canvas-count="inboxCanvases"
@@ -574,7 +576,7 @@
                The two audiences need different ones: a signed-in user can go
                make an agent, an external client can only ask the person who
                invited them. -->
-          <template v-else-if="store.isPlatformSession">
+          <template v-else-if="store.isPlatformSession && !workspaceOnly">
             <p :class="STAGE_TITLE">No agents here yet</p>
             <p :class="STAGE_BODY">
               Agents you own, and agents shared with you, appear here.
@@ -585,7 +587,7 @@
             <p :class="STAGE_TITLE">No agents shared with you yet</p>
             <p :class="STAGE_BODY">
               Ask whoever invited you to share an agent with
-              <span class="font-medium">{{ store.clientEmail || 'your email' }}</span>.
+              <span class="font-medium">{{ store.clientEmail || authStore.user?.email || 'your email' }}</span>.
             </p>
           </template>
           <button class="sm:hidden mt-4 text-sm text-action-primary-600" @click="mobileNav = true">Open menu</button>
@@ -894,6 +896,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick
 import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
+import { isWorkspaceOnlyRole } from '@/utils/workspaceOnly'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
 import { safeStorage } from '@/utils/safeStorage'
@@ -997,6 +1000,9 @@ import {
 
 const store = useClientPortalStore()
 const authStore = useAuthStore()
+// trinity-enterprise#837 — a `user` works in the Workspace only: the next step
+// on an empty roster is the one an external client gets, not "Go to your agents".
+const workspaceOnly = computed(() => isWorkspaceOnlyRole(authStore.user?.role))
 // trinity-enterprise#657. Declared with its siblings rather than beside its
 // first reader (`decorate`, ~900 lines down): `onMainReset` reads it too, and a
 // `const` used above its declaration is a TDZ crash the moment any caller

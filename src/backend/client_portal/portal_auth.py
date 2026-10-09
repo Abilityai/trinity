@@ -27,11 +27,11 @@ from fastapi import Depends, HTTPException, Request, Response
 from dependencies import (
     oauth2_scheme,
     decode_portal_session,
-    get_current_user,
     is_person_principal,
     portal_session_needs_rotation,
     reject_agent_principal,
     renew_portal_session,
+    resolve_platform_user_unfloored,
 )
 
 logger = logging.getLogger(__name__)
@@ -150,8 +150,9 @@ async def get_portal_principal(
         return PortalPrincipal(email, False)
 
     # Otherwise a platform principal (operator preview / signed-in user) →
-    # resolve their email.
-    user = await get_current_user(request, token)  # raises 401 if the token is invalid
+    # resolve their email. The Workspace is where a Workspace-only member
+    # belongs, so this door skips the operator floor (ent#837).
+    user = await resolve_platform_user_unfloored(request, token)  # raises 401 if the token is invalid
 
     # #2198 — the Workspace is HUMAN-only for platform principals. An
     # agent-scoped MCP key resolves to its OWNER carrying the owner's role

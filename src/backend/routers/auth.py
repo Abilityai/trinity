@@ -26,6 +26,7 @@ from dependencies import (
     authenticate_user,
     create_access_token,
     get_current_user,
+    workspace_route,
     is_token_revoked,
     oauth2_scheme,
     revoke_token_jti,
@@ -492,6 +493,7 @@ async def validate_token(request: Request):
 
 
 @router.post("/api/auth/logout")
+@workspace_route("signing out of the Workspace ends the platform session too (#2258)")
 async def logout(
     current_user: User = Depends(get_current_user),
     token: str = Depends(oauth2_scheme),
@@ -651,8 +653,9 @@ async def verify_email_login_code(request: Request):
     # This narrows nothing legitimate: codes obtained through the web flow above
     # already passed this exact check at mint time, channel users redeem in
     # their own channel, and every account that can legitimately email-login is
-    # allow-listed by construction (sharing, access-request approval, and the
-    # admin allow-list UI are the only ways such an account comes to exist).
+    # allow-listed by construction (an admin adds it in the allow-list UI; rows
+    # that sharing and access-request approval wrote before trinity-enterprise#837
+    # remain, and neither writes one any more).
     #
     # Fails into the SAME branch as a bad code — identical status, message,
     # audit row and rate-limit accounting — so this is not an oracle for

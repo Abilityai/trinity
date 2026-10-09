@@ -254,7 +254,7 @@
              depends on who is looking — a platform user can go make an agent,
              an external client can only ask whoever invited them. -->
         <div v-if="!roster.length && !loadingRoster" class="px-2 py-3 text-xs text-gray-500 dark:text-gray-400">
-          <template v-if="isPlatformSession">
+          <template v-if="isPlatformSession && !workspaceOnly">
             No agents yet.
             <a href="/" class="text-action-primary-600 hover:underline">Create one →</a>
           </template>
@@ -458,6 +458,9 @@ const props = defineProps({
   // active row class, the auto-expand below, and `visibleAgentRows`' `keep`.
   activeAgentName: { type: String, default: null },
   isPlatformSession: { type: Boolean, default: false },
+  // trinity-enterprise#837: a `user` cannot make an agent, so the empty roster
+  // asks for a share instead of pointing at the operator UI.
+  workspaceOnly: { type: Boolean, default: false },
   // ent#661 — the roster's capability, and whether a Projects page is on screen.
   projectsAvailable: { type: Boolean, default: false },
   projectsActive: { type: Boolean, default: false },

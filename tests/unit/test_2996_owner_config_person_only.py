@@ -118,7 +118,7 @@ def world(db_backend, monkeypatch):
     monkeypatch.setattr(dependencies, "get_breaker_redis", lambda: None)
     _stub_containers(monkeypatch)
     db.create_user(
-        UserCreate(username=OWNER, role="user", email="cfg2996-owner@example.com")
+        UserCreate(username=OWNER, role="operator", email="cfg2996-owner@example.com")
     )
     db.create_user(
         UserCreate(username=ADMIN, role="admin", email="cfg2996-admin@example.com")
@@ -135,7 +135,7 @@ def world(db_backend, monkeypatch):
             "id": owner_id,
             "username": OWNER,
             "email": "cfg2996-owner@example.com",
-            "role": "user",
+            "role": "operator",
         }
         base.update(fields)
         app.dependency_overrides[dependencies.get_current_user] = lambda: _Principal(
@@ -282,7 +282,7 @@ class TestAutonomyEveryOtherPrincipal:
     def test_a_principal_without_mcp_scope_fails_closed(self, world):
         world.app.dependency_overrides[dependencies.get_current_user] = (
             lambda: SimpleNamespace(
-                id=1, username=OWNER, email="cfg2996-owner@example.com", role="user"
+                id=1, username=OWNER, email="cfg2996-owner@example.com", role="operator"
             )
         )
         res = world.client.put(AUTONOMY, json={"enabled": True})

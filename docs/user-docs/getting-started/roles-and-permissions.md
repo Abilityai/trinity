@@ -1,6 +1,6 @@
 # Roles and Permissions
 
-Trinity uses a 4-tier role system to control who can create agents, manage existing ones, or just interact with them.
+Trinity uses a 4-tier role system to control who can create agents, manage existing ones, or work with them in the [Workspace](../sharing-and-access/workspace.md) only.
 
 ## Role Hierarchy
 
@@ -8,8 +8,10 @@ Trinity uses a 4-tier role system to control who can create agents, manage exist
 |------|-------------------|-------------------|------------|
 | **admin** | Yes | All agents | Password login (username `admin` or the registered admin email) |
 | **creator** | Yes | Own agents only | Promoted by an admin, or a whitelist entry added with `default_role: creator` |
-| **operator** | No | Assigned agents only | Set by an admin, or a whitelist entry added with `default_role: operator` |
-| **user** | No | No | The default for whitelist entries, sharing grants, and approved access requests; public links (no account) |
+| **operator** | No | Assigned agents only | Set by an admin, or a whitelist entry added with role `operator` |
+| **user** | No | No — **Workspace only** | The default for whitelist entries and single sign-on accounts; public self-signup |
+
+**`user` means a member who works with agents in the Workspace.** A `user` account signs in at `/login` and lands in `/workspace`: the agents shared with them (plus any they own), their chats, the Inbox, Work, rooms, loops, voice, files and projects. Everything else — the Dashboard, agent pages, Operations, Library, Settings, and the API behind them — starts at **operator**. The refusal is server-side: an operator route answers a `user` with `403 workspace_only` ("This account works in the Workspace. Open /workspace."), whether the call comes from the browser, the API or an MCP key the account owns.
 
 Roles are hierarchical: admin > creator > operator > user. Higher roles inherit all permissions of lower roles.
 
@@ -23,9 +25,11 @@ If two-factor authentication applies to the account (requires an entitlement), a
 
 ### Default Role Assignment
 
-When you sign up via email (if whitelisted), you receive the **default role recorded on your whitelist entry** — `user` unless the admin set another `default_role` when adding the email through the API (the Settings whitelist form always adds at `user`). Being granted access to an agent (sharing, or an approved access request) whitelists you at `user`.
+When you sign up via email (if whitelisted), you receive the **role recorded on your whitelist entry** — `user` unless the admin picked another role when adding the email (Settings → Access → Email Whitelist has a role picker, default `user`).
 
-Admins can change a user's role at any time via Settings.
+Being granted access to an agent — sharing, or an approved access request — does **not** create a platform account. The person signs in to the [Workspace](../sharing-and-access/workspace.md) with a code emailed to them. Whitelist rows that sharing wrote before this changed are still there, and the accounts they produce are Workspace-only `user` accounts.
+
+Admins can change a user's role at any time via Settings. To give someone the operator UI, raise them to `operator`.
 
 ### Role-Based Restrictions
 
@@ -34,8 +38,9 @@ Admins can change a user's role at any time via Settings.
 | Create agents | creator or above |
 | Delete agents | Owner or admin |
 | Configure agent settings (autonomy, resources, capacity, timeout, guardrails, read-only mode and similar) | Owner or admin, **a person only** — a browser session or the person's own API key, never an agent's key |
+| Open the operator UI (Dashboard, agent pages, Operations, Settings) | operator or above |
 | Run tasks and schedules | operator or above (with access) |
-| Chat with shared agents | Any authenticated user |
+| Chat with shared agents | Any authenticated user — in the Workspace for a `user` |
 | Use public links | Anyone (no auth required) |
 | Install a system from a manifest | creator or above |
 | Manage skill sources | Admin, **human only** |
@@ -43,7 +48,7 @@ Admins can change a user's role at any time via Settings.
 | Turn usage sharing on or off | Admin, **human only** |
 | Mint a **Portal delegate** MCP key | Admin, **human only** |
 | Mint an **Ops (read-only)** MCP key | Admin, **interactive browser session only** — no key of any scope can mint one |
-| Create or list MCP keys | Any user, **signed-in session only** — no key of any scope can create or list them |
+| Create or list MCP keys | operator or above, **signed-in session only** — no key of any scope can create or list them |
 | Change your own sign-in email or personal GitHub token | Any user, **signed-in session only**; a new sign-in email also needs the 6-digit code mailed to it |
 
 ### Role is not the same as "human"
@@ -63,8 +68,8 @@ For monitoring integrations that must keep working under enforced two-factor, an
 
 **Admin only**: Navigate to **Settings → Access** and find the **User Management** section.
 
-1. Find the user in the table.
-2. Select a new role from the dropdown.
+1. Find the user in the table. When some accounts are Workspace-only, the section says how many; **Show only these** filters the table to them.
+2. Select a new role from the dropdown (`user` reads "user — Workspace only").
 3. The change takes effect immediately on their next request.
 
 You cannot change your own role.
@@ -88,7 +93,8 @@ User roles are stored in the `users` table. The role is checked on each API requ
 ## Limitations
 
 - Role changes apply immediately but don't invalidate existing JWT tokens.
-- Public link users have no database entry — they operate at the `user` level.
+- Public link users have no database entry and need no role.
+- An agent owned by a `user` account (possible only after a demotion) keeps its own heartbeat, reports, notifications and asks; everything else it did through the platform is refused until an admin raises the owner's role (agent ownership cannot be transferred).
 - Admins cannot demote themselves.
 
 ## See Also

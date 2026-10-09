@@ -39,8 +39,12 @@ def _run_in_backend(python_code: str) -> str:
     return result.stdout.strip()
 
 
-def _create_test_user(username: str, password: str, email: str):
-    """Create a non-admin user in the backend database via docker exec."""
+def _create_test_user(username: str, password: str, email: str, role: str = "operator"):
+    """Create a non-admin user in the backend database via docker exec.
+
+    `operator` by default: a `user` is Workspace-only since trinity-enterprise#837
+    and is refused on every route this module checks.
+    """
     # Single Python script that hashes password and inserts the user
     code = f"""
 import sqlite3, os
@@ -55,8 +59,8 @@ conn = sqlite3.connect(db_path)
 try:
     conn.execute(
         "INSERT OR IGNORE INTO users (username, password_hash, role, email, created_at, updated_at) "
-        "VALUES (?, ?, 'user', ?, datetime('now'), datetime('now'))",
-        ("{username}", password_hash, "{email}"),
+        "VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
+        ("{username}", password_hash, "{role}", "{email}"),
     )
     conn.commit()
     print("OK")
@@ -390,6 +394,44 @@ class TestAgentAccessCheckEndpoints:
 # =============================================================================
 # Test: Non-admin user CAN still access their own data
 # =============================================================================
+
+
+WS_USER_USERNAME = f"wsuser-{uuid.uuid4().hex[:8]}"
+WS_USER_EMAIL = f"{WS_USER_USERNAME}@test.example.com"
+
+
+@pytest.fixture(scope="module")
+def workspace_only_client():
+    """A `user`-role account — Workspace-only since trinity-enterprise#837."""
+    _create_test_user(WS_USER_USERNAME, TEST_USER_PASSWORD, WS_USER_EMAIL, role="user")
+    config = ApiConfig(
+        base_url=os.getenv("TRINITY_API_URL", "http://localhost:8000"),
+        username=WS_USER_USERNAME,
+        password=TEST_USER_PASSWORD,
+    )
+    client = TrinityApiClient(config)
+    client.authenticate()
+    yield client
+    client.close()
+    _delete_test_user(WS_USER_USERNAME)
+
+
+class TestWorkspaceOnlyRung:
+    """trinity-enterprise#837: role `user` keeps the Workspace and is refused operator-side."""
+
+    def test_an_operator_route_answers_with_the_named_refusal(self, workspace_only_client):
+        response = workspace_only_client.get("/api/agents")
+        assert_status(response, 403)
+        assert response.json()["detail"]["code"] == "workspace_only"
+
+    def test_the_session_identity_still_answers(self, workspace_only_client):
+        response = workspace_only_client.get("/api/users/me")
+        assert_status(response, 200)
+        assert response.json()["role"] == "user"
+
+    def test_the_workspace_roster_still_answers(self, workspace_only_client):
+        response = workspace_only_client.get("/api/enterprise/client-portal/my-agents")
+        assert_status(response, 200)
 
 
 class TestRegularUserCanAccessOwnResources:

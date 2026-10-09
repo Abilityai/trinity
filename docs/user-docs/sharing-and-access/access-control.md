@@ -58,7 +58,7 @@ When someone requests access:
 2. Click **Approve** to grant access (adds them to the share list).
 3. Click **Deny** to reject.
 
-Approving auto-adds the email to your shared users list, which also puts the agent on that person's [Workspace](workspace.md) roster.
+Approving auto-adds the email to your shared users list, which also puts the agent on that person's [Workspace](workspace.md) roster. It does not create a platform account or add the email to the login whitelist.
 
 **The requester is notified automatically.** When you approve a request that came in over Telegram, Slack, or WhatsApp, Trinity sends the requester a message on that same channel confirming they now have access — closing the loop on the "I'll let you know once the owner responds" reply they got when they first messaged. Web users see the change through the dashboard. Denials are silent (the agent's existence is not confirmed to the requester). A delivery failure (e.g. the user blocked the bot) never blocks or rolls back the approval; the outcome is recorded in the audit log.
 

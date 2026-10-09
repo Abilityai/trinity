@@ -94,7 +94,7 @@ def world(db_backend, monkeypatch):
     # JWT revocation is a Redis read; no Redis here.
     monkeypatch.setattr(dependencies, "get_breaker_redis", lambda: None)
     db.create_user(UserCreate(username=ADMIN, role="admin", email=ADMIN_EMAIL))
-    db.create_user(UserCreate(username=PLAIN, role="user", email=PLAIN_EMAIL))
+    db.create_user(UserCreate(username=PLAIN, role="operator", email=PLAIN_EMAIL))
     db.register_agent_owner(AGENT, ADMIN)
     # One key per account, so "full listing" and "own only" are distinguishable.
     db.create_mcp_api_key(ADMIN, McpApiKeyCreate(name="admin laptop"))

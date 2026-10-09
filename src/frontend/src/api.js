@@ -7,6 +7,7 @@
 
 import axios from 'axios'
 import { notifyPlatformUnauthorized, readStoredToken } from '@/utils/platformSession'
+import { notifyWorkspaceOnly } from '@/utils/workspaceOnly'
 
 // PERF-269: In-flight request deduplication map
 // Key: "GET:/api/agents/context-stats" → Value: Promise
@@ -46,6 +47,7 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) notifyPlatformUnauthorized(error)
+    else notifyWorkspaceOnly(error)  // trinity-enterprise#837: a 403 `workspace_only`
     return Promise.reject(error)
   }
 )

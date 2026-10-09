@@ -62,11 +62,15 @@ collaboration edges after a laptop sleep.
 **2. Single stream with `scope` field, not two streams**
 - Stream key: `trinity:events`
 - Every XADD carries `scope: "all" | "scoped"` and optional `agent_name`
-- `_event_is_visible(slot, scope, agent_name, agent_names)` enforces:
+- `_event_is_visible(slot, scope, agent_name, agent_names, event_kind)` enforces:
   - `/ws` clients (`scope=SCOPE_SCOPED` events never reach them) see a
     `scope=all` event only when **every** agent the payload names is one they
     may access — admins short-circuit, an event naming no agent is
     fleet-visible (ent#467)
+  - a `/ws` slot with `allowed_types` (a Workspace-only account,
+    trinity-enterprise#837) additionally needs the event's kind in that set —
+    `event_kind_of`: `type`, else the lifecycle `event` key; a kind-less
+    payload is withheld. Checked first, so it only narrows
   - `/ws/events` clients (`scope=SCOPE_SCOPED`) see `scope=scoped` events,
     filtered by the single envelope `agent_name` (admins see all) — unchanged
 - Rationale: Keeps the auth boundary in one place; avoids the 8 dual-broadcast
@@ -82,12 +86,26 @@ with one shared agent could mint a ticket (`POST /api/ws/ticket` is plain
 `get_current_user`) and read it. `/ws/events` had scoped since #306.
 
 - **Identity at connect.** `services/ws_identity_service.resolve_ws_identity`
-  turns the ticket's `sub` into `{email, is_admin, accessible_agents}`.
+  turns the ticket's `sub` into `{email, is_admin, accessible_agents,
+  allowed_types}`.
   Fails **closed** — an unknown username, a suspended account (#995) or a
   raising lookup closes the socket with 4001. A non-admin row with *no email*
   is a resolved identity with an **empty roster**, not a refusal: ownership
   joins `users.email` and `agent_sharing` is keyed on it, so the empty set is
   the exact answer, and the frontend never retries a 4001.
+- **Kinds for a Workspace-only account (trinity-enterprise#837).**
+  `allowed_types` is `None` on the operator rungs and
+  `WORKSPACE_WS_EVENT_TYPES` for a `user` (or a role outside the ladder):
+  `agent_activity`, `loop_run_completed`, `loop_completed`,
+  `agent_skills_changed`, `resync_required` — what the Workspace stores read.
+  The operator queue, notifications, reports, room triggers, the agent
+  lifecycle and the sharing events never reach that socket, on fan-out or
+  replay. Each event it does get is cut to `allowed_fields`
+  (`WORKSPACE_WS_EVENT_FIELDS`: `type`, `event`, `agent_name`,
+  `activity_state`) plus `_eid` — an activity's prompt and reply previews,
+  cost and session ids stay off it. `ConnectionManager.connect` defaults both
+  arguments to the empty set, so a caller that forgets them gets a dark socket
+  rather than an unfiltered one.
 - **Identity is derived from the payload, once per event.** The 36 live
   `manager.broadcast` sites disagree about where the agent name lives
   (`agent_name` top-level, `data.name`, `data.agent_name`, two keys at once
@@ -289,7 +307,7 @@ Gate checks (see orchestration reliability plan, Tier 2.5):
 | Entry | `src/backend/main.py:634+`, `main.py:697+` | `/ws` and `/ws/events` endpoints with `?last-event-id=` support |
 | Entry | `src/backend/main.py:285-294` | Lifespan `event_bus.start()` + `stream_dispatcher.start()` |
 | Entry | `src/backend/main.py:538-547` | Lifespan 2s graceful drain on shutdown |
-| Client | `src/frontend/src/utils/websocket.js` | Main WebSocket client; `_eid` capture, reconnect replay, `resync_required` → REST refetch |
+| Client | `src/frontend/src/utils/websocket.js` | Main WebSocket client; `_eid` capture, reconnect replay, `resync_required` → REST refetch. For a Workspace-only `user` the operator stores (agents, notifications, operator queue, executions) do not follow the stream — their refetches would 403 `workspace_only`; the Workspace stores still do (trinity-enterprise#837) |
 | Client | `src/frontend/src/stores/network.js:535+` | Collaboration dashboard WS client; same contract, separate `lastEventId` |
 | Service | `src/backend/services/ws_identity_service.py` | ent#467 `/ws` identity + agent scope (`resolve_ws_identity`, `accessible_agents_for`) |
 | Tests | `tests/test_event_bus.py` | 23 unit tests — envelope, scope visibility, eviction, slow-consumer resync, monotonic cursor guard, catchup trim detection |

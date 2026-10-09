@@ -70,7 +70,7 @@
       <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
         Default role for provisioned users
         <select v-model="cfg.default_role" @change="saveConfig" class="ml-2 text-sm border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700">
-          <option value="user">user</option>
+          <option value="user">{{ WORKSPACE_ONLY_ROLE_LABEL }}</option>
           <option value="operator">operator</option>
           <option value="creator">creator</option>
           <option value="admin">admin</option>
@@ -85,6 +85,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../../stores/auth'
+import { WORKSPACE_ONLY_ROLE_LABEL } from '../../utils/workspaceOnly'
 
 const authStore = useAuthStore()
 const BASE = '/api/enterprise/sso'

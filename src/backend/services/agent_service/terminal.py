@@ -120,6 +120,19 @@ class TerminalSessionManager:
                 user_email = user.get("email") or user.get("sub") or "unknown"
                 user_role = user.get("role", "user")
 
+                # ent#837 — a shell is an operator surface, and this handler
+                # authenticates outside `get_current_user`, so the operator floor
+                # is applied here: a demoted owner keeps no shell into its agents.
+                from dependencies import WORKSPACE_ONLY_DETAIL, is_workspace_only_role
+                if is_workspace_only_role(user_role):
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        **WORKSPACE_ONLY_DETAIL,
+                        "close": True
+                    }))
+                    await websocket.close(code=4003, reason="Access denied")
+                    return
+
                 # Check access to this agent.
                 # SECURITY (CSO H1): a container shell exposes .env / .credentials.enc
                 # and the baked CLAUDE_CODE_OAUTH_TOKEN / TRINITY_MCP_API_KEY, so it

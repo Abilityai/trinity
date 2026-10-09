@@ -1450,6 +1450,18 @@ Example:
                     :disabled="addingEmail"
                     @keyup.enter="addEmailToWhitelist"
                   />
+                  <BaseSelect
+                    v-model="newEmailRole"
+                    aria-label="Role on first sign-in"
+                    data-testid="whitelist-role"
+                    :disabled="addingEmail"
+                    class="w-56 shrink-0"
+                  >
+                    <option value="user">{{ WORKSPACE_ONLY_ROLE_LABEL }}</option>
+                    <option value="operator">operator</option>
+                    <option value="creator">creator</option>
+                    <option value="admin">admin</option>
+                  </BaseSelect>
                   <button
                     @click="addEmailToWhitelist"
                     :disabled="!newEmail || addingEmail"
@@ -1472,6 +1484,9 @@ Example:
                           Email
                         </th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                          Role
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                           Source
                         </th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
@@ -1484,18 +1499,21 @@ Example:
                     </thead>
                     <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                       <tr v-if="loadingWhitelist">
-                        <td colspan="4" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                        <td colspan="5" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
                           <div class="h-4 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
                         </td>
                       </tr>
                       <tr v-else-if="emailWhitelist.length === 0">
-                        <td colspan="4" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                        <td colspan="5" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
                           No whitelisted emails. Add one above to get started.
                         </td>
                       </tr>
                       <tr v-else v-for="entry in emailWhitelist" :key="entry.id" class="hover:bg-gray-50 dark:hover:bg-gray-700">
                         <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
                           {{ entry.email }}
+                        </td>
+                        <td :class="['px-6 py-4 whitespace-nowrap', HELP_CLASS]">
+                          {{ roleLabel(entry.default_role) }}
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                           <span v-if="entry.source === 'agent_sharing'" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
@@ -1522,8 +1540,10 @@ Example:
                   </table>
                 </div>
 
-                <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                  💡 Tip: When you share an agent with someone by email, they're automatically added to this whitelist.
+                <p :class="[HELP_CLASS, 'mt-2']">
+                  💡 Sharing an agent adds no one here: people an agent is shared with sign in to the
+                  Workspace with an emailed code. An email added here gets a platform account at the role
+                  you pick — <code>user</code> works in the Workspace only.
                 </p>
               </div>
             </div>
@@ -1545,7 +1565,7 @@ Example:
                 <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-accent-purple-100 text-accent-purple-800 dark:bg-accent-purple-900 dark:text-accent-purple-200">admin — full control</span>
                 <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-action-primary-100 text-action-primary-800 dark:bg-action-primary-900 dark:text-action-primary-200">creator — create &amp; manage agents</span>
                 <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">operator — run existing agents</span>
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">user — public links only</span>
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">{{ WORKSPACE_ONLY_ROLE_LABEL }}</span>
               </div>
 
               <!-- #995 — enterprise: invite users (gated by user_management) -->
@@ -1563,7 +1583,7 @@ Example:
                     class="flex-1 min-w-[200px] px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" />
                   <select v-model="inviteRole" :disabled="umBusy"
                     class="px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
-                    <option value="user">user</option>
+                    <option value="user">{{ WORKSPACE_ONLY_ROLE_LABEL }}</option>
                     <option value="operator">operator</option>
                     <option value="creator">creator</option>
                     <option value="admin">admin</option>
@@ -1574,6 +1594,23 @@ Example:
                     class="px-3 py-2 text-sm rounded-lg text-gray-600 dark:text-gray-300 hover:underline">Cancel</button>
                   <span v-if="inviteMsg" class="text-xs" :class="inviteErr ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-700 dark:text-status-success-400'">{{ inviteMsg }}</span>
                 </form>
+              </div>
+
+              <!-- trinity-enterprise#837 — how many accounts the operator floor keeps in
+                   the Workspace, on one line; the filter turns the table into the list. -->
+              <div
+                v-if="workspaceOnlyCount"
+                :class="['mb-3 flex flex-wrap items-center gap-x-3 gap-y-1', HELP_CLASS]"
+                data-testid="workspace-only-users"
+              >
+                <span>
+                  {{ workspaceOnlyCount }} {{ workspaceOnlyCount === 1 ? 'account works' : 'accounts work' }}
+                  in the Workspace only (role <code>user</code>). Raise anyone who operates agents to
+                  <code>operator</code>.
+                </span>
+                <BaseButton variant="ghost" size="sm" type="button" @click="showWorkspaceOnlyUsers = !showWorkspaceOnlyUsers">
+                  {{ showWorkspaceOnlyUsers ? 'Show all users' : 'Show only these' }}
+                </BaseButton>
               </div>
 
               <!-- Users Table — padding trimmed + compact actions so the
@@ -1605,7 +1642,7 @@ Example:
                     <tr v-else-if="usersList.length === 0">
                       <td :colspan="umEntitled ? 5 : 4" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">No users found.</td>
                     </tr>
-                    <tr v-else v-for="u in usersList" :key="u.username" class="hover:bg-gray-50 dark:hover:bg-gray-700">
+                    <tr v-else v-for="u in visibleUsers" :key="u.username" class="hover:bg-gray-50 dark:hover:bg-gray-700">
                       <td class="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
                         {{ u.name || u.username }}
                       </td>
@@ -1622,7 +1659,7 @@ Example:
                           <option value="admin">admin</option>
                           <option value="creator">creator</option>
                           <option value="operator">operator</option>
-                          <option value="user">user</option>
+                          <option value="user">{{ WORKSPACE_ONLY_ROLE_LABEL }}</option>
                         </select>
                         <span v-else class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-accent-purple-100 text-accent-purple-800 dark:bg-accent-purple-900 dark:text-accent-purple-200">
                           {{ u.role }} (you)
@@ -2292,6 +2329,10 @@ import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.
 import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import BaseBadge from '../components/base/BaseBadge.vue'
+import BaseButton from '../components/base/BaseButton.vue'
+import BaseSelect from '../components/base/BaseSelect.vue'
+import { WORKSPACE_ONLY_ROLE_LABEL } from '../utils/workspaceOnly'
+import { HELP_CLASS } from '../components/base/fieldClasses'
 import InlineError from '../components/InlineError.vue'
 
 const router = useRouter()
@@ -2397,6 +2438,9 @@ watch(() => route.query.tab, (newTab) => {
 // Email whitelist state (Phase 12.4)
 const emailWhitelist = ref([])
 const newEmail = ref('')
+// trinity-enterprise#837: the role the address gets on first sign-in. `user`
+// (Workspace only) stays the default (#314) — the operator UI is a choice.
+const newEmailRole = ref('user')
 const addingEmail = ref(false)
 const removingEmail = ref(null)
 const loadingWhitelist = ref(false)
@@ -2404,6 +2448,16 @@ const loadingWhitelist = ref(false)
 // User management state (ROLE-001)
 const usersList = ref([])
 const loadingUsers = ref(false)
+
+// trinity-enterprise#837: `user` accounts are Workspace-only. The section names
+// how many there are on one line (a list above the table would push it down by
+// however many there are) and the filter turns the table into that list.
+const showWorkspaceOnlyUsers = ref(false)
+const workspaceOnlyCount = computed(() => usersList.value.filter((u) => u.role === 'user').length)
+const visibleUsers = computed(() => (showWorkspaceOnlyUsers.value && workspaceOnlyCount.value
+  ? usersList.value.filter((u) => u.role === 'user')
+  : usersList.value))
+const roleLabel = (role) => (role === 'user' ? WORKSPACE_ONLY_ROLE_LABEL : (role || '—'))
 
 // #995 — enterprise per-user activity audit (gated by user_management).
 // (enterpriseStore is declared near the top — visibleTabs needs it during setup.)
@@ -3511,12 +3565,14 @@ async function addEmailToWhitelist() {
   try {
     await axios.post('/api/settings/email-whitelist', {
       email: newEmail.value,
-      source: 'manual'
+      source: 'manual',
+      default_role: newEmailRole.value,
     }, {
       headers: authStore.authHeader
     })
 
     newEmail.value = ''
+    newEmailRole.value = 'user'
     await loadEmailWhitelist()
     showSuccess.value = true
     setTimeout(() => {

@@ -157,7 +157,7 @@ All endpoints are gated by `OwnedAgentByName` (owner or admin).
 | 140-146 | `/api/agents/{agent_name}/access-policy` | GET | Get `{require_email, open_access}` (Issue #311) |
 | 149-157 | `/api/agents/{agent_name}/access-policy` | PUT | Update policy (delegates to `db.set_access_policy`) |
 | 160-168 | `/api/agents/{agent_name}/access-requests` | GET | List requests, defaults `status=pending` |
-| 171-221 | `/api/agents/{agent_name}/access-requests/{request_id}/decide` | POST | `{approve: bool}` — on approve, idempotently inserts into `agent_sharing` via `db.share_agent`, auto-whitelists email when email auth is enabled, and broadcasts `agent_shared` over WebSocket |
+| 171-221 | `/api/agents/{agent_name}/access-requests/{request_id}/decide` | POST | `{approve: bool}` — on approve, idempotently inserts into `agent_sharing` via `db.share_agent` and broadcasts `agent_shared` over WebSocket; writes no login whitelist row (trinity-enterprise#837) |
 
 ### Authorization via Dependencies (`src/backend/dependencies.py:258-285`)
 
@@ -200,14 +200,8 @@ async def share_agent_endpoint(
     if not share:
         raise HTTPException(status_code=409, detail=f"Agent is already shared with {share_request.email}")
 
-    # Auto-add email to whitelist if email auth is enabled (Phase 12.4)
-    from config import EMAIL_AUTH_ENABLED
-    email_auth_setting = db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
-    if email_auth_setting.lower() == "true":
-        try:
-            db.add_to_whitelist(share_request.email, current_user.username, source="agent_sharing", default_role="user")  # #314: chat-only grant
-        except Exception:
-            pass  # Already whitelisted or error - continue anyway
+    # trinity-enterprise#837: sharing grants the agent, never a platform login.
+    # The person signs in to the Workspace with the emailed code.
 
     if manager:
         await manager.broadcast(json.dumps({
@@ -396,15 +390,11 @@ def delete_agent_ownership(self, agent_name: str) -> bool:
 | `agent_shared` | `{name, shared_with}` |
 | `agent_unshared` | `{name, removed_user}` |
 
-### Auto-Whitelist (Phase 12.4)
-When email auth is enabled, shared emails are automatically added to the whitelist (`routers/sharing.py:44-56`):
-```python
-if email_auth_setting.lower() == "true":
-    try:
-        db.add_to_whitelist(share_request.email, current_user.username, source="agent_sharing", default_role="user")  # #314: chat-only grant
-    except Exception:
-        pass  # Already whitelisted or error - continue anyway
-```
+### No platform login (trinity-enterprise#837)
+Until #837, a share (and an access-request approval) also wrote a login whitelist row at
+`user` (Phase 12.4, #314). Neither writes one now: the share row is the person's Workspace
+access, and they sign in there with the emailed code. Rows earlier shares wrote stay and
+produce Workspace-only `user` accounts. See [workspace-only-role.md](workspace-only-role.md).
 
 ---
 
@@ -426,7 +416,7 @@ if email_auth_setting.lower() == "true":
 2. **Owner-Only Sharing**: Only owners and admins can share (`OwnedAgentByName` dependency)
 3. **Cascade Delete**: Shares removed when agent deleted
 4. **Access Validation**: Every endpoint validates via `OwnedAgentByName` dependency
-5. **Auto-Whitelist**: When email auth is enabled, shared emails are auto-added to whitelist
+5. **No platform login**: sharing writes no login whitelist row (trinity-enterprise#837); the Access tab copy says adding a person grants Workspace access
 6. **System Agent Protection**: System agents cannot be shared (tab hidden in UI)
 
 ---
@@ -465,6 +455,7 @@ Working - Agent sharing fully functional with email-based collaboration
 
 | Date | Changes |
 |------|---------|
+| 2026-10-09 | **trinity-enterprise#837 — sharing stops creating platform logins.** `share_agent_endpoint` and `decide_access_request_endpoint` no longer call `add_to_whitelist`; the person signs in to the Workspace with the code. The Access tab (`AccessPanel.vue`) says adding a person grants Workspace access ("Add person"); the operator UI is the platform role. See [workspace-only-role.md](workspace-only-role.md). |
 | 2026-04-22 | **#446 — team-share gate hardening + Sharing UX**. `share_agent` now deletes stale pending `access_requests` rows atomically with the share insert (manual Team Share now clears the owner's Pending list). Email normalization (`.strip().lower()`) added in `share_agent`, `is_agent_shared_with_email`, and `email_has_agent_access` as defense-in-depth. `SharingPanel.vue` restructured to distinguish **Identity Proof** (`require_email`) from **Authorization** (Team Sharing allow-list + approval queue); dead-end warning shown when `require_email=true && !open_access && shares.length===0`. New unit test file: `tests/test_team_share_gate_unit.py`. Canonical gate semantics continue to live in [unified-channel-access-control.md](unified-channel-access-control.md). |
 | 2026-04-12 | **Issue #311 — unified cross-channel access control**: `agent_sharing` is now the cross-channel allow-list (web + Telegram + Slack). Added 4 endpoints to `routers/sharing.py` for access policy (`require_email`, `open_access`) and pending access requests (approve/deny). `SharingPanel.vue` gained a Channel Access Policy section + Pending Access Requests list (direct axios, no composable). New `SharingMixin` helpers: `is_agent_shared_with_email`, `email_has_agent_access`. `delete_agent_ownership` now also cascades `access_requests`. Canonical primitive lives in [unified-channel-access-control.md](unified-channel-access-control.md). |
 | 2026-02-18 | **Public Links tab consolidated**: Public Links tab removed from AgentDetail.vue. SharingPanel.vue now includes PublicLinksPanel as embedded component (lines 79-83, 92). Updated tab visibility line numbers (506-509). Single "Sharing" tab now contains both Team Sharing and Public Links sections. |
@@ -482,4 +473,4 @@ Working - Agent sharing fully functional with email-based collaboration
 
 - **Upstream**: Authentication (user identity)
 - **Downstream**: Public Agent Links (embedded in same tab via PublicLinksPanel), Telegram Integration, Slack Integration (all consume the unified allow-list)
-- **Related**: Agent Lifecycle (delete cascades shares + access requests), MCP Orchestration (agent-to-agent access control), Email Authentication (auto-whitelist)
+- **Related**: Agent Lifecycle (delete cascades shares + access requests), MCP Orchestration (agent-to-agent access control), Email Authentication (the manual whitelist; sharing writes none since trinity-enterprise#837), [Workspace-only `user` rung](workspace-only-role.md)

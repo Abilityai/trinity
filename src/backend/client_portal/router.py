@@ -34,6 +34,7 @@ from dependencies import (
     oauth2_scheme,
     reject_agent_principal,
     require_admin,
+    resolve_platform_user_unfloored,
 )
 from models import (
     REPORT_ROWS_PAGE_MAX,
@@ -974,8 +975,9 @@ def portal_agent_canvases(
     operator-only canvas stays invisible to a rostered client.
     """
     _require_roster(agent_name, principal.email, principal.is_platform)
-    # ent#534: a platform principal reads every audience (they already can on
-    # Agent Detail); an external client stays `roster`-only.
+    # ent#534: a platform principal reads every audience — an operator already
+    # can on Agent Detail, and a Workspace-only `user` keeps the team view by
+    # decision (#837); an external client stays `roster`-only.
     return {"agent_name": agent_name, "canvases": agent_page.canvases(
         agent_name, audience=agent_page.canvas_audience_for(principal.is_platform))}
 
@@ -1477,7 +1479,7 @@ async def portal_voice_start(
     # The WebSocket's ownership gate (#600) is by platform user id, so the
     # session must carry it — resolved from the same token the principal came
     # from, the way `get_portal_principal` itself does.
-    user = await get_current_user(request, token)
+    user = await resolve_platform_user_unfloored(request, token)  # past the floor: a Workspace door (ent#837)
     from . import voice as workspace_voice
     try:
         result = await workspace_voice.start_workspace_voice(

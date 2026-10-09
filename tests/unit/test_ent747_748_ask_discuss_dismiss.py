@@ -594,7 +594,7 @@ class TestRoutesOverHttp:
         async def agent_key(request, token):
             return SimpleNamespace(username="owner", agent_name="some-agent", mcp_scope="agent")
 
-        monkeypatch.setattr(pa, "get_current_user", agent_key)
+        monkeypatch.setattr(pa, "resolve_platform_user_unfloored", agent_key)
 
         r = client.post(f"/api/enterprise/client-portal/asks/{uid}/{route}",
                         headers={"Authorization": "Bearer trinity_mcp_x"})

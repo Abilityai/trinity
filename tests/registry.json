@@ -5326,6 +5326,44 @@
         "unit"
       ],
       "description": "#3406: the backend half of the contract the browser's 401 verdict reads. get_current_user rejects a dead token and OAuth2PasswordBearer rejects a missing one WITH `WWW-Authenticate: Bearer`; the five public-link session routes (intro, history, session clear, chat, terminate) answer an expired or missing visitor session with a bare 401. Handlers driven directly with the link check, rate limit and session lookup stubbed. No Docker."
+    },
+    {
+      "file": "unit/test_837_workspace_only_floor.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "auth",
+        "workspace",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837: the operator floor in get_current_user. A `user` (or out-of-ladder) principal gets 403 workspace_only on real operator routes with real JWTs and keys, before any agent lookup; @workspace_route admits a person only; an agent of a `user` owner keeps its own runtime surface, name-bound; the Workspace doors (portal principal, rooms principal) admit a `user`; the unfloored resolver's caller set is pinned; the agent terminal and /ws/events refuse the rung; share and access-request approval write no whitelist row. No Docker."
+    },
+    {
+      "file": "unit/test_837_workspace_route_census.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "frontend",
+        "auth",
+        "workspace",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837: the @workspace_route set is frozen, each mark has a reason, sits below its route decorator and reaches get_current_user; every /api/ call in the Workspace's own frontend files reaches a Workspace door, a sign-in/public/own-auth route or a marked route, and those files import no operator store. No Docker."
+    },
+    {
+      "file": "unit/test_837_ws_workspace_event_kinds.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "websocket",
+        "auth",
+        "workspace",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837: a Workspace-only account's /ws socket receives only the event kinds the Workspace reads (WORKSPACE_WS_EVENT_TYPES). Identity resolution per rung, the kind rule (type, else the lifecycle event key; kind-less withheld; narrows the agent scope, never widens it) on live fan-out and reconnect replay, register's default, and the main.py hand-offs with connect's closed default. No Docker."
     }
   ]
 }

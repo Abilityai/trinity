@@ -12,6 +12,7 @@ Passwordless email-based authentication with verification codes. Users enter the
 ## Revision History
 | Date | Changes |
 |------|---------|
+| 2026-10-09 | **trinity-enterprise#837** — sharing and access-request approval stop writing the whitelist; the Settings whitelist form gains a role picker (default `user`) and a Role column; a `user` signing in at `/login` lands in `/workspace`. See [workspace-only-role.md](workspace-only-role.md). |
 | 2026-09-29 | **Binding a sign-in email needs mailbox proof (trinity-enterprise#720)**: new `POST /api/users/me/email/code` sends a bind code; `PUT /api/users/me/email` now requires it (console-provider admin bypass, audited unverified), caps wrong guesses at 5 per 10 min under `otp_attempts:bind:{user_id}:{email}`, and `users.email` is unique (case-insensitive). See [Binding a Sign-In Email](#binding-a-sign-in-email-trinity-enterprise720). |
 | 2026-07-04 | **Enumeration hardening (#186)**: `request_email_login_code()` now returns a **byte-identical** body + status for whitelisted, non-whitelisted, and rate-limited emails — the generic `{"success": true, "message": "If your email is registered, you'll receive a code shortly"}` (dropped the distinct `"Verification code sent…"` message and `expires_in_seconds`). Over-limit returns the same generic 200 (WARN-logged `"email-code suppressed: rate limit"`, **no 429**). The verification email is dispatched **fire-and-forget** (`asyncio.create_task`, strong-ref set) so the whitelisted path's latency matches the immediate-return paths — closing the body/status/timing membership oracle (pentest 3.3.3). Frontend safe: `stores/auth.js` falls back to `|| 600` when `expires_in_seconds` is absent. |
 | 2026-05-18 | **Contextual email subjects (#890)**: `send_verification_code()` gains optional `agent_name` and `context_label` params. When `agent_name` is set, subject becomes `Your Trinity access code for "{agent_name}"`; when `context_label` is set, subject becomes `Your {context_label} verification code`. A new private `_get_verification_email_html()` generates an HTML body with inline CSS, 36px monospace code block, and contextual intro text. `auth.py` now passes `context_label="Trinity login"`; `public.py` now passes `agent_name=link["agent_name"]`. |
@@ -128,50 +129,15 @@ As an admin, I want to control who can access the platform via an email whitelis
 
 ---
 
-## Auto-Whitelist on Agent Sharing
+## Agent sharing no longer whitelists (trinity-enterprise#837)
 
-When an agent is shared with a new email, that email is automatically added to the whitelist:
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     Agent Sharing → Auto-Whitelist                   │
-└─────────────────────────────────────────────────────────────────────┘
-
-  Owner shares agent with email
-┌────────────────────────────┐
-│  AgentDetail.vue           │
-│  "Share Agent" dialog      │
-│  Enter email, click Share  │
-└─────────┬──────────────────┘
-          │
-          │ POST /api/agents/{agent_name}/share
-          │ { "email": "newuser@example.com" }
-          │
-          v
-┌─────────────────────────────────────────┐
-│  sharing.py:share_agent_endpoint()      │
-│  1. Validate ownership                  │
-│  2. Create share record                 │
-│  3. Check if EMAIL_AUTH_ENABLED         │
-│  4. If enabled: auto-add to whitelist   │
-│     - db.add_to_whitelist()             │
-│     - source="agent_sharing"            │
-│  5. Audit log                           │
-│  6. WebSocket broadcast                 │
-└─────────┬───────────────────────────────┘
-          │
-          v
-┌─────────────────────────────────────────┐
-│  email_whitelist table updated          │
-│  - email: newuser@example.com           │
-│  - added_by: owner_id                   │
-│  - source: "agent_sharing"              │
-│  - added_at: 2025-12-26T10:00:00Z       │
-└─────────────────────────────────────────┘
-
-Result: New user can now login with email code
-        without admin manually adding them
-```
+Until #837, sharing an agent (and approving an access request) also added the email to this
+whitelist at `user`. Neither does now: the share row is the person's Workspace access, and they
+sign in there with the emailed code. A platform account is an admin's decision — add the email
+here (Settings → Access → Email Whitelist now has a role picker, default `user`), or change a
+role in User Management. The role a new account takes still comes from its whitelist row (#314);
+a `user` is Workspace-only, and `/login` lands one in `/workspace`
+([workspace-only-role.md](workspace-only-role.md)). Rows earlier shares wrote stay.
 
 ---
 
@@ -817,32 +783,10 @@ Remove email from whitelist.
 }
 ```
 
-### Agent Sharing Auto-Whitelist (`src/backend/routers/sharing.py:44-56`)
+### Agent Sharing Auto-Whitelist — retired (trinity-enterprise#837)
 
-When an agent is shared, automatically add recipient to whitelist:
-
-```python
-# Lines 44-56: Auto-add email to whitelist if email auth is enabled
-from config import EMAIL_AUTH_ENABLED
-email_auth_setting = db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
-if email_auth_setting.lower() == "true":
-    try:
-        db.add_to_whitelist(
-            share_request.email,
-            current_user.username,
-            source="agent_sharing",
-            default_role="user",  # chat-only grant — #314
-        )
-    except Exception:
-        # Already whitelisted or error - continue anyway
-        pass
-```
-
-**Key behavior:**
-- Runs after successful share creation
-- Silent failure if email already whitelisted
-- Source is marked as `"agent_sharing"` for audit trail
-- Does NOT block agent sharing if whitelist add fails
+`share_agent_endpoint` and `decide_access_request_endpoint` no longer call `add_to_whitelist`.
+The `agent_sharing` / `access_request` sources remain on rows written before the change.
 
 ---
 

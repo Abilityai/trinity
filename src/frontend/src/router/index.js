@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { setBaseTitle } from '@/utils/tabTitle'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { isWorkspaceOnlyRole, landingAfterSignIn, operatorRouteRedirect } from '../utils/workspaceOnly'
 import { useSessionsStore } from '../stores/sessions'
 import { useAgentsStore } from '../stores/agents'
 
@@ -380,6 +381,17 @@ async function checkSetupStatus() {
   }
 }
 
+// trinity-enterprise#837 — the role the guard routes on. The STORED role, never
+// the `role` getter (it reports 'user' while the profile loads); a stored `user`
+// is confirmed with the server first, so an account raised to `operator` since
+// its last sign-in is not bounced on a stale cache. Only that case waits.
+async function confirmedRole(authStore) {
+  if (isWorkspaceOnlyRole(authStore.user?.role) && !authStore.profileVerified) {
+    await authStore.fetchUserProfile()
+  }
+  return authStore.user?.role
+}
+
 // Navigation guard
 // Vue Router 5 deprecated the `next` callback; guards now signal intent by
 // returning a value (true/undefined = proceed, a location = redirect).
@@ -419,6 +431,13 @@ router.beforeEach(async (to, from) => {
   // Check if route requires authentication
   if (to.meta.requiresAuth) {
     if (authStore.isAuthenticated) {
+      // trinity-enterprise#837 — the operator UI starts at `operator`. A
+      // Workspace-only member who opens an operator URL lands in the Workspace
+      // (an agent page opens that agent's conversation). The API refuses them
+      // regardless; this only spares them the wall.
+      const toWorkspace = operatorRouteRedirect(to, await confirmedRole(authStore))
+      if (toWorkspace) return toWorkspace
+
       // #847 — enterprise entitlement guard.
       // Two modes:
       //   * `meta.requiresEntitlement: '<id>'` — gate on the named
@@ -450,8 +469,8 @@ router.beforeEach(async (to, from) => {
     }
   } else if (to.path === '/login' && authStore.isAuthenticated) {
     // User is authenticated but trying to access login page
-    // Redirect to dashboard
-    return '/'
+    // Redirect to dashboard — the Workspace for a Workspace-only member (ent#837)
+    return landingAfterSignIn(undefined, await confirmedRole(authStore))
   } else {
     // Public route, allow access
     return true

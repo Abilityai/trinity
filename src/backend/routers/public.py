@@ -24,7 +24,7 @@ from database import (
     PublicChatResponse,
     PublicChatMessage
 )
-from dependencies import get_current_user, get_optional_user, assert_owns
+from dependencies import get_current_user, get_optional_user, assert_owns, workspace_route
 from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
 from services import canvas_share_service
@@ -1084,6 +1084,7 @@ async def get_public_link_session_detail(
 # ---------------------------------------------------------------------------
 
 @router.get("/canvas/{token}")
+@workspace_route("an `authorized` canvas link must recognise the member it was shared with, not read them as a stranger")
 async def get_shared_canvas(
     token: str,
     request: Request,
