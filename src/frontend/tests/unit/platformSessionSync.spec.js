@@ -217,6 +217,62 @@ describe('the reaction to a 401, executed (review C4 + the CI gap)', () => {
     expect(calls.login).toBe(0)
   })
 
+  // #3406 — the public token pages own their sign-in, so nothing there
+  // navigates; the Bearer challenge decides whether the platform session ends.
+  const challenged = (token) => ({
+    ...failedWith(token),
+    response: { status: 401, headers: { 'www-authenticate': 'Bearer' } },
+  })
+  const linkSession401 = (token) => ({
+    ...failedWith(token),
+    response: { status: 401, headers: { 'content-type': 'application/json' } },
+  })
+
+  it("#3406 — an expired link session on /chat/ leaves the operator's live session alone (AC1/AC2)", async () => {
+    const { reactToPlatformUnauthorized } = await import('@/utils/platformSession')
+    const { calls, deps } = harness({ storedToken: 'CUR', path: '/chat/abc123' })
+    const { verdict, navigation } = reactToPlatformUnauthorized(linkSession401('CUR'), deps)
+    expect(verdict).toBe('ignore')
+    expect(navigation).toBeUndefined()
+    expect(calls).toEqual({ adopt: 0, logout: 0, login: 0 })
+  })
+
+  it('#3406 — a dead operator token on /chat/ is ended where it stands: logout, never /login', async () => {
+    // The ws-ticket POST retries every 5 s while a token is stored; ending the
+    // dead one is what stops that loop. The visitor's page stays put.
+    const { reactToPlatformUnauthorized } = await import('@/utils/platformSession')
+    const { calls, deps } = harness({ storedToken: 'CUR', path: '/chat/abc123' })
+    const { verdict, navigation } = reactToPlatformUnauthorized(challenged('CUR'), deps)
+    expect(verdict).toBe('logout-in-place')
+    expect(navigation).toBeUndefined()
+    expect(calls).toEqual({ adopt: 0, logout: 1, login: 0 })
+  })
+
+  it('#3406 — a shared canvas 401 ends a dead session in place, so its own Sign in card stands', async () => {
+    const { reactToPlatformUnauthorized } = await import('@/utils/platformSession')
+    const { calls, deps } = harness({ storedToken: 'CUR', path: '/canvas/s/tok_1' })
+    const { verdict, navigation } = reactToPlatformUnauthorized(linkSession401('CUR'), deps)
+    expect(verdict).toBe('logout-in-place')
+    expect(navigation).toBeUndefined()
+    expect(calls).toEqual({ adopt: 0, logout: 1, login: 0 })
+  })
+
+  it('#3406 — a dead token on /m (the PWA start page) is ended in place: its inline login shows', async () => {
+    const { reactToPlatformUnauthorized } = await import('@/utils/platformSession')
+    const { calls, deps } = harness({ storedToken: 'CUR', path: '/m' })
+    const { verdict, navigation } = reactToPlatformUnauthorized(challenged('CUR'), deps)
+    expect(verdict).toBe('logout-in-place')
+    expect(navigation).toBeUndefined()
+    expect(calls).toEqual({ adopt: 0, logout: 1, login: 0 })
+  })
+
+  it("#3406 — logout's own revoke re-entering on the canvas ends nothing (no loop)", async () => {
+    const { reactToPlatformUnauthorized } = await import('@/utils/platformSession')
+    const { calls, deps } = harness({ storedToken: null, path: '/canvas/s/tok_1' })
+    expect(reactToPlatformUnauthorized(challenged('DEAD'), deps).verdict).toBe('ignore')
+    expect(calls).toEqual({ adopt: 0, logout: 0, login: 0 })
+  })
+
   it('a rejected redundant navigation from the REAL handler shape is absorbed', async () => {
     const { reactToPlatformUnauthorized, setPlatformUnauthorizedHandler, notifyPlatformUnauthorized } =
       await import('@/utils/platformSession')
@@ -354,6 +410,17 @@ describe('one credential source, one handler (source guards — wiring only)', (
     // No private copy of the verdict or the reaction survives in main.js.
     expect(MAIN).not.toContain('sessionLostVerdict(')
     expect(MAIN).not.toContain("router.push('/login')\n}")
+  })
+
+  it('#3406 — a 401 is judged against the address being loaded, not START_LOCATION', () => {
+    // `router.currentRoute.value.path` is "/" until the first navigation
+    // completes, so `currentRoute.value?.path || window.location.pathname`
+    // never reached its fallback. The behaviour is executed against a real
+    // router in platformSessionVerdict.spec.js; this pins the one line that
+    // hands it the router.
+    expect(MAIN).toContain('path: pathForVerdict(router, START_LOCATION, window.location.pathname),')
+    expect(MAIN).toMatch(/import \{[^}]*\bSTART_LOCATION\b[^}]*\} from 'vue-router'/)
+    expect(MAIN).not.toContain('router.currentRoute.value?.path')
   })
 
   it('the Workspace veto reads the per-tab store, not shared storage (W1)', () => {

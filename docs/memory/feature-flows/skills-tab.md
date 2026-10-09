@@ -123,7 +123,7 @@ Run enablement (`runVerdict`, `skillCards.js:108-118`), checked in order:
 | List not live (last-known) | off | The agent isn't answering right now |
 | Shared card whose name the agent's own skill shadows | off | The agent's own skill of this name runs: use it from Own skills |
 | Not in the live list | off | Not in the agent yet: sync now, or start it again |
-| `user_invocable: false` | off | This skill is not user-invocable |
+| The listing's `user_invocable` is false (frontmatter `user-invocable: false`) | off | This skill is not user-invocable |
 | Gated | on | Asks the approver first: nothing runs until they say yes |
 
 The last-known list never drives Run.

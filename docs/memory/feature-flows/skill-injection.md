@@ -282,7 +282,7 @@ first). Flat keys are the convention; a `trinity:` mapping wins when present:
 ---
 description: Cut and publish clips
 automation: gated            # surfaced, not enforced (trinity#518 input)
-user_invocable: true         # default true
+user-invocable: true         # default true; `user_invocable` also read (hyphen first, #3134)
 allowed-tools: Bash, Read
 requires:
   packages: [pillow]         # surfaced; NOT probed in v1 (packages_not_checked)

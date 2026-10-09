@@ -50,6 +50,8 @@
                 <!-- Wraps: two badges beside the numbers must not crush the name in a narrow rail. -->
                 <div class="flex items-center gap-x-2 gap-y-0.5 flex-wrap tabular-nums">
                   <span class="font-mono text-[11.5px] min-w-0 truncate">{{ m.name }}</span>
+                  <!-- ent#731: a number that must not move while the objective is pursued. -->
+                  <BaseBadge v-if="m.role === 'guard'" variant="neutral" title="Must stay where it is while this objective is pursued" data-testid="portal-role-metric-guard">Guard</BaseBadge>
                   <span class="text-gray-400">{{ shown(m.actual, m) }}<template v-if="m.target != null"> / {{ shown(m.target, m) }}</template></span>
                   <!-- Position against the target, never pace. Stale is orthogonal: both can show. -->
                   <BaseBadge v-if="gapBadge(m)" :variant="gapBadge(m).variant" dot data-testid="portal-role-metric-gap">{{ gapBadge(m).label }}</BaseBadge>
@@ -206,6 +208,8 @@ function findingText(code) {
     metric_retired: "This metric is no longer measured, so its last number isn't shown.",
     direction_mismatch: "The objective and the metric disagree on which way is good. The comparison follows the metric's own setting.",
     direction_undeclared: "Nothing says whether higher or lower is better here, so it can't be compared with its target.",
+    guard_target_unset: 'Target not set. This guard gets a level to hold once there is a baseline.',
+    guard_direction_invalid: 'This guard names a direction. A guard is only checked for staying put, so the direction is ignored.',
   }[code] || "This metric can't be compared with its target right now."
 }
 

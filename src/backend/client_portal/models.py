@@ -645,6 +645,9 @@ class PortalRoleMetric(BaseModel):
     projection of the objective ↔ metric join (`ObjectiveMetricRead`), never
     that model whole. A field added here is a disclosure decision."""
     name: str
+    # primary | guard (ent#731) — a fixed value, so a guard row can be labelled
+    # without any author text crossing.
+    role: str = "primary"
     # The registry's declared type and unit — what the card formats the two
     # numbers with. None for a metric this agent does not declare.
     type: Optional[str] = None

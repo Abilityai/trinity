@@ -90,6 +90,10 @@ OPERATOR_QUEUE_TITLE_MAX = int(os.getenv("OPERATOR_QUEUE_TITLE_MAX", "300"))
 OPERATOR_QUEUE_QUESTION_MAX = int(os.getenv("OPERATOR_QUEUE_QUESTION_MAX", "4000"))
 OPERATOR_QUEUE_CONTEXT_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_CONTEXT_MAX_BYTES", "8192"))
 OPERATOR_QUEUE_OPTIONS_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_OPTIONS_MAX_BYTES", "4096"))
+# #3385: `type` is agent-authored free text. A plain constant, not an env knob:
+# it must stay above every platform type literal (the longest is 24 chars) or the
+# clamp would re-type a platform row.
+OPERATOR_QUEUE_TYPE_MAX = 64
 # #3243: the authoring caps on an agent's ask, refused (never truncated) on the
 # native path and held on the queue-file path. Floored at load so a mis-set env
 # cannot refuse every skill-gate approval (two short options) or every title.
@@ -675,6 +679,28 @@ def _truncate_with_marker(text: str, max_len: int) -> str:
     return text[:keep] + _TRUNC_MARKER
 
 
+def _bounded_type(value):
+    """#3385: the ingest bound on an agent-authored `type` — truncate-with-marker,
+    strings only. Shared by the clamp and the #2915 fingerprint so a clamped
+    row never reads as a rewrite of its own oversize entry."""
+    return _truncate_with_marker(value, OPERATOR_QUEUE_TYPE_MAX) if isinstance(value, str) else value
+
+
+def _scalar_text(value):
+    """#3314: a JSON number/bool title or question is stored as its text, so the
+    stored value is the same on every DB backend and the fingerprint can match it.
+    Anything else is returned unchanged (str, None, and containers — a non-empty
+    container still fails the insert, as today). A FALSY scalar (0, 0.0, False)
+    is also returned unchanged: `create_item` stores the `or`-default for it
+    ("Agent request" / "(no details provided)"), and rows ingested before this
+    fix carry that default too, so stringifying it here would fingerprint "0"
+    against a row that says "Agent request" and flip every such pre-fix row to
+    409 `item_diverged` on the next sync."""
+    if isinstance(value, (bool, int, float)) and value:
+        return str(value)
+    return value
+
+
 def _validated_addressee(agent_name: str, raw) -> Optional[str]:
     """The email an ask is addressed to, or None (ent#364).
 
@@ -838,6 +864,7 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     contract above still holds.
 
     - title / question: truncate-with-marker.
+    - type: truncate-with-marker (#3385).
     - context: non-dict → {} (fixes the create_item .get crash class); serialized
       > cap OR non-serializable → a marker object that preserves only a *valid*
       (≤EXECUTION_ID_MAX, id-shaped) execution_id.
@@ -852,13 +879,16 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     """
     out = dict(req)
 
-    title = out.get("title")
+    title = _scalar_text(out.get("title"))
     if isinstance(title, str):
         out["title"] = _truncate_with_marker(title, OPERATOR_QUEUE_TITLE_MAX)
 
-    question = out.get("question")
+    question = _scalar_text(out.get("question"))
     if isinstance(question, str):
         out["question"] = _truncate_with_marker(question, OPERATOR_QUEUE_QUESTION_MAX)
+
+    if "type" in out:
+        out["type"] = _bounded_type(out["type"])
 
     # ent#364: the addressee is an authorization decision, so it is resolved here
     # rather than trusted. Absent/invalid/off-roster → None, i.e. an operator ask.
@@ -1027,7 +1057,11 @@ def _normalise_expires(value) -> str:
 
 
 def _canonical_options(options) -> str:
-    if options is None:
+    # #3314: mirrors `db/operator_queue.py` storing `json.dumps(options) if
+    # item.get("options") else None` — a falsy value ([], "", {}, 0, False) is
+    # stored NULL, so it must canonicalise like None or the untouched entry
+    # reads as a rewrite.
+    if not options:
         return ""
     try:
         return json.dumps(options, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -1041,9 +1075,9 @@ def _entry_content(req: dict) -> dict:
     matches what the row stored at ingest byte for byte. `_clamp_ingested_item`
     itself is deliberately not called: it reads the roster and may create a
     workspace thread, and must never run speculatively."""
-    title = req.get("title")
+    title = _scalar_text(req.get("title"))
     title = _truncate_with_marker(title, OPERATOR_QUEUE_TITLE_MAX) if isinstance(title, str) else None
-    question = req.get("question")
+    question = _scalar_text(req.get("question"))
     question = _truncate_with_marker(question, OPERATOR_QUEUE_QUESTION_MAX) if isinstance(question, str) else None
     options = req.get("options")
     if options is not None:
@@ -1078,6 +1112,9 @@ def _row_content(row: dict) -> dict:
 
 
 def _comparable_type(value) -> str:
+    # #3385: bound BEFORE the empty-value default, so a row holding the clamped
+    # value and an entry still holding the raw one compare equal.
+    value = _bounded_type(value)
     return "question" if value in (None, "") else str(value)
 
 
@@ -2303,7 +2340,8 @@ class OperatorQueueSyncService:
                 agent_name, {"id": new_id, "sync_state": None, "sync_detail": None},
                 SYNC_CONFIRMED, None, now,
             )
-            # `type` is agent-authored free text the clamp does not bound; the
+            # `type` is agent-authored free text — the clamp bounds its length
+            # (#3385) but not its content; the
             # audit row is durable operator-visible state (G-04), so it carries
             # the folded token or `other` — never the string itself. `req_id`
             # passed the `_ID_RE` shape check above.

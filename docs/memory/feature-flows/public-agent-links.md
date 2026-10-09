@@ -165,6 +165,26 @@ Public User -> POST /api/public/chat/{token}
 
 **Owner/admin/shared** users in `agent_sharing` are admitted by step (1). Everyone else falls through to `open_access` (public-by-default) or creates a pending row in `access_requests` which the owner can approve from the Access Requests UI.
 
+#### When the visitor's session ends (#3406)
+
+The verified session lives in `localStorage['public_session_<token>']` and lasts 24 hours (`session_hours=24` in `confirm_verification_code`). After that, every route that checks it — intro, history, session clear (`DELETE /session`), chat send and Stop (`POST /executions/{token}/{id}/terminate`) — answers a **bare** 401 (no `WWW-Authenticate` header). The page reacts in one place:
+
+```
+any of those 401s -> PublicChat.vue endPublicSession()
+   -> sessionToken = '', localStorage key removed only if it still holds THIS tab's session
+      (a sibling tab that verified again keeps its fresh one; try/catch)
+   -> linkInfo.require_email = true   (the 401 proves it, even if the policy changed after load)
+   -> verify card, email step, red box: "Session expired. Please verify your email again."
+   -> transcript cleared; it reloads from the server after the visitor verifies again
+   -> on a send: the unsent words go back into the input (restoreDraft)
+```
+
+- `fetchIntro()` does nothing on an email link with no session (a guaranteed 401), so a history 401 on load is not followed by a second request.
+- Stop sends `session_token` as a **query** parameter on email links (the route has no body model). Before #3406 it sent none, so Stop there always 401'd. A Stop 401 ends the session only on an email link: elsewhere the route checks no session and passes the agent's own status through.
+- Escape on the verify card does not try to stop the in-flight turn.
+- The quick actions (`GET /api/public/playbooks/{token}`, link-checked only) load whether or not the visitor is verified, so they are there after an in-page verification without a reload.
+- **Never the operator `/login`.** `PublicChat.vue` uses the global axios, whose 401 interceptor reports to the platform-session verdict (`utils/platformSession.js`). On `/chat/` a bare 401 is `ignore`: the visitor stays on the page, and an operator whose live JWT rode the request stays signed in. A **Bearer-challenged** 401 (the operator's own token is dead — `/api/users/me`, the ws ticket, the history dropdown's `/api/public/sessions/*`) ends that platform session in place, without navigating. See [workspace-session-signout.md](workspace-session-signout.md) → One verdict.
+
 ## Frontend Layer
 
 ### Components
@@ -207,6 +227,8 @@ Public User -> POST /api/public/chat/{token}
 | `subscribeToStream()` | 568 | THINK-001: Subscribe to public execution SSE stream |
 | `pollExecution()` | 635 | THINK-001: Poll public execution status until complete |
 | `sendMessage()` | 661 | Send chat message (async mode with SSE streaming) |
+| `endPublicSession()` | 481 | #3406: the one reaction to a link-session 401 — clears the session and its key, shows the verify card with "Session expired…", clears the transcript |
+| `cancelTurn()` | 907 | ent#155 Stop; #3406: sends `session_token` in the query on email links, and a 401 ends the session |
 
 ### Shared Chat Components (CHAT-001 Refactor)
 
@@ -457,6 +479,8 @@ PUBLIC_CHAT_URL=
 | Agent error | 502 | Failed to process your request |
 
 *Note: Public link info endpoint returns 200 with valid=false for invalid links (not 404)
+
+Both 401s are bare (no `WWW-Authenticate` header) and land the visitor on the verify card with "Session expired. Please verify your email again." — never on the operator `/login` (#3406; see [When the visitor's session ends](#when-the-visitors-session-ends-3406)).
 
 ## Files
 
@@ -2058,3 +2082,4 @@ const viewingHistorySession = ref(null)   // non-null = read-only history mode
 | 2026-03-04 | **EXEC-024 TaskExecutionService refactor**: `POST /api/public/chat/{token}` now routes through `TaskExecutionService.execute_task(triggered_by="public")` instead of raw `httpx` call. Public executions now create `schedule_executions` records, appear in Tasks tab and Dashboard timeline, count toward capacity slots (429 when full), and have credential-sanitized logs. Updated architecture diagram, data flow sections, chat endpoint steps, cost tracking, error handling, and file references. Added `task_execution_service.py` to files list. |
 | 2026-03-19 | **MEM-001 Per-User Persistent Memory** (#147): Added `public_user_memory` table (schema.py:363-374, migration #28). Email-verified sessions inject per-user memory via `format_user_memory_block()` (platform_prompt_service.py:97) as `system_prompt` kwarg to `execute_task()` — both sync (public.py:368) and async paths (public.py:683). Background summarization via `_summarize_user_memory()` (public.py:725-782) fires every 5th message using `claude-haiku-4-5-20251001`. New DB methods on `PublicLinkOperations` (public_links.py:439-522). Architecture diagram updated to include `public_user_memory`. Anonymous sessions unaffected. |
 | 2026-03-04 | **THINK-001 Dynamic Thinking Status for Public Chat**: Added async mode (`async_mode` field in `PublicChatRequest`), SSE stream proxy (`GET /api/public/executions/{token}/{id}/stream`), execution status polling (`GET /api/public/executions/{token}/{id}/status`), and background task function (`_execute_public_chat_background`). Frontend updated: `sendMessage()` uses async mode, `subscribeToStream()` for SSE, `pollExecution()` for completion, `updateLoadingText()` with anti-flicker timing, `resetHeartbeat()` fallback. Updated endpoints table, data flow, methods table, components, files. public.py now 764 lines, PublicChat.vue now 786 lines. |
+| 2026-10-08 | **#3406 Expired visitor sessions end on the verify card**: a 401 from intro, history, session clear, chat or Stop now runs `endPublicSession()` (key removed, verify card with the existing "Session expired" copy, transcript reloaded after re-verify, unsent words restored). Stop sends `session_token` as a query parameter on email links. Quick actions load before verification. The global 401 verdict no longer sends `/chat/` visitors to the operator `/login`, and ends a dead operator token in place only on a Bearer-challenged 401. |

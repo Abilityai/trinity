@@ -112,8 +112,9 @@ def test_the_canon_grammar_round_trips():
     assert obj["status"] == "active"
     assert obj["review_by"] == "2026-10-15"
     assert obj["metrics"] == [{
-        "name": "close_rate", "target": 35, "target_text": None,
-        "tolerance": None, "by": "2026-12-31", "direction": "up",
+        "name": "close_rate", "role": "primary", "target": 35,
+        "target_text": None, "tolerance": None, "by": "2026-12-31",
+        "direction": "up",
     }]
 
 

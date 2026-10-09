@@ -1715,6 +1715,10 @@ metrics:
     target: 35
     by: 2026-12-31
     tolerance: 1              # optional; `hold` only
+guard_metrics:                # optional; numbers that must not move (50.11)
+  - name: active_clients
+    target: 9                 # optional; the hold level once a baseline exists
+    tolerance: 1              # optional
 status: active | achieved | dropped
 review_by: 2026-10-15
 ```
@@ -1849,9 +1853,12 @@ it. Findings appear twice — flat in `findings[]` with `objective_id` / `metric
 | `metric_not_declared_here` | a **supporting-only** objective names a metric this agent does not declare | *nothing* — the owning role's agent declares it; when this agent holds a grant on the agent serving it, the row carries `served_by` and an actual instead (§51.6). Counted under `summary.declared_elsewhere`, **not** `undeclared` |
 | `metric_retired` | the name is declared but retired | re-declare and refresh; the last value is **withheld**, because a retired number rendering as current is the §49.2 failure |
 | `metric_name_invalid` | a `metrics:` entry is not a mapping, or its name is not a valid id | fix the objective file |
-| `metric_duplicate` | one objective lists a name twice | first entry wins; drop the rest |
+| `metric_duplicate` | one objective lists a name twice (in `metrics:`, in `guard_metrics:`, or once in each) | first entry wins, and a name in both lists is kept as the primary; drop the rest |
 | `direction_mismatch` | registry and objective both declare a direction and disagree | registry wins; fix whichever file is wrong |
 | `direction_undeclared` | neither declares one | add `direction:` to the template metric or the objective entry |
+| `guard_metrics_invalid` | `guard_metrics:` is present and not a list | fix the objective file; no guard of that objective is read |
+| `guard_target_unset` | a guard has no numeric `target` | set `target:` to the hold level once a baseline exists; the row reads "target not set", never blank |
+| `guard_direction_invalid` | a guard declares a `direction` other than `hold` | drop the word — a guard is always judged as a hold |
 | `objective_invalid` | the file is not a YAML mapping | fix the YAML; §3.4 names the fields |
 | `objective_unreadable` | the agent answered, but not with that file (retryable — a transport fault is not an author error) | retry |
 | `objective_id_duplicate` | two files declare one id | both are shown; give one its own id |
@@ -1926,7 +1933,7 @@ stopped is an *answer*, not an error.
           objectives_unscanned, objectives_skipped, objectives_truncated},
  objectives: [{id, path, schema_version, statement, horizon, status, owner,
                review_by, owned, supporting, metrics_truncated,
-               metrics: [{name, target, target_text, tolerance, by, horizon,
+               metrics: [{name, role, target, target_text, tolerance, by, horizon,
                           objective_direction, declared, declared_elsewhere,
                           direction, direction_source, unit, type, label,
                           actual, last_point_at, stale, freshness, stale_after,
@@ -1934,7 +1941,9 @@ stopped is an *answer*, not an error.
                           finding: {code, message} | null}]}],
  findings: [{code, objective_id, metric, path, message}],
  summary: {objectives, metrics, behind, ahead, on_target, off_target,
-           not_computable, stale, undeclared, declared_elsewhere},
+           not_computable, stale, undeclared, declared_elsewhere,
+           served_elsewhere,
+           guards: {total, on_target, off_target, not_computable, stale}},
  message: str | null}
 ```
 
@@ -2072,6 +2081,38 @@ fallback for `actual` (retired by §49's D-010); a projection cache.
 - [x] The model is the contract, pinned by key parity
 - [x] MCP `get_objectives` is agent-scoped, takes no agent parameter, and never
       throws
+
+### 50.11 Guard metrics (trinity-enterprise#731)
+
+An objective may list **guard metrics**: numbers that must not move while the
+objective's own metrics are pursued (grow signups, keep cost per signup flat).
+They are read from a top-level `guard_metrics:` list with the same entry shape
+as `metrics:`; the descriptive keys canon carries beside them (`definition`,
+`rationale`, `instrument`, `served_by`) are tolerated and ignored.
+
+- **One list on the wire.** Each guard is appended to the objective's `metrics`
+  with `role: "guard"`; primaries carry `role: "primary"`. One list is what
+  makes a guard fetched, served through a grant (§51.6) and judged by the same
+  code as a primary.
+- **A guard is always a hold.** It resolves to `direction: neutral`,
+  `direction_source: objective`, no `direction_mismatch`, whatever the
+  registry or its own `direction:` says — so it is `on_target` or
+  `off_target` within its `tolerance` (default exact) and **never `behind` or
+  `ahead`**. `objective_direction` reads `hold` when the entry wrote none. The
+  same metric as a primary of another objective keeps its normal direction
+  there.
+- **Never blank.** A guard with no numeric target is `not_computable` /
+  `no_target` with `guard_target_unset`; every other finding of 50.5
+  (undeclared, retired, supporting-only, served ambiguously) applies to a guard
+  exactly as to a primary.
+- **Counted apart.** `summary.behind` … `summary.served_elsewhere` count
+  primaries only, so an objective without guards reports exactly what it did
+  before; `summary.guards` carries `{total, on_target, off_target,
+  not_computable, stale}`.
+- **Bounds.** Guards have their own `MAX_METRICS_PER_OBJECTIVE` cap;
+  `metrics_truncated` is true when either list overflowed.
+- **Workspace.** The role card shows a guard row with a neutral "Guard" badge;
+  the portal row carries `role` as the fixed value `guard` | `primary` only.
 
 ## 51. Narrow Cross-Agent Metrics Read — a grant holder may read another agent's numbers (trinity-enterprise#727)
 

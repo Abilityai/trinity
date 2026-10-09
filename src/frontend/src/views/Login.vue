@@ -268,12 +268,19 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import { safeRedirect } from '../utils/safeRedirect'
 import QrCode from '../components/QrCode.vue'
 
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
+
+// #3406 — back to the page that sent the person here (a shared canvas's own
+// "Sign in" carries `?redirect=`), or the dashboard. SSO still lands on the
+// dashboard: the round trip through the identity provider drops the query.
+const afterLogin = () => router.push(safeRedirect(route.query.redirect))
 
 // Local state for admin login form. #82 Phase 1: the admin may sign in with the
 // email they registered at setup (or in Settings) instead of the fixed 'admin'.
@@ -373,7 +380,7 @@ const handleVerifyCode = async () => {
 
   const success = await authStore.verifyEmailCode(emailInput.value, codeInput.value)
   if (success) {
-    router.push('/')
+    afterLogin()
   }
 
   loginLoading.value = false
@@ -396,9 +403,9 @@ onMounted(async () => {
     await authStore.detectAuthMode()
   }
 
-  // If already authenticated, redirect to dashboard
+  // If already authenticated, go on (to the redirect, else the dashboard)
   if (authStore.isAuthenticated) {
-    router.push('/')
+    afterLogin()
     return
   }
 
@@ -428,7 +435,7 @@ const handleAdminLogin = async () => {
   const identifier = (adminIdentifier.value || 'admin').trim()
   const success = await authStore.loginWithCredentials(identifier, password.value)
   if (success) {
-    router.push('/')
+    afterLogin()
   }
 
   loginLoading.value = false
@@ -440,7 +447,7 @@ const handleMfaVerify = async () => {
   authStore.clearError()
   const ok = await authStore.verifyMfaCode(mfaCode.value.trim())
   loginLoading.value = false
-  if (ok) router.push('/')
+  if (ok) afterLogin()
 }
 
 const handleMfaEnrollConfirm = async () => {
@@ -451,13 +458,13 @@ const handleMfaEnrollConfirm = async () => {
   if (ok) {
     // Already authenticated (token minted); show the codes, then continue.
     mfaRecoveryCodes.value = recoveryCodes || []
-    if (!mfaRecoveryCodes.value.length) router.push('/')
+    if (!mfaRecoveryCodes.value.length) afterLogin()
   }
 }
 
 const finishMfa = () => {
   mfaRecoveryCodes.value = []
-  router.push('/')
+  afterLogin()
 }
 
 const handleMfaCancel = () => {

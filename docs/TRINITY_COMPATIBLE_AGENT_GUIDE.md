@@ -1493,6 +1493,10 @@ metrics:
     direction: up          # up | down | hold
     target: 35
     by: 2026-12-31
+guard_metrics:             # optional: numbers that must not move meanwhile
+  - name: cost_per_lead
+    target: 40             # the level to hold, once you have a baseline
+    tolerance: 5
 ```
 
 `name` is the whole link: an objective does not carry its own copy of the
@@ -1515,6 +1519,12 @@ from `get_metrics` plus the file: `gap.status` is *position* relative to the
 target (`behind` / `on_target` / `ahead`, or `on_target` / `off_target` for
 `hold`), and `stale: true` means do not act on that number — record a fresh
 point first.
+
+A **guard** row carries `role: "guard"`. It is always judged as a hold —
+`on_target` within its `tolerance` or `off_target`, never behind or ahead,
+whatever the metric's own direction — and it is counted in `summary.guards`,
+apart from the objective's own metrics. A guard with no `target` yet shows the
+finding `guard_target_unset`.
 
 ### File Locations
 

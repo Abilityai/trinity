@@ -446,9 +446,13 @@ def sanitize_text(text: str) -> str:
 
 
 def sanitize_dict(data: Dict[str, Any], depth: int = 0, max_depth: int = 10) -> Dict[str, Any]:
-    """Recursively sanitize sensitive values in a dictionary."""
+    """Recursively sanitize sensitive values in a dictionary.
+
+    Past ``max_depth`` the subtree is replaced with ``REDACTION_PLACEHOLDER``,
+    not walked (fail closed, #3312) — the root itself is never cut.
+    """
     if depth > max_depth:
-        return data
+        return REDACTION_PLACEHOLDER
 
     result = {}
     for key, value in data.items():
@@ -464,9 +468,13 @@ def sanitize_dict(data: Dict[str, Any], depth: int = 0, max_depth: int = 10) -> 
 
 
 def sanitize_list(data: List[Any], depth: int = 0, max_depth: int = 10) -> List[Any]:
-    """Recursively sanitize sensitive values in a list."""
+    """Recursively sanitize sensitive values in a list.
+
+    Past ``max_depth`` the subtree is replaced with ``REDACTION_PLACEHOLDER``,
+    not walked (fail closed, #3312) — the root itself is never cut.
+    """
     if depth > max_depth:
-        return data
+        return REDACTION_PLACEHOLDER
 
     result = []
     for item in data:
@@ -503,8 +511,9 @@ def sanitize_json_string(json_str: str) -> str:
         else:
             return sanitize_text(json_str)
         return json.dumps(sanitized)
-    except json.JSONDecodeError:
-        # If not valid JSON, sanitize as plain text
+    except (json.JSONDecodeError, RecursionError):
+        # Not valid JSON, or nested too deep for json.loads (#3312):
+        # sanitize as plain text
         return sanitize_text(json_str)
 
 

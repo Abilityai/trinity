@@ -338,9 +338,11 @@ class TestNestedStructures:
             current = current["nested"]
         current["secret"] = "sk-1234567890abcdefghij1234567890ghij1234567890"
 
-        # Should not crash, should stop at max depth
+        # Should not crash, and must not hand the uncut subtree back raw (#3312)
         result = sanitize_dict(data, max_depth=10)
         assert isinstance(result, dict)
+        assert "sk-1234567890abcdefghij1234567890ghij1234567890" not in json.dumps(result)
+        assert REDACTION_PLACEHOLDER in json.dumps(result)
 
 
 @pytest.mark.unit

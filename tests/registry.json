@@ -124,6 +124,17 @@
       "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for services/credential_encryption.py + services/secret_settings.py (#3325). Real bugs are strict-xfail and name their issue. No Docker, no network."
     },
     {
+      "file": "unit/test_3325_credential_error_types.py",
+      "feature": "#3325",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#3325 — an unstorable credential value is SecretSettingValueError → value-free 422 (anthropic, Slack OAuth, Slack connect routes); the secret reaches no message, chain or log line; a missing key is still reported first; main.py registers the handler. No Docker, no network."
+    },
+    {
       "file": "unit/test_ec_credential_crypto_properties.py",
       "feature": "edge-cases-2026-10-06",
       "added": "2026-10-07",
@@ -275,7 +286,7 @@
         "security",
         "unit"
       ],
-      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for utils/url_validation.py (#3322, #3323). Real bugs are strict-xfail and name their issue. No Docker, no network."
+      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for utils/url_validation.py. Open real bugs are strict-xfail and name their issue (#3322); the protocol-relative userinfo refusal (#3323) is now a passing regression test plus a no-over-reach pin. No Docker, no network."
     },
     {
       "file": "unit/test_ec_url_validation_properties.py",
@@ -286,7 +297,7 @@
         "security",
         "unit"
       ],
-      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for utils/url_validation.py (#3322, #3323). Real bugs are strict-xfail and name their issue. No Docker, no network."
+      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for utils/url_validation.py. The known open bugs (#3322) are strict-xfail in the edges file and excluded here. No Docker, no network."
     },
     {
       "file": "unit/test_3265_portal_message_attachments.py",
@@ -1811,7 +1822,7 @@
         "security",
         "reliability"
       ],
-      "description": "Operator-queue create-path ingestion caps (#1632): the agent-authored sync boundary is bounded by a DB-measured pending-DEPTH cap (primary, Redis-independent), a per-agent + fleet RATE cap (fail-open, break on deny, real in-process-fallback exercise), a total truncate-with-marker field-hygiene clamp inside the #1525 try/except (title/question/context/options/execution_id/created_at/priority, non-dict context, boundary lengths, never-raises), the reserved-platform-id + malformed-id guard, the opqueue:leader cross-worker lock (non-leader poll cycle is a no-op), the one-per-episode flood alert (un-guessable id, cooldown, emit-failure-safe, platform-exempt), the oversize-file skip, and the generous DB-sink belt + count_pending_for_agent helper. Also pins the concrete platform producer validation_service._notify_operator_on_failure, converted to a direct db.create_operator_queue_item (#1632): reserved `val_` id (an agent can't pre-create and thereby suppress its own validation alarm), bypasses the agent-file sync caps, and stays best-effort (a create failure never fails validation) — the conversion also fixed a latent bug where the notification appended to a bare list and was never ingested. Also pins the _leader_ttl 30s floor (F1: lease outlasts one worst-case cycle + sleep, so leadership doesn't flap and the flood alert doesn't double-emit under --workers 2). Pure/mocked (rate_limiter stubbed + one real in-process test; DB engine stubbed)."
+      "description": "Operator-queue create-path ingestion caps (#1632): the agent-authored sync boundary is bounded by a DB-measured pending-DEPTH cap (primary, Redis-independent), a per-agent + fleet RATE cap (fail-open, break on deny, real in-process-fallback exercise), a total truncate-with-marker field-hygiene clamp inside the #1525 try/except (title/question/context/options/execution_id/created_at/priority, non-dict context, boundary lengths, never-raises), the reserved-platform-id + malformed-id guard, the opqueue:leader cross-worker lock (non-leader poll cycle is a no-op), the one-per-episode flood alert (un-guessable id, cooldown, emit-failure-safe, platform-exempt), the oversize-file skip, and the generous DB-sink belt + count_pending_for_agent helper. Also pins the concrete platform producer validation_service._notify_operator_on_failure, converted to a direct db.create_operator_queue_item (#1632): reserved `val_` id (an agent can't pre-create and thereby suppress its own validation alarm), bypasses the agent-file sync caps, and stays best-effort (a create failure never fails validation) — the conversion also fixed a latent bug where the notification appended to a bare list and was never ingested. Also pins the _leader_ttl 30s floor (F1: lease outlasts one worst-case cycle + sleep, so leadership doesn't flap and the flood alert doesn't double-emit under --workers 2). Also pins #3385: an agent-authored `type` is truncated with the marker at OPERATOR_QUEUE_TYPE_MAX (64) while every platform-emitted and ask_operator type passes unchanged, the #2915 fingerprint bounds both sides so a clamped row is not a rewrite of its own oversize entry, and the DB belt rejects a type over 1 KiB. Pure/mocked (rate_limiter stubbed + one real in-process test; DB engine stubbed)."
     },
     {
       "file": "unit/test_1615_ssh_password_removed.py",
@@ -4124,6 +4135,16 @@
       "description": "`GET /api/agents/{name}/objectives` through a real TestClient with the service's edges stubbed. Gate order copied from `/metrics` and proved in order (the self-gate fires BEFORE the service is called and before the limiter), the route's own 60/min knob rather than the store read's 240 because this one drives the container, a store outage as 503 + `Retry-After`, and an unreachable agent as a 200 that SAYS so — an agent being stopped is an answer, not an error. The model-is-the-contract half walks the service's own dict against every model's fields recursively, so an additive service key fails the build instead of being silently filtered out by `response_model`; author-shaped targets (`.nan`, `.inf`, lists, bools, 4 KB strings) are pushed through the real route and parsed with `parse_constant` armed, since a bare `NaN` on the wire is what blanks the card."
     },
     {
+      "file": "unit/test_ent731_guard_metrics.py",
+      "feature": "abilityai/trinity-enterprise#731",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "Guard metrics in the objective join: `guard_metrics:` parsed into the same `metrics` list tagged `role: guard` (own cap, cross-list duplicate keeps the primary, malformed sections and entries named), a guard always resolving as a hold whatever the registry or its own word says, never behind/ahead, `guard_target_unset` / `guard_direction_invalid` findings, served / stale / retired / undeclared / supporting-only guards, `summary.guards` counted apart with empty-path parity, the guard's number fetched through the whole read, and the portal projection carrying `role` as a fixed value only."
+    },
+    {
       "file": "unit/test_ent638_seat_decisions.py",
       "feature": "trinity-enterprise#638",
       "added": "2026-09-22",
@@ -5398,6 +5419,18 @@
         "skeleton"
       ],
       "description": "J17 skeleton: a fact reaches its owner — reports NOT RUN, blocked by ent#793 and fact routing (ent#804)."
+    },
+    {
+      "file": "unit/test_3406_bearer_challenge_contract.py",
+      "feature": "#3406",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "auth",
+        "public-links",
+        "unit"
+      ],
+      "description": "#3406: the backend half of the contract the browser's 401 verdict reads. get_current_user rejects a dead token and OAuth2PasswordBearer rejects a missing one WITH `WWW-Authenticate: Bearer`; the five public-link session routes (intro, history, session clear, chat, terminate) answer an expired or missing visitor session with a bare 401. Handlers driven directly with the link check, rate limit and session lookup stubbed. No Docker."
     }
   ]
 }
