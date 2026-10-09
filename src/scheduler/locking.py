@@ -238,19 +238,6 @@ class LockManager:
             return lock
         return None
 
-    def is_schedule_locked(self, schedule_id: str) -> bool:
-        """
-        Check if a schedule is currently locked.
-
-        Args:
-            schedule_id: The schedule ID to check
-
-        Returns:
-            True if locked, False otherwise
-        """
-        lock_name = f"scheduler:lock:schedule:{schedule_id}"
-        return self.redis.exists(lock_name) > 0
-
     def set_heartbeat(self, instance_id: str, ttl: int = 60) -> bool:
         """
         Set a heartbeat for this scheduler instance.

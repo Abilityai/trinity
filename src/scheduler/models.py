@@ -26,14 +26,6 @@ class ExecutionStatus(str, Enum):
     PENDING_RETRY = "pending_retry"  # Added for RETRY-001 - retry scheduled but not yet fired
 
 
-class TriggerSource(str, Enum):
-    """What triggered the execution."""
-    SCHEDULE = "schedule"
-    MANUAL = "manual"
-    API = "api"
-    RETRY = "retry"  # Added for RETRY-001 - automatic retry of failed execution
-
-
 @dataclass
 class Schedule:
     """A scheduled task definition."""
@@ -238,26 +230,6 @@ class Reminder:
     created_by_email: Optional[str] = None
     source_agent_name: Optional[str] = None
     source_mcp_key_id: Optional[str] = None
-
-
-@dataclass
-class AgentTaskMetrics:
-    """Metrics extracted from agent task response."""
-    context_used: int = 0
-    context_max: int = 200000
-    context_percent: float = 0.0
-    cost_usd: Optional[float] = None
-    tool_calls_json: Optional[str] = None
-    execution_log_json: Optional[str] = None
-    session_id: Optional[str] = None  # Claude Code session ID for --resume (EXEC-023)
-
-
-@dataclass
-class AgentTaskResponse:
-    """Parsed response from agent task endpoint."""
-    response_text: str
-    metrics: AgentTaskMetrics
-    raw_response: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

@@ -704,17 +704,6 @@ class SchedulerDatabase:
             row = cursor.fetchone()
             return self._row_to_execution(row) if row else None
 
-    def get_recent_executions(self, limit: int = 50) -> List[ScheduleExecution]:
-        """Get recent executions across all schedules."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM schedule_executions
-                ORDER BY started_at DESC
-                LIMIT ?
-            """, (limit,))
-            return [self._row_to_execution(row) for row in cursor.fetchall()]
-
     # =========================================================================
     # Retry Operations (RETRY-001)
     # =========================================================================

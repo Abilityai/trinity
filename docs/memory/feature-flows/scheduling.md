@@ -1527,7 +1527,7 @@ async def task(
     execution_id: Optional[str] = None,
     allowed_tools: Optional[list] = None,
     model: Optional[str] = None          # MODEL-001
-) -> AgentTaskResponse:
+) -> dict:
     timeout = timeout or self.timeout
 
     payload = {"message": message, "timeout_seconds": int(timeout)}

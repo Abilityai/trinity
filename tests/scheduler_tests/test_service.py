@@ -120,7 +120,7 @@ class TestScheduleJobManagement:
     """Tests for job management in the scheduler."""
 
     @pytest.mark.asyncio
-    async def test_add_schedule(self, db_with_data: SchedulerDatabase, mock_lock_manager: LockManager, sample_schedule: Schedule):
+    async def test_add_job(self, db_with_data: SchedulerDatabase, mock_lock_manager: LockManager, sample_schedule: Schedule):
         """Test adding a schedule to the scheduler."""
         service = SchedulerService(
             database=db_with_data,
@@ -129,31 +129,14 @@ class TestScheduleJobManagement:
         service.initialize()
 
         initial_count = len(service.scheduler.get_jobs())
-        service.add_schedule(sample_schedule)
+        assert service._add_job(sample_schedule) is True
 
         assert len(service.scheduler.get_jobs()) == initial_count + 1
 
         service.shutdown()
 
     @pytest.mark.asyncio
-    async def test_add_disabled_schedule(self, db_with_data: SchedulerDatabase, mock_lock_manager: LockManager, sample_schedule: Schedule):
-        """Test that disabled schedules are not added."""
-        service = SchedulerService(
-            database=db_with_data,
-            lock_manager=mock_lock_manager
-        )
-        service.initialize()
-
-        sample_schedule.enabled = False
-        initial_count = len(service.scheduler.get_jobs())
-        service.add_schedule(sample_schedule)
-
-        assert len(service.scheduler.get_jobs()) == initial_count
-
-        service.shutdown()
-
-    @pytest.mark.asyncio
-    async def test_remove_schedule(self, db_with_data: SchedulerDatabase, mock_lock_manager: LockManager):
+    async def test_remove_job(self, db_with_data: SchedulerDatabase, mock_lock_manager: LockManager):
         """Test removing a schedule from the scheduler."""
         service = SchedulerService(
             database=db_with_data,
@@ -162,46 +145,9 @@ class TestScheduleJobManagement:
         service.initialize()
 
         initial_count = len(service.scheduler.get_jobs())
-        service.remove_schedule("schedule-1")
+        service._remove_job("schedule-1")
 
         assert len(service.scheduler.get_jobs()) == initial_count - 1
-
-        service.shutdown()
-
-    @pytest.mark.asyncio
-    async def test_update_schedule(self, db_with_data: SchedulerDatabase, mock_lock_manager: LockManager, sample_schedule: Schedule):
-        """Test updating a schedule."""
-        service = SchedulerService(
-            database=db_with_data,
-            lock_manager=mock_lock_manager
-        )
-        service.initialize()
-
-        # Add then update
-        service.add_schedule(sample_schedule)
-        sample_schedule.cron_expression = "0 10 * * *"
-        service.update_schedule(sample_schedule)
-
-        # Job should still exist with new schedule
-        job = service.scheduler.get_job(f"schedule_{sample_schedule.id}")
-        assert job is not None
-
-        service.shutdown()
-
-    @pytest.mark.asyncio
-    async def test_reload_schedules(self, db_with_data: SchedulerDatabase, mock_lock_manager: LockManager):
-        """Test reloading all schedules."""
-        service = SchedulerService(
-            database=db_with_data,
-            lock_manager=mock_lock_manager
-        )
-        service.initialize()
-
-        # Reload
-        service.reload_schedules()
-
-        # Should have same number of jobs (2 enabled)
-        assert len(service.scheduler.get_jobs()) == 2
 
         service.shutdown()
 

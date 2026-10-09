@@ -470,7 +470,7 @@ from scheduler.agent_client import get_agent_client, AgentNotReachableError
 # Create client for agent
 client = get_agent_client(schedule.agent_name)
 
-# Send task message - returns AgentTaskResponse with raw Claude Code log
+# Send task message - returns the response dict with raw Claude Code log
 task_response = await client.task(schedule.message, execution_id=execution.id)
 
 # Access parsed metrics
