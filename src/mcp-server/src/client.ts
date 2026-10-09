@@ -366,6 +366,80 @@ export interface DepthRefusal {
 export const INTER_AGENT_DEPTH_EXCEEDED = "inter_agent_depth_exceeded";
 
 /**
+ * #3244: a 429 from `/chat` that is NOT the admission refusal. Only
+ * `X-Trinity-Error-Code: capacity` proves nothing was dispatched; the usage /
+ * rate-limit 429 is raised after the agent ran the turn and its row was written
+ * `failed`, so "wait and re-send" would repeat what the partial run did. A
+ * RESULT that names that row, or — when the response names none — says the run
+ * may have started.
+ */
+export interface RateLimitedRun {
+  status: "rate_limited";
+  agent: string;
+  /** `X-Trinity-Error-Code` (e.g. `billing`); absent when the 429 carried none. */
+  code?: string;
+  /** The failed run, from `X-Trinity-Execution-Id`. */
+  execution_id?: string;
+  /** The agent's own error text. */
+  error?: string;
+  retryable: false;
+  message: string;
+}
+
+export const CAPACITY_ERROR_CODE = "capacity";
+
+/** An id safe to quote into a tool call the model is told to make. */
+const EXECUTION_ID_SHAPE = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * #3244: build the `RateLimitedRun` for a non-capacity 429. Never throws, and
+ * never passes on the backend's own "Please retry." (the auto-switch body).
+ */
+export function parseRateLimitedRun(
+  errorCode: string | null,
+  executionId: string | null,
+  body: string,
+  agent: string,
+): RateLimitedRun {
+  let error: string | undefined;
+  let switched = false;
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    const d = (parsed as { detail?: unknown })?.detail ?? parsed;
+    if (typeof d === "string") {
+      error = d;
+    } else if (d && typeof d === "object") {
+      const e = (d as { error?: unknown }).error;
+      if (typeof e === "string") error = e;
+      switched = Boolean((d as { auto_switch?: unknown }).auto_switch);
+    }
+  } catch {
+    // not JSON (a proxy's 429): nothing to quote
+  }
+  const id = executionId && EXECUTION_ID_SHAPE.test(executionId) ? executionId : undefined;
+  return {
+    status: "rate_limited",
+    agent,
+    ...(errorCode ? { code: errorCode } : {}),
+    ...(id ? { execution_id: id } : {}),
+    ...(error ? { error } : {}),
+    retryable: false,
+    message: id
+      ? `The run on '${agent}' started and then failed on a usage or rate limit; it is recorded as failed. ` +
+        `Part of the work may already be done, so do not re-send this message as it is. ` +
+        (switched ? "The agent's subscription was switched after the failure. " : "") +
+        `Read what happened with get_execution_result(agent_name="${agent}", execution_id="${id}") and decide from that.`
+      : `'${agent}' answered with a rate limit (HTTP 429) that is not a queue-full refusal, so the run may have started. ` +
+        `Do not re-send yet: look for your exact message in list_recent_executions(agent_name="${agent}") ` +
+        `and read that run with get_execution_result.`,
+  };
+}
+
+export function isRateLimitedRun(value: unknown): value is RateLimitedRun {
+  return (value as { status?: unknown })?.status === "rate_limited";
+}
+
+/**
  * #2806: a `DepthRefusal` from a non-2xx response, or undefined for anything
  * else — including a 403 WITHOUT the code (access denial, SELF-EXEC-001), which
  * must keep throwing. Read defensively, like `extractIdempotencyExecutionId`:
@@ -1118,7 +1192,8 @@ export class TrinityClient {
    * @param sourceAgent - Optional source agent name for agent-to-agent collaboration tracking
    * @param mcpKeyInfo - Optional MCP key info for execution origin tracking (AUDIT-001)
    *
-   * Returns ChatResponse on success, or a queue status object if agent is busy (429).
+   * Returns ChatResponse on success, a queue status object if admission refused
+   * the call (429 `capacity`), or a RateLimitedRun for any other 429 (#3244).
    */
   async chat(
     name: string,
@@ -1133,6 +1208,7 @@ export class TrinityClient {
     | Replayable<{ status: "queued_timeout"; agent: string; execution_id: string; message: string }>
     | DepthRefusal
     | GateResult
+    | RateLimitedRun
   > {
     // Prepare headers
     const headers: Record<string, string> = {
@@ -1241,6 +1317,22 @@ export class TrinityClient {
     // name. Checked first: its 429 (`approval_queue_full`) is not "agent busy".
     const gate = await readGateResult(response, name);
     if (gate) return gate;
+
+    // #3244: only the admission refusal (#2919 `capacity`) is "agent busy" —
+    // nothing was dispatched. Every other 429 fails toward "the run may have
+    // started": the post-run usage limit (which names its failed row), and one
+    // with no code at all (a proxy, or a backend that sent none), since
+    // "nothing ran, retry" is the one answer that is unsafe when wrong.
+    if (response.status === 429 && response.headers.get("x-trinity-error-code") !== CAPACITY_ERROR_CODE) {
+      const limited = parseRateLimitedRun(
+        response.headers.get("x-trinity-error-code"),
+        response.headers.get("x-trinity-execution-id"),
+        await response.text(),
+        name,
+      );
+      debugLog(`[chat] 429 on '${name}' is not an admission refusal (code=${limited.code ?? "none"}, execution_id=${limited.execution_id ?? "none"}) (#3244)`);
+      return limited;
+    }
 
     // Handle 429 Too Many Requests (agent queue full)
     if (response.status === 429) {

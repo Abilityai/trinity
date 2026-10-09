@@ -645,6 +645,12 @@ def _parse_agent_http_error(e, name: str):
 # breaks, and a dict-bodied path (the auto-switch shapes) carries it the same
 # way.
 ERROR_CODE_HEADER = "X-Trinity-Error-Code"
+# #3244: the execution row a post-dispatch failure was written to, on the same
+# additive terms. Without it the MCP server could not tell the 429 raised after
+# a turn ran from the admission 429 that dispatched nothing, and answered both
+# "agent busy, retry". The request header of the same name is the caller's own
+# turn (#2392); on a response it is the turn the response is about.
+EXECUTION_ID_HEADER = "X-Trinity-Execution-Id"
 
 
 def _error_code_headers(code, extra: Optional[dict] = None) -> Optional[dict]:
@@ -684,18 +690,25 @@ def _classify_agent_http_failure(
     return TaskExecutionErrorCode.AGENT_ERROR
 
 
-async def _apply_sub003_autoswitch(name: str, error_msg: str, agent_status_code):
+async def _apply_sub003_autoswitch(
+    name: str, error_msg: str, agent_status_code, execution_id: Optional[str] = None
+):
     """SUB-003 (#441): auto-switch on rate-limit (429) OR auth-class failures.
     ALWAYS raises: ChatDispatchError (switch/plain) OR the HTTPException that
     handle_subscription_failure itself raised (propagate-unchanged — the original
-    ``except HTTPException: raise`` semantics; preserved by the char tests)."""
+    ``except HTTPException: raise`` semantics; preserved by the char tests).
+
+    ``execution_id`` (#3244): the row this failure was written to, named on
+    ``X-Trinity-Execution-Id`` beside the code."""
     from services.subscription_auto_switch import (
         handle_subscription_failure,
         is_auth_failure,
     )
 
     code = _classify_agent_http_failure(agent_status_code, error_msg)
-    code_headers = _error_code_headers(code)
+    code_headers = _error_code_headers(
+        code, {EXECUTION_ID_HEADER: execution_id} if execution_id else None
+    )
 
     # #3012: no subscription can fix a model the CLI refuses — switching would
     # walk the agent through every seat onto the platform API key. Surface the
@@ -833,7 +846,9 @@ async def _finalize_http_failure(
             error=http_close_error,
         )
 
-    await _apply_sub003_autoswitch(name, error_msg, agent_status_code)
+    await _apply_sub003_autoswitch(
+        name, error_msg, agent_status_code, execution_id=task_execution_id
+    )
 
 
 async def run_chat_turn(

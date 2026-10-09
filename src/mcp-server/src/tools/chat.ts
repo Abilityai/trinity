@@ -7,7 +7,7 @@
 
 import { z } from "zod";
 import { createHash } from "crypto";
-import { TrinityClient, isDepthRefusal, isGateResult, type DepthRefusal } from "../client.js";
+import { TrinityClient, isDepthRefusal, isGateResult, isRateLimitedRun, type DepthRefusal } from "../client.js";
 import { MANUAL_EXECUTION_ID, isWellFormedExecutionId, resolveExecutionId } from "./execution_id.js";
 import type { McpAuthContext, AgentAccessCheckResult } from "../types.js";
 import { accessDenied, checkAgentEdge, resolveClient, uniformDenial } from "../access.js";
@@ -246,7 +246,7 @@ export const REPORT_BACK_DEFAULT_NOTE =
 
 /**
  * On `report_back: off` results of an opted-in call. Future-only, and never on a
- * `queued_timeout` / `agent_busy` result: the delegation contract tells the caller
+ * `queued_timeout` / `agent_busy` / `rate_limited` result: the delegation contract tells the caller
  * not to re-send (or to re-send word for word) on exactly those, and a re-send
  * shaped differently changes the idempotency key and runs the work twice.
  */
@@ -343,12 +343,12 @@ export function resolveReportBack(input: ReportBackInput): ReportBackDecision {
  * #3232: put the report-back fields on a result the call answered with. Never
  * called for gate results, depth refusals or thrown errors — those stay
  * byte-unchanged. The remedy note on `off` is left off `queued_timeout` /
- * `agent_busy` (see REPORT_BACK_OFF_NOTES).
+ * `agent_busy` / `rate_limited` (see REPORT_BACK_OFF_NOTES).
  */
 function withReportBack<T extends object>(result: T, fields: ReportBackFields | undefined): T {
   if (!fields) return result;
   const status = (result as { status?: unknown }).status;
-  if (fields.report_back === "off" && (status === "queued_timeout" || status === "agent_busy")) {
+  if (fields.report_back === "off" && (status === "queued_timeout" || status === "agent_busy" || status === "rate_limited")) {
     const { report_back_note: _note, ...rest } = fields;
     return { ...result, ...rest };
   }
@@ -571,6 +571,13 @@ export async function runAgentChat(
   // Surface the structured receipt so the caller polls rather than retries.
   if ('status' in response && response.status === 'queued_timeout') {
     console.log(`[Chat Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#914)`);
+    return JSON.stringify(withReportBack(response, reportBack.fields), null, 2);
+  }
+
+  // #3244: a 429 that is not the admission refusal — the run may have started
+  // (or ran and failed). A result the model reads, never "wait and retry".
+  if (isRateLimitedRun(response)) {
+    console.log(`[Rate Limited] Agent '${agent_name}' answered 429 after dispatch, execution_id=${response.execution_id ?? "unknown"} (#3244)`);
     return JSON.stringify(withReportBack(response, reportBack.fields), null, 2);
   }
 

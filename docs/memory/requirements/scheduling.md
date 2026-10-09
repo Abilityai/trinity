@@ -1378,10 +1378,12 @@ schedules:
     attempt; if the same `execution_id` comes back (a `lease_expired` failure
     keeps replaying until its hold window ends, §10.10), `set_reminder` and end
     the turn (#3245). An error without an
-    `execution_id` — `agent_busy` included — is checked against
-    `list_recent_executions` before a word-for-word re-send (`agent_busy` after
-    `retry_after_seconds`). `agent_busy` is not "nothing ran": the MCP client
-    also labels the usage-limit 429 that comes after a turn already ran (#3244).
+    `execution_id` is checked against `list_recent_executions` before a
+    word-for-word re-send. `agent_busy` means nothing ran (re-send after
+    `retry_after_seconds`): since #3244 the MCP client answers it only for the
+    admission 429 (`X-Trinity-Error-Code: capacity`); any other `/chat` 429 is a
+    `rate_limited` result, `retryable: false`, naming the failed run from
+    `X-Trinity-Execution-Id` when the backend sent one.
     `pending_approval` (ent#751): nothing ran, do not retry or route it through
     another agent. A `retryable: false` result: do what its `message` says.
     Long work: `parallel=true, async=true`; that run's end fires the target's
@@ -1437,7 +1439,7 @@ schedules:
   layer + chain budget), `send_message`'s caller-declared key (ent#665), the
   typed outcome (ent#569), the unforwarded `chat_with_agent` `execution_id`
   (#3232), the system-scoped gate-outcome gap (#3233), the post-run 429
-  labelled `agent_busy` (#3244), the async receipt replayed after a failed run
+  labelled `agent_busy` (#3244 — since fixed, above), the async receipt replayed after a failed run
   (#3245 — since fixed, §10.10), and the trinity-pm canon pointer (AC6, post-merge).
 
 ## 38. Sequential Agent Loops (#740)
