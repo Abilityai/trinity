@@ -59,9 +59,17 @@
     <!-- Policy -->
     <section class="space-y-3">
       <h4 class="text-sm font-medium text-gray-800 dark:text-gray-200">Policy</h4>
-      <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
-        <input v-model="cfg.allow_password_fallback" type="checkbox" @change="saveConfig" />
-        Keep email / admin password login available
+      <label class="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+        <input v-model="cfg.allow_password_fallback" type="checkbox" class="mt-1" @change="saveConfig" />
+        <span>
+          Keep email-code sign-in available for users
+          <span class="block text-xs">
+            Unchecked, with at least one provider enabled: users sign in with SSO only. Emailed
+            codes stop working on the login page, Workspace, public links, Telegram, WhatsApp and MCP sign-in.
+            People with no account who use a shared agent keep email codes. Admin password login
+            always stays available.
+          </span>
+        </span>
       </label>
       <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
         <input v-model="cfg.auto_provision" type="checkbox" @change="saveConfig" />
