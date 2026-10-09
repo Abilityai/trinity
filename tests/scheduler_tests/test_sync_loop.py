@@ -173,3 +173,89 @@ class TestSyncLoopIdempotence:
                 assert len(remove_calls) == 1
         finally:
             service.shutdown()
+
+
+class TestSyncLoopDisabledSchedules:
+    """The live sync path never registers a disabled schedule and drops one
+    that becomes disabled between ticks (#3433 — the deleted
+    `test_add_disabled_schedule` covered only the dead `add_schedule` API)."""
+
+    @staticmethod
+    def _exec(db: SchedulerDatabase, sql: str, params: tuple):
+        import sqlite3
+        conn = sqlite3.connect(db.database_path)
+        try:
+            conn.execute(sql, params)
+            conn.commit()
+        finally:
+            conn.close()
+
+    @pytest.mark.asyncio
+    async def test_sync_does_not_register_disabled_schedules(
+        self, db_with_data: SchedulerDatabase, mock_lock_manager: LockManager
+    ):
+        """A disabled row — present at boot, or inserted between ticks — is
+        seen by the sync loop (which reads all rows) but never becomes a job."""
+        service = SchedulerService(
+            database=db_with_data,
+            lock_manager=mock_lock_manager,
+        )
+        service.initialize()
+
+        try:
+            now_iso = datetime.utcnow().isoformat()
+            self._exec(
+                db_with_data,
+                """
+                INSERT INTO agent_schedules (
+                    id, agent_name, name, cron_expression, message, enabled,
+                    timezone, description, owner_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("schedule-4", "test-agent", "New Disabled Task",
+                 "15 * * * *", "Never run", 0,
+                 "UTC", "Inserted disabled", 1, now_iso, now_iso),
+            )
+
+            await service._sync_agent_schedules()
+            await service._sync_agent_schedules()
+
+            assert service.scheduler.get_job("schedule_schedule-3") is None
+            assert service.scheduler.get_job("schedule_schedule-4") is None
+            assert service.scheduler.get_job("schedule_schedule-1") is not None
+            assert service.scheduler.get_job("schedule_schedule-2") is not None
+        finally:
+            service.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_sync_removes_schedule_disabled_between_ticks(
+        self, db_with_data: SchedulerDatabase, mock_lock_manager: LockManager
+    ):
+        """Flipping `enabled` to 0 on a registered schedule removes its job on
+        the next sync tick (real `_remove_job`, not a spy)."""
+        service = SchedulerService(
+            database=db_with_data,
+            lock_manager=mock_lock_manager,
+        )
+        service.initialize()
+
+        try:
+            assert service.scheduler.get_job("schedule_schedule-1") is not None
+
+            self._exec(
+                db_with_data,
+                "UPDATE agent_schedules SET enabled = 0, updated_at = ? "
+                "WHERE id = ?",
+                (datetime.utcnow().isoformat(), "schedule-1"),
+            )
+
+            await service._sync_agent_schedules()
+
+            assert service.scheduler.get_job("schedule_schedule-1") is None
+            assert service.scheduler.get_job("schedule_schedule-2") is not None
+
+            # A further tick with no change must not resurrect it.
+            await service._sync_agent_schedules()
+            assert service.scheduler.get_job("schedule_schedule-1") is None
+        finally:
+            service.shutdown()
