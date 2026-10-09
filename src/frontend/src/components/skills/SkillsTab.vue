@@ -619,24 +619,28 @@ function resetView() {
 }
 
 onMounted(loadAll)
-watch(() => props.agentName, () => {
-  resetView()
-  loadAll()
-})
-
-// Started or stopped: the own list switches between live and last-known, and
-// the in-agent check can now (or no longer) answer.
-watch(() => props.agentStatus, (status, prev) => {
-  if (status === prev) return
-  store.loadAgentList()
-  if (showOwnerRow.value) gatesStore.probeHook(props.agentName)
+// One watcher for the agent and its state, so a switch to an agent in another
+// state is one load: one list read, one probe (PR review).
+watch([() => props.agentName, () => props.agentStatus], ([name, status], [prevName, prevStatus]) => {
+  if (name !== prevName) {
+    resetView()
+    loadAll()
+    return
+  }
+  // Started or stopped: the own list switches between live and last-known, and
+  // the in-agent check can now (or no longer) answer.
+  if (status !== prevStatus) {
+    store.loadAgentList()
+    if (showOwnerRow.value) gatesStore.probeHook(name)
+  }
 })
 
 // #2703: a skill was assigned / unassigned / synced on this agent (the thin
 // `agent_skills_changed` trigger, ticked per agent in the store): re-read the
-// agent's own list through the access-controlled route.
-watch(() => store.changedAt[props.agentName], (tick, prev) => {
-  if (tick && tick !== prev) store.loadAgentList()
+// agent's own list through the access-controlled route. A switch is the
+// watcher above's: the next agent's own tick is not a change.
+watch([() => props.agentName, () => store.changedAt[props.agentName]], ([name, tick], [prevName, prevTick]) => {
+  if (name === prevName && tick && tick !== prevTick) store.loadAgentList()
 })
 
 // A set added or removed in the dialog delivers or drops skills.

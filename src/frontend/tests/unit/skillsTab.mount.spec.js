@@ -21,6 +21,7 @@ vi.mock('@/stores/auth', () => ({
 }))
 
 import SkillsTab from '../../src/components/skills/SkillsTab.vue'
+import { useSkillsStore } from '../../src/stores/skills'
 
 const A = 'fin'
 const NOTICE = 'Not run: the skill pay-invoice on fin needs approval before it can run.'
@@ -394,6 +395,39 @@ describe('an agent switch (AgentDetail is KeepAlive\'d: the tab stays open)', ()
     await button('Save assignments').trigger('click')
     await flush()
     expect(api.put).not.toHaveBeenCalled()
+  })
+
+  it('a switch reads the next agent once: one list read, one probe (PR review)', async () => {
+    serveTwo()
+    const { w } = await mountTab()
+    // The next agent differs in state and has a skills-changed tick of its own:
+    // three watchers see the switch, and the switch is one load.
+    useSkillsStore().changedAt = { [B]: 1 }
+    api.get.mockClear()
+
+    await w.setProps({ agentName: B, agentStatus: 'stopped' })
+    await flush()
+
+    // Every agent's reads, not only B's: a watcher that fires before the store
+    // has switched reads the agent being left.
+    const reads = (path, probe) => api.get.mock.calls
+      .filter(([u, cfg]) => u.endsWith(`/${path}`) && !!cfg?.params?.probe === probe).map(([u]) => u)
+    expect(reads('playbooks', false)).toEqual([`/api/agents/${B}/playbooks`])
+    expect(reads('skill-gates', true)).toEqual([`/api/agents/${B}/skill-gates`])
+  })
+
+  it('a start or a stop on the same agent re-reads its list and probes again', async () => {
+    serveTwo()
+    const { w } = await mountTab()
+    api.get.mockClear()
+
+    await w.setProps({ agentStatus: 'stopped' })
+    await flush()
+
+    const reads = (path, probe) => api.get.mock.calls
+      .filter(([u, cfg]) => u === `/api/agents/${A}/${path}` && !!cfg?.params?.probe === probe).length
+    expect(reads('playbooks', false)).toBe(1)
+    expect(reads('skill-gates', true)).toBe(1)
   })
 
   it('a run that answers after the switch neither opens Tasks nor toasts, and frees the button', async () => {
