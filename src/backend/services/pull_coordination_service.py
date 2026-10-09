@@ -234,7 +234,8 @@ def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]
     ``execution_timeout_seconds`` plus ``SLOT_TTL_BUFFER`` (so a legitimately
     long turn's lease outlives its deadline exactly as a slot would).
 
-    #2846: the turn limit is clamped to that same timeout, read once here, so
+    #2846: the turn limit is clamped to that same timeout (read once here,
+    applied in `_build_claim_response` before the prompt is composed, #3321), so
     the turn always ends inside its lease. This is what keeps a healthy turn
     from being re-delivered while it still runs — the job the (never built)
     lease-renewal heartbeat was specified for.
