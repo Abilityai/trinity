@@ -1876,6 +1876,10 @@ class DatabaseManager:
         """ent#498 — attach a delivery destination to a pre-created row."""
         return self._schedule_ops.stamp_execution_channel_context(execution_id, **kwargs)
 
+    def set_execution_subscription(self, execution_id: str, subscription_id) -> bool:
+        """#3470 — re-point a row's SUB-004 attribution to the subscription that served."""
+        return self._schedule_ops.set_execution_subscription(execution_id, subscription_id)
+
     def resume_session_belongs_to_user(
         self, agent_name: str, claude_session_id: str, user_id: int
     ) -> bool:
@@ -3207,8 +3211,8 @@ class DatabaseManager:
     def delete_subscription(self, subscription_id: str):
         return self._subscription_ops.delete_subscription(subscription_id)
 
-    def assign_subscription_to_agent(self, agent_name: str, subscription_id: str):
-        return self._subscription_ops.assign_subscription_to_agent(agent_name, subscription_id)
+    def assign_subscription_to_agent(self, agent_name: str, subscription_id: str, **kwargs):
+        return self._subscription_ops.assign_subscription_to_agent(agent_name, subscription_id, **kwargs)
 
     def clear_agent_subscription(self, agent_name: str):
         return self._subscription_ops.clear_agent_subscription(agent_name)

@@ -491,6 +491,22 @@ def refresh_credential_values():
     logger.info(f"Refreshed credential cache with {len(_credential_values)} values")
 
 
+def add_credential_value(value: Optional[str]) -> None:
+    """Stage ONE value for redaction without a full reload (#3470).
+
+    A per-spawn `auth_override` credential lives in neither `.env` nor
+    `os.environ` — it is a layer of one subprocess's env — so the loaders above
+    can never see it. Register it here before the spawn so a stray echo in
+    stdout/stderr is masked like every other credential. Survives a later
+    `refresh_credential_values()` only if the loader finds it, which it will
+    not; that is acceptable because the value is gone from the process the
+    moment the spawn exits.
+    """
+    if not value or len(value) < 8:
+        return
+    get_credential_values().add(value)
+
+
 # URL userinfo: `scheme://user:secret@host/...` → `scheme://***@host/...`
 #
 # Shape-INDEPENDENT, and that is the point. The value patterns above only catch
