@@ -51,6 +51,7 @@ from .error_classifier import (
     _is_rate_limit_message,
     _model_rejection_detail,
     _model_rejection_message,
+    _stream_error_reason,
 )
 from .jsonl_recovery import (
     _extract_compact_events_from_jsonl,
@@ -1396,8 +1397,11 @@ def _finalize_headless_result(
             logger.warning(f"[Headless Task] {detail}")
             raise HTTPException(status_code=status_code, detail=detail)
 
+        # #3340: an error the stream named outranks stderr, which is often
+        # empty or unrelated noise on an API error.
+        stream_error = _stream_error_reason(ctx.metadata)
         error_preview = verbose_transcript[:500] if verbose_transcript else ""
-        if not error_preview:
+        if stream_error or not error_preview:
             # Try to provide a meaningful fallback based on common failure patterns
             error_preview = _diagnose_exit_failure(ctx.return_code, ctx.metadata)
 
@@ -1427,6 +1431,13 @@ def _finalize_headless_result(
                 f"[Headless Task] Zero tokens processed with exit code {ctx.return_code}. "
                 f"Stderr: {error_preview[:200]}"
             )
+            # #3340: the stream gave the reason, so say it instead of "no output".
+            # Auth-patterned text never gets here (the branch above took it).
+            if stream_error:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Execution failed: {error_preview[:300]}",
+                )
             raise HTTPException(
                 status_code=503,
                 detail=(
