@@ -33,7 +33,7 @@ Owns all autocomplete UI. Key sections:
 
 | Lines | Element | Purpose |
 |-------|---------|---------|
-| 5–78 | `<Transition>` dropdown | Floating list above the input, shown when `ac.showDropdown` is true; max 8 items visible |
+| 5–78 | `<Transition>` dropdown | Floating list above the input, shown when `ac.showDropdown` is true; max 8 items visible; headed **Skills** (`:25`, trinity-enterprise#754) |
 | 84–110 | Ghost-text overlay `<div>` + `<textarea>` | `<div aria-hidden>` sits behind the `<textarea>`; renders typed text as transparent + completion as gray |
 | 125–146 | Argument hint bar `<Transition>` | Below the form; shown after `/command ` is completed; displays `argument_hint` and description |
 | 199–207 | `watch([agentName, agentStatus])` | Calls `ac.load()` whenever the agent switches to `running` |
@@ -44,7 +44,7 @@ Owns all autocomplete UI. Key sections:
 Props accepted by `ChatInput`:
 ```javascript
 modelValue: String     // v-model content
-placeholder: String    // default: 'Type your message or / for playbooks…'
+placeholder: String    // default: 'Type your message or / for skills…'  (:248, trinity-enterprise#754)
 disabled: Boolean
 agentName: String      // passed from ChatPanel
 agentStatus: String    // 'running' | 'stopped' | ...
@@ -105,24 +105,25 @@ playbooks.value = response.data.skills || []
 ## Backend Layer
 
 ### Endpoint
-- `src/backend/routers/agents.py:580` — `GET /{agent_name}/playbooks`
+- `src/backend/routers/agent_files.py:79` — `GET /{agent_name}/playbooks` → `services/agent_skills_listing.py::list_skills` (trinity-enterprise#754)
 - Router prefix: `/api/agents`
 - Full path: `GET /api/agents/{agent_name}/playbooks`
 - Auth: `AuthorizedAgentByName` dependency (JWT required, agent ACL checked)
 
 ### Business Logic
 1. Resolve agent name via `AuthorizedAgentByName` dependency
-2. Look up Docker container with `get_agent_container(agent_name)`; 404 if missing
-3. Reload container state via `container_reload(container)`
-4. Return 503 if container status is not `running`
-5. Forward request to agent-server: `GET http://agent-{agent_name}:8000/api/skills` (10s timeout)
-6. Return agent-server JSON response directly
+2. Read the container's state with `docker_service.agent_container_state(agent_name)` (tri-state, a fresh read): missing → 404; Docker unreadable → 503 "Could not read the agent's state"
+3. Return 503 if container status is not `running`
+4. Forward request to agent-server: `GET http://agent-{agent_name}:8000/api/skills` (10s timeout)
+5. Return agent-server JSON response directly
+
+Steps 2-5 live in `agent_skills_listing.fetch_live`. A live success also refreshes the agent's last-known list in Redis; this caller sends no `last_known`, so its answers are unchanged. See [skills-tab.md](skills-tab.md).
 
 ### Error Responses
 | Case | Status | Detail |
 |------|--------|--------|
 | Container not found | 404 | "Agent not found" |
-| Container not running | 503 | "Agent is not running. Start the agent to view playbooks." |
+| Container not running | 503 | "Agent is not running. Start the agent to view its skills." |
 | Agent-server timeout | 504 | "Agent is starting up, please try again" |
 | Connection refused | 503 | "Could not connect to agent" |
 | Other exception | 500 | "Failed to fetch playbooks: {error}" |
@@ -130,7 +131,7 @@ playbooks.value = response.data.skills || []
 ## Agent Layer
 
 ### Agent Server Endpoint
-- `docker/base-image/agent_server/routers/skills.py:139` — `GET /api/skills`
+- `docker/base-image/agent_server/routers/skills.py:366` — `GET /api/skills`
 - Returns `SkillsResponse { skills: SkillInfo[], count: int, skill_paths: string[] }`
 
 ### `SkillInfo` Schema
@@ -144,7 +145,12 @@ class SkillInfo(BaseModel):
     allowed_tools: Optional[List[str]] = None
     argument_hint: Optional[str] = None
     has_schedule: bool = False
+    source: Optional[str] = None       # trinity-enterprise#754: "platform" | "agent"
+    dir: Optional[str] = None          # trinity-enterprise#754: the directory name
+    approval: Optional[str] = None     # trinity-enterprise#754: "recommended" | None
 ```
+
+The three #754 fields are informational; this popup does not read them ([skills-tab.md](skills-tab.md) → Agent Layer).
 
 ### Skill Discovery
 Scans the agent's `.claude/skills/` directories for `SKILL.md` files. Parses YAML frontmatter (between `---` delimiters) for skill metadata. Handles BOM characters and CRLF line endings.
@@ -232,5 +238,5 @@ None. This is a read-only feature. No database writes, no WebSocket broadcasts, 
 
 ## Related Flows
 - [authenticated-chat-tab.md](feature-flows/authenticated-chat-tab.md) — the Chat tab that hosts `ChatPanel` and `ChatInput`
-- [playbooks-tab.md](feature-flows/playbooks-tab.md) — dedicated Playbooks tab that invokes skills directly
+- [skills-tab.md](skills-tab.md) — the agent's Skills tab, which runs skills directly (absorbed the Playbooks tab, trinity-enterprise#754)
 - [continue-execution-as-chat.md](feature-flows/continue-execution-as-chat.md) — resume mode in the same `ChatPanel`

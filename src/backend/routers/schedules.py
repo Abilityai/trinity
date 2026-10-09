@@ -38,7 +38,7 @@ from dependencies import (
     resolve_source_agent,
 )
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
-from services import dispatch_admission_service
+from services import dispatch_admission_service, skill_gate_map_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.schedule_validation import (
     ScheduleValidationError,
@@ -891,7 +891,8 @@ async def get_schedule_executions(
 @router.get("/{name}/executions", response_model=List[ExecutionSummary])
 async def get_agent_executions(
     name: AuthorizedAgent,
-    limit: int = 50
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
 ):
     """Get execution summaries for an agent - optimized for list views.
 
@@ -908,13 +909,19 @@ async def get_agent_executions(
     and user access. This returns 404 if agent not found, 403 if no access, or execution list.
     """
     executions = db.get_agent_executions_summary(name, limit=limit)
+    # trinity-enterprise#754: "ran without approval" — one batch read for the page.
+    flags = skill_gate_map_service.self_approved_flags(
+        name, [e.get("id") for e in executions], current_user)
+    for e in executions:
+        e["gate_self_approved"], e["gate_self_approved_by_viewer"] = flags.get(e.get("id"), (False, False))
     return executions
 
 
 @router.get("/{name}/executions/{execution_id}", response_model=ExecutionResponse)
 async def get_execution(
     name: AuthorizedAgent,
-    execution_id: str
+    execution_id: str,
+    current_user: User = Depends(get_current_user),
 ):
     """Get details of a specific execution."""
     execution = db.get_execution(execution_id)
@@ -924,7 +931,11 @@ async def get_execution(
             detail="Execution not found"
         )
 
-    return ExecutionResponse(**execution.model_dump())
+    # trinity-enterprise#754: "ran without approval", as on the list.
+    self_approved, by_viewer = skill_gate_map_service.self_approved_flags(
+        name, [execution_id], current_user).get(execution_id, (False, False))
+    return ExecutionResponse(**execution.model_dump(), gate_self_approved=self_approved,
+                             gate_self_approved_by_viewer=by_viewer)
 
 
 @router.get("/{name}/executions/{execution_id}/log")
