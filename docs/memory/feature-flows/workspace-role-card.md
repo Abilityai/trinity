@@ -9,6 +9,14 @@ Framework §8's "organisation UI over the canon" shrunk to one agent — files a
 the card is a projection. This cut ships the Role + Readiness half; the relationship
 line reads from ent#500 when it lands.
 
+**Plain words (ent#843).** The objectives block is owned-first ("What this agent is
+responsible for"), with supported objectives folded under "Also contributes to · N"
+(headings and one neutral "Tracked by …" note each). Metrics read by label — declared,
+agreed across declarations, or the code name in words — and warning colour is kept for
+stale, behind/off target and unread files. `role_card.portal_objective` adds
+`client_heading`, `tracked_elsewhere`, `tracked_by`; `fill_metric_labels` sets every
+metric's `label` before the card is served.
+
 ## Flow
 
 ```
@@ -175,6 +183,15 @@ ent#689: `tests/unit/test_ent689_readiness_gate.py` (the verdict, every fail-ope
 endpoint, the rollout source, `brief_held`, the seed on both tracks against real SQLite) and
 `tests/scheduler_tests/test_ent689_readiness_gate.py` (held → skipped row + event, never
 dispatched; manual / webhook / non-seat not asked; every error fires).
+
+ent#843: `tests/unit/test_ent843_role_card_plain_words.py` — readable names (words
+fallback, declared label wins, the join's code-name fallback ignored), `fill_metric_labels`
+(agreed label, words, a failed lookup), `agreed_labels` on a real database (agreement,
+conflict, blank, retired rows), "tracked elsewhere" once per objective and named only for
+a single serving agent, and `client_heading` through the join. `portalAgentRole.spec.js`
+adds owned-first, the collapsed supported group (headings only, one neutral note, no
+warning colour), the plain heading, "this quarter", no snake_case on the card, and the
+group folding again on an agent switch.
 
 ## Related Flows
 

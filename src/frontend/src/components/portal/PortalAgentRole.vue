@@ -26,46 +26,72 @@
         <p v-if="card.seat" class="mt-1 text-[11px] text-gray-400">Seat · {{ card.seat }}</p>
       </div>
 
-      <!-- Objectives with metric freshness — the portal projection of the ONE
-           objective ↔ metric join (ent#676). An agent that simply has none
-           renders nothing here, as before. -->
+      <!-- Objectives — the portal projection of the ONE objective ↔ metric
+           join (ent#676), told in plain words (ent#843): what the agent is
+           responsible for first, what it only contributes to folded away,
+           readable metric names, and warning colour only for a real problem.
+           An agent that simply has none renders nothing here, as before. -->
       <template v-if="card.objectives.length || card.objectives_error">
-        <h3 class="mt-3 mb-1 text-[11px] font-medium text-gray-400">Objectives</h3>
         <!-- Zero objectives for a NAMED reason: a read that did not happen is
              never shown as "this agent has none" (principle 15). -->
-        <p v-if="!card.objectives.length" class="text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-objectives-error">
+        <p v-if="!card.objectives.length" class="mt-3 text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-objectives-error">
           {{ objectivesErrorText(card.objectives_error) }}
         </p>
-        <ul v-else class="space-y-1.5">
-          <li v-for="o in card.objectives" :key="o.id"
-              class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-[12.5px]"
-              data-testid="portal-role-objective">
-            <div class="flex items-center gap-2 flex-wrap">
-              <span class="font-medium">{{ o.statement || o.id }}</span>
-              <span class="text-gray-400">{{ o.owned ? 'owns' : 'supports' }}<template v-if="o.horizon"> · {{ o.horizon }}</template></span>
-            </div>
-            <ul v-if="o.metrics.length" class="mt-1 space-y-0.5">
-              <li v-for="m in o.metrics" :key="m.name"
-                  :data-testid="m.stale ? 'portal-role-metric-stale' : 'portal-role-metric'">
-                <!-- Wraps: two badges beside the numbers must not crush the name in a narrow rail. -->
-                <div class="flex items-center gap-x-2 gap-y-0.5 flex-wrap tabular-nums">
-                  <span class="font-mono text-[11.5px] min-w-0 truncate">{{ m.name }}</span>
-                  <span class="text-gray-400">{{ shown(m.actual, m) }}<template v-if="m.target != null"> / {{ shown(m.target, m) }}</template></span>
-                  <!-- Position against the target, never pace. Stale is orthogonal: both can show. -->
-                  <BaseBadge v-if="gapBadge(m)" :variant="gapBadge(m).variant" dot data-testid="portal-role-metric-gap">{{ gapBadge(m).label }}</BaseBadge>
-                  <!-- Freshness is the backend's verdict (the one 2× cadence rule) — never recomputed here. -->
-                  <BaseBadge v-if="m.stale" variant="warning" dot :title="m.last_point_at || undefined">stale</BaseBadge>
-                  <span v-else-if="m.freshness === 'no_points'" class="text-[11px] text-gray-400">no points yet</span>
-                  <span v-else-if="m.last_point_at" class="text-[11px] text-gray-400" :title="m.last_point_at">as of {{ relative(m.last_point_at) }}</span>
-                </div>
-                <!-- A finding is never a blank: the Workspace's own sentence for its code. -->
-                <p v-if="m.finding" class="text-[11px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-metric-finding">
-                  {{ findingText(m.finding.code) }}
-                </p>
+
+        <template v-else>
+          <template v-if="ownedObjectives.length">
+            <h3 class="mt-3 mb-1 text-[11px] font-medium text-gray-400">What this agent is responsible for</h3>
+            <ul class="space-y-1.5" data-testid="portal-role-owned">
+              <li v-for="o in ownedObjectives" :key="o.id"
+                  class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-[12.5px]"
+                  data-testid="portal-role-objective">
+                <p class="font-medium">{{ heading(o) }}</p>
+                <p v-if="horizonText(o.horizon)" class="text-[11px] text-gray-400">{{ horizonText(o.horizon) }}</p>
+                <ul v-if="o.metrics.length" class="mt-1 space-y-0.5">
+                  <li v-for="m in o.metrics" :key="m.name"
+                      :data-testid="m.stale ? 'portal-role-metric-stale' : 'portal-role-metric'">
+                    <!-- Wraps: badges beside the line must not crush the name in a narrow rail. -->
+                    <div class="flex items-center gap-x-2 gap-y-0.5 flex-wrap tabular-nums">
+                      <span class="min-w-0" data-testid="portal-role-metric-line">{{ metricLine(m) }}</span>
+                      <!-- Position against the target, never pace. Stale is orthogonal: both can show. -->
+                      <BaseBadge v-if="gapBadge(m)" :variant="gapBadge(m).variant" dot data-testid="portal-role-metric-gap">{{ gapBadge(m).label }}</BaseBadge>
+                      <!-- Freshness is the backend's verdict (the one 2× cadence rule) — never recomputed here. -->
+                      <BaseBadge v-if="m.stale" variant="warning" dot :title="m.last_point_at || undefined">not updated recently</BaseBadge>
+                    </div>
+                    <!-- A finding is never a blank — but a normal state is neutral text. -->
+                    <p v-if="findingLine(m)" class="text-[11px] text-gray-400" data-testid="portal-role-metric-finding">
+                      {{ findingLine(m) }}
+                    </p>
+                  </li>
+                </ul>
               </li>
             </ul>
-          </li>
-        </ul>
+          </template>
+
+          <!-- What it only supports: collapsed by default, headings only, and
+               "tracked elsewhere" said once per objective — never per metric. -->
+          <div v-if="supportedObjectives.length" class="mt-3" data-testid="portal-role-supported">
+            <button
+              type="button"
+              class="flex items-center gap-1.5 text-[11px] font-medium text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+              :aria-expanded="supportedOpen ? 'true' : 'false'"
+              data-testid="portal-role-supported-toggle"
+              @click="supportedOpen = !supportedOpen"
+            >
+              <span aria-hidden="true">{{ supportedOpen ? '▾' : '▸' }}</span>
+              Also contributes to · {{ supportedObjectives.length }}
+            </button>
+            <ul v-if="supportedOpen" class="mt-1 space-y-1" data-testid="portal-role-supported-list">
+              <li v-for="o in supportedObjectives" :key="o.id"
+                  class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-1.5 text-[12.5px]"
+                  data-testid="portal-role-supported-objective">
+                <p>{{ heading(o) }}</p>
+                <p v-if="supportNote(o)" class="text-[11px] text-gray-400" data-testid="portal-role-tracked-by">{{ supportNote(o) }}</p>
+              </li>
+            </ul>
+          </div>
+        </template>
+
         <!-- Some objectives joined but some files were not read: a partial list
              must not look like a complete one (principle 15). -->
         <p v-if="card.objectives.length && card.objectives_partial"
@@ -199,10 +225,54 @@ function gapBadge(m) {
   return GAP_BADGES[m.gap?.status] || null
 }
 
+// ent#843 — the objectives in plain words.
+const supportedOpen = ref(false)
+watch(() => props.agentName, () => { supportedOpen.value = false })
+const ownedObjectives = computed(() => (card.value?.objectives || []).filter((o) => o.owned))
+const supportedObjectives = computed(() => (card.value?.objectives || []).filter((o) => !o.owned))
+
+/** The canon's plain heading for client screens, else its statement. */
+function heading(o) {
+  return o.client_heading || o.statement || o.id
+}
+
+const HORIZONS = { week: 'this week', month: 'this month', quarter: 'this quarter', year: 'this year' }
+function horizonText(h) {
+  if (!h) return ''
+  return HORIZONS[String(h).toLowerCase()] || h
+}
+
+/** "Runway: 7.2 months (target 12 months) · updated 2h ago" — or "not measured yet". */
+function metricLine(m) {
+  const name = m.label || 'Metric'
+  const target = m.target != null ? ` (target ${shown(m.target, m)})` : ''
+  if (m.actual === null || m.actual === undefined) return `${name}: not measured yet${target}`
+  // A stale number says so in its badge (the time is the badge's tooltip).
+  const when = m.last_point_at && !m.stale ? ` · updated ${relative(m.last_point_at)}` : ''
+  return `${name}: ${shown(m.actual, m)}${target}${when}`
+}
+
+/** "Tracked by <agent>" once per supported objective, neutral. */
+function supportNote(o) {
+  if (!o.tracked_elsewhere) return ''
+  return o.tracked_by ? `Tracked by ${o.tracked_by}` : 'Tracked by another agent'
+}
+
+/**
+ * A finding as a neutral note. "Not measured yet" is already the line itself,
+ * and a number tracked elsewhere is said once per objective — so neither
+ * repeats under a metric.
+ */
+function findingLine(m) {
+  const code = m.finding?.code
+  if (!code || code === 'metric_undeclared' || code === 'metric_not_declared_here') return ''
+  return findingText(code)
+}
+
 function findingText(code) {
   return {
     metric_undeclared: "This metric isn't being measured yet, so there is no number to show.",
-    metric_not_declared_here: 'Another agent measures this one. This agent supports the objective without tracking the number.',
+    metric_not_declared_here: 'Another agent tracks this number.',
     metric_retired: "This metric is no longer measured, so its last number isn't shown.",
     direction_mismatch: "The objective and the metric disagree on which way is good. The comparison follows the metric's own setting.",
     direction_undeclared: "Nothing says whether higher or lower is better here, so it can't be compared with its target.",

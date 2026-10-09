@@ -4500,6 +4500,17 @@
       "description": "ent#527 rider (ruling 2026-09-24): the owner's readiness stamp on the agents list and the fleet grid. One batched read on a real database returns only stamped agents, names a rollout seed as such, never carries who flipped it, skips an unknown state and does not query for an empty list; GET /api/agents attaches it per agent from that one read, None when unstamped. brief_held rides next to it: the role card's shared predicates (is_seat_delivery_schedule, brief_is_held), one batched schedule read over the calibrating+autonomy candidates only, fail-soft to no claim, so the list's calibrating tooltip never says a brief is paused when the card would not."
     },
     {
+      "file": "unit/test_ent843_role_card_plain_words.py",
+      "feature": "trinity-enterprise#843",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "workspace",
+        "metrics"
+      ],
+      "description": "The Workspace role card's objectives in plain words: readable metric names (declared label, the label every active declaration agrees on via db.agreed_metric_labels, else the code name in words; never snake_case, a failed lookup still words); a supported objective tracked elsewhere says so once, named only for a single serving agent; the canon's optional client_heading through the join."
+    },
+    {
       "file": "unit/test_ent676_role_card_join.py",
       "feature": "abilityai/trinity-enterprise#676",
       "added": "2026-09-30",

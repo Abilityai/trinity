@@ -641,6 +641,10 @@ class PortalRoleMetric(BaseModel):
     projection of the objective ↔ metric join (`ObjectiveMetricRead`), never
     that model whole. A field added here is a disclosure decision."""
     name: str
+    # ent#843: what the card shows — the declared label, the label every
+    # declaring agent agrees on, or the code name turned into words. Never a
+    # raw snake_case name.
+    label: str = ""
     # The registry's declared type and unit — what the card formats the two
     # numbers with. None for a metric this agent does not declare.
     type: Optional[str] = None
@@ -659,9 +663,16 @@ class PortalRoleMetric(BaseModel):
 class PortalRoleObjective(BaseModel):
     id: str
     statement: Optional[str] = None
+    # ent#843: the canon's plain heading for client screens, when written.
+    client_heading: Optional[str] = None
     horizon: Optional[str] = None
     status: Optional[str] = None
     owned: bool = False
+    # ent#843: for a SUPPORTED objective — its numbers are tracked by another
+    # agent (said once per objective, never per metric), and which one when the
+    # join knows it (an agent this one holds a read grant on).
+    tracked_elsewhere: bool = False
+    tracked_by: Optional[str] = None
     metrics: list[PortalRoleMetric] = Field(default_factory=list)
 
 

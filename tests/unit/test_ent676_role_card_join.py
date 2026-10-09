@@ -56,9 +56,13 @@ VIEWER = "gary@example.com"
 
 #: What a Workspace client may see of one joined metric. A literal on purpose:
 #: a key the join grows later must turn this red before it reaches a client.
-METRIC_KEYS = {"name", "type", "unit", "target", "actual", "last_point_at",
+#: ent#843 added `label` (a readable name, never a raw code), and on the
+#: objective `client_heading` (canon's plain heading), `tracked_elsewhere` and
+#: `tracked_by` (the one agent this agent reads the number from, when known).
+METRIC_KEYS = {"name", "label", "type", "unit", "target", "actual", "last_point_at",
                "stale", "freshness", "gap", "finding"}
-OBJECTIVE_KEYS = {"id", "statement", "horizon", "status", "owned", "metrics"}
+OBJECTIVE_KEYS = {"id", "statement", "client_heading", "horizon", "status", "owned",
+                  "tracked_elsewhere", "tracked_by", "metrics"}
 
 
 def _ago(**delta) -> str:
@@ -326,7 +330,9 @@ def test_a_metric_crosses_as_exactly_the_client_fields():
 
     assert set(row) == METRIC_KEYS
     assert row == {
-        "name": "close_rate", "type": "percentage", "unit": "%",
+        # ent#843: no declared label → empty here; `fill_metric_labels` fills
+        # it (agreed label, else words) before the card is served.
+        "name": "close_rate", "label": "", "type": "percentage", "unit": "%",
         "target": 35, "actual": 30.0,
         "last_point_at": "2026-09-22T11:59:00.000000Z",
         "stale": False, "freshness": "fresh",
