@@ -360,6 +360,42 @@ describe('an agent switch (AgentDetail is KeepAlive\'d: the tab stays open)', ()
     expect(tid(w, 'skills-shared-empty').exists()).toBe(true)
   })
 
+  it('an unsaved tick on the previous agent is neither offered nor saved on the next (PR review)', async () => {
+    // Both agents hold the same individual set (none), so the switch changes
+    // nothing the draft watches: only opening the dialog may reset it.
+    api.get.mockImplementation((url, cfg) => {
+      if (url === '/api/skills/library/status') return Promise.resolve({ data: { configured: true, skill_count: 2 } })
+      if (url === '/api/skills/library') return Promise.resolve({ data: [{ name: 'shared-one' }, { name: 'lib-a' }] })
+      const m = url.match(/^\/api\/agents\/([^/]+)\/(.+)$/)
+      if (!m) return Promise.resolve({ data: [] })
+      const [, who, what] = m
+      if (what === 'skills') return Promise.resolve({ data: [] })
+      if (what === 'playbooks') return Promise.resolve({ data: LIVE })
+      if (what === 'skill-gates') return Promise.resolve({ data: MAP({ agent_name: who, hook: cfg?.params?.probe ? 'ok' : null }) })
+      return Promise.resolve({ data: [] })
+    })
+    api.put.mockResolvedValue({ data: { delivery: null } })
+    const { w } = await mountTab()
+    const tick = () => w.find('[data-testid="skill-assign-list"] input[value="lib-a"]')
+    const button = (label) => w.findAll('button').find((b) => b.text().includes(label))
+
+    await tid(w, 'skills-assign-open').trigger('click')
+    await flush()
+    await tick().setValue(true)
+    await flush()
+    await button('Close').trigger('click')                  // closed without saving
+    await flush()
+
+    await w.setProps({ agentName: B })
+    await flush()
+    await tid(w, 'skills-assign-open').trigger('click')
+    await flush()
+    expect(tick().element.checked).toBe(false)
+    await button('Save assignments').trigger('click')
+    await flush()
+    expect(api.put).not.toHaveBeenCalled()
+  })
+
   it('a run that answers after the switch neither opens Tasks nor toasts, and frees the button', async () => {
     serveTwo()
     const run = deferred()

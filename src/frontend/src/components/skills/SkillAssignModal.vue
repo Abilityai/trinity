@@ -104,7 +104,7 @@ import { deps, supersededLine, DEPRECATED_TITLE } from './contract'
 import { useSkillsStore } from '../../stores/skills'
 import { deliveryText, deprecationText } from '../../utils/skillDelivery'
 
-defineProps({
+const props = defineProps({
   modelValue: { type: Boolean, default: false },
   // The tab's shared notice ({text, tone, deprecation}), so a sync on the tab
   // clears the note here too — one note, one owner.
@@ -130,6 +130,11 @@ function resetDraft() {
 // #2914: reset only when the assignment SET changes — not on every refetch of
 // the rows, or a Sync (which re-reads them) would wipe unsaved ticks.
 watch(() => [...store.individualNames].sort().join('|'), resetDraft)
+// trinity-enterprise#754 (PR review): a draft is this opening's. The tab
+// outlives an agent switch, and two agents with the same assignments give the
+// watcher above nothing to see, so an unsaved tick would be offered, and
+// saved, on the next agent. Closing without saving discards it.
+watch(() => props.modelValue, (open) => { if (open) resetDraft() })
 
 async function onSave() {
   if (await store.saveAssignments([...draft.value])) {
