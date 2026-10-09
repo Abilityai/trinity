@@ -47,12 +47,16 @@
 import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 import { createServer } from "node:net";
+import { createServer as createHttpServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 
 import { FastMCP } from "fastmcp";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
+import { TOOL_ACCESS_POLICY } from "./access.js";
 import {
+  createServer as createTrinityServer,
   OPERATOR_SCOPES,
   makeOperatorOnly,
   connectorOnly,
@@ -467,6 +471,122 @@ describe("ent#500 get_agent_assignments is operator-scope only", () => {
         /^(create|set|update|delete|assign|remove)_/,
         `${tool.name} looks like a write tool; assignments are read-only over MCP`,
       );
+    }
+  });
+});
+
+describe("#3435 human-only credential tools are not advertised to agent sessions", () => {
+  // export_credentials / import_credentials (owner or admin, human-only) and
+  // get_credential_encryption_key (admin, human-only) can never be called with
+  // an agent-scoped key: the backend refuses every one. Each carries its own
+  // canAccess allow-list {user, system}. This boots the REAL server in key
+  // mode and drives it over the real transport with a user key and an agent
+  // key — listing AND calling, because advertisement alone is not a control.
+  const CREDENTIAL_TOOLS = ["export_credentials", "get_credential_encryption_key", "import_credentials"];
+
+  /**
+   * The other tools whose backend gate refuses every agent key (the `ADMIN_ONLY`
+   * owner in access.ts) but which are still advertised to agent sessions.
+   * SHRINK-ONLY: an entry that becomes hidden fails until it is removed here,
+   * and a new admin-only tool that is advertised to agents fails until it gets
+   * a canAccess. Never add an entry to make a new tool pass. Follow-up: convert
+   * the rest (#3435 ruling TD-3).
+   */
+  const ADVERTISED_TO_AGENTS_BASELINE = [
+    "get_agent_ssh_access",
+    "get_nevermined_payments",
+    "inject_credentials",
+    "register_a2a_endpoint",
+    "remove_a2a_endpoint",
+    "rename_agent",
+    "set_a2a_inbound_allowlist",
+    "set_agent_a2a_exposure",
+    "toggle_nevermined",
+  ];
+  const ADMIN_ONLY_OWNER = /^backend rejects agent principals/;
+
+  let backend: Server;
+  let mcpServer: { stop: () => Promise<void> };
+  let mcpUrl: URL;
+
+  async function boot(): Promise<void> {
+    backend = createHttpServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        if (req.url === "/api/mcp/validate") {
+          const agent = String(req.headers.authorization ?? "").includes("agent_key");
+          return res.end(JSON.stringify({
+            valid: true, key_id: agent ? "key-agent-1" : "key-user-1", user_id: "owner",
+            user_email: "owner@example.com", key_name: "vis", scope: agent ? "agent" : "user",
+            ...(agent ? { agent_name: "alpha" } : {}),
+          }));
+        }
+        return res.end("{}");
+      });
+    });
+    await new Promise<void>((r) => backend.listen(0, "127.0.0.1", () => r()));
+    const backendPort = (backend.address() as AddressInfo).port;
+    const mcpPort = await freePort();
+    const { server } = await createTrinityServer({
+      trinityApiUrl: `http://127.0.0.1:${backendPort}`,
+      requireApiKey: true,
+      port: mcpPort,
+    });
+    await server.start({ transportType: "httpStream", httpStream: { port: mcpPort, host: "127.0.0.1" } });
+    mcpServer = server;
+    mcpUrl = new URL(`http://127.0.0.1:${mcpPort}/mcp`);
+  }
+
+  async function asKey<T>(key: string, body: (client: Client) => Promise<T>): Promise<T> {
+    const client = new Client({ name: `vis-3435-${key}`, version: "1.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(mcpUrl, {
+      requestInit: { headers: { Authorization: `Bearer trinity_mcp_${key}` } },
+    }));
+    try {
+      return await body(client);
+    } finally {
+      await client.close().catch(() => {});
+    }
+  }
+
+  it("a user key lists them; an agent key neither lists nor can call them", async () => {
+    await boot();
+    try {
+      const userTools = await asKey("user_key", async (c) => (await c.listTools()).tools.map((t) => t.name));
+      const agentTools = await asKey("agent_key", async (c) => (await c.listTools()).tools.map((t) => t.name));
+      assert.ok(agentTools.length > 50, `only ${agentTools.length} tools for the agent session — the census is not seeing the server`);
+      for (const name of CREDENTIAL_TOOLS) {
+        assert.ok(userTools.includes(name), `${name} must be listed for a user key`);
+        assert.ok(!agentTools.includes(name), `${name} must NOT be listed for an agent key`);
+      }
+
+      await asKey("agent_key", async (c) => {
+        for (const name of CREDENTIAL_TOOLS) {
+          await assert.rejects(
+            () => c.callTool({ name, arguments: name === "get_credential_encryption_key" ? {} : { name: "alpha" } }),
+            (err: unknown) => /not found|unknown tool|method not found/i.test(String((err as Error)?.message ?? err)),
+            `${name}: an agent key calling it by name must be rejected as not found`,
+          );
+        }
+      });
+
+      // Shrink-only guard over every admin-only row: hidden from agents, or baselined.
+      const guarded = Object.entries(TOOL_ACCESS_POLICY)
+        .filter(([, p]) => p.kind === "baselined" && ADMIN_ONLY_OWNER.test(p.owner))
+        .map(([name]) => name)
+        .filter((name) => userTools.includes(name));
+      const advertised = guarded.filter((name) => agentTools.includes(name)).sort();
+      assert.deepEqual(
+        advertised.filter((n) => !ADVERTISED_TO_AGENTS_BASELINE.includes(n)),
+        [],
+        "an admin-only tool is advertised to agent sessions — give it a canAccess allow-list (the #3435 shape)",
+      );
+      const stale = ADVERTISED_TO_AGENTS_BASELINE.filter((n) => userTools.includes(n) && !agentTools.includes(n));
+      assert.deepEqual(stale, [], "baseline entries now hidden from agents — remove them (shrink-only)");
+    } finally {
+      await mcpServer?.stop().catch(() => {});
+      await new Promise<void>((r) => backend.close(() => r()));
     }
   });
 });
