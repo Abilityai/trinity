@@ -82,6 +82,7 @@ from services.event_dispatch_service import (
     verify_internal_dispatch_secret,
 )
 from services import idempotency_service
+from services import channel_completion_report
 from services import dispatch_admission_service
 from services import chat_persistence_service
 from services import skill_gate_service
@@ -499,7 +500,7 @@ async def _finalize_chat_success(
                     f"(execution_id={task_execution_id})"
                 )
                 real_session_id = None
-        db.update_execution_status(
+        won = db.update_execution_status(
             execution_id=task_execution_id,
             status=TaskExecutionStatus.SUCCESS,
             result=ExecutionResult(
@@ -514,6 +515,9 @@ async def _finalize_chat_success(
                 # row, as the task path already does (the column is on both tracks).
                 compact_metadata=_compact_metadata_json(metadata),
             ),
+        )
+        _spawn_chat_terminal_report(
+            won, name, task_execution_id, TaskExecutionStatus.SUCCESS, sanitized_response,
         )
 
     # Add execution metadata to response
@@ -575,17 +579,17 @@ async def _finalize_budget_exhausted(
     if task_execution_id and (
         not existing or existing.status != TaskExecutionStatus.CANCELLED
     ):
-        db.update_execution_status(
+        budget_status = (
+            TaskExecutionStatus.CANCELLED if cancelled else TaskExecutionStatus.FAILED
+        )
+        won = db.update_execution_status(
             execution_id=task_execution_id,
-            status=(
-                TaskExecutionStatus.CANCELLED
-                if cancelled
-                else TaskExecutionStatus.FAILED
-            ),
+            status=budget_status,
             result=ExecutionResult(
                 error=budget_msg,
             ),
         )
+        _spawn_chat_terminal_report(won, name, task_execution_id, budget_status, budget_msg)
     if collaboration_activity_id:
         await activity_service.complete_activity(
             activity_id=collaboration_activity_id,
@@ -812,7 +816,7 @@ async def _finalize_http_failure(
             if partial_metadata
             else None
         )
-        db.update_execution_status(
+        won = db.update_execution_status(
             execution_id=task_execution_id,
             status=TaskExecutionStatus.FAILED,
             result=ExecutionResult(
@@ -824,6 +828,9 @@ async def _finalize_http_failure(
                 # (504/429/plain-500 bodies carry no metadata — a known gap).
                 compact_metadata=_compact_metadata_json(partial_metadata),
             ),
+        )
+        _spawn_chat_terminal_report(
+            won, name, task_execution_id, TaskExecutionStatus.FAILED, error_msg,
         )
 
     if collaboration_activity_id:
@@ -953,6 +960,128 @@ async def run_chat_turn(
             idempotency_service.fail(idem)
 
 
+def _spawn_chat_terminal_report(won, name, task_execution_id, status, summary_or_error):
+    """#3295: a push ``/chat`` terminal reports back like a ``/task`` terminal.
+
+    A no-op unless the row carries an inherited channel context, which a
+    ``/chat`` row gains only through ``arm_chat_report_back`` — i.e. only when
+    the caller got a receipt instead of the reply. A row that answered inline
+    is never stamped, so this can never post a second "done". CAS-won only,
+    like every other terminal spawn (#1578/#1804).
+    """
+    if not (won and task_execution_id):
+        return
+    channel_completion_report.spawn_completion_report(
+        execution_id=task_execution_id,
+        agent_name=name,
+        status=str(getattr(status, "value", status)),
+        summary_or_error=summary_or_error,
+    )
+
+
+# ``triggered_by`` values a ``POST /chat`` row can carry (``chat_trigger``).
+# An inbound channel turn carries its channel name instead, and such a row is
+# answered inline by the adapter — it must never be armed.
+_CHAT_TRIGGERS = frozenset({"agent", "mcp", "chat"})
+
+
+async def arm_chat_report_back(*, name, execution_id, request, current_user) -> dict:
+    """#3295: make a sequential ``/chat`` execution report its terminal into the
+    caller's conversation (``POST /api/agents/{name}/executions/{id}/report-back``).
+
+    The MCP server calls this at the one moment it knows the caller did NOT get
+    the reply: when it hands back a ``queued_timeout`` receipt (its own abort, a
+    409 in-flight replay, or the backend's 504). A row that answered inline is
+    never armed, so the no-double-post rule holds without any "is the caller
+    still waiting" state on the backend.
+
+    Gates, in order:
+      * the row exists and belongs to ``name`` (uniform 404 otherwise);
+      * the caller DISPATCHED this row — an agent principal must be its
+        ``source_agent_name``, a person its ``source_user_id``; a connector key
+        is refused (403). An accessor of the agent can read the row's id, and
+        this call attaches an outbound destination to it;
+      * the row is a ``/chat`` turn (``_CHAT_TRIGGERS``), not an inbound channel
+        turn the adapter answers itself;
+      * the destination is inherited through ``_inherited_channel_context`` —
+        the ent#265 provenance guard (the caller must own the PARENT's context)
+        and the ent#457 parent-must-be-running check stay the only gate.
+
+    The stamp is ``stamp_execution_channel_context`` (ent#498): it only ever
+    ADDS a destination to a row that has none, so a retried arm is idempotent.
+    After stamping, the row is re-read and, if it already reached a terminal,
+    the report is spawned from the row here — the terminal writer may have run
+    before the stamp landed and found nothing to report. ``report_completion``
+    reads the row again itself and ``effect_guard`` keys on the destination, so
+    this spawn and a concurrent terminal spawn deliver exactly once.
+
+    Returns ``{"armed": bool, ...}``; a policy refusal is a 200 with
+    ``armed: false`` and a ``reason`` (the MCP server turns it into
+    ``report_back: off``), never a raise.
+    """
+    row = db.get_execution(execution_id)
+    agent_principal = getattr(current_user, "agent_name", None)
+    if getattr(current_user, "connector_agent", None):
+        raise ChatDispatchError(403, "Connector keys cannot arm a report")
+    # Existence and dispatcher are evaluated together and answered with ONE
+    # 404 (the Invariant #8 self-uniform shape): a row that is missing, belongs
+    # to another agent, or was dispatched by someone else all read the same, so
+    # the gate discloses nothing about which execution ids exist.
+    if agent_principal:
+        is_dispatcher = row is not None and getattr(row, "source_agent_name", None) == agent_principal
+    else:
+        is_dispatcher = row is not None and (
+            getattr(row, "source_user_id", None) == getattr(current_user, "id", None)
+        )
+    if row is None or getattr(row, "agent_name", None) != name or not is_dispatcher:
+        raise ChatDispatchError(404, "Execution not found")
+
+    if (getattr(row, "triggered_by", None) or "") not in _CHAT_TRIGGERS:
+        return {"armed": False, "execution_id": execution_id, "reason": "not_a_chat_turn"}
+
+    if getattr(row, "source_channel", None):
+        # A /chat row carries a destination only through an earlier arm (an
+        # inbound channel turn never passes the trigger check above), so this
+        # is a retry — idempotent. The terminal re-check below still runs: the
+        # retry may be the first arm to see the row finished.
+        stamped = False
+    else:
+        (
+            src_channel, chat_id, thread, binding_agent, client,
+        ) = _inherited_channel_context(request, current_user=current_user)
+        if not src_channel or not chat_id:
+            return {"armed": False, "execution_id": execution_id, "reason": "no_inherited_context"}
+        stamped = db.stamp_execution_channel_context(
+            execution_id,
+            source_channel=src_channel,
+            source_channel_chat_id=chat_id,
+            source_channel_thread=thread,
+            source_channel_agent=binding_agent,
+            source_channel_client=client,
+        )
+    logger.info(
+        "[#3295] report-back armed for %s on '%s' by %s (stamped=%s)",
+        execution_id, name, agent_principal or getattr(current_user, "username", "?"), stamped,
+    )
+
+    row = db.get_execution(execution_id)
+    status = str(getattr(getattr(row, "status", None), "value", getattr(row, "status", None)) or "")
+    if status in {s.value for s in _SYNC_BACKLOG_TERMINAL}:
+        # The terminal landed before the stamp — nothing reported then. The row
+        # stores the sanitized response; an error goes through the reporter's
+        # own sanitize-then-truncate (`_sanitized_detail`).
+        channel_completion_report.spawn_completion_report(
+            execution_id=execution_id,
+            agent_name=name,
+            status=status,
+            summary_or_error=(
+                getattr(row, "response", None) if status == TaskExecutionStatus.SUCCESS.value
+                else getattr(row, "error", None)
+            ),
+        )
+    return {"armed": True, "execution_id": execution_id, "status": status or "running"}
+
+
 def _valid_claude_session_id(value) -> Optional[str]:
     """``value`` when it parses as a UUID, else None (the #686 UC1 guard: a
     malformed id from the agent never reaches a resume)."""
@@ -1080,6 +1209,11 @@ async def run_pulled_chat_turn(
                     terminal_status=TaskExecutionStatus.FAILED,
                     summary_or_error=error,
                 )
+            # #3295: the lock wait can outlast the MCP server's abort, so an
+            # armed row that fails here has a caller holding a receipt.
+            _spawn_chat_terminal_report(
+                won, name, task_execution_id, TaskExecutionStatus.FAILED, error,
+            )
             if collaboration_activity_id:
                 await activity_service.complete_activity(
                     activity_id=collaboration_activity_id,

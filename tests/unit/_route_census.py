@@ -579,6 +579,12 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
         "PUT /api/agents/{agent_name}/skill-gates/{skill_name}", "ent#753 skills.manage USE on an owner-owned agent, never itself; persons pass assert_person + owner fence"),
     "routers/skill_gate.py::clear_agent_skill_gate": (
         "DELETE /api/agents/{agent_name}/skill-gates/{skill_name}", "ent#753 skills.manage USE on an owner-owned agent, never itself; persons pass assert_person + owner fence"),
+    # #3295: the MCP server arms a sequential /chat row's completion report with the
+    # CALLER's key when it hands back a receipt; the service admits only the row's own
+    # dispatcher and inherits the destination through the ent#265 provenance guard.
+    "routers/chat.py::arm_execution_report_back": (
+        "POST /api/agents/{name}/executions/{execution_id}/report-back",
+        "#3295 MCP report-back arm: the dispatcher of a /chat row (agent key = source_agent_name) asks for the consent-gated completion report; inheritance stays behind _inherited_channel_context"),
     # ent#703: the agent's pull loop reads its own switch every cycle with its own key.
     # The write (PUT .../git/pull-sync) is a setting, so it is person-only.
     "routers/git.py::get_pull_sync_config": (
