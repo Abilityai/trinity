@@ -796,7 +796,7 @@ async def set_agent_guardrails(
 
 @router.get("/{agent_name}/capability-grants", response_model=AgentCapabilityGrants)
 async def list_agent_capability_grants(agent_name: OwnedAgentByName):
-    """Which self-change permissions this agent holds — all four, held or not,
+    """Which self-change permissions this agent holds — all five, held or not,
     with who granted each and when. Visible to the owner (and admins); never
     to the agent's other users."""
     from db.capability_grants import CAPABILITIES

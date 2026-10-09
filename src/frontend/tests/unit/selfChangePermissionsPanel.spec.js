@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * trinity-enterprise#756 — an agent's self-change permissions as four
+ * trinity-enterprise#756 — an agent's self-change permissions as
  * admin-only toggles in its Settings.
  *
  * Mounted (#2918): each toggle gates a grant write, so the proof is a click
@@ -71,7 +71,7 @@ beforeEach(() => {
 })
 
 describe('SelfChangePermissionsPanel (ent#756)', () => {
-  it('a fresh agent shows all four off, with a line saying so — never a blank card', async () => {
+  it('a fresh agent shows every permission off, with a line saying so — never a blank card', async () => {
     route()
     const w = await mountAs('admin')
     for (const c of CAPS) {
@@ -131,7 +131,7 @@ describe('SelfChangePermissionsPanel (ent#756)', () => {
     expect(byId(w, 'self-change-permissions').exists()).toBe(false)
   })
 
-  it('shows autonomy beside the four, as a person\'s switch and not a grant', async () => {
+  it('shows autonomy beside the permissions, as a person\'s switch and not a grant', async () => {
     route({ autonomy: { autonomy_enabled: false } })
     const w = await mountAs('admin')
     expect(byId(w, 'self-change-autonomy').text()).toMatch(/Autonomy\s*·\s*off/)

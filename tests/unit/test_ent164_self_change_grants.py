@@ -30,6 +30,7 @@ from fastapi import HTTPException
 
 from db.capability_grants import (
     CAPABILITIES, CAPABILITY_AGENTS_MANAGE, CAPABILITY_INSTRUCTIONS_MANAGE,
+    CAPABILITY_PROJECTS_MANAGE,
     CAPABILITY_SCHEDULES_MANAGE, CAPABILITY_SKILLS_MANAGE,
 )
 
@@ -90,14 +91,17 @@ def _routes(module):
 # ---------------------------------------------------------------------------
 
 def test_the_three_capabilities_join_the_closed_set():
+    # ent#588 adds projects.manage (ent#661's planned agent right).
     assert CAPABILITIES == {CAPABILITY_SKILLS_MANAGE, CAPABILITY_SCHEDULES_MANAGE,
-                            CAPABILITY_INSTRUCTIONS_MANAGE, CAPABILITY_AGENTS_MANAGE}
+                            CAPABILITY_INSTRUCTIONS_MANAGE, CAPABILITY_AGENTS_MANAGE,
+                            CAPABILITY_PROJECTS_MANAGE}
 
 
 @pytest.mark.parametrize("cap,code", [
     (CAPABILITY_SCHEDULES_MANAGE, "schedule_management_not_permitted"),
     (CAPABILITY_INSTRUCTIONS_MANAGE, "instruction_management_not_permitted"),
     (CAPABILITY_AGENTS_MANAGE, "agent_management_not_permitted"),
+    (CAPABILITY_PROJECTS_MANAGE, "project_management_not_permitted"),
     (CAPABILITY_SKILLS_MANAGE, "skill_management_not_permitted"),
 ])
 def test_a_non_holder_gets_a_named_refusal_that_says_how_to_ask(held, cap, code):
