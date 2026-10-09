@@ -1697,7 +1697,7 @@ let streamReader = null                    // SSE reader reference
 
 - SSE stream and status endpoints validate the public link token instead of JWT
 - Execution ownership verified: the execution must belong to the agent associated with the link
-- No sensitive execution data exposed (only status, response text, and error message)
+- No sensitive execution data exposed (only status, response text, and a visitor-facing error). A `failed` row's own `error` is the operator's diagnosis and is never returned: the status route answers a fixed line, and `PublicChat.vue` renders its own plain notice and restores the visitor's message for a retry (#3461). A cancel reason and a skill-gate notice are written for the visitor and pass through
 
 ### Related
 
