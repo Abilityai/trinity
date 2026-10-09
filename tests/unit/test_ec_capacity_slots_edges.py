@@ -668,16 +668,6 @@ def test_force_release_matrix(cm, setup, was_running, cleared):
     assert not cm._redis.exists(cm._mem_queue_key("a"))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: get_status surfaces slots[0] after a sort by slot_number, but "
-        "slot_number=ZCARD+1 at acquire (slot_service.py:146) is reused after "
-        "out-of-order releases, so current_execution is not the oldest running "
-        "slot (capacity_manager.py:514-516 promises 'the oldest active slot') — "
-        "#3319"
-    ),
-)
 def test_r56_get_status_current_execution_is_the_oldest_slot(cm, clock):
     for i, eid in enumerate(["A", "B", "C"]):
         clock.t = 1_000_000.0 + i
@@ -686,6 +676,21 @@ def test_r56_get_status_current_execution_is_the_oldest_slot(cm, clock):
     _run(cm.release("a", "B"))
     clock.t = 1_000_010.0
     _run(_acq(cm, "D", cap=3))  # gets slot_number 2 < C's 3
+    st = _run(cm.get_status("a", 3))
+    assert st.current_execution.id == "C"
+
+
+def test_r56b_get_status_orders_sub_second_slots_by_score_not_slot_number(cm, clock):
+    # #3319: all four slots start within one second, so every duration_seconds
+    # truncates to 0 at read time — only the ZSET score can tell C from D.
+    for i, eid in enumerate(["A", "B", "C"]):
+        clock.t = 1_000_000.0 + i * 0.2
+        _run(_acq(cm, eid, cap=3))
+    _run(cm.release("a", "A"))
+    _run(cm.release("a", "B"))
+    clock.t = 1_000_000.9
+    _run(_acq(cm, "D", cap=3))  # gets slot_number 2 < C's 3
+    clock.t = 1_000_000.95
     st = _run(cm.get_status("a", 3))
     assert st.current_execution.id == "C"
 

@@ -515,9 +515,14 @@ class CapacityManager:
         # The original ExecutionQueue.get_status surfaced one "current" item;
         # SlotService tracks N. For status-endpoint compatibility, surface
         # the oldest active slot as `current_execution` when there is one.
+        # Oldest = smallest ZSET score, never slots[0]: slots are sorted by
+        # slot_number, which repeats after out-of-order releases (#3319). The
+        # score is re-anchored by renew_slot while parked and once at grant, so
+        # this is "oldest since its last admission/grant"; if every slot is
+        # parked, the least-recently-renewed one is shown.
         current_execution: Optional[Execution] = None
         if is_busy and slot_state.slots:
-            oldest = slot_state.slots[0]
+            oldest = min(slot_state.slots, key=lambda s: (s.start_score, s.execution_id))
             current_execution = Execution(
                 id=oldest.execution_id,
                 agent_name=agent_name,
