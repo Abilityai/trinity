@@ -206,7 +206,7 @@ A skill's `SKILL.md` frontmatter can declare:
 
 - `description:` — shown in the library and in autocomplete.
 - `automation:` — the skill's intended automation level.
-- `user_invocable:` — whether the skill appears as a runnable playbook (default true).
+- `user-invocable:` — whether the skill appears as a runnable playbook (default true).
 - `allowed-tools:` — the tools the skill may use, as Claude Code reads it. Write it in Claude Code's comma-separated form (`allowed-tools: Read, Bash, Bash(git:*)`) or as a YAML list (`[Read, Bash]`); both give the same list, and a comma inside parentheses (`Bash(npm run lint, npm test)`) stays part of one entry. Trinity reports this list in the agent's skill listing but does not enforce it — a Trinity run is restricted by the schedule, loop, or task's own allowed tools.
 - `argument-hint:` — the argument syntax shown in `/` autocomplete. The unquoted bracket idiom (`argument-hint: [file]`) is kept as written.
 - `requires:` with `packages`, `binaries`, and `env` lists.
