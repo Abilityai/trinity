@@ -54,7 +54,7 @@ Every account whose role is `user`. They usually got it from one of these:
    PostgreSQL:
 
    ```bash
-   psql "$DATABASE_URL" -c \
+   docker exec trinity-postgres psql -U trinity -d trinity -c \
      "SELECT username, email, last_login FROM users WHERE role = 'user' ORDER BY last_login DESC;"
    ```
 
@@ -85,8 +85,11 @@ Every account whose role is `user`. They usually got it from one of these:
   runtime routes: heartbeat, result delivery, reports, notifications, reading their own
   record, their own asks, and the skill-gate check. Everything else they did through the
   platform — MCP fleet tools, schedules, canvases, chatting other agents (rooms included) — is refused until
-  an admin raises the owner's role. There is no ownership transfer, and the agent's own key
-  stays bound to the account that minted it. To find them:
+  an admin raises the owner's role. What runs without the agent's key keeps running:
+  its schedules, webhooks and channel bots, and its connector keys on their own routes (the
+  agent's chat and playbook list). The owner can no longer pause those (they are operator
+  routes), so an admin pauses them or raises the owner. There is no ownership transfer, and
+  the agent's own key stays bound to the account that minted it. To find them:
 
   ```sql
   SELECT o.agent_name, u.username
@@ -96,9 +99,19 @@ Every account whose role is `user`. They usually got it from one of these:
 
 - A `user` account no longer opens an agent's terminal.
 
+## Lowering a role, and open sessions
+
+A role change applies to a live connection when it reconnects. A lowered account's open
+pages keep the scope they connected with: its `/ws` stream until it reconnects (the
+Workspace reconnects it on the next refused call), and an open agent terminal until it is
+closed. To end every open session at once, restart the backend: everyone signs in again.
+
 ## Whitelist rows written by sharing
 
-Rows whose source is agent sharing or an access request stay where they are. Their emails
+Rows whose source is agent sharing or an access request stay where they are. Adding such an
+email again on the Email Whitelist form replaces that row, so you can give the person
+`operator` before their first sign-in; an account that already exists keeps its role until you
+change it in User Management. Their emails
 can still sign in at `/login`, and the account they get is a Workspace-only `user`. Remove a
 row in Settings → Access → Email Whitelist if that person should use only the Workspace's
 code sign-in.

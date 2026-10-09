@@ -1027,6 +1027,11 @@ def enforce_operator_floor(request: Request, user: User) -> None:
     """Refuse a Workspace-only principal off its allowed routes (403 `workspace_only`)."""
     if not is_workspace_only_role(user.role):
         return
+    if user.connector_agent:
+        # A connector key serves the external consumers of one agent, as a
+        # public link does, and the ent#46 fence (already applied by the
+        # resolver) confines it to that agent's chat and playbook list.
+        return
     if user.agent_name:
         if _is_own_runtime_route(request, user.agent_name, _AGENT_SELF_ROUTES):
             return

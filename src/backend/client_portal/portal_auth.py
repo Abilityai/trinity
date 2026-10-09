@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 from fastapi import Depends, HTTPException, Request, Response
 
@@ -134,6 +134,24 @@ def _maybe_rotate(token: str, response: Response) -> None:
             response.headers[SESSION_ROTATION_HEADER] = fresh
     except Exception as exc:  # noqa: BLE001 — never fail an authorised request
         logger.warning("[ent#375] session rotation skipped: %s", exc)
+
+
+def workspace_email_from_request(request: Request) -> Optional[str]:
+    """The email of a Workspace session presented as a bearer token, or None.
+
+    For a route that also serves anonymous visitors (an `authorized` shared
+    canvas, trinity-enterprise#837): a missing or non-Workspace credential is
+    None, never a 401, and the session is not slid. A blocked client is refused
+    here as on every other Workspace route.
+    """
+    scheme, _, token = (request.headers.get("authorization") or "").partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    email = decode_portal_session(token.strip())
+    if not email:
+        return None
+    _reject_if_blocked(email)
+    return email
 
 
 async def get_portal_principal(

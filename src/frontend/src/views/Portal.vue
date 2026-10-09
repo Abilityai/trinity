@@ -896,7 +896,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick
 import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
-import { isWorkspaceOnlyRole } from '@/utils/workspaceOnly'
+import { canvasReturnPath, isWorkspaceOnlyRole } from '@/utils/workspaceOnly'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
 import { safeStorage } from '@/utils/safeStorage'
@@ -1068,7 +1068,8 @@ async function onVerify() {
     // where the client was when their session lapsed, and until now nothing ever
     // read it back: the expired notice promises "pick up where you left off", so
     // it has to actually land there rather than on the roster root.
-    const resumeTo = store.resumePath
+    // trinity-enterprise#837: or the shared canvas whose "Sign in" sent them here.
+    const resumeTo = store.resumePath || canvasReturnPath(route.query.redirect)
     await store.verifyCode(email.value.trim().toLowerCase(), code.value.trim())
     await bootstrap()
     if (resumeTo && resumeTo !== route.fullPath) {

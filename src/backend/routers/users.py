@@ -330,7 +330,6 @@ async def put_my_preference(
 
 
 @router.delete("/me/preferences/{key}")
-@workspace_route("the Workspace conversation clears the person's UI preferences")
 async def delete_my_preference(key: str, current_user: User = Depends(get_current_user)):
     """Remove one of the caller's preferences (the Grid's "Reset")."""
     reject_non_interactive_principal(current_user)

@@ -13,6 +13,9 @@ import {
   operatorRouteRedirect,
   isWorkspaceOnlyRefusal,
   reactToWorkspaceOnly,
+  canvasReturnPath,
+  existingAccountNotice,
+  WORKSPACE_ONLY_ROLE_LABEL,
   setWorkspaceOnlyHandler,
   notifyWorkspaceOnly,
 } from '../../src/utils/workspaceOnly'
@@ -107,6 +110,7 @@ describe('reactToWorkspaceOnly — a stale page gives way to the Workspace', () 
       currentPath: () => path,
       refreshProfile: vi.fn(async () => { role = refreshedRole }),
       currentRole: () => role,
+      rescope: vi.fn(),
       replace: vi.fn(),
     }
   }
@@ -116,6 +120,8 @@ describe('reactToWorkspaceOnly — a stale page gives way to the Workspace', () 
     await reactToWorkspaceOnly(c)
     expect(c.refreshProfile).toHaveBeenCalledTimes(1)
     expect(c.replace).toHaveBeenCalledWith({ path: '/workspace', query: { agent: 'scout' } })
+    // The live socket was scoped when it connected: it is rescoped too.
+    expect(c.rescope).toHaveBeenCalledTimes(1)
   })
 
   it('any other operator page moves to the Workspace', async () => {
@@ -131,6 +137,7 @@ describe('reactToWorkspaceOnly — a stale page gives way to the Workspace', () 
     await reactToWorkspaceOnly(c)
     expect(c.refreshProfile).toHaveBeenCalledTimes(1)
     expect(c.replace).not.toHaveBeenCalled()
+    expect(c.rescope).not.toHaveBeenCalled()
   })
 
   it('a failed re-read moves nothing and does not throw', async () => {
@@ -170,5 +177,37 @@ describe('notifyWorkspaceOnly — one reaction per burst', () => {
     setWorkspaceOnlyHandler(() => Promise.reject(new Error('navigation aborted')))
     expect(() => notifyWorkspaceOnly(refusal, 60_000)).not.toThrow()
     setWorkspaceOnlyHandler(null)
+  })
+})
+
+// trinity-enterprise#837: the Workspace sign-in returns a shared-canvas visitor
+// to the canvas; nothing else rides the `redirect` query.
+describe('canvasReturnPath — the Workspace sign-in returns to a shared canvas only', () => {
+  it.each(['/canvas/s/abc', '/canvas/s/abc?print=1'])('%s is kept', (path) => {
+    expect(canvasReturnPath(path)).toBe(path)
+  })
+
+  it.each([undefined, null, '', ['/canvas/s/abc'], '//evil.example/canvas/s/x', '/agents/scout',
+    '/workspace', 'https://evil.example/canvas/s/x', '/canvas/s/abc\\..'])('%s is refused', (raw) => {
+    expect(canvasReturnPath(raw)).toBeNull()
+  })
+})
+
+// trinity-enterprise#837 review: a whitelist role applies at a first sign-in
+// only, so adding someone who already has an account says where their role lives.
+describe('existingAccountNotice — the whitelist says where an existing role lives', () => {
+  it('names the account\'s current role and User Management', () => {
+    const notice = existingAccountNotice('user')
+    expect(notice).toContain('already has an account')
+    expect(notice).toContain(WORKSPACE_ONLY_ROLE_LABEL)
+    expect(notice).toContain('User Management')
+  })
+
+  it('names an operator rung as it is', () => {
+    expect(existingAccountNotice('operator')).toContain('operator')
+  })
+
+  it.each([undefined, null, ''])('%s means a new person: no notice', (role) => {
+    expect(existingAccountNotice(role)).toBeNull()
   })
 })

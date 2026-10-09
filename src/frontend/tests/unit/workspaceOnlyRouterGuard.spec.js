@@ -72,6 +72,26 @@ describe('the router guard and the Workspace-only rung', () => {
     expect(here()).toBe('/workspace')
   })
 
+  // Review item 13: the mobile admin signs in by itself (outside `requiresAuth`),
+  // yet it is an operator surface — every call it makes refuses a member.
+  it('sends a signed-in member who opens the mobile admin to the Workspace', async () => {
+    signedIn('user')
+    await router.push('/m')
+    expect(here()).toBe('/workspace')
+  })
+
+  it('leaves an admin, and a visitor who has not signed in, on the mobile admin', async () => {
+    signedIn('admin')
+    await router.push('/m')
+    expect(here()).toBe('/m')
+    await router.push('/workspace')
+    const auth = useAuthStore()
+    auth.isAuthenticated = false
+    auth.user = null
+    await router.push('/m')
+    expect(here()).toBe('/m')
+  })
+
   it('leaves an operator on the agent page', async () => {
     signedIn('operator')
     await router.push('/agents/atlas')

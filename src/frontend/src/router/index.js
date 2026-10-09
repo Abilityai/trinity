@@ -335,7 +335,9 @@ export const routes = [
     path: '/m',
     name: 'MobileAdmin',
     component: () => import('../views/MobileAdmin.vue'),
-    meta: { requiresAuth: false, title: 'Mobile' }  // handles its own inline auth
+    // Handles its own inline auth, so not `requiresAuth` — but an operator
+    // surface all the same (trinity-enterprise#837): see the guard below.
+    meta: { requiresAuth: false, operatorSurface: true, title: 'Mobile' }
   },
   // Catch-all redirect to dashboard
   {
@@ -426,6 +428,14 @@ router.beforeEach(async (to, from) => {
       }
       return '/setup'
     }
+  }
+
+  // trinity-enterprise#837 review: the mobile admin signs in by itself, outside
+  // `requiresAuth`, but every call it makes refuses a Workspace-only member —
+  // a signed-in member goes to the Workspace instead of a dead app.
+  if (to.meta.operatorSurface && authStore.isAuthenticated) {
+    const toWorkspace = operatorRouteRedirect(to, await confirmedRole(authStore))
+    if (toWorkspace) return toWorkspace
   }
 
   // Check if route requires authentication

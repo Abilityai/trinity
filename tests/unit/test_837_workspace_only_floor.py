@@ -196,6 +196,29 @@ def _marked_app(deps):
     return TestClient(app)
 
 
+class TestMarkedForWhatMembersUse:
+    """trinity-enterprise#837 review: the marks follow what a member's own pages
+    call — the public chat page's history, yes; the Dashboard's preference reset, no."""
+
+    def test_a_user_reads_their_own_public_chat_history(self, monkeypatch, jwt_as):
+        from fastapi import FastAPI
+        import database
+        import routers.public as public
+
+        monkeypatch.setattr(public, "_validate_public_link", lambda token: {"agent_name": "agent-a"})
+        monkeypatch.setattr(database.db, "get_agent_chat_sessions", lambda **_k: [])
+        app = FastAPI()
+        app.include_router(public.router)
+        path = next(r.path for r in app.routes if r.path.endswith("/sessions/{token}"))
+        r = TestClient(app).get(path.replace("{token}", "tok"), headers=_bearer(jwt_as("user")))
+        assert r.status_code == 200, r.text
+
+    def test_a_user_cannot_reset_a_preference(self, monkeypatch, jwt_as):
+        client = _users_app(monkeypatch)
+        r = client.delete("/api/users/me/preferences/fleet.grid", headers=_bearer(jwt_as("user")))
+        assert r.status_code == 403 and r.json()["detail"] == WORKSPACE_ONLY
+
+
 class TestTheMarker:
     def test_the_marker_admits_a_user_through_a_prefixed_router(self, jwt_as):
         import dependencies as deps
@@ -321,6 +344,36 @@ class TestAgentNeverExceedsItsOwner:
         client = _agent_app(deps)
         r = client.get("/api/agents", headers=_bearer(agent_key_as("operator")))
         assert r.status_code == 200
+
+    def test_a_connector_of_a_user_owner_keeps_its_two_routes(self, monkeypatch):
+        """A connector key serves the external consumers of one agent, as a public
+        link does, and the ent#46 fence confines it to that agent's chat and
+        playbook list. The floor lets it through there (trinity-enterprise#837
+        review); every other route is still the fence's refusal."""
+        import database
+        import dependencies as deps
+        from fastapi import Depends, FastAPI
+
+        monkeypatch.setattr(database.db, "validate_mcp_api_key", lambda *_a, **_k: {
+            "scope": "connector", "agent_name": "atlas", "key_id": "k2", "key_name": "connector",
+            "user_id": "owner", "user_email": "owner@example.com",
+        })
+        monkeypatch.setattr(database.db, "get_user_by_email", lambda *_a, **_k: _row("user", "owner"))
+        app = FastAPI()
+
+        async def handler(user=Depends(deps.get_current_user)):
+            return {"who": user.username}
+
+        app.add_api_route("/api/agents/{name}/chat", handler, methods=["POST"])
+        app.add_api_route("/api/agents/{name}/connector/playbooks", handler, methods=["GET"])
+        app.add_api_route("/api/agents/{name}/info", handler, methods=["GET"])
+        client = TestClient(app)
+        key = _bearer("trinity_mcp_fake_connector_key")
+
+        assert client.post("/api/agents/atlas/chat", headers=key).status_code == 200
+        assert client.get("/api/agents/atlas/connector/playbooks", headers=key).status_code == 200
+        fenced = client.get("/api/agents/atlas/info", headers=key)
+        assert fenced.status_code == 403 and fenced.json()["detail"] != WORKSPACE_ONLY
 
     def test_a_static_route_that_spells_the_agents_name_is_not_its_own(self, agent_key_as):
         """`GET /api/agents/slots` is a static fleet route registered before

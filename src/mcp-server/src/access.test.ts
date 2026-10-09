@@ -28,7 +28,7 @@ import {
   policyFor,
   withAgentAccess,
 } from "./access.js";
-import { TrinityClient } from "./client.js";
+import { ApiError, TrinityClient } from "./client.js";
 import type { McpAuthContext } from "./types.js";
 
 function fakeClient(opts: { permitted?: boolean } = {}) {
@@ -212,5 +212,36 @@ describe("ent#628 the permission read fails CLOSED", () => {
     assert.equal(await real.isAgentPermitted("a", "b"), false);
     const out = await checkAgentEdge(real, session("agent", "a").session, "b");
     assert.equal(out.allowed, false);
+  });
+});
+
+describe("trinity-enterprise#837 a workspace_only refusal is not read as 'none'", () => {
+  // The operator floor refuses a Workspace-only account on these reads. Turned
+  // into "no permitted agents" / "no such agent", the caller would report a
+  // missing permission or a missing agent instead of the account's situation.
+  const refusal = () =>
+    new ApiError(403, JSON.stringify({
+      detail: { code: "workspace_only", message: "This account works in the Workspace. Open /workspace." },
+    }));
+  const clientThrowing = (err: Error) => {
+    const real = new TrinityClient("http://127.0.0.1:1");
+    (real as unknown as { request: () => Promise<never> }).request = async () => {
+      throw err;
+    };
+    return real;
+  };
+
+  it("getPermittedAgents rethrows it", async () => {
+    await assert.rejects(clientThrowing(refusal()).getPermittedAgents("a"), /workspace_only/);
+  });
+
+  it("getAgentAccessInfo rethrows it", async () => {
+    await assert.rejects(clientThrowing(refusal()).getAgentAccessInfo("a"), /workspace_only/);
+  });
+
+  it("any other failure still reads as none (fail closed)", async () => {
+    const other = clientThrowing(new ApiError(403, JSON.stringify({ detail: "Forbidden" })));
+    assert.deepEqual(await other.getPermittedAgents("a"), []);
+    assert.equal(await other.getAgentAccessInfo("a"), null);
   });
 });

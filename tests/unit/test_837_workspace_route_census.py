@@ -41,12 +41,14 @@ MARKED = frozenset({
     "routers/ws_tickets.py::create_ws_ticket",
     "routers/users.py::get_my_preferences",
     "routers/users.py::put_my_preference",
-    "routers/users.py::delete_my_preference",
     "routers/loops.py::list_loops",
     "routers/loops.py::start_loop",
     "routers/loops.py::stop_loop",
     "routers/voice.py::get_voice_panel",
     "routers/public.py::get_shared_canvas",
+    # The public chat page lists the signed-in person's own past chats on a link.
+    "routers/public.py::get_public_link_sessions",
+    "routers/public.py::get_public_link_session_detail",
 })
 
 ROUTE_VERBS = {"get", "post", "put", "patch", "delete", "api_route"}

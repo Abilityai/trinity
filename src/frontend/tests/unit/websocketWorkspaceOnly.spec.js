@@ -27,13 +27,15 @@ vi.mock('axios', () => {
   return { default: { ...instance, create: vi.fn(() => instance) } }
 })
 
-import { useWebSocket } from '../../src/utils/websocket'
+import { useWebSocket, reconnectWebSocket } from '../../src/utils/websocket'
 import { useAuthStore } from '../../src/stores/auth'
+import { useLoopsStore } from '../../src/stores/loops'
+import { useSkillsStore } from '../../src/stores/skills'
 
 class FakeSocket {
   static last = null
-  constructor(url) { this.url = url; FakeSocket.last = this }
-  close() {}
+  constructor(url) { this.url = url; FakeSocket.last = this; this.closed = null }
+  close(code, reason) { this.closed = { code, reason } }
   send() {}
 }
 
@@ -86,5 +88,45 @@ describe('/ws events and the Workspace-only rung', () => {
     const reads = await streamAs('operator')
     expect(reads.some((u) => u.startsWith('/api/operator-queue'))).toBe(true)
     expect(reads.some((u) => u.startsWith('/api/notifications'))).toBe(true)
+  })
+
+  // Review nit: the loop and skills events feed an operator store too
+  // (Agent Detail's), which must not follow a member's stream either.
+  async function storeHitsAs(role) {
+    const auth = useAuthStore()
+    auth.isAuthenticated = true
+    auth.token = 'jwt'
+    auth.user = { email: 'x@example.com', role }
+    const loops = vi.spyOn(useLoopsStore(), 'handleWebSocketEvent')
+    const skills = vi.spyOn(useSkillsStore(), 'noteSkillsChanged')
+    const socket = useWebSocket()
+    await socket.connect()
+    FakeSocket.last.onmessage({ data: JSON.stringify({ type: 'loop_run_completed', agent_name: 'scout', loop_id: 'l1' }) })
+    FakeSocket.last.onmessage({ data: JSON.stringify({ type: 'agent_skills_changed', agent_name: 'scout' }) })
+    socket.disconnect()
+    return { loops: loops.mock.calls.length, skills: skills.mock.calls.length }
+  }
+
+  it('a member’s loop and skills events reach no operator store', async () => {
+    expect(await storeHitsAs('user')).toEqual({ loops: 0, skills: 0 })
+  })
+
+  it('an operator’s loop and skills events still do', async () => {
+    expect(await storeHitsAs('operator')).toEqual({ loops: 1, skills: 1 })
+  })
+
+  // trinity-enterprise#837 review: a socket's scope is fixed when it connects.
+  it('reconnectWebSocket drops the open socket so it reconnects with a fresh scope', async () => {
+    const auth = useAuthStore()
+    auth.isAuthenticated = true
+    auth.token = 'jwt'
+    auth.user = { email: 'x@example.com', role: 'user' }
+    const socket = useWebSocket()
+    await socket.connect()
+    const sock = FakeSocket.last
+    reconnectWebSocket()
+    expect(sock.closed).not.toBeNull()
+    expect(sock.closed.code).not.toBe(4001)  // 4001 means "do not reconnect"
+    socket.disconnect()
   })
 })

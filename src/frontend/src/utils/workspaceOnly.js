@@ -52,10 +52,33 @@ export function landingAfterSignIn(rawRedirect, role) {
   return isMemberPage(target) ? target : workspaceLocationFor(target)
 }
 
-/** The router guard's answer on an operator route (`meta.requiresAuth`): the
- *  Workspace for a member, `null` (proceed) for everyone else. */
+/**
+ * What the whitelist form says after adding someone who already has an account:
+ * a whitelist role applies only at a first sign-in, so theirs lives in User
+ * Management (trinity-enterprise#837 review). Null for a new person.
+ */
+export function existingAccountNotice(role) {
+  if (!role) return null
+  const label = isWorkspaceOnlyRole(role) ? WORKSPACE_ONLY_ROLE_LABEL : role
+  return `This person already has an account (${label}). The role above applies only to a first sign-in; change theirs in User Management.`
+}
+
+/**
+ * Where the Workspace sign-in returns a visitor who came from a shared canvas
+ * (`/workspace?redirect=/canvas/s/<token>`), or null. Only a same-origin shared
+ * canvas path rides the `redirect` query (trinity-enterprise#837).
+ */
+export function canvasReturnPath(raw) {
+  const safe = safeRedirect(raw, null)
+  return safe && isSharedCanvasPath(safe) ? safe : null
+}
+
+/** The router guard's answer on an operator route (`meta.requiresAuth`, or
+ *  `meta.operatorSurface` for one that signs in by itself, like the mobile
+ *  admin): the Workspace for a member, `null` (proceed) for everyone else. */
 export function operatorRouteRedirect(to, role) {
-  if (!isWorkspaceOnlyRole(role) || !to?.meta?.requiresAuth) return null
+  if (!isWorkspaceOnlyRole(role)) return null
+  if (!to?.meta?.requiresAuth && !to?.meta?.operatorSurface) return null
   return workspaceLocationFor(to.path)
 }
 
@@ -71,7 +94,7 @@ export function isWorkspaceOnlyRefusal(error) {
  * can answer a proxied call with it), so only the re-read role moves the tab.
  * Collaborators are arguments so a test can watch what is called.
  */
-export async function reactToWorkspaceOnly({ currentPath, refreshProfile, currentRole, replace }) {
+export async function reactToWorkspaceOnly({ currentPath, refreshProfile, currentRole, rescope, replace }) {
   const path = currentPath()
   if (isMemberPage(path) || isAuthRoute(path)) return undefined
   try {
@@ -80,12 +103,17 @@ export async function reactToWorkspaceOnly({ currentPath, refreshProfile, curren
     return undefined
   }
   if (!isWorkspaceOnlyRole(currentRole())) return undefined
+  // The live socket kept the scope it connected with: reconnect it as a member.
+  rescope()
   return replace(workspaceLocationFor(path))
 }
 
 // One handler, set by main.js (which owns the router), fed by both HTTP
 // clients' response interceptors. A page that fires several requests at once
-// reports its burst of refusals once.
+// reports its burst of refusals once. A time window rather than an in-flight
+// flag, deliberately: the burst's responses can arrive after the reaction has
+// already settled (a member page or an operator re-read resolves at once), and
+// a second reaction to the same burst would re-read the profile for nothing.
 const NOTIFY_WINDOW_MS = 2000
 let _handler = null
 let _lastNotified = -Infinity

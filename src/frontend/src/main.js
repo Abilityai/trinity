@@ -12,6 +12,7 @@ import {
   reactToPlatformUnauthorized, reactToStorageEvent, setPlatformUnauthorizedHandler,
 } from './utils/platformSession'
 import { installConsoleBuffer } from './utils/consoleBuffer'
+import { reconnectWebSocket } from './utils/websocket'
 import {
   notifyWorkspaceOnly, reactToWorkspaceOnly, setWorkspaceOnlyHandler,
 } from './utils/workspaceOnly'
@@ -95,6 +96,7 @@ setWorkspaceOnlyHandler(() => reactToWorkspaceOnly({
   currentPath: () => pathForVerdict(router, START_LOCATION, window.location.pathname),
   refreshProfile: () => useAuthStore().fetchUserProfile(),
   currentRole: () => useAuthStore().user?.role,
+  rescope: () => reconnectWebSocket(),
   replace: (path) => router.replace(path),
 }))
 

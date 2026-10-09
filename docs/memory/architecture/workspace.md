@@ -29,7 +29,8 @@ every operator route (403 `workspace_only`, `architecture/security.md` §1). The
 resolve the credential through `resolve_platform_user_unfloored`, so such a member reaches this
 surface exactly as before, roster included (shared agents plus any they own). The handful of
 operator-side routes the Workspace calls (session identity, sign-out, the `/ws` ticket, preferences,
-loops, the voice canvas, an `authorized` canvas link) carry `@workspace_route` and admit a browser
+loops, the voice canvas, an `authorized` canvas link, the public chat page's history) carry
+`@workspace_route` and admit a browser
 session only; the census in
 `tests/unit/test_837_workspace_route_census.py` fails when a Workspace file calls an operator route
 that is neither a door nor marked. In the SPA, `/login` lands a `user` in `/workspace` and the router

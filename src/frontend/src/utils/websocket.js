@@ -29,6 +29,16 @@ async function fetchWsTicket() {
   return data.ticket
 }
 
+/**
+ * Drop the open socket so it reconnects with a fresh ticket (trinity-enterprise#837).
+ * The server fixes a socket's scope (its agents, its kinds, its fields) when it
+ * connects, so after a role change only a reconnect picks up the new one. Any
+ * close code other than 4001 schedules that reconnect.
+ */
+export function reconnectWebSocket() {
+  if (ws.value) ws.value.close(4000, 'scope changed')
+}
+
 export function useWebSocket() {
   const agentsStore = useAgentsStore()
   const notificationsStore = useNotificationsStore()
@@ -203,7 +213,7 @@ export function useWebSocket() {
         // #1106: loop progress events (broadcast fleet-wide, keyed by type).
         // The store filters by the agent currently shown in LoopsPanel.
         if (data.type === 'loop_run_completed' || data.type === 'loop_completed') {
-          loopsStore.handleWebSocketEvent(data)
+          if (operatorStores) loopsStore.handleWebSocketEvent(data)
           // ent#458: the Workspace panel is a second consumer of the same
           // fleet-wide broadcast, scoped to the chat's participants instead of
           // the agent on Agent Detail. Two stores, one event — the
@@ -223,7 +233,7 @@ export function useWebSocket() {
         // through `/briefings`. Each is a no-op when its surface is not
         // showing that agent.
         if (data.type === 'agent_skills_changed' && data.agent_name) {
-          skillsStore.noteSkillsChanged(data.agent_name)
+          if (operatorStores) skillsStore.noteSkillsChanged(data.agent_name)
           clientPortalStore.revalidateBriefing(data.agent_name)
         }
         // #918: agent report thin trigger (broadcast fleet-wide, keyed by type).

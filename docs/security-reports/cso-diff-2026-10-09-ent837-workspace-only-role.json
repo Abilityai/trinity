@@ -50,26 +50,6 @@
   "findings": [
     {
       "id": 1,
-      "severity": "high",
-      "confidence": 9,
-      "status": "VERIFIED",
-      "evidence": "SUPPORTED",
-      "category": "vuln-disclosure-public-text",
-      "owasp_2025": "A02",
-      "asi": null,
-      "llm": null,
-      "title": "Added passages describe a privately tracked, unfixed weakness",
-      "files": [
-        "docs/memory/architecture/security.md",
-        "docs/memory/feature-flows/workspace-only-role.md",
-        "tests/unit/test_837_workspace_route_census.py"
-      ],
-      "exploit_scenario": "A reader of the public PR history learns how to reach the weakness before it is fixed.",
-      "resolution": "fixed: reworded; the unpushed branch collapsed to one commit so the wording never reached public history",
-      "verifier": "independent agent (the underlying weakness confirmed; detail kept private)"
-    },
-    {
-      "id": 2,
       "severity": "medium",
       "confidence": 9,
       "status": "VERIFIED",
@@ -91,7 +71,7 @@
       "verifier": "independent agent"
     },
     {
-      "id": 3,
+      "id": 2,
       "severity": "low",
       "confidence": 9,
       "status": "VERIFIED",
@@ -114,7 +94,7 @@
       "verifier": "independent agent (PARTIAL: mechanism confirmed, not a regression)"
     },
     {
-      "id": 4,
+      "id": 3,
       "severity": "low",
       "confidence": 9,
       "status": "VERIFIED",
@@ -137,7 +117,7 @@
       "verifier": "independent agent"
     },
     {
-      "id": 5,
+      "id": 4,
       "severity": "low",
       "confidence": 8,
       "status": "VERIFIED",
@@ -177,15 +157,15 @@
     "scanner": "n/a: no dependency change in diff"
   },
   "filter_stats": {
-    "candidates": 10,
+    "candidates": 9,
     "withdrawn": 1,
     "below_gate": 1,
     "out_of_scope_pre_existing": 7,
-    "reported": 5
+    "reported": 4
   },
   "totals": {
     "critical": 0,
-    "high": 1,
+    "high": 0,
     "medium": 1,
     "low": 3
   },

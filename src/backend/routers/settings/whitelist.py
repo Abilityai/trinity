@@ -161,10 +161,21 @@ async def add_email_to_whitelist(
         if not added:
             raise HTTPException(
                 status_code=409,
-                detail=f"Email {email} is already whitelisted"
+                detail=(
+                    f"Email {email} is already whitelisted (role at first sign-in: "
+                    f"{db.get_whitelist_default_role(email) or 'user'}). Remove it and add it "
+                    "again to change that role; an existing account's role is changed in "
+                    "User Management."
+                ),
             )
 
-        return {"success": True, "email": email}
+        result = {"success": True, "email": email}
+        # trinity-enterprise#837: a whitelist role applies only at a first sign-in,
+        # so tell the admin when the person already has an account.
+        account = db.get_user_by_email(email)
+        if account:
+            result["existing_account_role"] = account.get("role")
+        return result
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

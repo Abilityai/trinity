@@ -1474,6 +1474,7 @@ Example:
                     Add Email
                   </button>
                 </div>
+                <p v-if="whitelistNotice" :class="HELP_CLASS" data-testid="whitelist-existing-account">{{ whitelistNotice }}</p>
 
                 <!-- Whitelist Table -->
                 <div class="mt-4 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
@@ -1483,8 +1484,12 @@ Example:
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                           Email
                         </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                          Role
+                        <th
+                          scope="col"
+                          class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider"
+                          title="The role an account gets the first time it signs in. Change an existing account's role in User Management."
+                        >
+                          Role at first sign-in
                         </th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                           Source
@@ -1599,10 +1604,10 @@ Example:
               <!-- trinity-enterprise#837 — how many accounts the operator floor keeps in
                    the Workspace, on one line; the filter turns the table into the list. -->
               <div
-                v-if="workspaceOnlyCount"
-                :class="['mb-3 flex flex-wrap items-center gap-x-3 gap-y-1', HELP_CLASS]"
+                :class="['mb-3 flex min-h-[2rem] flex-wrap items-center gap-x-3 gap-y-1', HELP_CLASS]"
                 data-testid="workspace-only-users"
               >
+                <template v-if="workspaceOnlyCount">
                 <span>
                   {{ workspaceOnlyCount }} {{ workspaceOnlyCount === 1 ? 'account works' : 'accounts work' }}
                   in the Workspace only (role <code>user</code>). Raise anyone who operates agents to
@@ -1611,6 +1616,7 @@ Example:
                 <BaseButton variant="ghost" size="sm" type="button" @click="showWorkspaceOnlyUsers = !showWorkspaceOnlyUsers">
                   {{ showWorkspaceOnlyUsers ? 'Show all users' : 'Show only these' }}
                 </BaseButton>
+                </template>
               </div>
 
               <!-- Users Table — padding trimmed + compact actions so the
@@ -2331,7 +2337,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import BaseBadge from '../components/base/BaseBadge.vue'
 import BaseButton from '../components/base/BaseButton.vue'
 import BaseSelect from '../components/base/BaseSelect.vue'
-import { WORKSPACE_ONLY_ROLE_LABEL } from '../utils/workspaceOnly'
+import { WORKSPACE_ONLY_ROLE_LABEL, existingAccountNotice } from '../utils/workspaceOnly'
 import { HELP_CLASS } from '../components/base/fieldClasses'
 import InlineError from '../components/InlineError.vue'
 
@@ -2441,6 +2447,7 @@ const newEmail = ref('')
 // trinity-enterprise#837: the role the address gets on first sign-in. `user`
 // (Workspace only) stays the default (#314) — the operator UI is a choice.
 const newEmailRole = ref('user')
+const whitelistNotice = ref(null)
 const addingEmail = ref(false)
 const removingEmail = ref(null)
 const loadingWhitelist = ref(false)
@@ -2453,9 +2460,15 @@ const loadingUsers = ref(false)
 // how many there are on one line (a list above the table would push it down by
 // however many there are) and the filter turns the table into that list.
 const showWorkspaceOnlyUsers = ref(false)
-const workspaceOnlyCount = computed(() => usersList.value.filter((u) => u.role === 'user').length)
+// Guarded: the watch below evaluates this on every tab, not only Access, so a
+// users payload that is not (yet) a list must not throw.
+const listedUsers = computed(() => (Array.isArray(usersList.value) ? usersList.value : []))
+const workspaceOnlyCount = computed(() => listedUsers.value.filter((u) => u.role === 'user').length)
+// The filter has nothing to show once the last Workspace-only account is raised;
+// left on, it would silently apply again when the next one appears.
+watch(workspaceOnlyCount, (n) => { if (!n) showWorkspaceOnlyUsers.value = false })
 const visibleUsers = computed(() => (showWorkspaceOnlyUsers.value && workspaceOnlyCount.value
-  ? usersList.value.filter((u) => u.role === 'user')
+  ? listedUsers.value.filter((u) => u.role === 'user')
   : usersList.value))
 const roleLabel = (role) => (role === 'user' ? WORKSPACE_ONLY_ROLE_LABEL : (role || '—'))
 
@@ -3561,9 +3574,10 @@ async function addEmailToWhitelist() {
 
   addingEmail.value = true
   error.value = null
+  whitelistNotice.value = null
 
   try {
-    await axios.post('/api/settings/email-whitelist', {
+    const { data } = await axios.post('/api/settings/email-whitelist', {
       email: newEmail.value,
       source: 'manual',
       default_role: newEmailRole.value,
@@ -3573,6 +3587,7 @@ async function addEmailToWhitelist() {
 
     newEmail.value = ''
     newEmailRole.value = 'user'
+    whitelistNotice.value = existingAccountNotice(data?.existing_account_role)
     await loadEmailWhitelist()
     showSuccess.value = true
     setTimeout(() => {

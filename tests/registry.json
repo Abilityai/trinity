@@ -5364,6 +5364,41 @@
         "unit"
       ],
       "description": "trinity-enterprise#837: a Workspace-only account's /ws socket receives only the event kinds the Workspace reads (WORKSPACE_WS_EVENT_TYPES). Identity resolution per rung, the kind rule (type, else the lifecycle event key; kind-less withheld; narrows the agent scope, never widens it) on live fan-out and reconnect replay, register's default, and the main.py hand-offs with connect's closed default. No Docker."
+    },
+    {
+      "file": "unit/test_837_whitelist_grant.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "database",
+        "auth",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837 review: a deliberate whitelist grant replaces a row that agent sharing or access-request approval wrote (both backends via db_harness), any other existing row is left alone, and the route names an existing account's role. No Docker."
+    },
+    {
+      "file": "unit/test_837_shared_canvas_workspace_viewer.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "auth",
+        "workspace",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837 review: an authorized shared-canvas link recognises a Workspace session, limited to a roster agent and a roster-audience canvas (real SQLite); the route reads it from the bearer token, stays anonymous on an unknown token and refuses a blocked client. No Docker."
+    },
+    {
+      "file": "unit/test_837_cli_workspace_only.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-09",
+      "categories": [
+        "cli",
+        "auth",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837 review: the CLI names the workspace_only refusal (executed predicate, no CLI deps) and trinity init's key provisioning exits on it (AST pin). No Docker."
     }
   ]
 }
