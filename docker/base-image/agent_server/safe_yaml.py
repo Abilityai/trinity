@@ -86,7 +86,8 @@ DEFAULT_MAX_EXPANDED_NODES = 100_000
 # level, so 6 KB of `[` (~330 levels) exhausted the default 1000-frame stack
 # well under the byte cap and escaped as a bare RecursionError. The deepest
 # document Trinity actually loads is ~9 levels (`dashboard.yaml`); 64 is ~6x
-# that while leaving ~800 frames for the caller's own stack.
+# that while leaving ~800 frames for the caller's own stack. A level is one
+# nested mapping or sequence; the scalar leaf inside the deepest is not one.
 DEFAULT_MAX_DEPTH = 64
 
 
@@ -148,7 +149,14 @@ def _make_loader(
 
         def compose_node(self, parent, index):
             # Checked BEFORE recursing, so the refusal is named rather than a
-            # stack exhaustion inside the composer.
+            # stack exhaustion inside the composer. Only collection starts
+            # count: a scalar or alias leaf does not nest, so `max_depth`
+            # means that many nested mappings/sequences around any leaf.
+            nests = self.check_event(
+                yaml.events.SequenceStartEvent, yaml.events.MappingStartEvent
+            )
+            if not nests:
+                return self._compose_node_budgeted(parent, index)
             self._depth += 1
             try:
                 if self._depth > max_depth:

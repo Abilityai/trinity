@@ -453,6 +453,26 @@ def test_depth_at_the_limit_parses_and_one_more_is_refused():
     assert exc.value.code == "template_too_deep"
 
 
+@pytest.mark.parametrize("nest", [
+    pytest.param(lambda d: "[" * d + "1" + "]" * d, id="flow"),
+    pytest.param(_block_nest, id="block"),
+])
+def test_depth_counts_collections_not_the_scalar_leaf(nest):
+    """The bound is on nested COLLECTIONS: 64 of them around a scalar leaf
+    parse, 65 are refused. The leaf-less `_flow_nest` boundary above cannot
+    tell this apart from a counter that also counts the leaf (#3324 review I1)."""
+    from utils.safe_yaml import DEFAULT_MAX_DEPTH
+
+    load_hardened_yaml(
+        nest(DEFAULT_MAX_DEPTH), kind="template", alias_policy=AliasPolicy.BUDGET
+    )
+    with pytest.raises(HardenedYamlError) as exc:
+        load_hardened_yaml(
+            nest(DEFAULT_MAX_DEPTH + 1), kind="template", alias_policy=AliasPolicy.BUDGET
+        )
+    assert exc.value.code == "template_too_deep"
+
+
 def test_deep_block_nesting_under_the_byte_cap_is_a_named_refusal():
     """Block form, not only flow: 500 levels at a 1-space indent is ~125 KB —
     under the 256 KiB cap — and exhausted the stack before #3324."""
