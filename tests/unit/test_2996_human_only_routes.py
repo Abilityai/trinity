@@ -176,6 +176,9 @@ class TestTheRoutesThisChangeGates:
         "routers/users.py::update_my_email",
         "routers/users.py::set_my_github_pat",
         "routers/users.py::clear_my_github_pat",
+        # trinity-enterprise#709: changing your own password is a grant.
+        "routers/users.py::verify_my_current_password",
+        "routers/users.py::change_my_password",
         "routers/mcp_keys.py::create_mcp_api_key_endpoint",
         "routers/mcp_keys.py::ensure_default_mcp_api_key",
         "routers/mcp_keys.py::list_mcp_api_keys_endpoint",

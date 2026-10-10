@@ -20,16 +20,25 @@ from models import (
     UserPreferenceWrite,
     UserPreferenceRecord,
     UserPreferencesResponse,
+    VerifyMyPasswordRequest,
+    VerifyMyPasswordResponse,
+    ChangeMyPasswordRequest,
+    ChangeMyPasswordResponse,
 )
 from database import db
 from db.users import EmailInUseError
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from dependencies import (
     require_admin,
+    assert_admin,
     get_current_user,
     reject_non_interactive_principal,
     require_interactive,
+    create_access_token,
+    revoke_user_sessions,
 )
+from services import password_change_service
+from services.password_change_service import PasswordChangeRefused
 from services import user_preferences_service
 from services.user_preferences_service import PreferenceConflict, PreferenceError
 
@@ -334,6 +343,166 @@ async def delete_my_preference(key: str, current_user: User = Depends(get_curren
         return {"deleted": user_preferences_service.delete(current_user.id, key)}
     except PreferenceError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+# ---------------------------------------------------------------------------
+# Change your own password (trinity-enterprise#709) — the Settings dialog.
+#
+# Admin AND interactive: `require_interactive` refuses every MCP key (agent,
+# user, system, connector, …) and event-loopback tokens; `assert_admin` is the
+# Invariant #8 gate (never `require_role("admin")`). A grant, so human-only.
+# The account is always the caller's own — the request models forbid extras,
+# so no target username can be passed.
+#
+# Wrong current passwords and wrong second-factor codes go through login's own
+# counters (`routers/auth.py`), so a guess here counts against login too and a
+# stolen session cannot use the dialog as an unlimited password oracle.
+# Refusals are 400/409/429/503 with a named `detail.code` — never 401, which
+# the frontend reads as "your session ended".
+# ---------------------------------------------------------------------------
+
+_PASSWORD_REFUSAL_STATUS = {
+    "no_password": 409,
+    "second_factor_enrollment_required": 409,
+    "second_factor_unavailable": 503,
+}
+
+
+def _password_refusal(e: PasswordChangeRefused):
+    detail = {"code": e.code, "message": e.message}
+    if e.errors:
+        detail["errors"] = e.errors
+    raise HTTPException(status_code=_PASSWORD_REFUSAL_STATUS.get(e.code, 400), detail=detail)
+
+
+def _client_ip(request: Request) -> str:
+    # The same key login's limiter uses (`routers/auth.py::login`).
+    return request.client.host if request.client else "unknown"
+
+
+def _check_password_rate_limit(client_ip: str, account: str):
+    from routers import auth as auth_limits
+    try:
+        auth_limits.check_login_rate_limit(client_ip, account=account)
+    except HTTPException as e:
+        if e.status_code != 429:
+            raise
+        _refuse(429, "too_many_attempts", e.detail if isinstance(e.detail, str)
+                else "Too many failed attempts. Try again in a few minutes.")
+
+
+async def _audit_password_failure(request: Request, current_user: User, code: str):
+    await platform_audit_service.log(
+        event_type=AuditEventType.AUTHENTICATION, event_action="password_change_failed",
+        source="api", actor_user=current_user, actor_ip=_client_ip(request),
+        target_type="user", target_id=current_user.username,
+        endpoint=request.scope["path"], request_id=getattr(request.state, "request_id", None),
+        details={"reason": code},
+    )
+
+
+async def _reauthenticate(request: Request, current_user: User, current_password: str) -> dict:
+    """Rate-limit, load the caller's own row, and verify the current password.
+    A wrong password is counted against the login limiter and audited."""
+    from routers import auth as auth_limits
+    client_ip = _client_ip(request)
+    account = current_user.username.strip().lower()
+    _check_password_rate_limit(client_ip, account)
+    try:
+        user = password_change_service.load_account(current_user.username)
+    except PasswordChangeRefused as e:
+        _password_refusal(e)
+    if not password_change_service.current_password_matches(user, current_password):
+        auth_limits.record_login_attempt(client_ip, success=False, account=account)
+        await _audit_password_failure(request, current_user, "current_password_incorrect")
+        _refuse(400, "current_password_incorrect",
+                "Your current password is incorrect. Check it and try again.")
+    return user
+
+
+@router.post("/me/password/verify", response_model=VerifyMyPasswordResponse)
+async def verify_my_current_password(
+    body: VerifyMyPasswordRequest,
+    request: Request,
+    current_user: User = Depends(require_interactive),
+):
+    """Step 1 of the change-password dialog: check the current password and
+    say whether a second-factor step follows. Changes nothing."""
+    assert_admin(current_user)
+    user = await _reauthenticate(request, current_user, body.current_password)
+    try:
+        state = password_change_service.second_factor_state(user)
+    except PasswordChangeRefused as e:
+        _password_refusal(e)
+    return VerifyMyPasswordResponse(
+        verified=True,
+        second_factor_required=state["required"],
+        second_factor_enrollment_required=state["required"] and not state["enrolled"],
+    )
+
+
+@router.put("/me/password", response_model=ChangeMyPasswordResponse)
+async def change_my_password(
+    body: ChangeMyPasswordRequest,
+    request: Request,
+    current_user: User = Depends(require_interactive),
+):
+    """Change the caller's own password (trinity-enterprise#709).
+
+    Re-verifies everything step 1 checked — the dialog's steps are UX, this is
+    the boundary. On success every other session of the account is signed out
+    and the caller gets a fresh token.
+    """
+    assert_admin(current_user)
+    from routers import auth as auth_limits
+    user = await _reauthenticate(request, current_user, body.current_password)
+    client_ip = _client_ip(request)
+    account = current_user.username.strip().lower()
+
+    try:
+        second_factor = password_change_service.check_second_factor(user, body.second_factor_code)
+    except PasswordChangeRefused as e:
+        if e.code == "second_factor_invalid":
+            auth_limits.record_login_attempt(client_ip, success=False, account=account)
+            await _audit_password_failure(request, current_user, e.code)
+        _password_refusal(e)
+
+    try:
+        password_change_service.check_new_password(
+            body.current_password, body.new_password, body.confirm_password)
+    except PasswordChangeRefused as e:
+        _password_refusal(e)
+
+    password_change_service.apply_password_change(current_user.username, body.new_password)
+    auth_limits.record_login_attempt(client_ip, success=True, account=account)
+
+    # The caller's own tab keeps working on a fresh token; every other session
+    # of the account — including whatever leaked — is cut off.
+    from datetime import timedelta
+    from jose import jwt
+    from config import ACCESS_TOKEN_EXPIRE_MINUTES, SECRET_KEY, ALGORITHM
+    try:
+        mode = jwt.get_unverified_claims(
+            request.headers.get("authorization", "").split(" ", 1)[-1]).get("mode") or "admin"
+    except Exception:
+        mode = "admin"
+    token = create_access_token(
+        data={"sub": current_user.username},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+        mode=mode,
+    )
+    keep_jti = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM]).get("jti")
+    signed_out = revoke_user_sessions(current_user.username, keep_jti=keep_jti)
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.AUTHENTICATION, event_action="password_changed",
+        source="api", actor_user=current_user, actor_ip=client_ip,
+        target_type="user", target_id=current_user.username,
+        endpoint=request.scope["path"], request_id=getattr(request.state, "request_id", None),
+        details={"second_factor": second_factor, "other_sessions_signed_out": signed_out},
+    )
+    return ChangeMyPasswordResponse(
+        access_token=token, other_sessions_signed_out=signed_out)
 
 
 @router.get("")

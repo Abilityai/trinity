@@ -164,6 +164,73 @@ def is_token_revoked(jti: Optional[str]) -> bool:
         return False
 
 
+# trinity-enterprise#709 — "sign this account out everywhere, now", after a
+# password change. Same shape as the portal cutoff above: one Redis value per
+# username, `{cutoff}:{keep_jti}`; a token issued at or before `cutoff` is
+# rejected unless it is the one `keep_jti` names (the fresh token handed to the
+# tab that made the change). TTL = the access-token lifetime, so the key expires
+# exactly when the last token it could reject would have. Fail-open on Redis,
+# matching #187.
+_USER_SESSIONS_REVOKED_PREFIX = "auth:sessions_revoked_before:"
+
+
+def _user_sessions_key(username: str) -> str:
+    return f"{_USER_SESSIONS_REVOKED_PREFIX}{username}"
+
+
+def revoke_user_sessions(username: str, keep_jti: Optional[str] = None) -> bool:
+    """Reject every access token for ``username`` issued up to now, except
+    ``keep_jti``. Returns False when Redis is unavailable (fail-open)."""
+    from config import ACCESS_TOKEN_EXPIRE_MINUTES
+    r = get_breaker_redis()
+    if r is None:
+        logger.warning("[auth] user session revoke skipped — Redis unavailable")
+        return False
+    now = int(datetime.now(timezone.utc).timestamp())
+    try:
+        r.setex(_user_sessions_key(username), int(ACCESS_TOKEN_EXPIRE_MINUTES) * 60,
+                f"{now}:{keep_jti or ''}")
+        return True
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] revoke_user_sessions failed (fail-open): {exc}")
+        return False
+
+
+def is_user_session_revoked(username: Optional[str], payload: dict) -> bool:
+    """True if ``payload`` (a decoded access token) predates a password change.
+
+    A token with no ``iat`` predates #709 and cannot be shown to post-date the
+    cutoff, so it counts as revoked — fail CLOSED on the token, as the portal
+    cutoff does. Fail-OPEN on Redis.
+    """
+    if not username:
+        return False
+    r = get_breaker_redis()
+    if r is None:
+        return False
+    try:
+        raw = r.get(_user_sessions_key(username))
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] is_user_session_revoked failed (fail-open): {exc}")
+        return False
+    if raw is None:
+        return False
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode()
+    cutoff_s, _, keep_jti = str(raw).partition(":")
+    if keep_jti and payload.get("jti") == keep_jti:
+        return False
+    try:
+        cutoff = int(cutoff_s)
+    except ValueError:
+        return False
+    iat = payload.get("iat")
+    try:
+        return iat is None or int(iat) <= cutoff
+    except (TypeError, ValueError):
+        return True
+
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 # ent#554 — the same scheme with `auto_error=False`, so a route can accept an
@@ -232,6 +299,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None, m
         "exp": expire,
         "mode": mode,  # Track auth mode to prevent dev/prod token mixing
         "jti": secrets.token_urlsafe(16),  # #187: per-token id for revocation
+        # trinity-enterprise#709: issue time, so a password change can sign out
+        # every session issued before it (`is_user_session_revoked`).
+        "iat": int(datetime.now(timezone.utc).timestamp()),
     })
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -646,6 +716,10 @@ def decode_token(token: str) -> Optional[dict]:
         if is_token_revoked(payload.get("jti")):
             return None
 
+        # ent#709 — nor one signed out by a password change.
+        if is_user_session_revoked(username, payload):
+            return None
+
         # Get full user record from database
         user = db.get_user_by_username(username)
         if not user:
@@ -713,6 +787,10 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
 
         # #187 — reject a token revoked via logout.
         if is_token_revoked(payload.get("jti")):
+            raise credentials_exception
+
+        # ent#709 — reject a session signed out by a password change.
+        if is_user_session_revoked(username, payload):
             raise credentials_exception
 
         user = db.get_user_by_username(username)
