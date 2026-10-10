@@ -515,7 +515,7 @@ export interface OperatorQueueItem {
   disposition?: string | null;        // answered | cancelled | dismissed | expired
   disposed_at?: string | null;
   disposed_by?: string | null;        // person | timeout | platform (#3246) | agent (#3247: replaced its own ask)
-  disposition_reason?: string | null; // the operator's optional cancel reason, or the platform's (condition_cleared | superseded)
+  disposition_reason?: string | null; // the operator's optional cancel reason, or the platform's (condition_cleared | superseded), or the clock's outcome_unknown (an expired approval the platform did not hold, trinity-enterprise#844)
 }
 
 /**
