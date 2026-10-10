@@ -415,6 +415,17 @@
       "description": "#3232: POST /api/agents/{name}/voice-reply refuses a delegated child (a row with source_channel_agent set, i.e. it inherited its parent's conversation) with reason=delegated_turn before any channel branch, on Slack and Telegram; a direct channel turn still delivers; an agent tasking itself is still a delegated child (3 tests). Red on dev."
     },
     {
+      "file": "unit/test_3244_post_run_429_names_execution.py",
+      "feature": "abilityai/trinity#3244",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability"
+      ],
+      "description": "#3244: the sync /chat failures raised by the real `_finalize_http_failure` + `_apply_sub003_autoswitch`, after the turn ran and its row was written `failed`, name that row on an additive `X-Trinity-Execution-Id` response header beside `X-Trinity-Error-Code` (429 plain and auto-switched, 503, agent 500); bodies unchanged; no row, no header; the header survives FastAPI's HTTPException response. The MCP half (only the `capacity` 429 is `agent_busy`) is src/mcp-server/src/chat-429-split.test.ts. No Docker, no network."
+    },
+    {
       "file": "unit/test_3245_async_replay_after_failure.py",
       "feature": "abilityai/trinity#3245",
       "added": "2026-10-06",
