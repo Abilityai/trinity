@@ -66,6 +66,7 @@ width parity, short-viewport composer reachability).
   - **Keyboard shortcuts**: Enter to submit, Shift+Enter for newline, Cmd/Ctrl+Enter also works
 - **Task History**: Scrollable list of all tasks with expand/collapse — fills remaining viewport height (`flex-1 min-h-96`, #1500; formerly capped at `max-h-96`)
   - Row highlight: `highlightExecutionId` prop causes ring highlight and auto-scroll
+  - **Self-approved marker** (trinity-enterprise#754): `ExecutionGateMarker` renders a "ran without approval" badge after the compacted chip (`TasksPanel.vue:244-247`) when the summary's `gate_self_approved` is true; the hover says "you are the approver" when `gate_self_approved_by_viewer`. See [skills-tab.md](skills-tab.md)
   - **Action Buttons per Task** (lines 264-365):
     - Open Execution Detail (lines 265-287): External link / Live button for running tasks
     - View Log (lines 288-298): Modal for execution transcript
@@ -151,17 +152,21 @@ const avgDuration = computed(() => { /* ... */ })
 
 ### API Calls
 
-**Load Executions (lines 656-670)** - Returns lightweight `ExecutionSummary`:
+**Load Executions (lines 719-746)** - Returns lightweight `ExecutionSummary`:
 ```javascript
 async function loadExecutions() {
+  const seq = ++executionsSeq            // only the latest read is applied (ent#754)
   // PERF-001: Returns ExecutionSummary (excludes response, error, tool_calls, execution_log)
   const response = await axios.get(`/api/agents/${props.agentName}/executions?limit=100`, {
     headers: authStore.authHeader
   })
+  if (seq !== executionsSeq) return      // a later read, or the agent the page moved to
+  settleDetails(response.data)           // a row whose status changed drops its cached details
   executions.value = response.data
 
-  // If highlightExecutionId is set, auto-expand and scroll to that task
-  if (props.highlightExecutionId) {
+  // Expand and scroll to the highlighted task once, on the first read that answers
+  if (props.highlightExecutionId && props.highlightExecutionId !== highlightShownFor) {
+    highlightShownFor = props.highlightExecutionId
     scrollToHighlightedTask()
   }
 }
@@ -355,6 +360,8 @@ See [execution-termination.md](execution-termination.md) for full feature docume
 
 Queue status is polled every 5 seconds when agent is running (watch handler on agentStatus prop).
 
+The same poll re-reads the execution list while any loaded row is `queued`, `running` or `pending_retry`, and stops when none is (`shouldRereadExecutions`, lines 762-770; trinity-enterprise#754). A skill's Run from the Skills tab is accepted asynchronously and opens this tab while it is still running, and before this the row read "running" until Refresh. The re-read never stacks on a read still out, and it holds off while a task typed here is awaited: its local row stands for it until the call returns and re-reads the list, so a read meanwhile would list it twice. A row whose status changes drops the details read while it ran, and the open one re-reads them in place (`settleDetails`, lines 748-760).
+
 ---
 
 ## Backend Layer
@@ -414,6 +421,8 @@ async def get_agent_executions(
     executions = db.get_agent_executions_summary(name, limit=limit)
     return executions
 ```
+
+**trinity-enterprise#754**: the handler (`routers/schedules.py:891-917`) also takes `current_user` and sets `gate_self_approved` / `gate_self_approved_by_viewer` on each summary from one batch read (`skill_gate_map_service.self_approved_flags` → `db.get_self_approved_runs`, over `skill_gate_requests`). The detail route below carries the same two flags (`:920-938`).
 
 #### GET /api/agents/{name}/executions/{id}
 
@@ -832,6 +841,8 @@ Tasks are tracked in the `agent_activities` table via `activity_service.track_ac
 
 | Date | Changes |
 |------|---------|
+| 2026-10-08 | **trinity-enterprise#754, eyeball round**: the poll re-reads the list while a row is in flight, so a Run from the Skills tab settles without a Refresh; only the latest read is applied; the highlighted row is opened and scrolled to once; a settled row re-reads its details (`tests/unit/tasksPanelRunRefresh.spec.js`). |
+| 2026-10-08 | **trinity-enterprise#754**: the "ran without approval" badge on a self-approved run's row (`ExecutionGateMarker`), fed by `gate_self_approved` / `gate_self_approved_by_viewer` on the list and detail reads. The Skills tab's Run opens its run here (`?execution=<id>`) — [skills-tab.md](skills-tab.md). |
 | 2026-03-18 | **Timeout selector**: Added `taskTimeout` state with a Timeout dropdown in the New Task Input section (5min/15min/30min/1hr/2hr, default 15min). Value persisted per-agent in localStorage (`trinity-task-timeout-{name}`). Sent as `timeout_seconds` in POST /task payload. Added `cancelled` (orange) and `skipped` (purple) task status badges. Updated default model to `claude-opus-4-5-20251101`. Enhanced execution ID matching: fallback to single running execution when preview matching fails. `loadQueueStatus` now conditionally fetches running executions for local running tasks (manual tasks bypass queue). Terminate URL now includes `?task_execution_id=` query param so backend can update DB record. |
 | 2026-03-15 | **Unified chat execution tracking (#96)**: All `/api/chat` calls now create execution records (previously only MCP/agent-to-agent did). User chats use `triggered_by=chat`. Added "Chat" filter option (sky blue badge) to TasksPanel. Subtitle updated to "All executions". |
 | 2026-03-04 | **Paid/Public trigger types**: Added `paid` (yellow) and `public` (teal) to Trigger Badges table and filter dropdown. |

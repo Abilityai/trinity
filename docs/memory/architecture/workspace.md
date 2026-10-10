@@ -21,6 +21,9 @@ through `client_portal/portal_auth.py::get_portal_principal`, which returns
 `(email, is_platform, is_person)`; the roster is every agent shared with that email, plus — for a
 platform session only — the agents they own. `is_person` (trinity-enterprise#611) is False only
 for a platform principal that is not a person: a system-scoped key reads here but cannot answer an ask.
+The field defaults to False, and the principal also carries `self_approves` + `credential` (#3404): a
+portal session token says how it was minted (`minted_by`: `otp` | `delegate`), and only a platform
+person or an `otp`-minted session may self-approve a gated skill — see `feature-flows/skill-gate.md`.
 
 **Sign-out ends whichever credential is live — never a derivation of it (#2258).** The
 implicit entry above runs the other way too: `isPlatformSession = !portalToken &&
@@ -1318,6 +1321,19 @@ sites. The synchronous fallback genuinely had no id — `portal_chat` minted one
 threw it away — so it returns `message_id`, **declared on `PortalChatResponse`** because the
 response model strips undeclared keys in silence. The `v-if="item.message.id"` gate stays:
 carry the identifier with the flag and let the consumer still refuse an empty one.
+
+**A self-approved reply says so (trinity-enterprise#754).** `get_history` (both the window and the
+reply poll's `limit` read) calls `skill_gate_map_service.annotate_self_approved_turns`, which marks
+each agent reply whose `execution_id` has an ent#752 `self_approved` record with
+`gate_self_approved` / `gate_self_approved_by_viewer` (the portal session's email, casefolded,
+against the record's requester key). Both are declared on `PortalHistoryMessage` (an undeclared
+key is stripped by `response_model`); no email is added. `assistantRow` / `replyFromHistory`
+carry them, so a just-landed reply shows `ExecutionGateMarker` under the bubble without a reload.
+Rows from before #3166 (NULL `execution_id`) read false. The synchronous fallback (`POST .../chat`)
+answers the same pair from `_persist_reply`, declared on `PortalChatResponse`; the client reads either
+spelling through `portalUtils.turnGateFlags`. The marker is for people only: the history route passes
+`principal.is_person` and the chat path `gate_is_person`, so a system key on the platform session
+reads neither flag (the executions rule).
 
 **A reply names its turn (#3166).** `enterprise_portal_messages.execution_id` holds the
 execution that wrote the row: the dispatched id the client watches (never a cold retry's

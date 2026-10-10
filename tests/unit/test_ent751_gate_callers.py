@@ -1101,7 +1101,8 @@ def test_the_streaming_turn_forwards_the_proven_person(streaming, monkeypatch, f
 
 def _principal(is_person):
     from client_portal.portal_auth import PortalPrincipal
-    return PortalPrincipal(_P_EMAIL, True, is_person)
+    # #3404: self-approval rides on `self_approves`, not `is_person`.
+    return PortalPrincipal(_P_EMAIL, True, is_person, self_approves=is_person)
 
 
 def _stub_route(monkeypatch):
