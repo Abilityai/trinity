@@ -342,8 +342,15 @@ def open_for_reader(reader: Reader, item_id: str) -> PersonMentionDetail:
 
 
 def _room_access(room_id: str, reader: Reader) -> bool:
-    """Could this reader ALREADY see the room? A live participant (as a platform
-    user or as a Workspace identity), or an admin on the platform door."""
+    """Could this reader ALREADY see the room, through the door they are using?
+    A live `workspace_user` participant (either door), or — on the PLATFORM door
+    only — a live `user` participant or an admin.
+
+    Per door because the room's own rule is per door: `_require_membership`
+    resolves a Workspace session to a `workspace_user` and a platform session
+    to a `user`. A Workspace session for a platform member's address (one a
+    portal_delegate key minted included) is a 404 on that room, so it is not
+    shown the room here either (#78)."""
     from shared_sessions import db as rdb
 
     def _active(p):
@@ -354,12 +361,14 @@ def _room_access(room_id: str, reader: Reader) -> bool:
         return False
     if _active(rdb.get_participant(room_id, "workspace_user", email)):
         return True
+    if not reader.is_platform:
+        return False
     user = db.get_user_by_email(email)
     if not _usable(user):
         return False
     if _active(rdb.get_participant(room_id, "user", user["username"])):
         return True
-    return bool(reader.is_platform and user.get("role") == "admin")
+    return user.get("role") == "admin"
 
 
 def _labeller():

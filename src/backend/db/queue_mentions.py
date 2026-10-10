@@ -34,8 +34,34 @@ from .engine import get_engine, make_insert
 from .tables import operator_queue
 
 MENTION_TYPE = "mention"
+# The platform-reserved id prefix (`operator_queue_service._RESERVED_ID_PREFIXES`).
+# A row is a person tag only when it carries BOTH this prefix and the type: the
+# `type` column is agent-authored (the queue file's ingest only bounds its
+# length), so the type alone would let an agent forge "Alice mentioned you" into
+# a roster member's Inbox — and hide its own ask from the operator by naming it
+# `mention`. The prefix is the half an agent cannot write.
+MENTION_ID_PREFIX = "mention-"
 STATUS_DELIVERED = "delivered"
 STATUS_READ = "read"
+
+
+def is_tag_clause():
+    """SQL: this row is a person tag — the platform's, never an agent's."""
+    return and_(operator_queue.c.type == MENTION_TYPE,
+                operator_queue.c.request_id.like(f"{MENTION_ID_PREFIX}%"))
+
+
+def not_a_tag_clause():
+    """SQL complement of `is_tag_clause`, NULL-safe: a legacy row with no type
+    or no request_id is not a tag and stays listed."""
+    return ~and_(func.coalesce(operator_queue.c.type, "") == MENTION_TYPE,
+                 func.coalesce(operator_queue.c.request_id, "").like(f"{MENTION_ID_PREFIX}%"))
+
+
+def is_person_tag(item: Optional[Dict]) -> bool:
+    """Python twin of `is_tag_clause`, for a row already read."""
+    return bool(item) and item.get("type") == MENTION_TYPE and str(
+        item.get("request_id") or "").startswith(MENTION_ID_PREFIX)
 
 
 def _row(row) -> Dict:
@@ -101,7 +127,7 @@ class QueueMentionOperations:
         if not email:
             return []
         stmt = (select(*self._COLS)
-                .where(and_(operator_queue.c.type == MENTION_TYPE,
+                .where(and_(is_tag_clause(),
                             func.lower(operator_queue.c.addressed_to_email) == email))
                 .order_by(operator_queue.c.created_at.desc(), operator_queue.c.id.desc())
                 .limit(limit))
@@ -110,7 +136,7 @@ class QueueMentionOperations:
 
     def get(self, item_id: str) -> Optional[Dict]:
         stmt = select(*self._COLS).where(and_(
-            operator_queue.c.id == item_id, operator_queue.c.type == MENTION_TYPE))
+            operator_queue.c.id == item_id, is_tag_clause()))
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return _row(row) if row else None
@@ -123,7 +149,7 @@ class QueueMentionOperations:
         if not email:
             return None
         mine = and_(operator_queue.c.id == item_id,
-                    operator_queue.c.type == MENTION_TYPE,
+                    is_tag_clause(),
                     func.lower(operator_queue.c.addressed_to_email) == email)
         with get_engine().begin() as conn:
             conn.execute(update(operator_queue)
@@ -142,7 +168,9 @@ class QueueMentionOperations:
         if not prefix:
             return []
         esc = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        conds = [operator_queue.c.type == MENTION_TYPE,
+        if not prefix.startswith(MENTION_ID_PREFIX):
+            return []
+        conds = [is_tag_clause(),
                  operator_queue.c.request_id.like(f"{esc}%", escape="\\")]
         if agent_names is not None:
             names = sorted({a for a in agent_names if a})

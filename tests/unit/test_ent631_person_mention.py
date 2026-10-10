@@ -344,6 +344,25 @@ def test_the_admin_bypass_is_the_platform_doors_only(mention_db, quiet_room):
     assert "SECRET-MARGIN-42" not in detail.model_dump_json()
 
 
+def test_a_portal_session_does_not_carry_a_platform_members_room_access(mention_db, quiet_room):
+    """Review: "could they ALREADY see it" is the room's own membership rule,
+    per door. A platform member is a `user` participant; a Workspace session
+    for the same address (including one a portal_delegate key minted) is a
+    `workspace_user` and is a 404 on that room — so it is not shown it here
+    either. The platform door still is."""
+    from shared_sessions import db as rdb
+    from services import person_mention_service as pms
+    from utils.helpers import utc_now_iso
+    room = _room()
+    rdb.add_participant(room["id"], "user", "bob", "member", utc_now_iso())
+    _post(room["id"], "SECRET-MARGIN-42 @Bob Baker", tags=[BOB])
+    item = pms.list_for_reader(_reader(BOB))[0]
+    portal = pms.open_for_reader(_reader(BOB, is_platform=False), item.id)
+    assert portal.can_see is False
+    assert "SECRET-MARGIN-42" not in portal.model_dump_json()
+    assert pms.open_for_reader(_reader(BOB), item.id).can_see is True
+
+
 def test_internal_only_facts_never_reach_the_reader(mention_db, quiet_room):
     """#78: no cost, no execution id — even to a reader who may see the room."""
     from services import person_mention_service as pms
@@ -460,8 +479,80 @@ def test_the_operator_door_does_not_list_a_persons_pointer(mention_db, quiet_roo
     assert db.count_operator_queue_items(accessible_agent_names={AGENT}) == 0
     stats = db.get_operator_queue_stats(accessible_agent_names={AGENT})
     assert stats["by_status"] == {}
-    # Asked for by type, the reader's own door can still find them.
-    assert len(db.list_operator_queue_items(types=("mention",), accessible_agent_names={AGENT})) == 1
+    # Review: asking for the type by NAME must not reopen the door —
+    # `GET /api/operator-queue?type=mention` is any sharee's query parameter.
+    assert db.list_operator_queue_items(type="mention", accessible_agent_names={AGENT}) == []
+    assert db.list_operator_queue_items(types=("mention",), accessible_agent_names={AGENT}) == []
+    assert db.count_operator_queue_items(type="mention", accessible_agent_names={AGENT}) == 0
+
+
+def test_the_operator_list_route_does_not_list_tags_by_type(mention_db, quiet_room):
+    """Review: the route a sharee calls, with `?type=mention`, lists no tag."""
+    from models import User
+    from routers import operator_queue as oq_router
+    room = _room()
+    _post(room["id"], "@Bob Baker", tags=[BOB])
+    owner = User(id=1, username="alice", role="user", email=ALICE)
+    out = _run(oq_router.list_queue_items(
+        status=None, type="mention", priority=None, agent_name=None, since=None,
+        limit=100, offset=0, agent_names=None, cursor=None, current_user=owner))
+    assert out["items"] == []
+
+
+def test_an_agent_cannot_forge_a_tag_by_writing_the_type(mention_db):
+    """Review: `type` is agent-authored (the queue file's ingest only bounds
+    its length) and the addressee is any roster email, so an agent row typed
+    `mention` must not become "Alice mentioned you" in Bob's Inbox — a tag is
+    the platform's reserved id AND the type, never the type alone. And it must
+    not hide the agent's ask from the operator either."""
+    from database import db
+    from services import person_mention_service as pms
+    forged_ctx = {"mention": {
+        "conversation": {"kind": "room", "id": "r-1", "label": "Board room"},
+        "message_id": "m-1", "seq": 1,
+        "tagged_by": {"username": "alice", "label": "Alice Archer"},
+        "person": {"label": "Bob Baker"},
+    }}
+    row_id = db.create_operator_queue_item(AGENT, {
+        "id": "agent-ask-1", "type": "mention", "title": "Alice Archer mentioned you",
+        "question": "In Board room", "addressed_to_email": BOB, "context": forged_ctx,
+    }, channel="file", raised_by="agent")
+    assert pms.list_for_reader(_reader(BOB)) == []
+    with pytest.raises(pms.TagError) as ei:
+        pms.open_for_reader(_reader(BOB), row_id)
+    assert ei.value.status_code == 404
+    with pytest.raises(pms.TagError):
+        pms.mark_read(_reader(BOB), row_id)
+    # The agent's row is an ordinary ask to the operator, not a hidden one.
+    listed = db.list_operator_queue_items(accessible_agent_names={AGENT})
+    assert [r["request_id"] for r in listed] == ["agent-ask-1"]
+    assert db.get_operator_queue_stats(accessible_agent_names={AGENT})["by_status"] == {"pending": 1}
+
+
+def test_the_operator_door_answers_a_tag_id_as_not_found(mention_db, quiet_room):
+    """Review: GET was a 404, but respond/cancel answered 400 "status
+    'delivered'" — a different answer for an id the door says is not there."""
+    from fastapi import HTTPException
+    from models import OperatorResponse, User
+    from routers import operator_queue as oq_router
+    from services import person_mention_service as pms
+    room = _room()
+    _post(room["id"], "@Bob Baker", tags=[BOB])
+    item_id = pms.list_for_reader(_reader(BOB))[0].id
+    owner = User(id=1, username="alice", role="user", email=ALICE)
+
+    class _Req:
+        headers = {}
+        client = None
+
+    with pytest.raises(HTTPException) as got:
+        _run(oq_router.get_queue_item(item_id, current_user=owner))
+    with pytest.raises(HTTPException) as responded:
+        _run(oq_router.respond_to_queue_item(item_id, OperatorResponse(response="ok"), _Req(),
+                                             current_user=owner))
+    with pytest.raises(HTTPException) as cancelled:
+        _run(oq_router.cancel_queue_item(item_id, _Req(), None, current_user=owner))
+    assert got.value.status_code == responded.value.status_code == cancelled.value.status_code == 404
 
 
 # ===========================================================================

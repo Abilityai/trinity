@@ -345,6 +345,14 @@ _ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-", 
                                "mention-")
 
 
+def is_person_tag(item: Optional[dict]) -> bool:
+    """trinity-enterprise#631: is this row a person's tag of another person —
+    the reserved `mention-` id AND the type, never the agent-authored type
+    alone? The operator's door answers such a row as not there."""
+    from db.queue_mentions import is_person_tag as _is_tag
+    return _is_tag(item)
+
+
 def is_about_a_person(item: dict) -> bool:
     """Is this row one of the platform's heads-ups ABOUT a person (#715)? They
     are the operator's: the queue's reads never return one to a machine key."""

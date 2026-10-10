@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine, make_insert
 from .tables import operator_queue
-from .queue_mentions import MENTION_TYPE
+from .queue_mentions import not_a_tag_clause
 from utils.helpers import utc_now_iso, iso_cutoff, parse_iso_timestamp, to_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -75,8 +75,10 @@ _DB_BELT_TYPE_MAX_BYTES = 1024
 _NOT_A_GATE_ROW = or_(operator_queue.c.raised_by.is_(None), operator_queue.c.raised_by != "gate")
 
 # trinity-enterprise#631: person tags share the ledger but not the operator's
-# door. NULL-safe: a row with no type is a legacy agent row and stays listed.
-_NOT_A_MENTION = or_(operator_queue.c.type.is_(None), operator_queue.c.type != MENTION_TYPE)
+# door. A tag is the reserved `mention-` id AND the type (`queue_mentions`), so
+# an agent row that merely names its type `mention` stays an ordinary, listed
+# ask. NULL-safe: a row with no type is a legacy agent row and stays listed.
+_NOT_A_MENTION = not_a_tag_clause()
 
 
 def _own_pending_conds(agent_name: str, exclude_request_id_prefixes=None) -> list:
@@ -1108,10 +1110,11 @@ class OperatorQueueOperations:
         # trinity-enterprise#631: a person's tag is addressed to that person and
         # read through their own door (`db/queue_mentions.py`). It is never a
         # row of the operator's queue — listed there it would show who tagged
-        # whom to anyone with access to the agent — so it is left out unless a
-        # caller names the type explicitly.
-        if type != MENTION_TYPE and MENTION_TYPE not in (types or ()):
-            conds.append(_NOT_A_MENTION)
+        # whom to anyone with access to the agent — so it is left out
+        # UNCONDITIONALLY: `type` is a query parameter of the operator's list
+        # route, so an exception for "a caller who names the type" was a door
+        # any sharee could open with `?type=mention`.
+        conds.append(_NOT_A_MENTION)
 
         if accessible_agent_names is not None:
             conds.append(operator_queue.c.agent_name.in_(sorted(accessible_agent_names)))
