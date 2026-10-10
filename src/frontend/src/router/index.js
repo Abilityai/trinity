@@ -70,7 +70,16 @@ export const routes = [
     component: () => import('../views/AgentDetail.vue'),
     // #1418 — the :name param IS the canonical agent identifier in Trinity.
     // #1643 — the rendered tab title resolves to the display name (slug fallback).
-    meta: { requiresAuth: true, title: (to) => agentTabTitle(to.params.name) }
+    // #3446 — hideHelpLauncherOnTabs: the floating help launcher sits in the
+    // Chat composer's corner and covered Send. Only that tab, and only the
+    // launcher: the rest of the page keeps help, and an open help conversation
+    // is not torn down by a tab click. Reads `?tab=`, which the page keeps
+    // current (#2900).
+    meta: {
+      requiresAuth: true,
+      title: (to) => agentTabTitle(to.params.name),
+      hideHelpLauncherOnTabs: ['chat'],
+    }
   },
   {
     // ent#438 — the per-agent workspace is retired. It was a voice orb beside a

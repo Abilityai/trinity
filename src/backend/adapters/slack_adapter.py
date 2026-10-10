@@ -12,19 +12,37 @@ Supports:
 Transport-agnostic — works with both Socket Mode and webhook transports.
 """
 
+import asyncio
 import logging
-import random
 import re
+import secrets
 import string
 from typing import Optional
 
 from database import db
 from config import SLACK_AUTO_VERIFY_EMAIL
+from services import login_policy_gate
 from services.slack_service import slack_service
 from services.email_service import email_service
 from adapters.base import ChannelAdapter, FileAttachment, NormalizedMessage, ChannelResponse
 
 logger = logging.getLogger(__name__)
+
+
+# ent#849: strong refs so a detached code send is not garbage-collected mid-flight.
+_verification_code_tasks: set = set()
+
+
+async def _send_code_if_allowed(user_id: str, team_id: str, email: str) -> None:
+    """Mint and send a verification code off the reply path (policy-refused mode)."""
+    try:
+        if not login_policy_gate.email_code_allowed_for(email):
+            return
+        code = SlackAdapter._generate_verification_code()
+        db.update_slack_pending_verification(user_id, team_id, code=code)
+        await email_service.send_verification_code(email, code)
+    except Exception:
+        logger.exception("Failed to issue Slack verification code")
 
 
 class SlackAdapter(ChannelAdapter):
@@ -501,6 +519,23 @@ class SlackAdapter(ChannelAdapter):
                 )
                 return False
 
+            # ent#849: while the login policy refuses email codes, every address
+            # takes the same background path: members get no code, and neither
+            # the reply nor its timing tells a member from an outsider.
+            if not login_policy_gate.email_code_allowed():
+                db.update_slack_pending_verification(
+                    user_id, team_id, email=email, code="", state="awaiting_code"
+                )
+                task = asyncio.create_task(_send_code_if_allowed(user_id, team_id, email))
+                _verification_code_tasks.add(task)
+                task.add_done_callback(_verification_code_tasks.discard)
+                await slack_service.send_message(
+                    bot_token, channel,
+                    f"I've sent a 6-digit verification code to {email}.\n\n"
+                    "Reply with the code to complete verification. The code expires in 10 minutes."
+                )
+                return False
+
             code = self._generate_verification_code()
             db.update_slack_pending_verification(
                 user_id, team_id, email=email, code=code, state="awaiting_code"
@@ -524,6 +559,9 @@ class SlackAdapter(ChannelAdapter):
         if state == "awaiting_code":
             code = self._extract_code(text)
             expected_code = pending.get("code")
+            # ent#849: a member's code is refused like a wrong one.
+            if not login_policy_gate.email_code_allowed_for(pending.get("email")):
+                expected_code = None
             if not code or code != expected_code:
                 await slack_service.send_message(
                     bot_token, channel,
@@ -578,4 +616,4 @@ class SlackAdapter(ChannelAdapter):
 
     @staticmethod
     def _generate_verification_code() -> str:
-        return ''.join(random.choices(string.digits, k=6))
+        return ''.join(secrets.choice(string.digits) for _ in range(6))

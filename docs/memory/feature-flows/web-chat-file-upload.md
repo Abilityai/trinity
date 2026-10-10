@@ -124,7 +124,7 @@ files: Optional[List[WebFileUpload]] = None  # (#364)
 - On `all_writes_failed=True` → `502` with `"File upload failed: could not write to agent workspace."`
 - Appends file descriptions to `request.message` as a newline-joined block
 
-**Public chat** — `src/backend/routers/public.py:493-527` (`public_chat`):
+**Public chat** — `src/backend/routers/public.py:491-525` (`public_chat`):
 - Same pattern; `session_id` is `session_identifier` (the anonymous token or email)
 - `uploader` is `verified_email or f"anonymous ({client_ip})"`
 - File descriptions appended to `context_prompt` (not `chat_request.message`) so the stored user message doesn't contain the injection block

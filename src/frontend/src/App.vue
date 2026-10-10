@@ -14,8 +14,9 @@
              `onUnmounted` calls `closeSSE()` and stops an active voice session.
              Un-caching makes navigating away kill an in-flight chat stream and
              end a live voice call.
-           - `activeTab` is never URL-synced, so every revisit would reset the
-             user to Overview.
+           - A link back in that names no `?tab=` (the dashboard, the fleet
+             list) would reset the user to Overview; the cached view keeps the
+             tab and writes it back to the URL (#2900).
            - It is not even a win on requests: measured on a running agent,
              removing it saved 6 on first load and cost 19 on every revisit
              (27 -> 47), and `learnings.md:118-120` records the cached-revisit
@@ -33,12 +34,15 @@
 
     <!-- Help chat widget (authenticated users only; hidden on standalone
          client-facing surfaces like the portal where it overlaps the composer) -->
-    <HelpChatWidget v-if="authStore.isAuthenticated && !route.meta.hideHelpWidget" />
+    <HelpChatWidget
+      v-if="authStore.isAuthenticated && !route.meta.hideHelpWidget"
+      :hide-launcher="helpLauncherHidden"
+    />
   </div>
 </template>
 
 <script setup>
-import { onMounted } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import { readStoredToken } from './utils/platformSession'
@@ -48,6 +52,11 @@ import HelpChatWidget from './components/HelpChatWidget.vue'
 
 const route = useRoute()
 const authStore = useAuthStore()
+// #3446: a route may name tabs on which the floating launcher would cover one
+// of the page's own controls (the agent Chat composer's Send).
+const helpLauncherHidden = computed(() =>
+  (route.meta.hideHelpLauncherOnTabs || []).includes(route.query.tab)
+)
 const themeStore = useThemeStore()
 const { connect } = useWebSocket()
 
