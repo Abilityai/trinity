@@ -310,8 +310,8 @@ so its 30s auto-refresh polling tears down on tab-leave.
 **Template Structure**:
 - Header strip with monitoring status badge ("Monitoring Active/Disabled"), auto-refresh toggle + countdown, Refresh and "Check All" buttons
 - Summary cards (total, healthy, degraded, unhealthy, critical counts)
-- Active alerts section (collapsible, shows recent alerts)
-- Agent health grid with status indicators and issues
+- Active alerts section — every alert the header counts is rendered, inside a bounded viewport (`max-h-72`, internal scroll, keyboard-focusable) so the page does not grow (#3450). The count is the number of alerts fetched: `GET /api/monitoring/alerts` returns at most `limit` (default 50) and no grand total
+- Agent health grid with status indicators and issues; a row whose transport breaker is not closed carries a `BaseBadge` naming the state ("Breaker open" / "Breaker dormant") and the failure count, read from `circuit_breakers` on the status payload via `monitoringStore.circuitBreakers` (#3452)
 
 **Key State Variables** (same shape as the old view): `monitoringStore`,
 `statusFilter`, `triggeringCheck`, `checkingAgent`, `autoRefreshEnabled`,

@@ -11,7 +11,7 @@ As an agent orchestrator, I want to run a task N times in order, optionally chai
 ## Entry Points
 - **API**: `POST /api/agents/{name}/loops`, `GET /api/agents/{name}/loops`, `GET /api/loops/{id}`, `POST /api/loops/{id}/stop`
 - **MCP tools**: `run_agent_loop`, `get_loop_status`, `stop_loop`
-- **Web UI (Phase 2, #1106)**: the **Loops** tab on the Agent Detail page (`AgentDetail.vue`, between Schedules and Playbooks).
+- **Web UI (Phase 2, #1106)**: the **Loops** tab on the Agent Detail page (`AgentDetail.vue`, between Schedules and Skills — the Skills tab took Playbooks' slot in trinity-enterprise#754).
 
 Phase 1 shipped headless (API/MCP only); iterations also appear in the standard execution timeline tagged with `loop_id`, rendered as the distinct **Loops** analytics bucket and fuchsia trigger chip (#1150) rather than folding into Scheduled.
 

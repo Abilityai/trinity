@@ -1054,7 +1054,7 @@ export function availabilityChip(agent, { detailed = false } = {}) {
     }
 }
 
-export const EMPTY_REASON_NO_PLAYBOOKS = 'No playbooks are available for this agent right now.'
+export const EMPTY_REASON_NO_PLAYBOOKS = 'No skills are available for this agent right now.'
 export const EMPTY_REASON_NO_PEERS = 'No other agents are shared with you.'
 export const EMPTY_REASON_NO_MENTIONABLE_PEERS =
   "The other agents shared with you can't be @mentioned — their names aren't valid mention handles."
@@ -2126,9 +2126,24 @@ export function agentRowTime(threads, agentName, now = Date.now()) {
 // `id` defaults to `null`, never `undefined`: the consumer's gate is a
 // truthiness test either way, but a row whose id is explicitly null says "this
 // was built without one" where a missing key says nothing at all.
+/**
+ * trinity-enterprise#754: the two "ran without approval" facts of a reply that
+ * just landed, in the shape `assistantRow` takes, from either shape the reply
+ * arrives in: the streaming path's row (`gateSelfApproved`, mapped by
+ * `replyFromHistory`) or the synchronous fallback's raw `POST …/chat` body
+ * (`gate_self_approved`). True only when the server said true.
+ */
+export function turnGateFlags(data) {
+  return {
+    gate_self_approved: (data?.gateSelfApproved ?? data?.gate_self_approved) === true,
+    gate_self_approved_by_viewer: (data?.gateSelfApprovedByViewer ?? data?.gate_self_approved_by_viewer) === true,
+  }
+}
+
 export function assistantRow({ content = '', id = null, my_rating = null,
                                source = null, voice_call_id = null,
-                               execution_id = null } = {}) {
+                               execution_id = null, gate_self_approved = false,
+                               gate_self_approved_by_viewer = false } = {}) {
   return {
     role: 'assistant',
     content,
@@ -2138,6 +2153,10 @@ export function assistantRow({ content = '', id = null, my_rating = null,
     voiceCallId: voice_call_id || null,
     // #3166: the turn that wrote the row.
     executionId: execution_id || null,
+    // trinity-enterprise#754: the turn went through without approval because
+    // the asker is the approver, and whether the viewer is that person.
+    selfApproved: gate_self_approved === true,
+    selfApprovedByViewer: gate_self_approved_by_viewer === true,
   }
 }
 
@@ -2232,6 +2251,10 @@ function replyFields(row) {
     // trinity-enterprise#610: the stored time, which places a chat-turn ask
     // before this reply without the browser's clock (`placeAsksInThread`).
     at: row.created_at || null,
+    // trinity-enterprise#754: a just-landed reply shows "ran without
+    // approval" without waiting for a reload.
+    gateSelfApproved: row.gate_self_approved === true,
+    gateSelfApprovedByViewer: row.gate_self_approved_by_viewer === true,
   }
 }
 

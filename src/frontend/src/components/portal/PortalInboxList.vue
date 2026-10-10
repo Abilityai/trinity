@@ -91,7 +91,9 @@
               </BaseBadge>
               <BaseBadge v-if="it.latest && it.latest.kind === 'deliverable'" variant="purple">Deliverable</BaseBadge>
               <!-- §3g A10: what DIFFERS between pending asks — a high or critical
-                   priority, and an expiry within the day — at most two badges.
+                   priority, and an expiry within the day — at most two badges;
+                   a replacement adds the third that names what it replaces
+                   (#3247), because that is what differs about it.
                    "Waiting on you" was true of every row, so it said nothing. -->
               <template v-if="it.type === 'ask' && it.status === 'pending'">
                 <BaseBadge
@@ -106,6 +108,12 @@
                   :title="absolute(it.ask.expires_at)"
                   data-testid="inbox-row-badge-expiry"
                 >{{ expiry(it).label }}</BaseBadge>
+                <!-- #3247: the replacement names the ask it replaced. -->
+                <BaseBadge
+                  v-if="workspaceReplacesText(it.ask)"
+                  variant="neutral"
+                  :data-testid="`inbox-row-replaces-${it.key}`"
+                >{{ workspaceReplacesText(it.ask) }}</BaseBadge>
               </template>
               <BaseBadge
                 v-else-if="it.type === 'ask'"
@@ -138,7 +146,7 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import { relativeTime } from './portalUtils'
 import { newLabel } from './portalInbox'
 import { priorityBadge, expiresSoonLabel, needsExpiryTick, nextExpiryEntry, askKindIcon } from './portalAskUrgency'
-import { queueTypeLabel } from '@/utils/operatorQueue'
+import { queueTypeLabel, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
 import { formatLocalDateTime } from '@/utils/timestamps'
 
 const props = defineProps({
@@ -211,6 +219,8 @@ function askStatusLabel(it) {
   const s = it.status
   if (s === 'answered') return it.ask?.ended_by === 'you' ? 'Answered · you' : 'Answered'
   if (s === 'expired') return 'Expired'
+  // #3247: the agent replaced it — never read as the operator's cancel.
+  if (s === 'cancelled' && it.ask?.ended_by === 'agent') return workspaceEndingText(it.ask)
   if (s === 'cancelled') return 'Cancelled'
   // trinity-enterprise#748: the addressee's own "no answer".
   if (s === 'dismissed') return it.ask?.ended_by === 'you' ? 'Dismissed · you' : 'Dismissed'

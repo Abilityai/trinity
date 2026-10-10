@@ -429,6 +429,10 @@ class PortalChatResponse(BaseModel):
     # it. `None` then, and the client's `v-if="message.id"` correctly withholds
     # the thumbs rather than offering a control whose POST would 404.
     message_id: Optional[str] = None
+    # trinity-enterprise#754: the turn went through without approval because the
+    # asker is the approver (and the asker is this caller) — as on history rows.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
 
 class PortalTurnStarted(BaseModel):
@@ -1004,6 +1008,12 @@ class PortalHistoryMessage(BaseModel):
     # response, `in_flight_execution_id`, `last_turn_outcome`); NULL on rows
     # written before the column existed and on rows no turn wrote (reports).
     execution_id: Optional[str] = None
+    # trinity-enterprise#754: on an agent reply, its turn went through without
+    # approval because the asker IS the approver (ent#752's self-approved
+    # record), and whether the viewer is that person. Booleans only — derived
+    # server-side; false on questions and rows no turn wrote.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
 
 class PortalTurnOutcome(BaseModel):

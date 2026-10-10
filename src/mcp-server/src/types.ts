@@ -514,7 +514,7 @@ export interface OperatorQueueItem {
   // the ledger: read `status`).
   disposition?: string | null;        // answered | cancelled | dismissed | expired
   disposed_at?: string | null;
-  disposed_by?: string | null;        // person | timeout | platform (#3246)
+  disposed_by?: string | null;        // person | timeout | platform (#3246) | agent (#3247: replaced its own ask)
   disposition_reason?: string | null; // the operator's optional cancel reason, or the platform's (condition_cleared | superseded)
 }
 
@@ -547,6 +547,8 @@ export interface OperatorQueueAskReadback {
   to_role?: string | null;
   proposal?: unknown;
   supersedes_expired?: string | null;
+  replaces?: string | null;      // #3247: the ask this one replaced (request_id on get_my_ask)
+  replaced_by?: string | null;   // #3247: the ask that replaced this one
 }
 
 /**
@@ -566,6 +568,7 @@ export interface OperatorAskCreate {
   to?: "primary" | "approver" | "viewer" | "operator";
   expires_at?: string;
   supersedes_expired?: string;
+  replaces?: string;   // #3247: request_id of one of the agent's own PENDING asks
 }
 
 /**
@@ -587,6 +590,9 @@ export interface OperatorAskReceipt {
   expires_at?: string | null;
   wakes_on_ending: boolean;
   supersedes_expired?: string | null;
+  replaces?: string | null;      // #3247: request_id of the ask this one replaced
+  replaced_by?: string | null;   // #3247: request_id of the ask that replaced this one
+  disposed_by?: string | null;
   differs?: string[];
 }
 

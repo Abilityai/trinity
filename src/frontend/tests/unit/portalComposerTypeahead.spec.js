@@ -723,7 +723,7 @@ describe('PortalConversation wiring', () => {
 
   it('advertises both triggers in the placeholder, and @ only with the capability', () => {
     const src = convSource()
-    expect(src).toMatch(/for playbooks/)
+    expect(src).toMatch(/for skills/)        // trinity-enterprise#754: "skills" on agent surfaces
     expect(src).toMatch(/multiAgentChatAvailable[\s\S]{0,120}@ to add an agent/)
   })
 })

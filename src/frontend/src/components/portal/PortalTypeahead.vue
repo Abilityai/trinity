@@ -101,13 +101,13 @@ defineEmits(['pick', 'hover'])
 
 const listEl = ref(null)
 
-const heading = computed(() => (props.kind === '/' ? 'Playbooks' : 'Agents'))
+const heading = computed(() => (props.kind === '/' ? 'Skills' : 'Agents'))
 
 const status = computed(() => {
   if (!props.rows.length) return props.emptyMessage || 'No suggestions'
   const n = props.rows.length + props.overflow
   const hidden = props.hiddenCount > 0
-    ? ` ${props.hiddenCount} further playbook${props.hiddenCount === 1 ? '' : 's'} are not listed and must be asked for by name.`
+    ? ` ${props.hiddenCount} further skill${props.hiddenCount === 1 ? '' : 's'} are not listed and must be asked for by name.`
     : ''
   return `${n} suggestion${n === 1 ? '' : 's'}. Use the arrow keys to choose one.${hidden}`
 })
