@@ -282,6 +282,8 @@ services:
       # FULL non-empty default — a bare :- would arrive set-but-empty and shadow
       # the code default (#1076 class).
       - PUBLIC_ACCESS_REQUESTS_ENABLED=${PUBLIC_ACCESS_REQUESTS_ENABLED:-false}
+      # Original PDF delivery is opt-in; extraction stays in the agent.
+      - ALLOW_PDF_UPLOADS=${ALLOW_PDF_UPLOADS:-false}
       - OPERATOR_INTAKE_ENABLED=${OPERATOR_INTAKE_ENABLED:-true}
       - DO_NOT_TRACK=${DO_NOT_TRACK:-0}
       - OPERATOR_INTAKE_URL=${OPERATOR_INTAKE_URL:-https://intake.abilityai.dev/v1/operator-intake}

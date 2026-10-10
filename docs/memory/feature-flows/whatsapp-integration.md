@@ -15,9 +15,9 @@ no platform-level Twilio account required.
 - Inbound DMs → `WhatsAppAdapter` → `ChannelMessageRouter` → `TaskExecutionService`
 - Outbound responses via Twilio REST (`POST /Messages.json`, HTTP Basic auth)
 - Media in via Twilio-hosted URLs — SSRF-gated, two-tier (#1932). Any type is
-  **fetched**, but only **images** (plus text/CSV/JSON) reach the workspace:
-  `upload_service.UNSUPPORTED_MIMES` rejects `application/pdf`, `audio/`,
-  `video/` and archives for **every** channel, so a PDF or voice note lands as
+  **fetched**; images reach vision blocks and text/CSV/JSON documents reach the workspace; PDFs require explicit `ALLOW_PDF_UPLOADS=true` (default false):
+  `upload_service.UNSUPPORTED_MIMES` rejects `audio/`,
+  `video/` and non-ZIP archives for **every** channel, so a voice note lands as
   `"<name> — unsupported format"`. That is the policy gate, not a download
   failure — and WhatsApp has **no** voice-transcription route
   (`message_router._maybe_transcribe_voice` returns early for
@@ -361,7 +361,7 @@ an audit trail (`agent_service/helpers.py::validate_base_image`) — never env.
 Bodies are capped at `_WA_MEDIA_DOWNLOAD_MAX_BYTES` (16 MB transport guard, parity
 with Telegram/Slack — it bounds what is *accepted*, not what is buffered);
 `upload_service`'s per-type policy caps still apply downstream, as does its
-`UNSUPPORTED_MIMES` policy (PDF and `audio/*` are fetched successfully and then
+`UNSUPPORTED_MIMES` policy (`audio/*` is fetched successfully and then
 rejected by that channel-agnostic gate). A relative `Location` fails closed (no
 `https` scheme).
 

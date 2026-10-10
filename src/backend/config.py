@@ -20,6 +20,10 @@ EMAIL_AUTH_ENABLED = os.getenv("EMAIL_AUTH_ENABLED", "true").lower() == "true"
 # code requests for already-whitelisted emails (separate endpoint).
 PUBLIC_ACCESS_REQUESTS_ENABLED = os.getenv("PUBLIC_ACCESS_REQUESTS_ENABLED", "false").lower() == "true"
 
+# PDF attachments are opt-in across web chat and external channels. Enabling
+# delivers original bytes only; parsing, extraction and OCR remain agent-owned.
+ALLOW_PDF_UPLOADS = os.getenv("ALLOW_PDF_UPLOADS", "false").lower() == "true"
+
 # Operator intake (trinity-enterprise#38). At first-run setup the operator may
 # opt in to "occasionally receive important security & product updates"; when
 # they do, their email + company are submitted once to an Ability.ai-operated

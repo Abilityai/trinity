@@ -89,7 +89,7 @@ No frontend changes. File handling is entirely backend (Slack → adapter → ro
   rejection → 200-char truncation → collision dedup with `-1`, `-2`, … suffix (#487)
 - Channel limits: `CHANNEL_MAX_FILES=10`, `CHANNEL_MAX_FILE_SIZE=10MB`
 - Image budget: `CHANNEL_MAX_IMAGE_SIZE=5MB`, `CHANNEL_MAX_TOTAL_IMAGE_SIZE=10MB`
-- Unsupported MIME rejection: PDF, ZIP, tar, gzip, rar, video/*, audio/*
+- Unsupported MIME rejection: tar, gzip, rar, video/*, audio/*; PDF requires `ALLOW_PDF_UPLOADS=true` (disabled by default); enabled PDFs and ZIP use unchanged-byte workspace delivery
 - Magic-byte MIME validation via python-magic (graceful fallback if unavailable)
 - Session ID sanitized with `re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)` for shell safety
 
@@ -112,7 +112,7 @@ No frontend changes. File handling is entirely backend (Slack → adapter → ro
 |-----------|----------|
 | No `files:read` scope | Download returns HTML instead of file → logged as download failure |
 | File too large | Skipped with description in prompt |
-| Unsupported format (PDF, etc.) | Skipped with user-friendly message |
+| Unsupported format (tar, etc.) | Skipped with user-friendly message |
 | Download fails | Logged, description says "download failed" |
 | Container copy fails | Logged, description prefixed `[File upload failed]:` |
 | All container writes fail | Channel reply with explicit error, agent execution skipped (#487 AC6) |
@@ -152,7 +152,7 @@ No frontend changes. File handling is entirely backend (Slack → adapter → ro
 - [x] Image upload via Slack → agent describes image content
 - [x] Text file via API → agent reads and summarizes
 - [x] Text message without files → works unchanged
-- [x] PDF upload → rejected with user message
+- [x] PDF upload → disabled by default; with `ALLOW_PDF_UPLOADS=true`, unchanged bytes delivered to the per-session workspace; parsing/extraction remains agent-owned
 
 **Last Tested**: 2026-03-31
 **Status**: ✅ Working

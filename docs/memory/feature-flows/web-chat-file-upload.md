@@ -3,6 +3,8 @@
 ## Overview
 Adds drag-and-drop / file-picker to authenticated chat (ChatPanel.vue) and public chat (PublicChat.vue), encoding files as base64 in the JSON request body and reusing the same validation/write infrastructure as the Telegram/Slack/WhatsApp channel adapters.
 
+PDF delivery is opt-in: `ALLOW_PDF_UPLOADS=false` is the backend default in both Compose files and `.env.example`. Set it to `true` explicitly and recreate the backend to enable original-file delivery across web and external channels. Missing, false, empty or invalid values do not enable PDFs. The disabled policy also recognizes a PDF header anywhere within the first 1024 bytes, including preamble-bearing files sent as text or generic binary when MIME detection is unavailable. No per-agent policy or extraction service is added.
+
 ## User Story
 As a user chatting with an agent, I want to attach files to my message so that the agent can visually analyze images or read text/CSV/JSON files I provide.
 
@@ -150,7 +152,7 @@ files: Optional[List[WebFileUpload]] = None  # (#364)
 ```
 for each file (up to max_files):
   1. sanitize_filename() — NFKC, path traversal, dedup
-  2. Reject unsupported MIME categories (PDF, tar/gzip/rar, video/, audio/) — ZIP is accepted (#2152)
+  2. Reject declared/header-identified PDFs unless ALLOW_PDF_UPLOADS=true; reject unsupported MIME categories (tar/gzip/rar, video/, audio/) — ZIP is accepted (#2152)
   3. Actual size check against declared limit (TOCTOU defense)
   4. Magic-byte MIME validation via python-magic (graceful fallback):
      - Declared `application/zip` whose bytes start with a ZIP signature (`PK\x03\x04` /
@@ -159,9 +161,12 @@ for each file (up to max_files):
        libmagic 5.46 on Debian trixie returns `application/octet-stream` for a ZIP buffer)
      - Image MIME mislabel (JPEG vs PNG) → accept with detected MIME
      - text/plain vs text/csv → accept
+     - Generic `application/octet-stream` detected as `application/pdf` → identify as PDF and accept only when enabled; all other binary mismatches still reject
+     - If MIME detection is unavailable or fails, enabled PDF delivery requires a standard first-line `%PDF-N.N` header for the fallback; a generic MIME with that header is identified as PDF. This is file-type detection, not document validation or malware scanning.
      - Other mismatch → reject with "file type mismatch"
+  5. Reject detected PDFs before writes if PDF uploads are disabled
   5a. If image → base64-encode → append to image_data list (vision blocks)
-  5b. If non-image → container mkdir -p + put_archive to /home/developer/uploads/{session_id}/
+  5b. If non-image (including PDF) → container mkdir -p + put_archive to /home/developer/uploads/{session_id}/; the receiving agent owns PDF parsing, extraction and OCR
   6. Emit platform_audit_service.log(event_type=EXECUTION, event_action="file_upload")
 ```
 
@@ -212,7 +217,8 @@ Images are passed through to Claude Code via `--input-format stream-json` as con
 | All non-image writes fail | 502 | `"File upload failed: could not write to agent workspace."` |
 | Single file rejected (size) | — | Description appended to prompt: `"{name} — rejected (exceeds X limit)"` |
 | Single file rejected (MIME mismatch) | — | Description: `"{name} — rejected (file type mismatch)"` |
-| Unsupported format (PDF, tar/gzip/rar, video, audio) | — | Description: `"{name} — unsupported format ({mime}). Text, CSV, JSON, ZIP, and image files are supported."` (ZIP allowed since 2026-08) |
+| PDF uploads disabled | — | Description: `"{name} — PDF uploads are disabled by the operator"`; no workspace write or vision block |
+| Unsupported format (tar/gzip/rar, video, audio) | — | Description: `"{name} — unsupported format ({mime}). Text, CSV, JSON, PDF, ZIP, and image files are supported."` (PDF is omitted from this list when disabled; ZIP allowed since 2026-08) |
 | File count exceeds max | — | Description: `"({n} more file(s) skipped — max {max} per message)"` |
 | Total image size exceeded | — | Description: `"{name} — skipped (total image size limit reached)"` |
 | Client-side oversized file | — | `alert()` shown in browser, file not added to `pendingFiles` |
@@ -242,7 +248,8 @@ routers/chat.py:execute_parallel_task           routers/public.py:public_chat
 upload_service.process_file_uploads():
   for each file (max 3):
     sanitize_filename() — unicode NFKC, path traversal, dedup
-    reject unsupported MIME (PDF, tar/gzip/rar, video, audio)
+    reject PDFs unless ALLOW_PDF_UPLOADS=true, including generic MIME/header detection
+    reject unsupported MIME (tar/gzip/rar, video, audio)
     size check vs WEB_MAX_FILE_SIZE / WEB_MAX_IMAGE_SIZE
     magic-byte MIME validation (python-magic; fallback graceful; declared ZIP with ZIP signature bypasses libmagic, #3046)
     if image:
@@ -293,7 +300,7 @@ execute_task → claude code --input-format stream-json
    Expected: `alert()` shown; file not added to pending list
 
 5. **Attempt to attach a PDF**
-   Expected: file sent to backend; rejected by `process_file_uploads` with unsupported format description injected into prompt
+   Expected by default: PDF disabled description and no write. With `ALLOW_PDF_UPLOADS=true`: unchanged PDF bytes saved to the existing per-session uploads directory with uploader attribution; no vision block or platform-side extraction. Repeat with `application/octet-stream`. Non-PDF content declared as PDF and unrelated detected MIME mismatches reject before any workspace write.
 
 6. **Exceed 3-file limit**
    Expected: only first 3 files processed; overflow count injected into prompt
