@@ -1,4 +1,4 @@
-# mcp: skills.ts (list_skills, get_skill, get_skills_library_status, list_skill_sets, assign_skill_to_agent, set_agent_skills, sync_agent_skills, get_agent_skills, unassign_skill_set); skill-manager grant routes: none — admin grant, human-only (grant-vs-use, ent#596)
+# mcp: skills.ts (list_skills, get_skill, get_skills_library_status, list_skill_sets, assign_skill_to_agent, set_agent_skills, sync_agent_skills, get_agent_skills, unassign_skill_set); skill_sources.ts (list_skill_sources, register_skill_source, update_skill_source, delete_skill_source, sync_skill_source, sync_skill_library — admin principals only, trinity-enterprise#692); skill-manager grant routes: none — admin grant, human-only (grant-vs-use, ent#596)
 """
 Skills Router - API endpoints for skills management.
 
@@ -16,7 +16,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from models import User
 from dependencies import (
@@ -41,6 +41,7 @@ from models import (
     SkillsLibraryStatus,
     SkillSetInfo,
     AgentSkillSetStatus,
+    SkillSourceApply,
     SkillSourceCreate,
     SkillSourceUpdate,
 )
@@ -53,6 +54,7 @@ from utils.url_validation import (
 )
 from services.skill_service import (
     skill_service, SkillInjectionBusy, broadcast_skills_changed,
+    AmbiguousSkillSource, apply_skill_source,
 )
 from services.skill_packaging import validate_skill_name
 from services import capability_grant_service
@@ -1081,6 +1083,7 @@ async def create_skill_source(
             ref=body.ref,
             ref_type=body.ref_type,
             enabled=body.enabled,
+            priority=body.priority,
             is_default=False,
             created_by=str(admin_user.id),
         )
@@ -1094,6 +1097,71 @@ async def create_skill_source(
         {"url": url, "ref": body.ref, "ref_type": body.ref_type},
     )
     return source
+
+
+def _validated_source_url(raw: str) -> str:
+    """The create route's URL boundary, shared so every write path refuses the
+    same things with the same text (trinity-enterprise#692 AC 4)."""
+    try:
+        reject_embedded_credentials(raw)
+    except EmbeddedCredentialError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        return validate_skills_library_url(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid repository URL: {e}")
+
+
+@router.post("/skills/sources/apply")
+async def apply_source(
+    request: Request,
+    response: Response,
+    body: SkillSourceApply,
+    admin_user: User = Depends(require_admin),
+):
+    """Register-or-update a source keyed on its repository (trinity-enterprise#692).
+
+    The idempotent form of `POST /skills/sources`: re-applying a declared
+    source patches the fields it names on the existing row and never creates a
+    duplicate. 201 `created`, 200 `updated` / `unchanged`; 409
+    `ambiguous_source` when two rows (different refs) name the repository.
+    The create route keeps its 409-on-duplicate contract — the Settings panel
+    relies on it.
+
+    Same gates as every source route: `require_admin` (refuses agent and
+    connector principals itself) plus `reject_agent_principal` — the backing
+    route of the MCP `register_skill_source` tool, which is advertised only to
+    user/system scope.
+    """
+    reject_agent_principal(admin_user)
+    url = _validated_source_url(body.url)
+    fields = body.model_dump(exclude_unset=True, exclude_none=True)
+    fields.pop("url", None)
+
+    try:
+        action, source = apply_skill_source(
+            url=url, fields=fields, created_by=str(admin_user.id)
+        )
+    except AmbiguousSkillSource as e:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ambiguous_source", "message": str(e), "source_ids": e.source_ids},
+        )
+    except DuplicateSkillSource as e:  # e.g. an update colliding with another (url, ref)
+        raise HTTPException(status_code=409, detail=str(e))
+
+    if action == "created":
+        response.status_code = 201
+        await _audit_source(
+            request, admin_user, "skill_source_create", source.id,
+            {"url": url, "ref": source.ref, "ref_type": source.ref_type, "via": "apply"},
+        )
+    elif action == "updated":
+        await _audit_source(
+            request, admin_user, "skill_source_update", source.id,
+            {"named": sorted(fields.keys()), "via": "apply"},
+        )
+    return {"action": action, "source": source}
 
 
 @router.put("/skills/sources/{source_id}")

@@ -13,6 +13,7 @@ import { createChatTools } from "./tools/chat.js";
 import { createSystemTools } from "./tools/systems.js";
 import { createDocsTools } from "./tools/docs.js";
 import { createSkillsTools } from "./tools/skills.js";
+import { createSkillSourceTools } from "./tools/skill_sources.js";
 import { createRoomTools } from "./tools/rooms.js";  // ent#169 shared sessions
 import { createScheduleTools } from "./tools/schedules.js";
 import { createTagTools } from "./tools/tags.js";
@@ -649,6 +650,7 @@ export async function createServer(config: ServerConfig = {}) {
     createSystemTools(client, requireApiKey),
     createDocsTools(),
     createSkillsTools(client, requireApiKey),
+    createSkillSourceTools(client, requireApiKey), // Library source management — admin principals only, own canAccess allow-list (ent#692)
     createScheduleTools(client, requireApiKey),
     createTagTools(client, requireApiKey),
     createNotificationTools(client, requireApiKey),
