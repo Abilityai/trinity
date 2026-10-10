@@ -2,7 +2,6 @@
 Slack integration service (SLACK-001).
 
 Provides:
-- Slack request signature verification
 - Slack API interactions (chat.postMessage, users.info)
 - OAuth token exchange
 """
@@ -102,10 +101,6 @@ class SlackService:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=30.0)
         return self._client
-
-    # =========================================================================
-    # Request Verification
-    # =========================================================================
 
     # =========================================================================
     # OAuth Flow
