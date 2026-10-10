@@ -597,8 +597,9 @@ class TestTheCallEndingLosesNothing:
         assert "_persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id," in src
         # trinity-enterprise#751 moved the reply write into `_persist_reply`, shared
         # by an answered turn and one the skill gate held.
-        # #3166 appended the turn's execution id.
-        assert "_persist_reply(agent_name, email, session_id, reply, cost, voice_call_id, execution_id)" in src
+        # #3166 appended the turn's execution id. No closing paren:
+        # trinity-enterprise#754 passes `viewer_is_person=` after it.
+        assert "_persist_reply(agent_name, email, session_id, reply, cost, voice_call_id, execution_id," in src
         reply_src = inspect.getsource(portal._persist_reply)
         reply_write = reply_src.split("db.add_portal_message(new_message_id", 1)[1].split("message_id = new_message_id", 1)[0]
         assert "**_voice_attribution(voice_call_id)" in reply_write

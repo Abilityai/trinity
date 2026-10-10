@@ -239,6 +239,12 @@
                 >
                   compacted{{ taskCompactCount(task) > 1 ? ` ×${taskCompactCount(task)}` : '' }}
                 </span>
+                <!-- trinity-enterprise#754: went through without approval because
+                     its requester is the approver (server-decided booleans). -->
+                <ExecutionGateMarker
+                  :self-approved="!!task.gate_self_approved"
+                  :by-viewer="!!task.gate_self_approved_by_viewer"
+                />
                 <!-- Time -->
                 <span class="text-xs text-gray-500 dark:text-gray-400">
                   {{ formatRelativeTime(task.started_at) }}
@@ -549,13 +555,14 @@
 
 <script setup>
 import SkeletonLoader from './SkeletonLoader.vue'
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch, nextTick } from 'vue'
 import axios from 'axios'
 import { parseUTC } from '@/utils/timestamps'
 import { useAuthStore } from '../stores/auth'
 import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import ModelSelector from './ModelSelector.vue'
 import LoadFailed from './LoadFailed.vue'
+import ExecutionGateMarker from './skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
 import { apiErrorMessage } from '../utils/apiError'
 import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
 
@@ -627,6 +634,15 @@ const runningExecutions = ref([])
 
 // Polling interval
 let pollInterval = null
+
+// trinity-enterprise#754: a Run from the Skills tab is accepted asynchronously
+// and opens here while it is still going, so the poll re-reads the list until
+// no loaded row is in flight (models.TaskExecutionStatus: queued → running, and
+// pending_retry back to running, before a terminal status).
+const IN_FLIGHT_STATUSES = ['queued', 'running', 'pending_retry']
+let executionsSeq = 0           // only the latest read of the list is applied
+let executionsReading = false   // the poll never stacks a read on one still out
+let highlightShownFor = null    // the highlighted id already opened and scrolled to
 
 // Check if a task should be highlighted
 function isHighlightedTask(taskId) {
@@ -701,21 +717,56 @@ async function loadAllData() {
 
 // Load executions from server
 async function loadExecutions() {
+  const seq = ++executionsSeq
+  executionsReading = true
   loadError.value = ''
   try {
     const response = await axios.get(`/api/agents/${props.agentName}/executions?limit=100`, {
       headers: authStore.authHeader
     })
+    // A later read — or one for the agent the page moved to — supersedes this one.
+    if (seq !== executionsSeq) return
+    settleDetails(response.data)
     executions.value = response.data
 
-    // If highlightExecutionId is provided, expand and scroll to that task
-    if (props.highlightExecutionId) {
+    // If highlightExecutionId is provided, expand and scroll to that task —
+    // once, on the first read that answers: a re-read never re-opens a row the
+    // user closed, or scrolls the list back to it.
+    if (props.highlightExecutionId && props.highlightExecutionId !== highlightShownFor) {
+      highlightShownFor = props.highlightExecutionId
       scrollToHighlightedTask()
     }
   } catch (error) {
+    if (seq !== executionsSeq) return
     console.error('Failed to load executions:', error)
     loadError.value = apiErrorMessage(error, 'Request failed')
+  } finally {
+    if (seq === executionsSeq) executionsReading = false
   }
+}
+
+// trinity-enterprise#754: details are read once, on expand (PERF-001), and a
+// read taken while the run was in flight holds no response yet. So a row whose
+// status changes drops them, and the row that is open re-reads them: its
+// result shows where the user is looking.
+function settleDetails(rows) {
+  const before = new Map(executions.value.map(e => [e.id, e.status]))
+  for (const row of rows) {
+    const was = before.get(row.id)
+    if (was === undefined || was === row.status) continue
+    delete taskDetailsCache.value[row.id]
+    if (expandedTaskId.value === row.id) loadTaskDetails(row.id)
+  }
+}
+
+// Re-read the list on the poll while a loaded row is in flight. Not while a
+// read is already out, and not while a task typed here is still awaited: its
+// local row stands for it until the call returns and re-reads the list itself,
+// so a read meanwhile would list the same task twice.
+function shouldRereadExecutions() {
+  if (executionsReading) return false
+  if (pendingTasks.value.some(t => t.status === 'running')) return false
+  return executions.value.some(e => IN_FLIGHT_STATUSES.includes(e.status))
 }
 
 // Scroll to highlighted task and expand it
@@ -922,7 +973,11 @@ async function toggleTaskExpand(taskId) {
     return
   }
 
-  // Fetch details from the server
+  await loadTaskDetails(taskId)
+}
+
+// Fetch a task's details from the server, then cache them (PERF-001)
+async function loadTaskDetails(taskId) {
   expandLoadingTaskId.value = taskId
   try {
     const response = await axios.get(`/api/agents/${props.agentName}/executions/${taskId}`, {
@@ -938,7 +993,8 @@ async function toggleTaskExpand(taskId) {
     // Cache empty to avoid re-fetching on error
     taskDetailsCache.value[taskId] = { response: null, error: null }
   } finally {
-    expandLoadingTaskId.value = null
+    // Two reads can overlap (an expand, and a row settling while open).
+    if (expandLoadingTaskId.value === taskId) expandLoadingTaskId.value = null
   }
 }
 
@@ -1210,6 +1266,7 @@ function startPolling() {
   if (props.agentStatus === 'running') {
     pollInterval = setInterval(() => {
       loadQueueStatus()
+      if (shouldRereadExecutions()) loadExecutions()
     }, 5000)
   }
 }
@@ -1258,4 +1315,11 @@ onMounted(() => {
 onUnmounted(() => {
   stopPolling()
 })
+
+// trinity-enterprise#754 (PR review): AgentDetail is KeepAlive'd, so leaving
+// the page deactivates this panel without unmounting it. The poll (the queue
+// chip, and the list while a run is in flight) stops with the page and starts
+// again when the page is shown.
+onDeactivated(() => stopPolling())
+onActivated(() => startPolling())
 </script>

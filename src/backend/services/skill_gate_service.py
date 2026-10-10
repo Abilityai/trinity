@@ -270,7 +270,7 @@ async def enforce(
         receipt = _raise_ask(agent_name, ask)
     except AskRejected as e:
         db.transition_gate_request(request_id, "refused", detail=e.code)
-        raise SkillGateRefused(e.status, e.code, e.message, **e.extra) from e
+        raise SkillGateRefused(e.status_code, e.code, e.message, **e.extra) from e
     except Exception as e:
         # Never leave a pending record with no ask behind it: it would count
         # against the caps forever and no ending would ever consume it.
@@ -306,6 +306,17 @@ def _approvers(agent_name: str, role: str) -> List[str]:
             f"Nobody fills the {role} role for {agent_name}, so this gated request "
             "can't be approved. Ask the agent's owner to assign one.", role=role)
     return people
+
+
+def approver_people(agent_name: str, role: str) -> List[str]:
+    """`_approvers` without the refusal: the casefolded emails `role` reaches
+    on `agent_name`, or `[]` when it reaches nobody. trinity-enterprise#754:
+    the Skills tab's "you approve this" reads the very list `enforce` decides
+    self-approval with, so the card and the run cannot disagree."""
+    try:
+        return _approvers(agent_name, role)
+    except SkillGateRefused:
+        return []
 
 
 def read_gates(agent_name: str) -> Dict[str, SkillGate]:

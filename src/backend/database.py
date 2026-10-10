@@ -1876,6 +1876,10 @@ class DatabaseManager:
         """ent#498 — attach a delivery destination to a pre-created row."""
         return self._schedule_ops.stamp_execution_channel_context(execution_id, **kwargs)
 
+    def set_execution_subscription(self, execution_id: str, subscription_id) -> bool:
+        """#3470 — re-point a row's SUB-004 attribution to the subscription that served."""
+        return self._schedule_ops.set_execution_subscription(execution_id, subscription_id)
+
     def resume_session_belongs_to_user(
         self, agent_name: str, claude_session_id: str, user_id: int
     ) -> bool:
@@ -2317,6 +2321,9 @@ class DatabaseManager:
 
     def get_gate_request_by_dispatched_execution(self, execution_id: str):
         return self._skill_gate_request_ops.get_gate_request_by_dispatched_execution(execution_id)
+
+    def get_self_approved_runs(self, agent_name: str, execution_ids):
+        return self._skill_gate_request_ops.get_self_approved_runs(agent_name, execution_ids)
 
     def get_gate_requests_by_origin_executions(self, execution_ids):
         return self._skill_gate_request_ops.get_gate_requests_by_origin_executions(execution_ids)
@@ -3207,8 +3214,8 @@ class DatabaseManager:
     def delete_subscription(self, subscription_id: str):
         return self._subscription_ops.delete_subscription(subscription_id)
 
-    def assign_subscription_to_agent(self, agent_name: str, subscription_id: str):
-        return self._subscription_ops.assign_subscription_to_agent(agent_name, subscription_id)
+    def assign_subscription_to_agent(self, agent_name: str, subscription_id: str, **kwargs):
+        return self._subscription_ops.assign_subscription_to_agent(agent_name, subscription_id, **kwargs)
 
     def clear_agent_subscription(self, agent_name: str):
         return self._subscription_ops.clear_agent_subscription(agent_name)
@@ -3831,15 +3838,19 @@ class DatabaseManager:
 
     def create_native_operator_queue_item(self, agent_name, item, *, max_pending, channel,
                                           raised_by, to_role, resolved_to, proposal,
-                                          supersedes_expired, exclude_request_id_prefixes=None):
+                                          supersedes_expired, exclude_request_id_prefixes=None,
+                                          replaces=None, guard_pending_proposal=False):
         # trinity-enterprise#611: an agent-raised ask — replay, depth cap and insert
         # in one per-agent serialized step. #3130: the prefixes leave platform
-        # rows out of the depth cap.
+        # rows out of the depth cap. #3247: `replaces` ends one of the agent's
+        # own pending asks in the same transaction.
         return self._operator_queue_ops.create_native_item(
             agent_name, item, max_pending=max_pending, channel=channel,
             raised_by=raised_by, to_role=to_role, resolved_to=resolved_to,
             proposal=proposal, supersedes_expired=supersedes_expired,
             exclude_request_id_prefixes=exclude_request_id_prefixes,
+            replaces=replaces,
+            guard_pending_proposal=guard_pending_proposal,
         )
 
     def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
@@ -3858,6 +3869,15 @@ class DatabaseManager:
     def list_expired_operator_queue_proposals(self, agent_name, limit, raised_by=None):
         # trinity-enterprise#611: the native create's re-ask guard (C6).
         return self._operator_queue_ops.list_expired_proposals_for_agent(agent_name, limit, raised_by)
+
+    def list_pending_operator_queue_proposals(self, agent_name, limit, raised_by=None):
+        # #3247 T8: the native create's pending-proposal guard (`already_pending`).
+        return self._operator_queue_ops.list_pending_proposals_for_agent(agent_name, limit, raised_by)
+
+    def list_pending_operator_queue_asks(self, agent_name, limit, exclude_request_id_prefixes=None):
+        # #3247: the agent's own pending asks for the Execution Context line.
+        return self._operator_queue_ops.list_pending_asks_for_agent(
+            agent_name, limit, exclude_request_id_prefixes)
 
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):

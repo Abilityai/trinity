@@ -28,10 +28,13 @@ tests pinning that contract.
 import asyncio
 import importlib
 import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from database import db
 from db_models import NotificationCreate
+from utils.helpers import parse_iso_timestamp, utc_now_iso
 
 # Re-export the shared SUB-003 auth-class classifier (#1088) so existing
 # consumers (routers/chat.py, services/task_execution_service.py) and their
@@ -159,11 +162,81 @@ def _readmit_recovered(headroom, current_subscription_id: str) -> tuple:
     return readmitted, why
 
 
-def select_best_alternative_subscription(current_subscription_id: str) -> Optional[tuple]:
+def _blocked_window_already_reset(reading, now: Optional[datetime] = None) -> bool:
+    """A fresh reading whose BLOCKED window carries a `resets_at` that has
+    already elapsed describes a quota that no longer exists (#3470, the
+    `_readmit_recovered` rule applied to the last-resort rung). Fail-closed:
+    an unreadable instant is not evidence the window rolled over."""
+    if reading is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    for window in (getattr(reading, "five_hour", None), getattr(reading, "seven_day", None)):
+        if window is None or not getattr(window, "blocked", False):
+            continue
+        try:
+            if window.resets_at and parse_iso_timestamp(window.resets_at) <= now:
+                return True
+        except Exception:  # noqa: BLE001 — a provider string we cannot read proves nothing
+            continue
+    return False
+
+
+def _last_resort_candidates(
+    current_subscription_id: str, exclude_ids, min_age_seconds: int
+) -> list:
+    """The skip-listed alternatives a WALK may still try (#3470 AC#2).
+
+    `list_viable_alternative_subscriptions` drops every subscription with any
+    failure event in a flat 2h window. For a turn that has already failed on
+    everything else, that inference is the difference between a reply and a
+    "try again later" against a pool with headroom: the AC names the rule —
+    *the 2h skip-list must not block a candidate that is the last untried one*.
+    Excluded here are only the subscriptions this TURN already ran on
+    (`exclude_ids`) and, for autonomous triggers, candidates whose last failure
+    is younger than `min_age_seconds` — a schedule firing every five minutes
+    must not re-probe a refused subscription on every run. A trial moves no
+    assignment (the caller commits only the subscription that served), so the
+    #444 thrash — assignment flips and a notification per flip — cannot recur.
+    """
+    skipped = [
+        c for c in db.list_recently_failed_alternatives(current_subscription_id)
+        if c.id not in exclude_ids
+    ]
+    if not skipped or min_age_seconds <= 0:
+        return skipped
+    last_failed = db.last_failure_at_by_subscription([c.id for c in skipped])
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=min_age_seconds)
+    aged = []
+    for c in skipped:
+        raw = last_failed.get(c.id)
+        try:
+            failed_at = parse_iso_timestamp(raw) if raw else None
+        except Exception:  # noqa: BLE001 — unreadable ⇒ treat as recent (fail closed)
+            failed_at = datetime.now(timezone.utc)
+        if failed_at is None or failed_at <= cutoff:
+            aged.append(c)
+    return aged
+
+
+def select_best_alternative_subscription(
+    current_subscription_id: str,
+    *,
+    exclude_ids=(),
+    last_resort_min_age_seconds: Optional[int] = None,
+) -> Optional[tuple]:
     """Filter (db) → rank (cached headroom) → first. Returns `(subscription,
     why)` or None (#2409). Synchronous by design — call it via
     `asyncio.to_thread`: both reads are blocking and it runs under the
     per-agent switch lock.
+
+    `exclude_ids` (#3470): subscriptions this turn already ran on — never a
+    candidate again within the turn, whatever the skip-list says.
+    `last_resort_min_age_seconds` (#3470): when not None, a turn that finds no
+    viable or readmitted candidate may fall back to the skip-listed ones
+    (`_last_resort_candidates`), still RANKED so a fresh provider refusal keeps
+    excluding a candidate — the skip-list is an inference from past events;
+    live evidence is not overridden. None (the default, every pre-#3470
+    caller) keeps the skip-list absolute.
 
     The db layer answers "which subscriptions are usable at all" (the 2h
     failure filter, kind-blind, #444/#2352 — FIRST and unchanged, so a
@@ -187,11 +260,29 @@ def select_best_alternative_subscription(current_subscription_id: str) -> Option
     and whether ambient refresh is on — because on a two-subscription install
     the ranking cannot change the pick, and the explanation IS the value.
     """
-    survivors = db.list_viable_alternative_subscriptions(current_subscription_id)
+    exclude_ids = set(exclude_ids or ())
+    survivors = [
+        s for s in db.list_viable_alternative_subscriptions(current_subscription_id)
+        if s.id not in exclude_ids
+    ]
+    last_resort_ids: set = set()
     try:
         headroom = importlib.import_module("services.subscription_headroom_service")
         readmitted, readmit_why = _readmit_recovered(headroom, current_subscription_id)
+        readmitted = [c for c in readmitted if c.id not in exclude_ids]
         candidates = survivors + readmitted
+        if not candidates and last_resort_min_age_seconds is not None:
+            last_resort = _last_resort_candidates(
+                current_subscription_id, exclude_ids, last_resort_min_age_seconds
+            )
+            last_resort_ids = {c.id for c in last_resort}
+            candidates = last_resort
+            if candidates:
+                logger.info(
+                    "[#3470] no viable alternative to subscription %s; trying %d "
+                    "skip-listed candidate(s) as a last resort (untried this turn)",
+                    current_subscription_id, len(candidates),
+                )
         if not candidates:
             return None
         readings = headroom.cached_headroom_readings([c.id for c in candidates])
@@ -208,6 +299,12 @@ def select_best_alternative_subscription(current_subscription_id: str) -> Option
         # says the provider is serving, so the ranker keeps them on its own.
         for sid, verdict in readmit_why.items():
             if verdict == headroom.RECOVERY_WINDOW_RESET:
+                readings[sid] = None
+        # #3470: the same rule for a last-resort candidate whose blocked window
+        # has a reset instant already in the past — the flag is about a quota
+        # that no longer exists, so it ranks UNKNOWN rather than REFUSED.
+        for sid in last_resort_ids:
+            if _blocked_window_already_reset(readings.get(sid)):
                 readings[sid] = None
         ranked = headroom.rank_subscriptions(candidates, readings)
         auto_refresh = bool(headroom.is_auto_refresh_enabled())
@@ -246,6 +343,8 @@ def select_best_alternative_subscription(current_subscription_id: str) -> Option
     # #2638: name the override on the pick that used it, so an operator reading
     # the notification can tell a never-failed candidate from a readmitted one.
     why["readmitted"] = readmit_why.get(chosen.id)
+    # #3470: and a last-resort pick from one the skip-list would have excluded.
+    why["last_resort"] = chosen.id in last_resort_ids
     if all(readings.get(c.id) is None for c in candidates):
         if auto_refresh:
             logger.info(
@@ -375,6 +474,7 @@ async def handle_subscription_failure(
             failure_kind=failure_kind,
             event_count=consecutive_count,
             destination_headroom=destination_headroom,
+            old_subscription_id=current_sub_id,
         )
 
 
@@ -496,6 +596,18 @@ async def ensure_serviceable_subscription(agent_name: str) -> Optional[dict]:
                 select_best_alternative_subscription, current_sub_id
             )
             if not picked:
+                # #3470 Part 2: no subscription can serve — route THIS turn to
+                # the platform API key by per-spawn override instead of
+                # dispatching a doomed attempt. No assignment changes; the
+                # dispatcher reads `route` and attaches the credential.
+                if api_key_rung(agent_name) is not None:
+                    logger.info(
+                        "[#3470] agent '%s' is on a subscription that cannot serve "
+                        "(%s) and no alternative is available — routing the turn "
+                        "to the platform API key",
+                        agent_name, evidence,
+                    )
+                    return {"switched": False, "route": "api_key", "evidence": evidence}
                 logger.info(
                     "[#2638] agent '%s' is on a subscription that cannot serve "
                     "(%s) and no alternative is available — dispatching anyway, "
@@ -521,6 +633,7 @@ async def ensure_serviceable_subscription(agent_name: str) -> Optional[dict]:
                 event_count=0,
                 destination_headroom=destination_headroom,
                 pre_dispatch=True,
+                old_subscription_id=current_sub_id,
             )
             result["evidence"] = evidence
             return result
@@ -582,43 +695,331 @@ def earliest_known_reset(subscription_ids) -> Optional[str]:
         logger.warning("[#2638] earliest-reset lookup failed (%s)", type(e).__name__)
         return None
     instants = []
+    now = datetime.now(timezone.utc)
     for reading in readings.values():
         if reading is None:
             continue
         for window in (reading.five_hour, reading.seven_day):
-            if window is not None and window.blocked and window.resets_at:
-                instants.append(window.resets_at)
+            if window is None or not window.blocked or not window.resets_at:
+                continue
+            # #3470: never tell a person their quota "resets at" an instant that
+            # has already passed — a stale snapshot keeps its instants for up
+            # to 7 days. Unreadable ⇒ dropped: a time we cannot parse is not
+            # one we should display either.
+            try:
+                if parse_iso_timestamp(window.resets_at) <= now:
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            instants.append(window.resets_at)
     if not instants:
         return None
     # ISO-Z strings sort lexicographically, which is why every timestamp in this
-    # platform is written that way (Invariant #16). Sorting parsed datetimes
-    # would mean parsing values a provider controls, on a path whose whole job
-    # is to still answer when things are going wrong.
+    # platform is written that way (Invariant #16).
     return min(instants)
 
 
-async def fallback_to_api_key(agent_name: str) -> Optional[dict]:
-    """#2638 AC#4 — when NO subscription can serve, run the turn on the platform
-    API key instead of failing it.
+# ---------------------------------------------------------------------------
+# #3470 — walk the whole pool before a turn fails; the API key is a rung
+# ---------------------------------------------------------------------------
+#
+# SUB-003 remediated at most ONCE per turn (#792: one switch, one re-issue;
+# #2638: or one API-key fallback), and the fallback CLEARED the assignment and
+# RESTARTED the container — a few-hour limit on a key with no credit became a
+# permanent outage, and in-flight work died with the restart.
+#
+# The walk below is a *credential trial*. A refused attempt asks for the next
+# rung — another subscription, then the platform API key — and the dispatcher
+# re-issues the SAME turn with a request-scoped `auth_override` the agent
+# applies to that one spawn (`AUTH_OVERRIDE_HEADER` confirms it did). Nothing
+# in the container or the DB moves until a trial SERVES: the dispatcher then
+# commits that subscription once (`commit_subscription_walk` →
+# `_perform_auto_switch`: assign + hot-reload + one notification). A key that
+# served changes no assignment at all — the fallback is per-turn routing, and
+# the agent returns to its subscription the moment it can serve, with nothing
+# to restore.
+#
+# Attribution is exact by construction: a failed trial ran on the credential
+# the walk sent, so its failure event goes to THAT subscription (or the key),
+# never to whatever the assignment reads after the fact — the #799 cascade
+# (turn 2 blaming turn 1's destination) cannot happen. Liveness is the walk's
+# own property: every rung grows `tried_subscription_ids` or sets
+# `tried_api_key`, a pick already tried is treated as exhausted, and a hard cap
+# of `len(subscriptions) + 2` rungs is computed once. The remaining turn budget
+# is the dispatcher's bound (#2789 — the only ceiling).
+#
+# An agent image that predates the override ignores the field and runs the
+# attempt on its baseline; the header is then absent and the walk degrades to
+# LEGACY mode — commit-and-retry per rung, as #792 did — capped at one
+# restart-based rung (a restart kills the agent's concurrent work and outruns
+# the #2944 claim grace) and with no key rung (the restart-based key path IS the
+# stranding bug this replaces).
 
-    This is the last resort and it is deliberately narrow. It fires only when
-    the switcher has already declined to find an alternative, only for a
-    Claude-runtime agent, only when a platform key is actually configured, and
-    only when the operator has left the setting on. It clears the subscription
-    assignment and turns `use_platform_api_key` on, then RESTARTS rather than
-    hot-reloading: the reload endpoint pushes an OAuth token, and the change
-    needed here is the opposite one — set `ANTHROPIC_API_KEY`, drop
-    `CLAUDE_CODE_OAUTH_TOKEN` — which `lifecycle`'s own auth block already does
-    correctly from DB state on a recreate (#2114's guard lives there too, so
-    nothing here has to reason about the shadowing rules).
+# Mirrors `agent_server/services/execution_env.AUTH_OVERRIDE_HEADER` by name.
+AUTH_OVERRIDE_HEADER = "X-Trinity-Auth-Override"
 
-    The subscription is CLEARED, not remembered-and-restored. A hidden "go back
-    when the window resets" would be a second, invisible scheduler competing
-    with the operator's own assignment; the notification says what happened and
-    reassignment is a deliberate act.
+# A refused platform key is skipped for a while, like a refused subscription
+# (#2409's "recently refused by the provider" rule). Kind-AWARE: an auth /
+# billing refusal ("credit balance is too low", a revoked key) holds for the
+# same 2h the subscription skip-list uses; a 429 is a burst, not "no credit",
+# and a fleet-wide 2h skip for it would remove the last rung from every agent
+# on one spike. One platform key ⇒ one marker, not agent-keyed.
+API_KEY_REFUSAL_KEY = "platform_api_key:refused"
+API_KEY_REFUSAL_TTL_SECONDS = {"auth": 2 * 3600, "rate_limit": 300}
 
-    Returns a result dict shaped like the switch's, or `None` for "did nothing".
-    Never raises.
+# Autonomous triggers may try a skip-listed subscription only when its last
+# failure is at least this old — a schedule firing every five minutes must not
+# re-probe a refused subscription on every run. Interactive triggers (a person
+# is waiting) try any untried candidate.
+LAST_RESORT_MIN_AGE_AUTONOMOUS_SECONDS = 1800
+
+# Transition notifications ("routed to the platform API key" / "returned to its
+# subscription") and the exhausted-pool alert are deduped through TTL markers.
+# Informational only — a stale or missing marker changes a notification, never
+# a credential — so they are EXEMPT from the lifecycle clear (#1560 registry).
+API_KEY_ROUTE_NOTICE_KEY = "agent:api_key_route:{name}"
+API_KEY_ROUTE_NOTICE_TTL_SECONDS = 24 * 3600
+POOL_EXHAUSTED_NOTICE_KEY = "agent:pool_exhausted_notice:{name}"
+POOL_EXHAUSTED_NOTICE_TTL_SECONDS = 3600
+
+_WALK_MAX_RUNGS_FALLBACK = 8
+
+
+def _marker_redis():
+    """The breaker Redis client, or None — every marker here is fail-open."""
+    try:
+        from redis_breaker_util import get_breaker_redis
+        return get_breaker_redis()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def record_api_key_refusal(failure_kind: str) -> None:
+    """Remember that the platform key refused a turn (#3470 Part 2 AC#2)."""
+    r = _marker_redis()
+    if r is None:
+        return
+    ttl = API_KEY_REFUSAL_TTL_SECONDS.get(failure_kind, API_KEY_REFUSAL_TTL_SECONDS["auth"])
+    try:
+        r.set(API_KEY_REFUSAL_KEY, f"{failure_kind}@{utc_now_iso()}", ex=ttl)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[#3470] could not record the API-key refusal (%s)", type(e).__name__)
+
+
+def is_api_key_recently_refused() -> bool:
+    """Fail-OPEN: an unreadable marker means the key is tried, and a refusal is
+    then one more exhausted candidate — never a turn that dies with a usable
+    key sitting in settings."""
+    r = _marker_redis()
+    if r is None:
+        return False
+    try:
+        return bool(r.get(API_KEY_REFUSAL_KEY))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def clear_api_key_refusal() -> None:
+    """Best-effort: a turn the key SERVED proves the marker stale."""
+    r = _marker_redis()
+    if r is None:
+        return
+    try:
+        r.delete(API_KEY_REFUSAL_KEY)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@dataclass
+class Rung:
+    """One step of a walk: the credential the NEXT attempt should run on.
+
+    `credential` is the secret itself (an OAuth token or the platform key) and
+    exists only to be placed on the dispatch payload — it is never logged,
+    never persisted, never surfaced on a result. `kind`:
+      "subscription"      — try another subscription (trial, commit if it serves)
+      "api_key"           — try the platform key (per-turn routing, no commit)
+      "concurrent_switch" — a concurrent turn already moved the agent; re-run
+                            on the new assignment, nothing to override
+    """
+    kind: str
+    subscription_id: Optional[str] = None
+    subscription_name: Optional[str] = None
+    # repr=False: a dataclass repr of a Rung — or of the SubscriptionWalk that
+    # holds one as `active` — must never print the secret, so a stray
+    # `logger.debug(f"{walk}")` or an assertion message cannot leak it.
+    credential: Optional[str] = field(default=None, repr=False)
+    why: Optional[dict] = None
+
+    @property
+    def label(self) -> str:
+        return self.subscription_name or ("platform API key" if self.kind == "api_key" else "?")
+
+    def payload(self) -> Optional[dict]:
+        """The `auth_override` body for the agent, or None (nothing to send)."""
+        if self.kind == "subscription" and self.credential:
+            return {"oauth_token": self.credential}
+        if self.kind == "api_key" and self.credential:
+            return {"api_key": self.credential}
+        return None
+
+    @property
+    def override_kind(self) -> Optional[str]:
+        if self.kind == "subscription":
+            return "oauth_token"
+        if self.kind == "api_key":
+            return "api_key"
+        return None
+
+
+@dataclass
+class SubscriptionWalk:
+    """Per-turn state of a SUB-003 walk (see the section comment)."""
+    agent_name: str
+    interactive: bool
+    assigned_subscription_id: Optional[str] = None
+    assigned_subscription_name: Optional[str] = None
+    tried_subscription_ids: set = field(default_factory=set)
+    tried_api_key: bool = False
+    attempts: list = field(default_factory=list)
+    # The override the CURRENT attempt runs on (None = the container baseline).
+    active: Optional[Rung] = None
+    # None until the first override-bearing response says yes/no.
+    override_supported: Optional[bool] = None
+    legacy_restart_used: bool = False
+    # None until the first refusal (`_resolve_walk_lazies`); never read before.
+    max_rungs: Optional[int] = None
+    # Filled by `commit_subscription_walk` / legacy applies: the switch dict a
+    # caller surfaces (`TaskExecutionResult.subscription_switch`).
+    committed: Optional[dict] = None
+    # Set once the walk has nothing further to offer; names why.
+    stop_reason: Optional[str] = None
+
+    @property
+    def started(self) -> bool:
+        return bool(self.attempts) or self.active is not None or self.committed is not None
+
+    def ran_on(self) -> tuple:
+        """`(kind, subscription_id, label)` of the credential the attempt that
+        just came back ran on — exact, because it is what the walk sent."""
+        if self.active is not None and self.active.kind == "api_key":
+            return "api_key", None, "platform API key"
+        if self.active is not None and self.active.kind == "subscription":
+            return "subscription", self.active.subscription_id, self.active.label
+        return (
+            "subscription",
+            self.assigned_subscription_id,
+            self.assigned_subscription_name or self.assigned_subscription_id or "assigned subscription",
+        )
+
+    def trail_text(self) -> str:
+        """One sentence for the FAILED row's `error` and the operator alert."""
+        if not self.attempts:
+            return ""
+        steps = []
+        for a in self.attempts:
+            kind = "rate limit" if a.get("failure") == "rate_limit" else a.get("failure") or "refused"
+            steps.append(f"{a.get('on')} ({kind})")
+        tail = {
+            "exhausted": "every candidate refused.",
+            "budget": "stopped: the turn's time budget ran out.",
+            "cap": "stopped: attempt cap reached.",
+            "disabled": "automatic switching is off.",
+            "legacy_restart": "stopped after a container restart.",
+        }.get(self.stop_reason or "", "")
+        return f" Tried: {' -> '.join(steps)}; {tail}".rstrip()
+
+    def summary(self) -> Optional[dict]:
+        """What rides `TaskExecutionResult.subscription_switch` (#2638 shape,
+        extended): `switched` means the ASSIGNMENT changed; `retried` means at
+        least one re-issue ran; `exhausted` means every rung refused."""
+        if not self.started:
+            return None
+        base = dict(self.committed or {})
+        base.setdefault("switched", False)
+        base.setdefault("new_subscription", None)
+        base["attempts"] = [dict(a) for a in self.attempts]
+        base["retried"] = any(a.get("next") for a in self.attempts)
+        base["exhausted"] = self.stop_reason in ("exhausted", "cap", "disabled", "legacy_restart")
+        base["budget_exhausted"] = self.stop_reason == "budget"
+        base["tried_subscription_ids"] = sorted(self.tried_subscription_ids)
+        base["routed_api_key"] = bool(self.active is not None and self.active.kind == "api_key")
+        return base
+
+
+def _subscription_count_cap() -> int:
+    try:
+        return int(len(db.list_subscriptions())) + 2
+    except Exception:  # noqa: BLE001 — a cap must exist even when the read fails
+        return _WALK_MAX_RUNGS_FALLBACK
+
+
+def start_subscription_walk(agent_name: str, triggered_by: Optional[str]) -> SubscriptionWalk:
+    """A fresh walk for one turn. Snapshots the assignment the turn starts on
+    (the baseline the first attempt runs on) and whether a person is waiting.
+    ONE read on the hot path — the subscription's name and the rung cap are
+    resolved lazily, on the first refusal, so a turn that never fails pays
+    nothing more than it did before #3470."""
+    try:
+        from services.pull_pilot import INTERACTIVE_TRIGGERS
+        interactive = (triggered_by or "") in INTERACTIVE_TRIGGERS
+    except Exception:  # noqa: BLE001
+        interactive = False
+    walk = SubscriptionWalk(agent_name=agent_name, interactive=interactive)
+    try:
+        walk.assigned_subscription_id = db.get_agent_subscription_id(agent_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[#3470] could not read the assignment for '%s': %s", agent_name, type(e).__name__)
+    return walk
+
+
+def _resolve_walk_lazies(walk: SubscriptionWalk) -> None:
+    """The reads a walk needs only once it has something to do."""
+    if walk.max_rungs is None:
+        walk.max_rungs = _subscription_count_cap()
+    if walk.assigned_subscription_id and not walk.assigned_subscription_name:
+        try:
+            sub = db.get_subscription(walk.assigned_subscription_id)
+            walk.assigned_subscription_name = getattr(sub, "name", None) or walk.assigned_subscription_id
+        except Exception:  # noqa: BLE001
+            walk.assigned_subscription_name = walk.assigned_subscription_id
+
+
+def apply_pre_dispatch_result(walk: SubscriptionWalk, pre_switch: Optional[dict]) -> None:
+    """Fold `ensure_serviceable_subscription`'s answer into the walk: a switch
+    moves the baseline (its origin is known-refused, so it is TRIED); a key
+    route makes the first attempt run on the key by override."""
+    if not pre_switch:
+        return
+    if pre_switch.get("switched"):
+        old_id = pre_switch.get("old_subscription_id")
+        if old_id:
+            walk.tried_subscription_ids.add(old_id)
+        walk.assigned_subscription_id = pre_switch.get("new_subscription_id") or walk.assigned_subscription_id
+        walk.assigned_subscription_name = pre_switch.get("new_subscription") or walk.assigned_subscription_name
+        walk.committed = dict(pre_switch)
+        return
+    if pre_switch.get("route") == "api_key":
+        rung = api_key_rung(walk.agent_name)
+        if rung is not None:
+            _resolve_walk_lazies(walk)
+            walk.active = rung
+            walk.attempts.append({
+                "attempt": 0, "on": walk.assigned_subscription_name or "assigned subscription",
+                "failure": "known_refused",
+                "next": "routed to the platform API key before the first attempt",
+            })
+
+
+def api_key_rung(agent_name: str) -> Optional[Rung]:
+    """The platform-key rung, or None when it must not be offered (#3470 Part 2).
+
+    Offered only when: the fallback setting is on; the agent is a Claude
+    runtime (a Claude key means nothing to Gemini/Codex); the agent's
+    `use_platform_api_key` is not explicitly False (an operator's "never bill
+    the key" is a hard rule — the column defaults to True, so this only ever
+    refuses a deliberate opt-out); a key is configured; and the key is not
+    recently refused. Never raises.
     """
     try:
         if not is_api_key_fallback_enabled():
@@ -632,89 +1033,448 @@ async def fallback_to_api_key(agent_name: str) -> Optional[dict]:
             runtime = (container.labels or {}).get("trinity.agent-runtime") or runtime
         if not is_claude_runtime(runtime):
             return None
-
+        try:
+            if db.get_use_platform_api_key(agent_name) is False:
+                return None
+        except Exception:  # noqa: BLE001 — unreadable preference ⇒ the default (True)
+            pass
         from services.settings_service import get_anthropic_api_key
         api_key = get_anthropic_api_key()
         if not api_key:
             return None
+        if is_api_key_recently_refused():
+            logger.info("[#3470] platform API key recently refused — not offered to '%s'", agent_name)
+            return None
+        return Rung(kind="api_key", credential=api_key)
+    except Exception as e:  # noqa: BLE001 — a last resort must not become the failure
+        logger.error("[#3470] API-key rung check failed for '%s': %s", agent_name, e)
+        return None
 
-        async with await agent_switch_lock(agent_name):
-            old_sub_id = db.get_agent_subscription_id(agent_name)
-            if not old_sub_id:
-                # Already off subscriptions — nothing to fall back FROM, and the
-                # agent is presumably failing for another reason entirely.
-                return None
-            old_sub = db.get_subscription(old_sub_id)
-            old_name = old_sub.name if old_sub else old_sub_id
-            db.clear_agent_subscription(agent_name)
-            db.set_use_platform_api_key(agent_name, True)
-            restart_result = await _restart_agent(agent_name)
 
-            from services.activity_service import activity_service
-            from models import ActivityType, ActivityState
+async def fallback_to_api_key(agent_name: str) -> Optional[dict]:
+    """#2638 AC#4, reshaped by #3470 Part 2: is the platform API key a rung this
+    agent may try? Returns a credential-free summary or None — and changes
+    NOTHING: no assignment cleared, no flag set, no restart. The key reaches
+    the agent only as a per-spawn `auth_override` on the turn that needs it.
+    Never raises.
+    """
+    rung = api_key_rung(agent_name)
+    if rung is None:
+        return None
+    return {"switched": False, "fallback": "api_key", "agent_name": agent_name, "route": "api_key"}
 
-            activity_id = await activity_service.track_activity(
-                agent_name=agent_name,
-                activity_type=ActivityType.SCHEDULE_END,
-                triggered_by="system",
-                details={
-                    "action": "subscription_api_key_fallback",
-                    "old_subscription": old_name,
-                    "restart_result": restart_result,
-                },
+
+async def advance_subscription_walk(
+    walk: SubscriptionWalk,
+    *,
+    failure_kind: str,
+    error_message: str = "",
+    budget_ok: bool = True,
+) -> Optional[Rung]:
+    """The attempt that just came back was refused (`failure_kind`). Record it
+    against the credential it ran on, then return the next rung — or None when
+    the walk is over (`walk.stop_reason` says why). Never raises.
+
+    `budget_ok=False` records the refusal (#471: unconditionally — the
+    skip-list depends on it) and stops without picking.
+    """
+    agent_name = walk.agent_name
+    if walk.assigned_subscription_id is None and walk.active is None:
+        # A key-only / credential-less agent: there is no pool to walk and the
+        # platform key is the very baseline that just refused. The pre-#3470
+        # switcher returned early here too (`if not sub_at_entry`). No attempt
+        # is recorded, so the caller's wording falls through to its own.
+        walk.stop_reason = "no_subscription"
+        return None
+    _resolve_walk_lazies(walk)
+    ran_kind, ran_id, ran_label = walk.ran_on()
+    attempt = {"attempt": len(walk.attempts) + 1, "on": ran_label, "failure": failure_kind}
+    walk.attempts.append(attempt)
+
+    # 1. Record the refusal where it happened.
+    try:
+        if ran_kind == "api_key":
+            walk.tried_api_key = True
+            record_api_key_refusal(failure_kind)
+        elif ran_id:
+            walk.tried_subscription_ids.add(ran_id)
+            db.record_rate_limit_event(
+                agent_name=agent_name, subscription_id=ran_id,
+                error_message=error_message, failure_kind=failure_kind,
             )
-            await activity_service.complete_activity(
-                activity_id=activity_id,
-                status=ActivityState.COMPLETED,
-                details={
-                    "message": (
-                        f"Fell back to the platform API key after '{old_name}' "
-                        "and every alternative were unable to serve"
-                    )
-                },
-            )
+    except Exception as e:  # noqa: BLE001 — recording must never fail the turn
+        logger.error("[#3470] could not record the refusal for '%s': %s", agent_name, e)
+    walk.active = None
+
+    # 2. Bounds.
+    if not budget_ok:
+        walk.stop_reason = "budget"
+        return None
+    if len(walk.attempts) > (walk.max_rungs or _WALK_MAX_RUNGS_FALLBACK):
+        walk.stop_reason = "cap"
+        return None
+    if walk.legacy_restart_used:
+        walk.stop_reason = "legacy_restart"
+        return None
+    try:
+        enabled = db.get_setting_value("auto_switch_subscriptions", default="true") == "true"
+    except Exception:  # noqa: BLE001
+        enabled = True
+    if not enabled:
+        walk.stop_reason = "disabled"
+        return None
+
+    # 3. A concurrent turn may already have moved the agent (#799, AC#7): the
+    #    attempt ran on the OLD baseline, the new assignment is untried — run
+    #    on it rather than switching again or racing a restart.
+    if ran_kind == "subscription" and ran_id and ran_id == walk.assigned_subscription_id:
+        try:
+            current = db.get_agent_subscription_id(agent_name)
+        except Exception:  # noqa: BLE001
+            current = None
+        if current and current != ran_id and current not in walk.tried_subscription_ids:
+            sub = db.get_subscription(current)
+            name = getattr(sub, "name", None) or current
+            walk.assigned_subscription_id = current
+            walk.assigned_subscription_name = name
+            attempt["next"] = f"re-run on '{name}' (moved by a concurrent turn)"
+            return Rung(kind="concurrent_switch", subscription_id=current, subscription_name=name)
+
+    # 4. Another subscription, excluding everything this turn ran on. A
+    #    candidate whose token cannot be read is marked tried and the pick is
+    #    repeated (bounded), so a healthy third subscription is still offered.
+    base = walk.assigned_subscription_id or ran_id
+    if base:
+        min_age = 0 if walk.interactive else LAST_RESORT_MIN_AGE_AUTONOMOUS_SECONDS
+        for _ in range(3):
             try:
-                db.create_notification(
-                    agent_name=agent_name,
-                    data=NotificationCreate(
-                        notification_type="alert",
-                        title="Switched to the platform API key",
-                        message=(
-                            f"Agent '{agent_name}' could not be served by subscription "
-                            f"'{old_name}' or any alternative, so it was moved onto the "
-                            "platform API key to keep working. Spend now goes through "
-                            "that key until you reassign a subscription."
-                        ),
-                        priority="high",
-                        category="subscription",
-                        metadata={
-                            "old_subscription": old_name,
-                            "restart_result": restart_result,
-                            "fallback": "api_key",
-                        },
-                    )
+                picked = await asyncio.to_thread(
+                    select_best_alternative_subscription, base,
+                    exclude_ids=set(walk.tried_subscription_ids),
+                    last_resort_min_age_seconds=min_age,
                 )
             except Exception as e:  # noqa: BLE001
-                logger.error(
-                    "[#2638] failed to notify about the API-key fallback for '%s': %s",
-                    agent_name, e,
+                logger.error("[#3470] candidate selection failed for '%s': %s", agent_name, e)
+                picked = None
+            if not picked:
+                break
+            alternative, why = picked
+            if alternative.id in walk.tried_subscription_ids:
+                logger.warning(
+                    "[#3470] selector offered an already-tried subscription to '%s' — "
+                    "treating the pool as exhausted", agent_name,
+                )
+                break
+            token = None
+            try:
+                token = db.get_subscription_token(alternative.id)
+            except Exception as e:  # noqa: BLE001
+                logger.error("[#3470] token for %s unreadable: %s", alternative.id, type(e).__name__)
+            if token:
+                rung = Rung(
+                    kind="subscription", subscription_id=alternative.id,
+                    subscription_name=alternative.name, credential=token, why=why,
+                )
+                walk.active = rung
+                attempt["next"] = f"try '{alternative.name}'"
+                if isinstance(why, dict) and why.get("last_resort"):
+                    attempt["next"] += " (skip-listed; last untried)"
+                return rung
+            # An undecryptable token is a candidate that cannot serve.
+            walk.tried_subscription_ids.add(alternative.id)
+
+    # 5. The platform API key — once, by override only (never in legacy mode).
+    if not walk.tried_api_key and walk.override_supported is not False:
+        rung = api_key_rung(agent_name)
+        if rung is not None:
+            walk.active = rung
+            attempt["next"] = "try the platform API key"
+            return rung
+
+    walk.stop_reason = "exhausted"
+    return None
+
+
+def note_override_honoured(walk: SubscriptionWalk, headers) -> bool:
+    """After a dispatch that carried an override: did the agent apply it?
+
+    Reads `AUTH_OVERRIDE_HEADER`. True ⇒ the attempt ran on `walk.active`.
+    False ⇒ an older image ignored the field; the attempt ran on the BASELINE
+    (so `walk.active` is cleared to keep attribution exact) and the walk is
+    now in legacy mode. No-op (True) when nothing was overridden.
+    """
+    if walk.active is None:
+        return True
+    try:
+        sent = headers.get(AUTH_OVERRIDE_HEADER) if headers is not None else None
+    except Exception:  # noqa: BLE001
+        sent = None
+    if sent and sent == walk.active.override_kind:
+        walk.override_supported = True
+        return True
+    if walk.override_supported is None:
+        logger.warning(
+            "[#3470] agent '%s' did not apply the per-spawn credential (image predates "
+            "it) — SUB-003 falls back to commit-and-retry for this turn", walk.agent_name,
+        )
+    walk.override_supported = False
+    walk.active = None
+    return False
+
+
+async def apply_rung_legacy(walk: SubscriptionWalk, rung: Rung, *, failure_kind: str) -> bool:
+    """Legacy mode (old agent image): make the rung the ASSIGNMENT now —
+    assign + hot-reload (or restart) + notification, exactly the #792 switch —
+    so the next baseline dispatch runs on it. Returns False when the rung
+    cannot be applied; a restart-based apply is allowed ONCE per turn.
+    """
+    if rung.kind != "subscription" or not rung.subscription_id:
+        return False
+    try:
+        async with await agent_switch_lock(walk.agent_name):
+            current = db.get_agent_subscription_id(walk.agent_name)
+            if current != walk.assigned_subscription_id:
+                # Someone else moved the agent meanwhile — run on that instead.
+                sub = db.get_subscription(current) if current else None
+                walk.assigned_subscription_id = current
+                walk.assigned_subscription_name = getattr(sub, "name", None) or current
+                return bool(current)
+            new_sub = db.get_subscription(rung.subscription_id)
+            if new_sub is None:
+                return False
+            result = await _perform_auto_switch(
+                agent_name=walk.agent_name,
+                old_subscription_name=walk.assigned_subscription_name or (current or "?"),
+                new_subscription=new_sub,
+                failure_kind=failure_kind,
+                event_count=len(walk.attempts),
+                destination_headroom=rung.why,
+                old_subscription_id=current,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.error("[#3470] legacy switch failed for '%s': %s", walk.agent_name, e)
+        return False
+    walk.committed = result
+    walk.assigned_subscription_id = rung.subscription_id
+    walk.assigned_subscription_name = rung.subscription_name
+    walk.active = None
+    if result.get("restart_result") != "hot_reloaded":
+        # A recreate killed whatever else the agent was doing and takes longer
+        # than the settle + connect backoff the re-issue allows. Once per turn.
+        walk.legacy_restart_used = True
+    return True
+
+
+def _notice_marker(key: str, *, ttl: int) -> Optional[bool]:
+    """SET NX a dedupe marker. True = first in the window (notify), False =
+    already notified, None = Redis unavailable (notify — fail-open)."""
+    r = _marker_redis()
+    if r is None:
+        return None
+    try:
+        return bool(r.set(key, utc_now_iso(), nx=True, ex=ttl))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _notice_marker_present(key: str) -> bool:
+    r = _marker_redis()
+    if r is None:
+        return False
+    try:
+        return bool(r.get(key))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _clear_notice_marker(key: str) -> None:
+    r = _marker_redis()
+    if r is None:
+        return
+    try:
+        r.delete(key)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _notify(agent_name: str, *, title: str, message: str, metadata: dict, priority: str = "high") -> None:
+    try:
+        db.create_notification(
+            agent_name=agent_name,
+            data=NotificationCreate(
+                notification_type="alert", title=title, message=message,
+                priority=priority, category="subscription", metadata=metadata,
+            ),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error("[#3470] failed to notify about '%s' for '%s': %s", title, agent_name, e)
+
+
+async def commit_subscription_walk(walk: SubscriptionWalk, *, failure_kind: str) -> Optional[dict]:
+    """The attempt that just came back SERVED. Make its credential durable
+    where that is the right thing, and say so once.
+
+    * On a subscription trial: commit — `_perform_auto_switch` under the #799
+      lock (assign + hot-reload + ONE notification), after re-checking that the
+      assignment is still the one this turn started on (a concurrent commit
+      wins; this one is then a no-op with a log line).
+    * On the API key: no assignment changes (per-turn routing, Part 2 AC#3);
+      the "routed to the platform API key" notification fires once per 24h
+      transition and the refusal marker is cleared (it served).
+    * On the baseline, after earlier turns ran on the key: the "returned to its
+      subscription" notification (Part 2 AC#4), and the transition marker goes.
+    Never raises. Returns the switch dict a caller surfaces, or None.
+    """
+    agent_name = walk.agent_name
+    try:
+        _resolve_walk_lazies(walk)
+        rung = walk.active
+        if rung is not None and rung.kind == "subscription" and rung.subscription_id:
+            async with await agent_switch_lock(agent_name):
+                current = db.get_agent_subscription_id(agent_name)
+                if current != walk.assigned_subscription_id:
+                    logger.info(
+                        "[#3470] '%s' served on '%s' but a concurrent turn already moved the "
+                        "agent to %s — not committing", agent_name, rung.label, current,
+                    )
+                    return walk.committed
+                new_sub = db.get_subscription(rung.subscription_id)
+                if new_sub is None:
+                    return walk.committed
+                # The #799 lock is process-local and prod runs several workers,
+                # so the read above cannot see a sibling worker's commit. The
+                # assignment write is therefore a compare-and-set on the value
+                # this turn started from: the first worker wins, the second
+                # reads False and skips its hot-reload and notification.
+                if not db.assign_subscription_to_agent(
+                    agent_name, rung.subscription_id,
+                    expected_subscription_id=walk.assigned_subscription_id,
+                ):
+                    logger.info(
+                        "[#3470] '%s': a sibling worker committed another subscription "
+                        "first — not committing '%s'", agent_name, rung.label,
+                    )
+                    return walk.committed
+                result = await _perform_auto_switch(
+                    agent_name=agent_name,
+                    old_subscription_name=walk.assigned_subscription_name or (current or "?"),
+                    new_subscription=new_sub,
+                    failure_kind=failure_kind,
+                    event_count=len(walk.attempts),
+                    destination_headroom=rung.why,
+                    old_subscription_id=current,
+                )
+            walk.committed = result
+            walk.assigned_subscription_id = rung.subscription_id
+            walk.assigned_subscription_name = rung.subscription_name
+            if _notice_marker_present(API_KEY_ROUTE_NOTICE_KEY.format(name=agent_name)):
+                _clear_notice_marker(API_KEY_ROUTE_NOTICE_KEY.format(name=agent_name))
+                _notify(
+                    agent_name,
+                    title=f"Returned to subscription '{rung.label}'",
+                    message=(
+                        f"Agent '{agent_name}' had been running on the platform API key while "
+                        f"no subscription could serve it; it is back on subscription "
+                        f"'{rung.label}'."
+                    ),
+                    metadata={"subscription": rung.label, "transition": "api_key_to_subscription"},
+                    priority="normal",
+                )
+            return result
+        if rung is not None and rung.kind == "api_key":
+            clear_api_key_refusal()
+            first = _notice_marker(
+                API_KEY_ROUTE_NOTICE_KEY.format(name=agent_name),
+                ttl=API_KEY_ROUTE_NOTICE_TTL_SECONDS,
+            )
+            if first is not False:
+                origin = walk.assigned_subscription_name or "its subscription"
+                _notify(
+                    agent_name,
+                    title="Switched to the platform API key",
+                    message=(
+                        f"Agent '{agent_name}' could not be served by subscription "
+                        f"'{origin}' or any alternative, so this turn ran on the platform "
+                        "API key. Its subscription assignment is unchanged; it returns to "
+                        "the subscription as soon as that can serve again."
+                    ),
+                    metadata={"old_subscription": origin, "fallback": "api_key",
+                              "transition": "subscription_to_api_key"},
                 )
             logger.warning(
-                "[#2638] agent '%s' fell back from subscription '%s' to the "
-                "platform API key (restart=%s)",
-                agent_name, old_name, restart_result,
+                "[#3470] agent '%s' served on the platform API key (assignment kept)", agent_name,
             )
-            return {
-                "switched": True,
-                "fallback": "api_key",
-                "agent_name": agent_name,
-                "old_subscription": old_name,
-                "new_subscription": None,
-                "restart_result": restart_result,
+            walk.committed = {
+                "switched": False, "fallback": "api_key", "agent_name": agent_name,
+                "old_subscription": walk.assigned_subscription_name, "new_subscription": None,
             }
-    except Exception as e:  # noqa: BLE001 — a last resort must not become the failure
-        logger.error("[#2638] API-key fallback failed for '%s': %s", agent_name, e)
-        return None
+            return walk.committed
+        # Served on the baseline. If earlier turns had been routed to the key,
+        # the subscription can serve again — say so and drop the marker.
+        marker = API_KEY_ROUTE_NOTICE_KEY.format(name=agent_name)
+        if walk.assigned_subscription_id and _notice_marker_present(marker):
+            _clear_notice_marker(marker)
+            name = walk.assigned_subscription_name or walk.assigned_subscription_id
+            _notify(
+                agent_name,
+                title=f"Returned to subscription '{name}'",
+                message=(
+                    f"Agent '{agent_name}' had been running on the platform API key while its "
+                    f"subscription could not serve; subscription '{name}' is serving again."
+                ),
+                metadata={"subscription": name, "transition": "api_key_to_subscription"},
+                priority="normal",
+            )
+        return walk.committed
+    except Exception as e:  # noqa: BLE001 — a committed, billed success must stand
+        logger.error("[#3470] commit after a served trial failed for '%s': %s", agent_name, e)
+        return walk.committed
+
+
+def notify_pool_exhausted(walk: SubscriptionWalk, earliest_reset: Optional[str]) -> None:
+    """Every candidate refused: tell the operator WHICH were tried and why, once
+    per agent per hour (a Workspace user re-sending must not page per message).
+    Never raises."""
+    if not walk.attempts:
+        return
+    first = _notice_marker(
+        POOL_EXHAUSTED_NOTICE_KEY.format(name=walk.agent_name),
+        ttl=POOL_EXHAUSTED_NOTICE_TTL_SECONDS,
+    )
+    if first is False:
+        return
+    when = ""
+    if earliest_reset:
+        try:
+            when = " Earliest known reset: " + parse_iso_timestamp(earliest_reset).strftime(
+                "%H:%M UTC on %-d %b"
+            ) + "."
+        except Exception:  # noqa: BLE001
+            when = ""
+    _notify(
+        walk.agent_name,
+        title="No subscription could serve a turn",
+        message=(
+            f"Agent '{walk.agent_name}' tried every credential available to it and all "
+            f"refused.{walk.trail_text()}{when}"
+        ),
+        metadata={
+            "attempts": [dict(a) for a in walk.attempts],
+            "tried_subscription_ids": sorted(walk.tried_subscription_ids),
+            "tried_api_key": walk.tried_api_key,
+            "earliest_reset": earliest_reset,
+            "stop_reason": walk.stop_reason,
+        },
+    )
+
+
+def walk_reset_candidates(walk: SubscriptionWalk) -> list:
+    """Subscription ids whose reset instants a refusal message should consider:
+    everything the turn ran on plus the current assignment."""
+    ids = set(walk.tried_subscription_ids)
+    if walk.assigned_subscription_id:
+        ids.add(walk.assigned_subscription_id)
+    return sorted(ids)
 
 
 # #2643: strong refs for the fire-and-forget switches spawned below. asyncio
@@ -856,6 +1616,7 @@ async def _perform_auto_switch(
     event_count: int,
     destination_headroom: Optional[dict] = None,
     pre_dispatch: bool = False,
+    old_subscription_id: Optional[str] = None,
 ) -> dict:
     """
     Execute the subscription switch: DB update, container restart, log, notify.
@@ -948,6 +1709,10 @@ async def _perform_auto_switch(
         "agent_name": agent_name,
         "old_subscription": old_subscription_name,
         "new_subscription": new_subscription.name,
+        # #3470: ids beside the names, so a walk can exclude the origin from
+        # its candidates and attribute later failures exactly.
+        "old_subscription_id": old_subscription_id,
+        "new_subscription_id": new_subscription.id,
         "failure_kind": failure_kind,
         "event_count": event_count,
         "restart_result": restart_result,

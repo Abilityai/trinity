@@ -381,6 +381,9 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
  *     addressed to chose not to answer; its status is `cancelled`),
  *     else the terminal status (a row that ended before the ledger). The
  *     Workspace projection's own `status` (`answered`) reads the same way.
+ *     #3247: `replaced` — a cancel the AGENT authored by replacing its own
+ *     ask (`disposed_by` / the projection's `ended_by` is `agent`); never a
+ *     person's cancel, a timeout or a platform ending.
  *   - `who` — the person, for the Operating Room (`disposed_by_email`, or a
  *     legacy answer's `responded_by_email`); the Workspace projection's coarse
  *     `ended_by` (`you` / `the operator`); `timeout` for an expiry; `the
@@ -401,6 +404,7 @@ export const ENDING_LABELS = Object.freeze({
   dismissed: 'Dismissed',
   cancelled: 'Cancelled',
   expired: 'Expired',
+  replaced: 'Replaced',   // #3247
 })
 
 /** #3246 — why the platform ended a row, in words. An unknown reason token
@@ -411,6 +415,12 @@ export const PLATFORM_ENDING_REASONS = Object.freeze({
 })
 
 function endingKind(item) {
+  const kind = ledgerKind(item)
+  if (kind === 'cancelled' && (item.disposed_by === 'agent' || item.ended_by === 'agent')) return 'replaced'
+  return kind
+}
+
+function ledgerKind(item) {
   const d = item.disposition
   if (d === 'answered' || d === 'dismissed' || d === 'cancelled' || d === 'expired') return d
   const s = item.status
@@ -428,6 +438,8 @@ export function queueEnding(item) {
   let reason = null
   if (kind === 'expired') {
     who = 'timeout'
+  } else if (kind === 'replaced') {
+    who = 'the agent'
   } else if (item.disposed_by === 'platform' || item.ended_by === 'platform') {
     who = 'the platform'
     reason = PLATFORM_ENDING_REASONS[item.disposition_reason] || null
@@ -454,6 +466,21 @@ export function queueEndingText(ending) {
     return ending.reason ? `Ended by the platform — ${ending.reason}` : 'Ended by the platform'
   }
   return ending.who ? `${ending.label} by ${ending.who}` : ending.label
+}
+
+/** #3247 — a Workspace ask's ending in words. On a Workspace ask `replaced_by`
+ *  and `replaces` are the OTHER ask's request_id (the server projects them only
+ *  when this ask's addressee could already see that ask), not the operator
+ *  row's uuids — so the successor is named, never linked. */
+export function workspaceEndingText(ask) {
+  const ending = queueEnding(ask)
+  const text = queueEndingText(ending)
+  return ending?.kind === 'replaced' && ask.replaced_by ? `${text} with ${ask.replaced_by}` : text
+}
+
+/** #3247 — the successor's own line: "Replaces <request_id>", or '' . */
+export function workspaceReplacesText(ask) {
+  return ask && ask.replaces ? `Replaces ${ask.replaces}` : ''
 }
 
 function relativeAgo(iso, now) {
@@ -505,6 +532,10 @@ export function recentlyEnded(items, max = 5) {
  * predecessor is not loaded still says it is one. One fact per badge: an ask in
  * a chain gets both. Each badge is `{ key, prefix, id, title }`; `id` is the
  * other ask's request_id (machine text), or null when it is not loaded.
+ *
+ * #3247 — a replace is linked on BOTH rows (`replaces` on the successor,
+ * `replaced_by` on the predecessor, platform ids), so each side is said from
+ * its own row; the loaded list only supplies the other ask's request_id.
  */
 export function queueReaskBadges(item, items = []) {
   if (!item || typeof item !== 'object') return []
@@ -524,6 +555,18 @@ export function queueReaskBadges(item, items = []) {
       id: succ.request_id || null,
       title: `The agent asked again after this expired: "${succ.title}".`,
     })
+  }
+  if (item.replaces) {
+    const pred = list.find((i) => i && i.id === item.replaces)
+    out.push(pred?.request_id
+      ? { key: 'replaces', prefix: 'Replaces', id: pred.request_id, title: `The agent replaced "${pred.title}" with this ask.` }
+      : { key: 'replaces', prefix: 'Replaces an earlier ask', id: null, title: 'The agent replaced an earlier ask with this one.' })
+  }
+  if (item.replaced_by) {
+    const next = list.find((i) => i && i.id === item.replaced_by)
+    out.push(next?.request_id
+      ? { key: 'replaced-by', prefix: 'Replaced by', id: next.request_id, title: `The agent replaced this ask with "${next.title}".` }
+      : { key: 'replaced-by', prefix: 'Replaced by a newer ask', id: null, title: 'The agent replaced this ask with a newer one.' })
   }
   return out
 }

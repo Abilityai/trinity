@@ -1,334 +1,234 @@
-# Phase 2: Agent Creation (Local Templates)
+# Phase 02: Agent Creation
 
-> **Purpose**: Validate agent creation from local templates for test agents
-> **Duration**: ~15 minutes (agents need time to initialize)
-> **Assumes**: Phase 1 PASSED (logged in, clean slate)
-> **Output**: 3 agents created from local templates, all running
+> **Purpose**: Exercise the Create Agent modal end to end — open, validate, create one throwaway agent, see it running, delete it.
+> **Duration**: ~12 minutes
+> **Assumes**: the fixture trio is running and you are logged in as admin
+> **Output**: A pass proves an agent can be created and deleted entirely through the UI, that bad or duplicate names are refused with a named error, and that nothing is left behind.
+> **Last verified**: 2026-10-09 against source (not yet browser-run)
 
 ---
+
+## Background
+
+Agents are created from one modal, `components/CreateAgentModal.vue` (title "Create New
+Agent"). It opens from the **Create Agent** button in the Dashboard's control cluster
+(every Dashboard mode) and from **Use Template** on a Library template card. The modal
+sends only a slug, an optional display name and a template; the backend sanitises the
+slug (non-alphanumerics → `-`, lower-cased) and returns a named error if nothing is left
+or the name is taken. Deletion is the trash-can button in the agent header and is
+confirmed by a "Delete Agent" dialog. Deletion is a soft delete: the container is removed
+but the slug stays reserved (and the workspace volume kept) until the retention sweep
+purges it, so a deleted slug cannot be reused straight away. That is why the throwaway
+carries a per-run suffix.
+
+Replaces the January flow that created eight GitHub-template agents and asserted SSH
+ports and "Context 0%". The fixtures already exist, so this phase now creates ONE
+throwaway agent and also absorbs the old Phase 12 cleanup. The fixture templates
+(`test-echo` etc.) are hidden from the template catalog, so the throwaway uses the
+"Blank Agent (Claude Code)" option.
 
 ## Prerequisites
 
-- ✅ Phase 1 PASSED
-- ✅ Logged in as admin
-- ✅ Dashboard shows "No agents"
-- ✅ Local templates available (test-echo, test-counter, test-delegator)
+- [ ] Logged in as `admin` (password is `ADMIN_PASSWORD` from `.env`)
+- [ ] `test-echo`, `test-counter`, `test-delegator` exist and are running
+- [ ] A run suffix chosen in Setup — the throwaway is `sweep-tmp-02-<run>`
+- [ ] A Bearer token for API checks, referred to as `$TOKEN`
 
----
+## Setup
 
-## Overview
-
-You will create 3 agents from available local templates:
-1. test-echo - Basic terminal commands
-2. test-counter - State persistence
-3. test-delegator - Agent-to-agent communication
-
-**Timeline**: Each agent takes 30-60 seconds to create and ~10-15 seconds to initialize.
-
----
-
-## Agent Creation Procedure (Repeat 3 times)
-
-### For Each Agent:
-
-#### Step 1: Via API (Recommended)
-**Action**: Create agent via API endpoint
-
+- Pick a run suffix `<run>`: the current local time as six digits `HHMMSS` (e.g. `142507`).
+  The throwaway agent is `sweep-tmp-02-<run>`, written `$NAME` below. **Record `$NAME`.**
+- Record the current list of agent names so Cleanup can prove the list is unchanged:
 ```bash
-TOKEN="<from Phase 1>"
-AGENT_NAME="test-echo"  # change for each agent
-TEMPLATE="local:test-echo"  # change for each agent
-
-curl -X POST http://localhost:8000/api/agents \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"name\": \"$AGENT_NAME\",
-    \"template\": \"$TEMPLATE\"
-  }"
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents \
+  | python3 -c "import sys,json; print(sorted(a['name'] for a in json.load(sys.stdin)))"
 ```
+- If that list already contains any `sweep-tmp-02-…` agent, an earlier run left it behind:
+  open `http://localhost/agents/<that name>` and delete it via Steps 12–13 first.
 
-**Expected Response**:
-```json
-{
-  "name": "test-echo",
-  "status": "starting",
-  "type": "business-assistant",
-  "template": "local:test-echo",
-  "port": 2290
-}
-```
+## Test: Opening the modal
 
-**Verify**:
-- [ ] HTTP 201 (Created) status
-- [ ] `name` matches request
-- [ ] `template` = `local:test-*`
-- [ ] `status` = "starting"
-- [ ] `port` assigned (2290+)
-
----
-
-#### Step 2: Verify in UI
-**Action**: Navigate to http://localhost/agents
+### Step 1: Create Agent button on the Dashboard
+**Action**:
+- Navigate to `http://localhost/?view=list`
+- Find the button with the accessible name "Create Agent" (plus icon; the text label shows at desktop width) in the controls at the top right of the Dashboard
 
 **Expected**:
-- [ ] Agent card appears in list
-- [ ] Status shows "Starting" (yellow badge)
-- [ ] Agent name displayed: "test-echo"
-- [ ] "No agents" message gone
+- [ ] The agent list is visible with a "Search agents..." box and the three fixtures
+- [ ] The **Create Agent** button is present and enabled
 
-**Wait 10-15 seconds** for agent to initialize
-
-**After Wait**:
-- [ ] Status transitions to "Running" (green badge)
-- [ ] Telemetry appears: CPU, MEM, NET, Uptime
-
----
-
-#### Step 3: Verify Docker Container
-**Action**: Check container created
-```bash
-docker ps --filter "label=trinity.agent-name=test-echo"
-```
+### Step 2: Modal contents
+**Action**:
+- Click **Create Agent**
 
 **Expected**:
-```
-CONTAINER ID   IMAGE                    STATUS         PORTS
-abc123...      trinity-agent-base:...   Up 20 seconds  0.0.0.0:2290->22/tcp
-```
+- [ ] A modal titled "Create New Agent" opens above the page
+- [ ] Field "Slug / Identifier" with placeholder `my-agent` and the help text beginning "The permanent identifier used in URLs, containers, and API keys."
+- [ ] Field "Display name (optional)" with placeholder "e.g. Marketing Assistant"
+- [ ] A "Template" list containing "Blank Agent (Claude Code)" (selected by default — highlighted with a check mark) and "GitHub Repository"
+- [ ] Record whether a "Local Templates" and/or "GitHub Templates" group is listed and how many entries each has. "Test Echo", "Test Counter" and "Test Delegator" must NOT be listed
+- [ ] Footer buttons **Create Agent** and **Cancel**
 
-**Verify**:
-- [ ] Container exists
-- [ ] Status = "Up X seconds"
-- [ ] Port mapping correct (2290->22)
-- [ ] Image = trinity-agent-base:latest
-
----
-
-#### Step 4: Verify Template in Container Labels
-**Action**: Check Docker labels
-
-```bash
-docker inspect agent-test-echo --format='{{json .Config.Labels}}' | jq .
-```
-
-**Expected Output** (partial):
-```json
-{
-  "trinity.template": "local:test-echo",
-  "trinity.agent-name": "test-echo",
-  "trinity.platform": "agent"
-}
-```
-
-**Verify**:
-- [ ] `trinity.template` = `local:test-echo`
-- [ ] `trinity.agent-name` matches
-- [ ] `trinity.platform` = "agent"
-
----
-
-#### Step 5: Verify Trinity Injection
-**Action**: Check meta-prompt was injected
-
-```bash
-docker exec agent-test-echo cat /home/developer/.trinity/prompt.md | head -5
-```
-
-**Expected**: First few lines of Trinity meta-prompt
-
-```
-# Trinity Planning System
-...
-```
-
-**Verify**:
-- [ ] `.trinity/prompt.md` exists
-- [ ] File contains planning prompt text
-
----
-
-#### Step 6: Verify API Metadata
-**Action**: Get agent details
-
-```bash
-curl http://localhost:8000/api/agents/test-echo \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-**Expected Response**:
-```json
-{
-  "name": "test-echo",
-  "status": "running",
-  "type": "business-assistant",
-  "template": "local:test-echo",
-  "owner": "admin",
-  "created_at": "2026-01-14T...",
-  "port": 2290,
-  ...
-}
-```
-
-**Verify**:
-- [ ] `status` = "running"
-- [ ] `template` = "local:test-echo"
-- [ ] `owner` = "admin"
-
----
-
-#### Step 7: Verify Default Permissions Granted (Req 9.10)
-**Action**: Check agent received default permissions for same-owner agents
-
-```bash
-curl http://localhost:8000/api/agents/test-echo/permissions \
-  -H "Authorization: Bearer $TOKEN" | jq .
-```
-
-**Expected Response** (after first agent - minimal):
-```json
-{
-  "source_agent": "test-echo",
-  "permitted_agents": [],
-  "available_agents": []
-}
-```
-
-**Expected Response** (after multiple agents created):
-```json
-{
-  "source_agent": "test-echo",
-  "permitted_agents": [
-    {"name": "test-counter", "status": "running", "permitted": true},
-    {"name": "test-delegator", "status": "running", "permitted": true}
-  ],
-  "available_agents": [...]
-}
-```
-
-**Verify**:
-- [ ] HTTP 200 response
-- [ ] `source_agent` matches agent name
-- [ ] Other same-owner agents appear in `permitted_agents`
-- [ ] Permissions are bidirectional (if test-echo can see test-counter, test-counter can see test-echo)
-
-**Note**: As each new agent is created, it automatically receives bidirectional permissions with all existing same-owner agents.
-
----
-
-### Repeat Steps 1-7 for Each Agent
-
-Create agents in this order:
-
-| Agent | Template | Notes |
-|-------|----------|-------|
-| test-echo | local:test-echo | Basic chat, no special setup |
-| test-counter | local:test-counter | Stateful, file I/O |
-| test-delegator | local:test-delegator | Requires Trinity MCP injection |
-
----
-
-## Dashboard Verification
-
-Once all 3 agents created:
-
-**Action**: Navigate to http://localhost/ (Dashboard)
+### Step 3: Template options toggle correctly, Cancel discards
+**Action**:
+- Click "GitHub Repository"
+- Click "Blank Agent (Claude Code)" again
+- Click **Cancel**
 
 **Expected**:
-- [ ] 3 agent nodes visible in graph
-- [ ] All nodes show green status (running)
-- [ ] All show "Idle" state
-- [ ] Context shows 0% for each
-- [ ] Tasks show "—" for each
-- [ ] Stats bar shows: "3 agents · 3 running · 0 messages"
-- [ ] No overlapping nodes
-- [ ] Mini-map visible in corner
+- [ ] Selecting "GitHub Repository" reveals an input with placeholder "owner/repo or https://github.com/owner/repo"; re-selecting Blank Agent hides it
+- [ ] **Cancel** closes the modal; no agent was created (the list still shows only the agents recorded in Setup)
 
----
-
-## Agents Page Verification
-
-**Action**: Navigate to http://localhost/agents
+### Step 4: Library entry point
+**Action**:
+- Navigate to `http://localhost/library`
+- If a "Starter Templates" section with cards is shown, click **Use Template** on the first card, read the modal, then click **Cancel**
 
 **Expected**:
-- [ ] 3 agent cards in list
-- [ ] All show "running" status (green)
-- [ ] Each shows correct port (2290-2292)
-- [ ] Each shows "Context 0%"
-- [ ] Each shows template name
-- [ ] Newest first sorting shows: test-delegator, test-counter, test-echo
+- [ ] The Library opens on the "Agent Templates" tab
+- [ ] If starter cards exist: the same "Create New Agent" modal opens with that card's template pre-selected (highlighted) in the Template list; **Cancel** closes it
+- [ ] If no "Starter Templates" section is shown, record `SKIPPED (no starter templates on this instance)`
 
----
+## Test: Name validation
+
+### Step 5: Empty slug is blocked in the browser
+**Action**:
+- Back on `http://localhost/?view=list`, open the modal, leave "Slug / Identifier" empty, click **Create Agent**
+
+**Expected**:
+- [ ] The browser's own required-field prompt appears on the slug field; the modal stays open
+- [ ] No `POST /api/agents` request is sent
+
+### Step 6: A slug with no usable characters is refused
+**Action**:
+- Type `!!!` in "Slug / Identifier", keep "Blank Agent (Claude Code)", click **Create Agent**
+
+**Expected**:
+- [ ] The modal stays open and shows, in red above the footer: "Invalid agent name - must contain at least one alphanumeric character"
+- [ ] No new agent appears
+
+### Step 7: A duplicate slug is refused
+**Action**:
+- Replace the slug with `test-echo`, click **Create Agent**
+
+**Expected**:
+- [ ] The modal stays open and shows "Agent already exists"
+- [ ] `test-echo` is untouched (still listed, still running)
+
+## Test: Create, observe, delete
+
+### Step 8: Create the throwaway (slug is sanitised)
+**Action**:
+- Replace the slug with `Sweep Tmp 02 <run>` — capitals and spaces exactly as written, with your suffix (e.g. `Sweep Tmp 02 142507`)
+- Set "Display name" to `Sweep throwaway`
+- Keep "Blank Agent (Claude Code)" selected
+- Click **Create Agent** and wait up to 60 seconds
+
+**Expected**:
+- [ ] The button reads "Creating..." with a spinner while the request runs
+- [ ] The modal closes by itself with no error (the modal shows no preview of the final slug — that is expected)
+- [ ] The agent list gains exactly one new entry
+
+**Verify** (API):
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/$NAME \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('name'), d.get('status'))"
+# sweep-tmp-02-<run> running
+```
+- [ ] The agent exists under the sanitised slug `sweep-tmp-02-<run>` (lower-case, spaces turned into hyphens). **Record the actual name.** If the API returns 404, find the new name by diffing `GET /api/agents` against the Setup list, record it as a defect, and use that name for every remaining step
+
+### Step 9: The new agent appears on the Dashboard
+**Action**:
+- On `http://localhost/?view=list`, type `sweep` in "Search agents..."
+
+**Expected**:
+- [ ] One entry matches; it shows the display name `Sweep throwaway` and/or the slug `$NAME`
+- [ ] Clear the search box afterwards — the three fixtures are listed again
+
+### Step 10: Agent detail opens and the agent is running
+**Action**:
+- Navigate to `http://localhost/agents/$NAME`
+
+**Expected**:
+- [ ] The header shows the agent and a status pill reading `running` (allow up to 60 seconds; reload once if it still reads another value)
+- [ ] The Overview tab is the active tab
+- [ ] The tab strip includes at least Overview, Tasks, Chat, Files and Info
+- [ ] The header has a trash-can button whose title is "Delete agent"
+- [ ] Do not send this agent any chat message or task
+
+### Step 11: Narrow viewport (390 px)
+**Action**:
+- Resize to 390 × 844 on `http://localhost/?view=list`, open the Create Agent modal, then **Cancel** and resize back to ≥ 1280 px
+
+**Expected**:
+- [ ] The Create Agent button is still present (icon only; accessible name "Create Agent")
+- [ ] The modal fits the width with no horizontal page scroll; the Template list scrolls inside the modal and **Create Agent** / **Cancel** are reachable
+
+### Step 12: Delete is confirmed first, and Cancel keeps the agent
+**Action**:
+- On `http://localhost/agents/$NAME`, click the trash-can button titled "Delete agent"
+- In the dialog, click **Cancel**
+
+**Expected**:
+- [ ] A dialog titled "Delete Agent" asks "Are you sure you want to delete this agent?" with buttons **Delete** and **Cancel**
+- [ ] After **Cancel** the dialog closes and the agent page is unchanged
+
+### Step 13: Delete the throwaway
+**Action**:
+- Click the trash-can button again, then **Delete**
+
+**Expected**:
+- [ ] The app navigates to the Dashboard (`http://localhost/`)
+- [ ] `$NAME` is no longer listed in any Dashboard mode; the three fixtures still are
+
+**Verify** (API):
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/$NAME
+# 404
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/admin/soft-deleted/agents
+# read-only: record whether $NAME appears in this list (expected — deletion is a soft delete)
+```
+
+## Cleanup / Restore
+
+- The only thing this phase creates is the agent `$NAME` (`sweep-tmp-02-<run>`), deleted in Step 13.
+  If any step after Step 8 failed, delete it now: open `http://localhost/agents/<recorded name>`,
+  click the "Delete agent" trash-can, confirm **Delete**.
+- Report the recorded agent name in the run output. Its slug stays reserved and its
+  workspace volume (`agent-<name>-workspace`) is kept until the retention sweep purges
+  the soft-deleted agent; whoever maintains the host can remove the volume earlier.
+- Do NOT recover the agent via `/api/admin/soft-deleted/agents/{name}/recover`.
+- Confirm `GET /api/agents` lists the same names recorded in Setup.
+- No setting, fixture or template was changed.
+
+## Manual-only (not run unattended)
+
+- Creating from "GitHub Repository" or a GitHub template (needs external GitHub; shows a post-create validation step instead of closing).
+- Templates that copy a repository into your own account (need a GitHub token and create a real repository).
+- Creating as a non-admin user / role limits and per-user agent quota errors (need a second account).
 
 ## Critical Validations
 
-### Local Templates
-**Validation**: EVERY agent must have local template
-
-For each agent:
-```bash
-curl http://localhost:8000/api/agents/$AGENT_NAME \
-  -H "Authorization: Bearer $TOKEN" \
-  | jq .template
-```
-
-**Expected**:
-```
-"local:test-echo"  ✅
-"local:test-counter"  ✅
-"local:test-delegator"  ✅
-```
-
-### Docker Labels Verification
-```bash
-for agent in test-echo test-counter test-delegator; do
-  echo "=== $agent ==="
-  docker inspect agent-$agent --format='{{index .Config.Labels "trinity.template"}}'
-done
-```
-
-**Expected**: All show `local:test-*`
-
----
+1. The modal opens from the Dashboard and lists "Blank Agent (Claude Code)" selected by default (Step 2).
+2. `!!!` and `test-echo` are each refused with the named error and create nothing (Steps 6–7).
+3. `Sweep Tmp 02 <run>` is created as `sweep-tmp-02-<run>` and reaches `running` (Steps 8, 10).
+4. Deletion requires the "Delete Agent" confirmation and removes the agent (Steps 12–13).
+5. The fixture trio is untouched and the agent list equals the Setup list at the end.
 
 ## Success Criteria
 
-Phase 2 is **PASSED** when:
-- ✅ 3 agents created successfully
-- ✅ All agents use local templates (local:test-*)
-- ✅ All agents show "running" status
-- ✅ All have Trinity meta-prompt injected
-- ✅ Dashboard shows all 3 nodes
-- ✅ All initialized (green status, CPU/MEM visible)
-- ✅ **Default permissions granted** - Each agent has bidirectional permissions with other same-owner agents (Req 9.10)
-
----
+- [ ] Modal opens from Dashboard (and Library, where starter cards exist) and cancels cleanly
+- [ ] Empty, unusable and duplicate slugs are all refused without creating anything
+- [ ] One throwaway agent created, sanitised slug confirmed, status `running`
+- [ ] Throwaway deleted through the header control; API returns 404 afterwards
+- [ ] Modal and Create button usable at 390 px
 
 ## Troubleshooting
 
-**Agent stuck on "Starting"**:
-- Wait 20-30 seconds
-- Check logs: `docker logs agent-test-echo | tail -20`
-- If persistent, delete and recreate
-
-**Template not found**:
-- Check available templates: `curl http://localhost:8000/api/templates`
-- Verify template directory exists in config/agent-templates/
-
-**Port conflict**:
-- Verify no other containers using 2290-2297
-- Docker automatically assigns next available
-
----
-
-## Next Phase
-
-Once Phase 2 is **PASSED**, proceed to:
-- **Phase 3**: Basic Chat & Context Validation (test-echo)
-- **Phase 4**: State Persistence (test-counter)
-- ... (other phases in order)
-
----
-
-**Status**: Ready for Testing
-**Last Updated**: 2026-01-14
+- **"Loading templates..." never resolves or "Failed to load templates" with "Try again"**: `GET /api/templates` failed; the Blank Agent option is not shown in that state — click "Try again".
+- **Create returns a quota message**: the per-user agent limit is reached; the modal shows the backend's message verbatim. Record it and stop — do not delete other agents to make room.
+- **Step 8 returns "Agent already exists"**: the slug is still reserved by a soft-deleted agent from an earlier run that used the same suffix. Choose a new `<run>` suffix and repeat Step 8 once.
+- **Create fails mentioning an existing data volume**: a volume with that name is on the host and no agent claims it. Choose a new `<run>` suffix and repeat Step 8 once; record the message.
+- **No trash-can button in the header**: the signed-in user may not delete this agent (`can_delete` false) — confirm you are signed in as `admin`.
+- **Status pill never reaches `running`**: check `GET /api/agents/$NAME` for `status`; record the value and still run Steps 12–13 to clean up.
