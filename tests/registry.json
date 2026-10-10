@@ -10,7 +10,7 @@
         "database",
         "unit"
       ],
-      "description": "An approval the clock ended records whether the platform held its action (trinity-enterprise#844): on the real SQLite, mark_expired stamps disposition_reason='outcome_unknown' on an expired approval raised by an agent (native or file) or a legacy NULL-raiser row, never on a gate approval (the platform held the action; expiry ran nothing), a question or an alert; an approval answered in time is never marked; the #3247 replace path's in-transaction expiry writes the same marker; the expiry audit row carries outcome_unknown: true for exactly those rows. Mutation-proven."
+      "description": "An approval the clock ended records whether the platform held its action (trinity-enterprise#844): on the real SQLite, mark_expired stamps disposition_reason='outcome_unknown' on an expired approval raised by an agent (native or file) or a legacy NULL-raiser row, never on a gate approval (the platform held the action; expiry ran nothing), a question or an alert; an approval answered in time is never marked; the #3247 replace path's in-transaction expiry writes the same marker; the expiry audit row carries outcome_unknown: true for exactly those rows, from BOTH timeout writers (the sweep and, driven through ask_service.raise_ask, the #3247 replace-path expiry). Mutation-proven."
     },
     {
       "file": "../src/frontend/tests/unit/operatorQueueOutcomeUnknown.spec.js",
@@ -21,6 +21,16 @@
         "operator-queue"
       ],
       "description": "An expired approval marked outcome_unknown reads 'Expired — nobody answered in time; whether the action went ahead is unknown' through the one ending rule (queueEndingText); a gate approval, a question, an unmarked row and an unknown token keep the plain wording; ResolvedCard (mounted) never prints the raw token as a note (trinity-enterprise#844)."
+    },
+    {
+      "file": "../src/frontend/tests/unit/queueItemDetailExpired.mount.spec.js",
+      "feature": "abilityai/trinity-enterprise#844",
+      "added": "2026-10-10",
+      "categories": [
+        "frontend",
+        "operator-queue"
+      ],
+      "description": "The queue DETAIL panel (mounted) words a clock ending through queueEndingText: an outcome_unknown approval reads '...whether the action went ahead is unknown', a gate approval keeps the plain expiry wording, and neither falls through to the person-answer branch (trinity-enterprise#844 review finding). Mutation-proven."
     },
     {
       "file": "unit/test_3088_retention_ack_env_window.py",

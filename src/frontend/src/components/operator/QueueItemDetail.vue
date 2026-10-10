@@ -102,7 +102,9 @@
         <div class="bg-status-success-50 dark:bg-status-success-900/20 rounded-lg p-3 space-y-1">
           <!-- #3246: a row the platform ended is not a person's answer — say who
                ended it and why (utils/operatorQueue.js::queueEndingText). -->
-          <p v-if="endedByPlatform" class="text-sm font-medium text-status-success-800 dark:text-status-success-300" data-testid="queue-detail-ending">
+          <!-- trinity-enterprise#844: an expiry is the clock's, not a person's
+               answer either — and an unheld approval's says its outcome is unknown. -->
+          <p v-if="endedByPlatform || endedByTimeout" class="text-sm font-medium text-status-success-800 dark:text-status-success-300" data-testid="queue-detail-ending">
             {{ endingText }}<template v-if="item.disposed_at"> &middot; {{ formatDate(item.disposed_at) }}</template>
           </p>
           <template v-else>
@@ -235,6 +237,7 @@ const item = computed(() => store.selectedItem)
 const responseKind = computed(() => queueResponseKind(item.value))
 const ending = computed(() => queueEnding(item.value))
 const endedByPlatform = computed(() => ending.value?.who === 'the platform')
+const endedByTimeout = computed(() => ending.value?.kind === 'expired')
 const endingText = computed(() => queueEndingText(ending.value))
 const seenLine = computed(() => queueSeenLine(item.value))
 
