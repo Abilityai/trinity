@@ -79,7 +79,7 @@ As a Trinity platform user, I want to create, start, stop, and delete agents so 
 
 **Create Agent Modal** - `src/frontend/src/components/CreateAgentModal.vue`
 - Line 9: Form submit calls `createAgent()`
-- Line 15-22: Agent name input
+- Agent identifier input previews the formatted name before submission (#3463), matching `utils/helpers.py::sanitize_agent_name`: ASCII letters/numbers plus dots, underscores and hyphens, leading non-alphanumeric characters removed, repeated hyphens collapsed, trailing hyphens removed, then lowercase. The raw input still goes to the API. Names that format to empty are blocked with an example next to the field; there is no client-side length cap.
 - Line 26-137: Template selection (blank, GitHub, local)
 - Lines 191-196: `initialTemplate` prop - Pre-selects template when modal opens
 - Line 198: `emit('created', agent)` - Emits created agent for navigation
