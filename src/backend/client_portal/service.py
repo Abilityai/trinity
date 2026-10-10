@@ -45,7 +45,7 @@ from services.chat_title import (
 # #2157: the surface stamp written onto every portal execution — see
 # `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
 from config import PORTAL_SOURCE_CHANNEL
-from services import skill_gate_map_service, turn_context
+from services import login_policy_gate, skill_gate_map_service, turn_context
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.channel_completion_report import COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED
 
@@ -297,6 +297,9 @@ def portal_signin_request(email: str | None) -> str | None:
     email = (email or "").strip().lower()
     if not email or not email_has_access(email):
         return None
+    # ent#849: members of an SSO-only org sign in with SSO; outsiders keep codes.
+    if not login_policy_gate.email_code_allowed_for(email):
+        return None
     from database import db as core_db
     return core_db.create_login_code(email, expiry_minutes=10)["code"]
 
@@ -305,6 +308,9 @@ def portal_signin_verify(email: str | None, code: str | None) -> str | None:
     """Step 2: verify the code AND re-check access, then mint a portal session
     token (a verified email, no platform account). Returns None on any failure."""
     email = (email or "").strip().lower()
+    # ent#849: before redeeming, so a refused member's code is not consumed.
+    if not login_policy_gate.email_code_allowed_for(email):
+        return None
     from database import db as core_db
     if not core_db.verify_login_code(email, code or ""):
         return None
