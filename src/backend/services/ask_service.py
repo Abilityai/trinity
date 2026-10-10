@@ -44,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from database import db
+from db.operator_queue import OUTCOME_UNKNOWN
 from services import operator_resume_service
 from services.operator_queue_choices import (
     SOMETHING_ELSE,
@@ -353,7 +354,12 @@ def expire() -> Ending:
         "source": "system",
         "target_type": "operator_queue",
         "target_id": r["id"],
-        "details": {"agent_name": r["agent_name"]},
+        # trinity-enterprise#844: an approval whose action the platform did not
+        # hold expired without telling anyone whether that action went ahead.
+        # A boolean, never the reason text (no person's words in an audit row).
+        "details": {"agent_name": r["agent_name"],
+                    **({"outcome_unknown": True}
+                       if r.get("disposition_reason") == OUTCOME_UNKNOWN else {})},
     } for r in rows]
     return _ended(EndingEvent(EXPIRED, tuple(rows), None), audit, None)
 
