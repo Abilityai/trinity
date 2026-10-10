@@ -216,6 +216,8 @@ Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_
 | POST | `/api/auth/logout` | Revoke the caller's JWT — blacklists its `jti` in Redis until the token's own expiry, so an exfiltrated 7-day token dies on logout (#187). Idempotent; MCP-key callers are a no-op (keys revoke via key management) |
 | GET | `/api/auth/validate` | Validate JWT (for nginx auth_request) — also rejects a `jti` revoked via logout (#187) |
 | GET | `/api/users/me` | Current user |
+| POST | `/api/users/me/password/verify` | Step 1 of Change password (ent#709): check the caller's current password (login rate limit), report whether a second factor follows. Admin + interactive |
+| PUT | `/api/users/me/password` | Change the caller's own password (ent#709): current password, optional second factor, first-run rules, named refusals; signs out other sessions, returns a fresh token. Admin + interactive |
 | PUT | `/api/users/me/email` | Bind a sign-in email to the caller's own account (#82 transition; 409 if taken). No verification email sent |
 | GET | `/api/users/me/preferences` | Every stored per-user UI preference of the caller — `{preferences: {key: {value, updated_at}}}` (trinity-enterprise#413). Interactive JWT only (`reject_non_interactive_principal`) |
 | PUT | `/api/users/me/preferences/{key}` | Conditionally store one preference. Body `{value: object, base_updated_at: null \| string}` — `null` = insert-only, string = compare-and-set; 404 unknown key (allowlist: `grid_layout`, `grid_widgets`, `grid_org`), 422 non-object, 413 over 256 KiB, 409 stale base with `detail.current` = the live record (or `null`). Interactive JWT only |

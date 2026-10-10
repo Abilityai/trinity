@@ -187,6 +187,7 @@
 | Email Authentication | [email-authentication.md](feature-flows/email-authentication.md) | Passwordless email login; binding the sign-in email is signed-in-session only (ent#711) |
 | Admin Login | [admin-login.md](feature-flows/admin-login.md) | Password-based admin auth |
 | First-Time Setup | [first-time-setup.md](feature-flows/first-time-setup.md) | Admin password wizard |
+| Admin Password Change | [admin-password-change.md](feature-flows/admin-password-change.md) | Stepped Change password dialog (ent#709) |
 | First-Run Overlay | [onboarding-wizard.md](feature-flows/onboarding-wizard.md) | The blocking post-login setup sequence — step registry, derived completion, re-run (ent#581; formerly the ent#52 wizard) |
 | MCP API Keys | [mcp-api-keys.md](feature-flows/mcp-api-keys.md) | API key management — creating (`POST /keys`, `ensure-default`) and listing keys require a signed-in session; every creation is audited as `key_create` |
 | Execution Origin Tracking | [AUDIT-001-execution-origin-tracking.md](feature-flows/AUDIT-001-execution-origin-tracking.md) | Track who triggered executions |
