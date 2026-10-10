@@ -349,19 +349,27 @@ def expire() -> Ending:
     rows = db.mark_operator_queue_expired()
     if not rows:
         return Ending(rows=[])
-    audit = [{
+    audit = [_expired_audit(r) for r in rows]
+    return _ended(EndingEvent(EXPIRED, tuple(rows), None), audit, None)
+
+
+def _expired_audit(r: Mapping) -> Dict[str, Any]:
+    """The one `expired` audit row, shared by BOTH timeout writers — the sweep
+    (`expire`) and #3247's in-transaction expiry of a replaced predecessor.
+
+    trinity-enterprise#844: an approval whose action the platform did not hold
+    expired without telling anyone whether that action went ahead. A boolean,
+    never the reason text (no person's words in an audit row)."""
+    details: Dict[str, Any] = {"agent_name": r["agent_name"]}
+    if r.get("disposition_reason") == OUTCOME_UNKNOWN:
+        details["outcome_unknown"] = True
+    return {
         "event_action": "expired",
         "source": "system",
         "target_type": "operator_queue",
         "target_id": r["id"],
-        # trinity-enterprise#844: an approval whose action the platform did not
-        # hold expired without telling anyone whether that action went ahead.
-        # A boolean, never the reason text (no person's words in an audit row).
-        "details": {"agent_name": r["agent_name"],
-                    **({"outcome_unknown": True}
-                       if r.get("disposition_reason") == OUTCOME_UNKNOWN else {})},
-    } for r in rows]
-    return _ended(EndingEvent(EXPIRED, tuple(rows), None), audit, None)
+        "details": details,
+    }
 
 
 # #3246: the platform ends its own alerts for exactly these reasons — DATA on
@@ -636,14 +644,9 @@ def raise_ask(
             # ask as pending until its next poll. The agent-scoped "an ask
             # ended, refetch" trigger — there is no expiry-specific type.
             pred = out["predecessor"]
-            _ended(EndingEvent(EXPIRED, (pred,), None), [{
-                "event_action": "expired",
-                "source": "system",
-                "target_type": "operator_queue",
-                "target_id": pred["id"],
-                "details": {"agent_name": pred["agent_name"]},
-            }], _broadcast_payload({"type": "operator_queue_cancelled",
-                                    "data": {"id": pred["id"], "agent_name": pred["agent_name"]}}))
+            _ended(EndingEvent(EXPIRED, (pred,), None), [_expired_audit(pred)],
+                   _broadcast_payload({"type": "operator_queue_cancelled",
+                                       "data": {"id": pred["id"], "agent_name": pred["agent_name"]}}))
         _refuse_ended_predecessor(out["predecessor"])
     row = out["row"]
     if out["outcome"] == "replayed":   # a concurrent call with the same id won

@@ -154,3 +154,36 @@ class TestTheAuditTrailSaysSo:
         by_id = {a["target_id"]: a for a in sink.audit if a.get("target_id") in (unheld, held)}
         assert by_id[unheld]["details"]["outcome_unknown"] is True
         assert "outcome_unknown" not in by_id[held]["details"]
+
+
+# The #3247 sink harness (real SQLite, audit/broadcast/wakes recorded) — reused
+# so the replace path is driven through `ask_service.raise_ask`, the way an
+# agent reaches it, not only through the db writer.
+from unit.test_3247_replace_ask import _Rejected, _body, _raise, ask  # noqa: E402,F401
+
+
+class TestTheReplacePathAuditSaysSoToo:
+    AGENT = "agent-844-replace-audit"
+
+    @pytest.mark.asyncio
+    async def test_the_replace_path_expiry_audit_row_names_an_unknown_outcome(self, ask):
+        """Review finding (trinity-enterprise#844): the sweep's `expired` audit
+        row carried the marker but #3247's in-transaction expiry — the second
+        timeout writer — wrote its own `expired` audit row without it, so the
+        same bypass read differently depending on which writer the clock used."""
+        old = _raise(ask, self.AGENT, _body("ra-old", expires_at=_iso(20)))
+        from sqlalchemy import update
+        from db.engine import get_engine
+        from db.tables import operator_queue
+        with get_engine().begin() as conn:
+            conn.execute(update(operator_queue).where(operator_queue.c.id == old["id"])
+                         .values(expires_at=_iso(-5)))
+        await _drain()
+        ask.audit.clear()
+        with _Rejected(ask.svc, 409, "replaces_ended"):
+            _raise(ask, self.AGENT, _body("ra-new", replaces="ra-old"))
+        await _drain()
+        [row] = [a for a in ask.audit if a["event_action"] == "expired"]
+        assert row["target_id"] == old["id"]
+        assert row["details"] == {"agent_name": self.AGENT, "outcome_unknown": True}
+        assert ask.db.get_operator_queue_item(old["id"])["disposition_reason"] == "outcome_unknown"
