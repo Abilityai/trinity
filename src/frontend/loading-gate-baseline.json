@@ -1,6 +1,6 @@
 {
-  "generated": "2026-10-08",
-  "commit": "3f9a4cc160109d90a952c62679fa710c9d25132c",
+  "generated": "2026-10-10",
+  "commit": "9dc65085e4890d69c5b7185f38d4c6658bc69c44",
   "rule": "per-file counts of bare v-if/v-else-if loading gates may only shrink; see scripts/scan-loading-gates.mjs",
   "files": {
     "src/frontend/src/components/A2aPanel.vue": 1,
@@ -13,7 +13,7 @@
     "src/frontend/src/components/ChatPanel.vue": 1,
     "src/frontend/src/components/CompatibilityPanel.vue": 1,
     "src/frontend/src/components/ConnectorChannelPanel.vue": 1,
-    "src/frontend/src/components/CreateAgentModal.vue": 2,
+    "src/frontend/src/components/CreateAgentModal.vue": 1,
     "src/frontend/src/components/CredentialSetupChecklist.vue": 1,
     "src/frontend/src/components/CredentialsPanel.vue": 2,
     "src/frontend/src/components/FilesPanel.vue": 1,
@@ -57,7 +57,7 @@
     "src/frontend/src/views/enterprise/Audit.vue": 3
   },
   "totals": {
-    "bare_loading_gates": 68,
+    "bare_loading_gates": 67,
     "files_with_gates": 52
   }
 }
