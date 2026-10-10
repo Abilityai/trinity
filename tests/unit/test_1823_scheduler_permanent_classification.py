@@ -24,7 +24,7 @@ IANA removal, a differently-built image — now fails bounded instead of stormin
 `src/scheduler` is a standalone package that cannot import the backend, so the
 service is driven directly with an injected fake DB and scheduler; the assertion
 is about which arm the branch takes. Structure mirrors
-`test_1994_process_schedule_lock_audit.py`.
+`test_1969_lock_denied_tick_audit.py`.
 """
 
 from __future__ import annotations

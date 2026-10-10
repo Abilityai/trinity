@@ -17,7 +17,6 @@ The Dedicated Scheduler Service is a standalone Python service that executes sch
 - **Independent deployment** - Can be scaled/monitored separately from API workers
 - **Event publishing** - Redis pub/sub for WebSocket compatibility
 - **Health endpoints** - Kubernetes-ready health checks
-- **Process schedules** - Cron-triggered process execution alongside agent schedules
 
 ---
 
@@ -53,13 +52,12 @@ As a **platform administrator**, I want **scheduled tasks to execute exactly onc
 ```
 
 **Data Flow**:
-1. Backend writes schedule CRUD to SQLite (`agent_schedules` / `process_schedules` tables)
+1. Backend writes agent schedule CRUD to the DB (`agent_schedules`)
 2. Scheduler reads schedules from SQLite on startup
 3. APScheduler triggers jobs at cron times
 4. Scheduler acquires Redis lock before execution
 5. For **agent schedules**: Scheduler calls backend's `POST /api/internal/execute-task` which routes through `TaskExecutionService` for slot management, activity tracking, agent HTTP call, and credential sanitization
-6. For **process schedules**: Scheduler calls backend's `POST /api/processes/{id}/execute` to start a process execution
-7. Scheduler publishes events to Redis for WebSocket relay
+6. Scheduler publishes events to Redis for WebSocket relay
 
 ---
 
@@ -80,7 +78,7 @@ As a **platform administrator**, I want **scheduled tasks to execute exactly onc
 | Entry | `src/scheduler/main.py` | SchedulerApp, signal handlers, health server, manual trigger endpoint |
 | Core | `src/scheduler/service.py` | SchedulerService with APScheduler integration |
 | Config | `src/scheduler/config.py` | Environment-based configuration |
-| Models | `src/scheduler/models.py` | Schedule, ScheduleExecution, ProcessSchedule, ProcessScheduleExecution |
+| Models | `src/scheduler/models.py` | Schedule, ScheduleExecution, Reminder, SchedulerStatus |
 | Database | `src/scheduler/database.py` | SQLite read/write operations |
 | HTTP | `src/scheduler/agent_client.py` | Agent container communication (legacy, unused in main path) |
 | Locking | `src/scheduler/locking.py` | Redis distributed locks |
@@ -111,7 +109,7 @@ As a **platform administrator**, I want **scheduled tasks to execute exactly onc
 | `PRE_CHECK_TIMEOUT` | `70` | HTTP deadline for the scheduler→backend pre-check call (agent-side hook is 60s; 10s headroom). Fail-open (#1022) |
 | `READINESS_CHECK_TIMEOUT` | `5` | HTTP deadline for the scheduler→backend readiness verdict on a cron seat brief (trinity-enterprise#689; the backend bounds its template read at 3 s). Fail-open |
 | `MISFIRE_GRACE_TIME` | `3600` | Seconds after a missed trigger that APScheduler will still execute (Issue #145) |
-| `BACKEND_URL` | `http://backend:8000` | Backend API URL for process executions and task delegation |
+| `BACKEND_URL` | `http://backend:8000` | Backend API URL for task dispatch and reminders |
 | `INTERNAL_API_SECRET` | _(empty)_ | Shared secret for backend internal API auth (C-003) |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
 | `PUBLISH_EVENTS` | `true` | Enable Redis event publishing |
@@ -127,14 +125,14 @@ main.py:265                     main.py:51                      service.py:80
 asyncio.run(main())   -->       SchedulerApp.start()   -->      SchedulerService.initialize()
                                 |                               |
                                 v                               v
-                                Start health server             Ensure process_schedules table
+                                Start health server             Load enabled agent schedules
                                 (aiohttp on :8001)              |
-                                |                               v
-                                v                               Load enabled agent schedules
+                                |                               |
+                                v                               |
                                 main.py:68                      Detect missed schedules (Issue #145)
                                 initialize()                    |
                                 |                               v
-                                v                               Load enabled process schedules
+                                v                               |
                                 main.py:71                      |
                                 fire_missed_schedules()         v
                                 |                               Add CronTrigger jobs
@@ -151,9 +149,6 @@ def initialize(self):
     if self._initialized:
         return
 
-    # Ensure process schedules table exists
-    self.db.ensure_process_schedules_table()
-
     # Create scheduler with memory job store
     jobstores = {'default': MemoryJobStore()}
     self.scheduler = AsyncIOScheduler(jobstores=jobstores, timezone=pytz.UTC)
@@ -167,12 +162,6 @@ def initialize(self):
     for schedule in schedules:
         self._add_job(schedule)
         self._schedule_snapshot[schedule.id] = (schedule.enabled, ...)
-
-    # Load all enabled process schedules from database
-    process_schedules = self.db.list_all_enabled_process_schedules()
-    for process_schedule in process_schedules:
-        self._add_process_job(process_schedule)
-        self._process_schedule_snapshot[process_schedule.id] = (...)
 
     # Add listener for skipped executions (max_instances reached)
     self.scheduler.add_listener(self._on_job_max_instances, EVENT_JOB_MAX_INSTANCES)
@@ -303,7 +292,7 @@ Uses async fire-and-forget dispatch (SCHED-ASYNC-001):
 2. If backend accepts (`{"status": "accepted", "async_mode": true}`), poll DB
 3. Backward compatible: if backend returns sync result, use directly
 
-A dispatch `httpx.TimeoutException` is re-raised as a **named, non-blank** error (`"dispatch to /api/internal/execute-task timed out after {N}s ({TimeoutType}) — outcome unknown"`) *before* it can reach the generic `except` handler. The outcome is genuinely unknown: the backend spawns the background task before replying (`internal.py`), so a dispatch timeout may mean the task is already running and will surface as an orphan recovered by the cleanup service. This closes the #1022 silent-failure — bare `httpx` timeouts stringify to `''`, which previously persisted as a blank `error`. Defense-in-depth: `_describe_exception()` normalizes any other blank-stringifying exception (falls back to the type name) across every execution, retry, and process-schedule error path.
+A dispatch `httpx.TimeoutException` is re-raised as a **named, non-blank** error (`"dispatch to /api/internal/execute-task timed out after {N}s ({TimeoutType}) — outcome unknown"`) *before* it can reach the generic `except` handler. The outcome is genuinely unknown: the backend spawns the background task before replying (`internal.py`), so a dispatch timeout may mean the task is already running and will surface as an orphan recovered by the cleanup service. This closes the #1022 silent-failure — bare `httpx` timeouts stringify to `''`, which previously persisted as a blank `error`. Defense-in-depth: `_describe_exception()` normalizes any other blank-stringifying exception (falls back to the type name) across every execution and retry error path.
 
 **DB Polling** (`service.py:835-887`):
 ```python
@@ -325,79 +314,7 @@ async def _poll_execution_completion(self, execution_id, timeout_seconds):
 
 ---
 
-## Flow 3: Process Schedule Execution
-
-**Trigger**: APScheduler CronTrigger fires for a process schedule
-
-```
-APScheduler                     service.py:987                  locking.py:221
-CronTrigger fires   -->         _execute_process_schedule() --> try_acquire_schedule_lock()
-                                |                               key: "process_{schedule_id}"
-                                v (if acquired)                 |
-                                _execute_process_schedule_with_lock()
-                                service.py:1005                 |
-                                |                               v
-                                v                               database.py:602
-                                Get process schedule            create_process_schedule_execution()
-                                from DB                         INSERT process_schedule_executions
-                                |                               |
-                                v                               v
-                                Publish "started" event         POST /api/processes/{id}/execute
-                                |                               (backend process execution API)
-                                v                               |
-                                On success:                     v
-                                - Update execution status       Update process schedule run times
-                                - Publish "completed" event     |
-                                                                v
-                                On failure:                     lock.release()
-                                - Update execution as failed
-                                - Publish "completed" with error
-```
-
-**Process Execution** (`service.py:987-1145`):
-```python
-async def _execute_process_schedule(self, schedule_id: str):
-    """Execute a scheduled process. Uses distributed locking."""
-    lock = self.lock_manager.try_acquire_schedule_lock(f"process_{schedule_id}")
-    if not lock:
-        return
-    try:
-        await self._execute_process_schedule_with_lock(schedule_id)
-    finally:
-        lock.release()
-
-async def _execute_process_schedule_with_lock(self, schedule_id: str):
-    """Execute process schedule after acquiring lock."""
-    schedule = self.db.get_process_schedule(schedule_id)
-    # ... validation ...
-
-    execution = self.db.create_process_schedule_execution(...)
-    await self._publish_event({"type": "process_schedule_execution_started", ...})
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{config.backend_url}/api/processes/{schedule.process_id}/execute",
-            json={"triggered_by": "schedule", "input_data": {"trigger": {...}}},
-            timeout=60.0
-        )
-        # Handle success/failure, update execution status, publish events
-```
-
-**Key Differences from Agent Schedules**:
-- Uses `process_schedules` / `process_schedule_executions` tables (separate from agent schedules)
-- Calls `POST /api/processes/{id}/execute` instead of `/api/internal/execute-task`
-- No autonomy check (process-level, not agent-level)
-- No async polling -- uses synchronous HTTP call with 60s timeout
-- Lock key prefixed with `process_` to avoid collision with agent schedule locks
-
-**Process Schedule Job Management** (`service.py:934-985`):
-- `_get_process_job_id()` (line 934): Returns `process_schedule_{schedule_id}`
-- `_add_process_job()` (line 938): Adds CronTrigger job for process schedule
-- `_remove_process_job()` (line 975): Removes process schedule job from APScheduler
-
----
-
-## Flow 4: Distributed Locking
+## Flow 3: Distributed Locking
 
 **Purpose**: Prevent duplicate executions across multiple scheduler instances or restarts
 
@@ -468,7 +385,7 @@ def _renewal_loop(self):
 
 ---
 
-## Flow 5: Event Publishing
+## Flow 4: Event Publishing
 
 **Purpose**: Broadcast execution events to Redis for backend WebSocket relay
 
@@ -488,9 +405,6 @@ redis.publish()                                                 clients
 | `schedule_execution_started` | agent, schedule_id, execution_id, schedule_name, triggered_by | Agent execution begins |
 | `schedule_execution_completed` | agent, schedule_id, execution_id, status, error? | Agent execution ends |
 | `schedule_execution_skipped` | agent, schedule_id, execution_id, schedule_name, reason | Agent execution skipped (max_instances) |
-| `process_schedule_execution_started` | process_id, process_name, schedule_id, trigger_id, execution_id | Process execution begins |
-| `process_schedule_execution_completed` | process_id, process_name, schedule_id, execution_id, process_execution_id?, status, error? | Process execution ends |
-| `process_schedule_execution_skipped` | process_id, process_name, schedule_id, trigger_id, execution_id, reason | Process execution skipped (max_instances) |
 
 **Publishing Code** (`service.py:1166-1180`):
 ```python
@@ -506,7 +420,7 @@ async def _publish_event(self, event: dict):
 
 ---
 
-## Flow 6: Periodic Schedule Sync
+## Flow 5: Periodic Schedule Sync
 
 **Purpose**: Detect new/updated/deleted schedules without container restart
 
@@ -518,8 +432,8 @@ _run_until_shutdown() -->     _sync_schedules()      -->      _sync_agent_schedu
 (main loop)                   |                                |
 |                             v                                v
 v                             _sync_agent_schedules()          Compare DB with _schedule_snapshot
-heartbeat (30s)               _sync_process_schedules()        Build current_state from list_all_schedules()
-|                             service.py:426                   Detect: new / deleted / updated
+heartbeat (30s)               _reconcile_reminders()           Build current_state from list_all_schedules()
+|                                                              Detect: new / deleted / updated
 v                                                              Update APScheduler jobs
 check sync_interval                                            Update snapshot
 (>= 60s since last?)
@@ -557,17 +471,13 @@ async def _sync_agent_schedules(self):
             # Re-add job with updated config
 ```
 
-**Process Schedule Sync** (`service.py:426-483`):
-
-Identical pattern to agent schedule sync but operates on `_process_schedule_snapshot` and uses `_add_process_job()` / `_remove_process_job()`. Reads from `process_schedules` table via `db.list_all_process_schedules()`.
-
 **Invariant — run-time writes must not bump `updated_at`** (Issue #420):
 
-The sync loop compares `(enabled, updated_at)` to detect config changes. `update_schedule_run_times()` and `update_process_schedule_run_times()` therefore write `last_run_at` / `next_run_at` only — they must NOT touch `updated_at`. Bumping it produced a self-triggering loop where each sync tick saw its own previous `_add_job` write, flagged every schedule as "updated", and re-registered all N jobs once per tick. Legitimate config edits still bump `updated_at` via `update_schedule()` / `set_schedule_enabled()` in the backend, so user-initiated changes are still detected.
+The sync loop compares `(enabled, updated_at)` to detect config changes. `update_schedule_run_times()` therefore writes `last_run_at` / `next_run_at` only — they must NOT touch `updated_at`. Bumping it produced a self-triggering loop where each sync tick saw its own previous `_add_job` write, flagged every schedule as "updated", and re-registered all N jobs once per tick. Legitimate config edits still bump `updated_at` via `update_schedule()` / `set_schedule_enabled()` in the backend, so user-initiated changes are still detected.
 
 ---
 
-## Flow 7: Manual Trigger (via Dedicated Scheduler)
+## Flow 6: Manual Trigger (via Dedicated Scheduler)
 
 **Purpose**: Manual schedule triggers are routed through the dedicated scheduler for consistent locking and activity tracking.
 
@@ -607,7 +517,7 @@ schedules.py:trigger_schedule    main.py:136                     TaskExecutionSe
 
 ---
 
-## Flow 8: Activity Tracking (via TaskExecutionService)
+## Flow 7: Activity Tracking (via TaskExecutionService)
 
 **Purpose**: Create `agent_activities` records for Timeline dashboard visibility
 
@@ -633,7 +543,7 @@ Returns result from DB
 
 ---
 
-## Flow 9: Skipped Execution Recording (Issue #46)
+## Flow 8: Skipped Execution Recording (Issue #46)
 
 **Purpose**: Record executions dropped due to APScheduler's max_instances=1 constraint
 
@@ -642,22 +552,19 @@ Returns result from DB
 ```
 APScheduler                     service.py:488                  database.py:237
 EVENT_JOB_MAX_INSTANCES  -->    _on_job_max_instances()  -->    create_skipped_execution()
-|                               |                               or create_skipped_process_
-v                               v                               schedule_execution()
-Job skipped because             Parse job_id prefix:            |
-max_instances=1 reached         "schedule_" -> agent            v
-                                "process_schedule_" -> process  INSERT with status='skipped'
-                                |                               duration_ms=0
-                                v                               error=skip_reason
+|                               |                               |
+v                               v                               v
+Job skipped because             Parse job_id prefix:            INSERT with status='skipped'
+max_instances=1 reached         "schedule_" -> agent            duration_ms=0
+                                other -> warning only           error=skip_reason
+                                |
+                                v
                                 _record_skipped_agent_schedule()
                                 service.py:512
-                                or _record_skipped_process_schedule()
-                                service.py:552
                                 |
                                 v
                                 Publish event
                                 "schedule_execution_skipped"
-                                or "process_schedule_execution_skipped"
 ```
 
 **Handler** (`service.py:488-511`):
@@ -667,9 +574,8 @@ def _on_job_max_instances(self, event: JobExecutionEvent):
     if job_id.startswith("schedule_"):
         schedule_id = job_id[len("schedule_"):]
         self._record_skipped_agent_schedule(schedule_id)
-    elif job_id.startswith("process_schedule_"):
-        schedule_id = job_id[len("process_schedule_"):]
-        self._record_skipped_process_schedule(schedule_id)
+    else:  # reminder_* jobs share this listener
+        logger.warning(f"Unknown job_id format for skipped job: {job_id}")
 ```
 
 **WebSocket Event**:
@@ -686,7 +592,7 @@ def _on_job_max_instances(self, event: JobExecutionEvent):
 
 ---
 
-## Flow 10: Automatic Retry (RETRY-001)
+## Flow 9: Automatic Retry (RETRY-001)
 
 **Location**: `src/scheduler/service.py:1074-1132`
 
@@ -775,7 +681,7 @@ backend copy, like `failure_classifier.py`):
 - **Writes** go through `utc_now_iso()` ("now") / `to_utc_iso(dt)` (caller datetimes) →
   always UTC with an explicit **`Z`** suffix. Every write site (`started_at`,
   `completed_at`, `last_run_at`, `next_run_at`, `retry_scheduled_at`, `validated_at` in
-  `service.py`, + all process-schedule variants) emits `Z`. Previously they used
+  `service.py`) emits `Z`. Previously they used
   `datetime.utcnow().isoformat()` (no `Z`), which JS `new Date(...)` mis-parsed as *local*
   time — schedule-triggered rows rendered shifted by the viewer's UTC offset.
 - **Reads** go through `parse_scheduler_ts(s)` → **naive UTC**. It tolerates `…Z`, `…+03:00`,
@@ -818,24 +724,6 @@ backend copy, like `failure_classifier.py`):
 | `get_execution(id)` | 353-359 | `SELECT * FROM schedule_executions WHERE id = ?` | Get execution |
 | `get_recent_executions()` | 361-370 | `SELECT ... ORDER BY started_at DESC LIMIT ?` | List recent |
 
-### Process Schedule Operations
-
-| Method | Line | SQL | Purpose |
-|--------|------|-----|---------|
-| `ensure_process_schedules_table()` | 376-422 | `CREATE TABLE IF NOT EXISTS process_schedules / process_schedule_executions` | Create tables on startup |
-| `get_process_schedule(id)` | 459-465 | `SELECT * FROM process_schedules WHERE id = ?` | Get single process schedule |
-| `get_process_schedule_by_trigger()` | 467-476 | `SELECT ... WHERE process_id = ? AND trigger_id = ?` | Look up by process+trigger |
-| `list_all_enabled_process_schedules()` | 478-486 | `SELECT * FROM process_schedules WHERE enabled = 1` | Load on startup |
-| `list_all_process_schedules()` | 488-496 | `SELECT * FROM process_schedules` | Sync detection |
-| `list_process_schedules(process_id)` | 498-506 | `SELECT ... WHERE process_id = ?` | Per-process list |
-| `create_process_schedule()` | 508-558 | `INSERT INTO process_schedules` | Create schedule |
-| `update_process_schedule_run_times()` | 685-715 | `UPDATE process_schedules SET last_run_at, next_run_at` (does NOT touch `updated_at` — Issue #420) | Track run times |
-| `delete_process_schedule()` | 586-592 | `DELETE FROM process_schedules WHERE id = ?` | Delete single |
-| `delete_process_schedules_for_process()` | 594-600 | `DELETE ... WHERE process_id = ?` | Delete all for process |
-| `create_process_schedule_execution()` | 602-639 | `INSERT INTO process_schedule_executions` | Create execution record |
-| `create_skipped_process_schedule_execution()` | 641-702 | `INSERT ... status='skipped'` | Record skipped (Issue #46) |
-| `update_process_schedule_execution()` | 704-741 | `UPDATE process_schedule_executions SET status, ...` | Complete execution |
-
 ---
 
 ## Service Method Reference
@@ -855,12 +743,10 @@ backend copy, like `failure_classifier.py`):
 | `_add_job()` | 280-315 | Add agent schedule as APScheduler CronTrigger job |
 | `_remove_job()` | 317-327 | Remove agent schedule job |
 | `_get_next_run_time()` | 329-339 | Calculate next run time via croniter |
-| `_sync_schedules()` | 345-360 | Top-level sync: calls agent + process sync |
+| `_sync_schedules()` | 345-360 | Top-level sync: calls agent sync + reminder reconcile |
 | `_sync_agent_schedules()` | 362-424 | Sync agent schedule snapshot with DB |
-| `_sync_process_schedules()` | 426-483 | Sync process schedule snapshot with DB |
 | `_on_job_max_instances()` | 488-510 | APScheduler event handler for skipped jobs |
 | `_record_skipped_agent_schedule()` | 512-550 | Record skipped agent execution |
-| `_record_skipped_process_schedule()` | 552-591 | Record skipped process execution |
 | `_execute_schedule()` | 597-613 | Agent execution entry point (lock + delegate) |
 | `_execute_schedule_with_lock()` | 615-758 | Agent execution with lock held |
 | `_call_backend_execute_task()` | 760-833 | HTTP dispatch to backend + async handoff |
@@ -869,14 +755,6 @@ backend copy, like `failure_classifier.py`):
 | `remove_schedule()` | 898-900 | Runtime: remove agent schedule |
 | `update_schedule()` | 902-906 | Runtime: update agent schedule |
 | `reload_schedules()` | 908-928 | Reload all schedules from DB |
-| `_get_process_job_id()` | 934-936 | Generate process job ID: `process_schedule_{id}` |
-| `_add_process_job()` | 938-973 | Add process schedule as APScheduler job |
-| `_remove_process_job()` | 975-985 | Remove process schedule job |
-| `_execute_process_schedule()` | 987-1003 | Process execution entry point (lock + delegate) |
-| `_execute_process_schedule_with_lock()` | 1005-1145 | Process execution with lock held |
-| `add_process_schedule()` | 1147-1150 | Runtime: add new process schedule |
-| `remove_process_schedule()` | 1152-1154 | Runtime: remove process schedule |
-| `update_process_schedule()` | 1156-1160 | Runtime: update process schedule |
 | `_publish_event()` | 1166-1180 | Publish event to Redis pub/sub |
 | `get_status()` | 1186-1212 | Get scheduler status |
 | `is_healthy()` | 1214-1220 | Health check |
@@ -1030,8 +908,6 @@ docker compose -f docker/scheduler/docker-compose.test.yml up
 | **Dispatch timeout (#1022)** | Re-raised as a named non-blank error *before* the generic handler; outcome UNKNOWN (task may already be running → orphan) | Descriptive `error` persisted (never blank); cleanup service recovers any orphan |
 | **Blank-stringifying exception (e.g. httpx timeout)** | `_describe_exception()` falls back to the exception type name | `error` never persisted blank (#1022) |
 | **Polling deadline exceeded** | Raise exception, overwrite guard checks DB status | Error recorded (if genuinely stale) |
-| Process backend HTTP error | Update process execution as failed, publish event | Error recorded |
-| Process backend timeout | Update process execution as failed, publish event | Error recorded |
 | Redis publish fails | Log error, continue | Execution still succeeds |
 
 ---
@@ -1122,6 +998,7 @@ The embedded scheduler (`src/backend/services/scheduler_service.py`) has been co
 
 | Date | Change |
 |------|--------|
+| 2026-10-09 | **Process-schedule remnant removed (#3432)**: the scheduler no longer creates, reads or executes `process_schedules` / `process_schedule_executions` (nothing could create a row, and the execute route went with #430). Removed Flow 3 (renumbered 4–10 → 3–9), the process sync, the process events, the `process_schedule_` max-instances branch (such an id now falls to the unknown-prefix warning) and the process DB operations. The two tables are left in place on existing installs; no migration. |
 | 2026-08-09 | **Legacy IANA timezone aliases (#1823)**: `python:3.13-slim` carries no codename pin, so both images silently migrated bookworm→trixie, where the IANA *backward-compatibility links* were split out of `tzdata` into `tzdata-legacy`. A schedule stored under any legacy alias (`Europe/Kiev`) then could not resolve. Three layers: (1) both images install `tzdata-legacy` + declare the `tzdata` wheel — `zoneinfo` reads the system db first and falls back to the wheel only for missing keys, so the wheel is the portability floor against the next silent base-tag move; guarded by `tests/unit/test_1823_tz_capability_parity.py`. (2) `validate_timezone` gains a `zoneinfo` probe (the resolver APScheduler's `astimezone()` actually binds; pytz bundles its own complete db and accepts every alias everywhere), and `validate_cron_expression` **delegates** to it — the create route calls only the latter and the update route only the former, so two probes meant two contracts. (3) `_add_job` files `ZoneInfoNotFoundError` in the **permanent** arm; as a `KeyError` subclass it previously fell through to transient and retry-stormed every 60s with a frozen `next_run_at` — the exact symptom #1472 existed to remove, and what canary **E-06** fires on. Also: a cron-only `PUT` now validates against the row's own timezone instead of a hardcoded `"UTC"` (deliberate 200→400 for an already-non-firing row), and the scheduler's `APScheduler` floor is pinned to the backend's `==3.11.0` so validator and executor cannot resolve different versions of the parser the contract is stated against. |
 | 2026-07-06 | **UTC `Z`-suffix serialization (#1474)**: scheduler-written execution/schedule timestamps were naive (no `Z`), so JS `new Date(...)` parsed them as local time and schedule-triggered rows rendered shifted by the viewer's UTC offset. New vendored `src/scheduler/utils.py` (byte-parity mirror of backend `utils/helpers.py`): `utc_now_iso`/`to_utc_iso` writes emit `Z`; `parse_scheduler_ts` reads tolerantly and returns naive-UTC (write+read atomic — a `Z` write + a tz-aware read would break `update_execution_status`'s `aware − naive` duration math). Backend read boundaries (`get_agent_executions_summary`/`get_fleet_executions`/`get_agent_schedules_summary`; `db/activities.py` mappers) normalize historical naive rows; the 5 execution panels parse via `parseUTC`. `next_run_at` stays mixed-format across writers by design (Python-compared only). See the Timestamp serialization contract section + Architectural Invariant #16. |
 | 2026-07-06 | **Stale `next_run_at` repair (#1472)**: fixed the "Next: Nd ago" bug across the projection-advance paths. Autonomy-off skip now advances `next_run_at` only (no row/last_run_at). Every fire outcome (success/dispatched/failure/exception) advances **once at fire time** (`_execute_schedule_with_lock`), replacing the per-branch advances — closes the failure/exception leak and a latent phantom-catch-up. `_add_job` returns a bool and classifies permanent (bad cron/tz — snapshot + log-once, bounded) vs transient (retried next sync) instead of orphaning silently; snapshot-on-success at all sync sites. `_get_missed_schedules` compares in UTC (was stripping tzinfo → non-UTC schedules mis-compared). New API validation `services/schedule_validation.py` matches the scheduler's 5-field/`CronTrigger`/`pytz` parser (was bare `croniter()` — accepted `@daily`/seconds-crons/quartz/bad-tz that then failed registration). UI `SchedulesPanel.vue` renders "Overdue by …"; canary **E-06** detects any residual. |

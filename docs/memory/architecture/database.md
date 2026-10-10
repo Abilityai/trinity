@@ -14,6 +14,8 @@
 
 ### SQLite (`/data/trinity.db`)
 
+**Orphan tables (#3432):** installs upgraded from before #3432 — SQLite and PostgreSQL alike — may carry `process_schedules` and `process_schedule_executions`, which the scheduler's boot path created ad hoc outside both migration tracks; the scheduler no longer creates or reads them, nothing else references them, and they are deliberately left in place (no migration), so #746 autogenerate will surface them as unknown tables.
+
 **users:**
 ```sql
 CREATE TABLE users (
