@@ -573,3 +573,26 @@ def test_both_routes_are_interactive_in_the_census(monkeypatch):
     classified, _ = rc.classify(rc.walk(), rc.load_baseline())
     assert classified["routers/users.py::change_my_password"] == "interactive"
     assert classified["routers/users.py::verify_my_current_password"] == "interactive"
+
+
+# =============================================================================
+# A failed marker write leaves the password unchanged (merge-train, W3)
+# =============================================================================
+
+def test_a_failed_marker_write_does_not_change_the_password(monkeypatch):
+    import services.password_change_service as svc
+
+    writes = []
+
+    class _Db:
+        def set_setting(self, k, v):
+            raise RuntimeError("settings store down")
+
+        def update_user_password(self, u, h):
+            writes.append(u)
+
+    monkeypatch.setattr(svc, "db", _Db())
+    monkeypatch.setattr(svc, "admin_username", lambda: "admin")
+    with pytest.raises(RuntimeError):
+        svc.apply_password_change("admin", "N3w-Passw0rd!x")
+    assert writes == []

@@ -455,8 +455,9 @@ def create_portal_session_token(
     (no platform identity) — only the email + the portal scope.
 
     Carries an explicit ``iat`` so bulk revocation (ent#281) can date the token
-    against the per-email cutoff. Set here rather than in ``create_access_token``
-    to keep the claim set of every other token type unchanged.
+    against the per-email cutoff. ``create_access_token`` now stamps ``iat`` on
+    every token too (trinity-enterprise#709); it is set again here with the same
+    value so this contract does not depend on that.
 
     ent#375 — the session SLIDES, so two clocks are needed and ``iat`` can only
     be one of them. ``iat`` moves on every rotation (it is what the revoke cutoff

@@ -119,7 +119,11 @@ def check_new_password(current_password: str, new_password: str, confirm_passwor
 def apply_password_change(username: str, new_password: str) -> None:
     """Write the new hash. For the provisioned admin, also record that the
     password now comes from the UI, so the next boot does not revert it to
-    `ADMIN_PASSWORD` (see `utils/admin_identity.env_may_resync_admin_password`)."""
-    db.update_user_password(username, hash_password(new_password))
+    `ADMIN_PASSWORD` (see `utils/admin_identity.env_may_resync_admin_password`).
+
+    Marker first: if it cannot be written the password is left unchanged and the
+    caller sees the error. Hash first would leave a changed password that the
+    next boot silently reverts to `.env`."""
     if username == admin_username():
         db.set_setting(ADMIN_PASSWORD_SOURCE_KEY, ADMIN_PASSWORD_SOURCE_UI)
+    db.update_user_password(username, hash_password(new_password))
