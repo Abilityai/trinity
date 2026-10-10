@@ -123,8 +123,12 @@
             {{ m.content }}
           </p>
 
-          <div v-else-if="isMine(m)" class="flex justify-end">
+          <div v-else-if="isMine(m)" class="flex flex-col items-end gap-1">
             <div class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white" :class="BUBBLE_WRAP_CLASS">{{ m.content }}</div>
+            <!-- trinity-enterprise#631: the tagger's own marks — each tag
+                 landed in that person's Inbox (in-app only), and whether they
+                 read it. Only on the sender's own messages. -->
+            <PortalTagMarks :tags="tagsFor(m, room?.own_tags)" :data-testid="`portal-room-tags-${m.seq}`" />
           </div>
 
           <div v-else class="flex items-start gap-2.5">
@@ -300,6 +304,7 @@
               <PortalTypeahead
                 v-if="typeaheadOpen"
                 kind="@"
+                :title="typeaheadTitle"
                 :rows="typeaheadRows"
                 :active-index="activeIndex"
                 :overflow="typeaheadBound.overflow"
@@ -400,6 +405,9 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
+import PortalTagMarks from './PortalTagMarks.vue'
+import { usePeoplePicker } from '@/composables/usePeoplePicker'
+import { noOneCalled, peopleRows, personToken, tagsFor, typeaheadHeading } from './portalMentions'
 import BaseButton from '@/components/base/BaseButton.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import { workSignalFromRoom } from './portalRail'
@@ -653,19 +661,45 @@ const addable = computed(() => {
 
 const mentionSource = computed(() => roomMentionSource(agentParticipants.value, props.roster))
 
+// trinity-enterprise#631: the same `@` also tags a PERSON — a colleague on
+// this instance who can reach one of the room's agents (read from the server
+// once there is a query; never a directory). People follow the agents in the
+// list; picking one inserts `@Name` and remembers who, so the send carries the
+// address beside the text (`tagsInText`). A tag is a pointer, never a wake.
+const peoplePicker = usePeoplePicker({ fetch: (q) => store.fetchRoomPeople(props.roomId, q) })
+watch(() => typeaheadTrigger.value?.query, (q) => {
+  if (typeaheadTrigger.value) peoplePicker.lookup(q)
+  else peoplePicker.clear()
+})
+
 const typeaheadResult = computed(() => {
   const t = typeaheadTrigger.value
   if (!t || t.kind !== '@') return null
   return filterAgentCandidates(mentionSource.value, t.query)
 })
 
-const typeaheadBound = computed(() => boundCandidates(typeaheadResult.value?.items || []))
+const typeaheadCandidates = computed(() => {
+  const agents = (typeaheadResult.value?.items || []).map((a) => ({ kind: 'agent', name: a.name, agent: a }))
+  const q = typeaheadTrigger.value?.query || ''
+  const people = q && peoplePicker.answeredFor.value === q.trim() ? peopleRows(peoplePicker.people.value) : []
+  return [...agents, ...people]
+})
+
+const typeaheadBound = computed(() => boundCandidates(typeaheadCandidates.value))
+
+const typeaheadTitle = computed(() => typeaheadHeading({ people: !peoplePicker.unavailable.value }))
 
 const typeaheadEmpty = computed(() => {
   const t = typeaheadTrigger.value
   const r = typeaheadResult.value
-  if (!t || !r || r.items.length || t.query !== '') return null
-  return typeaheadEmptyMessage('@', r, { scope: 'room' })
+  if (!t || !r || typeaheadCandidates.value.length) return null
+  if (t.query === '') return typeaheadEmptyMessage('@', r, { scope: 'room' })
+  // trinity-enterprise#631: the named refusal — only once the server answered
+  // "no one" for exactly this query (a person may tag; agents matched nothing).
+  if (!peoplePicker.unavailable.value && peoplePicker.answeredFor.value === t.query.trim()) {
+    return noOneCalled(t.query, agentParticipants.value)
+  }
+  return null
 })
 
 const typeaheadOpen = computed(() => {
@@ -676,11 +710,11 @@ const typeaheadOpen = computed(() => {
   return typeaheadBound.value.visible.length > 0 || !!typeaheadEmpty.value
 })
 
-const typeaheadRows = computed(() => typeaheadBound.value.visible.map((a) => ({
-  key: `ag-${a.name}`,
-  primary: agentDisplayName(a),
-  secondary: `@${a.name}`,
-})))
+const typeaheadRows = computed(() => typeaheadBound.value.visible.map((c) => (
+  c.kind === 'person'
+    ? c
+    : { key: `ag-${c.name}`, primary: agentDisplayName(c.agent), secondary: `@${c.name}` }
+)))
 
 watch(typeaheadBound, (b) => { activeIndex.value = clampActiveIndex(activeIndex.value, b.visible.length) })
 
@@ -814,7 +848,11 @@ function acceptActive(index) {
   const t = typeaheadTrigger.value
   const row = typeaheadBound.value.visible[index]
   if (!t || !row) return
-  const { value, caret } = applyTypeaheadInsert(input.value, t, buildMentionToken(row.name))
+  // trinity-enterprise#631: a person's token is their name; who they are
+  // travels beside the text (`peoplePicker.picked`), never parsed out of it.
+  if (row.kind === 'person') peoplePicker.pick(row.person)
+  const token = row.kind === 'person' ? personToken(row.person) : buildMentionToken(row.name)
+  const { value, caret } = applyTypeaheadInsert(input.value, t, token)
   input.value = value
   closeTypeahead()
   // See PortalConversation: a mid-sentence pick leaves the caret inside the
@@ -880,8 +918,11 @@ async function send() {
   input.value = ''
   autoGrowAfterUpdate()   // deferred: Vue patches the textarea next tick
   resetTypeahead()
+  // trinity-enterprise#631: the people still named in the text, as picked.
+  const tags = peoplePicker.tagsFor(text)
   try {
-    await store.postRoomMessage(props.roomId, text)
+    await store.postRoomMessage(props.roomId, text, { tags })
+    peoplePicker.reset()
     // #2794: the chips describe what is going out with THIS message, so they
     // clear once it has gone — the 1:1's rule, which this composer never had.
     // Without it a room accumulated every chip it had ever drawn, describing
