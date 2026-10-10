@@ -492,7 +492,7 @@
           <PortalWorkCard
             :item="liveCardItem"
             :live-step="liveStepLine"
-            :elapsed-seconds="elapsed"
+            :elapsed-seconds="cardElapsedSeconds"
             :children="liveChildren"
             :can-stop="canCancelTurn"
             :stopping="cancelling"
@@ -916,7 +916,7 @@ import { BUBBLE_WRAP_CLASS } from './portalBubble'
 import { messageLimitState, messageRefusalReason } from './portalMessageLimit'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
-import { askAboutItPrefill, childrenForChat, clockRestartsAt, itemById, pendingTurnOutcome, previewTitle } from './portalWork'
+import { askAboutItPrefill, childrenForChat, clockRestartsAt, itemById, liveElapsedSeconds, pendingTurnOutcome, previewTitle } from './portalWork'
 import { activityFromStreamEvent, resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
@@ -1603,9 +1603,7 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
   // stop — without the id, `canCancelTurn` stayed false after every reload.
   activeExecutionId.value = executionId || null
   liveStreamActivity.value = null
-  elapsed.value = 0
-  clearInterval(elapsedTimer)
-  elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
+  startElapsedClock()
   // The baseline is what is on screen right now: this client reloaded INTO a
   // running turn, so every assistant message it can see predates that turn.
   // Passing nothing made the poll's comparison false on every poll, so the
@@ -1756,6 +1754,7 @@ function onViewportResize() {
 }
 
 onBeforeUnmount(() => {
+  clearInterval(elapsedTimer)
   window.removeEventListener('online', onNet)
   window.removeEventListener('offline', onNet)
   document.removeEventListener('click', onDocClick)
@@ -2038,13 +2037,27 @@ let elapsedTimer = null
 // ent#525: the card renders the clock (`formatElapsed`); the three-tier
 // "Thinking… / Working on it… / Still working…" label went with the dots.
 const elapsed = ref(0)
+// #3431: the instant the feed's `elapsed_seconds` was true, advanced from it by
+// the same 1 s tick, so the card re-reads the row's age exactly the way the
+// Work tab and Rooms do (`liveElapsedSeconds`), and one turn shows one age on
+// every surface. `elapsed` above stays the pending placeholder's clock: while
+// the feed has not read the turn there is no anchor but the page's own load,
+// and a page cannot know a run's age.
+const clockMs = ref(Date.now())
+const cardElapsedSeconds = computed(() =>
+  liveElapsedSeconds(liveCardItem.value, { fetchedAtMs: workStore.fetchedAt, nowMs: clockMs.value })
+    ?? elapsed.value)
+function startElapsedClock() {
+  elapsed.value = 0
+  clockMs.value = Date.now()
+  clearInterval(elapsedTimer)
+  elapsedTimer = setInterval(() => { elapsed.value += 1; clockMs.value = Date.now() }, 1000)
+}
 
 async function deliver(text, { replyId = null, attachments = null } = {}) {
   terminalOutcome.value = null
   sending.value = true
-  elapsed.value = 0
-  clearInterval(elapsedTimer)
-  elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
+  startElapsedClock()
   const startedNew = currentSessionId.value === null
   try {
     // ent#286: stream the turn so tool activity is visible while it runs.
