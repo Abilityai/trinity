@@ -144,7 +144,8 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
     """`(ended_at, ended_by)` for a client — COARSE on purpose.
 
     `ended_by` is `you` (the viewer answered), `operator` (another person
-    answered or cancelled), `platform` (the platform ended the row itself —
+    answered or cancelled), `someone_else` (a person a SHARED ask was also
+    delivered to answered it, trinity-enterprise#816), `platform` (the platform ended the row itself —
     `disposed_by = 'platform'`, #3246: never a person's answer, never a
     timeout), `agent` (the agent replaced it, #3247) or `timeout`; never an email and never the cancel
     reason (both are the operator's, not the client's). `ended_at` is the
@@ -164,9 +165,13 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
         return item.get("disposed_at"), "agent"
     by = item.get("disposed_by_email") or (item.get("responded_by_email") if status == "answered" else None)
     who = "you" if by and viewer_email and by.lower() == viewer_email.lower() else "operator"
-    if who == "operator" and _answered_by_co_addressee(item, by):
+    if who == "operator" and status == "answered" and _answered_by_co_addressee(item, by):
         # trinity-enterprise#816: another person the shared ask was delivered
-        # to answered it first — not the operator.
+        # to answered it first — not the operator. An ANSWER only: a
+        # co-addressee who is also an operator and CANCELS it from the
+        # Operating Room ended it as the operator, so it stays the coarse,
+        # unnamed `operator` (the Workspace has no cancel, and refuses
+        # dismissal on a shared ask).
         who = "someone_else"
     at = item.get("disposed_at") or (item.get("responded_at") if status == "answered" else None)
     return at, who

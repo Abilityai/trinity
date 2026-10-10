@@ -337,3 +337,50 @@ class TestMembershipIsExact:
             resolved_to=[a, b], proposal=None, supersedes_expired=None,
         )
         assert _ids(b.upper()) == [out["row"]["id"]]
+
+
+# ===========================================================================
+# Review fixes (PR #3513 pre-landing review)
+# ===========================================================================
+
+class TestOnlyAnAnswerNamesTheCoAddressee:
+    def test_a_co_addressee_who_cancels_from_the_operating_room_stays_the_operator(
+            self, real_db, agent, people):
+        """A person the role resolves to may also be an operator. Their CANCEL
+        (the Operating Room's verb — the Workspace refuses dismissal on a shared
+        ask) is an operator's ending: coarse `operator`, unnamed. Only an ANSWER
+        by a co-addressee reads `someone_else` + `answered_by`."""
+        _provide({"approver": [people["alice"], people["bob"]]})
+        receipt = _raise(agent)
+        real_db.cancel_operator_queue_item(receipt["id"], disposed_by_email=people["alice"])
+
+        [ask] = _svc().list_asks_page(people["bob"], is_platform=False,
+                                      include_ended=True).items
+        assert ask.status == "cancelled"
+        assert (ask.ended_by, ask.answered_by) == ("operator", None)
+
+
+class TestReplaceLinkOnASharedAsk:
+    """`replaces` / `replaced_by` are projected when the OTHER ask is the
+    viewer's too — by the same addressing rule as the list (shared included)."""
+
+    def test_a_shared_ask_that_replaces_a_shared_ask_links_both_ways(self, agent, people):
+        _provide({"approver": [people["alice"], people["bob"]]})
+        first = _raise(agent, "q-first", kind="question")
+        second = _raise(agent, "q-second", kind="question", replaces="q-first")
+
+        by_id = {a.id: a for a in _svc().list_asks_page(
+            people["bob"], is_platform=False, include_ended=True).items}
+        assert by_id[second["id"]].replaces == "q-first"
+        assert by_id[first["id"]].replaced_by == "q-second"
+
+    def test_the_link_is_withheld_when_the_other_ask_was_never_the_viewers(self, agent, people):
+        _provide({"approver": [people["alice"]]})
+        _raise(agent, "q-alices", kind="question")
+        _provide({"approver": [people["alice"], people["bob"]]})
+        second = _raise(agent, "q-shared", kind="question", replaces="q-alices")
+
+        [ask] = _svc().list_asks_page(people["bob"], is_platform=False,
+                                      include_ended=True).items
+        assert ask.id == second["id"]
+        assert ask.replaces is None
