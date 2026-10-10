@@ -27,7 +27,7 @@ from database import (
 from dependencies import get_current_user, get_optional_user, assert_owns
 from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
-from services import agent_skills_listing, canvas_share_service
+from services import agent_skills_listing, canvas_share_service, login_policy_gate, rate_limiter
 from services.agent_auth import agent_httpx_client
 from services.chat_execution_service import terminate_execution as _terminate_execution
 from services.chat_signals import ChatDispatchError
@@ -446,6 +446,21 @@ async def get_public_playbooks(token: str, request: Request):
     return view
 
 
+# ent#849: strong refs so a detached code send is not garbage-collected mid-flight.
+_verification_tasks: set = set()
+
+
+async def _send_verification_if_allowed(link_id, email: str, agent_name: str) -> None:
+    """Mint and send a public-link code off the response path (policy-refused mode)."""
+    try:
+        if not login_policy_gate.email_code_allowed_for(email):
+            return
+        data = db.create_verification(link_id=link_id, email=email, expiry_minutes=10)
+        await email_service.send_verification_code(email, data["code"], agent_name=agent_name)
+    except Exception:
+        logger.exception("Failed to issue public-link verification code")
+
+
 @router.post("/verify/request")
 async def request_verification_code(
     verification: VerificationRequest,
@@ -474,6 +489,26 @@ async def request_verification_code(
             status_code=429,
             detail="Too many verification requests. Please wait 10 minutes."
         )
+
+    # ent#849: while the login policy refuses email codes, every address takes
+    # the same background path: members of the organisation get no code, and
+    # neither the response nor its timing tells a member from an outsider.
+    if not login_policy_gate.email_code_allowed():
+        # The row count above sees only addresses that were sent a code, so
+        # count every request here too, or the 429 would tell them apart.
+        if not rate_limiter.check(
+            f"public_verify_req_email:{verification.email.lower()}",
+            MAX_VERIFICATION_REQUESTS_PER_EMAIL, 10 * 60,
+        ).allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many verification requests. Please wait 10 minutes."
+            )
+        task = asyncio.create_task(_send_verification_if_allowed(
+            link["id"], verification.email, link["agent_name"]))
+        _verification_tasks.add(task)
+        task.add_done_callback(_verification_tasks.discard)
+        return {"message": "Verification code sent", "expires_in_seconds": 10 * 60}
 
     # Create verification code
     verification_data = db.create_verification(
@@ -519,6 +554,11 @@ async def confirm_verification_code(
     check_login_rate_limit(client_ip)
     check_public_link_rate_limit(client_ip)
     link = _validate_public_link(confirmation.token)
+
+    # ent#849: refused before redeeming, with the wrong-code answer.
+    if not login_policy_gate.email_code_allowed_for(confirmation.email):
+        record_login_attempt(client_ip, success=False)
+        return VerificationResponse(verified=False, error="invalid_code")
 
     # Verify the code
     success, error, session_data = db.verify_code(

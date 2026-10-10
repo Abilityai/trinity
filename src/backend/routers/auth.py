@@ -13,6 +13,7 @@ import redis
 
 from models import Token
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services import login_policy_gate
 from config import (
     SECRET_KEY,
     ALGORITHM,
@@ -304,6 +305,7 @@ async def get_auth_mode():
 
     Returns:
         - email_auth_enabled: Whether email-based login is enabled
+        - email_code_login_enabled: Whether the email-code form may be used (ent#849)
         - setup_completed: Whether first-time setup is complete
     """
     # Check if email auth is enabled (can be overridden via settings)
@@ -312,6 +314,8 @@ async def get_auth_mode():
 
     return {
         "email_auth_enabled": email_auth_enabled,
+        # ent#849: false when the login policy turned email-code sign-in off.
+        "email_code_login_enabled": email_auth_enabled and login_policy_gate.email_code_allowed(),
         "setup_completed": is_setup_completed()
     }
 
@@ -545,6 +549,15 @@ async def request_email_login_code(request: Request):
             detail="Email authentication is disabled"
         )
 
+    # ent#849: a registered login policy can turn email-code sign-in off.
+    # Checked before the body is read, so the refusal is identical for every
+    # address and spends no rate-limit budget. `/token` never asks this gate.
+    if not login_policy_gate.email_code_allowed():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="email_code_disabled"
+        )
+
     # Parse request
     body = await request.json()
     login_request = EmailLoginRequest(**body)
@@ -617,6 +630,15 @@ async def verify_email_login_code(request: Request):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email authentication is disabled"
+        )
+
+    # ent#849: a registered login policy can turn email-code sign-in off.
+    # Checked before the body is read, so the refusal is identical for every
+    # address and spends no rate-limit budget. `/token` never asks this gate.
+    if not login_policy_gate.email_code_allowed():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="email_code_disabled"
         )
 
     # Get client IP for rate limiting

@@ -148,6 +148,11 @@ Public User -> POST /api/public/verify/confirm
             -> Generate session_token (24h validity)
             -> Return {session_token: "..."}
 
+            ent#849: when login_policy_gate refuses email codes, request and
+            confirm refuse platform users and whitelisted addresses (same
+            body as a normal send / "invalid_code"); every request sends in a
+            detached task and counts toward the per-address 429.
+
 Public User -> POST /api/public/chat/{token}
               {message: "...", session_token: "..."}
             -> Backend validates session -> verified email
