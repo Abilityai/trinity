@@ -19,6 +19,7 @@ As a platform administrator, I want to configure and sync a GitHub repository co
 | `src/frontend/src/views/Settings.vue:514-524` | `PUT /api/settings/{key}` | Save URL/branch settings |
 | Settings → Skills Library → Automation | `GET/PUT /api/settings/skills-library` | Auto-sync + fleet re-inject config, sync status, last fleet report (ent#236) |
 | — (background) | `services/skills_sync_service.py` | Scheduled sync loop (ent#236) |
+| MCP (admin principals: user-scoped key of an admin, system agent) | `list_skill_sources`, `register_skill_source`, `update_skill_source`, `delete_skill_source`, `sync_skill_source`, `sync_skill_library` → `/api/skills/sources[...]`, `POST /api/skills/sources/apply`, `POST /api/skills/library/sync` | Source management + sync over MCP (trinity-enterprise#692); agent and connector keys never see these tools and the routes refuse them |
 
 ---
 
@@ -709,6 +710,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 | Date | Changes |
 |------|---------|
+| 2026-10-10 | **ent#692**: source management over MCP for admin principals (`src/mcp-server/src/tools/skill_sources.ts`) — fenced by principal, not transport. New idempotent `POST /api/skills/sources/apply` (keyed on the repo URL; `created`/`updated`/`unchanged`, 409 `ambiguous_source`); create accepts `priority`. `GET /api/skills/library/status` now carries `last_fleet_reinject` (counts only — the per-agent `failures` map stays on the admin routes), so whoever ran a sync can read its consequence. Sync tools report `ran` / `refused_busy` / `failed`. |
 | 2026-10-06 | **#3123**: bundled community-catalog pin bumped to `trinity-skills` **v0.3.0** (fresh-install seed only). The catalog gains `update-dashboard`, the playbook the metrics tiles already point users at, and drops the four retired `add-*` installers (now marketplace-only), giving 38 skills. The guard floor rises to v0.3.0, and `docs/user-docs/automation/skills-and-playbooks.md` joins `.env.example` in the parity check. Existing instances keep their row (ent#529); that user doc now carries the steps for moving one to a newer tag (`PUT /api/skills/sources/{id}`, then a full sync). |
 | 2026-09-30 | **ent#672**: the listing the sync produces now carries each skill's lifecycle keys — `deprecated` and `superseded_by` (the library's `superseded-by`) — parsed on every listing, never persisted, so a re-sync that drops the key clears the flag. Contract details: [skill-injection.md](skill-injection.md). |
 | 2026-09-06 | **#2545 + #2550**: bundled community-catalog pin bumped to `trinity-skills` **v0.2.0** (fresh-install seed only — adds the `project-management` category, 14 skills; `.env.example` documents the same value, `tests/unit/test_2545_skill_source_pin.py` keeps them in step). Update-path tag pin now compares the tag **peeled** (`refs/tags/<ref>^{commit}`): an annotated tag's bare rev-parse is the tag object, so the unmoved bundled source was refused as `moved_tag` on every sync after the first (`tests/unit/test_2550_annotated_tag_pin.py`, both tag kinds). |
@@ -719,5 +721,5 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 ---
 
-**Last Updated**: 2026-10-06
-**Status**: Verified - Updated for #3123 bundled catalog pin v0.3.0
+**Last Updated**: 2026-10-10
+**Status**: Verified - Updated for ent#692 source management over MCP
