@@ -67,6 +67,42 @@ def _is_expired(item: dict) -> bool:
     return bool(expires_at) and expires_at <= utc_now_iso()
 
 
+def _resolved_people(item: dict) -> List[str]:
+    """Everyone the ask's role resolved to (`resolved_to`, platform-written at
+    raise time — never agent-authored), lower-cased and de-duplicated."""
+    raw = item.get("resolved_to") or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = []
+    out: List[str] = []
+    for p in raw if isinstance(raw, list) else []:
+        email = str(p or "").strip().lower()
+        if email and email not in out:
+            out.append(email)
+    return out
+
+
+def _is_shared(item: dict) -> bool:
+    """An ask to a role several people fill (trinity-enterprise#816): ONE row,
+    delivered to each of them; the first answer wins."""
+    return len(_resolved_people(item)) > 1
+
+
+def _is_addressed_to(item: dict, email: Optional[str]) -> bool:
+    """`email` is the ask's single addressee, or one of the people its role
+    resolved to (trinity-enterprise#816) — the Python twin of the list's SQL
+    condition (`db/operator_queue._list_conditions`), so a per-ask door never
+    disagrees with the list about who an ask is for."""
+    viewer = (email or "").strip().lower()
+    if not viewer:
+        return False
+    if (item.get("addressed_to_email") or "").strip().lower() == viewer:
+        return True
+    return viewer in _resolved_people(item)
+
+
 # Queue statuses that mean "this has been answered". `acknowledged` is the
 # operator-side terminal for the same thing; both read as answered to a client,
 # which has no vocabulary for the distinction and no surface that uses it.
@@ -108,7 +144,8 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
     """`(ended_at, ended_by)` for a client — COARSE on purpose.
 
     `ended_by` is `you` (the viewer answered), `operator` (another person
-    answered or cancelled), `platform` (the platform ended the row itself —
+    answered or cancelled), `someone_else` (a person a SHARED ask was also
+    delivered to answered it, trinity-enterprise#816), `platform` (the platform ended the row itself —
     `disposed_by = 'platform'`, #3246: never a person's answer, never a
     timeout), `agent` (the agent replaced it, #3247) or `timeout`; never an email and never the cancel
     reason (both are the operator's, not the client's). `ended_at` is the
@@ -128,11 +165,46 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
         return item.get("disposed_at"), "agent"
     by = item.get("disposed_by_email") or (item.get("responded_by_email") if status == "answered" else None)
     who = "you" if by and viewer_email and by.lower() == viewer_email.lower() else "operator"
+    if who == "operator" and status == "answered" and _answered_by_co_addressee(item, by):
+        # trinity-enterprise#816: another person the shared ask was delivered
+        # to answered it first — not the operator. An ANSWER only: a
+        # co-addressee who is also an operator and CANCELS it from the
+        # Operating Room ended it as the operator, so it stays the coarse,
+        # unnamed `operator` (the Workspace has no cancel, and refuses
+        # dismissal on a shared ask).
+        who = "someone_else"
     at = item.get("disposed_at") or (item.get("responded_at") if status == "answered" else None)
     return at, who
 
 
-def _linked_request_id(item: dict, key: str) -> Optional[str]:
+def _answered_by_co_addressee(item: dict, by: Optional[str]) -> bool:
+    return (bool(by) and _is_shared(item)
+            and str(by).strip().lower() in _resolved_people(item))
+
+
+def _answered_by(item: dict, ended_by: Optional[str]) -> Optional[str]:
+    """Who answered a SHARED ask first, for the others it was delivered to
+    (trinity-enterprise#816, the 2026-10-07 ruling: "the others see that
+    someone else answered"). Only ever a co-addressee — a person the same role
+    resolved to, as the viewer was — so it names nobody the viewer was not
+    already asked alongside; an operator's identity never crosses (their
+    ending stays the coarse `operator`). Their account name when they have
+    one, else their address."""
+    if ended_by != "someone_else":
+        return None
+    email = (item.get("disposed_by_email") or item.get("responded_by_email") or "").strip().lower()
+    if not email:
+        return None
+    try:
+        user = db.get_user_by_email(email)
+    except Exception:  # noqa: BLE001 — a name is a nicety; the address stands in
+        user = None
+    name = " ".join(str((user or {}).get("name") or "").split())
+    return name or email
+
+
+def _linked_request_id(item: dict, key: str,
+                       viewer_email: Optional[str] = None) -> Optional[str]:
     """#3247: the `request_id` of the ask `item[key]` names (`replaces` /
     `replaced_by` store the other row's uuid), and nothing else about it.
 
@@ -146,9 +218,16 @@ def _linked_request_id(item: dict, key: str) -> Optional[str]:
     other = db.get_operator_queue_item(other_id)
     if not other or other.get("agent_name") != item.get("agent_name"):
         return None
+    if other.get("type") not in _VISIBLE_KINDS:
+        return None
+    if viewer_email:
+        # trinity-enterprise#816: an ask is the viewer's when it is addressed to
+        # them OR delivered to them as one of several — the same rule the list
+        # and every per-ask door apply.
+        return other.get("request_id") if _is_addressed_to(other, viewer_email) else None
     mine = (item.get("addressed_to_email") or "").strip().lower()
     theirs = (other.get("addressed_to_email") or "").strip().lower()
-    if not mine or mine != theirs or other.get("type") not in _VISIBLE_KINDS:
+    if not mine or mine != theirs:
         return None
     return other.get("request_id")
 
@@ -188,6 +267,8 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         status=_status_of(item),
         ended_at=ended_at,
         ended_by=ended_by,
+        answered_by=_answered_by(item, ended_by),
+        shared=_is_shared(item),
         chat_id=chat_id if isinstance(chat_id, str) else None,
         raised_in_turn=raised_in_turn,
         discussion_chat_id=discussion if isinstance(discussion, str) and discussion else None,
@@ -195,8 +276,8 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         sync=_coarse_sync(item),
         aging=bool(is_aged(item)),
         decided_by_options=ask_service.decided_by_options(item),
-        replaces=_linked_request_id(item, "replaces"),
-        replaced_by=_linked_request_id(item, "replaced_by"),
+        replaces=_linked_request_id(item, "replaces", viewer_email),
+        replaced_by=_linked_request_id(item, "replaced_by", viewer_email),
     )
 
 
@@ -399,8 +480,9 @@ def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None,
 def _owned_ask(item_id: str, email: str, is_platform: bool, *, strict: bool = False) -> dict:
     """The ask row, when it is one THIS viewer may read — else the uniform 404.
 
-    Missing, addressed to someone else, off the viewer's roster, or a kind the
-    Workspace never renders are ONE refusal: a distinguishable 403 would let any
+    Missing, addressed to someone else (neither its single addressee nor one of
+    the people a shared ask was delivered to, trinity-enterprise#816), off the
+    viewer's roster, or a kind the Workspace never renders are ONE refusal: a distinguishable 403 would let any
     client enumerate which ask ids exist (Invariant #8). Shared by the answer
     path and the context read (trinity-enterprise#610 §3g L7), so the two cannot
     disagree about who owns an ask. The kind check is the list's own
@@ -414,7 +496,7 @@ def _owned_ask(item_id: str, email: str, is_platform: bool, *, strict: bool = Fa
     item = db.get_operator_queue_item(item_id)
     if (
         not item
-        or (item.get("addressed_to_email") or "").lower() != email.lower()
+        or not _is_addressed_to(item, email)
         or item.get("type") not in _VISIBLE_KINDS
         or not _on_roster(item.get("agent_name") or "", email, is_platform, strict=strict)
     ):
@@ -524,6 +606,11 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     return _project(updated, viewer_email=email, resume_requested=dispatched)
 
 
+#: trinity-enterprise#816: why Dismiss and Discuss are refused on a shared ask.
+_SHARED_REFUSAL = ("This ask went to several people, so it can't be {action} here yet "
+                   "\u2014 answer it, or leave it for someone else to answer.")
+
+
 def dismiss_ask(item_id: str, email: str, is_platform: bool) -> WorkspaceAsk:
     """The addressee ends an ask WITHOUT answering it (trinity-enterprise#748).
 
@@ -538,6 +625,11 @@ def dismiss_ask(item_id: str, email: str, is_platform: bool) -> WorkspaceAsk:
     # nothing to decide, so there is no ending to choose for it.
     if (item.get("type") or "question") == "alert":
         raise AskError(422, "not_dismissable", "An update has nothing to decide.")
+    # trinity-enterprise#816 (the 2026-10-07 ruling): one person's dismissal
+    # would end a shared ask for everyone it was delivered to. Refused by name
+    # until dismissal is per person (a follow-up); answering is unaffected.
+    if _is_shared(item):
+        raise AskError(422, "shared_ask", _SHARED_REFUSAL.format(action="dismissed"))
     # Past its deadline it has already ended (expired), whether or not the
     # poller has swept it: that ending is the true one, not a dismissal.
     if item.get("status") == "pending" and not _is_expired(item):
@@ -594,6 +686,11 @@ def discuss_ask(item_id: str, email: str, is_platform: bool):
     item = _owned_ask(item_id, email, is_platform)
     if (item.get("type") or "question") == "alert":
         raise AskError(422, "not_discussable", "An update has nothing to decide.")
+    # trinity-enterprise#816: a discussion chat belongs to one person, and a
+    # shared ask's link holds one chat — refused by name for now (a follow-up
+    # makes it per person).
+    if _is_shared(item):
+        raise AskError(422, "shared_ask", _SHARED_REFUSAL.format(action="discussed"))
     agent = item.get("agent_name") or ""
 
     def _linked(row: dict) -> Optional[str]:

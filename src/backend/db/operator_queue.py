@@ -1117,10 +1117,17 @@ class OperatorQueueOperations:
             # match NOTHING rather than silently widening to everyone's. The
             # other filters narrow a view the caller is already entitled to see;
             # this one decides entitlement, which is why it diverges.
-            conds.append(
-                func.lower(operator_queue.c.addressed_to_email)
-                == addressed_to_email.strip().lower()
-            )
+            #
+            # trinity-enterprise#816: an ask to a role SEVERAL people fill has no
+            # single addressee — it is addressed to every person in its
+            # platform-written `resolved_to` (the 2026-10-07 ruling: one row,
+            # delivered to each of them). So "addressed to this person" is the
+            # single addressee OR membership of `resolved_to`.
+            viewer = addressed_to_email.strip().lower()
+            conds.append(or_(
+                func.lower(operator_queue.c.addressed_to_email) == viewer,
+                self._resolved_to_contains(viewer),
+            ))
         if since:
             conds.append(operator_queue.c.created_at >= since)
         if hide_ended_before:
@@ -2191,6 +2198,27 @@ class OperatorQueueOperations:
         "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
         "\u2028\u2029\u202f\u205f\u3000"
     )
+
+    @staticmethod
+    def _resolved_to_contains(email: str):
+        """`email` is one of the people in the row's `resolved_to`
+        (trinity-enterprise#816) — a SQL condition, so the Workspace list pages
+        and counts over exactly what it shows (#3059).
+
+        `resolved_to` is TEXT holding `json.dumps(list_of_emails)`
+        (`create_native_item`), so membership is the JSON-quoted email as a
+        substring: the quotes bound it, so `a@x.com` never matches
+        `aa@x.com` or `a@x.community`. LIKE-escaped, so a `_` or `%` in an
+        address matches only itself. Lower-cased on both sides (the writers
+        already store lower-case; the read must not depend on it). `lower` and
+        `LIKE … ESCAPE` behave the same on SQLite and PostgreSQL over this
+        ASCII text (`json.dumps` escapes anything else) — no dialect branch.
+        A NULL `resolved_to` matches nothing. An empty `email` matches nothing:
+        `""` JSON-quotes to `""`, which no stored list of addresses contains.
+        """
+        fragment = json.dumps(email).lower()
+        escaped = fragment.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return func.lower(operator_queue.c.resolved_to).like(f"%{escaped}%", escape="\\")
 
     @staticmethod
     def _request_id_not_prefixed_ci(prefixes):

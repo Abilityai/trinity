@@ -102,7 +102,7 @@ const askOperatorParameters = z.object({
     .max(256)
     .describe(
       "An id YOU choose for this ask: letters, digits, '.', '_', ':' or '-'. Raising again with the same id returns the first receipt as status replayed, with differs naming any field that is not the same, so a retry never makes a second ask; use a NEW request_id for a new ask. " +
-        "The receipt: status (created | replayed), id, to_role (the role it went to, never a person's email), resolved (false when nobody could be named and it went to the operators), ask_status, and wakes_on_ending (true when your owner has turned on waking you when your asks end).",
+        "The receipt: status (created | replayed), id, to_role (the role it went to, never a person's email), resolved (true when a person's Workspace will show the ask — every person the role resolves to, when several fill it; false when nobody could be named and it went to the operators), ask_status, and wakes_on_ending (true when your owner has turned on waking you when your asks end).",
     ),
   title: z
     .string()
@@ -136,7 +136,7 @@ const askOperatorParameters = z.object({
     .enum(["primary", "approver", "viewer", "operator"])
     .optional()
     .describe(
-      "Who should answer: primary (your owner — it also shows in their Workspace; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused with role_unassigned until someone fills them.",
+      "Who should answer: primary (your owner — it also shows in their Workspace; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused with role_unassigned until someone fills them. A role several people fill reaches every one of them: the first answer wins.",
     ),
   expires_at: z
     .string()

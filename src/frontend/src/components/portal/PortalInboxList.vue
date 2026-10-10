@@ -217,7 +217,12 @@ const kindLabel = (it) => queueTypeLabel(it.ask && it.ask.kind) || 'Ask'
 
 function askStatusLabel(it) {
   const s = it.status
-  if (s === 'answered') return it.ask?.ended_by === 'you' ? 'Answered · you' : 'Answered'
+  if (s === 'answered') {
+    if (it.ask?.ended_by === 'you') return 'Answered · you'
+    // trinity-enterprise#816: a shared ask another person answered first.
+    if (it.ask?.ended_by === 'someone_else') return `Answered · ${it.ask.answered_by || 'someone else'}`
+    return 'Answered'
+  }
   if (s === 'expired') return 'Expired'
   // #3247: the agent replaced it — never read as the operator's cancel.
   if (s === 'cancelled' && it.ask?.ended_by === 'agent') return workspaceEndingText(it.ask)
