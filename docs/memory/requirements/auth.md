@@ -17,7 +17,7 @@
 ### 2.2 Admin Password Login
 - **Status**: ✅ Implemented
 - **Description**: Password-based fallback for admin user
-- **Key Features**: Bcrypt hashing, first-time setup wizard
+- **Key Features**: Bcrypt hashing, first-time setup wizard, change from the UI (§2.10)
 
 ### 2.3 Session Persistence
 - **Status**: ✅ Implemented
@@ -124,5 +124,23 @@
 - **Tests**: `tests/unit/test_ent164_self_change_grants.py` (fences read off FastAPI's dependant graph, behaviour per class, ghost and own-schedule exemptions, calibrating refusal), `tests/unit/test_2996_owner_config_person_only.py` (real keys: an ungranted agent gets the named refusal, a granted one changes the stored value, the grant does not open the PERSON writes; the grant route), `tests/unit/test_2996_human_only_routes.py` (census class `person_or_grant`).
 - **Settings surface (trinity-enterprise#756)**: Agent Settings → **Permissions to change itself** — the five as toggles (skills · schedules · instructions · other agents · projects), each with a plain line of what it allows and what is refused without it, and *granted by · when* (absolute time on hover). Read by the owner (and admins); a non-owner's read 404s and the card does not render. Editable only by an admin — the owner sees the state with *Only an instance admin can change these*; the PUT itself stays the gate (admin **and** interactive). A fresh agent shows all five **off** with a one-line explanation. **Autonomy** is shown beside them as a person's switch, never a grant. The agent's **open permission requests** are listed — pending queue items from this agent whose title contains a permission id (the refusal tells it to put one there) — each linking to Operations. Toggle refusals (calibrating, system, ephemeral) render next to their own toggle in the backend's words. **OSS-core, ungated** — the UI for #3236's grants follows #3236's open-core ruling.
 - **Flow**: `feature-flows/self-change-grants.md`
+
+### 2.10 Admin Password Change (trinity-enterprise#709)
+- **Status**: ✅ Implemented (2026-10-10)
+- **Problem**: the admin password was set exactly once, at first-run setup. Rotating it meant editing `ADMIN_PASSWORD` in `.env` and restarting the backend — shell access, every session dropped, MCP clients disconnected — which is not a rotation an operator can do in seconds after a suspected leak.
+- **Surface**: Settings → General → **Account** card → *Change password* (and Mobile Admin → System → *Account*), one stepped dialog:
+  1. **Current password** — verified by `POST /api/users/me/password/verify` before anything else is shown.
+  2. **Second factor** — shown only when `services/mfa_gate.step_up_decision` reports the user enrolled or required. OSS builds with no provider skip it entirely (the dialog goes 1 → 3). A user whose policy requires 2FA but who is not enrolled is refused (`second_factor_enrollment_required`) — they enroll first.
+  3. **New password + confirm** — the first-run rules (`utils/password_validation.py`, OWASP ASVS 2.1) shown as inline hints; a mismatch is shown before submit and blocks it.
+  4. **Done** — "Password updated", with a note that other sessions were signed out.
+- **Endpoint**: `PUT /api/users/me/password` `{current_password, new_password, confirm_password, second_factor_code?}`. The caller changes **their own** password — no username is accepted. Gate: `require_interactive` (JWT session only — any MCP key, agent key, or event-loopback token is refused) **and** `assert_admin` (Invariant #8; never `require_role("admin")`). A grant, so it is human-only. An account with no password hash (email-code-only) gets `409 no_password`.
+- **Refusals are named** (`detail.code`), never a 401 (the frontend treats any 401 as "session ended"): `current_password_incorrect` (400), `too_many_attempts` (429), `second_factor_required` / `second_factor_invalid` (400), `second_factor_enrollment_required` (409), `second_factor_unavailable` (503 — the provider cannot verify a code; fails **closed**, unlike login's fail-open gate, because this is a re-authentication of an already-signed-in session), `password_mismatch`, `password_too_weak` (with the failing rules in `errors[]`), `password_unchanged` (400).
+- **Rate limit**: the current-password and second-factor checks share login's counters (`routers/auth.py::check_login_rate_limit` / `record_login_attempt`, per-account 5/15 min + per-IP 30/5 min), so the dialog is not an offline-guess oracle for a stolen session and a guess here counts against login too.
+- **Env reconciliation — the DB wins once set from the UI**: a successful change of the provisioned admin (`utils/admin_identity.admin_username()`) writes `system_settings['admin_password_source'] = 'ui'`. At boot, `_ensure_admin_user` (SQLite) and `_ensure_admin_user_engine` (PostgreSQL) then leave a usable stored hash alone even when `ADMIN_PASSWORD` in `.env` no longer matches; the env value only seeds a missing or unusable hash. Without the marker the old behaviour holds (env re-syncs the hash). No schema change — the marker is a settings row.
+- **Sessions**: every other session of the account is signed out. A Redis cutoff `auth:sessions_revoked_before:{username}` is written, and `get_current_user`, `decode_token` (WebSocket) and `/api/auth/validate` reject a token issued at or before it (access tokens now carry `iat`; a token without one is treated as issued before). The response carries a fresh access token for the dialog's own tab, exempted from the cutoff by its `jti`. Fail-open on Redis like logout (#187). MCP API keys are not sessions and are untouched — revoke them in Settings → MCP Keys.
+- **Audit**: `AUTHENTICATION / password_changed` (actor, IP, request id; `details.second_factor` says whether step 2 ran) on success and `password_change_failed` (with the refusal code) on a wrong current password or second factor. Password values are never logged.
+- **Open-core**: OSS core, not entitlement-gated — admin password management already exists in OSS (first-run setup). The second-factor step uses the generic `mfa_gate` seam; a provider verifies a code through an optional `verify_code(user, code)` method on the `MfaProvider` protocol.
+- **Tests**: `tests/unit/test_ent709_admin_password_change.py` (endpoint, gate, rate limit, 2FA stub, session cutoff, audit, boot reconciliation on both paths), `tests/unit/test_2996_human_only_routes.py` (census class `interactive`), `src/frontend/tests/unit/changePasswordDialog.spec.js` (mounted dialog).
+- **Flow**: `feature-flows/admin-password-change.md`
 
 ---

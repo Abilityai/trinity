@@ -209,6 +209,12 @@
                The panel fetches the gated enterprise endpoint itself. -->
           <ActivationFunnelPanel v-if="activeTab === 'activation'" />
 
+          <!-- ent#709 — the signed-in admin's own account: change password.
+               First on General — it is the one card here about YOU. -->
+          <div v-if="activeTab === 'general'" class="mb-6">
+            <AccountPasswordPanel />
+          </div>
+
           <!-- ent#581 — Re-run setup: reopens the first-run overlay the same
                way `?onboarding=1` does, so a skipped step is recoverable. -->
           <div v-if="activeTab === 'general'" class="mb-6">
@@ -2280,6 +2286,7 @@ import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
 import SubscriptionsPanel from '../components/settings/SubscriptionsPanel.vue'
 import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
+import AccountPasswordPanel from '../components/settings/AccountPasswordPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
 import SkillManagersPanel from '../components/SkillManagersPanel.vue'

@@ -53,3 +53,25 @@ def is_usable_password_hash(value) -> bool:
     admin, and the wizard is its only way in).
     """
     return isinstance(value, str) and value.strip() != ""
+
+
+#: trinity-enterprise#709 — the `system_settings` row that says the admin's
+#: password was last set from the UI (Settings → Change password). Once it reads
+#: ``ADMIN_PASSWORD_SOURCE_UI``, the boot-time seeding in ``database.py`` leaves a
+#: usable stored hash alone instead of re-syncing it to ``ADMIN_PASSWORD`` — the
+#: DB wins, and ``.env`` only seeds a missing or unusable hash. Without it, a
+#: restart with the old value still in ``.env`` would silently revert a rotation.
+ADMIN_PASSWORD_SOURCE_KEY = "admin_password_source"
+ADMIN_PASSWORD_SOURCE_UI = "ui"
+
+
+def env_may_resync_admin_password(stored_hash, password_source) -> bool:
+    """Whether boot may overwrite the admin's stored hash with ``ADMIN_PASSWORD``.
+
+    One rule for both boot paths (SQLite cursor and engine), so they cannot
+    drift: the env value wins unless the password was set from the UI AND the
+    stored hash is one a login could verify (#709).
+    """
+    if password_source == ADMIN_PASSWORD_SOURCE_UI and is_usable_password_hash(stored_hash):
+        return False
+    return True

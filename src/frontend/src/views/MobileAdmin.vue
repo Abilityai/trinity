@@ -524,6 +524,16 @@
             </div>
           </div>
 
+          <!-- trinity-enterprise#709 — the signed-in admin's own password,
+               the same stepped dialog as Settings → General → Account. -->
+          <div v-if="isAdmin" class="system-section" data-testid="account-section">
+            <h2 class="section-title">Account</h2>
+            <BaseButton variant="secondary" data-testid="open-change-password" @click="changePasswordOpen = true">
+              Change password
+            </BaseButton>
+            <ChangePasswordDialog v-model="changePasswordOpen" />
+          </div>
+
           <!-- Action Result -->
           <div v-if="actionResult" class="action-result" :class="actionResult.success ? 'result-success' : 'result-error'">
             {{ actionResult.message }}
@@ -681,6 +691,9 @@ import { queueEnding, queueEndingText, queueSeenLine, recentlyEnded } from '../u
 import { formatLocalDateTime } from '../utils/timestamps'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
+import BaseButton from '../components/base/BaseButton.vue'
+import ChangePasswordDialog from '../components/settings/ChangePasswordDialog.vue'
+import { useRole } from '../composables/useRole'
 import QueueProposal from '../components/operator/QueueProposal.vue'
 
 const route = useRoute()
@@ -767,6 +780,9 @@ const lastLoadedAt = reactive({ agents: null, queue: null, notifications: null, 
 // permission boundary — the Agents tab and the fleet summary say "admin-only"
 // instead of a load failure, and the poll stops asking.
 const fleetAdminOnly = ref(false)
+// ent#709: the Account section's change-password dialog.
+const { isAdmin } = useRole()
+const changePasswordOpen = ref(false)
 const isForbidden = (e) => e?.response?.status === 403
 
 // Polling

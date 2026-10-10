@@ -103,7 +103,12 @@ from db.connection import get_db_connection, DB_PATH
 from utils.helpers import utc_now_iso
 # #2381: the shared "is this install provisioned?" policy. Stdlib-only leaf, so
 # it is safe at import time here; `routers/setup.py` reads the same two rules.
-from utils.admin_identity import admin_username, is_usable_password_hash
+from utils.admin_identity import (
+    admin_username,
+    is_usable_password_hash,
+    ADMIN_PASSWORD_SOURCE_KEY,
+    env_may_resync_admin_password,
+)
 
 # Import schema and migration utilities
 from db.migrations import run_all_migrations
@@ -863,6 +868,30 @@ _NO_ADMIN_AT_BOOT_NOTE = (
 )
 
 
+_ADMIN_UI_CHANGE_WINS_NOTE = (
+    "[ent#709] Admin '%s' password was changed from the UI; ADMIN_PASSWORD in "
+    ".env no longer matches and is ignored (it only seeds a missing password). "
+    "Remove it from .env, or update it, to avoid confusion."
+)
+
+
+def _read_setting_sqlite(cursor, key):
+    """One `system_settings` value on the raw boot cursor; None if absent/unreadable."""
+    try:
+        cursor.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _env_matches_hash(pwd_context, admin_password, existing_hash) -> bool:
+    try:
+        return bool(pwd_context.verify(admin_password, existing_hash))
+    except Exception:
+        return False
+
+
 def _ensure_admin_user_engine():
     """Ensure the admin user exists — engine-based path for PostgreSQL (#300).
 
@@ -887,6 +916,16 @@ def _ensure_admin_user_engine():
         return
 
     existing_hash = existing.get("password")
+    # trinity-enterprise#709: once the password was changed from the UI, the
+    # stored hash wins and `.env` only seeds a missing/unusable one.
+    try:
+        source = SettingsOperations().get_setting_value(ADMIN_PASSWORD_SOURCE_KEY)
+    except Exception:
+        source = None
+    if not env_may_resync_admin_password(existing_hash, source):
+        if not _env_matches_hash(pwd_context, admin_password, existing_hash):
+            print(_ADMIN_UI_CHANGE_WINS_NOTE % admin_username)
+        return
     needs_update = False
     if existing_hash and not existing_hash.startswith("$2"):
         needs_update = existing_hash == admin_password  # plaintext → bcrypt
@@ -948,6 +987,13 @@ def _ensure_admin_user(cursor, conn):
 
         from passlib.context import CryptContext
         pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+        # trinity-enterprise#709: once the password was changed from the UI,
+        # the stored hash wins and `.env` only seeds a missing/unusable one.
+        if not env_may_resync_admin_password(existing_hash, _read_setting_sqlite(cursor, ADMIN_PASSWORD_SOURCE_KEY)):
+            if admin_password and not _env_matches_hash(pwd_context, admin_password, existing_hash):
+                print(_ADMIN_UI_CHANGE_WINS_NOTE % admin_username)
+            return
 
         if existing_hash and not existing_hash.startswith("$2"):
             # Password is likely plaintext (bcrypt hashes start with $2)

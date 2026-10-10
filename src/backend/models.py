@@ -4512,6 +4512,43 @@ class UpdateMyEmailRequest(BaseModel):
     code: Optional[str] = None
 
 
+class VerifyMyPasswordRequest(BaseModel):
+    """`POST /api/users/me/password/verify` — step 1 of the change-password
+    dialog (trinity-enterprise#709). The caller's OWN account; no username."""
+    model_config = ConfigDict(extra="forbid")
+    current_password: str = Field(..., max_length=1024)
+
+
+class VerifyMyPasswordResponse(BaseModel):
+    verified: bool = True
+    # True when the dialog must show the second-factor step (the mfa_gate
+    # provider reports the user enrolled or required). Always False on OSS.
+    second_factor_required: bool = False
+    # Required by policy but not enrolled — the change will be refused until
+    # the user enrolls.
+    second_factor_enrollment_required: bool = False
+
+
+class ChangeMyPasswordRequest(BaseModel):
+    """`PUT /api/users/me/password` (trinity-enterprise#709). `extra="forbid"`
+    so a target username can never ride along: this changes the caller's own
+    password and nobody else's."""
+    model_config = ConfigDict(extra="forbid")
+    current_password: str = Field(..., max_length=1024)
+    new_password: str = Field(..., max_length=1024)
+    confirm_password: str = Field(..., max_length=1024)
+    second_factor_code: Optional[str] = Field(default=None, max_length=64)
+
+
+class ChangeMyPasswordResponse(BaseModel):
+    success: bool = True
+    # A fresh session for the tab that made the change; every other session of
+    # the account was signed out.
+    access_token: str
+    token_type: str = "bearer"
+    other_sessions_signed_out: bool
+
+
 class RequestEmailBindCodeRequest(BaseModel):
     """`POST /api/users/me/email/code` — send a bind code to a NEW address (ent#720)."""
     email: str

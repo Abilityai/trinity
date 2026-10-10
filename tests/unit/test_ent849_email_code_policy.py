@@ -549,6 +549,9 @@ _EXEMPT = {
     # Sends what service.portal_signin_request returns; that function holds the gate.
     ("client_portal/router.py", "portal_auth_request"),
     ("client_portal/router.py", "_issue_and_send"),
+    # `mfa_gate.verify_code` is the authenticator-app (TOTP) check on an already
+    # signed-in admin changing their password (trinity-enterprise#709) — no emailed code.
+    ("services/password_change_service.py", "check_second_factor"),
 }
 
 

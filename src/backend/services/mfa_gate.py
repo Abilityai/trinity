@@ -32,6 +32,17 @@ class MfaProvider(Protocol):
     def gate_decision(self, user: dict) -> dict:  # {"enrolled": bool, "required": bool}
         ...
 
+    # OPTIONAL (trinity-enterprise#709): verify a second-factor code for an
+    # already-signed-in user re-authenticating a sensitive change (the admin
+    # password). A provider without it cannot confirm a code, so step-up fails
+    # CLOSED — see `verify_code` below.
+    # def verify_code(self, user: dict, code: str) -> bool: ...
+
+
+class MfaUnavailable(Exception):
+    """The provider cannot answer a step-up question (errored, or has no
+    `verify_code`). Callers refuse the change rather than skip the factor."""
+
 
 _provider: Optional[MfaProvider] = None
 
@@ -88,3 +99,49 @@ def gate_login(user: dict, mode: str) -> Optional[dict[str, Any]]:
         "enrollment_required": required and not enrolled,
         "challenge_token": challenge,
     }
+
+
+# ---------------------------------------------------------------------------
+# Step-up (trinity-enterprise#709) — re-verifying an already-signed-in user
+# before a sensitive change. Unlike `gate_login`, these fail CLOSED: login
+# fails open so a 2FA bug is not a platform outage, but here the user already
+# has a session, so refusing one password change costs nothing comparable, and
+# skipping the factor would let a stolen session rotate the password.
+# ---------------------------------------------------------------------------
+
+
+def step_up_decision(user: dict) -> dict:
+    """``{"required": bool, "enrolled": bool}`` for a step-up on ``user``.
+
+    ``required`` means a code must be supplied: the user is enrolled, or policy
+    requires a second factor for them. No provider (OSS) → not required.
+    Raises :class:`MfaUnavailable` if the provider errors.
+    """
+    provider = _provider
+    if provider is None:
+        return {"required": False, "enrolled": False}
+    try:
+        decision = provider.gate_decision(user) or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[mfa_gate] provider.gate_decision failed during step-up")
+        raise MfaUnavailable(str(exc)) from exc
+    enrolled = bool(decision.get("enrolled"))
+    required = bool(decision.get("required"))
+    return {"required": enrolled or required, "enrolled": enrolled}
+
+
+def verify_code(user: dict, code: str) -> bool:
+    """Ask the provider whether ``code`` is a valid second factor for ``user``.
+
+    Raises :class:`MfaUnavailable` when there is no provider, it has no
+    ``verify_code``, or it errors — never returns True by default.
+    """
+    provider = _provider
+    verify = getattr(provider, "verify_code", None) if provider is not None else None
+    if not callable(verify):
+        raise MfaUnavailable("provider cannot verify a second-factor code")
+    try:
+        return bool(verify(user, code))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[mfa_gate] provider.verify_code failed")
+        raise MfaUnavailable(str(exc)) from exc

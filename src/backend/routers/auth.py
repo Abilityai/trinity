@@ -28,6 +28,7 @@ from dependencies import (
     create_access_token,
     get_current_user,
     is_token_revoked,
+    is_user_session_revoked,
     oauth2_scheme,
     revoke_token_jti,
 )
@@ -480,7 +481,8 @@ async def validate_token(request: Request):
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         user = db.get_user_by_username(username) if username else None
-        if username is None or user is None or is_token_revoked(payload.get("jti")):
+        if (username is None or user is None or is_token_revoked(payload.get("jti"))
+                or is_user_session_revoked(username, payload)):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token",
