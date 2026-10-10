@@ -674,7 +674,7 @@ The receipts above only help a caller who knows what they mean. The rule is now
   call timed out or could not be confirmed; read with `get_execution_result` /
   `get_fan_out_result` or `set_reminder` and end the turn; an error without an
   `execution_id` is checked in `list_recent_executions` before a word-for-word
-  re-send (`agent_busy` included — it is not "nothing ran", #3244); `pending_approval` is not
+  re-send; `agent_busy` means nothing ran and is re-sent after `retry_after_seconds` (#3244: only the `capacity` 429 is `agent_busy`; any other `/chat` 429 is a `rate_limited` result naming the failed run); `pending_approval` is not
   retried, and its `message` says whether the outcome will reach the caller (#3233); `parallel=true, async=true` for long work, whose end fires
   `agent.task.*` for a subscriber (a sequential `/chat` turn fires none).
   #3245 added: after a confirmed `failed` or `cancelled`, re-send word for word
