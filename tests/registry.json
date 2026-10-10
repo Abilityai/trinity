@@ -5535,6 +5535,17 @@
         "unit"
       ],
       "description": "Email-code sign-in policy seam: gate fail-open, web /api/auth/email/* 403 before any lookup, /api/auth/mode flag, /token never consults the gate, MCP inline / Workspace / Telegram / WhatsApp refusals, and an AST guard that every login-code caller asks the gate."
+    },
+    {
+      "file": "unit/test_3404_delegate_session_self_approval.py",
+      "feature": "abilityai/trinity#3404",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#3404: a Workspace session minted through a portal_delegate key (minted_by=delegate) or carrying no minted_by claim is a person for the ask routes but may not self-approve a gated skill; an emailed-code session and a platform person may. Real mint -> get_portal_principal -> both chat routes -> the execute_task backstop over a real per-test database; rotation keeps the claim; the self-approval audit row names the credential kind; PortalPrincipal.is_person defaults False. Mutation-proven. No Docker, no network."
     }
   ]
 }

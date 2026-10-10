@@ -359,8 +359,20 @@ PORTAL_DELEGATE_ALLOWED_ROUTES = {
 }
 
 
+# #3404 — HOW a Workspace session was minted, carried as the `minted_by` claim.
+# The emailed-code sign-in and the ent#163 delegated exchange mint the same
+# token, so without it a session a `portal_delegate` key asserted was read as
+# the person's own proof. One decision reads it: whether the session may
+# self-approve a gated skill (`PortalPrincipal.self_approves`), which only
+# `PORTAL_MINT_OTP` may — an allowlist, so a token with no claim (minted before
+# this shipped, or by a caller that did not say) is unproven too.
+PORTAL_MINT_OTP = "otp"
+PORTAL_MINT_DELEGATE = "delegate"
+
+
 def create_portal_session_token(
-    email: str, mode: str = "prod", session_start: Optional[int] = None
+    email: str, mode: str = "prod", session_start: Optional[int] = None,
+    minted_by: Optional[str] = None,
 ) -> str:
     """Mint a Workspace session token for a verified email. Carries no ``sub``
     (no platform identity) — only the email + the portal scope.
@@ -389,16 +401,35 @@ def create_portal_session_token(
     absolute_deadline = start + absolute_s
     expires_in = max(1, min(idle_deadline, absolute_deadline) - now)
 
+    data = {
+        "scope": PORTAL_SESSION_SCOPE,
+        "email": email.lower(),
+        "iat": now,
+        "sst": start,
+    }
+    if minted_by:
+        data["minted_by"] = minted_by  # #3404
     return create_access_token(
-        data={
-            "scope": PORTAL_SESSION_SCOPE,
-            "email": email.lower(),
-            "iat": now,
-            "sst": start,
-        },
+        data=data,
         expires_delta=timedelta(seconds=expires_in),
         mode=mode,
     )
+
+
+def portal_session_minted_by(token: str) -> Optional[str]:
+    """The `minted_by` claim of a portal session token, or None (#3404).
+
+    Says nothing about validity — `decode_portal_session` decides that; call
+    this only on a token it accepted. None for a token that carries no claim.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("scope") != PORTAL_SESSION_SCOPE:
+        return None
+    minted_by = payload.get("minted_by")
+    return minted_by if isinstance(minted_by, str) and minted_by else None
 
 
 def decode_portal_session(token: str) -> Optional[str]:
@@ -562,7 +593,12 @@ def renew_portal_session(token: str) -> Optional[str]:
     if started + absolute_s <= now:
         return None  # capped out — a fresh sign-in is required
 
-    new_token = create_portal_session_token(email, session_start=started)
+    # #3404: `minted_by` is carried through like `sst` — using a session must
+    # not turn a delegate-minted one into the person's own (or back).
+    minted_by = payload.get("minted_by")
+    new_token = create_portal_session_token(
+        email, session_start=started,
+        minted_by=minted_by if isinstance(minted_by, str) else None)
 
     # Retire the old jti, but only after a grace: requests already in flight are
     # still carrying it, and a hard revoke here would 401 them mid-rotation.
