@@ -203,8 +203,12 @@ def test_every_kind_prefix_is_reserved():
 
 def test_every_reserved_prefix_is_a_known_platform_family():
     from services import operator_queue_service as oqs
+    from services import person_mention_service as pms
     from services import platform_alerts as pa
-    known = {k.prefix for k in pa.KINDS.values()} | set(pa.EXTERNAL_PREFIXES) | {oqs.GATE_ASK_ID_PREFIX}
+    # Two reserved families are platform-raised rows that are NOT alerts: the
+    # skill gate's asks, and a person's tag of another person (ent#631).
+    known = ({k.prefix for k in pa.KINDS.values()} | set(pa.EXTERNAL_PREFIXES)
+             | {oqs.GATE_ASK_ID_PREFIX, pms.MENTION_ID_PREFIX})
     stray = [p for p in oqs._RESERVED_ID_PREFIXES if p not in known]
     assert not stray, f"reserved prefixes with no registered kind: {stray}"
 
