@@ -26,8 +26,15 @@ describe('workspace-only hand-offs (review round 1)', () => {
       'const resumeTo = store.resumePath || canvasReturnPath(route.query.redirect)')
   })
 
-  it('the whitelist form names an existing account\'s role', () => {
+  it('the whitelist form names an existing account\'s role, and shows its refusals inline', () => {
     expect(read('../../src/views/Settings.vue')).toContain(
-      'whitelistNotice.value = existingAccountNotice(data?.existing_account_role)')
+      'whitelistNotice.value = existingAccountNotice(added?.existingAccountRole)')
+    // The eyeball of d9473d334: the 409 hint landed in the page-wide error box at
+    // the bottom of Settings. It belongs under the form, beside the notice.
+    const page = read('../../src/views/Settings.vue')
+    const fn = page.slice(page.indexOf('async function addEmailToWhitelist()'),
+                          page.indexOf('async function removeEmailFromWhitelist('))
+    expect(fn).toContain('whitelistAddError.value = apiErrorMessage(')
+    expect(fn).not.toContain('error.value =')
   })
 })

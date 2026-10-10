@@ -43,6 +43,14 @@ def _mfa_required_exit() -> None:
     raise SystemExit(1)
 
 
+def _email_code_error(detail: str) -> str:
+    """ent#849: name the next step when the instance turned email codes off."""
+    if detail == "email_code_disabled":
+        return ("email-code sign-in is turned off on this instance. Sign in with "
+                "SSO in the web UI and create an MCP API key, or use --admin.")
+    return detail
+
+
 def _exit_on_login_error(e: TrinityAPIError, prefix: str) -> None:
     """Map a failed login response to an exit message (#2322).
 
@@ -208,7 +216,7 @@ def login(ctx, instance, profile_opt, admin):
     try:
         client.post_unauthenticated("/api/auth/email/request", {"email": email})
     except TrinityAPIError as e:
-        click.echo(f"Error requesting code: {e.detail}", err=True)
+        click.echo(f"Error requesting code: {_email_code_error(e.detail)}", err=True)
         raise SystemExit(1)
 
     click.echo(f"Verification code sent to {email}")
@@ -366,7 +374,7 @@ def init(ctx, profile_opt, admin):
         try:
             client.post_unauthenticated("/api/auth/email/request", {"email": email})
         except TrinityAPIError as e:
-            click.echo(f"Error requesting code: {e.detail}", err=True)
+            click.echo(f"Error requesting code: {_email_code_error(e.detail)}", err=True)
             raise SystemExit(1)
 
         click.echo(f"Verification code sent to {email}")

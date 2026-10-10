@@ -1674,7 +1674,8 @@ def portal_history(agent_name: str, session_id: str | None = None,
     include_owned = principal.is_platform
     try:
         return service.get_history(agent_name, email, session_id=session_id,
-                                   include_owned=include_owned, limit=limit)
+                                   include_owned=include_owned, limit=limit,
+                                   viewer_is_person=principal.is_person)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 

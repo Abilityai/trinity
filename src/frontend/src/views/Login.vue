@@ -105,98 +105,93 @@
       <!-- Login Forms -->
       <div v-else class="mt-8 space-y-6 bg-white dark:bg-gray-800 rounded-lg shadow-lg dark:shadow-gray-900 p-8">
 
-        <!-- Email Authentication (Default) -->
-        <div v-if="authStore.emailAuthEnabled && !showAdminLogin">
-          <!-- Step 1: Enter Email -->
-          <div v-if="!codeSent">
-            <form @submit.prevent="handleRequestCode" class="space-y-4">
-              <div>
-                <label for="email" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                  Email Address
-                </label>
-                <input
-                  id="email"
-                  v-model="emailInput"
-                  type="email"
-                  required
-                  autocomplete="email"
-                  class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
-                  placeholder="you@example.com"
-                />
-              </div>
+        <!-- Sign-in options: email code, SSO, and the Admin Login entry.
+             ent#849: the SSO policy can hide the email-code form alone; SSO
+             buttons and Admin Login never depend on it. -->
+        <div v-if="!showAdminLogin && (authStore.emailCodeLoginEnabled || ssoProviders.length)">
+          <!-- Email Authentication -->
+          <div v-if="authStore.emailCodeLoginEnabled">
+            <!-- Step 1: Enter Email -->
+            <div v-if="!codeSent">
+              <form @submit.prevent="handleRequestCode" class="space-y-4">
+                <div>
+                  <label for="email" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Email Address
+                  </label>
+                  <input
+                    id="email"
+                    v-model="emailInput"
+                    type="email"
+                    required
+                    autocomplete="email"
+                    class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
+                    placeholder="you@example.com"
+                  />
+                </div>
 
-              <button
-                type="submit"
-                :disabled="loginLoading || !emailInput"
-                class="w-full flex justify-center py-3 px-4 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 dark:focus:ring-offset-gray-800 disabled:opacity-50 transition-colors"
-              >
-                {{ loginLoading ? 'Sending code...' : 'Send Verification Code' }}
-              </button>
-            </form>
-          </div>
-
-          <!-- Step 2: Enter Code -->
-          <div v-else>
-            <div class="mb-4">
-              <p class="text-sm text-gray-600 dark:text-gray-400">
-                📧 We sent a 6-digit code to <strong class="text-gray-900 dark:text-white">{{ emailInput }}</strong>
-              </p>
-              <p v-if="countdown > 0" class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                Code expires in {{ formatTime(countdown) }}
-              </p>
+                <button
+                  type="submit"
+                  :disabled="loginLoading || !emailInput"
+                  class="w-full flex justify-center py-3 px-4 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 dark:focus:ring-offset-gray-800 disabled:opacity-50 transition-colors"
+                >
+                  {{ loginLoading ? 'Sending code...' : 'Send Verification Code' }}
+                </button>
+              </form>
             </div>
 
-            <form @submit.prevent="handleVerifyCode" class="space-y-4">
-              <div>
-                <label for="code" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                  Verification Code
-                </label>
-                <input
-                  id="code"
-                  v-model="codeInput"
-                  type="text"
-                  required
-                  maxlength="6"
-                  pattern="[0-9]{6}"
-                  autocomplete="one-time-code"
-                  class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-center text-2xl tracking-widest placeholder-gray-400 dark:placeholder-gray-500"
-                  placeholder="000000"
-                />
+            <!-- Step 2: Enter Code -->
+            <div v-else>
+              <div class="mb-4">
+                <p class="text-sm text-gray-600 dark:text-gray-400">
+                  📧 We sent a 6-digit code to <strong class="text-gray-900 dark:text-white">{{ emailInput }}</strong>
+                </p>
+                <p v-if="countdown > 0" class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Code expires in {{ formatTime(countdown) }}
+                </p>
               </div>
 
-              <button
-                type="submit"
-                :disabled="loginLoading || codeInput.length !== 6"
-                class="w-full flex justify-center py-3 px-4 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 dark:focus:ring-offset-gray-800 disabled:opacity-50 transition-colors"
-              >
-                {{ loginLoading ? 'Verifying...' : 'Verify & Sign In' }}
-              </button>
+              <form @submit.prevent="handleVerifyCode" class="space-y-4">
+                <div>
+                  <label for="code" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Verification Code
+                  </label>
+                  <input
+                    id="code"
+                    v-model="codeInput"
+                    type="text"
+                    required
+                    maxlength="6"
+                    pattern="[0-9]{6}"
+                    autocomplete="one-time-code"
+                    class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-center text-2xl tracking-widest placeholder-gray-400 dark:placeholder-gray-500"
+                    placeholder="000000"
+                  />
+                </div>
 
-              <button
-                type="button"
-                @click="handleBackToEmail"
-                class="w-full text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 transition-colors"
-              >
-                ← Back to email
-              </button>
-            </form>
-          </div>
+                <button
+                  type="submit"
+                  :disabled="loginLoading || codeInput.length !== 6"
+                  class="w-full flex justify-center py-3 px-4 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 dark:focus:ring-offset-gray-800 disabled:opacity-50 transition-colors"
+                >
+                  {{ loginLoading ? 'Verifying...' : 'Verify & Sign In' }}
+                </button>
 
-          <!-- Admin Login Option -->
-          <div v-if="!codeSent" class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
-            <button
-              @click="showAdminLogin = true"
-              class="w-full text-sm py-2 px-4 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-            >
-              🔐 Admin Login
-            </button>
+                <button
+                  type="button"
+                  @click="handleBackToEmail"
+                  class="w-full text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 transition-colors"
+                >
+                  ← Back to email
+                </button>
+              </form>
+            </div>
           </div>
 
           <!-- #32 — Enterprise SSO (OIDC). Buttons appear only when the `sso`
                feature is entitled and at least one provider is enabled.
                Full-page nav to the backend login endpoint → IdP → callback. -->
-          <div v-if="!codeSent && ssoProviders.length" class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700 space-y-2">
-            <p class="text-xs text-center text-gray-500 dark:text-gray-400">Or sign in with</p>
+          <div v-if="!codeSent && ssoProviders.length" class="space-y-2" :class="{ 'mt-6 pt-6 border-t border-gray-200 dark:border-gray-700': authStore.emailCodeLoginEnabled }">
+            <p class="text-xs text-center text-gray-500 dark:text-gray-400">{{ authStore.emailCodeLoginEnabled ? 'Or sign in with' : 'Sign in with' }}</p>
             <a
               v-for="p in ssoProviders"
               :key="p.id"
@@ -206,10 +201,20 @@
               🔑 {{ p.name }}
             </a>
           </div>
+
+          <!-- Admin Login Option — break-glass, available whatever the SSO policy says -->
+          <div v-if="!codeSent" class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
+            <button
+              @click="showAdminLogin = true"
+              class="w-full text-sm py-2 px-4 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+            >
+              🔐 Admin Login
+            </button>
+          </div>
         </div>
 
         <!-- Admin Login: Password Only (username is fixed as 'admin') -->
-        <div v-else-if="showAdminLogin || !authStore.emailAuthEnabled">
+        <div v-else>
           <div class="mb-4 p-3 bg-gray-50 dark:bg-gray-900/50 border border-gray-200 dark:border-gray-700 rounded-lg">
             <p class="text-sm text-gray-600 dark:text-gray-400 flex items-center">
               <span class="mr-2">🔐</span>
@@ -254,11 +259,11 @@
           </form>
 
           <button
-            v-if="authStore.emailAuthEnabled"
+            v-if="authStore.emailCodeLoginEnabled || ssoProviders.length"
             @click="showAdminLogin = false"
             class="w-full mt-4 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 transition-colors"
           >
-            ← Back to email login
+            {{ authStore.emailCodeLoginEnabled ? '← Back to email login' : '← Back to sign-in options' }}
           </button>
         </div>
 
@@ -319,6 +324,9 @@ const mfaCode = ref('')
 const mfaEnroll = ref(null)            // provisioning payload during forced enrollment
 const mfaRecoveryCodes = ref([])
 const ssoProviders = ref([])           // #32 — enabled SSO IdPs (login buttons)
+// ent#849: the layout depends on the SSO buttons too, so hold the loading state
+// until they are known. Otherwise an SSO-only org sees the admin form flash first.
+const ssoLoaded = ref(false)
 const mfaMode = computed(() =>
   authStore.mfaChallenge?.enrollmentRequired ? 'enroll' : 'verify'
 )
@@ -338,6 +346,8 @@ const isLoading = computed(() => {
   if (!authStore.modeDetected) return true
   // Auth store is loading
   if (authStore.isLoading) return true
+  // SSO buttons not fetched yet (ent#849)
+  if (!ssoLoaded.value) return true
   return false
 })
 
@@ -440,6 +450,7 @@ onMounted(async () => {
 
   // Populate SSO login buttons (no-op / empty in OSS-only builds).
   ssoProviders.value = await authStore.fetchSsoProviders()
+  ssoLoaded.value = true
 })
 
 // Handle admin login (username 'admin' OR the admin's registered email — #82 Phase 1)

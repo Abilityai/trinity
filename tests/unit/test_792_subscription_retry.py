@@ -43,12 +43,56 @@ def _resp(status: int, body: dict) -> MagicMock:
     resp.status_code = status
     resp.text = json.dumps(body)
     resp.json.return_value = body
+    # #3470: a current agent image echoes the per-spawn credential it applied;
+    # the walk reads this to tell "ran on the trial" from "old image, ran on
+    # the baseline". Every response in this harness is from a current image.
+    resp.headers = {"X-Trinity-Auth-Override": "oauth_token"}
     if status >= 400:
         err = httpx.HTTPStatusError(f"HTTP {status}", request=MagicMock(), response=resp)
         resp.raise_for_status = MagicMock(side_effect=err)
     else:
         resp.raise_for_status = MagicMock()
     return resp
+
+
+def _walk_seam(switch_result):
+    """#3470: the seam `execute_task` drives is `advance_subscription_walk`,
+    not `handle_subscription_failure` — the walk records the refusal and names
+    the next credential; the dispatcher re-issues with it. A truthy
+    `switch_result` ⇒ ONE alternative exists (a two-subscription install):
+    the first refusal gets a rung, every later one finds the pool exhausted.
+    Returns an AsyncMock so the tests' `assert_awaited_*` / `await_args` reads
+    keep working unchanged."""
+    from services.subscription_auto_switch import Rung
+
+    async def _advance(walk, *, failure_kind, error_message="", budget_ok=True):
+        walk.attempts.append(
+            {"attempt": len(walk.attempts) + 1, "on": "sub-a", "failure": failure_kind}
+        )
+        if switch_result and len(walk.attempts) == 1 and budget_ok:
+            rung = Rung(
+                kind="subscription", subscription_id="sub-b",
+                subscription_name=switch_result.get("new_subscription", "sub-b"),
+                credential="tok-b",
+            )
+            walk.active = rung
+            walk.attempts[-1]["next"] = f"try '{rung.subscription_name}'"
+            return rung
+        walk.active = None
+        walk.stop_reason = "budget" if not budget_ok else "exhausted"
+        return None
+
+    return AsyncMock(side_effect=_advance)
+
+
+def _switch_db():
+    """The switcher's own `db` view: the agent is on sub-a."""
+    sw_db = MagicMock(name="switch_db")
+    sw_db.get_agent_subscription_id.return_value = "sub-a"
+    sw_db.get_subscription.return_value = MagicMock(id="sub-a", name="sub-a")
+    sw_db.list_subscriptions.return_value = [MagicMock(), MagicMock()]
+    sw_db.get_setting_value.return_value = "true"
+    return sw_db
 
 
 def _resp_429(cost: float | None = None) -> MagicMock:
@@ -122,7 +166,7 @@ def _run(*, responses, switch_result, timeout_seconds=300):
             raise AssertionError("agent_post_with_retry called more times than responses provided")
         return responses.pop(0)
 
-    mock_switch = AsyncMock(return_value=switch_result)
+    mock_switch = _walk_seam(switch_result)
     mock_audit = MagicMock(log=AsyncMock())
 
     with (
@@ -135,7 +179,11 @@ def _run(*, responses, switch_result, timeout_seconds=300):
         patch("services.task_execution_service._record_dispatch_terminal", AsyncMock()),
         patch("services.task_execution_service.platform_audit_service", mock_audit),
         patch("services.task_execution_service._SWITCH_RETRY_DELAY_S", 0),
-        patch("services.subscription_auto_switch.handle_subscription_failure", mock_switch),
+        patch("services.subscription_auto_switch.db", _switch_db()),
+        patch("services.subscription_auto_switch.ensure_serviceable_subscription", AsyncMock(return_value=None)),
+        patch("services.subscription_auto_switch.advance_subscription_walk", mock_switch),
+        patch("services.subscription_auto_switch.commit_subscription_walk", AsyncMock(return_value=None)),
+        patch("services.subscription_auto_switch.notify_pool_exhausted", MagicMock()),
     ):
         svc = TaskExecutionService()
         result = _await(svc.execute_task(
@@ -235,9 +283,12 @@ def test_no_alternative_subscription_no_retry():
 
 
 def test_cascade_fails_with_exactly_one_switch():
-    """429 → switch → still 429: FAILED, exactly one retry AND exactly one switch
-    (the subscription_switch_attempted guard blocks the except-handler from
-    switching again)."""
+    """429 → switch → still 429 on a two-subscription install: FAILED after
+    exactly one re-issue. #3470 reframed the bound: the walk asks for the next
+    rung after EVERY refusal (so it is consulted twice here), and it is the
+    pool — not a one-shot flag — that says there is nothing left. The
+    `subscription_switch_attempted` guard still blocks the except-handler from
+    running its own pre-#3470 switch on top of the walk."""
     from services.task_execution_service import TaskExecutionStatus
 
     result, ctx = _run(
@@ -247,7 +298,9 @@ def test_cascade_fails_with_exactly_one_switch():
 
     assert result.status == TaskExecutionStatus.FAILED
     assert ctx.agent_call_count == 2  # original + one retry, no third
-    ctx.switch.assert_awaited_once()  # NOT twice — no cascade double-switch
+    assert ctx.switch.await_count == 2  # asked after each refusal; the 2nd finds nothing
+    # The trail names what was tried, on the row the operator reads.
+    assert "Tried:" in (result.error or "")
 
 
 def test_678_interplay_both_retries_fire():

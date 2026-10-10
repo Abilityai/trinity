@@ -41,7 +41,7 @@ vi.mock('../../src/components/SparklineChart.vue', () => ({
 import axios from 'axios'
 import ChatPanel from '../../src/components/ChatPanel.vue'
 import DashboardPanel from '../../src/components/DashboardPanel.vue'
-import PlaybooksPanel from '../../src/components/PlaybooksPanel.vue'
+import SkillsTab from '../../src/components/skills/SkillsTab.vue'
 import TasksPanel from '../../src/components/TasksPanel.vue'
 import PublicChat from '../../src/views/PublicChat.vue'
 import { useAgentsStore } from '../../src/stores/agents'
@@ -224,29 +224,34 @@ describe('TasksPanel', () => {
 })
 
 // ---------------------------------------------------------------------------
-// PlaybooksPanel — Run on a playbook (sync /task)
+// SkillsTab — Run on a skill (async /task; trinity-enterprise#754 merged the
+// Playbooks tab into it)
 // ---------------------------------------------------------------------------
 
-describe('PlaybooksPanel', () => {
-  async function playbooks(post) {
-    serve({ '/playbooks': { data: { skills: [] } } }, { '/task': post })
+describe('SkillsTab', () => {
+  async function skills(post) {
+    serve({ '/playbooks': { data: { skills: [{ name: 'pay-invoice', user_invocable: true, source: 'agent', dir: 'pay-invoice' }] } } },
+      { '/task': post })
     const notify = vi.fn()
-    wrapper = mount(PlaybooksPanel, { props: { agentName: AGENT, agentStatus: 'running', notify } })
+    wrapper = mount(SkillsTab, {
+      props: { agentName: AGENT, agentStatus: 'running', notify },
+      global: { stubs: { teleport: true, 'router-link': true } },
+    })
     await flush()
-    await wrapper.vm.runSkill({ name: 'pay-invoice', user_invocable: true })
+    await wrapper.find('[data-testid="skill-run-pay-invoice"]').trigger('click')
     await flush()
     return { w: wrapper, notify }
   }
 
   it('tells the notice and opens no run', async () => {
-    const { w, notify } = await playbooks(PENDING)
+    const { w, notify } = await skills(PENDING)
     expect(notify).toHaveBeenCalledWith(NOTICE, 'info', { timeout: 8000 })
     expect(w.emitted('run-with-instructions')).toBeUndefined()
     expect(w.text()).not.toContain('started')
   })
 
   it('names a refusal in the persistent error toast, not a 3-second one', async () => {
-    const { w, notify } = await playbooks(() => Promise.reject(refusal()))
+    const { w, notify } = await skills(() => Promise.reject(refusal()))
     expect(notify).toHaveBeenCalledWith(REFUSED, 'error')
     expect(w.text()).not.toContain('"code"')              // not the detail object as JSON
   })

@@ -260,6 +260,17 @@ class TestDormantState:
         monkeypatch.setattr(_ac_circuit, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.01)
 
         fake_db = MagicMock()
+        # #3246: the alert is filed through the platform-alert seam
+        # (`platform_alerts.observe` → `create_platform_operator_queue_item`),
+        # one pending row per subject — no longer a direct
+        # `create_operator_queue_item`. No pending row and no snooze, so this
+        # reading files a fresh one; `changed=False` keeps the seam from
+        # scheduling a broadcast on an event loop this sync test doesn't have.
+        fake_db.find_pending_operator_queue_by_subject.return_value = None
+        fake_db.find_person_ended_operator_queue_by_subject.return_value = None
+        fake_db.create_platform_operator_queue_item.return_value = {
+            "outcome": "created", "changed": False,
+        }
         fake_module = types.ModuleType("database")
         fake_module.db = fake_db
         monkeypatch.setitem(sys.modules, "database", fake_module)
@@ -283,9 +294,12 @@ class TestDormantState:
         assert last == "dormant"
 
         # Alert fired exactly once on the transition.
-        assert fake_db.create_operator_queue_item.call_count == 1
-        called_agent, item = fake_db.create_operator_queue_item.call_args.args
+        create = fake_db.create_platform_operator_queue_item
+        assert create.call_count == 1
+        called_agent, item = create.call_args.args
         assert called_agent == agent_name
+        # One row per subject: the seam keys the row on the agent's circuit.
+        assert create.call_args.kwargs["subject"]
         # Type is the generic 'alert' so the existing Operating Room UI
         # renders an Acknowledge control. The narrower CB-specific marker
         # is in context.alert_type for callers that need to filter.
@@ -293,7 +307,7 @@ class TestDormantState:
         assert item["context"]["alert_type"] == "circuit_breaker_dormant"
         assert item["priority"] == "high"
         assert item["status"] == "pending"
-        assert item["agent_name"] == agent_name
+        assert item["context"]["agent_name"] == agent_name
         assert "DORMANT" in item["title"]
         assert item["context"]["transition"] == "dormant"
         assert (
@@ -305,7 +319,7 @@ class TestDormantState:
         # no second alert. Verifies the once-per-entry guarantee.
         for _ in range(3):
             cs.record_failure()
-        assert fake_db.create_operator_queue_item.call_count == 1
+        assert create.call_count == 1
 
     def test_dormant_probes_after_cooldown(self, agent_name, monkeypatch):
         """#921: once the dormant cooldown elapses, exactly one probe is

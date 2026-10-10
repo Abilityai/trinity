@@ -29,7 +29,7 @@ As a **platform user**, I want to see all notifications from my agents in one pl
 **Template Structure**:
 - Header with title and refresh button (lines 8-26)
 - Filter controls panel (lines 29-117): agent, type, priority, status dropdowns + show dismissed checkbox
-- Stats cards grid (lines 120-137): pending (red), acknowledged (green), total, agents count (blue)
+- Stats cards grid: pending (red — the global count from `GET /api/notifications/count`, independent of the list filter and page, #3449), acknowledged (green), shown (the rows rendered below), agents count (blue)
 - Bulk actions bar (lines 140-164): shown when items selected
 - Notifications list (lines 167-320): cards with checkbox, icon, content, actions
 - Load more button (lines 311-319): pagination
@@ -61,7 +61,7 @@ As a **platform user**, I want to see all notifications from my agents in one pl
 | State | Type | Description |
 |-------|------|-------------|
 | `notifications` | Array | Loaded notifications |
-| `pendingCount` | Number | Count of pending notifications (for badge) |
+| `pendingCount` | Number | Global pending count (badges, Operations header). Server figure from `fetchPendingCount()`; never derived from the loaded list (#3449) |
 | `loading` | Boolean | Loading state |
 | `error` | String | Error message |
 | `totalCount` | Number | Total notification count from API |

@@ -332,3 +332,103 @@ test.describe('dashboard list column alignment + identity (#2358)', () => {
     }
   })
 })
+
+/**
+ * #3465 — the row layout follows the LIST's width. At a 768 window the systems
+ * rail (224px open, 48px collapsed) decides whether the list is ~496px or
+ * ~672px wide. The tablet row needs about 610px, so behind the open rail its
+ * success cell collapsed to 0 (the percentage painted over the capacity meter)
+ * and the task counts ran 50-67px past the row. Below 40rem of list
+ * (`list-mid:`) the compact row renders instead.
+ *
+ * The cascade itself is unit-tested (tests/unit/agentListLayoutSwitch.spec.js);
+ * this is the half only a layout engine can see: that whichever row renders,
+ * every cell stays inside it and no two cells of a line overlap. It is written
+ * against whatever agents the stack has, so it holds on a system-agent-only CI
+ * stack and bites hardest on a fleet with execution stats.
+ */
+test.describe('dashboard list rows fit a narrow list (#3465)', () => {
+  /** Geometry violations across every rendered row; [] when the layout holds. */
+  async function rowViolations(page) {
+    return page.evaluate(() => {
+      const out = []
+      const shown = (el) => getComputedStyle(el).display !== 'none'
+      for (const row of document.querySelectorAll('[data-agent]')) {
+        const slug = row.getAttribute('data-agent')
+        const rowBox = row.getBoundingClientRect()
+        if (rowBox.right > window.innerWidth + 1) out.push(`${slug}: row leaves the window`)
+        // The half-out avatar is `absolute` and overhangs the LEFT edge by
+        // design; the layout blocks are the in-flow children.
+        const blocks = [...row.children].filter(
+          (el) => getComputedStyle(el).position !== 'absolute' && shown(el)
+        )
+        for (const block of blocks) {
+          for (const line of block.children) {
+            if (!shown(line)) continue
+            const lineBox = line.getBoundingClientRect()
+            if (lineBox.right > rowBox.right + 1) {
+              out.push(`${slug}: a line ends ${Math.round(lineBox.right - rowBox.right)}px past the row`)
+            }
+            // The secondary / meta lines clip their own overflow by contract
+            // (a long slug plus tags never opens another row), so their cells
+            // may legitimately extend past the box; the line itself may not.
+            if (getComputedStyle(line).overflowX !== 'visible') continue
+            const cells = [...line.children].filter(shown)
+            let prevRight = -Infinity
+            for (const cell of cells) {
+              const box = cell.getBoundingClientRect()
+              const what = `${slug}: <${cell.tagName.toLowerCase()} class="${cell.className}">`
+              if (box.right > rowBox.right + 1) {
+                out.push(`${what} ends ${Math.round(box.right - rowBox.right)}px past the row`)
+              }
+              if (box.left < prevRight - 1) {
+                out.push(`${what} overlaps the cell before it by ${Math.round(prevRight - box.left)}px`)
+              }
+              prevRight = box.right
+              // A cell squeezed below its content paints that content over its
+              // neighbours without moving its own box — the success cell at 0px.
+              const cs = getComputedStyle(cell)
+              if (
+                !cs.display.startsWith('inline') &&
+                cs.overflowX === 'visible' &&
+                cell.scrollWidth > cell.clientWidth + 1
+              ) {
+                out.push(`${what} content is ${cell.scrollWidth - cell.clientWidth}px wider than its box`)
+              }
+            }
+          }
+        }
+      }
+      return out
+    })
+  }
+
+  for (const [rail, collapsed, tabletRow] of [
+    ['open', 'false', false],
+    ['collapsed', 'true', true],
+  ]) {
+    test(`768 window, rail ${rail}: no cell overlaps or leaves its row`, async ({ page }) => {
+      await page.addInitScript(
+        (value) => localStorage.setItem('trinity-sidebar-collapsed', value),
+        collapsed
+      )
+      await page.setViewportSize({ width: 768, height: 1024 })
+      await gotoList(page)
+      const row = page.locator('[data-agent]').first()
+      await expect(row).toBeVisible({ timeout: 15000 })
+
+      // Which row renders is the fix: the tablet row only where it fits.
+      const secondaryMd = row.locator('[data-testid="row-secondary-md"]')
+      if (tabletRow) await expect(secondaryMd).toBeVisible()
+      else await expect(secondaryMd).toBeHidden()
+
+      expect(await rowViolations(page)).toEqual([])
+      // Wide content never scrolls the page (contract, principle 7).
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= document.documentElement.clientWidth
+        )
+      ).toBe(true)
+    })
+  }
+})

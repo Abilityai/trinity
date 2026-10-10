@@ -190,6 +190,20 @@
             </div>
           </div>
 
+          <!-- #3454 — automatic database backups (#2216). The status rides the
+               same GET /api/settings/retention response as the card above, so
+               it takes that response rather than fetching again; "loaded" is
+               "a response has arrived", so a re-fetch after a save does not
+               blank it. -->
+          <div v-if="activeTab === 'retention'" class="mb-6">
+            <BackupStatusPanel
+              :backup="retention?.backup"
+              :has-loaded="retention !== null"
+              :error="retentionError"
+              @retry="loadRetention"
+            />
+          </div>
+
           <!-- ent#184 — Activation funnel (local product events). Capture is
                OSS-core; this operator view is entitlement-gated (`telemetry`).
                The panel fetches the gated enterprise endpoint itself. -->
@@ -1474,6 +1488,7 @@ Example:
                     Add Email
                   </button>
                 </div>
+                <InlineError :message="whitelistAddError" data-testid="whitelist-add-error" @dismiss="whitelistAddError = ''" />
                 <p v-if="whitelistNotice" :class="HELP_CLASS" data-testid="whitelist-existing-account">{{ whitelistNotice }}</p>
 
                 <!-- Whitelist Table -->
@@ -1514,7 +1529,7 @@ Example:
                         </td>
                       </tr>
                       <tr v-else v-for="entry in emailWhitelist" :key="entry.id" class="hover:bg-gray-50 dark:hover:bg-gray-700">
-                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
+                        <td class="px-6 py-4 break-all text-sm font-medium text-gray-900 dark:text-gray-100">
                           {{ entry.email }}
                         </td>
                         <td :class="['px-6 py-4 whitespace-nowrap', HELP_CLASS]">
@@ -2288,6 +2303,7 @@ import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useRole } from '../composables/useRole'
 import { useBuildInfo } from '../composables/useBuildInfo'
+import { useQueryTab } from '../composables/useQueryTab'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSettingsStore } from '../stores/settings'
@@ -2321,6 +2337,7 @@ import FirstRunRerunPanel from '../components/settings/FirstRunRerunPanel.vue'
 import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
 import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPanel.vue'
+import BackupStatusPanel from '../components/settings/BackupStatusPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
 // #2691: one home for what the Public URL buys, what must be true first, and
 // what saving it re-points — shared with the first-run step so the explanation
@@ -2421,24 +2438,17 @@ const validTabIds = computed(() => visibleTabs.value.map(t => t.id))
 const DEFAULT_TAB = computed(() =>
   isAdmin.value ? 'general' : 'mcp-keys'
 )
-function resolveTabFromQuery(q) {
-  return validTabIds.value.includes(q) ? q : DEFAULT_TAB.value
-}
-const activeTab = ref(resolveTabFromQuery(route.query.tab))
-
-// Click handler — push a new history entry so browser back/forward
-// navigates between tabs. Pushes only when the tab actually changes,
-// to avoid duplicate entries on re-clicks.
-function selectTab(id) {
-  if (!validTabIds.value.includes(id)) return
-  if (id === activeTab.value) return
-  activeTab.value = id
-  router.push({ query: { ...route.query, tab: id } })
-}
-
-// Sync activeTab when the URL changes externally (back/forward, deep link).
-watch(() => route.query.tab, (newTab) => {
-  activeTab.value = resolveTabFromQuery(newTab)
+// #3453: the resolution lives in `useQueryTab`. `visibleTabs` filters on
+// entitlements that load after setup, so resolving `?tab=` once here sent a
+// refresh on an entitlement-gated tab to the default and left it there; the
+// composable re-applies the URL's tab when the offered set changes, unless
+// the user has clicked a tab in the meantime. `selectTab` still pushes one
+// history entry per change, and back/forward still drives the tab.
+const { activeTab, selectTab } = useQueryTab({
+  queryTab: () => route.query.tab,
+  validTabIds,
+  defaultTab: DEFAULT_TAB,
+  pushTab: (id) => router.push({ query: { ...route.query, tab: id } }),
 })
 
 // Email whitelist state (Phase 12.4)
@@ -2460,15 +2470,15 @@ const loadingUsers = ref(false)
 // how many there are on one line (a list above the table would push it down by
 // however many there are) and the filter turns the table into that list.
 const showWorkspaceOnlyUsers = ref(false)
-// Guarded: the watch below evaluates this on every tab, not only Access, so a
-// users payload that is not (yet) a list must not throw.
-const listedUsers = computed(() => (Array.isArray(usersList.value) ? usersList.value : []))
-const workspaceOnlyCount = computed(() => listedUsers.value.filter((u) => u.role === 'user').length)
+const workspaceOnlyUsers = computed(() => (Array.isArray(usersList.value)
+  ? usersList.value.filter((u) => u.role === 'user')
+  : []))
+const workspaceOnlyCount = computed(() => workspaceOnlyUsers.value.length)
 // The filter has nothing to show once the last Workspace-only account is raised;
 // left on, it would silently apply again when the next one appears.
 watch(workspaceOnlyCount, (n) => { if (!n) showWorkspaceOnlyUsers.value = false })
 const visibleUsers = computed(() => (showWorkspaceOnlyUsers.value && workspaceOnlyCount.value
-  ? listedUsers.value.filter((u) => u.role === 'user')
+  ? workspaceOnlyUsers.value
   : usersList.value))
 const roleLabel = (role) => (role === 'user' ? WORKSPACE_ONLY_ROLE_LABEL : (role || '—'))
 
@@ -3569,32 +3579,34 @@ async function loadEmailWhitelist() {
   }
 }
 
+// #3455: why the last add was refused — by the client-side rule or by the
+// server — shown beside the field until dismissed or the next attempt.
+const whitelistAddError = ref('')
+
 async function addEmailToWhitelist() {
   if (!newEmail.value) return
 
   addingEmail.value = true
-  error.value = null
+  whitelistAddError.value = ''
   whitelistNotice.value = null
 
   try {
-    const { data } = await axios.post('/api/settings/email-whitelist', {
-      email: newEmail.value,
-      source: 'manual',
-      default_role: newEmailRole.value,
-    }, {
-      headers: authStore.authHeader
-    })
+    // The store refuses a value that is not one address before any request.
+    const added = await settingsStore.addWhitelistEmail(newEmail.value, newEmailRole.value)
 
     newEmail.value = ''
     newEmailRole.value = 'user'
-    whitelistNotice.value = existingAccountNotice(data?.existing_account_role)
+    whitelistNotice.value = existingAccountNotice(added?.existingAccountRole)
     await loadEmailWhitelist()
     showSuccess.value = true
     setTimeout(() => {
       showSuccess.value = false
     }, 3000)
   } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to add email to whitelist'
+    whitelistAddError.value = apiErrorMessage(
+      e,
+      'Could not add that address. Check it is one email address, for example user@example.com, and try again.'
+    )
   } finally {
     addingEmail.value = false
   }
@@ -3607,9 +3619,8 @@ async function removeEmailFromWhitelist(email) {
   error.value = null
 
   try {
-    await axios.delete(`/api/settings/email-whitelist/${encodeURIComponent(email)}`, {
-      headers: authStore.authHeader
-    })
+    // #3456: addressed by its exact stored value, as one encoded segment.
+    await settingsStore.removeWhitelistEmail(email)
 
     await loadEmailWhitelist()
     showSuccess.value = true

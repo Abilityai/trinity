@@ -36,7 +36,7 @@ As an admin, I want to control who can access the platform via an email whitelis
 - **API**: `POST /api/users/me/email/code` + `PUT /api/users/me/email` - Bind a sign-in email to the signed-in account (routers/users.py, trinity-enterprise#720)
 - **API**: `GET /api/settings/email-whitelist` - List whitelisted emails (lines 429-443 in settings.py)
 - **API**: `POST /api/settings/email-whitelist` - Add email to whitelist (lines 446-478 in settings.py)
-- **API**: `DELETE /api/settings/email-whitelist/{email}` - Remove from whitelist (lines 481-503 in settings.py)
+- **API**: `DELETE /api/settings/email-whitelist/{email:path}` - Remove from whitelist (`routers/settings/whitelist.py`; `:path` so a stored value containing `/` is removable, #3456)
 
 ---
 
@@ -395,26 +395,24 @@ async function loadEmailWhitelist() {
   }
 }
 
-// Add email to whitelist
+// Add email to whitelist (#3455). `settingsStore.addWhitelistEmail` runs
+// `utils/emailWhitelist.js::validateWhitelistEmail` first and rejects WITHOUT a
+// request when the value is not one address; the reason — the client rule's or
+// the server's 422 `detail` — is rendered beside the field by `InlineError`.
 async function addEmailToWhitelist() {
   if (!newEmail.value) return
 
   addingEmail.value = true
-  error.value = null
+  whitelistAddError.value = ''
 
   try {
-    await axios.post('/api/settings/email-whitelist', {
-      email: newEmail.value,
-      source: 'manual'
-    }, {
-      headers: authStore.authHeader
-    })
+    await settingsStore.addWhitelistEmail(newEmail.value)
 
     newEmail.value = ''
     await loadEmailWhitelist()
     showSuccessMessage()
   } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to add email'
+    whitelistAddError.value = apiErrorMessage(e, 'Could not add that address. …')
   } finally {
     addingEmail.value = false
   }
@@ -428,9 +426,9 @@ async function removeEmailFromWhitelist(email) {
   error.value = null
 
   try {
-    await axios.delete(`/api/settings/email-whitelist/${encodeURIComponent(email)}`, {
-      headers: authStore.authHeader
-    })
+    // `utils/emailWhitelist.js::whitelistEntryUrl` — the exact stored value as
+    // ONE encoded path segment; never validated, so any listed row can go (#3456).
+    await settingsStore.removeWhitelistEmail(email)
 
     await loadEmailWhitelist()
     showSuccessMessage()
@@ -625,6 +623,28 @@ Used by the public-facing verification flow (separate from the main email login)
 
 **Note:** This endpoint does not apply per-email OTP rate limiting (`check_otp_rate_limit`); only the IP-based limit is enforced here.
 
+### Email-code sign-in policy (ent#849)
+
+`POST /api/auth/email/request` and `/verify` ask `services/login_policy_gate.py::email_code_allowed()`
+right after the `email_auth_enabled` check, before the body is read. When a
+registered provider refuses, both answer **403 `email_code_disabled`** — the same
+bytes for every address, no rate-limit budget spent. `GET /api/auth/mode` adds
+`email_code_login_enabled` (`email_auth_enabled` AND the gate); `Login.vue`
+hides only the email-code form on it. SSO buttons and **Admin Login** sit outside
+that block and stay reachable, and the page holds its loading state until the
+SSO provider list is known. `POST /token` never asks the gate.
+
+The same gate covers the other email-code sign-in surfaces: MCP inline auth
+(no code minted, redeem refused), Workspace guest sign-in, Telegram/WhatsApp
+`/login`, the Slack `require_email` check and public-link email verification (refused for platform users and
+whitelisted addresses only; outsiders keep codes; refusals read like a normal
+send or a wrong code, and while codes are refused every request step sends in a
+detached task so timing does not reveal membership; the public-link request
+step also counts every request per address, so its 429 lands on the same
+request for both). A stale login page that
+gets `email_code_disabled` re-reads `/api/auth/mode` and says to sign in with
+SSO; the CLI prints the same next step.
+
 ### Second Factor Pending (#5 / #2322)
 
 `POST /api/auth/email/verify` runs the same `services/mfa_gate.py::gate_login`
@@ -755,7 +775,7 @@ Add email to whitelist.
 ```
 
 **Business Logic:**
-1. Parse request and lowercase email (lines 460-463)
+1. Parse and validate the request (#3455). `db_models.EmailWhitelistAdd` trims and lower-cases `email` and refuses anything that is not one address — empty, longer than 254 characters, containing whitespace or control characters, or not exactly one `@` with text on both sides. An entry is always a single address: the whitelist is matched by exact lower-cased address, with no domain or wildcard form. A refusal — or a body that is not a JSON object — is **422** with a one-sentence string `detail` naming the reason (never the echoed value).
 2. Add to whitelist (lines 466-467)
    - `db.add_to_whitelist(email, current_user.username, source, default_role=add_request.default_role)`
    - `default_role` is a required keyword-only kwarg (defaults to `"user"` on the Pydantic request model); see #314.
@@ -771,9 +791,9 @@ Add email to whitelist.
 }
 ```
 
-#### DELETE /api/settings/email-whitelist/{email} (Lines 481-503)
+#### DELETE /api/settings/email-whitelist/{email:path}
 
-Remove email from whitelist.
+Remove email from whitelist. The value is matched case-insensitively against the stored row and is **not** validated, so rows that predate #3455 remain removable. The `:path` converter is what lets a stored value containing `/` match at all (#3456) — the router decodes `%2F` before matching; nothing else is registered under `/email-whitelist/`, so it claims no sibling route. Clients send the value as one URL-encoded segment. 404 when no row matches.
 
 **Response:**
 ```json
@@ -1504,7 +1524,7 @@ curl -X GET "http://localhost:8001/api/audit/events?event_type=authentication&ac
 - [x] POST /api/auth/email/verify endpoint
 - [x] GET /api/settings/email-whitelist endpoint
 - [x] POST /api/settings/email-whitelist endpoint
-- [x] DELETE /api/settings/email-whitelist/{email} endpoint
+- [x] DELETE /api/settings/email-whitelist/{email:path} endpoint
 - [x] Email service (console, SMTP, SendGrid, Resend)
 - [x] Rate limiting (3 per 10 min)
 - [x] Email enumeration prevention
