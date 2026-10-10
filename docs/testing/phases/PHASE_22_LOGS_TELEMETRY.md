@@ -1,367 +1,237 @@
-# Phase 22: Logs & Telemetry
+# Phase 22: Telemetry & Logs
 
-> **Purpose**: Validate container logs viewing, CPU/memory telemetry, and observability features
+> **Purpose**: Verify host and per-agent telemetry in the UI (Dashboard meters, agent header stats, Overview trends) and container logs through the API.
 > **Duration**: ~15 minutes
-> **Assumes**: Phase 2 PASSED (agents running)
-> **Output**: Logs and telemetry display verified
+> **Assumes**: the fixture trio is running and you are logged in as admin
+> **Output**: Live CPU/memory figures, the Overview panel and the stats/logs endpoints all answer for a running fixture agent
+> **Last verified**: 2026-10-09 against source (not yet browser-run)
 
 ---
 
 ## Background
 
-**Observability Features** (OBS-001 to OBS-007):
-- View container logs for debugging
-- Search and filter log content
-- Real-time CPU and memory usage
-- Context window percentage display
-- Tool call tracking and statistics
+Telemetry is spread over three surfaces:
 
-**User Stories**:
-- OBS-001: View container logs
-- OBS-002: Search/filter logs
-- OBS-003: See CPU/memory usage
-- OBS-004: See context window percentage
-- OBS-005: See real-time tool calls
-- OBS-006: See tool call details
-- OBS-007: See aggregated tool statistics
+- **Dashboard (`/`)** — an inline host strip (`components/HostTelemetry.vue`) with CPU, Mem and Disk meters, polled every 5 s from `GET /api/telemetry/host`.
+- **Agent header (`/agents/:name`)** — live CPU / MEM / uptime with sparklines (`components/AgentHeader.vue`), polled every 10 s from `GET /api/agents/{name}/stats`, plus a token-usage row.
+- **Overview tab** (the default agent tab, `components/OverviewPanel.vue`) — Activity trends, Health & reliability, Recent activity, Footprint.
 
----
+Replaces the January flow that opened a "Logs" tab and a Terminal: the agent page has no Logs tab today (`utils/agentTabs.js`), and `?tab=logs` resolves to nothing, so container logs are checked through `GET /api/agents/{name}/logs` only. The phase is observe-only and sends no messages.
 
 ## Prerequisites
 
-- [ ] Phase 2 PASSED (agents created and running)
-- [ ] At least one agent with activity (messages sent)
-- [ ] Agent has been running for at least 1 minute
+- [ ] Logged in at http://localhost as `admin` with `ADMIN_PASSWORD` from `.env`
+- [ ] `test-echo` is running (it has at least one seeded execution)
+- [ ] Browser window at 1280 px wide or more
+- [ ] For API checks, a token in `$TOKEN`:
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
+  -d "username=admin&password=$ADMIN_PASSWORD" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+```
 
 ---
 
-## Test: Container Logs Display
+## Test: Host telemetry on the Dashboard
 
-### Step 1: Navigate to Logs Tab
+### Step 1: Host meters render
 **Action**:
-- Go to http://localhost/agents
-- Click on a running agent
-- Click "Logs" tab
+- Open http://localhost/
+- Find the stats strip at the top of the Dashboard (the line containing "working now" and "messages (…h)")
 
 **Expected**:
-- [ ] Logs tab loads
-- [ ] Container logs displayed
-- [ ] Logs show recent output
-- [ ] Timestamps visible
+- [ ] Three meters follow on the same strip, labelled `CPU`, `Mem` and `Disk`
+- [ ] CPU shows a whole-number percentage (e.g. `12%`) with a small sparkline
+- [ ] Mem shows used/total in the form `7.9/16G` with a small sparkline
+- [ ] Disk shows a small fill bar and a whole-number percentage
+- [ ] Hovering each meter shows a tooltip starting `CPU `, `Memory ` and `Disk ` respectively
 
 **Verify**:
-- [ ] Log content from container stdout/stderr
-- [ ] Auto-scrolls to latest entries
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/telemetry/host
+# Expect "cpu": {"percent": …}, "memory": {"percent","used_gb","total_gb"}, "disk": {"percent","used_gb","total_gb"}
+```
+
+### Step 2: Host meters refresh
+**Action**:
+- Note the CPU percentage, wait 15 seconds without reloading
+
+**Expected**:
+- [ ] The CPU sparkline has gained points (the strip polls every 5 s); the percentage may or may not have changed
+- [ ] No console errors from `/api/telemetry/host`
+
+### Step 3: Host strip at 390 px
+**Action**:
+- Resize the browser to 390 px wide and look at the same strip
+- Resize back to 1280 px
+
+**Expected**:
+- [ ] At 390 px the page body does not scroll horizontally
+- [ ] Record which of the CPU / Mem / Disk meters are still shown (the strip hides them progressively as its container narrows; all three hidden is acceptable)
+- [ ] Back at 1280 px all three meters return
 
 ---
 
-### Step 2: Verify Log Content
-**Action**:
-- Read the displayed logs
-- Look for expected entries
+## Test: Agent header stats
 
-**Expected Log Types**:
-- [ ] Startup messages
-- [ ] Health check entries
-- [ ] API request logs (if agent-server verbose)
-- [ ] Claude Code execution output
-- [ ] Error messages (if any)
+### Step 4: Live CPU / MEM / uptime
+**Action**:
+- Open http://localhost/agents/test-echo
+- Look at the second row of the header card, right-hand side
+
+**Expected**:
+- [ ] The status badge under the agent name reads `running`
+- [ ] After at most a brief `Loading...`, the row shows `CPU`, a sparkline, a percentage and `/ N cores`
+- [ ] It shows `MEM`, a sparkline, a used-memory figure and `/ NG` (the configured ceiling, upper-case)
+- [ ] An uptime value sits to the right of MEM
+- [ ] A small icon button with the tooltip "Configure resources (Memory/CPU)" ends the row (do not click it in this phase)
+
+### Step 5: Stats endpoint shape
+**Verify**:
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/test-echo/stats
+```
+**Expected**:
+- [ ] HTTP 200 with the keys `cpu_percent`, `memory_used_bytes`, `memory_limit_bytes`, `memory_percent`, `network_rx_bytes`, `network_tx_bytes`, `uptime_seconds`, `status`
+- [ ] `status` is `running`
+- [ ] `cpu_percent` in the response is consistent with the header figure (allow drift; it is a live sample)
+
+### Step 6: Header stats refresh
+**Action**:
+- Stay on the page for 25 seconds, tab in the foreground
+
+**Expected**:
+- [ ] The uptime value has advanced
+- [ ] The CPU and MEM sparklines have gained points (polling is every 10 s)
+- [ ] The header never drops back to `Loading...` between polls
+
+### Step 7: Token usage row
+**Action**:
+- Look directly under the stats row of the header card
+
+**Expected**:
+- [ ] A row shows `7d` with a sparkline, `Today` with a figure, and on the right `Lifetime`, a figure and `N runs` with N ≥ 1
+- [ ] If the figures are prefixed with `≈` and a `≈ API-equiv` chip is shown, record it (subscription-funded agent); a `—` in place of a cost is also valid — record which appears
 
 **Verify**:
-- [ ] Logs are readable
-- [ ] Timestamps in consistent format
-- [ ] Log levels visible (INFO, ERROR, etc.)
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/test-echo/token-stats
+# lifetime_executions must match the "N runs" figure
+```
 
 ---
 
-### Step 3: Test Log Refresh
+## Test: Overview tab
+
+### Step 8: Overview is the default tab
 **Action**:
-- Send a message to the agent via Terminal
-- Switch back to Logs tab
-- Wait for auto-refresh (15s interval)
+- Reload http://localhost/agents/test-echo (no `?tab=`)
 
 **Expected**:
-- [ ] New log entries appear
-- [ ] Recent activity visible in logs
-- [ ] No manual refresh needed
+- [ ] The `Overview` tab is selected
+- [ ] The first card shows the agent's name, a `Full details →` link and a `New task` button
+- [ ] Section headings `Activity trends`, `Health & reliability`, `Recent activity` and `Footprint` are present (rendered upper-case)
 
+### Step 9: Activity trends and window switch
+**Action**:
+- In `Activity trends`, note the selected window button (`7d` is the default)
+- Click `30d`, then click `7d` again
+
+**Expected**:
+- [ ] Next to the window buttons a live counter reads `N running · N queued`
+- [ ] With runs in the window: charts titled `Executions by type` (with `N total`), `Execution completion rate` (a percentage) and `Duration` (`avg … · p95 …`) are shown; `Context consumption` may also appear
+- [ ] With no runs in the window the card instead reads `No runs in the last 7d` — record which of the two states appears for each window
+- [ ] Switching windows changes the selected button and re-renders without a full-page reload
+
+### Step 10: Health & reliability
+**Action**:
+- Read the `Health & reliability` card (do not enable anything)
+
+**Expected**:
+- [ ] The first chip reads one of `Healthy`, `Degraded`, `Unhealthy`, `Unknown` — record it
+- [ ] Either two charts titled `Uptime (last 7 days)` and `Latency (last 7 days)` are shown, or the card reads `No health data yet` with the link `Enable it in Operations → Health →` — record which
+- [ ] No chip reads `OOM killed` or `Circuit open — see header` (record it as a finding if one does)
+
+### Step 11: Recent activity and Footprint
+**Action**:
+- In `Recent activity`, click the first row
+- Go back to the `Overview` tab and read the `Footprint` card
+
+**Expected**:
+- [ ] `Recent activity` lists at least one row (message text, a trigger chip, a timestamp) and a `View all →` link
+- [ ] Clicking a row switches to the `Tasks` tab and adds `execution=<id>` to the URL
+- [ ] `Footprint` shows chips `N schedules`, `N skills`, `N shares` and `Sync: …`
+
+### Step 12: Agent page at 390 px and in both themes
+**Action**:
+- On http://localhost/agents/test-echo, resize to 390 px wide, scroll the Overview
+- Resize back to 1280 px
+- Note the title of the theme button in the top bar (one of `Light mode (click to switch)`, `Dark mode (click to switch)`, `System theme (click to switch)`), then click it until the page is dark, then until it is light
+
+**Expected**:
+- [ ] At 390 px the header stats wrap onto extra lines and the page body does not scroll horizontally
+- [ ] In dark and in light theme the CPU/MEM sparklines, the stat figures and the Overview chart axes are all legible (no dark-on-dark or white-on-white text)
+
+---
+
+## Test: Container logs (API only)
+
+### Step 13: `?tab=logs` does not open a tab
+**Action**:
+- Open http://localhost/agents/test-echo?tab=logs
+
+**Expected**:
+- [ ] The page lands on `Overview`
+- [ ] The tab strip (including its overflow menu) has no `Logs` entry
+
+### Step 14: Logs endpoint
 **Verify**:
-- [ ] Auto-refresh interval: ~15 seconds
-- [ ] New entries appended
-
----
-
-### Step 4: Test Log Search/Filter (if implemented)
-**Action**:
-- Look for search/filter input in Logs tab
-- Enter search term: "error" or "claude"
-- Apply filter
-
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "http://localhost:8000/api/agents/test-echo/logs?tail=50" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d['logs'].splitlines()))"
+curl -s -H "Authorization: Bearer $TOKEN" "http://localhost:8000/api/agents/test-echo/logs?tail=5" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d['logs'].splitlines()))"
+curl -s -o /dev/null -w "%{http_code}\n" "http://localhost:8000/api/agents/test-echo/logs"
+```
 **Expected**:
-- [ ] Logs filtered to matching entries
-- [ ] Matched terms highlighted
-- [ ] Clear filter restores all logs
-
-**Note**: If search not implemented, skip and document as gap.
-
----
-
-## Test: CPU/Memory Telemetry
-
-### Step 5: Verify Header Telemetry Display
-**Action**:
-- On agent detail page, look at the header area
-- Find CPU and memory indicators
-
-**Expected**:
-- [ ] CPU usage percentage displayed
-- [ ] Memory usage displayed (MB or %)
-- [ ] Values update periodically
-- [ ] Sparkline charts (if implemented)
-
-**Verify**:
-- [ ] Stats refresh every ~10 seconds
-- [ ] Values change with agent activity
+- [ ] The first call returns a JSON object with a single string field `logs`, non-empty, at most 50 lines
+- [ ] The second returns at most 5 lines
+- [ ] The third (no token) returns `401`
+- [ ] The log text contains no API key, token or password in clear (skim it; report any hit as Critical)
 
 ---
 
-### Step 6: Test Telemetry During Load
-**Action**:
-- Send a complex message to generate CPU load
-- Watch telemetry values change
+## Cleanup / Restore
 
-**Expected**:
-- [ ] CPU spikes during processing
-- [ ] Memory may increase during execution
-- [ ] Values return to baseline after completion
+- Click the theme button until its title matches the one noted in Step 12.
+- Restore the browser width to 1280 px.
+- Nothing else was changed (no messages sent, no settings touched).
 
-**Verify**:
-- [ ] Real-time updates reflect actual load
-- [ ] No stale/cached values
+## Manual-only (not run unattended)
 
----
-
-### Step 7: Verify Host Telemetry in Dashboard
-**Action**:
-- Navigate to Dashboard (http://localhost/)
-- Look at header/top area for host stats
-
-**Expected** (if implemented):
-- [ ] Host CPU usage displayed
-- [ ] Host memory usage displayed
-- [ ] Host disk usage displayed
-- [ ] Aggregate container stats
-
-**Verify**:
-- [ ] Host stats independent of individual agents
-- [ ] Updates periodically
-
----
-
-## Test: Context Window Tracking
-
-### Step 8: Verify Context Display
-**Action**:
-- On agent detail page, look for context indicator
-- Check progress bar and percentage
-
-**Expected**:
-- [ ] Context percentage displayed (e.g., "15.5K / 200K")
-- [ ] Progress bar visual
-- [ ] Color-coded: Green (low) → Yellow → Orange → Red (high)
-
-**Verify**:
-- [ ] Percentage matches actual usage
-- [ ] Progress bar fills proportionally
-
----
-
-### Step 9: Test Context Growth
-**Action**:
-- Send several messages to agent
-- Watch context percentage increase
-
-**Expected**:
-- [ ] Context % increases with each exchange
-- [ ] Progress bar grows
-- [ ] Color may change if significant increase
-
-**Verify**:
-- [ ] Context tracking accurate
-- [ ] No stuck at 0% bug (Phase 3 issue)
-
----
-
-## Test: Tool Call Tracking
-
-### Step 10: Trigger Tool Calls
-**Action**:
-- Send message that requires tools: "Read the file CLAUDE.md and tell me what it says"
-- Wait for response
-
-**Expected**:
-- [ ] Agent uses Read tool
-- [ ] Tool call tracked in activity
-
----
-
-### Step 11: Verify Tool Call Display
-**Action**:
-- Look for Activity panel or tool call section
-- Find the tool calls from recent message
-
-**Expected**:
-- [ ] Tool name displayed (Read, Write, Bash, etc.)
-- [ ] Tool call duration shown
-- [ ] Parameters visible (file path, etc.)
-- [ ] Result/status shown
-
-**Verify**:
-- [ ] All tool calls captured
-- [ ] Details accurate
-
----
-
-### Step 12: Check Tool Statistics
-**Action**:
-- Look for aggregated tool stats
-- May be in Activity panel summary
-
-**Expected**:
-- [ ] Tool counts per type
-- [ ] Total tool calls
-- [ ] Most used tools ranked
-
-**Verify**:
-- [ ] Statistics aggregate correctly
-- [ ] Counts match actual tool calls
-
----
-
-## Test: Activity Timeline (OBS-008 to OBS-010)
-
-### Step 13: Check Activity Timeline on Dashboard
-**Action**:
-- Navigate to Dashboard
-- Switch to Timeline view (if available)
-- Look for activity entries
-
-**Expected**:
-- [ ] Timeline shows recent activities
-- [ ] Multiple agents' activities visible
-- [ ] Time-ordered display
-
----
-
-### Step 14: Test Activity Type Filter
-**Action**:
-- Look for filter dropdown in Timeline
-- Filter by activity type (e.g., "chat_start", "tool_call")
-
-**Expected**:
-- [ ] Filter options available
-- [ ] Timeline filters to selected type
-- [ ] Multiple filter values supported
-
----
-
-### Step 15: Test Time Range Filter
-**Action**:
-- Look for time range selector
-- Select "Last hour" or specific range
-
-**Expected**:
-- [ ] Activities filtered by time
-- [ ] Only activities within range shown
-- [ ] Range updates URL or state
-
----
+- Stats for a stopped agent: `GET /api/agents/{name}/stats` answers `400 "Agent is not running"` and the header shows the agent's age plus `N CPU` / `NG` instead of live figures. Needs a fixture stopped and restarted.
+- Colour thresholds on the header figures (amber above 50 %, red above 80 %) need a load generator.
+- `Enable it in Operations → Health →` changes instance-wide monitoring.
 
 ## Critical Validations
 
-### Log API Endpoint
-**Validation**: Logs API returns container output
-
-```bash
-curl -H "Authorization: Bearer {token}" \
-  "http://localhost:8000/api/agents/{name}/logs?tail=50"
-```
-
-### Stats API Endpoint
-**Validation**: Stats API returns telemetry
-
-```bash
-curl -H "Authorization: Bearer {token}" \
-  http://localhost:8000/api/agents/{name}/stats
-```
-
-Expected response:
-```json
-{
-  "cpu_percent": 2.5,
-  "memory_mb": 256,
-  "memory_percent": 12.5,
-  "network_rx": 1024,
-  "network_tx": 512,
-  "uptime": "1:23:45"
-}
-```
-
----
+1. The Dashboard strip shows CPU, Mem and Disk with real, non-zero totals.
+2. The agent header shows live CPU / MEM / uptime for a running agent and keeps updating.
+3. `GET /api/agents/test-echo/stats` returns 200 with the eight documented keys.
+4. `GET /api/agents/test-echo/logs` returns `{"logs": "…"}`, honours `tail`, and refuses an unauthenticated call.
+5. The Overview tab renders all four sections without a console error.
 
 ## Success Criteria
 
-Phase 22 is **PASSED** when:
-- [ ] Logs tab displays container logs
-- [ ] Logs show recent entries with timestamps
-- [ ] Logs auto-refresh periodically
-- [ ] CPU/memory telemetry displayed in header
-- [ ] Telemetry updates in real-time
-- [ ] Context percentage displayed and accurate
-- [ ] Context progress bar color-coded
-- [ ] Tool calls tracked with details
-- [ ] Tool statistics aggregated
-- [ ] Activity timeline shows cross-agent activities
-- [ ] Activity filters work (type, time)
-
----
+- [ ] Steps 1–14 pass, with observations recorded where a step asks for one
+- [ ] No horizontal page scroll at 390 px on `/` or `/agents/test-echo`
+- [ ] No console errors from `/api/telemetry/*`, `/api/agents/test-echo/stats` or `/api/monitoring/*`
+- [ ] Theme restored to its starting value
 
 ## Troubleshooting
 
-**Logs tab empty**:
-- Agent may have just started
-- Check agent is running: `docker ps | grep {name}`
-- Verify logs endpoint: `curl .../api/agents/{name}/logs`
-
-**Telemetry not updating**:
-- Check polling interval (10s)
-- Verify stats endpoint works
-- Check for JavaScript errors in console
-
-**Context stuck at 0%**:
-- Known bug (Phase 3)
-- Check Claude Code returns context info
-- Verify parsing in backend
-
-**Tool calls not showing**:
-- Activity tracking may be disabled
-- Check message generated tool calls
-- Verify activity table has entries
-
-**Timeline empty**:
-- No recent activities
-- Check time range filter
-- Verify activities exist in database
-
----
-
-## Next Phase
-
-Once Phase 22 is **PASSED**, proceed to:
-- **Phase 23**: Agent Configuration
-
----
-
-**Status**: Ready for Testing
-**Last Updated**: 2026-01-14
-**User Stories**: OBS-001 to OBS-010
+- **Header shows the agent's age and `N CPU` instead of live stats** — the agent is not running, or `/stats` returned an error (a 400 is swallowed silently by the UI). Check the status badge.
+- **Host meters missing at full width** — `GET /api/telemetry/host` failed; the strip renders nothing on error. Check the network tab.
+- **No token-usage row** — it only renders when `lifetime_executions > 0`; the seeded execution should satisfy this.
+- **`No health data yet`** — fleet-health monitoring is off on this instance; that is a valid state, not a failure.
+- **Sparklines flat after the tab was in the background** — header polling is skipped while the document is hidden.

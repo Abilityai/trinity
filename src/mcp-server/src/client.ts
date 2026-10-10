@@ -4079,6 +4079,16 @@ export class TrinityClient {
     return this.projectRequest("POST", this.projectPath(projectId, "/health"), turn, body);
   }
 
+  /** trinity-enterprise#588: create a project on the agent's OWNER's behalf (projects.manage). */
+  async createProjectAsAgent(body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", "/api/enterprise/projects/agent/projects", turn, body);
+  }
+
+  /** trinity-enterprise#588: import one of the agent's OWN folder projects (projects.manage). */
+  async importProjectAsAgent(path: string, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", "/api/enterprise/projects/agent/projects/import", turn, { path });
+  }
+
   // --- Role assignments (trinity-enterprise#500) ----------------------------
 
   /**

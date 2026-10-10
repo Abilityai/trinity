@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import axios from 'axios'
+import { validateWhitelistEmail, whitelistEntryUrl } from '../utils/emailWhitelist'
 
 export const useSettingsStore = defineStore('settings', {
   state: () => ({
@@ -162,6 +163,28 @@ export const useSettingsStore = defineStore('settings', {
       } finally {
         this.saving = false
       }
+    },
+
+    /**
+     * #3455: add one address to the email whitelist. Refused HERE, before any
+     * request, when it is not one email address — the rejection's `message` is
+     * the reason to show beside the field. Resolves to the address as sent
+     * (trimmed, lower-cased). A server refusal rejects with the Axios error,
+     * whose `detail` is the server's own named reason. Admin-only.
+     */
+    async addWhitelistEmail(raw) {
+      const { email, error } = validateWhitelistEmail(raw)
+      if (error) throw new Error(error)
+      await axios.post('/api/settings/email-whitelist', { email, source: 'manual' })
+      return email
+    },
+
+    /**
+     * #3456: remove a whitelist row by its exact stored value — never
+     * validated, so a row that predates validation can still go. Admin-only.
+     */
+    async removeWhitelistEmail(email) {
+      await axios.delete(whitelistEntryUrl(email))
     },
 
     /**
