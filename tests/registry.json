@@ -1,15 +1,15 @@
 {
   "test_files": [
     {
-      "file": "unit/test_3340_stream_api_error_detail.py",
-      "feature": "#3340",
+      "file": "unit/test_3293_dims_selector_quiet_series.py",
+      "feature": "#3293",
       "added": "2026-10-09",
       "categories": [
-        "agent-server",
-        "execution",
+        "backend",
+        "database",
         "unit"
       ],
-      "description": "#3340 — an API error the stream parser recorded (content-filter refusal, exit 1, zero tokens, empty stderr) is the failure detail on the headless finalize path (zero-token 503 and the generic 500) and on the chat path, and outranks unrelated stderr; a run where neither stream nor stderr said why keeps the OOM/timeout guess verbatim; the no-detail placeholder is not a reason; billing keeps its wording; stream/stderr auth signals still answer through the auth branch and auth-patterned stream text never reaches the new wording; the backend text classifier does not read the new detail as auth. No Docker, no network."
+      "description": "A `dims:` tile reads its own series (#3293): against the real store, a quiet series beside a busy one holding more than 200 newer points binds with its own latest point, freshness and history; a series whose last point is older than the tile's window still shows its number with an empty history; stored key order and a busier wider series (`channel=google, geo=us`) neither hide nor crowd out the exact one; a series that never reported, a partial selector and a series silent for longer than the 90-day lookback are refused `metric_series_not_found` and never show the fold; a store fault on the per-series read refuses that one tile with `metric_store_unavailable`; the unselected tile still equals `latest_by_metric`; and the store read itself is newest-first, bounded by `since` and `limit`, exact on dims and scoped to the agent."
     },
     {
       "file": "unit/test_3247_replace_ask.py",
@@ -374,7 +374,7 @@
         "backend",
         "unit"
       ],
-      "description": "A bound dashboard.yaml widget names ONE series with `dims:`: each per-channel tile shows its own series' number, freshness, sparkline and colour (pick a source, fill once), matching by `canonical_dims` with exact match only; a selector that cannot match is one of three named refusals (`metric_dimension_invalid` with a type hint, `metric_dimension_undeclared`, `metric_series_not_found` with `binding_detail` facts) and never the fold; `bound_series` says what an unselected number is; selection equals the fold over that series alone (parity with `latest_by_metric`); the 200-point / 50-series window is pinned against a fake that honours the real store's SQL contract (and once against the real store); a Hypothesis property over arbitrary JSON `dims` never raises; the typed `threshold_verdict` and `direction` (one rule behind verdict and colour, each row stated independently); a store outage drops an author's placeholder `value`; a successful bind drops an author trend; a non-text `metric:` refuses one widget instead of failing the dashboard read; and the user doc's recipe YAML runs through the real agent-server validator and the bind."
+      "description": "A bound dashboard.yaml widget names ONE series with `dims:`: each per-channel tile shows its own series' number, freshness, sparkline and colour (pick a source, fill once), matching by `canonical_dims` with exact match only; a selector that cannot match is one of three named refusals (`metric_dimension_invalid` with a type hint, `metric_dimension_undeclared`, `metric_series_not_found` with `binding_detail` facts) and never the fold; `bound_series` says what an unselected number is; selection equals the fold over that series alone (parity with `latest_by_metric`); a selected series binds from its own read however many points or series sit beside it (#3293), pinned against a fake that honours the real store's SQL contract (and once against the real store); a Hypothesis property over arbitrary JSON `dims` never raises; the typed `threshold_verdict` and `direction` (one rule behind verdict and colour, each row stated independently); a store outage drops an author's placeholder `value`; a successful bind drops an author trend; a non-text `metric:` refuses one widget instead of failing the dashboard read; and the user doc's recipe YAML runs through the real agent-server validator and the bind."
     },
     {
       "file": "unit/test_ent730_dims_compat.py",
@@ -5337,6 +5337,17 @@
         "unit"
       ],
       "description": "#3406: the backend half of the contract the browser's 401 verdict reads. get_current_user rejects a dead token and OAuth2PasswordBearer rejects a missing one WITH `WWW-Authenticate: Bearer`; the five public-link session routes (intro, history, session clear, chat, terminate) answer an expired or missing visitor session with a bare 401. Handlers driven directly with the link check, rate limit and session lookup stubbed. No Docker."
+    },
+    {
+      "file": "unit/test_3340_stream_api_error_detail.py",
+      "feature": "#3340",
+      "added": "2026-10-09",
+      "categories": [
+        "agent-server",
+        "execution",
+        "unit"
+      ],
+      "description": "#3340 — an API error the stream parser recorded (content-filter refusal, exit 1, zero tokens, empty stderr) is the failure detail on the headless finalize path (zero-token 503 and the generic 500) and on the chat path, and outranks unrelated stderr; a run where neither stream nor stderr said why keeps the OOM/timeout guess verbatim; the no-detail placeholder is not a reason; billing keeps its wording; stream/stderr auth signals still answer through the auth branch and auth-patterned stream text never reaches the new wording; the backend text classifier does not read the new detail as auth. No Docker, no network."
     },
     {
       "file": "unit/test_3088_retention_ack_env_window.py",

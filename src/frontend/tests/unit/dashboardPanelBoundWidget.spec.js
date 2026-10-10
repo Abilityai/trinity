@@ -230,7 +230,7 @@ function notFound(extra = {}) {
     binding_error: "metric 'ad_spend': no recent data for channel=tiktok",
     binding_error_code: 'metric_series_not_found',
     binding_detail: { selector: { channel: 'tiktok' }, recent_series: [{ channel: 'meta' }],
-      more: 0, window_points: 200, series_cap: null, near: [] },
+      more: 0, lookback_days: 90, near: [] },
     ...extra,
   }
 }
@@ -275,8 +275,8 @@ describe('a bound tile captions which series it shows (ent#730)', () => {
 
   it('tells a selected tile on a metric with no points that there are none yet', async () => {
     const wrapper = await mountPanel(dashboard([notFound({ binding_detail: {
-      selector: { channel: 'google' }, recent_series: [], more: 0, window_points: 200,
-      series_cap: null, near: [] } })]))
+      selector: { channel: 'google' }, recent_series: [], more: 0, lookback_days: 90,
+      near: [] } })]))
     expect(wrapper.find('[data-testid="bound-series"]').text()).toBe('channel=google')
     expect(wrapper.find('[data-testid="bound-error-hint"]').text()).toBe('This metric has no points yet.')
     expect(wrapper.find('[data-testid="bound-no-points"]').exists()).toBe(false)

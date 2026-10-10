@@ -1578,14 +1578,25 @@ from the registry on every read: `value`, `color` (from the declared status
   |---|---|
   | `metric_dimension_invalid` | `dims` is not a mapping, a value is not a non-empty string (YAML `2024` / `yes`), is over-long or holds a control character, or there are more than 10 keys. A hint is added only for a non-text value, chosen by its type: quote it / one value per tile / the value is missing. |
   | `metric_dimension_undeclared` | A key the metric does not declare. The sentence lists the declared keys, or says the metric declares none. |
-  | `metric_series_not_found` | Valid and declared, but no recent series matches, including on a metric with no points at all. `binding_error` is "metric 'ad_spend': no recent data for channel=tiktok" (never "does not exist"); the rest travels as `binding_detail` facts (`selector`, `recent_series` ≤ 5, `more`, `window_points`, `series_cap`, `near` ≤ 5) and the browser writes the second line. |
+  | `metric_series_not_found` | Valid and declared, but no recent series matches, including on a metric with no points at all. `binding_error` is "metric 'ad_spend': no recent data for channel=tiktok" (never "does not exist"); the rest travels as `binding_detail` facts (`selector`, `recent_series` ≤ 5, `more`, `lookback_days`, `near` ≤ 5) and the browser writes the second line. |
 
-- **Known limit, documented not fixed:** the read keeps each metric's 200 newest
-  points (`LATEST_POINTS_PER_METRIC`) and lists 50 series
-  (`MAX_SERIES_PER_METRIC`). A series that reports rarely beside a busy one can
-  fall outside that window and is then refused `metric_series_not_found` even
-  though it still reports; the refusal states the window as facts and the hint
-  says so. A selector-specific lookup is the fix (follow-up bug #3293).
+- **A selected series is read on its own (#3293).** The fold reads each
+  metric's 200 newest points across all of its series
+  (`LATEST_POINTS_PER_METRIC`) and lists 50 series (`MAX_SERIES_PER_METRIC`); a
+  `dims:` selector is NOT matched against that shared read, because a series
+  that reports rarely beside a busy one is not in it. Each selected widget
+  makes its own bounded store read (`metric_series_points_for_dims`): the
+  series' 200 newest points inside the tile's window give the value, freshness
+  and history, and, only when the window holds none, its single newest point
+  back to 90 days (`SELECTED_SERIES_LOOKBACK_HOURS`) gives the value with an
+  empty history, stale. So how many points the metric's OTHER series recorded
+  never decides whether a tile binds. `metric_series_not_found` means the
+  series has no point in the last 90 days (and is not in the shared read
+  either); `lookback_days` states that bound and the hint says it. The fold,
+  `_latest_entry` and the objective join are unchanged. No schema change: the
+  read walks `idx_metric_points_agent_metric_ts` and filters on `dims`, so its
+  cost follows the metric's points inside the span it covers. A store fault on
+  this read refuses that one widget with `metric_store_unavailable`.
 - **Every successfully bound widget says what its number is** through
   `bound_series` (facts; the browser writes the caption):
 
