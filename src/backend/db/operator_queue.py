@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine, make_insert
 from .tables import operator_queue
+from .queue_mentions import MENTION_TYPE
 from utils.helpers import utc_now_iso, iso_cutoff, parse_iso_timestamp, to_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,10 @@ _DB_BELT_TYPE_MAX_BYTES = 1024
 # native ask cap nor the file poller's #1632 depth cap. The gate caps its own
 # raises. NULL `raised_by` is a legacy or file row, so it counts.
 _NOT_A_GATE_ROW = or_(operator_queue.c.raised_by.is_(None), operator_queue.c.raised_by != "gate")
+
+# trinity-enterprise#631: person tags share the ledger but not the operator's
+# door. NULL-safe: a row with no type is a legacy agent row and stays listed.
+_NOT_A_MENTION = or_(operator_queue.c.type.is_(None), operator_queue.c.type != MENTION_TYPE)
 
 
 def _own_pending_conds(agent_name: str, exclude_request_id_prefixes=None) -> list:
@@ -1097,6 +1102,13 @@ class OperatorQueueOperations:
         conds = []
         if not include_cleared:
             conds.append(operator_queue.c.cleared_at.is_(None))  # #1017
+        # trinity-enterprise#631: a person's tag is addressed to that person and
+        # read through their own door (`db/queue_mentions.py`). It is never a
+        # row of the operator's queue — listed there it would show who tagged
+        # whom to anyone with access to the agent — so it is left out unless a
+        # caller names the type explicitly.
+        if type != MENTION_TYPE and MENTION_TYPE not in (types or ()):
+            conds.append(_NOT_A_MENTION)
 
         if accessible_agent_names is not None:
             conds.append(operator_queue.c.agent_name.in_(sorted(accessible_agent_names)))
@@ -1901,7 +1913,8 @@ class OperatorQueueOperations:
             access_cond = operator_queue.c.agent_name.in_(sorted(accessible_agent_names))
 
         def _with_access(*conds):
-            all_conds = list(conds)
+            # trinity-enterprise#631: a person's tag is no operator's statistic.
+            all_conds = list(conds) + [_NOT_A_MENTION]
             if access_cond is not None:
                 all_conds.append(access_cond)
             return all_conds

@@ -16,11 +16,11 @@ import logging
 import secrets
 from typing import Optional, Dict, List, Any
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import and_, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
-from .tables import users
+from .tables import agent_ownership, agent_sharing, users
 from db_models import UserCreate
 from utils.helpers import utc_now_iso
 
@@ -365,6 +365,70 @@ class UserOperations:
         ).order_by(users.c.created_at.desc())
         with get_engine().connect() as conn:
             return [dict(row) for row in conn.execute(stmt).mappings()]
+
+    # ------------------------------------------------------- trinity-enterprise#631
+    # Who a person may TAG in a conversation: a platform account that exists, is
+    # not suspended, can be reached in the Workspace (it has an email — the
+    # Inbox's address), and can already reach one of the conversation's agents
+    # (owner, shared, or an admin). The population is scoped to the agents so
+    # the picker is never a fleet-wide account dump (the ent#450 pattern), and
+    # the SAME predicate answers "may this address be tagged" so a refusal can
+    # never disagree with what the picker offered.
+
+    @staticmethod
+    def _taggable_conds(agent_names: List[str]) -> list:
+        agents = sorted({a for a in (agent_names or []) if a})
+        owners = select(agent_ownership.c.owner_id).where(agent_ownership.c.agent_name.in_(agents))
+        sharees = select(func.lower(agent_sharing.c.shared_with_email)).where(
+            agent_sharing.c.agent_name.in_(agents))
+        return [
+            users.c.email.isnot(None),
+            users.c.email != "",
+            users.c.suspended_at.is_(None),
+            or_(
+                users.c.role == "admin",
+                users.c.id.in_(owners),
+                func.lower(users.c.email).in_(sharees),
+            ),
+        ]
+
+    _TAGGABLE_COLUMNS = (users.c.username, users.c.name, users.c.email)
+
+    def list_taggable_people(self, agent_names: List[str], query: str, *,
+                             exclude_email: Optional[str] = None, limit: int = 8) -> List[Dict]:
+        """Accounts matching `query` (a prefix of the email, the username, or a
+        word of the display name) that may be tagged in a conversation with
+        `agent_names`. Bounded: an empty query or no agents matches nothing."""
+        q = (query or "").strip().lower()
+        if not q or not agent_names:
+            return []
+        esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        name = func.lower(func.coalesce(users.c.name, ""))
+        conds = self._taggable_conds(agent_names) + [or_(
+            func.lower(users.c.email).like(f"{esc}%", escape="\\"),
+            func.lower(users.c.username).like(f"{esc}%", escape="\\"),
+            name.like(f"{esc}%", escape="\\"),
+            name.like(f"% {esc}%", escape="\\"),
+        )]
+        exclude = normalize_email(exclude_email)
+        if exclude:
+            conds.append(func.lower(users.c.email) != exclude)
+        stmt = (select(*self._TAGGABLE_COLUMNS).where(and_(*conds))
+                .order_by(func.lower(func.coalesce(users.c.name, users.c.username)), users.c.id)
+                .limit(max(1, int(limit))))
+        with get_engine().connect() as conn:
+            return [dict(r) for r in conn.execute(stmt).mappings()]
+
+    def get_taggable_person(self, agent_names: List[str], email: str) -> Optional[Dict]:
+        """The account behind `email` when it may be tagged with `agent_names`, else None."""
+        email = normalize_email(email)
+        if not email or not agent_names:
+            return None
+        stmt = select(*self._TAGGABLE_COLUMNS).where(and_(
+            *self._taggable_conds(agent_names), func.lower(users.c.email) == email))
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return dict(row) if row else None
 
     def update_user_role(self, username: str, role: str) -> Optional[Dict]:
         """Update a user's role. Returns updated user or None if not found."""

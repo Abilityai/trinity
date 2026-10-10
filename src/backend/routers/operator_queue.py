@@ -291,7 +291,9 @@ async def get_queue_item(
 ):
     """Get a single queue item by ID."""
     item = db.get_operator_queue_item(item_id)
-    if not item:
+    # trinity-enterprise#631: a person's tag is read through its addressee's own
+    # door only — to the operator's door it is a row that is not there.
+    if not item or item.get("type") == "mention":
         raise HTTPException(status_code=404, detail="Queue item not found")
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(item["agent_name"], accessible)

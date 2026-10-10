@@ -656,8 +656,12 @@ def test_the_sender_cannot_be_set_from_the_request_body(rooms_db, allow_all, fak
     from shared_sessions.models import RoomMessageCreate
 
     fields = set(RoomMessageCreate.model_fields)
-    assert fields == {"content"}, (
-        f"RoomMessageCreate grew {fields - {'content'}} — anything identity-shaped "
+    # trinity-enterprise#631: `tags` names the people a message POINTS AT (its
+    # recipients), never its sender — the tagger is still resolved from auth
+    # (`person_mention_service.tagger_for`), and an agent key is refused.
+    allowed = {"content", "tags"}
+    assert fields == allowed, (
+        f"RoomMessageCreate grew {fields - allowed} — anything identity-shaped "
         "here lets a caller post as someone else; the sender must come from auth"
     )
 

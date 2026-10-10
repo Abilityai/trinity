@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from config import ROOM_SOURCE_CHANNEL
+from services import person_mention_service
 from services.platform_prompt_service import build_user_facing_room_prompt
 from services.skill_gate_errors import SkillGateError
 from utils.helpers import utc_now_iso
@@ -547,10 +548,15 @@ def create_room(current_user, name: str, agents: list[str], topic: Optional[str]
 def get_room(current_user, room_id: str, since_seq: int = 0) -> dict:
     room = _require_membership(room_id, current_user)
     participants = db.list_participants(room_id)
+    messages = db.get_messages(room_id, since_seq)
+    own_tags = _annotate_own_tags(current_user, room_id, messages)
     return {
         **room,
         "participants": participants,
-        "messages": db.get_messages(room_id, since_seq),
+        "messages": messages,
+        # trinity-enterprise#631: the caller's tags across the WHOLE room, so a
+        # tag on an older message turns `read` without a full reload.
+        "own_tags": own_tags,
         "message_count": db.count_messages(room_id),
         "cost": db.room_cost(room_id),
         # Who is mid-turn, so a client that reloaded can show it again.
@@ -767,6 +773,94 @@ def _broadcast(event: str, payload: dict) -> None:
 
 
 _WS_TASKS: set = set()
+
+
+# --- person tags (trinity-enterprise#631) -------------------------------------
+#
+# A tag is a POINTER to a person, never a wake: it lands as one Unread item in
+# their Inbox (`services/person_mention_service.py`) and changes nothing about
+# who is in the room. Kept apart from `resolve_mentions` on purpose — that
+# function's output is the wake list, and a person must never appear in it.
+
+def _tagger(current_user):
+    """The person tagging, or the named refusal (agents, external clients)."""
+    try:
+        return person_mention_service.tagger_for(current_user)
+    except person_mention_service.TagError as e:
+        raise RoomError(e.status_code, e.code, e.detail, **e.extra) from e
+
+
+def _room_agents(participants: list[dict]) -> list[str]:
+    """The room's live agent participants, in the order they joined."""
+    live = [p for p in participants if p.get("kind") == "agent" and not p.get("left_at")]
+    live.sort(key=lambda p: (p.get("joined_at") or "", p.get("identity") or ""))
+    return [p["identity"] for p in live]
+
+
+def _deliver_tags(room_id: str, room: dict, participants: list[dict], message_id: str,
+                  seq: int, people: list, tagger) -> list[dict]:
+    """Write the tags of a message that has LANDED. Never fails the post: a
+    write that fails is reported as `failed` on the tagger's own message (and
+    logged), not as an error for a message everyone can already read."""
+    if not people:
+        return []
+    agents = _room_agents(participants) or [p["identity"] for p in participants
+                                            if p.get("kind") == "agent"]
+    conv = person_mention_service.Conversation(
+        kind="room", id=room_id, agent_name=agents[0] if agents else "",
+        label=room.get("name") or "a room")
+    try:
+        if not conv.agent_name:
+            raise RuntimeError("a room with no agent has no ledger anchor")
+        return person_mention_service.deliver(conv, message_id, seq, people, tagger)
+    except Exception:  # noqa: BLE001 — the message has landed; say what did not
+        logger.warning("room %s: tags on message %s could not be delivered", room_id, seq,
+                       exc_info=True)
+        return [{"label": p.label, "state": "failed", "read_at": None} for p in people]
+
+
+def tags_by_message(room_id: str, message_ids: Optional[list[str]] = None,
+                    tagged_by: Optional[str] = None) -> dict[str, list[dict]]:
+    return person_mention_service.tags_by_message("room", room_id, message_ids,
+                                                  tagged_by=tagged_by)
+
+
+def _own_tags(current_user, room_id: str) -> dict[str, list[dict]]:
+    """Message id → the caller's OWN tags on it, delivered or read — for every
+    message in the room, so the room's incremental poll (which re-reads only
+    new messages) still sees a tag on an older message turn to `read`. Only
+    the tagger's: a read receipt is the sender's, never the room's."""
+    if _caller(current_user)[0] == "agent":
+        return {}
+    try:
+        tagger = person_mention_service.tagger_for(current_user)
+    except person_mention_service.TagError:
+        return {}                     # someone who cannot tag has tagged no one
+    try:
+        return tags_by_message(room_id, tagged_by=tagger.username)
+    except Exception:  # noqa: BLE001 — marks are a courtesy; the transcript must load
+        logger.warning("room %s: could not read tag marks", room_id, exc_info=True)
+        return {}
+
+
+def _annotate_own_tags(current_user, room_id: str, messages: list[dict]) -> dict:
+    """Stamp each message with the caller's own tags on it (`[]` when none),
+    and return the whole room's map (`own_tags`)."""
+    marks = _own_tags(current_user, room_id)
+    for m in messages:
+        m["tags"] = marks.get(m["id"], [])
+    return marks
+
+
+def room_people(current_user, room_id: str, query: str) -> list[dict]:
+    """The picker's people for this room: accounts that exist and can reach
+    one of its agents, matching `query` (required — the ent#450 bound)."""
+    _require_membership(room_id, current_user)
+    tagger = _tagger(current_user)
+    if not (query or "").strip():
+        return []
+    agents = _room_agents(db.list_participants(room_id))
+    return person_mention_service.taggable_people(agents, query.strip()[:64], tagger)
 
 
 def resolve_mentions(content: str, participants: list[dict]) -> list[str]:
@@ -1051,11 +1145,19 @@ async def _room_inbox_context(agent_name: str, email: str | None,
 async def post_message(current_user, room_id: str, content: str,
                        _chain_depth: int = 0,
                        _sender_override: Optional[tuple[str, str]] = None,
-                       _execution_id: Optional[str] = None) -> dict:
+                       _execution_id: Optional[str] = None,
+                       tags: Optional[list[str]] = None) -> dict:
     """Append a message and wake the agents it @mentions.
 
     ``_sender_override`` / ``_execution_id`` are used when the engine posts an
     agent's reply back into the room; external callers never set them.
+
+    ``tags`` (trinity-enterprise#631) are the PEOPLE the sender picked to tag —
+    addresses, never parsed from the text. They are validated before anything
+    is written (an unknown name is refused by name), and each lands as one
+    Unread item in that person's Inbox once the message has landed. A tag is
+    never a wake target: ``mentions`` (the agents to wake) is computed from the
+    text exactly as before.
     """
     content = (content or "").strip()
     if not content:
@@ -1090,12 +1192,23 @@ async def post_message(current_user, room_id: str, content: str,
                            room_id, _sender_override[1], _execution_id)
             _post_system_safe(room_id, f"{_sender_override[1]}'s reply arrived "
                                        "after the room closed and was not posted.")
-            return {"room_id": room_id, "seq": None, "mentions": [], "woke": []}
+            return {"room_id": room_id, "seq": None, "mentions": [], "woke": [], "tags": []}
     else:
         _enforce_budgets(room)
 
     sender_kind, sender_identity = _sender_override or _caller(current_user)
     participants = db.list_participants(room_id)
+
+    # trinity-enterprise#631: the tags are refused (by name) BEFORE any write —
+    # the newcomer join below writes, and a refused tag must leave no trace.
+    # The engine's own post of an agent reply never carries tags.
+    tagger, tagged = None, []
+    if tags and not is_agent_reply:
+        tagger = _tagger(current_user)
+        try:
+            tagged = person_mention_service.resolve_tags(tags, _room_agents(participants), tagger)
+        except person_mention_service.TagError as e:
+            raise RoomError(e.status_code, e.code, e.detail, **e.extra) from e
 
     # ent#361 AC#4: a HUMAN @mentioning someone not in the room brings them in.
     # Deliberately not offered to agents (`is_agent_reply`): an agent that could
@@ -1110,9 +1223,11 @@ async def post_message(current_user, room_id: str, content: str,
 
     mentions = resolve_mentions(content, participants)
 
-    seq = db.append_message(uuid.uuid4().hex, room_id, sender_kind, sender_identity,
+    message_id = uuid.uuid4().hex
+    seq = db.append_message(message_id, room_id, sender_kind, sender_identity,
                             content, mentions, "message", _execution_id, utc_now_iso())
     _broadcast("room_message", {"room_id": room_id, "seq": seq})
+    tag_states = _deliver_tags(room_id, room, participants, message_id, seq, tagged, tagger)
 
     # #3210: the message has LANDED, and from here on nothing may fail the post.
     #
@@ -1134,7 +1249,8 @@ async def post_message(current_user, room_id: str, content: str,
         _post_system_safe(room_id, "This message was posted, but its mentions "
                                    f"could not be processed ({type(e).__name__}).")
         woke = []
-    return {"room_id": room_id, "seq": seq, "mentions": mentions, "woke": woke}
+    return {"room_id": room_id, "seq": seq, "mentions": mentions, "woke": woke,
+            "tags": tag_states}
 
 
 async def _after_landing(current_user, room_id: str, room: dict, sender_kind: str,

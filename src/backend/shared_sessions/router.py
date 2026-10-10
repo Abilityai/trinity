@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 
@@ -29,7 +29,7 @@ from dependencies import (
     reject_agent_principal,
     require_admin,
 )
-from models import User
+from models import TaggablePerson, User
 
 from . import service
 from .models import (
@@ -226,7 +226,8 @@ async def post_message(room_id: str, body: RoomMessageCreate,
     if decision.replay:
         return {**(decision.snapshot or {}), "replayed": True}
     try:
-        result = await service.post_message(current_user, room_id, body.content)
+        result = await service.post_message(current_user, room_id, body.content,
+                                            tags=body.tags)
     except RoomError as e:
         idempotency_service.fail(decision)
         _raise(e)
@@ -235,6 +236,26 @@ async def post_message(room_id: str, body: RoomMessageCreate,
         raise
     idempotency_service.complete(decision, None, result)
     return result
+
+
+@router.get("/{room_id}/people", response_model=List[TaggablePerson])
+async def room_people(room_id: str,
+                      q: str = Query(default="", max_length=64),
+                      current_user=Depends(get_room_principal)):
+    """People who can be TAGGED in this room (trinity-enterprise#631): accounts
+    on this instance that can already reach one of its agents, matching `q`.
+
+    The ent#450 shape: membership-scoped (uniform 404 for a non-member), a query
+    is required (an empty one lists no one), capped, and rate-limited per
+    caller — a picker, never a directory. Refused by name for a caller who may
+    not tag (an agent key, an external Workspace client)."""
+    from services import rate_limiter
+    who = getattr(current_user, "email", None) or getattr(current_user, "username", "") or "?"
+    rate_limiter.enforce(f"room_people:{who}", 120, 60)
+    try:
+        return service.room_people(current_user, room_id, q)
+    except RoomError as e:
+        _raise(e)
 
 
 @router.patch("/{room_id}")

@@ -151,6 +151,7 @@ from db.slack import SlackOperations
 from db.slack_channels import SlackChannelOperations
 from db.nevermined import NeverminedOperations
 from db.operator_queue import OperatorQueueOperations
+from db.queue_mentions import QueueMentionOperations
 from db.event_subscriptions import EventSubscriptionOperations
 from db.telegram_channels import TelegramChannelOperations
 from db.whatsapp_channels import WhatsAppChannelOperations
@@ -1033,6 +1034,7 @@ class DatabaseManager:
         self._slack_channel_ops = SlackChannelOperations()
         self._nevermined_ops = NeverminedOperations()
         self._operator_queue_ops = OperatorQueueOperations()
+        self._queue_mention_ops = QueueMentionOperations()  # trinity-enterprise#631
         self._event_subscription_ops = EventSubscriptionOperations()
         self._telegram_channel_ops = TelegramChannelOperations()
         self._whatsapp_channel_ops = WhatsAppChannelOperations()
@@ -1080,6 +1082,14 @@ class DatabaseManager:
 
     def list_users(self):
         return self._user_ops.list_users()
+
+    # trinity-enterprise#631 — who may be tagged in a conversation with these agents
+    def list_taggable_people(self, agent_names, query, *, exclude_email=None, limit=8):
+        return self._user_ops.list_taggable_people(agent_names, query,
+                                                   exclude_email=exclude_email, limit=limit)
+
+    def get_taggable_person(self, agent_names, email):
+        return self._user_ops.get_taggable_person(agent_names, email)
 
     def update_user_role(self, username: str, role: str):
         return self._user_ops.update_user_role(username, role)
@@ -3818,6 +3828,25 @@ class DatabaseManager:
 
     def get_nevermined_payment_log_entry(self, log_id):
         return self._nevermined_ops.get_payment_log_entry(log_id)
+
+    # =========================================================================
+    # Person tags on the queue-item ledger (db/queue_mentions.py) - ent#631
+    # =========================================================================
+
+    def create_person_mention(self, **kwargs):
+        return self._queue_mention_ops.create(**kwargs)
+
+    def list_person_mentions_for(self, email, limit=200):
+        return self._queue_mention_ops.list_for_addressee(email, limit)
+
+    def get_person_mention(self, item_id):
+        return self._queue_mention_ops.get(item_id)
+
+    def mark_person_mention_read(self, item_id, email, now):
+        return self._queue_mention_ops.mark_read(item_id, email, now)
+
+    def list_person_mentions_by_prefix(self, prefix, limit=2000):
+        return self._queue_mention_ops.list_by_request_prefix(prefix, limit)
 
     # =========================================================================
     # Operator Queue (delegated to db/operator_queue.py) - OPS-001
