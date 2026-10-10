@@ -195,13 +195,18 @@ def classify_switch_failure(response: httpx.Response) -> Optional[str]:
     """
     # Imported here (not at module scope) to match the except-handler import and
     # keep the test patch target `subscription_auto_switch.is_auth_failure` live.
-    from services.failure_classifier import is_model_rejection
+    from services.failure_classifier import is_container_fault, is_model_rejection
     from services.subscription_auto_switch import is_auth_failure
 
     code = response.status_code
     if code >= 400:
         error_msg, _, _ = _extract_agent_error(response, "")
         if is_model_rejection(error_msg):
+            return None
+        # #3470: the agent server answers 503 for "cannot run Claude in this
+        # container at all" too. No credential fixes that, and a walk would
+        # record an auth refusal against every subscription and the key.
+        if is_container_fault(error_msg):
             return None
     if code == 429:
         return "rate_limit"

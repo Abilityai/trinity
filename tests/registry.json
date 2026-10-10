@@ -5145,6 +5145,102 @@
       "description": "trinity#3274: utils/skillGate.js — pendingApprovalMessage reads the server message off a 202 pending_approval (fallback the MCP wording) and is null for an ordinary async accept; isGateRefusal matches a named refusal by its X-Trinity-Error-Code header (plain object or get())."
     },
     {
+      "file": "frontend/tests/unit/skillCards.spec.js",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#754: the Skills tab's rules as a pure module — every skill in exactly one section (a #2914 conflict in both), Run needs a running agent, the LIVE list and user_invocable, the gate line names a kind (\"you approve this\", \"nobody fills it yet\", the recommendation warning), kept gates with no skill, role / ephemeral / system controls, shared badges and the note line, the mode chip relabel."
+    },
+    {
+      "file": "frontend/tests/unit/skillGatesStore.spec.js",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#754: the agent-scoped gate store — the map loads before the hook probe, a write sends the selected kind and re-reads the map for the agent it wrote to (never the one the cached page moved to), per-skill busy/error. Mutation-proven."
+    },
+    {
+      "file": "frontend/tests/unit/skillsStoreAgentSwitch.spec.js",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#754: the skills store survives an agent switch — a load, a sync, a save or a set write that answers after the KeepAlive'd page moved to another agent is dropped, never shown as that agent's state, and a write's follow-up read never re-reads the next agent. Mutation-proven."
+    },
+    {
+      "file": "frontend/tests/unit/skillsTab.mount.spec.js",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "frontend",
+        "unit",
+        "mount"
+      ],
+      "description": "trinity-enterprise#754, MOUNTED: the merged Skills tab — own and shared sections, owner vs viewer vs ghost vs system controls, the stopped agent's last-known list, Run in async mode with its three answers (opened run, 202 notice, refusal toast, other errors on the card), the approval toggle / picker writes, the kept-gate Clear, the hook warning, the filter. Mutation-proven."
+    },
+    {
+      "file": "frontend/tests/unit/executionGateMarker.mount.spec.js",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "frontend",
+        "unit",
+        "mount"
+      ],
+      "description": "trinity-enterprise#754, MOUNTED: a self-approved run says \"ran without approval\" on its Tasks row and its execution page, \"you are the approver\" only to the person who ran it, from the server's two booleans."
+    },
+    {
+      "file": "frontend/tests/unit/tasksPanelRunRefresh.spec.js",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "frontend",
+        "unit",
+        "mount"
+      ],
+      "description": "trinity-enterprise#754, MOUNTED (eyeball round): a skill's Run opens the Tasks tab while it is still running, and the row settles without a Refresh — the poll re-reads the list while a row is queued / running / pending_retry and stops when none is, never stacks a read, holds off while a typed task is awaited (no duplicate row), applies only the latest read, opens the highlighted row once, and shows a settled row's result. Mutation-proven."
+    },
+    {
+      "file": "frontend/tests/unit/baseBadgeSize.spec.js",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-09",
+      "categories": [
+        "frontend",
+        "unit",
+        "mount"
+      ],
+      "description": "trinity-enterprise#754, MOUNTED: BaseBadge size=\"sm\" (11/550, padding 1.5x7, the Skills card's author-mode chip); md stays the default recipe. Cataloged in design-system.md (PR review). Mutation-proven."
+    },
+    {
+      "file": "frontend/tests/unit/baseSelectSize.spec.js",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "frontend",
+        "unit",
+        "mount"
+      ],
+      "description": "trinity-enterprise#754, MOUNTED: BaseSelect size=\"sm\" gives the field recipe BaseButton sm's box and the 12px chevron; md stays the default and the shared field recipe stays byte-identical; ghost takes no size. Mutation-proven."
+    },
+    {
+      "file": "frontend/tests/unit/portalSelfApprovedTurn.spec.js",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "frontend",
+        "unit",
+        "mount"
+      ],
+      "description": "trinity-enterprise#754 (C9): the Workspace carries the self-approved marker through assistantRow and replyFromHistory (true only when the server said true; a just-landed reply included) and binds it to the marker under the agent bubble (shallow-mounted PortalConversation)."
+    },
+    {
       "file": "frontend/tests/unit/skillGateSenders.spec.js",
       "feature": "#3274",
       "added": "2026-10-07",
@@ -5152,7 +5248,7 @@
         "frontend",
         "unit"
       ],
-      "description": "trinity#3274 item 9, MOUNTED: ChatPanel shows a held request's notice as a platform line, polls nothing, and leaves the held lines out of the next turn's history; PublicChat stops at a skipped turn and shows its notice instead of polling to a timeout; TasksPanel keeps a held or refused request as its own row (no server row exists); PlaybooksPanel and DashboardPanel hand the notice to the agent page's toast and open nothing; refusals are named, never an object. Mutation-proven per sender."
+      "description": "trinity#3274 item 9, MOUNTED: ChatPanel shows a held request's notice as a platform line, polls nothing, and leaves the held lines out of the next turn's history; PublicChat stops at a skipped turn and shows its notice instead of polling to a timeout; TasksPanel keeps a held or refused request as its own row (no server row exists); the Skills tab (trinity-enterprise#754, which absorbed PlaybooksPanel) and DashboardPanel hand the notice to the agent page's toast and open nothing; refusals are named, never an object. Mutation-proven per sender."
     },
     {
       "file": "frontend/tests/unit/mobileAdminSkillGate.spec.js",
@@ -5172,7 +5268,7 @@
         "frontend",
         "unit"
       ],
-      "description": "trinity#3274 (@source-text-pin): AgentDetail hands its toast host (:notify) to PlaybooksPanel and DashboardPanel, and its toast has an info arm in the status-info family ahead of the red fallback."
+      "description": "trinity#3274 (@source-text-pin): AgentDetail hands its toast host (:notify) to SkillsTab and DashboardPanel, and its toast has an info arm in the status-info family ahead of the red fallback."
     },
     {
       "file": "unit/test_3313_operator_queue_sync_error_logged.py",
@@ -5239,6 +5335,60 @@
         "unit"
       ],
       "description": "trinity-enterprise#753: the approval: frontmatter key (top level or the trinity: block) parsed into the skill contract from the closed set {recommended}; YAML bool/int/date/mapping/list and unknown words are named frontmatter_invalid:approval and never raise; the value rides list_skills entries and SkillInfo."
+    },
+    {
+      "file": "unit/test_ent754_agent_server_skillinfo.py",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "unit",
+        "agent-server"
+      ],
+      "description": "trinity-enterprise#754: the agent server's GET /api/skills reports each skill's source (platform when the .trinity-skill.json marker is in the dir, else agent), its dir, and approval (the closed set {recommended}, read with the backend contract's trinity:-block-first precedence); a behavioural parity table runs the same frontmatter through both parsers, and the vendored constants equal the backend's."
+    },
+    {
+      "file": "unit/test_ent754_skills_list_cache.py",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#754: the last-known skills list — every live /playbooks success is kept in Redis (agent:skills_list:{name}, no TTL), a live empty list replaces it, a failed read never overwrites it, an oversized one is dropped; ?last_known=true serves it only for a stopped/unreachable agent, labelled; Redis is fail-open; cleared on teardown and create, never on start; the public link strips source/dir/approval; the connector read refreshes it. Through the real routes."
+    },
+    {
+      "file": "unit/test_ent754_gate_map_viewer_and_hook.py",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "trinity-enterprise#754: GET /skill-gates lists every approver kind with reachable and viewer_fills (decided by the same functions enforce self-approves with — a parity test runs enforce for owner, viewer, admin and agent key; booleans only), and ?probe=true reads the agent's /health skill_gate_hook for a manager only: a 200 without the field is predates, no answer is unknown."
+    },
+    {
+      "file": "unit/test_ent754_execution_self_approved.py",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "unit",
+        "database"
+      ],
+      "description": "trinity-enterprise#754: the executions list and detail carry gate_self_approved / gate_self_approved_by_viewer, derived from ent#752's self_approved records (no new column): the record is written through the real record_self_approval and read back through the real routes on a real DB; only the requester is \"you\", a machine key never is, and no email leaves."
+    },
+    {
+      "file": "unit/test_ent754_workspace_self_approved.py",
+      "feature": "abilityai/trinity-enterprise#754",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "unit",
+        "database"
+      ],
+      "description": "trinity-enterprise#754 (C9): a Workspace reply whose turn skipped approval because the asker is the approver is marked on the history read (the window and the reply poll's narrow read), from ent#752's self_approved record via #3166's execution_id — only that reply, casefolded viewer compare, both fields declared on the route model, no email added. Through the real get_history and record_self_approval on a real DB."
     },
     {
       "file": "mcp-server/src/tools/skill-gates.test.ts",
@@ -5326,6 +5476,42 @@
         "unit"
       ],
       "description": "#3406: the backend half of the contract the browser's 401 verdict reads. get_current_user rejects a dead token and OAuth2PasswordBearer rejects a missing one WITH `WWW-Authenticate: Bearer`; the five public-link session routes (intro, history, session clear, chat, terminate) answer an expired or missing visitor session with a bare 401. Handlers driven directly with the link check, rate limit and session lookup stubbed. No Docker."
+    },
+    {
+      "file": "unit/test_3455_email_whitelist_validation.py",
+      "feature": "#3455",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "settings",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "#3455 + #3456: the email whitelist validates what it stores and can remove whatever it holds. Driven through the real composed settings router with the auth dependency overridden and the table replaced by an in-memory stand-in. POST refuses a@, @b.com, a 10 000-character string, whitespace and control characters with a 422 whose detail is ONE named sentence (never Pydantic's array, never the echoed value, never a 500 for a malformed or non-JSON body), and stores a valid address trimmed and lower-cased; the admin gate still answers first. DELETE removes a stored value containing a slash when sent URL-encoded (the {email:path} converter), including rows that predate validation, still 404s an absent value, keeps its admin gate, and claims no sibling settings route at any method (Invariant #4). No Docker."
+    },
+    {
+      "file": "unit/test_3443_public_chat_history_lookup.py",
+      "feature": "#3443",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "database",
+        "public-links",
+        "unit"
+      ],
+      "description": "#3443: an anonymous public-chat session finds its own row. get_session_by_identifier (behind GET /api/public/history and DELETE /api/public/session) matches the identifier verbatim, as get_or_create_session stores it, so a mixed-case anonymous token restores its history after a reload; two tokens differing only in case stay separate sessions; only an email row is reachable through its lowercased form. PublicChatOperations driven against an ephemeral DB (db_harness). No Docker."
+    },
+    {
+      "file": "unit/test_ent849_email_code_policy.py",
+      "feature": "trinity-enterprise#849",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "Email-code sign-in policy seam: gate fail-open, web /api/auth/email/* 403 before any lookup, /api/auth/mode flag, /token never consults the gate, MCP inline / Workspace / Telegram / WhatsApp refusals, and an AST guard that every login-code caller asks the gate."
     },
     {
       "file": "unit/test_3404_delegate_session_self_approval.py",

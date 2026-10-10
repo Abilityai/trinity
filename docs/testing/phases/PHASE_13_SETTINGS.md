@@ -1,504 +1,245 @@
-# Phase 13: System Settings, Email Whitelist & Agent Controls
+# Phase 13: Settings — General & Access
 
-> **Purpose**: Validate admin-only Settings page, Trinity Prompt, Email Whitelist, and per-agent API key control
-> **Duration**: ~20 minutes
-> **Assumes**: Phase 1 PASSED (authentication working), Phase 2 PASSED (agents can be created)
-> **Output**: Settings CRUD verified, Trinity Prompt injected, Email Whitelist working, API key toggle tested
+> **Purpose**: Verify the Settings page shell and its General and Access tabs, including a save/restore round trip of the Trinity Prompt and an add/remove round trip of the Email Whitelist.
+> **Duration**: ~12 minutes
+> **Assumes**: the fixture trio is running and you are logged in as admin
+> **Output**: A pass proves Settings tabs deep-link and switch, the Trinity Prompt saves and persists, and the whitelist accepts and removes an address — with both restored to their original state.
+> **Last verified**: 2026-10-09 against source (not yet browser-run)
 
 ---
+
+## Background
+
+Settings lives at `/settings` (`views/Settings.vue`) and is split into tabs selected by
+`?tab=`: General, Access, Integrations, MCP Keys, Agents, Retention, plus a few that only
+appear on some instances. An admin lands on **General**. The **Trinity Prompt** card is
+on the General tab; the **Email Whitelist** card is on the Access tab, alongside
+"User Management" and "SSH Access".
+
+Replaces the January flow that treated Settings as one long page, toggled a per-agent
+"Allow Agent API Key" control in a Terminal tab (that tab no longer exists) and queried
+an audit service on port 8001 (gone). This phase covers the `general` and `access`
+tabs only; the other tabs are covered by Phase 35.
+
+**This phase changes two global values** — the Trinity Prompt (read by every agent on
+every turn) and the login whitelist. Both are restored in Cleanup; do not skip it.
 
 ## Prerequisites
 
-- ✅ Phase 1 PASSED (logged in as admin)
-- ✅ Backend healthy at http://localhost:8000
-- ✅ Frontend accessible at http://localhost
-- ✅ At least one running agent (or ability to create one)
+- [ ] Logged in as `admin` (password is `ADMIN_PASSWORD` from `.env`)
+- [ ] A Bearer token for API checks, referred to as `$TOKEN`
+- [ ] Do not send any message or task to an agent during this phase
 
----
+## Setup
 
-## Test Steps
+Record the original values before touching anything.
 
-### Step 1: Verify Admin Access to Settings
-
-**Action**:
-- Login as admin user
-- Look for "Settings" link in the navigation bar (top right area)
-- Click on "Settings" link
-
-**Expected**:
-- [ ] Settings link visible in navbar (admin users only)
-- [ ] Clicking navigates to `/settings` route
-- [ ] Settings page loads with "Trinity Prompt" section
-- [ ] Textarea visible for editing prompt
-- [ ] "Save Changes" button visible
-- [ ] "Clear" button visible
-
-**Verify**:
-- [ ] No console errors
-- [ ] Page title shows "Settings"
-- [ ] Character count displays (e.g., "0 characters")
-
----
-
-### Step 2: Verify Non-Admin Cannot Access Settings
-
-**Action**:
-- If possible, login as a non-admin user
-- OR directly navigate to http://localhost/settings
-
-**Expected** (non-admin):
-- [ ] Settings link NOT visible in navbar
-- [ ] Direct URL access redirects to home or shows access denied
-
-**Verify**:
-- [ ] Non-admins cannot see Settings navigation
-- [ ] Non-admins cannot access Settings page
-
-*Note: In dev mode with only admin user, this test can be skipped but should be documented.*
-
----
-
-### Step 3: Create Trinity Prompt
-
-**Action**:
-- Navigate to Settings page (as admin)
-- Enter test prompt in textarea:
-```
-## Test Custom Instructions
-
-This is a test prompt from the Settings page.
-
-**Rules**:
-1. Always be helpful
-2. Use proper Markdown formatting
-3. Reference this test ID: TEST-12345
-```
-- Click "Save Changes"
-
-**Expected**:
-- [ ] Success message appears (green toast or inline message)
-- [ ] "Unsaved changes" indicator disappears
-- [ ] Character count updates to reflect saved content
-- [ ] Prompt value persists in textarea
-
-**Verify**:
-- [ ] API call succeeded: `PUT /api/settings/trinity_prompt`
-- [ ] No console errors
-- [ ] Can refresh page and see saved prompt
-
----
-
-### Step 4: Verify Prompt Persistence via API
-
-**Action**: In browser DevTools Console, run:
-```javascript
-fetch('/api/settings/trinity_prompt', {
-  headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-}).then(r => r.json()).then(console.log)
-```
-
-OR via curl:
 ```bash
-TOKEN=$(cat ~/.trinity-test-token)  # or get from browser
-curl http://localhost:8000/api/settings/trinity_prompt \
-  -H "Authorization: Bearer $TOKEN"
+# Trinity Prompt — 200 with {"key","value","updated_at"} when set, 404 when never set
+curl -s -w '\n%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/settings/trinity_prompt
+
+# Whitelist — {"whitelist": [ {email, source, added_at, ...}, ... ]}
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/settings/email-whitelist
 ```
+- Record `ORIGINAL_PROMPT` = the exact `value` string, or `UNSET` if the call returned 404. Save it to a file so it can be restored byte-for-byte.
+- Record `ORIGINAL_WHITELIST` = the list of emails, and whether `user@example.com` is already in it (`PRESENT` / `ABSENT`).
 
-**Expected**:
-- [ ] Returns JSON with key, value, updated_at
-- [ ] Value matches saved prompt text
-- [ ] Response status: 200
+## Test: Page shell and tabs
 
-**Verify**:
-```json
-{
-  "key": "trinity_prompt",
-  "value": "## Test Custom Instructions\n\nThis is a test...",
-  "updated_at": "2025-12-14T..."
-}
-```
-
----
-
-### Step 5: Verify Prompt Injection into New Agent
-
+### Step 1: Settings opens on General
 **Action**:
-- Create a new test agent (can use any template)
-- Wait for agent to start and reach "running" status
-- Wait additional 5 seconds for Trinity injection
+- Click **Settings** in the top navigation
 
 **Expected**:
-- [ ] Agent created successfully
-- [ ] Agent reaches "running" status
-- [ ] Trinity injection completes (check agent logs)
+- [ ] URL is `http://localhost/settings`; heading "Settings" with the line "System-wide configuration for the Trinity platform"
+- [ ] A tab strip is shown and **General** is the selected tab
+- [ ] The strip contains at least General, Access, Integrations, MCP Keys, Agents, Retention (some may sit under a "More" menu at the right; record any additional tabs without opening them)
 
-**Verify Injection** (via Files tab or API):
+### Step 2: Tabs switch and deep-link
+**Action**:
+- Click the **Access** tab
+- Use the browser Back button
+- Navigate to `http://localhost/settings?tab=access`
+- Navigate to `http://localhost/settings?tab=does-not-exist`
+
+**Expected**:
+- [ ] Clicking Access changes the URL to `/settings?tab=access` and shows the "Email Whitelist" card
+- [ ] Back returns to the General tab content (the "Trinity Prompt" card is visible again)
+- [ ] The direct link opens straight on Access
+- [ ] The unknown tab id falls back to General — no blank page
+
+### Step 3: General tab contents
+**Action**:
+- Navigate to `http://localhost/settings?tab=general` and scroll the whole tab
+
+**Expected**:
+- [ ] Cards headed "Admin sign-in email", "Platform", "Trinity Prompt", "Build Info" and "Default Avatars" are present (other cards may appear above them — record their headings)
+- [ ] A blue "How it works" box lists five bullet points about the Trinity Prompt and links to a docs guide
+- [ ] The "Email Whitelist" card is NOT on this tab
+- [ ] Do not change anything in "Admin sign-in email", "Platform" or "Default Avatars"
+
+## Test: Trinity Prompt (General tab)
+
+### Step 4: Card state matches the stored value
+**Action**:
+- Look at the "Trinity Prompt" card
+
+**Expected**:
+- [ ] Subtitle begins "Custom instructions added to every agent's instructions on each chat and task turn."
+- [ ] A textarea labelled "Custom Instructions" holds exactly `ORIGINAL_PROMPT` (empty, showing the placeholder "Enter custom instructions for all agents...", when `UNSET`)
+- [ ] The counter reads "<N> characters" where N is the length of the text
+- [ ] **Save Changes** is disabled; **Clear** is disabled when the textarea is empty
+- [ ] No "Unsaved changes" label is shown
+
+### Step 5: Editing marks the form dirty
+**Action**:
+- Click into the textarea, move the caret to the very end, press Enter and type `ui-sweep-13-marker`
+
+**Expected**:
+- [ ] "Unsaved changes" appears next to the character counter and the counter increases
+- [ ] **Save Changes** becomes enabled
+
+### Step 6: Save the change
+**Action**:
+- Click **Save Changes**
+
+**Expected**:
+- [ ] The button briefly reads "Saving..."
+- [ ] A green banner "Settings saved successfully!" appears at the bottom of the page and disappears after about 3 seconds
+- [ ] "Unsaved changes" disappears and **Save Changes** is disabled again
+- [ ] No red "Error" box is shown
+
+**Verify** (API):
 ```bash
-# Get agent's CLAUDE.md content
-curl "http://localhost:8000/api/agents/YOUR_AGENT_NAME/files/CLAUDE.md" \
-  -H "Authorization: Bearer $TOKEN"
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/settings/trinity_prompt \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['value'].endswith('ui-sweep-13-marker'))"
+# True
 ```
 
-**Expected in CLAUDE.md**:
-- [ ] Contains "## Custom Instructions" section
-- [ ] Contains "TEST-12345" from our test prompt
-- [ ] Custom Instructions appears AFTER Trinity Planning System section
-
----
-
-### Step 6: Verify Prompt Update on Agent Restart
-
+### Step 7: The saved value survives a reload
 **Action**:
-- Update the Trinity Prompt in Settings:
-```
-## Updated Instructions
-
-This prompt has been UPDATED.
-Test ID: UPDATE-67890
-```
-- Save changes
-- Stop the test agent
-- Start the test agent again
-- Wait for startup and Trinity injection
+- Reload `http://localhost/settings?tab=general`
 
 **Expected**:
-- [ ] Agent stops successfully
-- [ ] Agent starts successfully
-- [ ] Agent logs show "Appended Custom Instructions to CLAUDE.md"
+- [ ] The textarea ends with `ui-sweep-13-marker`; **Save Changes** is disabled; no "Unsaved changes"
 
-**Verify** (check CLAUDE.md again):
-- [ ] Contains "UPDATE-67890" (new content)
-- [ ] Does NOT contain "TEST-12345" (old content removed)
-
----
-
-### Step 7: Verify Prompt Removal When Cleared
-
+### Step 8: Clear (only when the prompt was originally unset)
 **Action**:
-- Navigate to Settings page
-- Click "Clear" button to empty the prompt
-- Confirm action if prompted
-- Stop the test agent
-- Start the test agent again
-- Wait for Trinity injection
+- If `ORIGINAL_PROMPT` is `UNSET`: click **Clear**
+- Otherwise: record `SKIPPED (prompt had an original value — restored in Cleanup instead)` and go to Step 9
 
 **Expected**:
-- [ ] Settings shows empty textarea
-- [ ] API returns 404 for `GET /api/settings/trinity_prompt`
-- [ ] Agent logs show "Removed Custom Instructions from CLAUDE.md" (or just Trinity section without custom)
+- [ ] The textarea empties, "0 characters" is shown and the "Settings saved successfully!" banner appears
+- [ ] `GET /api/settings/trinity_prompt` now returns 404 (the setting is deleted, not stored empty)
 
-**Verify** (check CLAUDE.md):
-- [ ] "## Custom Instructions" section is GONE
-- [ ] "UPDATE-67890" text is NOT present
-- [ ] Trinity Planning System section still exists
+## Test: Email Whitelist (Access tab)
 
----
-
-## Email Whitelist Testing (Req 12.4)
-
-### Step 8: Navigate to Email Whitelist Section
-
+### Step 9: Access tab contents
 **Action**:
-- In Settings page, scroll to "Email Whitelist" section
-- Verify section is visible
+- Navigate to `http://localhost/settings?tab=access`
 
 **Expected**:
-- [ ] Section header shows "Email Whitelist"
-- [ ] Table displays existing whitelisted emails (if any)
-- [ ] "Add Email" input field visible
-- [ ] "Add" button visible
+- [ ] Cards headed "Email Whitelist", "User Management" and "SSH Access" are present
+- [ ] The whitelist card has an email input with placeholder `user@example.com`, an **Add Email** button (disabled while the input is empty) and a table with columns Email, Source, Added
+- [ ] The table rows match `ORIGINAL_WHITELIST`, or the single line "No whitelisted emails. Add one above to get started." if it is empty
+- [ ] Each row shows a source pill — "✋ Manual" or "🤝 Auto (Agent Sharing)" — and a **Remove** button
+- [ ] The tip line beginning "💡 Tip: When you share an agent with someone by email" is shown
+- [ ] Record whether the blue "How it works" box about the Trinity Prompt is also shown at the bottom of this tab (it is not tab-scoped in source)
+- [ ] Do not change any role in "User Management" and do not touch the "SSH Access" toggle
 
----
-
-### Step 9: Add Email to Whitelist
-
+### Step 10: Add an address
 **Action**:
-- Enter email: `test@example.com`
-- Click "Add" button
+- If `user@example.com` was `PRESENT` in Setup: record `SKIPPED (address already whitelisted)` for Steps 10 and 12, run Step 11 only, and leave the row alone
+- Otherwise type `user@example.com` in the input and click **Add Email**
 
 **Expected**:
-- [ ] Success message appears
-- [ ] Email appears in whitelist table
-- [ ] Table shows email, added date, and remove button
+- [ ] The input clears and a row `user@example.com` appears with the "✋ Manual" pill and a date in "Added"
+- [ ] The green "Settings saved successfully!" banner appears briefly
 
-**Verify via API**:
+**Verify** (API):
 ```bash
-curl http://localhost:8000/api/settings/email-whitelist \
-  -H "Authorization: Bearer $TOKEN"
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/settings/email-whitelist \
+  | python3 -c "import sys,json; print([e['email'] for e in json.load(sys.stdin)['whitelist']])"
+# contains user@example.com exactly once
 ```
 
-**Expected Response**:
-```json
-{
-  "emails": ["test@example.com", ...]
-}
-```
-
----
-
-### Step 10: Remove Email from Whitelist
-
+### Step 11: A duplicate is refused
 **Action**:
-- Click "Remove" button next to test email
-- Confirm action if prompted
+- Type `user@example.com` again and click **Add Email**
 
 **Expected**:
-- [ ] Email removed from table
-- [ ] Success message appears
+- [ ] A red "Error" box appears reading "Email user@example.com is already whitelisted"
+- [ ] The table still has exactly one `user@example.com` row
 
----
-
-### Step 11: Test Duplicate Email Prevention
-
+### Step 12: Remove the address
 **Action**:
-- Add email: `existing@example.com`
-- Try to add same email again
+- Click **Remove** on the `user@example.com` row — ONLY that row
+- A native browser confirm dialog "Remove user@example.com from whitelist?" appears: accept it (arm the dialog handler to accept before clicking)
 
 **Expected**:
-- [ ] Error message: "Email already whitelisted"
-- [ ] Duplicate not added
+- [ ] The row disappears; the other rows are unchanged
+- [ ] The green banner appears briefly
+- [ ] The API list from Step 10 no longer contains `user@example.com`
 
----
-
-## Per-Agent API Key Control (Req 11.7)
-
-### Step 12: Navigate to Agent Detail Settings
-
+### Step 13: Narrow viewport (390 px) and dark theme
 **Action**:
-- Go to any running agent's detail page
-- Click on "Settings" tab (or find API key toggle in Terminal tab)
+- On `http://localhost/settings?tab=access`, resize to 390 × 844
+- Open the user menu (avatar button, top right), choose **Dark** under "Theme", look at both the Access and General tabs, then restore the previous theme
+- Resize back to ≥ 1280 px
 
 **Expected**:
-- [ ] Settings panel/tab visible
-- [ ] "Allow Agent API Key" toggle visible
-- [ ] Toggle shows current state (default: ON)
+- [ ] At 390 px the tabs that do not fit the strip move into a "More" menu, from which they can still be opened
+- [ ] The page itself does not scroll horizontally (the whitelist table may scroll inside its own card); **Add Email** and the Trinity Prompt buttons are reachable
+- [ ] In dark theme the cards, table, pills and the blue "How it works" box are readable — no white cards or dark-on-dark text
 
----
+## Cleanup / Restore
 
-### Step 13: Toggle API Key Setting
+Restore both values, then prove it.
 
-**Action**:
-- Toggle "Allow Agent API Key" to OFF
-- Wait for save confirmation
+1. **Trinity Prompt** — original read in Setup as `ORIGINAL_PROMPT`.
+   - If `UNSET`: Step 8 already cleared it. If Step 8 did not run or failed, open the General tab and click **Clear**, or run `curl -s -X DELETE -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/settings/trinity_prompt`.
+   - Otherwise write the saved original back exactly:
+     ```bash
+     python3 -c "import json,sys; print(json.dumps({'value': open('original_prompt.txt').read()}))" > body.json
+     curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+       --data @body.json http://localhost:8000/api/settings/trinity_prompt
+     ```
+   - Confirm: `GET /api/settings/trinity_prompt` returns the same status and `value` as in Setup, and contains no `ui-sweep-13-marker`.
+2. **Email Whitelist** — original read in Setup as `ORIGINAL_WHITELIST`.
+   - If `user@example.com` was `ABSENT` in Setup and is still listed, remove it: `curl -s -X DELETE -H "Authorization: Bearer $TOKEN" "http://localhost:8000/api/settings/email-whitelist/user%40example.com"`.
+   - If it was `PRESENT` in Setup, it must still be there.
+   - Confirm: the whitelist email set equals `ORIGINAL_WHITELIST`.
+3. **Theme** — set back to the value it had before Step 13.
+4. Delete the temporary `original_prompt.txt` / `body.json` files.
 
-**Expected**:
-- [ ] Toggle updates to OFF state
-- [ ] Success message appears
-- [ ] Setting persists after page refresh
+## Manual-only (not run unattended)
 
-**Verify via API**:
-```bash
-curl http://localhost:8000/api/agents/AGENT_NAME/api-key-setting \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-**Expected Response**:
-```json
-{
-  "agent_name": "AGENT_NAME",
-  "allow_agent_api_key": false
-}
-```
-
----
-
-### Step 14: Verify API Key Behavior When Disabled
-
-**Action**:
-- With toggle OFF, check agent environment
-- Try to use agent API key
-
-**Expected**:
-- [ ] Agent's `ANTHROPIC_API_KEY` env var is empty or unset
-- [ ] Agent cannot make direct API calls
-- [ ] MCP proxy still works (if configured)
-
-**Reset**:
-- Toggle back to ON for normal operation
-
----
-
-## Trinity Prompt Testing (Continued)
-
-### Step 15: Test Markdown Content Support
-
-**Action**:
-- Save a prompt with various Markdown elements:
-```markdown
-## Code Guidelines
-
-Always use:
-- **Bold** for emphasis
-- `code blocks` for technical terms
-- Lists for multiple items
-
-### Example
-\`\`\`python
-def hello():
-    print("Hello, World!")
-\`\`\`
-
-> This is a blockquote
-
-| Column A | Column B |
-|----------|----------|
-| Value 1  | Value 2  |
-```
-
-**Expected**:
-- [ ] Prompt saves successfully
-- [ ] All Markdown preserved when retrieved
-- [ ] Agent CLAUDE.md contains exact Markdown
-
-**Verify**:
-- [ ] No escaping or corruption of special characters
-- [ ] Backticks preserved
-- [ ] Table syntax preserved
-
----
+- A non-admin user sees only the MCP Keys tab and gets "Access denied. Admin privileges required." paths (needs a second account).
+- Confirming a whitelisted address can actually log in by email code (needs a mailbox) — see Phase 17.
+- Confirming the Trinity Prompt text reaches an agent's instructions on its next turn (costs a model call and is covered by agent-level phases).
+- Changing user roles, the admin sign-in email, the SSH Access toggle, or generating default avatars.
 
 ## Critical Validations
 
-### Admin-Only Access Control
-
-**Validation**: Settings endpoints require admin role
-
-```bash
-# This should work (admin user)
-curl http://localhost:8000/api/settings \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
-# Expected: 200, array of settings
-
-# Without auth should fail
-curl http://localhost:8000/api/settings
-# Expected: 401 Unauthorized
-```
-
-**Verify**:
-- [ ] Authenticated admin: 200
-- [ ] Unauthenticated: 401
-- [ ] Non-admin (if testable): 403
-
----
-
-### Audit Logging
-
-**Validation**: Settings operations are logged
-
-Check audit logs after CRUD operations:
-```bash
-curl http://localhost:8001/api/logs?action=system_settings \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-**Expected**:
-- [ ] Events for: list, read, update, delete
-- [ ] User attribution correct
-- [ ] Resource shows "setting:trinity_prompt"
-
----
+1. Settings opens on General for admin and `?tab=access` deep-links (Steps 1–2).
+2. The Trinity Prompt card is on General and the Email Whitelist card is on Access — not the other way round (Steps 3, 9).
+3. A prompt edit saves, shows the success banner and survives reload (Steps 6–7).
+4. `user@example.com` can be added once, a duplicate is refused by name, and it can be removed (Steps 10–12).
+5. After Cleanup the prompt and the whitelist equal what Setup recorded.
 
 ## Success Criteria
 
-Phase 13 is **PASSED** when:
-- ✅ Settings page accessible to admin users only
-- ✅ Trinity Prompt can be created, read, updated, deleted
-- ✅ New agents receive Trinity Prompt in CLAUDE.md
-- ✅ Agent restart updates CLAUDE.md with new prompt
-- ✅ Clearing prompt removes Custom Instructions from CLAUDE.md
-- ✅ Markdown content preserved correctly
-- ✅ Email Whitelist: Add, remove, duplicate prevention work
-- ✅ Per-Agent API Key: Toggle works, setting persists
-- ✅ All operations logged for audit
-
----
+- [ ] Tab strip works by click, Back button and deep link; unknown tab falls back to General
+- [ ] Trinity Prompt round trip completed and restored
+- [ ] Whitelist round trip completed and restored
+- [ ] No other setting was modified
+- [ ] Both tabs usable at 390 px and readable in dark theme
 
 ## Troubleshooting
 
-**Settings link not visible**:
-- Check if user role is "admin"
-- Check NavBar.vue conditional rendering: `v-if="isAdmin"`
-- Verify `/api/users/me` returns `role: "admin"`
-
-**Prompt not saving**:
-- Check browser console for API errors
-- Verify backend logs: `docker logs trinity-backend | grep settings`
-- Ensure SQLite database is writable
-
-**Injection not working**:
-- Check agent logs for injection activity
-- Verify agent-server is receiving `custom_prompt` in request
-- Check `/api/trinity/status` on agent for injection state
-
-**Custom Instructions not removed**:
-- This was a known bug fixed 2025-12-14
-- Check agent-server routers/trinity.py for `had_custom_instructions` flag
-- Restart agent with empty prompt should trigger removal
-
----
-
-## API Reference
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/settings` | List all settings (admin only) |
-| GET | `/api/settings/{key}` | Get specific setting |
-| PUT | `/api/settings/{key}` | Create/update setting |
-| DELETE | `/api/settings/{key}` | Delete setting |
-
-**Request Body** (PUT):
-```json
-{
-  "value": "Your prompt text here"
-}
-```
-
-**Response** (GET/PUT):
-```json
-{
-  "key": "trinity_prompt",
-  "value": "Your prompt text here",
-  "updated_at": "2025-12-14T12:00:00Z"
-}
-```
-
----
-
-## Cleanup
-
-After testing:
-- [ ] Delete test agent if created
-- [ ] Clear Trinity Prompt setting (or leave configured if intentional)
-- [ ] No orphaned settings left
-
-```bash
-# Clear trinity_prompt
-curl -X DELETE http://localhost:8000/api/settings/trinity_prompt \
-  -H "Authorization: Bearer $TOKEN"
-```
-
----
-
-## Related Documentation
-
-- Feature Flow: `docs/memory/feature-flows/system-wide-trinity-prompt.md`
-- API Tests: `tests/test_settings.py`
-- Requirements: `requirements.md` section 10.6
-- NavBar Component: `src/frontend/src/components/NavBar.vue`
-- Settings Page: `src/frontend/src/views/Settings.vue`
-- Settings Store: `src/frontend/src/stores/settings.js`
-
----
-
-## Next Phase
-
-Phase 13 completion marks the end of the core feature test suite.
-Future phases may include:
-- Phase 14: Vector Memory (Chroma)
-- Phase 15: Shared Folders
-- Phase 16: Advanced Agent Metrics
-
----
-
-**Status**: 🟢 Ready for testing
-**Last Updated**: 2025-12-14
+- **Settings opens on MCP Keys with only that tab**: the signed-in user is not an admin; sign in as `admin`.
+- **Pulsing placeholder that never resolves, or a red "Error" box with "Access denied. Admin privileges required."**: the settings load failed — check the token is still valid (backend restarts invalidate sessions).
+- **Step 12 does nothing**: the native confirm dialog was dismissed rather than accepted; the row is only removed on accept.
+- **Remove reports "Email user@example.com not found in whitelist"**: it was already removed (for example by Cleanup run twice); re-read the list and continue.
+- **Save reports a 4xx in the "Error" box**: record the text verbatim; the prompt was not changed, so only the whitelist needs checking in Cleanup.

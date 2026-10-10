@@ -1,6 +1,6 @@
 {
-  "generated": "2026-09-13",
-  "commit": "08719bf1b8b0c2ba49995b15ad4c4d8feefab780",
+  "generated": "2026-10-08",
+  "commit": "3f9a4cc160109d90a952c62679fa710c9d25132c",
   "rule": "per-file counts of bare v-if/v-else-if loading gates may only shrink; see scripts/scan-loading-gates.mjs",
   "files": {
     "src/frontend/src/components/A2aPanel.vue": 1,
@@ -23,14 +23,12 @@
     "src/frontend/src/components/McpExposedPanel.vue": 1,
     "src/frontend/src/components/NeverminedPanel.vue": 1,
     "src/frontend/src/components/PermissionsPanel.vue": 1,
-    "src/frontend/src/components/PlaybooksPanel.vue": 1,
     "src/frontend/src/components/PublicLinksPanel.vue": 2,
     "src/frontend/src/components/ReadOnlyToggle.vue": 1,
     "src/frontend/src/components/ReliabilityPanel.vue": 2,
     "src/frontend/src/components/RunningStateToggle.vue": 1,
     "src/frontend/src/components/ScheduleAnalyticsCard.vue": 1,
     "src/frontend/src/components/SchedulesPanel.vue": 1,
-    "src/frontend/src/components/SkillsPanel.vue": 1,
     "src/frontend/src/components/SlackAgentBotPanel.vue": 1,
     "src/frontend/src/components/SlackChannelPanel.vue": 1,
     "src/frontend/src/components/TasksPanel.vue": 2,
@@ -59,7 +57,7 @@
     "src/frontend/src/views/enterprise/Audit.vue": 3
   },
   "totals": {
-    "bare_loading_gates": 70,
-    "files_with_gates": 54
+    "bare_loading_gates": 68,
+    "files_with_gates": 52
   }
 }

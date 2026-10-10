@@ -1,196 +1,176 @@
-# Phase 0: Setup & Prerequisites
+# Phase 0: Preflight (non-destructive)
 
-> **Purpose**: Verify all services running and environment ready for testing
+> **Purpose**: Confirm the instance, the fixture agents and the login page are in the state every other phase assumes.
 > **Duration**: ~5 minutes
-> **Assumes**: Nothing (first phase)
-> **Output**: Services healthy, clean slate, authentication token ready
+> **Assumes**: the local stack is up; nothing about browser login state
+> **Output**: backend healthy, admin token mintable, setup completed, fixture trio running, fixture templates resolvable, login page renders cleanly
+> **Last verified**: 2026-10-09 against source (not yet browser-run)
 
 ---
 
-## Prerequisites Check
+## Background
 
-### Step 1: Verify Backend Health
-**Action**: Query backend health endpoint
+Phase 0 is a read-only gate. **This phase deletes nothing, creates nothing and changes nothing.**
+It only reads: `GET /health`, `POST /api/token` (mints a token, no state change),
+`GET /api/setup/status`, `GET /api/agents`, `GET /api/templates/...`, and the login page at
+`http://localhost/login`.
+
+Replaces the January flow that deleted eight agents by name (including the live fixtures) and
+expected eight GitHub test templates. The fixtures are now three long-lived local agents —
+`test-echo`, `test-counter`, `test-delegator` — and a missing or stopped fixture is a **FAIL to
+report**, never something this phase repairs.
+
+## Prerequisites
+
+- [ ] Stack reachable at `http://localhost` (UI) and `http://localhost:8000` (API)
+- [ ] `ADMIN_PASSWORD` is readable from the repo's `.env` (the value lives there; compose only passes it through)
+- [ ] `curl` and `jq` available in the shell
+
+## Test: Backend
+
+### Step 1: Health endpoint
+**Action**:
+- Run:
 ```bash
-curl -s http://localhost:8000/health | jq
+curl -s -w '\nHTTP %{http_code}\n' http://localhost:8000/health
 ```
-
 **Expected**:
-```json
-{"status": "healthy"}
+- [ ] Last line is `HTTP 200`
+- [ ] Body has `"status": "healthy"` and a `timestamp`
+- [ ] If the status is `503`, the body has `"status": "unhealthy"` and a `migrations` object (`applied`, `expected`, `first_pending`) — record it verbatim and FAIL the phase
+
+### Step 2: Mint an admin token
+**Action**:
+- Log in as `admin` with `ADMIN_PASSWORD` from `.env`. The endpoint is form-encoded, not JSON:
+```bash
+ADMIN_PASSWORD=$(grep -E '^ADMIN_PASSWORD=' .env | cut -d= -f2-)
+TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
+  --data-urlencode 'username=admin' \
+  --data-urlencode "password=${ADMIN_PASSWORD}" | jq -r '.access_token // empty')
+test -n "$TOKEN" && echo "token ok" || echo "NO TOKEN"
 ```
-
-**Verify**:
-- [ ] Status code: 200
-- [ ] Response contains `"status": "healthy"`
-
-**If Failed**: Backend not running. Start with `docker-compose up -d backend`
-
----
-
-### Step 2: Verify Frontend Accessible
-**Action**: Navigate to http://localhost
-
 **Expected**:
-- Page loads without errors
-- Login page or Dashboard visible
+- [ ] Prints `token ok`
+- [ ] The token starts with `eyJ` (do not print or record the full token or the password)
 
-**Verify**:
-- [ ] HTTP 200 response
-- [ ] Page renders (not blank or error)
-
-**If Failed**: Frontend not running. Start with `docker-compose up -d frontend`
-
----
-
-### Step 3: Verify Redis Running
-**Action**: Check Redis container
+### Step 3: Unauthenticated calls are refused
+**Action**:
+- Run:
 ```bash
-docker ps --filter "name=trinity-redis" --format "{{.Status}}"
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8000/api/agents
 ```
+**Expected**:
+- [ ] HTTP status `401` (a JSON refusal, not a connection error)
 
-**Expected**: "Up X minutes/hours/days"
-
-**Verify**:
-- [ ] Container running
-- [ ] Status shows "Up"
-
-**If Failed**: Redis not running. Start with `docker-compose up -d redis`
-
----
-
-### Step 4: Verify Docker Socket Access
-**Action**: Backend can access Docker
+### Step 4: Setup is completed
+**Action**:
+- Run (no auth needed):
 ```bash
-curl -s http://localhost:8000/api/agents -H "Authorization: Bearer test" 2>&1 | head -1
+curl -s http://localhost:8000/api/setup/status | jq
 ```
+**Expected**:
+- [ ] `setup_completed` is `true`
+- [ ] `setup_available` is `true`
+- [ ] A `claim_required` key is present (its value is `null` on most instances — record it)
 
-**Expected**: JSON response (even if 401 unauthorized)
+## Test: Fixtures
 
-**Verify**:
-- [ ] Response is JSON (not connection error)
-- [ ] Backend can communicate
-
----
-
-### Step 5: Get Authentication Token
-**Action**: Authenticate with dev mode credentials
+### Step 5: The fixture trio is running
+**Action**:
+- Run:
 ```bash
-curl -s -X POST http://localhost:8000/api/token \
-  -d "username=admin&password=YOUR_PASSWORD" \
-  -H "Content-Type: application/x-www-form-urlencoded" | jq -r '.access_token // empty'
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents \
+  | jq -r '.[] | select(.name=="test-echo" or .name=="test-counter" or .name=="test-delegator") | "\(.name) \(.status)"'
 ```
+**Expected**:
+- [ ] Exactly three lines: `test-echo running`, `test-counter running`, `test-delegator running`
+- [ ] If any of the three is missing or not `running`: record which one and its status, mark the phase **FAIL**, and stop. Do **not** create, start, restart or delete anything to fix it.
 
-**Expected**: JWT token string (starts with "eyJ...")
-
-**Verify**:
-- [ ] Token returned (not error)
-- [ ] Token is valid JWT format
-
-**Store**: Save token for subsequent API calls
-
----
-
-### Step 6: Clean Existing Test Agents
-**Action**: Delete any existing test agents
+### Step 6: `trinity-system` is present (observe only)
+**Action**:
+- Run:
 ```bash
-TOKEN="<token from step 5>"
-for agent in test-echo test-counter test-worker test-delegator test-scheduler test-queue test-files test-error; do
-  curl -s -X DELETE "http://localhost:8000/api/agents/$agent" \
-    -H "Authorization: Bearer $TOKEN"
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/trinity-system \
+  | jq '{name, status, is_system, can_delete}'
+```
+**Expected**:
+- [ ] `name` is `trinity-system`; record `status`
+- [ ] `can_delete` is `false`
+- [ ] Nothing was changed on it
+
+### Step 7: The three fixture templates resolve by id
+**Action**:
+- The fixture templates are marked `hidden: true`, so they are deliberately **absent** from the
+  catalog list and must be fetched by id:
+```bash
+for t in test-echo test-counter test-delegator; do
+  curl -s -o /dev/null -w "local:$t %{http_code}\n" \
+    -H "Authorization: Bearer $TOKEN" "http://localhost:8000/api/templates/local:$t"
 done
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/templates \
+  | jq '[.[] | select(.id | startswith("local:test-"))] | length'
 ```
+**Expected**:
+- [ ] `local:test-echo 200`, `local:test-counter 200`, `local:test-delegator 200`
+- [ ] The catalog count of `local:test-*` ids is `0` (hidden fixtures are not listed)
+- [ ] `GET /api/templates` itself returned a JSON array (HTTP 200)
 
-**Expected**: 200 OK or 404 (agent doesn't exist)
+## Test: Frontend
 
-**Verify**:
-- [ ] No test agents remain
-- [ ] Clean slate for testing
+### Step 8: Login page renders
+**Action**:
+- Open `http://localhost/login` in the browser.
+- If the browser already holds a session you are redirected to `/` (the Dashboard). In that case
+  record `already signed in`, check the top nav shows Dashboard, Library, Operations, Settings,
+  Workspace, and skip the remaining bullets of this step.
+**Expected** (signed-out browser):
+- [ ] URL stays `/login`
+- [ ] Heading "Trinity" with the line "Sign in to manage your agents"
+- [ ] Either a "Send Verification Code" button with a "🔐 Admin Login" button below it, or the admin form directly with a "Sign In as Admin" button — record which
+- [ ] The page is not blank and shows no error card
 
----
+### Step 9: Signed-out routing
+**Action**:
+- Only if Step 8 found a signed-out browser: navigate to `http://localhost/` and then to `http://localhost/setup`.
+**Expected**:
+- [ ] `/` redirects to `/login`
+- [ ] `/setup` redirects to `/login` (setup is completed, so the setup form must not render)
 
-### Step 7: Verify GitHub Templates Available
-**Action**: Check templates API
-```bash
-curl -s http://localhost:8000/api/templates \
-  -H "Authorization: Bearer $TOKEN" | jq '[.[] | select(.id | contains("test-agent"))] | length'
-```
+### Step 10: Clean console and narrow width
+**Action**:
+- Read the browser console messages for the page loads in Steps 8–9.
+- Resize the viewport to 390 px wide on `/login` (or on `/` if already signed in), then restore the original size.
+**Expected**:
+- [ ] No console errors (warnings are acceptable; record any error text verbatim)
+- [ ] No failed (4xx/5xx) network requests other than an expected `401` for a signed-out probe
+- [ ] At 390 px the sign-in card (or the Dashboard) fits without a horizontal page scrollbar
 
-**Expected**: 8 (all test templates available)
+## Cleanup / Restore
 
-**Verify**:
-- [ ] 8 test templates visible
-- [ ] Templates include: test-agent-echo, test-agent-counter, test-agent-worker, test-agent-delegator, test-agent-scheduler, test-agent-queue, test-agent-files, test-agent-error
+Nothing to restore. **This phase deletes nothing** and writes nothing: the only non-GET request
+is the token mint in Step 2, which changes no state.
 
-**If Less Than 8**: Check config.py TEST_AGENT_TEMPLATES
+## Critical Validations
 
----
-
-### Step 8: Verify Docker Agent Network
-**Action**: Check agent network exists
-```bash
-docker network ls --filter "name=trinity-agent-network" --format "{{.Name}}"
-```
-
-**Expected**: `trinity-agent-network`
-
-**Verify**:
-- [ ] Network exists
-- [ ] Agents can communicate
-
----
-
-## Phase 0 Completion Checklist
-
-| Check | Status |
-|-------|--------|
-| Backend healthy | [ ] |
-| Frontend accessible | [ ] |
-| Redis running | [ ] |
-| Docker socket accessible | [ ] |
-| Auth token obtained | [ ] |
-| Test agents cleaned up | [ ] |
-| 8 GitHub templates available | [ ] |
-| Agent network exists | [ ] |
-
----
+1. `GET /health` → `200` / `"status": "healthy"`.
+2. `POST /api/token` returns an access token for `admin`.
+3. `GET /api/setup/status` → `setup_completed: true`.
+4. `test-echo`, `test-counter`, `test-delegator` all present with status `running`.
+5. `/login` renders with no console errors.
 
 ## Success Criteria
 
-Phase 0 is **PASSED** when:
-- All 8 checks above are verified
-- Authentication token saved for subsequent phases
-- No test agents exist (clean slate)
-
-## Next Phase
-
-Proceed to **Phase 1: Authentication** (`PHASE_01_AUTHENTICATION.md`)
-
----
+- [ ] All five critical validations hold
+- [ ] The three `local:test-*` templates resolve by id
+- [ ] No agent, template, setting or file was created, modified or deleted
 
 ## Troubleshooting
 
-### Backend Not Starting
-```bash
-docker-compose logs backend --tail 50
-```
-
-### Frontend Not Loading
-```bash
-docker-compose logs frontend --tail 50
-```
-
-### Redis Connection Issues
-```bash
-docker-compose restart redis
-```
-
-### Token Invalid
-- Check ADMIN_PASSWORD is set in docker-compose.yml
-- Restart backend after changing env vars
-
----
-
-**Phase Status**: Setup Complete
-**Artifacts**: Authentication token stored
-**Next**: Phase 1 - Authentication
+- **`NO TOKEN` in Step 2**: `ADMIN_PASSWORD` in `.env` is empty or differs from the running
+  backend's value (the backend reads it at start). Record the HTTP body of the token call; do not
+  attempt other passwords — repeated failures are rate-limited.
+- **`503` from `/health`**: a SQLite migration has not been applied; `first_pending` names it.
+- **A fixture is missing or stopped**: this is the phase's FAIL condition. The fixtures are
+  provisioned outside the test run; report it rather than creating one.
+- **`setup_completed: false`**: the instance has never been set up; every UI route will redirect
+  to `/setup`. Report and stop — Phase 19 describes that flow as manual-only.

@@ -202,7 +202,7 @@ requirement) and syncs to GCS with a flattened name (`/` → `-`):
 
 ## In-App Help Widget (#391)
 
-A floating help chat widget provides instant access to Trinity documentation from within the UI.
+A floating help chat widget provides instant access to Trinity documentation from within the UI. Its launcher stands down on the agent Chat tab (`/agents/:name?tab=chat`, route meta `hideHelpLauncherOnTabs`), where it sat on the composer's Send button (#3446); an already-open panel stays.
 
 ### Components
 

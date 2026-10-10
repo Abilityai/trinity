@@ -687,11 +687,55 @@ class EmailWhitelistEntry(BaseModel):
     default_role: str = "user"  # Role assigned on first email login (#314)
 
 
+# RFC 5321 §4.5.3.1.3: a forward-path is at most 256 octets including its angle
+# brackets, so an address is at most 254.
+WHITELIST_EMAIL_MAX_LENGTH = 254
+
+
 class EmailWhitelistAdd(BaseModel):
     """Request to add an email to the whitelist."""
     email: str
     source: str = "manual"
     default_role: str = "user"  # Role assigned on first email login (#314)
+
+    @field_validator("email")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        """Trim and lower-case the entry, and refuse what cannot be one address (#3455).
+
+        The whitelist is matched by exact, lower-cased address
+        (`db/email_auth.py::is_email_whitelisted`) — there is no domain or
+        wildcard entry form — so a value that is not one address is a row that
+        can never match a login. The route used to store whatever it was sent:
+        `a@`, `@b.com`, and a 10 000-character string that stretched the
+        Settings table to ~75 000px.
+
+        The shape check is deliberately the minimal one `ScheduleCreate` uses
+        (exactly one `@` with something on both sides, no whitespace, no control
+        characters, bounded length): a self-hosted install whitelists intranet
+        addresses (`user@localhost`) and internationalised ones, which a
+        stricter grammar would refuse. Each refusal names its reason and never
+        echoes the value — the reason is rendered beside the field, and an
+        echoed 10 000 characters would reproduce the overflow there.
+        """
+        s = v.strip().lower()
+        if not s:
+            raise ValueError("email is required, for example user@example.com")
+        if len(s) > WHITELIST_EMAIL_MAX_LENGTH:
+            raise ValueError(
+                f"email is too long ({len(s)} characters; "
+                f"the limit is {WHITELIST_EMAIL_MAX_LENGTH})"
+            )
+        if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in s):
+            raise ValueError(
+                "email must not contain whitespace or control characters"
+            )
+        if s.count("@") != 1 or s.startswith("@") or s.endswith("@"):
+            raise ValueError(
+                "email must be a single address in the form name@domain, "
+                "for example user@example.com"
+            )
+        return s
 
 
 class EmailLoginRequest(BaseModel):

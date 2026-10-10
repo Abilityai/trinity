@@ -1,320 +1,79 @@
-# Trinity UI Integration Test Phases
-
-**New modular testing structure for comprehensive platform validation**
-
----
-
-## What Changed?
-
-The monolithic `UI_INTEGRATION_TEST.md` has been **split into individual phase files** for:
-- ✅ Clearer step-by-step instructions
-- ✅ Better for sub-agent automation
-- ✅ Easy to run single phase
-- ✅ Progress tracking across phases
-- ✅ Focus on GitHub agent validation
-- ✅ Explicit context/task tracking
-
----
-
-## Quick Start
-
-### Run All Phases (Automated)
-```bash
-# Using the test runner agent
-/run @agent-ui-integration-tester all
-```
-
-### Run Specific Phase (Manual)
-1. Open `PHASE_XX_NAME.md`
-2. Follow instructions
-3. Record results
-4. Proceed to next phase
-
-### Run Specific Phase (Automated)
-```bash
-# Run only Phase 3 (Context Validation)
-/run @agent-ui-integration-tester phase-3
-```
-
----
-
-## Phase Sequence
-
-| # | Name | Time | What's Tested |
-|---|------|------|---|
-| 0 | Setup | 5 min | Services, clean slate |
-| 1 | Authentication | 5 min | Login, session, token |
-| 2 | Agent Creation | 30 min | **local templates**, 3 agents, **default permissions** |
-| 3 | Context Validation | 10 min | **CRITICAL: context %, progress bar** |
-| 4 | State Persistence | 10 min | File I/O, counter.txt, state |
-| 5 | Agent Collaboration + Permissions | 25 min | Trinity MCP, delegation, Pillar II, **permissions UI + enforcement** |
-| 7 | Scheduling | 15 min | Cron, execution history, autonomy |
-| 8 | Execution Queue | 15 min | Concurrency, 429, queue ordering |
-| 9 | File Browser | 10 min | Tree structure, download, security |
-| 10 | Error Handling | 10 min | Failures, recovery, cascading |
-| 11 | Multi-Agent | 10 min | Dashboard with 3 agents |
-| 12 | Cleanup | 5 min | Delete all agents, clean slate |
-
-**Total**: ~175 minutes (~3 hours) for full suite
-
----
-
-## Critical Validations (Every Phase)
-
-### GitHub Templates (MANDATORY)
-All agents MUST be created from `local:test-*`:
-```bash
-docker inspect agent-test-echo --format='{{index .Config.Labels "trinity.template"}}'
-# Expected: local:test-echo ✅
-# NOT: local:test-echo ❌ (PHASE FAILS)
-```
-
-### Context Progress Bar (CRITICAL BUG)
-Context % MUST increase as messages are sent:
-- ✅ If increasing: Bug fixed, continue testing
-- ❌ If stuck at 0%: Critical bug exists, document and continue
-
-### Terminal Tab (Replaces Chat)
-All agents now use the Web Terminal for interaction:
-- Terminal tab is default on agent detail pages
-- Full CLI access to agent containers
-- Supports shell commands and Claude Code
-- Per-agent API key toggle available
-
----
-
-## Phase Files
-
-All files in `docs/testing/phases/`:
-
-| File | Purpose |
-|------|---------|
-| **INDEX.md** | Overview, dependencies, templates |
-| **README.md** | This file - quick reference |
-| **PHASE_00_SETUP.md** | Prerequisites, services, templates |
-| **PHASE_01_AUTHENTICATION.md** | Login, session, token, user profile |
-| **PHASE_02_AGENT_CREATION.md** | Create 3 agents from GitHub |
-| **PHASE_03_CONTEXT_VALIDATION.md** | Context %, progress bar (CRITICAL) |
-| **PHASE_04_STATE_PERSISTENCE.md** | File I/O, counter operations |
-| **PHASE_05_AGENT_COLLABORATION.md** | Trinity MCP, delegation, **Permissions system** |
-| **PHASE_07_SCHEDULING.md** | Cron, execution history, autonomy |
-| **PHASE_08_EXECUTION_QUEUE.md** | Concurrency, 429, queue ordering |
-| **PHASE_09_FILE_BROWSER.md** | Tree structure, download, security |
-| **PHASE_10_ERROR_HANDLING.md** | Failures, recovery, cascading |
-| **PHASE_11_MULTI_AGENT_DASHBOARD.md** | Dashboard with 3 agents |
-| **PHASE_12_CLEANUP.md** | Delete all agents, clean slate |
-| **PHASE_13_SETTINGS.md** | Trinity Prompt, Email Whitelist, API Keys |
-| **PHASE_14_OPENTELEMETRY.md** | OTel metrics, Observability UI |
-| **PHASE_15_SYSTEM_AGENT.md** | System Agent, Fleet Ops, Admin UI |
-| **PHASE_16_WEB_TERMINAL.md** | Browser CLI for all agents (Req 11.5) |
-| **PHASE_17_EMAIL_AUTHENTICATION.md** | Email OTP login flow (Req 12.4) |
-| **PHASE_18_GITHUB_INITIALIZATION.md** | GitHub repo sync for agents |
-
----
-
-## How Sub-Agent Runs Phases
-
-The `ui-integration-tester` sub-agent:
-
-1. **Loads phase file** from `docs/testing/phases/PHASE_XX.md`
-2. **Executes test steps** in order
-3. **Takes screenshots** for each action
-4. **Verifies success criteria**
-5. **If PASSED**: Automatically loads next phase
-6. **If FAILED**: Stops, documents issue, awaits decision
-7. **Generates report** with all results
-
-```
-PHASE_00 ✅ PASSED
-   ↓
-PHASE_01 ✅ PASSED
-   ↓
-PHASE_02 ✅ PASSED (local templates verified)
-   ↓
-PHASE_03 ⚠️ BUG FOUND: Context stuck at 0%
-   ↓ (continues despite bug)
-PHASE_04 ✅ PASSED
-   ↓
-... (continues through remaining phases)
-```
-
----
-
-## Prerequisites Enforcement
-
-Each phase **requires previous phases to PASS**:
-
-```
-Phase 0 → All services running
-Phase 1 → Logged in with valid token
-Phase 2 → 3 agents created (local templates)
-Phase 3 → Context tracking status known
-Phase 4 → test-counter working
-Phase 5 → test-delegator working
-...
-```
-
-If skipping phases, tester must **manually verify** prerequisites.
-
----
-
-## Success Criteria Checklist
-
-Each phase file contains a "Success Criteria" section.
-
-Example (Phase 3: Context Validation):
-```
-Phase 3 is PASSED when:
-- ✅ Context % increased from 0%
-- ✅ Progress bar visually filled
-- ✅ Tooltip shows "X / 200K tokens"
-- ✅ Colors change: Green → Yellow → Orange
-- ✅ Multiple agents show independent context
-```
-
----
-
-## Results Tracking
-
-After each phase, document:
-
-```markdown
-## Phase X: [Name]
-**Status**: ✅ PASSED / ❌ FAILED / ⚠️ BUG FOUND
-
-**Results**:
-- [x] Test step 1
-- [x] Test step 2
-- [x] Success criteria met
-
-**Issues Found**:
-- None (or list any bugs)
-
-**Evidence**:
-- Screenshot: /test-screenshots/phase-XX-01.png
-- API response: [Details]
-```
-
----
-
-## Common Issues by Phase
-
-| Phase | Issue | Solution |
-|-------|-------|----------|
-| 0 | Services not running | `./scripts/deploy/start.sh` |
-| 1 | Invalid login | Check admin credentials in `.env` |
-| 2 | Agent stuck on "Starting" | Wait 30 sec, check logs |
-| 2 | Local template instead of GitHub | Delete and recreate with correct template |
-| 3 | **Context stuck at 0%** | **Known bug - document and continue** |
-| 4 | Counter wrong value | Check counter.txt: `docker exec agent-test-counter cat /home/developer/workspace/counter.txt` |
-| 5 | Delegation times out | Wait longer (15-20 sec normal) |
-
----
-
-## GitHub Template Validation
-
-**CRITICAL**: Every agent MUST be from GitHub
-
-Check each agent:
-```bash
-# test-echo
-docker inspect agent-test-echo --format='{{index .Config.Labels "trinity.template"}}'
-# Expected: local:test-echo ✅
-
-# test-counter
-docker inspect agent-test-counter --format='{{index .Config.Labels "trinity.template"}}'
-# Expected: local:test-counter ✅
-
-# All others...
-```
-
-**If any show `local:`**: Phase 2 FAILS - requires local templates.
-
----
-
-## Running Phase 3 Multiple Times
-
-Phase 3 (Context Validation) is designed to run multiple times:
-
-1. **Run 1**: Context stuck at 0% (bug confirmed)
-   - Document issue
-   - Continue to Phase 4 (for now)
-
-2. **After Fix**: Re-run Phase 3
-   - Context % now increases
-   - Progress bar fills
-   - Bug resolution confirmed
-
-3. **Record Both Results**:
-   - Before fix: ❌ FAILED (but expected)
-   - After fix: ✅ PASSED
-
----
-
-## Skipping Phases (Advanced)
-
-If time-constrained, skip optional phases:
-
-**REQUIRED** (do not skip):
-- Phase 0 (Setup)
-- Phase 1 (Authentication)
-- Phase 2 (Agent Creation)
-- Phase 3 (Context) - must document status
-
-**Optional** (can skip):
-- Phase 4-11 (specific features)
-- Phase 12 (Cleanup - always do this)
-
----
-
-## Testing with Different Environments
-
-### Local Development
-- URL: `http://localhost`
-- Backend: `http://localhost:8000`
-- Credentials: `admin / YOUR_PASSWORD` (from `.env`)
-
-### Staging/Production
-- Update URLs in phase files
-- Adjust timings (may be slower)
-- Use production credentials
-
----
-
-## Automated Test Runner (TBD)
-
-Future `run_test_phases.py` script will:
-
-```bash
-# Run all phases
-python3 docs/testing/run_test_phases.py --all
-
-# Run phase range
-python3 docs/testing/run_test_phases.py --from 2 --to 5
-
-# Run single phase with prerequisites check
-python3 docs/testing/run_test_phases.py --phase 5
-
-# Skip prerequisites check (advanced)
-python3 docs/testing/run_test_phases.py --phase 6 --skip-prerequisites
-
-# Generate HTML report
-python3 docs/testing/run_test_phases.py --all --report html
-```
-
-Not yet implemented - use sub-agent for now.
-
----
-
-## Questions?
-
-Refer to specific phase file for detailed instructions:
-- `PHASE_00_SETUP.md` - Troubleshooting services
-- `PHASE_02_AGENT_CREATION.md` - GitHub template details
-- `PHASE_03_CONTEXT_VALIDATION.md` - Context bug documentation
-- `INDEX.md` - Full overview and dependencies
-
----
-
-**Status**: 🟢 All 13 phases ready (0-12)
-**Last Updated**: 2025-12-10 (Added Agent Permissions testing to Phase 2 and Phase 5)
+# Trinity UI Test Phases
+
+Scripted click-through scenarios for the Trinity web UI. Each `PHASE_NN_*.md` file is one
+self-contained scenario: a browser-driving agent (or a person) follows its numbered steps
+against a running local instance and checks each **Expected** line.
+
+[`INDEX.md`](INDEX.md) is the catalog — every phase, its status and what it covers.
+
+## How the phases are run
+
+- **Core team**: the `/ui-sweep` skill runs one phase per invocation (`scenarios` lane) through
+  the `ui-integration-tester` subagent and Playwright, and writes a dated report to
+  [`docs/testing/ui-sweep/`](../ui-sweep/). The same skill has a `refresh` lane that re-checks
+  one phase file against the code.
+- **Anyone else**: open a phase file and follow it by hand, or hand it to any agent that can
+  drive a browser. Nothing in a phase depends on private tooling.
+
+There is no `run_test_phases.py` runner; earlier versions of this folder referred to one that
+was never written.
+
+## The rules every phase follows
+
+These are what make a phase safe to run unattended and cheap to keep true. A phase that breaks
+one is a bug in the phase.
+
+1. **Independent.** No phase depends on state left by another. A phase that needs a known
+   state sets it in its own Setup section.
+2. **Three fixtures, nothing else.** Phases use the local fixture agents `test-echo`,
+   `test-counter` and `test-delegator` (templates in `config/agent-templates/`), which stay
+   running between runs. A phase never creates, stops or deletes any other agent, and never
+   changes `trinity-system`. A phase that must create an agent creates one throwaway whose name
+   starts with `sweep-tmp-<phase>` and deletes it in its own Cleanup. (Deleting an agent keeps its
+   name reserved for a while, so phases add a time suffix rather than reuse a fixed name.)
+3. **Restores what it changes.** Any setting, permission, policy or file a phase changes is
+   read first and put back in a `Cleanup / Restore` section.
+4. **Source-verified.** Every route, tab, label and endpoint in a step exists in the current
+   code. The `Last verified` line in each header says when that was last checked, and whether
+   the phase has been run in a browser since.
+5. **No secrets.** Log in as `admin` with `ADMIN_PASSWORD` from `.env`; no password, token or
+   real email address appears in a phase file or in a report.
+6. **Bounded.** One phase fits in about 25 minutes, sends at most four messages to fixture
+   agents (each is a real model call), and has no wait longer than about a minute.
+7. **Unattended-safe.** Steps that need a second user, a real mailbox, an external GitHub
+   repository, a wiped database or host-level access sit under a `Manual-only` heading and
+   are not run by the scenario runner.
+8. **Honest about what is not there.** Some tabs and routes are not present on every
+   instance. A step for one says "if it is not present, record `SKIPPED (not present)`" and
+   moves on.
+
+## Fixtures
+
+| Agent | Template | What it does |
+|---|---|---|
+| `test-echo` | `local:test-echo` | Echoes the message back; the default target for chat, tasks, links |
+| `test-counter` | `local:test-counter` | Keeps a counter in a file; used for state and files |
+| `test-delegator` | `local:test-delegator` | Lists agents and delegates to them; used for collaboration |
+
+The `/ui-sweep` seed script also prepares a chat and a task execution on `test-echo`, a task on
+`test-counter`, a workspace thread, a room and a public chat link, and hands their ids to the
+tester. Run by hand, create the equivalent through the UI where a phase asks for one.
+
+## Statuses
+
+| Mark | Meaning |
+|---|---|
+| 🟢 | Run in a browser and passed since its last rewrite |
+| 🟡 | Rewritten against source; not yet run in a browser |
+| 🆕 | New phase; not yet run in a browser |
+| ⛔ | Retired — the file is a stub saying why and what covers it now |
+
+## Writing or changing a phase
+
+Follow the skeleton of any current phase (header block with Purpose / Duration / Assumes /
+Output / Last verified, then Background, Prerequisites, numbered `Test:` steps with Action and
+Expected, Cleanup / Restore, optional Manual-only, Critical Validations, Success Criteria,
+Troubleshooting). Before you write a label or a route, find it in `src/frontend/src/` — the
+router (`router/index.js`), the agent tab list (`utils/agentTabs.js`) and the nav
+(`utils/navLinks.js`) are the three places the January phases drifted from. Add the phase to
+`INDEX.md`. Numbers are never reused: a retired phase keeps its number and its stub.

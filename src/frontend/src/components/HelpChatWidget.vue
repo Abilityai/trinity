@@ -1,7 +1,7 @@
 <template>
   <!-- Floating help button -->
   <button
-    v-if="!isOpen"
+    v-if="!isOpen && !hideLauncher"
     @click="openChat"
     class="fixed bottom-6 right-6 w-14 h-14 bg-action-primary-600 hover:bg-action-primary-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-105 focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2 z-50"
     aria-label="Open help chat"
@@ -333,6 +333,12 @@ const tabs = [
   { id: 'feature', label: 'Feature' },
   { id: 'feedback', label: 'Feedback' },
 ]
+
+// #3446: the host asks the launcher to stand down where it would cover one of
+// the page's own controls. The open panel is unaffected.
+defineProps({
+  hideLauncher: { type: Boolean, default: false },
+})
 
 const isOpen = ref(false)
 const mode = ref('ask')

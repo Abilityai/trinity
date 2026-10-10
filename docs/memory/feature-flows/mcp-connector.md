@@ -15,12 +15,12 @@ the public repo and the entitlement gate was dropped front and back. Part B
 | Layer | File | Notes |
 |-------|------|-------|
 | Router | `src/backend/routers/connector.py` | `/api/agents/{name}/connector*`, mounted unconditionally in `main.py` (no `requires_entitlement`) |
-| Service (pure) | `src/backend/services/connector_service.py` | `build_snippets`, `resolve_exposed_playbooks`, `connector_name` |
+| Service (pure) | `src/backend/services/connector_service.py` | `build_snippets`, `resolve_exposed_playbooks`, `connector_name`; `fetch_live_playbooks` (`:108`) reads the agent's list through `services/agent_skills_listing.py::fetch_live` (trinity-enterprise#754: the one proxy, which also refreshes the agent's last-known list; HTTP mapping unchanged — [skills-tab.md](skills-tab.md)) |
 | DB | `src/backend/db/connector.py` (`ConnectorOperations`) | config CRUD + key mint/regenerate/revoke; facade delegators on `database.py` (`db.get_connector_config`, …) |
 | Models | `src/backend/models.py` | `ConnectorConfigUpdate/Status/KeySecret/Playbook/ClientSnippet` (Invariant #14) |
 | MCP tools | `src/mcp-server/src/tools/connector.ts` | `list_playbooks` / `run_playbook` / `ask` — `connectorOnly` `canAccess` (already OSS) |
 | Auth fence | `src/backend/dependencies.py` | `_enforce_connector_scope` / `_reject_connector_principal` — edition-agnostic (already OSS) |
-| UI | `components/ConnectorChannelPanel.vue` + `ExposedToolsPanel.vue` | in `SharingPanel.vue`, un-gated (#118) |
+| UI | `components/ConnectorChannelPanel.vue` + `ExposedToolsPanel.vue` | in `SharingPanel.vue`, un-gated (#118). Copy says "skills" since trinity-enterprise#754 ("Exposed skills", "its skills become tools"); `exposed_playbooks`, `list_playbooks` and `run_playbook` keep their names |
 | UI (2nd surface) | `components/McpExposedPanel.vue` "Connect an external client" section | #1575: one-click **Copy connection config** on the #846 Expose-via-MCP panel (Settings tab), shown when `mcp_exposed` is on. Reuses the SAME connector endpoints (`GET/POST/DELETE /connector[/key]`) + `ExposedToolsPanel` picker — mint-or-reuse the scoped key, copy the `.mcp.json` (with the live key embedded, via `utils/clipboard.copyToClipboard`), regenerate/revoke. No new backend/key/endpoint. Copy-once secret: an existing key re-copies the placeholder config and offers "Regenerate & copy" for a fresh live key |
 
 ## Endpoints (all under `/api/agents`)

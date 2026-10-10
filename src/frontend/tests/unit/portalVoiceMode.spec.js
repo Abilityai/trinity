@@ -398,7 +398,8 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
     expect(CODE).toMatch(
       /:class="voiceCallActive \? 'border-transparent bg-transparent' : 'border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800'"/
     )
-    expect(CODE).toContain(':disabled="sending || !input.trim() || voiceCallActive"')
+    // #3460 appended the message-limit term; the call's own term is unchanged.
+    expect(CODE).toContain(':disabled="sending || !input.trim() || voiceCallActive || messageLimit.over"')
     expect(TABS).toContain('disabled: { type: Boolean, default: false }')
     expect(TABS).toMatch(/function onSelect\(id\) \{\s*if \(props\.disabled\) return/)
   })

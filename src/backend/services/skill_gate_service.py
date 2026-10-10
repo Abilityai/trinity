@@ -311,6 +311,17 @@ def _approvers(agent_name: str, role: str) -> List[str]:
     return people
 
 
+def approver_people(agent_name: str, role: str) -> List[str]:
+    """`_approvers` without the refusal: the casefolded emails `role` reaches
+    on `agent_name`, or `[]` when it reaches nobody. trinity-enterprise#754:
+    the Skills tab's "you approve this" reads the very list `enforce` decides
+    self-approval with, so the card and the run cannot disagree."""
+    try:
+        return _approvers(agent_name, role)
+    except SkillGateRefused:
+        return []
+
+
 def read_gates(agent_name: str) -> Dict[str, SkillGate]:
     """The agent's gate map, or a named refusal — never "nothing is gated"
     because the read failed. A store that returns None has not answered
