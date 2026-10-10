@@ -24,7 +24,7 @@ from db.capability_grants import CAPABILITY_SKILLS_MANAGE
 from dependencies import (
     can_manage_agent_skills,
     get_current_user,
-    get_owned_agent_by_name,
+    get_capability_owned_agent,
     get_self_agent,
     get_skill_gate_readable_agent_by_name,
     is_person_principal,
@@ -124,7 +124,7 @@ async def set_agent_skill_gate(
     body: SkillGateSetRequest,
     request: Request,
     current_user: User = Depends(_gate_writer),
-    agent_name: str = Depends(get_owned_agent_by_name),
+    agent_name: str = Depends(get_capability_owned_agent),
 ):
     """Gate a skill on the agent, or change its gate. Only the fields sent are
     applied."""
@@ -142,7 +142,7 @@ async def clear_agent_skill_gate(
     skill_name: str,
     request: Request,
     current_user: User = Depends(_gate_writer),
-    agent_name: str = Depends(get_owned_agent_by_name),
+    agent_name: str = Depends(get_capability_owned_agent),
 ):
     """Clear the gate on a skill. Idempotent."""
     try:

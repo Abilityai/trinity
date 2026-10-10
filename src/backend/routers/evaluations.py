@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from database import db
 from dependencies import (
+    agent_may_reach,
     get_current_user,
     get_authorized_agent_by_name,
     reject_agent_principal,
@@ -164,7 +165,7 @@ def _operator_for(rows, current_user: User) -> set:
     operator = set()
     for name in names:
         try:
-            if db.can_user_share_agent(current_user.username, name):
+            if (db.can_user_share_agent(current_user.username, name) and agent_may_reach(current_user, name, manage=True)):
                 operator.add(name)
         except Exception:  # noqa: BLE001
             logger.warning("evaluations: operator check failed for %s", name)

@@ -25,6 +25,7 @@ import logging
 from typing import Dict, Optional
 
 from database import db
+from dependencies import agent_may_reach
 from db.canvas_shares import SCOPE_AUTHORIZED, SCOPE_PUBLIC
 from services import canvas_service
 from utils.helpers import parse_iso_timestamp, utc_now_iso
@@ -71,7 +72,7 @@ def viewer_may_see(agent_name: str, canvas_id: str, user) -> bool:
     if user is None:
         return False
     try:
-        if db.can_user_access_agent(user.username, agent_name):
+        if (db.can_user_access_agent(user.username, agent_name) and agent_may_reach(user, agent_name)):
             return True
     except Exception as e:  # noqa: BLE001
         logger.warning("canvas share: access check failed for %s: %s", agent_name, e)

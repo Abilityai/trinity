@@ -32,6 +32,7 @@ from fastapi import HTTPException
 
 from models import User
 from database import db
+from dependencies import agent_may_reach
 from services.docker_service import get_agent_container
 from services.agent_client import get_agent_client
 
@@ -105,7 +106,7 @@ async def get_read_only_status_logic(
     current_user: User
 ) -> dict:
     """Get the read-only mode status for an agent."""
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)
@@ -142,7 +143,7 @@ async def set_read_only_status_logic(
     - enabled: True to enable read-only mode, False to disable
     - config: Optional dict with 'blocked_patterns' and 'allowed_patterns'
     """
-    if not db.can_user_share_agent(current_user.username, agent_name):
+    if not (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True)):
         raise HTTPException(status_code=403, detail="Only the owner can modify read-only settings")
 
     container = get_agent_container(agent_name)

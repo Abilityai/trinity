@@ -9,6 +9,7 @@ from fastapi import HTTPException, Request
 
 from models import User
 from database import db
+from dependencies import agent_may_reach
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 
@@ -29,7 +30,7 @@ async def get_agent_folders_logic(
     - consumed_folders: List of mounted folders from other agents
     - restart_required: Whether config changed and restart is needed
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)
@@ -112,7 +113,7 @@ async def update_agent_folders_logic(
     Note: Changes require agent restart to take effect.
     """
     # Only owner can modify folder sharing
-    if not db.can_user_share_agent(current_user.username, agent_name):
+    if not (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True)):
         raise HTTPException(status_code=403, detail="Only the owner can modify folder sharing")
 
     container = get_agent_container(agent_name)
@@ -152,7 +153,7 @@ async def get_available_shared_folders_logic(
 
     Useful for showing which folders can be mounted.
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)
@@ -192,7 +193,7 @@ async def get_folder_consumers_logic(
 
     Useful for understanding who will see exposed files.
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)

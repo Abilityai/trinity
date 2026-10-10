@@ -22,7 +22,7 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 
 from database import db
-from dependencies import AuthorizedAgentByName, CurrentUser, OwnedAgentByName
+from dependencies import AuthorizedAgentByName, CurrentUser, OwnedAgentByName, agent_may_reach
 from services import brain_orb_postprocess, brain_orb_voice_service, idempotency_service, rate_limiter
 # Runtime-resolved flags (#85): system_settings override → BRAIN_ORB_* env
 # opt-in → OFF. Imported as module-level names so tests can monkeypatch the
@@ -177,7 +177,7 @@ async def post_brain_orb_voice_token(agent_name: AuthorizedAgentByName, current_
     # Phase 4a). The mint route is AuthorizedAgentByName (shared users may voice-chat),
     # so compute owner access here — same predicate OwnedAgentByName enforces. Shared
     # users get the read-only manifest; the backend /action route is the hard gate.
-    can_write = is_brain_orb_write_enabled() and db.can_user_share_agent(current_user.username, agent_name)
+    can_write = is_brain_orb_write_enabled() and (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True))
     try:
         result = await brain_orb_voice_service.mint_voice_token(
             agent_name,

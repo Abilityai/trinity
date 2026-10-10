@@ -16,6 +16,7 @@ import logging
 from fastapi import HTTPException
 
 from database import db
+from dependencies import agent_may_reach
 from models import User
 from services.docker_service import get_agent_container
 
@@ -56,7 +57,7 @@ def check_public_folder_mount_matches(container, agent_name: str) -> bool:
 
 async def get_file_sharing_status_logic(agent_name: str, current_user: User) -> dict:
     """Return the current file-sharing status for the agent."""
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)
@@ -93,7 +94,7 @@ async def set_file_sharing_status_logic(
     current_user: User,
 ) -> dict:
     """Enable/disable file sharing for an agent (owner-only)."""
-    if not db.can_user_share_agent(current_user.username, agent_name):
+    if not (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True)):
         raise HTTPException(status_code=403, detail="Only the owner can modify file-sharing settings")
 
     container = get_agent_container(agent_name)

@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, capability_fence
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, capability_fence
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -490,7 +490,7 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     agent_dict["is_shared"] = not agent_dict["is_owner"] and not is_admin and \
                                db.is_agent_shared_with_user(agent_name, current_user.username)
     agent_dict["is_system"] = owner.get("is_system", False) if owner else False
-    agent_dict["can_share"] = db.can_user_share_agent(current_user.username, agent_name)
+    agent_dict["can_share"] = (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True))
     # ent#181: the detail endpoint is what AgentHeader loads on page open — it
     # must carry the label too, or the header shows the slug until the first
     # edit and the surfaces disagree (§1.3.1 FR-3). One extra read; not the list
@@ -1865,7 +1865,7 @@ async def get_activity_timeline(
     filtered_activities = []
     for activity in all_activities:
         agent_name = activity.get("agent_name")
-        if db.can_user_access_agent(current_user.username, agent_name):
+        if (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
             filtered_activities.append(activity)
             if len(filtered_activities) >= limit:
                 break

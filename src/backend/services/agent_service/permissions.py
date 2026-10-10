@@ -9,6 +9,7 @@ from fastapi import HTTPException, Request
 
 from models import User
 from database import db
+from dependencies import agent_may_reach
 from services.docker_service import agent_container_states, get_agent_container
 from .helpers import get_accessible_agents
 
@@ -32,7 +33,7 @@ async def get_agent_permissions_logic(
     confident, smaller set — see `_strict_permissions`. Without it the
     behaviour is unchanged (the frontend and the lenient MCP callers).
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     if strict:
@@ -141,7 +142,7 @@ async def set_agent_permissions_logic(
     - permitted_agents: List of agent names to permit
     """
     # Only owner or admin can modify permissions
-    if not db.can_user_share_agent(current_user.username, agent_name):
+    if not (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True)):
         raise HTTPException(status_code=403, detail="Only the owner can modify agent permissions")
 
     container = get_agent_container(agent_name)
@@ -152,7 +153,7 @@ async def set_agent_permissions_logic(
 
     # Validate all target agents exist and are accessible
     for target in permitted_agents:
-        if not db.can_user_access_agent(current_user.username, target):
+        if not (db.can_user_access_agent(current_user.username, target) and agent_may_reach(current_user, target)):
             raise HTTPException(
                 status_code=400,
                 detail=f"Agent '{target}' does not exist or is not accessible"
@@ -178,7 +179,7 @@ async def add_agent_permission_logic(
     Add permission for an agent to communicate with another agent.
     """
     # Only owner or admin can modify permissions
-    if not db.can_user_share_agent(current_user.username, agent_name):
+    if not (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True)):
         raise HTTPException(status_code=403, detail="Only the owner can modify agent permissions")
 
     # Verify source agent exists
@@ -187,7 +188,7 @@ async def add_agent_permission_logic(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     # Verify target agent exists and is accessible
-    if not db.can_user_access_agent(current_user.username, target_agent):
+    if not (db.can_user_access_agent(current_user.username, target_agent) and agent_may_reach(current_user, target_agent)):
         raise HTTPException(status_code=400, detail=f"Target agent '{target_agent}' does not exist or is not accessible")
 
     # Can't permit self
@@ -213,7 +214,7 @@ async def remove_agent_permission_logic(
     Remove permission for an agent to communicate with another agent.
     """
     # Only owner or admin can modify permissions
-    if not db.can_user_share_agent(current_user.username, agent_name):
+    if not (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True)):
         raise HTTPException(status_code=403, detail="Only the owner can modify agent permissions")
 
     # Verify source agent exists

@@ -13,6 +13,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from models import User
 from database import db
+from dependencies import agent_may_reach
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 from .helpers import agent_http_request
@@ -153,6 +154,20 @@ def _touches_skills_dir(path: str, *, include_ancestors: bool = False) -> bool:
     return False
 
 
+def _may_reach_for_path(current_user, agent_name, path, *, include_ancestors=False) -> bool:
+    """trinity-enterprise#629 reach, plus the ent#596 exception: `skills.manage`
+    IS the grant to change the skills of the owner's other agents, so a holder
+    writing a skills path reaches the target without a permission edge (the
+    capability gate below still decides the write)."""
+    if agent_may_reach(current_user, agent_name):
+        return True
+    if not _touches_skills_dir(path, include_ancestors=include_ancestors):
+        return False
+    from dependencies import capability_refusal
+    from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+    return capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is None
+
+
 # trinity-enterprise#164: the agent's INSTRUCTIONS — its top-level CLAUDE.md /
 # AGENTS.md and everything under `.claude/` except the skills dir (which is
 # `skills.manage`, one permission per file class). A platform write there
@@ -213,7 +228,7 @@ async def list_agent_files_logic(
         request: HTTP request object
         show_hidden: If True, include hidden files (starting with .)
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)
@@ -266,7 +281,7 @@ async def download_agent_file_logic(
     Download a file from the agent's workspace.
     Returns the file content as plain text.
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)
@@ -318,7 +333,7 @@ async def delete_agent_file_logic(
     """
     Delete a file or directory from the agent's workspace.
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and _may_reach_for_path(current_user, agent_name, path, include_ancestors=True)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     # ent#596: a write into the skills dir needs the skill-management capability.
@@ -388,7 +403,7 @@ async def preview_agent_file_logic(
     Get file with proper MIME type for preview.
     Streams the response from the agent container.
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)
@@ -457,7 +472,7 @@ async def update_agent_file_logic(
         current_user: Current authenticated user
         request: HTTP request object
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and _may_reach_for_path(current_user, agent_name, path)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     # ent#596: a write into the skills dir needs the skill-management capability.
@@ -534,7 +549,7 @@ async def create_agent_folder_logic(
         current_user: Current authenticated user
         request: HTTP request object
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and _may_reach_for_path(current_user, agent_name, path)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     # ent#596: a write into the skills dir needs the skill-management capability.

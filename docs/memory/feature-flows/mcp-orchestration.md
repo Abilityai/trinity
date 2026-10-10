@@ -811,9 +811,9 @@ async function checkAgentAccess(
 Since ent#628 the agent-scope rule has ONE implementation, `src/mcp-server/src/access.ts::checkAgentEdge`, and
 every registered tool declares in `TOOL_ACCESS_POLICY` whether it is gated at registration (`enforce`),
 gates itself after resolving its target (`in-tool`), is ungated at the MCP layer with a named owner
-(`baselined` → trinity-enterprise#629), or has no agent target (`none`); `server.ts` refuses to register a
-tool without a row. It is a tool-surface gate — the REST routes behind the tools resolve an agent key to
-its owner (Invariant #8).
+(`baselined`, naming the backend fence), or has no agent target (`none`); `server.ts` refuses to register a
+tool without a row. The backend holds the same line one hop down (trinity-enterprise#629,
+`dependencies.agent_may_reach`).
 
 ---
 

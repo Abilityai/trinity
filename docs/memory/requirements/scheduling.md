@@ -1477,9 +1477,8 @@ schedules:
   edge `chat_with_agent` enforces — gated at the MCP layer at registration
   (`src/mcp-server/src/access.ts`, `TOOL_ACCESS_POLICY`); the loop-id tools
   resolve the loop's agent first. User keys are decided by the backend
-  (owner/admin/shared). The REST routes themselves are owner-equivalent for an
-  agent key (Invariant #8) — a tool-surface gate, not a capability boundary;
-  trinity-enterprise#629 owns that question.
+  (owner/admin/shared). The REST routes hold the same line for an agent key
+  used raw (trinity-enterprise#629, `dependencies.agent_may_reach`).
 - **Execution model**: each iteration goes through the standard
   `task_execution_service.execute_task()` path → `capacity_manager`
   admit/slot → execute → release. Each iteration is recorded in

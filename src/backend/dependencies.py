@@ -1316,6 +1316,29 @@ def require_interactive(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+def _spawned_by_caller(agent_name: str, target_agent: str) -> bool:
+    """Whether ``agent_name`` spawned ``target_agent`` with the key it holds NOW.
+
+    A name-only match is forgeable via name reuse; the key id is stable and
+    cascade-deletes with the parent (trinity-enterprise#69 Part 2). Fails
+    closed: any lookup error is "not spawned by the caller".
+    """
+    try:
+        info = db.get_agent_ephemeral_info(target_agent)
+    except Exception:
+        return False
+    if not isinstance(info, dict) or info.get("spawned_by_agent") != agent_name:
+        return False
+    expected_key_id = info.get("spawned_by_key_id")
+    if not expected_key_id:
+        return False
+    try:
+        parent_key = db.get_agent_mcp_api_key(agent_name)
+    except Exception:
+        return False
+    return bool(parent_key) and parent_key.id == expected_key_id
+
+
 def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
     """Lifecycle-mutation gate for agent-scoped callers
     (trinity-enterprise#69 Part 2) — INTERIM until #948 capability tokens.
@@ -1329,25 +1352,78 @@ def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
     """
     if not current_user.agent_name:
         return
-    denied = HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Agent-scoped keys may only manage agents they spawned",
-    )
+    if not _spawned_by_caller(current_user.agent_name, target_agent):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Agent-scoped keys may only manage agents they spawned",
+        )
+
+
+# ============================================================================
+# Agent reach (trinity-enterprise#629)
+# ============================================================================
+# An agent-scoped key resolves to its OWNER carrying the owner's role
+# (Invariant #8), so every owner/access predicate answered "yes" for any
+# sibling the owner holds: the `agent_permissions` edge the MCP layer checks
+# (P-02) did not exist one hop down, on the raw backend routes an agent reaches
+# with its injected `TRINITY_MCP_API_KEY` and `TRINITY_BACKEND_URL`. Patched per
+# endpoint, that class would recur on the next route — so the narrowing lives
+# HERE, under every access/owner helper, and the inline sites call it too
+# (`tests/unit/test_ent629_agent_reach.py` keeps them honest).
+#
+#   * USE (read, call — the access tier): itself, an agent it holds an
+#     `agent_permissions` edge to, an agent it spawned.
+#   * MANAGE (config, grants — the owner tier): itself, an agent it spawned.
+#     An edge means "may call", never "may manage".
+#
+# Every other principal is unchanged: humans, `user`/`system` keys, connector
+# keys (fenced separately) — `agent_name` is set only for scope `agent`. A
+# capability (ent#596 `skills.manage`) is the explicit grant to manage the
+# owner's other agents; its dependency keeps the plain owner fence.
+def agent_may_reach(current_user, target_agent: str, *, manage: bool = False) -> bool:
+    """False only when an agent-scoped principal is outside its reach."""
+    agent = getattr(current_user, "agent_name", None)
+    # `isinstance`, not truthiness: a bare MagicMock principal (older suites)
+    # carries a truthy mock attribute and is not an agent.
+    if not isinstance(agent, str) or not agent:
+        return True
+    if target_agent == agent:
+        return True
+    if not manage and _has_edge(agent, target_agent):
+        return True
+    if _spawned_by_caller(agent, target_agent):
+        return True
+    return manage and _manages_owners_agent(current_user, target_agent)
+
+
+def _manages_owners_agent(current_user, target_agent: str) -> bool:
+    """An `agents.manage` holder reaches, for owner operations, the agents its
+    owner OWNS (trinity-enterprise#164): the grant IS the instance admin's
+    permission to reconfigure the owner's other agents, the same way
+    `skills.manage` is for their skills (ent#596). Bounded exactly like
+    `_refuse_unless_owners_agent` — `owner_username` equality, never the admin
+    short-circuit an agent key's owner role carries. Reads are not widened.
+    Fails closed."""
+    from db.capability_grants import CAPABILITY_AGENTS_MANAGE
     try:
-        info = db.get_agent_ephemeral_info(target_agent)
+        if capability_refusal(current_user, CAPABILITY_AGENTS_MANAGE) is not None:
+            return False
+        owner = db.get_agent_owner(target_agent) or {}
     except Exception:
-        raise denied
-    if not isinstance(info, dict) or info.get("spawned_by_agent") != current_user.agent_name:
-        raise denied
-    expected_key_id = info.get("spawned_by_key_id")
-    if not expected_key_id:
-        raise denied
+        logger.warning("[ent#629] agents.manage reach lookup for %s failed; treating as unreachable",
+                       target_agent)
+        return False
+    return bool(owner) and owner.get("owner_username") == current_user.username
+
+
+def _has_edge(agent_name: str, target_agent: str) -> bool:
+    """The `agent_permissions` edge, read fail-CLOSED like the MCP layer reads it."""
     try:
-        parent_key = db.get_agent_mcp_api_key(current_user.agent_name)
+        return bool(db.is_agent_permitted(agent_name, target_agent))
     except Exception:
-        raise denied
-    if not parent_key or parent_key.id != expected_key_id:
-        raise denied
+        logger.warning("[ent#629] edge lookup %s -> %s failed; treating as no edge",
+                       agent_name, target_agent)
+        return False
 
 
 def _reject_connector_principal(current_user: User) -> None:
@@ -1666,7 +1742,10 @@ def get_authorized_agent(
     # timing) is identical for the non-existent and inaccessible cases (#186).
     exists = db.get_agent_owner(name) is not None
     allowed = db.can_user_access_agent(current_user.username, name)
-    if not (exists and allowed):
+    # ent#629: an agent key reaches only itself, its edges, its spawned agents.
+    # Same uniform 404 — outside its reach reads exactly like "no such agent".
+    reach = agent_may_reach(current_user, name)
+    if not (exists and allowed and reach):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
@@ -1749,7 +1828,8 @@ def get_owned_agent(
     # Evaluate existence AND owner-access before branching (equal timing, #186).
     exists = db.get_agent_owner(name) is not None
     allowed = db.can_user_share_agent(current_user.username, name)
-    if not (exists and allowed):
+    reach = agent_may_reach(current_user, name, manage=True)  # ent#629
+    if not (exists and allowed and reach):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
@@ -1777,7 +1857,8 @@ def get_authorized_agent_by_name(
     _enforce_connector_scope(current_user, agent_name, owner_op=False)
     exists = db.get_agent_owner(agent_name) is not None
     allowed = db.can_user_access_agent(current_user.username, agent_name)
-    if not (exists and allowed):
+    reach = agent_may_reach(current_user, agent_name)  # ent#629
+    if not (exists and allowed and reach):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
@@ -1802,10 +1883,18 @@ def get_owned_agent_by_name(
             owner/admin — a uniform 404 so a non-existent and an unowned agent
             are indistinguishable (enumeration-safe, #186).
     """
+    return _owned_agent_or_404(agent_name, current_user, narrow=True)
+
+
+def _owned_agent_or_404(agent_name: str, current_user: User, *, narrow: bool) -> str:
+    """The owner fence behind ``get_owned_agent_by_name``. ``narrow=False`` is
+    for a dependency whose CAPABILITY already is the agent's grant to manage
+    its owner's other agents (ent#596) — there, the plain owner fence applies."""
     _enforce_connector_scope(current_user, agent_name, owner_op=True)
     exists = db.get_agent_owner(agent_name) is not None
     allowed = db.can_user_share_agent(current_user.username, agent_name)
-    if not (exists and allowed):
+    reach = agent_may_reach(current_user, agent_name, manage=True) if narrow else True
+    if not (exists and allowed and reach):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
@@ -2176,7 +2265,28 @@ async def get_skill_managed_agent_by_name(
     await enforce_agent_capability(
         request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
     )
-    return get_owned_agent_by_name(agent_name=agent_name, current_user=current_user)
+    return get_capability_owned_agent_by_name(agent_name, current_user)
+
+
+def get_capability_owned_agent(
+    agent_name: str = Path(..., description="Agent name from path"),
+    current_user: User = Depends(get_current_user),
+) -> str:
+    """Path-dependency form of `get_capability_owned_agent_by_name`, ONLY for a
+    route whose capability dependency (`require_person_or_capability`) already
+    refused a non-holder and bounded a holder to its owner's agents — e.g. the
+    skill gate writes (trinity-enterprise#753). On any other route it would hand
+    an agent key the owner's reach."""
+    return get_capability_owned_agent_by_name(agent_name, current_user)
+
+
+def get_capability_owned_agent_by_name(agent_name: str, current_user: User) -> str:
+    """The owner fence a CAPABILITY dependency applies after its grant check.
+
+    Not narrowed to the agent's reach (ent#629): the capability IS the instance
+    admin's grant to manage the owner's other agents (ent#596) — the fence still
+    stops it at the owner's agents."""
+    return _owned_agent_or_404(agent_name, current_user, narrow=False)
 
 
 # ============================================================================
@@ -2248,7 +2358,8 @@ def assert_agent_access(current_user: User, agent_name: str, *, detail: str = "A
     first so the connector boundary is enforced identically to the path-deps.
     """
     _enforce_connector_scope(current_user, agent_name, owner_op=False)
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name)
+            and agent_may_reach(current_user, agent_name)):  # ent#629
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
@@ -2262,7 +2373,8 @@ def assert_agent_owner(current_user: User, agent_name: str, *, detail: str = "No
     the connector owner-op fence first (connectors can never own).
     """
     _enforce_connector_scope(current_user, agent_name, owner_op=True)
-    if not db.can_user_share_agent(current_user.username, agent_name):
+    if not (db.can_user_share_agent(current_user.username, agent_name)
+            and agent_may_reach(current_user, agent_name, manage=True)):  # ent#629
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 

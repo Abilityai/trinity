@@ -166,7 +166,8 @@ def owner_fence(monkeypatch):
         return agent_name
 
     from routers import skills
-    monkeypatch.setitem(skills.get_skill_managed_agent_by_name.__globals__, "get_owned_agent_by_name", fence)
+    # ent#629: the capability's owner fence is its own seam (not narrowed to reach).
+    monkeypatch.setitem(skills.get_skill_managed_agent_by_name.__globals__, "get_capability_owned_agent_by_name", fence)
     return reached
 
 
