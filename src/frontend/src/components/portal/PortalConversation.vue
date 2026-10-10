@@ -2273,6 +2273,8 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
     // …and the rail's half of the same set (#2794 follow-up): this turn has
     // gone out, so nothing sent before it is still pending.
     store.markUploadsCarried(props.agent?.name)
+    // trinity-enterprise#631: who this message tagged, as the server stored it.
+    if (tags && tags.length) void showOwnTags(text)
     return true
   } catch (err) {
     // #3460: a validation refusal (a 422 carrying Pydantic's list) is said in
@@ -2726,6 +2728,22 @@ watch(sending, async (isSending) => {
 // on the other caller, the exact defect this change exists to remove — and a
 // refused cancel's error stayed pinned above the composer across every later
 // turn because only `send()` cleared it.
+// trinity-enterprise#631: the tagger sees the tag land without a reload — one
+// narrow history read, only for a message that tagged someone, copying the
+// server's marks from the stored row onto the one on screen. Best-effort: a
+// failure leaves the marks to the next history read.
+async function showOwnTags(text) {
+  try {
+    const data = await store.fetchHistory(props.agent.name, currentSessionId.value || null, { limit: REPLY_POLL_ROWS })
+    const rows = Array.isArray(data?.messages) ? data.messages : []
+    const row = [...rows].reverse().find((m) => m && m.role === 'user' && m.content === text && Array.isArray(m.tags))
+    const msg = [...messages.value].reverse().find((m) => m && m.role === 'user' && m.content === text)
+    if (row && msg) msg.tags = row.tags
+  } catch {
+    // the next history read brings them
+  }
+}
+
 function settleDelivery(index, text, res) {
   if (res === true) return { ok: true }
   // #2320: `retryable` when `deliver` decided it (a server verdict, or a
