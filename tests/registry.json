@@ -5568,6 +5568,79 @@
         "unit"
       ],
       "description": "A `dims:` tile reads its own series (#3293): against the real store, a quiet series beside a busy one holding more than 200 newer points binds with its own latest point, freshness and history; a series whose last point is older than the tile's window still shows its number with an empty history; stored key order and a busier wider series (`channel=google, geo=us`) neither hide nor crowd out the exact one; a series that never reported, a partial selector and a series silent for longer than the 90-day lookback are refused `metric_series_not_found` and never show the fold; a store fault on the per-series read refuses that one tile with `metric_store_unavailable`; the unselected tile still equals `latest_by_metric`; and the store read itself is newest-first, bounded by `since` and `limit`, exact on dims and scoped to the agent."
+    },
+    {
+      "file": "unit/test_837_workspace_only_floor.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "auth",
+        "workspace",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837: the operator floor in get_current_user. A `user` (or out-of-ladder) principal gets 403 workspace_only on real operator routes with real JWTs and keys, before any agent lookup; @workspace_route admits a person only; an agent of a `user` owner keeps its own runtime surface, name-bound; the Workspace doors (portal principal, rooms principal) admit a `user`; the unfloored resolver's caller set is pinned; the agent terminal and /ws/events refuse the rung; share and access-request approval write no whitelist row. No Docker."
+    },
+    {
+      "file": "unit/test_837_workspace_route_census.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "frontend",
+        "auth",
+        "workspace",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837: the @workspace_route set is frozen, each mark has a reason, sits below its route decorator and reaches get_current_user; every /api/ call in the Workspace's own frontend files reaches a Workspace door, a sign-in/public/own-auth route or a marked route, and those files import no operator store. No Docker."
+    },
+    {
+      "file": "unit/test_837_ws_workspace_event_kinds.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "websocket",
+        "auth",
+        "workspace",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837: a Workspace-only account's /ws socket receives only the event kinds the Workspace reads (WORKSPACE_WS_EVENT_TYPES). Identity resolution per rung, the kind rule (type, else the lifecycle event key; kind-less withheld; narrows the agent scope, never widens it) on live fan-out and reconnect replay, register's default, and the main.py hand-offs with connect's closed default. No Docker."
+    },
+    {
+      "file": "unit/test_837_whitelist_grant.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "database",
+        "auth",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837 review: a deliberate whitelist grant replaces a row that agent sharing or access-request approval wrote (both backends via db_harness), any other existing row is left alone, and the route names an existing account's role. No Docker."
+    },
+    {
+      "file": "unit/test_837_shared_canvas_workspace_viewer.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "auth",
+        "workspace",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837 review: an authorized shared-canvas link recognises a Workspace session, limited to a roster agent and a roster-audience canvas (real SQLite); the route reads it from the bearer token, stays anonymous on an unknown token and refuses a blocked client. No Docker."
+    },
+    {
+      "file": "unit/test_837_cli_workspace_only.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-09",
+      "categories": [
+        "cli",
+        "auth",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837 review: the CLI names the workspace_only refusal (executed predicate, no CLI deps) and trinity init's key provisioning exits on it (AST pin). No Docker."
     }
   ]
 }

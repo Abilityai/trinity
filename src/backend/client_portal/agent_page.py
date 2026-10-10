@@ -187,9 +187,11 @@ def _total_of(row) -> int:
 # already drops `alert` asks as "operations telemetry, not something the agent
 # is asking a person". A loop run is the same kind of thing.
 #
-# Operators keep it — they can click through and read every run, so hiding it
-# from them removes real signal and fixes nothing. Same `is_platform` split the
-# roster and `_require_roster` already use.
+# Platform accounts keep it. An operator can click through and read every run;
+# a Workspace-only `user` (trinity-enterprise#837) cannot, and keeps it by
+# decision — a team member, not an outside client, keeps the team's view of the
+# agent here — so hiding it removes real signal and fixes nothing. Same
+# `is_platform` split the roster and `_require_roster` already use.
 _CLIENT_HIDDEN_TRIGGERS = frozenset({"loop"})
 
 # The analytics bucket `_TRIGGER_BUCKETS` folds `loop` into (`db/schedules`).
@@ -440,11 +442,13 @@ def canvas_audience_for(is_platform: bool) -> Optional[str]:
     """Which canvas audiences a Workspace principal reads (ent#534).
 
     A portal-token client sees `roster` only — what the agent meant for them.
-    A PLATFORM principal sees every audience (None = no narrowing): they can
-    already open Agent Detail for any agent on their Workspace roster and read
-    every canvas there, so narrowing here hid nothing from them and only made
-    the canvas the orb drew during a voice call vanish from the rail the moment
-    the call ended (the `main` canvas is `operator` by default). Deliberately
+    A PLATFORM principal sees every audience (None = no narrowing). An operator
+    can open Agent Detail and read every canvas there anyway. A Workspace-only
+    `user` cannot since trinity-enterprise#837, and keeps every audience here by
+    decision: a team member, not an outside client. Narrowing either one would
+    only make the canvas the orb drew during their voice call vanish from the
+    rail the moment the call ended (the `main` canvas is `operator` by
+    default). Deliberately
     asymmetric with Reports on this page, which stay addressed-to-me for
     everyone: a report is *sent*, a canvas is the agent's *surface*.
 

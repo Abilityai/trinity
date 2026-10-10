@@ -12,6 +12,10 @@ import {
   reactToPlatformUnauthorized, reactToStorageEvent, setPlatformUnauthorizedHandler,
 } from './utils/platformSession'
 import { installConsoleBuffer } from './utils/consoleBuffer'
+import { reconnectWebSocket } from './utils/websocket'
+import {
+  notifyWorkspaceOnly, reactToWorkspaceOnly, setWorkspaceOnlyHandler,
+} from './utils/workspaceOnly'
 
 // #1116: capture recent console errors/warnings from the very start so the
 // in-app bug reporter can attach them (scrubbed) to a report. Runs before the
@@ -81,6 +85,21 @@ function handlePlatformUnauthorized(error) {
 
 setPlatformUnauthorizedHandler(handlePlatformUnauthorized)
 
+// trinity-enterprise#837 — the operator floor refused this account
+// (403 `workspace_only`): its role is below `operator`, and the router guard did
+// not know yet (a stored role gone stale, a demotion mid-session). Re-read the
+// role and give way to the Workspace, unless the page already is one.
+setWorkspaceOnlyHandler(() => reactToWorkspaceOnly({
+  // The address being loaded until the first navigation settles (#3406):
+  // `currentRoute` reads "/" until then, which would move a member off the
+  // Workspace page they are opening.
+  currentPath: () => pathForVerdict(router, START_LOCATION, window.location.pathname),
+  refreshProfile: () => useAuthStore().fetchUserProfile(),
+  currentRole: () => useAuthStore().user?.role,
+  rescope: () => reconnectWebSocket(),
+  replace: (path) => router.replace(path),
+}))
+
 // #2791 — every bare-`axios` caller gets the CURRENT credential, per request.
 //
 // There are ~368 `axios.get/post/...` call sites outside `api.js`, and they used
@@ -105,6 +124,7 @@ axios.interceptors.response.use(
   response => response,
   error => {
     if (error.response?.status === 401) notifyPlatformUnauthorized(error)
+    else notifyWorkspaceOnly(error)
     return Promise.reject(error)
   }
 )

@@ -24,7 +24,7 @@ from models import (
     VoiceStopRequest,
     VoiceStopResponse,
 )
-from dependencies import get_current_user, get_authorized_agent, get_owned_agent, assert_owns_or_admin
+from dependencies import get_current_user, get_authorized_agent, get_owned_agent, assert_owns_or_admin, workspace_route
 from database import db
 from config import VOICE_ENABLED, DEFAULT_VOICE_NAME, GEMINI_VOICE_NAMES
 from services import canvas_service
@@ -173,6 +173,7 @@ async def voice_status(
 
 
 @router.get("/api/agents/{name}/voice/{session_id}/panel")
+@workspace_route("the Workspace voice call shows the live canvas beside the conversation")
 async def get_voice_panel(
     session_id: str,
     name: str = Depends(get_authorized_agent),

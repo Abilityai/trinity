@@ -70,7 +70,7 @@ CODE = "inter_agent_depth_exceeded"
 
 @pytest.fixture
 def world(db_backend, monkeypatch):
-    db.create_user(UserCreate(username=OWNER, role="user", email="nr-owner@example.com"))
+    db.create_user(UserCreate(username=OWNER, role="operator", email="nr-owner@example.com"))
     # The EVT-001 loopback JWT is `sub: admin`.
     db.create_user(UserCreate(username="admin", role="admin", email="nr-admin@example.com"))
     db.register_agent_owner(A, OWNER)

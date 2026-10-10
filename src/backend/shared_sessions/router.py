@@ -24,10 +24,12 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 
 from dependencies import (
-    get_current_user,
+    WORKSPACE_ONLY_DETAIL,
+    is_workspace_only_role,
     oauth2_scheme,
     reject_agent_principal,
     require_admin,
+    resolve_platform_user_unfloored,
 )
 from models import User
 
@@ -85,9 +87,19 @@ async def get_room_principal(
     uniform 404. A portal token still cannot touch any other platform endpoint.
     """
     try:
-        return await get_current_user(request, token)
+        # Rooms are a Workspace surface, so a Workspace-only member resolves
+        # here as the `User` it is, past the operator floor (ent#837).
+        user = await resolve_platform_user_unfloored(request, token)
     except HTTPException:
-        pass
+        user = None
+    if user is not None:
+        # ...but an agent of a Workspace-only owner keeps only its own runtime
+        # routes: rooming with its owner's agents, and waking them, is the
+        # agent-to-agent chat the floor refuses everywhere else. Room wakes run
+        # in-process, never on the agent's key, so agents still take part.
+        if user.agent_name and is_workspace_only_role(user.role):
+            raise HTTPException(status_code=403, detail=dict(WORKSPACE_ONLY_DETAIL))
+        return user
 
     # The portal resolver owns the blocked-client check and the ent#375 sliding
     # renewal, so it is called rather than re-implemented — and it raises 401

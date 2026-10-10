@@ -24,7 +24,7 @@ from database import (
     PublicChatResponse,
     PublicChatMessage
 )
-from dependencies import get_current_user, get_optional_user, assert_owns
+from dependencies import get_current_user, get_optional_user, assert_owns, workspace_route
 from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
 from services import agent_skills_listing, canvas_share_service, login_policy_gate, rate_limiter
@@ -1071,6 +1071,7 @@ async def public_terminate_execution(
 
 
 @router.get("/sessions/{token}")
+@workspace_route("the public chat page lists the signed-in person's own past chats on this link")
 async def get_public_link_sessions(
     token: str,
     limit: int = 20,
@@ -1107,6 +1108,7 @@ async def get_public_link_sessions(
 
 
 @router.get("/sessions/{token}/{session_id}")
+@workspace_route("the public chat page reopens one of the signed-in person's own past chats on this link")
 async def get_public_link_session_detail(
     token: str,
     session_id: str,
@@ -1144,6 +1146,7 @@ async def get_public_link_session_detail(
 # ---------------------------------------------------------------------------
 
 @router.get("/canvas/{token}")
+@workspace_route("an `authorized` canvas link must recognise the member it was shared with, not read them as a stranger")
 async def get_shared_canvas(
     token: str,
     request: Request,
@@ -1169,7 +1172,17 @@ async def get_shared_canvas(
     """
     check_public_link_rate_limit(_get_client_ip(request))
 
-    resolution = canvas_share_service.resolve(token, user)
+    viewer = user
+    if viewer is None:
+        # trinity-enterprise#837: someone an agent was shared with signs in to
+        # the Workspace, not at /login, so an `authorized` link recognises a
+        # Workspace session too — narrowed to what the Workspace shows them.
+        from client_portal.portal_auth import workspace_email_from_request
+
+        email = workspace_email_from_request(request)
+        if email:
+            viewer = canvas_share_service.WorkspaceViewer(email)
+    resolution = canvas_share_service.resolve(token, viewer)
     status_value = resolution["status"]
 
     if status_value == canvas_share_service.ShareResolution.OK:

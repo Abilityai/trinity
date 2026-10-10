@@ -53,7 +53,8 @@ Portal.vue::onSignOut  (signingOut ref guards re-entry + holds the frame)
         ├─ if authStore.isAuthenticated: await authStore.logout()   ← platform credential FIRST
         ├─ signOut()                                      (portal state; unchanged primitive)
         └─ return wasPlatform ? '/login' : '/workspace'
-   ├─ '/login'    → router.push  (an operator signed out of Trinity)
+   ├─ '/login'    → router.push  (an operator signed out of Trinity; a `user`
+   │                              signing back in lands in /workspace, ent#837)
    └─ '/workspace'→ escapeStage() (a client lands on the OTP form; ?agent= stripped, #2158)
 ```
 

@@ -37,7 +37,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Set
 
 try:
     import redis.asyncio as aioredis
@@ -97,6 +97,12 @@ class _ClientSlot:
     # ent#467: the identity a SCOPE_ALL slot is filtered as. Empty for the
     # legacy direct-construction path in tests and for admins (never filtered).
     email: str = ""
+    # trinity-enterprise#837: the event kinds a SCOPE_ALL slot may receive.
+    # None = every kind (operators, admins, direct construction); a set = only
+    # those, for a Workspace-only account (`ws_identity_service`).
+    allowed_types: Optional[FrozenSet[str]] = None
+    # ...and the fields each delivered event is cut to (None = the whole payload).
+    allowed_fields: Optional[FrozenSet[str]] = None
     refreshing: bool = False
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=CLIENT_QUEUE_MAXSIZE))
     last_delivered_id: str = "0-0"
@@ -181,11 +187,36 @@ def agent_names_in_payload(payload: Any) -> frozenset:
     return frozenset(names)
 
 
+def event_kind_of(payload: Any) -> Optional[str]:
+    """The name a ``/ws`` client dispatches on: ``type``, else the lifecycle
+    ``event`` key (``agent_created``, ``agent_shared``, …). ``None`` when the
+    payload carries neither as a non-empty string (trinity-enterprise#837)."""
+    if not isinstance(payload, dict):
+        return None
+    for key in ("type", "event"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _payload_for(slot: _ClientSlot, payload: dict) -> dict:
+    """The payload as this slot receives it: whole, or cut to its
+    ``allowed_fields`` plus ``_eid``, the replay cursor (trinity-enterprise#837)."""
+    if slot.allowed_fields is None:
+        return payload
+    projected = {key: payload[key] for key in slot.allowed_fields if key in payload}
+    if "_eid" in payload:
+        projected["_eid"] = payload["_eid"]
+    return projected
+
+
 def _event_is_visible(
     slot: _ClientSlot,
     event_scope: str,
     agent_name: Optional[str],
     agent_names: Optional[frozenset] = None,
+    event_kind: Optional[str] = None,
 ) -> bool:
     """Apply the scope/filter contract that replaces FilteredWebSocketManager.
 
@@ -203,9 +234,17 @@ def _event_is_visible(
     non-agent event (and every existing direct-construction test) working.
     Admins short-circuit BEFORE the set is consulted: their roster is a
     connect-time snapshot, so filtering them would blind an admin to any agent
-    created after they opened the page."""
+    created after they opened the page.
+
+    A slot with ``allowed_types`` (a Workspace-only account, #837) also needs
+    ``event_kind`` in that set. It is checked before the admin and agent
+    rules on the SCOPE_ALL branch, so it only ever narrows: a kind it allows
+    still has to pass the agent rule below, and a payload with no kind is
+    withheld."""
     if slot.scope == SCOPE_ALL:
         if event_scope != SCOPE_ALL:
+            return False
+        if slot.allowed_types is not None and event_kind not in slot.allowed_types:
             return False
         if slot.is_admin:
             return True
@@ -454,6 +493,8 @@ class StreamDispatcher:
         is_admin: bool = False,
         accessible_agents: Optional[List[str]] = None,
         email: str = "",
+        allowed_types: Optional[Iterable[str]] = None,
+        allowed_fields: Optional[Iterable[str]] = None,
         last_event_id: Optional[str] = None,
     ) -> str:
         """Register a WebSocket client. Returns the client_id used for lookups.
@@ -469,6 +510,8 @@ class StreamDispatcher:
             is_admin=is_admin,
             accessible_agents=set(accessible_agents or []),
             email=email or "",
+            allowed_types=frozenset(allowed_types) if allowed_types is not None else None,
+            allowed_fields=frozenset(allowed_fields) if allowed_fields is not None else None,
         )
         client_id = str(uuid.uuid4())
         slot.consumer_task = asyncio.create_task(
@@ -625,6 +668,7 @@ class StreamDispatcher:
         # ent#467: derived ONCE per event, not per client — the walk is the
         # same for everyone and this loop is the hot path.
         agent_names = agent_names_in_payload(payload)
+        event_kind = event_kind_of(payload)  # #837 — same: once per event
 
         # ent#467: an accessibility-changing event invalidates the cached
         # rosters BEFORE the filter runs on it, so a freshly-shared user's
@@ -639,10 +683,10 @@ class StreamDispatcher:
         payload["_eid"] = entry_id
 
         for client_id, slot in list(self._clients.items()):
-            if not _event_is_visible(slot, scope, agent_name, agent_names):
+            if not _event_is_visible(slot, scope, agent_name, agent_names, event_kind):
                 continue
             try:
-                slot.queue.put_nowait((entry_id, payload))
+                slot.queue.put_nowait((entry_id, _payload_for(slot, payload)))
             except asyncio.QueueFull:
                 # Slow client — drop and require resync.
                 self.drops_queue_full += 1
@@ -768,12 +812,13 @@ class StreamDispatcher:
             # reconnect with `last-event-id` re-reads history straight out of
             # Redis, so a filter wired only into `_fanout` would hand the whole
             # unfiltered backlog to the client that asked for it.
-            if not _event_is_visible(slot, scope, agent_name, agent_names_in_payload(payload)):
+            if not _event_is_visible(slot, scope, agent_name, agent_names_in_payload(payload),
+                                     event_kind_of(payload)):
                 continue
             payload = dict(payload)
             payload["_eid"] = entry_id
             try:
-                slot.queue.put_nowait((entry_id, payload))
+                slot.queue.put_nowait((entry_id, _payload_for(slot, payload)))
             except asyncio.QueueFull:
                 await self._queue_resync(slot, "queue_overflow_during_catchup")
                 return

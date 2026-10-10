@@ -147,14 +147,24 @@ describe('settings store — an invalid entry never reaches the API (#3455)', ()
   it('POSTs a valid entry trimmed and lower-cased, and returns what was sent', async () => {
     const store = useSettingsStore()
 
-    const email = await store.addWhitelistEmail('  User@Example.COM ')
+    const { email } = await store.addWhitelistEmail('  User@Example.COM ')
 
     expect(email).toBe('user@example.com')
     expect(axios.post).toHaveBeenCalledTimes(1)
     expect(axios.post).toHaveBeenCalledWith('/api/settings/email-whitelist', {
       email: 'user@example.com',
       source: 'manual',
+      default_role: 'user',
     })
+  })
+
+  it("passes on the role of an account that already exists (trinity-enterprise#837)", async () => {
+    axios.post.mockResolvedValue({ data: { success: true, email: 'user@example.com', existing_account_role: 'user' } })
+    const store = useSettingsStore()
+
+    const added = await store.addWhitelistEmail('user@example.com', 'operator')
+
+    expect(added).toEqual({ email: 'user@example.com', existingAccountRole: 'user' })
   })
 
   it("lets the server's own reason through when it still refuses", async () => {
@@ -280,7 +290,7 @@ describe('Settings.vue — the whitelist section, mounted', () => {
     await addButton(w).trigger('click')
     await flushPromises()
 
-    expect(whitelistPosts()).toEqual([[WHITELIST, { email: 'new.user@example.com', source: 'manual' }]])
+    expect(whitelistPosts()).toEqual([[WHITELIST, { email: 'new.user@example.com', source: 'manual', default_role: 'user' }]])
     expect(field(w).element.value).toBe('')
     expect(reason(w).exists()).toBe(false)
     expect(whitelistGets().length).toBe(loadsBefore + 1)

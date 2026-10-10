@@ -66,7 +66,7 @@ def client(db_backend, monkeypatch):
         UserCreate(username=OWNER, role="admin", email="keymint-owner@example.com")
     )
     db.create_user(
-        UserCreate(username=PLAIN, role="user", email="keymint-plain@example.com")
+        UserCreate(username=PLAIN, role="operator", email="keymint-plain@example.com")
     )
     db.register_agent_owner(AGENT, OWNER)
     app = FastAPI()

@@ -26,7 +26,7 @@ import httpx
 
 from config import CORS_ORIGINS, VOICE_ENABLED
 from models import User
-from dependencies import get_current_user, scope_may_open_event_stream
+from dependencies import get_current_user, owner_is_workspace_only, scope_may_open_event_stream, workspace_route
 from services.docker_service import docker_client, list_all_agents_fast
 from utils.helpers import utc_now_iso
 
@@ -209,6 +209,8 @@ class ConnectionManager:
         email: str = "",
         is_admin: bool = False,
         accessible_agents: Optional[List[str]] = None,
+        allowed_types: Optional[frozenset] = frozenset(),
+        allowed_fields: Optional[frozenset] = frozenset(),
     ) -> None:
         """Accept a ``/ws`` client and register it with its agent scope.
 
@@ -217,7 +219,13 @@ class ConnectionManager:
         forgets them registers a slot that sees only agent-less events rather
         than the whole fleet — the fail-closed direction for a delivery
         surface. ``/ws`` itself resolves them before calling and refuses the
-        connection when it cannot."""
+        connection when it cannot.
+
+        trinity-enterprise#837: ``allowed_types`` is the event-kind allowlist and
+        ``allowed_fields`` the fields each event is cut to (``None`` = all).
+        Both default to the empty set, so a caller that forgets them registers
+        a socket that receives nothing usable — noticed at once — rather than
+        everything for a Workspace-only account."""
         await websocket.accept()
         async def _send(payload: dict) -> None:
             await websocket.send_text(json.dumps(payload))
@@ -228,6 +236,8 @@ class ConnectionManager:
             is_admin=is_admin,
             accessible_agents=accessible_agents or [],
             email=email,
+            allowed_types=allowed_types,
+            allowed_fields=allowed_fields,
             last_event_id=last_event_id,
         )
         self._client_ids[websocket] = client_id
@@ -1580,6 +1590,8 @@ async def websocket_endpoint(
         email=identity["email"],
         is_admin=identity["is_admin"],
         accessible_agents=identity["accessible_agents"],
+        allowed_types=identity["allowed_types"],  # trinity-enterprise#837
+        allowed_fields=identity["allowed_fields"],
     )
 
     try:
@@ -1659,6 +1671,13 @@ async def websocket_events_endpoint(
     user_email = key_info.get("user_email")
     # Determine if admin by checking user role
     user_data = db.get_user_by_username(key_info.get("user_id"))  # user_id is actually username
+    # ent#837 — the event stream is an operator surface, and this handler never
+    # runs `get_current_user`, so the operator floor is applied here: a key whose
+    # owner is Workspace-only (including one minted before the upgrade) does not
+    # open it. An owner that cannot be resolved is refused the same way.
+    if owner_is_workspace_only(user_data):
+        await websocket.close(code=4003, reason="This account works in the Workspace")
+        return
     is_admin = user_data and user_data.get("role") == "admin"
 
     # Get list of accessible agents for this user
@@ -1899,6 +1918,7 @@ async def get_version(current_user: User = Depends(get_current_user)):
 
 # User info endpoint
 @app.get("/api/users/me")
+@workspace_route("the SPA reads the role to decide where a signed-in person lands")
 async def get_current_user_info(current_user: User = Depends(get_current_user)):
     """Get current user information."""
     from database import db

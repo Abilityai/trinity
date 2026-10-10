@@ -27,6 +27,7 @@ from services.platform_audit_service import AuditEventType, platform_audit_servi
 from dependencies import (
     require_admin,
     get_current_user,
+    workspace_route,
     reject_non_interactive_principal,
     require_interactive,
 )
@@ -281,6 +282,7 @@ async def clear_my_github_pat(current_user: User = Depends(require_interactive))
 
 
 @router.get("/me/preferences", response_model=UserPreferencesResponse)
+@workspace_route("the Workspace conversation reads the person's UI preferences")
 async def get_my_preferences(current_user: User = Depends(get_current_user)):
     """Every stored UI preference of the caller, in one round trip."""
     reject_non_interactive_principal(current_user)
@@ -288,6 +290,7 @@ async def get_my_preferences(current_user: User = Depends(get_current_user)):
 
 
 @router.put("/me/preferences/{key}", response_model=UserPreferenceRecord)
+@workspace_route("the Workspace conversation saves the person's UI preferences")
 async def put_my_preference(
     key: str,
     body: UserPreferenceWrite,

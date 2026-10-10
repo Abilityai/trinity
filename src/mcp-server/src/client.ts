@@ -110,6 +110,24 @@ export class ApiError extends Error {
 }
 
 /**
+ * The operator floor's refusal (trinity-enterprise#837): a Workspace-only
+ * account is refused on operator routes with `403 {detail: {code:
+ * "workspace_only"}}`. A read that degrades to "none" on failure must pass this
+ * one through, or the caller reports a missing permission or a missing agent
+ * instead of the account's real situation.
+ */
+export function isWorkspaceOnlyRefusal(err: unknown): boolean {
+  if (!(err instanceof ApiError) || err.status !== 403) return false;
+  try {
+    const parsed = JSON.parse(err.body) as { detail?: unknown };
+    const d = (parsed?.detail ?? parsed) as { code?: unknown } | null;
+    return d?.code === "workspace_only";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Default trigger set for the #914 `/chat` recovery lookup.
  *
  * Deliberately NOT widened to cover `/task` (#2661). `/chat` never produces a
@@ -878,7 +896,8 @@ export class TrinityClient {
         owner: agent.owner || "unknown",
         is_shared: agent.is_shared || false,
       };
-    } catch {
+    } catch (err) {
+      if (isWorkspaceOnlyRefusal(err)) throw err;
       return null;
     }
   }
@@ -979,7 +998,8 @@ export class TrinityClient {
         `/api/agents/${encodeURIComponent(sourceAgent)}/permissions`
       );
       return response.permitted_agents.map((a) => a.name);
-    } catch {
+    } catch (err) {
+      if (isWorkspaceOnlyRefusal(err)) throw err;
       return [];
     }
   }

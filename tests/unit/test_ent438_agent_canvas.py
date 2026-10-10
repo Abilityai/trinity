@@ -118,8 +118,9 @@ def test_the_portal_read_narrows_in_the_query():
 
 
 def test_the_workspace_audience_is_decided_by_principal_kind():
-    """ent#534: a platform user reads every audience (they already can on Agent
-    Detail for any agent on their roster); an external client stays roster-only.
+    """ent#534: a platform user reads every audience (an operator can on Agent
+    Detail anyway; a Workspace-only `user` keeps the team view by decision,
+    trinity-enterprise#837); an external client stays roster-only.
     The two callers in the router pass this function's answer, never a literal."""
     from client_portal import agent_page
     from db.canvas import AUDIENCE_ROSTER

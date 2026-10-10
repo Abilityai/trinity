@@ -412,6 +412,17 @@ describe('one credential source, one handler (source guards — wiring only)', (
     expect(MAIN).not.toContain("router.push('/login')\n}")
   })
 
+  it('trinity-enterprise#837 — main.js and api.js wire the workspace_only reaction', () => {
+    // The reaction itself is executed in workspaceOnly.spec.js; these pin the
+    // hand-offs, which a node-env spec cannot drive (deleting one left the
+    // suite green, review item 15).
+    expect(MAIN).toContain('setWorkspaceOnlyHandler(() => reactToWorkspaceOnly({')
+    expect(MAIN).toContain('currentRole: () => useAuthStore().user?.role,')
+    expect(MAIN).toContain('rescope: () => reconnectWebSocket(),')
+    expect(MAIN).toContain('else notifyWorkspaceOnly(error)')
+    expect(read('../../src/api.js')).toContain('else notifyWorkspaceOnly(error)')
+  })
+
   it('#3406 — a 401 is judged against the address being loaded, not START_LOCATION', () => {
     // `router.currentRoute.value.path` is "/" until the first navigation
     // completes, so `currentRoute.value?.path || window.location.pathname`

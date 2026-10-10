@@ -1398,7 +1398,7 @@ class TestWorkspaceAnswerIsPersonOnly:
             return SimpleNamespace(username="owner", agent_name=None, connector_agent=None,
                                    portal_delegate=False, mcp_scope=scope)
 
-        monkeypatch.setattr(pa, "get_current_user", fake_get_current_user)
+        monkeypatch.setattr(pa, "resolve_platform_user_unfloored", fake_get_current_user)
         return pa
 
     @pytest.mark.asyncio

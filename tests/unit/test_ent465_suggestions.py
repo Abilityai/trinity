@@ -531,7 +531,7 @@ async def test_the_platform_door_stamps_is_admin_on_the_principal(monkeypatch, r
     async def current_user(request, token):
         return user
     monkeypatch.setattr(pa, "decode_portal_session", lambda t: None)
-    monkeypatch.setattr(pa, "get_current_user", current_user)
+    monkeypatch.setattr(pa, "resolve_platform_user_unfloored", current_user)
     monkeypatch.setattr(database.db, "get_user_by_username", lambda name: {"email": "U1@Example.com"})
     monkeypatch.setattr(portal_db, "is_client_blocked", lambda e: False)
 
