@@ -21,6 +21,9 @@ through `client_portal/portal_auth.py::get_portal_principal`, which returns
 `(email, is_platform, is_person)`; the roster is every agent shared with that email, plus — for a
 platform session only — the agents they own. `is_person` (trinity-enterprise#611) is False only
 for a platform principal that is not a person: a system-scoped key reads here but cannot answer an ask.
+The field defaults to False, and the principal also carries `self_approves` + `credential` (#3404): a
+portal session token says how it was minted (`minted_by`: `otp` | `delegate`), and only a platform
+person or an `otp`-minted session may self-approve a gated skill — see `feature-flows/skill-gate.md`.
 
 **The `user` rung is Workspace-only (trinity-enterprise#837).** A platform account whose role is
 `user` is a member who works with agents here and nowhere else: `get_current_user` refuses it on

@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3088_retention_ack_env_window.py",
+      "feature": "#3088",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "retention",
+        "settings",
+        "unit"
+      ],
+      "description": "#3088 — POST /api/settings/retention/acknowledge binds the approval to the window the sweep reads: with METRICS_RETENTION_DAYS set and no row, approving the env window succeeds and records it (and equals cleanup_service._read_retention_setting); a stored row wins over env; env in force does not make the code default approvable (409); an empty-string row on agent_soft_delete_retention_days is still 422 with nothing recorded. Drives the real handler with both db bindings patched and non-default values. No Docker, no network."
+    },
+    {
       "file": "unit/test_3247_replace_ask.py",
       "feature": "#3247",
       "added": "2026-10-05",
@@ -363,7 +375,7 @@
         "backend",
         "unit"
       ],
-      "description": "A bound dashboard.yaml widget names ONE series with `dims:`: each per-channel tile shows its own series' number, freshness, sparkline and colour (pick a source, fill once), matching by `canonical_dims` with exact match only; a selector that cannot match is one of three named refusals (`metric_dimension_invalid` with a type hint, `metric_dimension_undeclared`, `metric_series_not_found` with `binding_detail` facts) and never the fold; `bound_series` says what an unselected number is; selection equals the fold over that series alone (parity with `latest_by_metric`); the 200-point / 50-series window is pinned against a fake that honours the real store's SQL contract (and once against the real store); a Hypothesis property over arbitrary JSON `dims` never raises; the typed `threshold_verdict` and `direction` (one rule behind verdict and colour, each row stated independently); a store outage drops an author's placeholder `value`; a successful bind drops an author trend; a non-text `metric:` refuses one widget instead of failing the dashboard read; and the user doc's recipe YAML runs through the real agent-server validator and the bind."
+      "description": "A bound dashboard.yaml widget names ONE series with `dims:`: each per-channel tile shows its own series' number, freshness, sparkline and colour (pick a source, fill once), matching by `canonical_dims` with exact match only; a selector that cannot match is one of three named refusals (`metric_dimension_invalid` with a type hint, `metric_dimension_undeclared`, `metric_series_not_found` with `binding_detail` facts) and never the fold; `bound_series` says what an unselected number is; selection equals the fold over that series alone (parity with `latest_by_metric`); a selected series binds from its own read however many points or series sit beside it (#3293), pinned against a fake that honours the real store's SQL contract (and once against the real store); a Hypothesis property over arbitrary JSON `dims` never raises; the typed `threshold_verdict` and `direction` (one rule behind verdict and colour, each row stated independently); a store outage drops an author's placeholder `value`; a successful bind drops an author trend; a non-text `metric:` refuses one widget instead of failing the dashboard read; and the user doc's recipe YAML runs through the real agent-server validator and the bind."
     },
     {
       "file": "unit/test_ent730_dims_compat.py",
@@ -401,6 +413,17 @@
         "security"
       ],
       "description": "#3232: POST /api/agents/{name}/voice-reply refuses a delegated child (a row with source_channel_agent set, i.e. it inherited its parent's conversation) with reason=delegated_turn before any channel branch, on Slack and Telegram; a direct channel turn still delivers; an agent tasking itself is still a delegated child (3 tests). Red on dev."
+    },
+    {
+      "file": "unit/test_3244_post_run_429_names_execution.py",
+      "feature": "abilityai/trinity#3244",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability"
+      ],
+      "description": "#3244: the sync /chat failures raised by the real `_finalize_http_failure` + `_apply_sub003_autoswitch`, after the turn ran and its row was written `failed`, name that row on an additive `X-Trinity-Execution-Id` response header beside `X-Trinity-Error-Code` (429 plain and auto-switched, 503, agent 500); bodies unchanged; no row, no header; the header survives FastAPI's HTTPException response. The MCP half (only the `capacity` 429 is `agent_busy`) is src/mcp-server/src/chat-429-split.test.ts. No Docker, no network."
     },
     {
       "file": "unit/test_3245_async_replay_after_failure.py",
@@ -5512,6 +5535,39 @@
         "unit"
       ],
       "description": "Email-code sign-in policy seam: gate fail-open, web /api/auth/email/* 403 before any lookup, /api/auth/mode flag, /token never consults the gate, MCP inline / Workspace / Telegram / WhatsApp refusals, and an AST guard that every login-code caller asks the gate."
+    },
+    {
+      "file": "unit/test_3340_stream_api_error_detail.py",
+      "feature": "#3340",
+      "added": "2026-10-09",
+      "categories": [
+        "agent-server",
+        "execution",
+        "unit"
+      ],
+      "description": "#3340 — an API error the stream parser recorded (content-filter refusal, exit 1, zero tokens, empty stderr) is the failure detail on the headless finalize path (zero-token 503 and the generic 500) and on the chat path, and outranks unrelated stderr; a run where neither stream nor stderr said why keeps the OOM/timeout guess verbatim; the no-detail placeholder is not a reason; billing keeps its wording; stream/stderr auth signals still answer through the auth branch and auth-patterned stream text never reaches the new wording; the backend text classifier does not read the new detail as auth. No Docker, no network."
+    },
+    {
+      "file": "unit/test_3404_delegate_session_self_approval.py",
+      "feature": "abilityai/trinity#3404",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#3404: a Workspace session minted through a portal_delegate key (minted_by=delegate) or carrying no minted_by claim is a person for the ask routes but may not self-approve a gated skill; an emailed-code session and a platform person may. Real mint -> get_portal_principal -> both chat routes -> the execute_task backstop over a real per-test database; rotation keeps the claim; the self-approval audit row names the credential kind; PortalPrincipal.is_person defaults False. Mutation-proven. No Docker, no network."
+    },
+    {
+      "file": "unit/test_3293_dims_selector_quiet_series.py",
+      "feature": "#3293",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "database",
+        "unit"
+      ],
+      "description": "A `dims:` tile reads its own series (#3293): against the real store, a quiet series beside a busy one holding more than 200 newer points binds with its own latest point, freshness and history; a series whose last point is older than the tile's window still shows its number with an empty history; stored key order and a busier wider series (`channel=google, geo=us`) neither hide nor crowd out the exact one; a series that never reported, a partial selector and a series silent for longer than the 90-day lookback are refused `metric_series_not_found` and never show the fold; a store fault on the per-series read refuses that one tile with `metric_store_unavailable`; the unselected tile still equals `latest_by_metric`; and the store read itself is newest-first, bounded by `since` and `limit`, exact on dims and scoped to the agent."
     },
     {
       "file": "unit/test_837_workspace_only_floor.py",

@@ -42,6 +42,7 @@ from .error_classifier import (
     _is_rate_limit_message,
     _model_rejection_detail,
     _model_rejection_message,
+    _stream_error_reason,
 )
 from . import chat_session_marker
 from . import jsonl_recovery as _jsonl_recovery
@@ -584,7 +585,9 @@ async def _execute_claude_code_once(
                     raise HTTPException(status_code=status_code, detail=detail)
 
                 error_detail = stderr_output[:500] if stderr_output else ""
-                if not error_detail:
+                # #3340: an error the stream named outranks stderr. Mirrors
+                # headless_executor._finalize_headless_result.
+                if _stream_error_reason(metadata) or not error_detail:
                     error_detail = _diagnose_exit_failure(return_code, metadata)
                 # Also check if stderr contains a rate limit message
                 if _is_rate_limit_message(error_detail) or _is_rate_limit_message(stderr_output):

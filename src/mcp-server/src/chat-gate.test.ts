@@ -100,8 +100,8 @@ describe("#751 gated skill answers surface as structured, non-retryable results"
     });
   }
 
-  it("an ordinary 429 on /chat is still agent_busy", async () => {
-    stubDispatch(() => json({ retry_after: 12 }, 429));
+  it("the admission 429 on /chat is still agent_busy", async () => {
+    stubDispatch(() => json({ retry_after: 12 }, 429, "capacity"));
     const out = JSON.parse(await tools().chatWithAgent.execute(
       { agent_name: "target", message: "hi" }, agentSession));
     assert.equal(out.status, "agent_busy");
