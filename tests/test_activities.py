@@ -27,18 +27,37 @@ from testkit.cleanup import cleanup_test_agent
 TIMELINE = "/api/activities/timeline"
 
 
+def _timeline_watermark(api_client):
+    """`created_at` of the newest timeline row, or None on an empty timeline.
+
+    Passed back as `start_time`, it bounds a later read to "rows written from
+    here on" using the backend's own clock, so a test that looks for the rows
+    its own action wrote does not depend on them fitting in a fleet-wide
+    `limit` window, nor on the test host's clock agreeing with the backend's.
+    """
+    response = api_client.get(f"{TIMELINE}?limit=1")
+    assert_status(response, 200)
+    rows = response.json().get("activities", [])
+    return rows[0].get("created_at") if rows else None
+
+
 def _agent_activities(api_client, agent_name, *, activity_type=None, activity_state=None,
-                      limit=100, fetch_limit=500):
+                      limit=100, fetch_limit=500, since=None):
     """One agent's activity rows, newest first.
 
     #3434 removed `GET /api/agents/{name}/activities` (no product caller). The
     live read is the cross-agent timeline; filter it client-side by agent, as
-    the MCP tool `get_agent_activity_summary` does.
+    the MCP tool `get_agent_activity_summary` does. The route has no agent
+    filter, so pass `since` (see `_timeline_watermark`) wherever a test needs
+    rows it has just caused: unbounded, the read is the newest `fetch_limit`
+    rows of the whole fleet and can miss them on a busy stack.
     """
-    path = f"{TIMELINE}?limit={fetch_limit}"
+    params = {"limit": fetch_limit}
     if activity_type:
-        path += f"&activity_types={activity_type}"
-    response = api_client.get(path)
+        params["activity_types"] = activity_type
+    if since:
+        params["start_time"] = since
+    response = api_client.get(TIMELINE, params=params)
     assert_status(response, 200)
     rows = [a for a in response.json().get("activities", []) if a.get("agent_name") == agent_name]
     if activity_state:
@@ -177,8 +196,9 @@ class TestActivityCreation:
         """Sending a chat message creates an activity record."""
         agent_name = created_agent["name"]
 
-        # Get initial activity count
-        initial_count = len(_agent_activities(api_client, agent_name, limit=500))
+        # Rows already there, bounded server-side to "from now on"
+        since = _timeline_watermark(api_client)
+        before = {a["id"] for a in _agent_activities(api_client, agent_name, limit=500, since=since)}
 
         # Send a simple chat message
         chat_response = api_client.post(
@@ -193,10 +213,11 @@ class TestActivityCreation:
         time.sleep(2)
 
         # Check for new activities
-        activities = _agent_activities(api_client, agent_name, limit=500)
+        activities = _agent_activities(api_client, agent_name, limit=500, since=since)
 
         # Should have at least one new activity
-        assert len(activities) > initial_count, "New activity should be created after chat"
+        assert [a for a in activities if a["id"] not in before], \
+            "New activity should be created after chat"
 
         # Check that chat_start activity exists
         chat_activities = [a for a in activities if a["activity_type"] == "chat_start"]
