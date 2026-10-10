@@ -414,6 +414,14 @@ export const PLATFORM_ENDING_REASONS = Object.freeze({
   superseded: 'superseded by a newer reading',
 })
 
+/** trinity-enterprise#844 — why the CLOCK's ending says more than "expired".
+ *  `outcome_unknown`: an approval whose action the platform did not hold (any
+ *  but a skill gate's) ran out of time, so nothing here can say whether the
+ *  agent went ahead without an answer. An unknown token falls back to nothing. */
+export const TIMEOUT_ENDING_REASONS = Object.freeze({
+  outcome_unknown: 'whether the action went ahead is unknown',
+})
+
 function endingKind(item) {
   const kind = ledgerKind(item)
   if (kind === 'cancelled' && (item.disposed_by === 'agent' || item.ended_by === 'agent')) return 'replaced'
@@ -438,6 +446,7 @@ export function queueEnding(item) {
   let reason = null
   if (kind === 'expired') {
     who = 'timeout'
+    reason = TIMEOUT_ENDING_REASONS[item.disposition_reason] || null
   } else if (kind === 'replaced') {
     who = 'the agent'
   } else if (item.disposed_by === 'platform' || item.ended_by === 'platform') {
@@ -455,12 +464,14 @@ export function queueEnding(item) {
 
 /** The ending in words: "Cancelled by op@…", "Answered by you",
  *  "Ended by the platform — the condition cleared", "Expired — nobody answered
- *  in time" ("nobody acted on it" for an alert), or the bare label when nobody
- *  is known. */
+ *  in time" ("nobody acted on it" for an alert; "…; whether the action went
+ *  ahead is unknown" for an unheld approval, trinity-enterprise#844), or the
+ *  bare label when nobody is known. */
 export function queueEndingText(ending) {
   if (!ending) return ''
   if (ending.kind === 'expired') {
-    return `${ending.label} — ${ending.alert ? 'nobody acted on it' : 'nobody answered in time'}`
+    const base = `${ending.label} — ${ending.alert ? 'nobody acted on it' : 'nobody answered in time'}`
+    return ending.reason ? `${base}; ${ending.reason}` : base
   }
   if (ending.who === 'the platform') {
     return ending.reason ? `Ended by the platform — ${ending.reason}` : 'Ended by the platform'

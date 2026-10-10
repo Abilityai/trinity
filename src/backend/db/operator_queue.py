@@ -73,6 +73,20 @@ _DB_BELT_TYPE_MAX_BYTES = 1024
 # raises. NULL `raised_by` is a legacy or file row, so it counts.
 _NOT_A_GATE_ROW = or_(operator_queue.c.raised_by.is_(None), operator_queue.c.raised_by != "gate")
 
+# trinity-enterprise#844: what the clock writes as `disposition_reason` when it
+# ends a pending ask. A gated-skill approval (`raised_by='gate'`) is the one
+# approval whose action the PLATFORM holds — expiry runs nothing. Every other
+# approval names an action the agent holds: the platform cannot tell whether it
+# went ahead unanswered, so the ending says so instead of reading exactly like a
+# stale ask nobody acted on. Questions and alerts name no action: NULL, as before.
+# Evaluated in the same compare-and-set UPDATE that ends the row, so only the
+# writer that won records it; rows that ended earlier are never rewritten.
+OUTCOME_UNKNOWN = "outcome_unknown"
+_TIMEOUT_REASON = case(
+    (and_(operator_queue.c.type == "approval", _NOT_A_GATE_ROW), OUTCOME_UNKNOWN),
+    else_=None,
+)
+
 
 def _own_pending_conds(agent_name: str, exclude_request_id_prefixes=None) -> list:
     """The pending rows that spend an agent's OWN ask budget — the one predicate
@@ -544,7 +558,8 @@ class OperatorQueueOperations:
                     update(operator_queue)
                     .where(and_(mine, operator_queue.c.status == "pending"))
                     .values(status="expired", disposition="expired",
-                            disposed_at=now, disposed_by="timeout")
+                            disposed_at=now, disposed_by="timeout",
+                            disposition_reason=_TIMEOUT_REASON)
                 ).rowcount
                 row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
                 return self._row_to_item(row), {"outcome": "replaces_ended", "expired_now": bool(expired)}
@@ -1831,6 +1846,11 @@ class OperatorQueueOperations:
         UPDATE is the identity of the winner, so two overlapping sweeps (a Redis
         flap can briefly give two leaders) end — and later wake — each row once.
         Edge-triggered: a second pass over the same rows ends nothing.
+
+        trinity-enterprise#844: an approval whose action the platform does not
+        hold (anything but a gate's) is ended with `disposition_reason =
+        'outcome_unknown'` — the deadline passing says nothing about whether the
+        agent went ahead, and the record must not read as though it does.
         """
         now = utc_now_iso()
         candidates = (
@@ -1866,6 +1886,9 @@ class OperatorQueueOperations:
                         disposition="expired",
                         disposed_at=now,
                         disposed_by="timeout",
+                        # trinity-enterprise#844: an approval whose action the
+                        # platform did not hold ends as `outcome_unknown`.
+                        disposition_reason=_TIMEOUT_REASON,
                     )
                 )
                 if result.rowcount:

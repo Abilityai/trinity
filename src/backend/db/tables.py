@@ -1505,7 +1505,7 @@ operator_queue = Table(
     Column("disposed_at", Text),
     Column("disposed_by", Text),         # person|timeout|platform (#3130: superseded flood alarms)|agent (#3247: replaced by its own successor)
     Column("disposed_by_email", Text),   # NULL for timeout; withheld from agent principals
-    Column("disposition_reason", Text),  # the operator's optional cancel reason
+    Column("disposition_reason", Text),  # the operator's optional cancel reason, or a closed token (ent#844: outcome_unknown on a timeout)
     Column("batch_id", Text),            # one uuid per bulk-cancel sweep
     # trinity-enterprise#611: the agent-raised ask. Platform-owned — written only
     # from keyword-only arguments, never from an agent's file entry.
