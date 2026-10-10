@@ -235,7 +235,12 @@ class TestHealMigration:
         # The heal's list is frozen on purpose (a one-time fix), so it must be
         # complete on the day it ships.
         from db.migrations import PLATFORM_ALERT_HEAL_PREFIXES
-        assert set(PLATFORM_ALERT_HEAL_PREFIXES) == set(oqs._RESERVED_ID_PREFIXES)
+        # Prefixes reserved AFTER the heal shipped, whose rows can never sit in
+        # `responded` (the state the heal fixes), so the frozen list rightly
+        # lacks them. trinity-enterprise#631: a person tag starts `delivered`
+        # and ends `read` — it never enters the ask lifecycle at all.
+        reserved_after_heal = {"mention-"}
+        assert set(PLATFORM_ALERT_HEAL_PREFIXES) == set(oqs._RESERVED_ID_PREFIXES) - reserved_after_heal
 
     def test_is_registered_on_both_tracks(self):
         from pathlib import Path

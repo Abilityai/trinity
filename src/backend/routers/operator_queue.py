@@ -291,7 +291,9 @@ async def get_queue_item(
 ):
     """Get a single queue item by ID."""
     item = db.get_operator_queue_item(item_id)
-    if not item:
+    # trinity-enterprise#631: a person's tag is read through its addressee's own
+    # door only — to the operator's door it is a row that is not there.
+    if not item or operator_queue_service.is_person_tag(item):
         raise HTTPException(status_code=404, detail="Queue item not found")
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(item["agent_name"], accessible)
@@ -317,7 +319,8 @@ async def respond_to_queue_item(
     """
     reject_non_person_principal(current_user)
     existing = db.get_operator_queue_item(item_id)
-    if not existing:
+    # trinity-enterprise#631: the same "not there" GET gives a person's tag.
+    if not existing or operator_queue_service.is_person_tag(existing):
         raise HTTPException(status_code=404, detail="Queue item not found")
 
     accessible = _accessible_set(current_user)
@@ -428,7 +431,8 @@ async def cancel_queue_item(
     """
     reject_non_person_principal(current_user)
     existing = db.get_operator_queue_item(item_id)
-    if not existing:
+    # trinity-enterprise#631: the same "not there" GET gives a person's tag.
+    if not existing or operator_queue_service.is_person_tag(existing):
         raise HTTPException(status_code=404, detail="Queue item not found")
 
     accessible = _accessible_set(current_user)

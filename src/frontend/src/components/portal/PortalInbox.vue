@@ -288,7 +288,8 @@ const listColClass = computed(() => {
 })
 
 // ---- the rows -------------------------------------------------------------------
-const counts = computed(() => inboxCounts(props.threads, store.openAsks))
+// trinity-enterprise#631: a tag not yet opened is one thing that came back.
+const counts = computed(() => inboxCounts(props.threads, store.openAsks, store.mentions))
 const asksVerdict = computed(() => store.asksLoaded || store.asksAbsent)
 
 // The tab the URL does not name is chosen ONCE, when both sources have a
@@ -366,8 +367,11 @@ function onFrom(id) {
 
 const baseItems = computed(() => {
   if (tab.value === 'action') return filterByAgent(actionBase.value, activeFrom.value)
-  if (tab.value === 'unread') return unreadItems(props.threads, props.previews)
-  return allItems(props.threads, store.asks, props.previews)
+  // trinity-enterprise#631: tags merge in when their read lands, like asks in
+  // All — the tab's honest state stays the chats' (a failed tags read keeps
+  // its last good list in the store).
+  if (tab.value === 'unread') return unreadItems(props.threads, props.previews, store.mentions)
+  return allItems(props.threads, store.asks, props.previews, Date.now(), store.mentions)
 })
 const footerNotes = computed(() => (tab.value === 'all'
   ? allFooterNotes({ hasRooms: props.threads.some((t) => t && t.is_room), askCount: store.asks.length })
@@ -430,6 +434,7 @@ const visitKey = computed(() => `${tab.value}|${activeFrom.value || ''}`)
 const live = {
   thread: (id) => props.threads.find((t) => (t.id || t.session_id) === id) || null,
   ask: (id) => store.asks.find((a) => a.id === id) || null,
+  mention: (id) => store.mentions.find((m) => m.id === id) || null,
 }
 const shownItems = computed(() => {
   visitEpoch.value // eslint-disable-line no-unused-expressions
@@ -484,7 +489,7 @@ const selectedItem = computed(() => {
   const k = selectedKey.value
   if (!k) return null
   return shownItems.value.find((it) => it.key === k)
-    || resolveItem(k, { threads: props.threads, asks: store.asks, previews: props.previews })
+    || resolveItem(k, { threads: props.threads, asks: store.asks, previews: props.previews, mentions: store.mentions })
 })
 
 // ---- per-tab honest state -------------------------------------------------------
@@ -537,7 +542,7 @@ const empty = computed(() => {
         }
   }
   if (tab.value === 'unread') {
-    return { title: "You're all caught up", body: 'New replies and deliverables from your agents land here.' }
+    return { title: "You're all caught up", body: 'New replies and deliverables from your agents, and the times a colleague tags you, land here.' }
   }
   return {
     title: 'No chats or asks yet',
@@ -548,7 +553,7 @@ const empty = computed(() => {
 
 function retry() {
   if (tab.value !== 'unread') store.fetchAsks()
-  if (tab.value !== 'action') emit('refresh')
+  if (tab.value !== 'action') { emit('refresh'); store.fetchMentions() }
 }
 
 // ---- selection ------------------------------------------------------------------
@@ -570,18 +575,31 @@ function replaceQuery(patch) {
 // deliverables and every payload on screen. Never on a preview, and never
 // before the content — a failed load leaves the chat unread.
 const initial = parseItemKey(routeItem.value)
-const readIntent = ref(initial && initial.type === 'thread' ? routeItem.value : null)
+// trinity-enterprise#631: a tag opened by a deep link is read the same way.
+const readIntent = ref(initial && (initial.type === 'thread' || initial.type === 'mention') ? routeItem.value : null)
 const renderedKey = ref(null)
 const readFailedKey = ref(null)
 async function readNow(it) {
-  if (!it || it.type !== 'thread') return
+  if (!it || (it.type !== 'thread' && it.type !== 'mention')) return
   readIntent.value = null
   readFailedKey.value = null
+  // trinity-enterprise#631: a tag is read once its card is on screen — which
+  // is what the tagger then sees.
+  if (it.type === 'mention') {
+    if (it.status === 'read') return
+    const ok = await store.markMentionRead(it.id)
+    if (ok === false) readFailedKey.value = it.key
+    return
+  }
   const ok = props.markRead ? await props.markRead('thread', it.id) : true
   if (ok === false) readFailedKey.value = it.key
 }
 watch([readIntent, renderedKey], ([want, done]) => {
-  if (want && want === done) readNow(selectedItem.value?.key === want ? selectedItem.value : resolveItem(want, { threads: props.threads }))
+  if (want && want === done) {
+    readNow(selectedItem.value?.key === want
+      ? selectedItem.value
+      : resolveItem(want, { threads: props.threads, mentions: store.mentions }))
+  }
 })
 
 // An explicit open (click / Enter / Space). The row keeps its place through the
@@ -593,6 +611,13 @@ let pushedKey = null
 async function open(it) {
   clickedKey = it.key
   returnIndex = Math.max(0, shownItems.value.findIndex((x) => x.key === it.key))
+  if (it.type === 'mention') {
+    // Same rule as a chat: a card already on screen (the desktop preview) is
+    // reloaded, so the read waits for a render OF THIS OPEN.
+    renderedKey.value = null
+    readIntent.value = it.key
+    if (paneEl.value && selectedItem.value?.key === it.key) paneEl.value.reload?.()
+  }
   if (it.type === 'thread') {
     // The read waits for a render OF THIS OPEN (round 3): a verdict left over
     // from an earlier render of the same chat — the preview, a re-click, a

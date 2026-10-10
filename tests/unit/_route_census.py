@@ -652,7 +652,16 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
 }
 
 # Check lives in services/. key -> ("METHOD /full/path", service function, behavioural test id)
-DELEGATED: Dict[str, Tuple[str, str, str]] = {}
+DELEGATED: Dict[str, Tuple[str, str, str]] = {
+    # trinity-enterprise#631: the people picker of a room. Its principal is
+    # `get_room_principal` (a platform user OR a Workspace client), so no
+    # dependency gate fits; the refusal of agents, system keys and external
+    # clients is `person_mention_service.tagger_for`, reached first.
+    "shared_sessions/router.py::room_people": (
+        "GET /api/rooms/{room_id}/people",
+        "shared_sessions.service.room_people -> person_mention_service.tagger_for",
+        "tests/unit/test_ent631_person_mention.py::test_an_agent_key_cannot_list_people_to_tag"),
+}
 
 # WebSocket routes — out of the HTTP census, pinned so a new one is a visible edit.
 WEBSOCKET_ROUTES = frozenset({

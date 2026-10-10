@@ -405,6 +405,10 @@
               class="rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap"
               :class="[BUBBLE_WRAP_CLASS, item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white']"
             >{{ item.message.content }}</div>
+            <!-- trinity-enterprise#631: who this message tagged, and whether
+                 each has read it (the server's marks — only ever the reader's
+                 own, since a thread is its owner's). -->
+            <PortalTagMarks :tags="item.message.tags || []" data-testid="portal-message-tags" />
             <!-- ent#551: a task the agent ran during a voice call lands as an
                  ordinary turn (it was not spoken, so it is not in the block);
                  the caption is the attribution. -->
@@ -766,6 +770,7 @@
               <PortalTypeahead
                 v-if="typeaheadOpen"
                 :kind="typeaheadKind"
+                :title="typeaheadTitle"
                 :rows="typeaheadRows"
                 :active-index="activeIndex"
                 :overflow="typeaheadBound.overflow"
@@ -941,6 +946,9 @@ import { useComposerDraft } from '@/composables/useComposerDraft'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { draftKeyFor, shouldAutoFocusComposer } from './portalDrafts'
 import PortalTypeahead from './PortalTypeahead.vue'
+import { usePeoplePicker } from '@/composables/usePeoplePicker'
+import PortalTagMarks from './PortalTagMarks.vue'
+import { noOneCalled, peopleRows, personToken, typeaheadHeading } from './portalMentions'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import PortalAsks from './PortalAsks.vue'
 import PortalReplyChip from './PortalReplyChip.vue'
@@ -1837,7 +1845,33 @@ const typeaheadResult = computed(() => {
   }
 })
 
-const typeaheadBound = computed(() => boundCandidates(typeaheadResult.value?.items || []))
+// trinity-enterprise#631: `@` also tags a PERSON — a colleague on this
+// instance who can reach this agent, read from the server once there is a
+// query (never a directory). Independent of the rooms capability: a tag is a
+// pointer to a person, not a second agent in the conversation, so it never
+// escalates. An external client's first lookup answers 403 and the picker
+// stays agents-only from then on.
+const peoplePicker = usePeoplePicker({ fetch: (q) => store.fetchChatPeople(props.agent?.name, q) })
+watch(() => (typeaheadTrigger.value?.kind === '@' ? typeaheadTrigger.value.query : null), (q) => {
+  if (q === null) peoplePicker.clear()
+  else peoplePicker.lookup(q)
+})
+const peopleOffered = computed(() => !peoplePicker.unavailable.value && !!props.agent?.name)
+
+const typeaheadCandidates = computed(() => {
+  const r = typeaheadResult.value
+  if (!r) return []
+  if (r.kind === '/') return r.items
+  const agents = r.enabled === false ? [] : r.items.map((a) => ({ ...a, kind: 'agent' }))
+  const q = (typeaheadTrigger.value?.query || '').trim()
+  const people = q && peoplePicker.answeredFor.value === q ? peopleRows(peoplePicker.people.value) : []
+  return [...agents, ...people]
+})
+const typeaheadTitle = computed(() => (typeaheadKind.value === '@'
+  ? typeaheadHeading({ people: peopleOffered.value })
+  : ''))
+
+const typeaheadBound = computed(() => boundCandidates(typeaheadCandidates.value))
 // #2213: rows the popup could not RENDER are `typeaheadBound.overflow`; skills that
 // never reached the client at all are this. Two different omissions, so the popup
 // is told about them separately rather than adding them into one misleading number.
@@ -1859,8 +1893,14 @@ const typeaheadHidden = computed(() => {
 const typeaheadEmpty = computed(() => {
   const t = typeaheadTrigger.value
   const r = typeaheadResult.value
-  if (!t || !r || r.items.length || t.query !== '') return null
-  return typeaheadEmptyMessage(r.kind, r)
+  if (!t || !r || typeaheadCandidates.value.length) return null
+  if (t.query === '') return typeaheadEmptyMessage(r.kind, r)
+  // trinity-enterprise#631: the named refusal — only once the server answered
+  // "no one" for exactly this query, and no agent matched either.
+  if (r.kind === '@' && peopleOffered.value && peoplePicker.answeredFor.value === t.query.trim()) {
+    return noOneCalled(t.query, [props.agent?.name])
+  }
+  return null
 })
 
 // A computed, not an imperative ref: it self-heals when the roster refreshes,
@@ -1868,13 +1908,17 @@ const typeaheadEmpty = computed(() => {
 const typeaheadOpen = computed(() => {
   const t = typeaheadTrigger.value
   const r = typeaheadResult.value
-  if (!t || !r || r.enabled === false) return false
+  if (!t || !r) return false
+  // #2128: with no rooms substrate an @mention of an AGENT is ordinary text;
+  // the popup still opens for a PERSON (trinity-enterprise#631).
+  if (r.enabled === false && !(r.kind === '@' && peopleOffered.value)) return false
   if (isSuppressed(dismissed.value, t)) return false
   return typeaheadBound.value.visible.length > 0 || !!typeaheadEmpty.value
 })
 
 const typeaheadRows = computed(() => typeaheadBound.value.visible.map((c, i) => (
-  typeaheadKind.value === '/'
+  c.kind === 'person' ? c
+  : typeaheadKind.value === '/'
     ? { key: `pb-${i}-${c.title}`, primary: c.title, secondary: c.description || '' }
     // The slug rides along beside the label: it IS the token, and teaching it is
     // half of why this exists.
@@ -2002,7 +2046,11 @@ function acceptActive(index) {
   const t = typeaheadTrigger.value
   const row = typeaheadBound.value.visible[index]
   if (!t || !row) return                  // never insert `@undefined`
-  const insert = t.kind === '/' ? starterFor(row) : buildMentionToken(row.name)
+  // trinity-enterprise#631: a person's token is their name; who they are
+  // travels beside the text (`peoplePicker.picked`), never parsed out of it.
+  if (row.kind === 'person') peoplePicker.pick(row.person)
+  const insert = row.kind === 'person' ? personToken(row.person)
+    : t.kind === '/' ? starterFor(row) : buildMentionToken(row.name)
   const { value, caret } = applyTypeaheadInsert(input.value, t, insert)
   input.value = value
   closeTypeahead()
@@ -2054,7 +2102,7 @@ function startElapsedClock() {
   elapsedTimer = setInterval(() => { elapsed.value += 1; clockMs.value = Date.now() }, 1000)
 }
 
-async function deliver(text, { replyId = null, attachments = null } = {}) {
+async function deliver(text, { replyId = null, attachments = null, tags = null } = {}) {
   terminalOutcome.value = null
   sending.value = true
   startElapsedClock()
@@ -2086,7 +2134,9 @@ async function deliver(text, { replyId = null, attachments = null } = {}) {
                                               // ent#610 — the message this replies to.
                                               replyToMessageId: replyId,
                                               // #3265 — what the message carries.
-                                              attachments: attachmentsForRequest(attachments) })
+                                              attachments: attachmentsForRequest(attachments),
+                                              // trinity-enterprise#631 — who it tags.
+                                              tags })
     } catch (dispatchErr) {
       // Nothing was created, so a retry is safe — but only retry when the
       // ROUTE is what failed. A 404/405 means an older backend without this
@@ -2107,7 +2157,8 @@ async function deliver(text, { replyId = null, attachments = null } = {}) {
                                           // context silently depends on streaming working.
                                           openCanvasId: openCanvasId.value,
                                           replyToMessageId: replyId,
-                                          attachments: attachmentsForRequest(attachments) })
+                                          attachments: attachmentsForRequest(attachments),
+                                          tags })
     }
 
     if (started) {
@@ -2222,6 +2273,8 @@ async function deliver(text, { replyId = null, attachments = null } = {}) {
     // …and the rail's half of the same set (#2794 follow-up): this turn has
     // gone out, so nothing sent before it is still pending.
     store.markUploadsCarried(props.agent?.name)
+    // trinity-enterprise#631: who this message tagged, as the server stored it.
+    if (tags && tags.length) void showOwnTags(text)
     return true
   } catch (err) {
     // #3460: a validation refusal (a 422 carrying Pydantic's list) is said in
@@ -2569,7 +2622,10 @@ async function send() {
           agents: [props.agent.name, ...others],
           message: text,
           attachments: attachments.value.slice(),
+          // trinity-enterprise#631: the people this message tags go with it.
+          tags: peoplePicker.tagsFor(text),
         })
+        peoplePicker.reset()
       } finally {
         // Released even on the success path: the emit is synchronous and this
         // component is not unmounted until the route change renders, so a flag
@@ -2605,7 +2661,8 @@ async function send() {
       clearAttachments()
     }
     await submitUserText(text, { replyId: reply?.messageId || null, replyExcerpt: reply?.excerpt || '',
-                                 attachments: carried })
+                                 attachments: carried, tags: peoplePicker.tagsFor(text) })
+    peoplePicker.reset()
   } finally {
     settlingUploads.value = false
   }
@@ -2616,7 +2673,7 @@ async function send() {
 // be a second conversation wearing the same thread, which is the whole thing
 // this feature exists not to be. Returns the outcome so a caller that is not a
 // person watching the screen — the voice loop — can decide what to do next.
-async function submitUserText(text, { replyId = null, replyExcerpt = '', attachments: carried = null } = {}) {
+async function submitUserText(text, { replyId = null, replyExcerpt = '', attachments: carried = null, tags = null } = {}) {
   // ent#491: the user's own activity is the ordering signal, so the bump happens
   // HERE — on send — and not when a reply lands. Any agent this message wakes
   // counts, mirroring the room fan-out (`unreadByAgent`): if you @mention two
@@ -2634,6 +2691,9 @@ async function submitUserText(text, { replyId = null, replyExcerpt = '', attachm
     replyTo: replyId ? { messageId: replyId, excerpt: replyExcerpt } : null,
     // #3265: what the message carried, shown on it from the moment it is sent.
     attachments: carried && carried.length ? carried : null,
+    // trinity-enterprise#631: who it tags — Retry resends them; the reload
+    // brings the server's delivered/read marks.
+    tagEmails: tags && tags.length ? tags : null,
     // trinity-enterprise#610: sent from here — placed at the newest server time
     // before it, so an ask this turn raises lands below it without the browser's
     // clock taking part (`placeAsksInThread`); the reload brings the server's time.
@@ -2645,7 +2705,7 @@ async function submitUserText(text, { replyId = null, replyExcerpt = '', attachm
   await pinToBottom()
   // A stale "couldn't stop the turn" must not outlive the turn it described.
   cancelError.value = ''
-  const res = await deliver(text, { replyId, attachments: carried })
+  const res = await deliver(text, { replyId, attachments: carried, tags })
   return settleDelivery(index, text, res)
 }
 
@@ -2668,6 +2728,22 @@ watch(sending, async (isSending) => {
 // on the other caller, the exact defect this change exists to remove — and a
 // refused cancel's error stayed pinned above the composer across every later
 // turn because only `send()` cleared it.
+// trinity-enterprise#631: the tagger sees the tag land without a reload — one
+// narrow history read, only for a message that tagged someone, copying the
+// server's marks from the stored row onto the one on screen. Best-effort: a
+// failure leaves the marks to the next history read.
+async function showOwnTags(text) {
+  try {
+    const data = await store.fetchHistory(props.agent.name, currentSessionId.value || null, { limit: REPLY_POLL_ROWS })
+    const rows = Array.isArray(data?.messages) ? data.messages : []
+    const row = [...rows].reverse().find((m) => m && m.role === 'user' && m.content === text && Array.isArray(m.tags))
+    const msg = [...messages.value].reverse().find((m) => m && m.role === 'user' && m.content === text)
+    if (row && msg) msg.tags = row.tags
+  } catch {
+    // the next history read brings them
+  }
+}
+
 function settleDelivery(index, text, res) {
   if (res === true) return { ok: true }
   // #2320: `retryable` when `deliver` decided it (a server verdict, or a
@@ -2722,8 +2798,11 @@ async function retry(i) {
   // A stale "couldn't stop the turn" must not outlive the turn it described —
   // and `retry` is a new turn, so it clears it for the same reason `send` does.
   cancelError.value = ''
+  // trinity-enterprise#631: a retry tags the same people — the server dedupes
+  // on the stored row, so a retried turn is still one item per person.
   const res = await deliver(content, { replyId: msg.replyTo?.messageId || null,
-                                       attachments: msg.attachments || null })
+                                       attachments: msg.attachments || null,
+                                       tags: msg.tagEmails || null })
   settleDelivery(i, content, res)
 }
 

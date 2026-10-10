@@ -1,7 +1,7 @@
 """Pydantic models for the enterprise shared-sessions module (ent#169)."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +28,12 @@ class RoomMessageCreate(BaseModel):
     """``sender`` is deliberately absent — the acting principal comes from the
     auth context, never the body, so nobody can post as someone else."""
     content: str = Field(min_length=1, max_length=8000)
+    # trinity-enterprise#631 — the PEOPLE this message tags, by address, as
+    # picked in the composer. Optional: every existing caller (the MCP
+    # `post_to_room` tool included) is unaffected. Bounded loosely here; the
+    # service dedupes and enforces `MAX_TAGS_PER_MESSAGE` with a NAMED refusal.
+    tags: Optional[List[Annotated[str, Field(min_length=1, max_length=320)]]] = Field(
+        default=None, max_length=50)
 
 
 class RoomParticipantAdd(BaseModel):

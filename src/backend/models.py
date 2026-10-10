@@ -5403,3 +5403,64 @@ class AgentSkillSetStatus(BaseModel):
     assigned_by: Optional[str] = None
     assigned_by_agent: Optional[str] = None
     assigned_at: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#631 — tagging a person in a conversation
+# ---------------------------------------------------------------------------
+# What the TAGGED person reads (their Inbox) and what the TAGGER sees of it.
+# Deliberately narrow: no cost, no execution id, no addressee and no ledger
+# internals (#78 — internal-only facts never cross to a workspace reader). The
+# conversation's id and its content are present ONLY when the reader may see
+# the conversation already; a tag grants no access.
+
+class PersonMentionConversation(BaseModel):
+    kind: str                      # 'room' | 'chat'
+    # Only when the reader can see the conversation — a non-member is told
+    # which conversation by name, never handed an id to probe with.
+    id: Optional[str] = None
+    label: str
+
+
+class PersonMention(BaseModel):
+    """One Inbox item: a person tagged you. Kind *Unread* — never *Action*."""
+    id: str
+    agent_name: str
+    state: str                     # 'unread' | 'read'
+    created_at: str
+    read_at: Optional[str] = None
+    tagged_by: str                 # the tagger's display name
+    conversation: PersonMentionConversation
+
+
+class PersonMentionMessage(BaseModel):
+    id: str
+    seq: Optional[int] = None
+    sender_kind: str               # 'agent' | 'person' | 'system'
+    sender_label: str
+    content: str
+    created_at: Optional[str] = None
+    tagged: bool = False           # the message the tag points at
+
+
+class PersonMentionDetail(PersonMention):
+    """The item opened: the tagged message with a little around it — only when
+    the reader may already see the conversation; otherwise `can_see` is False,
+    there is no content at all, and `can_let_you_in` names who can."""
+    can_see: bool
+    message: Optional[PersonMentionMessage] = None
+    context: List[PersonMentionMessage] = []
+    can_let_you_in: List[str] = []
+
+
+class TaggablePerson(BaseModel):
+    """A picker row: enough to tell two colleagues apart, nothing more."""
+    email: str
+    label: str
+
+
+class PersonTagState(BaseModel):
+    """What the tagger sees on their own message: it landed, and whether it was read."""
+    label: str
+    state: str                     # 'delivered' | 'read'
+    read_at: Optional[str] = None
