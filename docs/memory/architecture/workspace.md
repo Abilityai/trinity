@@ -938,6 +938,87 @@ reply (unchanged). The relation is not persisted on the stored user row, so a re
 quote on a sent reply (ent#746). Pinned by `portalInChatReply.mount.spec.js` and
 `portalInboxShell.mount.spec.js`.
 
+## Person tags — a pointer, not a seat (trinity-enterprise#631)
+
+**OSS core, ungated — the same edition as rooms (ent#443) and the Inbox (ent#610).** A
+person in a 1:1 chat or a room `@`s a colleague and the colleague is told. Requirement
+§5.42 of `core-agent.md`; flow in `feature-flows/workspace-person-tag.md`.
+
+**One row on the existing ledger, outside the ask lifecycle.** A tag is ONE
+`operator_queue` row (`db/queue_mentions.py`) — type `mention`, `addressed_to_email` = the
+tagged person, platform-written `context.mention` = `{conversation {kind, id, label},
+message_id, seq, tagged_by {username, label}, person {label}}`, `raised_by = 'person'`,
+`channel = 'mention'`. Its status is `delivered` → `read` (`acknowledged_at` is the read
+time — unused on a platform-minted row, since no agent acknowledges one) and **never
+`pending`**: every depth cap, expiry sweep, delivery flag, ending observer and operator badge
+reads `pending`, so starting outside it keeps all of that blind to the row by construction.
+The id is `mention-<h(kind:conversation)>-<h(message)>-<h(email)>`: deterministic, so the
+`(agent_name, request_id)` conflict makes a repeat a no-op (same person twice, a retried
+turn, a re-delivery), and one conversation's tags share a prefix the tagger's marks read in
+one query (served by `idx_operator_queue_type`). `agent_name` is the conversation's agent —
+a room's first live agent participant, by join order — which is what scopes the row's
+lifecycle (an agent rename cascades it; an agent delete removes it). `mention-` is in
+`_RESERVED_ID_PREFIXES` (an agent's queue file cannot forge or pre-suppress one, and
+`is_platform_minted` keeps it out of the agent's file and answer wake) and in the
+about-a-person subset (a machine key never reads one). The operator door
+(`_list_conditions`, `get_stats`, `GET /api/operator-queue/{id}`) leaves `mention` rows out
+unless a caller names the type: listed there, they would tell anyone with access to the
+agent who tagged whom.
+
+**The wake is untouched.** `shared_sessions.service.resolve_mentions` still returns the
+agents to wake from the TEXT, and the message's stored `mentions` stay agent-only. Tags are
+not parsed from text: the composer sends `tags: [email]` beside it (picked from the `@`
+typeahead; a name the writer deleted is not tagged — `portalMentions.tagsInText`). A name
+equal to an agent participant still wakes that agent, exactly as before.
+
+**Who, decided once in `services/person_mention_service.py`.** `tagger_for` resolves the
+tagger from the auth context and refuses an agent key (`agents_cannot_tag` — checked before
+`is_person_principal`, since an agent key resolves to its owner), a non-person platform key,
+and an external Workspace client (`tagging_unavailable`: the colleagues it would list are
+the organisation's, #78). `taggable_people` / `resolve_tags` share ONE predicate
+(`db.users._taggable_conds`): an account with an email, not suspended, that is an admin, an
+owner, or a sharee of one of the conversation's agents. The picker requires a query, caps
+at 8 and is rate-limited (`room_people:*`, `portal_people:*`, 120/min) — the ent#450 shape,
+never a directory. The send-time check refuses before ANY write (in a room, before the
+newcomer join): one `unknown_person` for "no account" and "no access", so it is no oracle;
+`cannot_tag_yourself`; `too_many_tags` past 10 distinct.
+
+**Delivery.** Rooms: `post_message(tags=)` validates, appends, then `_deliver_tags` writes
+the rows — inside the #3210 "the message has landed" discipline: a failed write is
+reported as `failed` on the tagger's marks, never as a failed post. 1:1 chat: the router
+resolves `PortalChatRequest.tags` before the turn (`service.resolve_chat_tags`, refusals as
+`ChatTagError` → 403/422 with `{code, message, name}`), threads `person_tags` through
+`start_portal_turn` → `portal_chat`, and delivers once `_persist_user_turn` returns the row
+that stands for the message (the retry-reuse row on a retry — still one item).
+
+**The tagged person's door** (`client_portal/mentions/router.py`, portal principal):
+`GET /mentions` (theirs, newest first), `GET /mentions/{id}`, `POST /mentions/{id}/read`
+(person only). Addressee match in the service; not-yours and not-there are one 404. Opening
+one is `open_for_reader`: for a room, `_room_access` — a live participant as `workspace_user`
+(email) or `user` (username), or an **admin on the platform door only** (`Reader.is_platform`;
+a portal session for an admin's address is not the admin, #78) — decides `can_see`. Only
+then does any content cross: the tagged message and its neighbours (seq −3…+2, each
+≤4,000 chars), sender labels, never `execution_id` or cost. Otherwise `can_see = false`,
+`conversation.id = null`, no content (not even the tagger's own words), and
+`can_let_you_in` = the room's human moderators. A 1:1 chat is always its owner's alone:
+`can_let_you_in = [tagger]`.
+
+**The tagger's view.** Rooms: `get_room` stamps `tags` on the caller's own messages and
+returns `own_tags` (message id → `[{label, state, read_at}]`) for the whole room, filtered to
+`tagged_by.username` = the caller, so the 3 s incremental poll (which re-reads only new
+messages) still sees an older tag turn `read`. 1:1: history rows carry `tags` on the
+reader's own messages (a thread is only ever its owner's). `PortalTagMarks.vue` draws them
+— envelope "in their Inbox", double check "read", cross "not delivered" — icon and word.
+
+**The Inbox.** `portalInbox.js` gains a third item type, `mention:<id>`: in Unread while
+`state = unread` and in All always, counted in `inboxCounts().came` (one per unread tag), never
+in Action. The store reads `GET /mentions` on the asks tick (`fetchMentions`; absence is
+404/403, a failure keeps the last good list). The pane renders `PortalMentionCard.vue`,
+which reads the item, says `rendered`, and the container's read waits for that (the chat
+rule — a previewed card is reloaded on an explicit open). The read is
+`store.markMentionRead`; the row stays in place drawn read (`ghostOf`). Tags merge into
+Unread/All as their read lands; the tabs' honest state stays the chats'.
+
 ## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
 
 Clicking an agent opens the **conversation** you were last in. `/workspace/a/:agentName`
