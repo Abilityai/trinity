@@ -207,6 +207,10 @@ const ENT629 =
   "abilityai/trinity-enterprise#629 — the backend route is owner-equivalent for an agent key (Invariant #8); MCP gate pending that ruling";
 const ADMIN_ONLY =
   "backend rejects agent principals (require_admin / assert_admin / reject_agent_principal, #1890)";
+const CREDENTIAL_HUMAN_ONLY =
+  "backend: get_owned_agent_by_name + reject_agent_principal (trinity-enterprise#69 Part 2) — owner or admin, human-only; hidden from agent sessions by a per-tool canAccess (#3435)";
+const KEY_ADMIN_ONLY =
+  "backend require_admin (#1890): admin + human-only; hidden from agent sessions by a per-tool canAccess (#3435)";
 const TEARDOWN_HUMAN_ONLY =
   "backend fence: the gated route requires role 'creator' AND a HUMAN caller — reject_agent_principal plus a credential-kind refusal, because one call removes N agents without delete_agent's per-agent spawn-scope check (abilityai/trinity-enterprise#454)";
 const REMINDER_SELF_GATE = "backend self-gate: reminders.py::_self_gate refuses an agent key naming another agent";
@@ -255,11 +259,11 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_templates: { kind: "none", why: "no agent target" },
   get_credential_status: { kind: "baselined", owner: ENT629 },
   inject_credentials: { kind: "baselined", owner: ADMIN_ONLY },
-  export_credentials: { kind: "baselined", owner: ADMIN_ONLY },
-  import_credentials: { kind: "baselined", owner: ADMIN_ONLY },
+  export_credentials: { kind: "baselined", owner: CREDENTIAL_HUMAN_ONLY },
+  import_credentials: { kind: "baselined", owner: CREDENTIAL_HUMAN_ONLY },
   export_agent_data: { kind: "baselined", owner: ENT629 },
   import_agent_data: { kind: "baselined", owner: ENT629 },
-  get_credential_encryption_key: { kind: "none", why: "no agent target" },
+  get_credential_encryption_key: { kind: "none", why: "no agent target; " + KEY_ADMIN_ONLY },
   get_agent_ssh_access: { kind: "baselined", owner: ADMIN_ONLY },
   deploy_local_agent: { kind: "none", why: "creates the agent; `name` is the new agent's name, not a target" },
   initialize_github_sync: { kind: "baselined", owner: ENT629 },

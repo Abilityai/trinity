@@ -5512,6 +5512,19 @@
         "unit"
       ],
       "description": "Email-code sign-in policy seam: gate fail-open, web /api/auth/email/* 403 before any lookup, /api/auth/mode flag, /token never consults the gate, MCP inline / Workspace / Telegram / WhatsApp refusals, and an AST guard that every login-code caller asks the gate."
+    },
+    {
+      "file": "unit/test_3435_credential_tool_gates.py",
+      "feature": "#3435",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "auth",
+        "credentials",
+        "mcp",
+        "unit"
+      ],
+      "description": "#3435: pins the EXISTING backend gates behind the export_credentials / import_credentials / get_credential_encryption_key MCP tools, by principal (real models.User objects): import/export admit an owner or admin human (JWT, user or system key), refuse every agent key with the exact human-only 403 the MCP mapper keys on, and give a non-owner the uniform 404; the key route admits an admin human, refuses a non-admin 403 'Admin access required', an agent key 403 human-only, an ops-scope key 403, and answers 503 when CREDENTIAL_ENCRYPTION_KEY is unset. Real router + real owner/admin dependencies; DB ownership, Docker and the encryption service stubbed. No Docker."
     }
   ]
 }

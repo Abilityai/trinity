@@ -5,7 +5,7 @@
  */
 
 import { z } from "zod";
-import { TrinityClient } from "../client.js";
+import { ApiError, TrinityClient } from "../client.js";
 import type { McpAuthContext, StartAgentResult } from "../types.js";
 import { accessDenied } from "../access.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
@@ -36,6 +36,39 @@ export function skillsDeliveryLines(result: StartAgentResult): string[] {
     if (!problems.some(([n]) => n === skill)) lines.push(`- ${skill}: conflict`);
   }
   return lines;
+}
+
+/**
+ * #3435: the scopes that may see the three credential-portability tools. An
+ * ALLOW-list (#848 — a null or unknown scope fails closed), equal to what the
+ * backend admits: import/export take `get_owned_agent_by_name` +
+ * `reject_agent_principal`, the key takes `require_admin`; both refuse every
+ * agent-scoped key, so an agent session is never shown a tool it cannot call.
+ */
+const CREDENTIAL_TOOL_SCOPES: ReadonlySet<string> = new Set(["user", "system"]);
+const credentialToolAccess = (auth: any): boolean => CREDENTIAL_TOOL_SCOPES.has(auth?.scope ?? "");
+
+/**
+ * #3435: a backend 403 on a credential tool, as a typed envelope stamped
+ * `denied` on the audit row (#2807). Only the backend `detail` is copied — never
+ * a body: a 403 without a JSON `detail` (a proxy or WAF page) gets a fixed
+ * sentence. Every other failure (400/404/503, transport) is rethrown unchanged.
+ */
+function credentialRefusal(error: unknown, context: { session?: McpAuthContext } | undefined): string {
+  if (!(error instanceof ApiError) || error.status !== 403) throw error;
+  let detail = "Access denied (HTTP 403)";
+  try {
+    const parsed = JSON.parse(error.body);
+    if (typeof parsed?.detail === "string") detail = parsed.detail;
+  } catch {
+    // not JSON — keep the fixed sentence; the body is never echoed
+  }
+  const flag = /human-only/i.test(detail)
+    ? "human_only"
+    : /admin access required/i.test(detail)
+      ? "admin_only"
+      : "not_authorized";
+  return accessDenied(context, { success: false, error: detail, [flag]: true });
 }
 
 /**
@@ -624,18 +657,26 @@ export function createAgentTools(
         "Reads .env and .mcp.json from the agent, encrypts them, and writes .credentials.enc " +
         "to the agent's workspace. This file can be committed to git for portable credential storage. " +
         "Requires CREDENTIAL_ENCRYPTION_KEY to be configured on the backend. " +
-        "The agent must be running.",
+        "The agent must be running. " +
+        "WHO MAY CALL: the agent's owner or an admin, with a user-scoped or system-scoped key, or a signed-in session; " +
+        "agent-scoped keys can never call it (human-only), so agent sessions are not shown it. " +
+        "A refusal returns {success:false, error, human_only|not_authorized}.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to export credentials from"),
       }),
+      canAccess: credentialToolAccess,
       execute: async ({ name }: { name: string }, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
 
         console.log(`[export_credentials] Exporting credentials from agent '${name}'`);
 
-        const result = await apiClient.exportCredentials(name);
-        return JSON.stringify(result, null, 2);
+        try {
+          const result = await apiClient.exportCredentials(name);
+          return JSON.stringify(result, null, 2);
+        } catch (error) {
+          return credentialRefusal(error, context);
+        }
       },
     },
 
@@ -649,19 +690,27 @@ export function createAgentTools(
         "Reads .credentials.enc from the agent's workspace, decrypts it, and writes " +
         "the credential files (.env, .mcp.json, etc.) to the workspace. " +
         "This is useful after cloning an agent's git repo. " +
-        "Requires CREDENTIAL_ENCRYPTION_KEY to be configured on the backend. " +
-        "The agent must be running.",
+        "Requires CREDENTIAL_ENCRYPTION_KEY to be configured on the backend (the same key " +
+        "that encrypted the file). The agent must be running. " +
+        "WHO MAY CALL: the agent's owner or an admin, with a user-scoped or system-scoped key, or a signed-in session; " +
+        "agent-scoped keys can never call it (human-only), so agent sessions are not shown it. " +
+        "A refusal returns {success:false, error, human_only|not_authorized}.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to import credentials into"),
       }),
+      canAccess: credentialToolAccess,
       execute: async ({ name }: { name: string }, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
 
         console.log(`[import_credentials] Importing credentials into agent '${name}'`);
 
-        const result = await apiClient.importCredentials(name);
-        return JSON.stringify(result, null, 2);
+        try {
+          const result = await apiClient.importCredentials(name);
+          return JSON.stringify(result, null, 2);
+        } catch (error) {
+          return credentialRefusal(error, context);
+        }
       },
     },
 
@@ -732,13 +781,21 @@ export function createAgentTools(
         "This allows local agents to encrypt/decrypt .credentials.enc files themselves, " +
         "enabling portable agents that work both locally and on Trinity. " +
         "Returns the key as a hex string (64 chars for AES-256). " +
-        "SECURITY: Store securely and never commit to git.",
+        "SECURITY: Store securely and never commit to git. " +
+        "WHO MAY CALL: an administrator only, with a user-scoped or system-scoped key, or a signed-in session; " +
+        "agent-scoped keys can never call it (human-only), so agent sessions are not shown it. " +
+        "A refusal returns {success:false, error, admin_only|human_only}.",
       parameters: z.object({}),
+      canAccess: credentialToolAccess,
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
-        const result = await apiClient.getEncryptionKey();
-        return JSON.stringify(result, null, 2);
+        try {
+          const result = await apiClient.getEncryptionKey();
+          return JSON.stringify(result, null, 2);
+        } catch (error) {
+          return credentialRefusal(error, context);
+        }
       },
     },
 
