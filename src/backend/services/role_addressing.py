@@ -52,6 +52,9 @@ class Resolution:
 
     ``people`` — every resolved email (lower-case, de-duplicated, in order).
     ``single`` — the one addressee when exactly one person resolved, else None.
+    A caller decides what several people mean: a report or a message has one
+    reader and refuses (``role_resolves_to_several``); an ask is delivered to
+    every one of them (trinity-enterprise#816).
     ``resolved`` — False when the role fell back to the operators (no primary
     assigned, or an owner without an email); True for ``operator`` itself.
     """

@@ -1031,8 +1031,11 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
 
     The one resolution rule, `services/role_addressing.resolve` (ent#606) —
     shared with reports and messages so an ask and a report addressed to the
-    same role reach the same people. Several people are recorded, but none
-    becomes the single Workspace addressee. `role` is already validated
+    same role reach the same people. Several people are recorded in
+    `resolved_to` and none becomes the single Workspace addressee: the ONE ask
+    is delivered to each of them on read (trinity-enterprise#816, the
+    2026-10-07 ruling — the Workspace list and its doors match `resolved_to`
+    membership), so `resolved` is true because a person's Inbox shows it. `role` is already validated
     against `ASK_ROLES` by `_validated_ask` (the only caller passes its output),
     so the one refusal left to map is an unfilled role.
     """
