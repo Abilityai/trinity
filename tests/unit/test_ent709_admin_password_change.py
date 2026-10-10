@@ -559,7 +559,7 @@ class TestBootReconciliation:
 # The census classifies both routes as interactive
 # =============================================================================
 
-def test_both_routes_are_interactive_in_the_census():
+def test_both_routes_are_interactive_in_the_census(monkeypatch):
     # Loaded by path: putting tests/unit on sys.path would shadow the
     # top-level `conftest` that later suites import helpers from.
     import importlib.util
@@ -568,7 +568,7 @@ def test_both_routes_are_interactive_in_the_census():
         spec = importlib.util.spec_from_file_location(
             "_route_census", Path(__file__).resolve().parent / "_route_census.py")
         rc = importlib.util.module_from_spec(spec)
-        sys.modules["_route_census"] = rc
+        monkeypatch.setitem(sys.modules, "_route_census", rc)
         spec.loader.exec_module(rc)
     classified, _ = rc.classify(rc.walk(), rc.load_baseline())
     assert classified["routers/users.py::change_my_password"] == "interactive"

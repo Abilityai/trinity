@@ -138,6 +138,7 @@ def auth_module(monkeypatch):
     # None are exercised by the rate-limit paths — bare lambdas resolve the import.
     deps_mod.get_current_user = lambda *a, **k: None
     deps_mod.is_token_revoked = lambda *a, **k: False
+    deps_mod.is_user_session_revoked = lambda *a, **k: False  # trinity-enterprise#709
     deps_mod.oauth2_scheme = lambda *a, **k: None
     deps_mod.revoke_token_jti = lambda *a, **k: None
     stubs["dependencies"] = deps_mod

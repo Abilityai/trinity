@@ -868,7 +868,7 @@ _NO_ADMIN_AT_BOOT_NOTE = (
 )
 
 
-_ADMIN_PASSWORD_UI_WINS_NOTE = (
+_ADMIN_UI_CHANGE_WINS_NOTE = (
     "[ent#709] Admin '%s' password was changed from the UI; ADMIN_PASSWORD in "
     ".env no longer matches and is ignored (it only seeds a missing password). "
     "Remove it from .env, or update it, to avoid confusion."
@@ -924,7 +924,7 @@ def _ensure_admin_user_engine():
         source = None
     if not env_may_resync_admin_password(existing_hash, source):
         if not _env_matches_hash(pwd_context, admin_password, existing_hash):
-            print(_ADMIN_PASSWORD_UI_WINS_NOTE % admin_username)
+            print(_ADMIN_UI_CHANGE_WINS_NOTE % admin_username)
         return
     needs_update = False
     if existing_hash and not existing_hash.startswith("$2"):
@@ -992,7 +992,7 @@ def _ensure_admin_user(cursor, conn):
         # the stored hash wins and `.env` only seeds a missing/unusable one.
         if not env_may_resync_admin_password(existing_hash, _read_setting_sqlite(cursor, ADMIN_PASSWORD_SOURCE_KEY)):
             if admin_password and not _env_matches_hash(pwd_context, admin_password, existing_hash):
-                print(_ADMIN_PASSWORD_UI_WINS_NOTE % admin_username)
+                print(_ADMIN_UI_CHANGE_WINS_NOTE % admin_username)
             return
 
         if existing_hash and not existing_hash.startswith("$2"):
