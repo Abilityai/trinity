@@ -104,8 +104,9 @@ POST …/client-portal/agents/{a}/chat/stream {…, tags}
 GET /api/enterprise/client-portal/mentions/{id}        (client_portal/mentions/router.py)
   person_mention_service.open_for_reader(Reader(email, is_platform), id)
     _mine: addressee match, else 404 not_found (same as missing)
-    room: _room_access — live participant (workspace_user email | user username)
-          or admin AND is_platform (never via a portal session, #78)
+    room: _room_access — per door, as _require_membership: live workspace_user
+          (email) on either door; live user participant (username) or admin
+          only when is_platform (never via a portal session, #78)
       yes → shared_sessions.db.get_messages(seq−4, limit 6) → context, message
       no  → can_see false, id null, no content, can_let_you_in = moderators
     chat: can_see false, can_let_you_in = [tagger]

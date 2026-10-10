@@ -960,10 +960,16 @@ a room's first live agent participant, by join order — which is what scopes th
 lifecycle (an agent rename cascades it; an agent delete removes it). `mention-` is in
 `_RESERVED_ID_PREFIXES` (an agent's queue file cannot forge or pre-suppress one, and
 `is_platform_minted` keeps it out of the agent's file and answer wake) and in the
-about-a-person subset (a machine key never reads one). The operator door
-(`_list_conditions`, `get_stats`, `GET /api/operator-queue/{id}`) leaves `mention` rows out
-unless a caller names the type: listed there, they would tell anyone with access to the
-agent who tagged whom.
+about-a-person subset (a machine key never reads one). **A row is a tag only when it
+carries BOTH the reserved `mention-` id and `type='mention'`** (`queue_mentions.is_tag_clause`
+/ `is_person_tag`): `type` is agent-authored (the queue file's ingest only bounds its length),
+so keying on the type alone let an agent forge "Alice mentioned you" into a roster member's
+Inbox and hide its own ask from the operator by naming it `mention`. The operator door
+(`_list_conditions`, `get_stats`, and `GET`/`respond`/`cancel` on `/api/operator-queue/{id}`,
+each a 404) leaves tags out **unconditionally** — `type` is a query parameter of the list
+route, so an exception for "a caller who names the type" was a door any sharee could open
+with `?type=mention`. Listed there, a tag would tell anyone with access to the agent who
+tagged whom.
 
 **The wake is untouched.** `shared_sessions.service.resolve_mentions` still returns the
 agents to wake from the TEXT, and the message's stored `mentions` stay agent-only. Tags are
@@ -994,9 +1000,12 @@ that stands for the message (the retry-reuse row on a retry — still one item).
 **The tagged person's door** (`client_portal/mentions/router.py`, portal principal):
 `GET /mentions` (theirs, newest first), `GET /mentions/{id}`, `POST /mentions/{id}/read`
 (person only). Addressee match in the service; not-yours and not-there are one 404. Opening
-one is `open_for_reader`: for a room, `_room_access` — a live participant as `workspace_user`
-(email) or `user` (username), or an **admin on the platform door only** (`Reader.is_platform`;
-a portal session for an admin's address is not the admin, #78) — decides `can_see`. Only
+one is `open_for_reader`: for a room, `_room_access` — the room's own membership rule, **per
+door**: a live `workspace_user` participant (email) on either door; a live `user` participant
+(username) or an admin on the **platform door only** (`Reader.is_platform`; a Workspace
+session for a platform member's or an admin's address — a portal_delegate-minted one
+included — is a 404 on that room through `_require_membership`, so it is not shown it here
+either, #78) — decides `can_see`. Only
 then does any content cross: the tagged message and its neighbours (seq −3…+2, each
 ≤4,000 chars), sender labels, never `execution_id` or cost. Otherwise `can_see = false`,
 `conversation.id = null`, no content (not even the tagger's own words), and
