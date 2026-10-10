@@ -131,6 +131,13 @@ def _client(monkeypatch, facade, *, user, real_admin_gate=False):
 
     monkeypatch.setattr(skills_router, "db", facade)
     monkeypatch.setattr(ss, "db", facade)
+    # The facade raises from whatever `db.skill_sources` is in sys.modules NOW;
+    # a file that evicted `db.*` after `routers.skills` was imported leaves the
+    # router catching a stale class, and the 409 escapes as a raw exception.
+    import db.skill_sources as live_sources
+
+    monkeypatch.setattr(skills_router, "DuplicateSkillSource", live_sources.DuplicateSkillSource)
+    monkeypatch.setattr(skills_router, "DefaultSourceExists", live_sources.DefaultSourceExists)
 
     async def _no_audit(*_a, **_k):
         return None
