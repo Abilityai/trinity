@@ -5,8 +5,8 @@ Covers the Redis-backed liveness primitives with a fake Redis double:
   * record_heartbeat — SETEX (TTL=15) + idempotent `seen` marker; Redis-None
     fail-soft.
   * read_heartbeat — hit / missing / malformed-JSON.
-  * heartbeat_status — alive / stale / unsupported + Redis-None fail-open.
-  * heartbeat_status_bulk — one pipeline round-trip, correct per-agent map.
+  * heartbeat_status_bulk — alive / stale / unsupported + Redis-None fail-open,
+    malformed `ts`, one pipeline round-trip, correct per-agent map.
   * process_watch_tick — returns (agent, kind) transitions; threshold/recovery.
   * _emit_heartbeat_alert — dispatches lost/recovered to monitoring_alerts and
     swallows alert failures so the loop can't die (#307 Option A).
@@ -202,42 +202,8 @@ def test_read_heartbeat_malformed_returns_none(fake_redis):
 
 
 # ---------------------------------------------------------------------------
-# heartbeat_status
+# heartbeat_status_bulk — single-agent payload edge cases
 # ---------------------------------------------------------------------------
-def test_status_alive(fake_redis):
-    hb.record_heartbeat("agent-a", {"memory_mb": 12.0, "active_executions": 3})
-    st = hb.heartbeat_status("agent-a")
-
-    assert st["heartbeat_state"] == "alive"
-    assert st["heartbeat_alive"] is True
-    assert st["heartbeat_active_executions"] == 3
-    assert st["heartbeat_memory_mb"] == 12.0
-    assert st["last_heartbeat_age_s"] is not None
-    assert 0 <= st["last_heartbeat_age_s"] < 5
-
-
-def test_status_stale(fake_redis):
-    hb.record_heartbeat("agent-a", {"memory_mb": 12.0})
-    # Heartbeat key expired but the seen marker persists.
-    fake_redis.expire_now("agent:heartbeat:agent-a")
-    st = hb.heartbeat_status("agent-a")
-
-    assert st["heartbeat_state"] == "stale"
-    assert st["heartbeat_alive"] is False
-
-
-def test_status_unsupported_when_never_seen(fake_redis):
-    st = hb.heartbeat_status("old-image-agent")
-    assert st["heartbeat_state"] == "unsupported"
-    assert st["heartbeat_alive"] is None
-
-
-def test_status_redis_none_is_unsupported(no_redis):
-    st = hb.heartbeat_status("agent-a")
-    assert st["heartbeat_state"] == "unsupported"
-    assert st["heartbeat_alive"] is None
-
-
 def test_status_alive_with_missing_ts(fake_redis):
     """A seen agent whose payload has no `ts` (old/malformed) is still alive,
     with last_heartbeat_age_s=None — exercises the `isinstance(ts, ...)` guard
@@ -246,7 +212,7 @@ def test_status_alive_with_missing_ts(fake_redis):
         {"memory_mb": 4.0, "active_executions": 1}
     )
     fake_redis.store["agent:heartbeat:seen:agent-a"] = "1"
-    st = hb.heartbeat_status("agent-a")
+    st = hb.heartbeat_status_bulk(["agent-a"])["agent-a"]
     assert st["heartbeat_state"] == "alive"
     assert st["heartbeat_alive"] is True
     assert st["last_heartbeat_age_s"] is None
@@ -259,7 +225,7 @@ def test_status_alive_with_nonnumeric_ts(fake_redis):
         {"memory_mb": 4.0, "ts": "not-a-number"}
     )
     fake_redis.store["agent:heartbeat:seen:agent-a"] = "1"
-    st = hb.heartbeat_status("agent-a")
+    st = hb.heartbeat_status_bulk(["agent-a"])["agent-a"]
     assert st["heartbeat_state"] == "alive"
     assert st["heartbeat_alive"] is True
     assert st["last_heartbeat_age_s"] is None
@@ -289,6 +255,10 @@ def test_bulk_mixed_states_single_round_trip(fake_redis, monkeypatch):
     assert created["count"] == 1  # one pipeline for all agents
     assert result["alive-agent"]["heartbeat_state"] == "alive"
     assert result["alive-agent"]["heartbeat_alive"] is True
+    assert result["alive-agent"]["heartbeat_memory_mb"] == 5
+    assert result["alive-agent"]["heartbeat_active_executions"] == 1
+    assert result["alive-agent"]["last_heartbeat_age_s"] is not None
+    assert 0 <= result["alive-agent"]["last_heartbeat_age_s"] < 5
     assert result["stale-agent"]["heartbeat_state"] == "stale"
     assert result["stale-agent"]["heartbeat_alive"] is False
     assert result["new-agent"]["heartbeat_state"] == "unsupported"

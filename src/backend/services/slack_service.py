@@ -2,7 +2,6 @@
 Slack integration service (SLACK-001).
 
 Provides:
-- Slack request signature verification
 - Slack API interactions (chat.postMessage, users.info)
 - OAuth token exchange
 """
@@ -22,7 +21,6 @@ from config import (
     SECRET_KEY
 )
 from services.settings_service import (
-    get_slack_signing_secret,
     get_slack_client_id,
     get_slack_client_secret,
     get_public_chat_url,
@@ -103,47 +101,6 @@ class SlackService:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=30.0)
         return self._client
-
-    # =========================================================================
-    # Request Verification
-    # =========================================================================
-
-    def verify_slack_signature(
-        self,
-        timestamp: str,
-        body: bytes,
-        signature: str
-    ) -> Tuple[bool, Optional[str]]:
-        """
-        Verify that a request came from Slack using the signing secret.
-
-        Returns (is_valid, error_reason).
-        """
-        signing_secret = get_slack_signing_secret()
-        if not signing_secret:
-            return False, "Slack Signing Secret not configured"
-
-        # Reject requests older than 5 minutes (prevent replay attacks)
-        try:
-            request_timestamp = int(timestamp)
-            if abs(time.time() - request_timestamp) > 60 * 5:
-                return False, "Request timestamp too old"
-        except (ValueError, TypeError):
-            return False, "Invalid timestamp"
-
-        # Compute expected signature
-        sig_basestring = f"v0:{timestamp}:{body.decode('utf-8')}"
-        expected_signature = 'v0=' + hmac.new(
-            signing_secret.encode('utf-8'),
-            sig_basestring.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-
-        # Constant-time comparison
-        if not hmac.compare_digest(expected_signature, signature):
-            return False, "Invalid signature"
-
-        return True, None
 
     # =========================================================================
     # OAuth Flow

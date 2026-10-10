@@ -411,7 +411,7 @@ A token that doesn't start with `xapp-` (operator pasted a `xoxb-` bot token by 
 |---------|---------|-------------|
 | `channel_rate_limit_max` | 30 | Messages per rate limit window |
 | `channel_rate_limit_window` | 60 | Window duration in seconds |
-| `channel_timeout_seconds` | 120 | Max execution time per message |
+| `channel_timeout_seconds` | — | No reader since #221 (the agent's own timeout applies); setting it has no effect |
 | `channel_allowed_tools` | WebSearch,WebFetch | Comma-separated allowed tools for public users |
 | `slack_transport_mode` | socket | Transport: `socket` or `webhook` |
 | `slack_app_token` | (none) | App-Level Token for Socket Mode |

@@ -103,7 +103,7 @@ def sanitize_filename(name, file_id="F123"):
 
 
 def format_file_size(size_bytes):
-    """Reproduces message_router._format_file_size."""
+    """Reproduces upload_service.format_file_size."""
     if size_bytes < 1024:
         return f"{size_bytes} B"
     elif size_bytes < 1024 * 1024:

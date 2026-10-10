@@ -448,13 +448,6 @@ def _read_marker_sync(execution_id: str) -> Optional[dict]:
     return parsed if isinstance(parsed, dict) else {"phase": "unknown"}
 
 
-def _set_cancel_sync(execution_id: str) -> None:
-    client = _get_client()
-    if client is None:
-        return
-    client.set(_cancel_key(execution_id), "1", ex=int(_queue_wait_bound_seconds() + INFLIGHT_DEADLINE_SLACK_SECONDS))
-
-
 def _set_cancel_then_reread_phase_sync(execution_id: str) -> str:
     """Set the cancel key and re-read the marker, IN THAT ORDER, in one
     pipeline (single connection ⇒ the server applies them in order).

@@ -2187,28 +2187,6 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
     return (True, None, template_data)
 
 
-def get_name_from_template(path: Path) -> Optional[str]:
-    """
-    Extract agent name from template.yaml.
-
-    Args:
-        path: Path to the agent directory
-
-    Returns:
-        Agent name from template.yaml, or None if not found
-    """
-    template_path = path / "template.yaml"
-    if not template_path.exists():
-        return None
-
-    try:
-        with open(template_path) as f:
-            template_data = parse_template_yaml(f.read())  # ent#314
-            return template_data.get("name") if template_data else None
-    except Exception:
-        return None
-
-
 # Platform-injected environment variables — credentials/config Trinity sets on
 # the agent container itself at create time, so a template's MCP config that
 # references one of these does NOT need the operator to supply a matching

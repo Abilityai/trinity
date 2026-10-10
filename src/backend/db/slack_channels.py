@@ -415,19 +415,6 @@ class SlackChannelOperations:
             deleted = result.rowcount > 0
         return deleted
 
-    def unbind_channel(self, team_id: str, slack_channel_id: str) -> bool:
-        """Remove a channel's agent binding."""
-        stmt = delete(slack_channel_agents).where(
-            and_(
-                slack_channel_agents.c.team_id == team_id,
-                slack_channel_agents.c.slack_channel_id == slack_channel_id,
-            )
-        )
-        with get_engine().begin() as conn:
-            result = conn.execute(stmt)
-            deleted = result.rowcount > 0
-        return deleted
-
     # =========================================================================
     # Row converters
     # =========================================================================

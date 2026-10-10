@@ -7,7 +7,7 @@ can. SQLAlchemy Core so it runs unchanged on SQLite and PostgreSQL.
 """
 from typing import Dict, Iterable, Optional
 
-from sqlalchemy import select, delete, insert, update
+from sqlalchemy import select, insert, update
 
 from .engine import get_engine
 from .tables import agent_role_readiness
@@ -78,9 +78,3 @@ class RoleReadinessOperations:
                     agent_name=agent_name, status=status, changed_at=now, changed_by=changed_by,
                 ))
         return {"status": status, "changed_at": now, "changed_by": changed_by}
-
-    def delete_role_readiness(self, agent_name: str) -> int:
-        with get_engine().begin() as conn:
-            return conn.execute(
-                delete(agent_role_readiness).where(agent_role_readiness.c.agent_name == agent_name)
-            ).rowcount

@@ -95,7 +95,7 @@
 - **Configurable Settings** (via Settings UI or DB):
   - `channel_rate_limit_max` — Messages per window (default: 30)
   - `channel_rate_limit_window` — Window in seconds (default: 60)
-  - `channel_timeout_seconds` — Execution timeout (default: 120)
+  - `channel_timeout_seconds` — no reader since #221 (channel executions use the agent's own timeout); setting it has no effect
   - `channel_allowed_tools` — Comma-separated tool list (default: WebSearch,WebFetch)
 - **API Endpoints (new in 2026-03-26)**:
   - `GET /api/settings/slack/status` — Transport connection state + workspace info

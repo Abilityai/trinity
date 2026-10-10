@@ -140,17 +140,6 @@ def derive_webhook_key(token: str, body: Optional[bytes]) -> str:
     return f"auto:{h.hexdigest()}"
 
 
-def derive_schedule_key(execution_id: str) -> str:
-    """Deterministic key for scheduler dispatch.
-
-    The scheduler creates one execution_id per fire and reuses it across an
-    HTTP-level resend of the same dispatch (the network-blip case #525 targets),
-    so the execution_id is the natural per-fire idempotency token. Intentional
-    #271 retries create a fresh execution_id → fresh key → not suppressed.
-    """
-    return f"sched:{execution_id}"
-
-
 def derive_reminder_key(agent_name: str, message: str, raw_fire_spec: str) -> str:
     """Stable create-idempotency key over the RAW reminder input (#1296).
 

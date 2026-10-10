@@ -907,12 +907,6 @@ def test_e1b_expire_stale_zero_is_silent(monkeypatch, caplog):
     assert not any("Expired" in r.message for r in caplog.records)
 
 
-def test_singleton_is_stable():
-    from services.backlog_service import get_backlog_service
-
-    assert get_backlog_service() is get_backlog_service()
-
-
 def test_a14_public_replay_audit_wrapper_attributes_from_principal():
     log = AsyncMock()
     with patch.object(_DISPATCH, "platform_audit_service", MagicMock(log=log)):

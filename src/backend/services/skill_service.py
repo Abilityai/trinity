@@ -956,19 +956,6 @@ class SkillService:
     # Durable sync status (ent#236)
     # -------------------------------------------------------------------------
 
-    def _persisted_commit(self) -> Optional[str]:
-        """Last commit SHA this install synced, per the durable row.
-
-        Read from the DB rather than `self._last_commit_sha` because the
-        commit-changed comparison must hold across workers AND restarts — an
-        in-memory None on a fresh process would read as "changed" and sweep the
-        whole fleet on every backend restart.
-        """
-        try:
-            return db.get_setting_value(SKILLS_LAST_COMMIT_KEY, None)
-        except Exception:  # noqa: BLE001 — status is advisory, never blocks sync
-            return None
-
     def _persist_sync_status(
         self, success: bool, error: Optional[str], commit_sha: Optional[str]
     ) -> None:

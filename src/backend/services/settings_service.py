@@ -904,9 +904,6 @@ class SettingsService:
         """
         db.set_setting(TEMPLATE_REGISTRY_LKG_KEY, json.dumps(payload))
 
-    def clear_template_registry_lkg(self) -> None:
-        db.delete_setting(TEMPLATE_REGISTRY_LKG_KEY)
-
     def get_platform_default_model(self) -> str:
         """
         Return the platform-wide default Claude model (#831).

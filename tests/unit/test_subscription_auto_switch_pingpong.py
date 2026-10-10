@@ -574,17 +574,6 @@ class TestSingleEventThreshold:
         assert len(svc._spy_calls) == 1
 
     @pytest.mark.asyncio
-    async def test_handle_rate_limit_error_shim_still_works(self, svc):
-        """Backward-compat shim: existing 429 callers keep working without
-        migration."""
-        result = await svc.handle_rate_limit_error(
-            agent_name="agent-x",
-            error_message="429",
-        )
-        assert result is not None
-        assert result["failure_kind"] == "rate_limit"
-
-    @pytest.mark.asyncio
     async def test_no_switch_when_alternative_recently_rate_limited(self, svc):
         """Regression on the 2h skip-list: when no alternative is viable,
         the service must NOT call _perform_auto_switch even at threshold=1.

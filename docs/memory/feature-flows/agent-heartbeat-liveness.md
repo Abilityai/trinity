@@ -38,7 +38,7 @@ keeps a false positive cheap and self-correcting.
 
 ### Heartbeat states
 
-`heartbeat_status()` resolves each agent to one of three states, hinged on a
+`heartbeat_status_bulk()` resolves each agent to one of three states, hinged on a
 **persistent `seen` marker** (the backward-compatibility primitive):
 
 | State | Condition | Meaning |
@@ -174,7 +174,6 @@ into the request path.
 | `record_heartbeat(agent_name, payload)` | 99 | SETEX 15s + `seen` marker (nx); stamps `ts`; returns `stored` bool |
 | `clear_heartbeat(agent_name)` | 121 | DELETE all three keys (delete/rename cleanup); best-effort |
 | `read_heartbeat(agent_name)` | 144 | Last payload or None |
-| `heartbeat_status(agent_name)` | 205 | Single-agent state compute |
 | `heartbeat_status_bulk(agent_names)` | 219 | **One pipelined round-trip** for the whole fleet (D4) |
 | `_compute_status(data, seen, now)` | 167 | The state machine (alive/stale/unsupported) |
 | `process_watch_tick()` | 293 | One watch iteration; returns `(name, kind)` transitions, sync + testable |

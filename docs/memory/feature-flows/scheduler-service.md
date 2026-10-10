@@ -82,7 +82,6 @@ As a **platform administrator**, I want **scheduled tasks to execute exactly onc
 | Config | `src/scheduler/config.py` | Environment-based configuration |
 | Models | `src/scheduler/models.py` | Schedule, ScheduleExecution, ProcessSchedule, ProcessScheduleExecution |
 | Database | `src/scheduler/database.py` | SQLite read/write operations |
-| HTTP | `src/scheduler/agent_client.py` | Agent container communication (legacy, unused in main path) |
 | Locking | `src/scheduler/locking.py` | Redis distributed locks |
 | Docker | `docker/scheduler/Dockerfile` | Container definition |
 | Docker | `docker/scheduler/requirements.txt` | Python dependencies |
@@ -816,7 +815,6 @@ backend copy, like `failure_classifier.py`):
 | `create_skipped_execution()` | 237-297 | `INSERT ... status='skipped'` | Record skipped execution (Issue #46) |
 | `update_execution_status()` | 299-351 | `UPDATE schedule_executions SET status, response, ..., claude_session_id` | Complete execution (EXEC-023) |
 | `get_execution(id)` | 353-359 | `SELECT * FROM schedule_executions WHERE id = ?` | Get execution |
-| `get_recent_executions()` | 361-370 | `SELECT ... ORDER BY started_at DESC LIMIT ?` | List recent |
 
 ### Process Schedule Operations
 
@@ -849,7 +847,6 @@ backend copy, like `failure_classifier.py`):
 | `_get_missed_schedules()` | 142-194 | Detect schedules missed while container was down (Issue #145) |
 | `shutdown()` | 196-207 | Stop APScheduler, close Redis, close lock manager |
 | `fire_missed_schedules()` | 209-222 | Execute missed schedules on startup |
-| `run_forever()` | 224-248 | Main loop (heartbeat + sync) |
 | `_get_job_id()` | 254-256 | Generate APScheduler job ID: `schedule_{id}` |
 | `_parse_cron()` | 258-278 | Parse 5-field cron expression |
 | `_add_job()` | 280-315 | Add agent schedule as APScheduler CronTrigger job |
@@ -865,10 +862,6 @@ backend copy, like `failure_classifier.py`):
 | `_execute_schedule_with_lock()` | 615-758 | Agent execution with lock held |
 | `_call_backend_execute_task()` | 760-833 | HTTP dispatch to backend + async handoff |
 | `_poll_execution_completion()` | 835-887 | Poll DB for execution completion (SCHED-ASYNC-001) |
-| `add_schedule()` | 893-896 | Runtime: add new agent schedule |
-| `remove_schedule()` | 898-900 | Runtime: remove agent schedule |
-| `update_schedule()` | 902-906 | Runtime: update agent schedule |
-| `reload_schedules()` | 908-928 | Reload all schedules from DB |
 | `_get_process_job_id()` | 934-936 | Generate process job ID: `process_schedule_{id}` |
 | `_add_process_job()` | 938-973 | Add process schedule as APScheduler job |
 | `_remove_process_job()` | 975-985 | Remove process schedule job |

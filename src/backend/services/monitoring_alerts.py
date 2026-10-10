@@ -343,39 +343,6 @@ class MonitoringAlertService:
         await self._broadcast_alert(notification)
         return notification.id
 
-    async def alert_stuck_execution(
-        self,
-        agent_name: str,
-        execution_id: str,
-        duration_minutes: int
-    ) -> Optional[str]:
-        """Send alert when execution is stuck."""
-        condition = f"stuck:{execution_id}"
-
-        if db.is_in_alert_cooldown(agent_name, condition, self.config.degraded_cooldown):
-            return None
-
-        notification = db.create_notification(
-            agent_name=agent_name,
-            data=NotificationCreate(
-                notification_type="alert",
-                title=f"Agent {agent_name} has stuck execution",
-                message=f"Execution {execution_id} has been running for {duration_minutes} minutes",
-                priority="high",
-                category="health",
-                metadata={
-                    "agent_name": agent_name,
-                    "execution_id": execution_id,
-                    "duration_minutes": duration_minutes,
-                    "timestamp": utc_now_iso()
-                }
-            )
-        )
-
-        db.set_alert_cooldown(agent_name, condition)
-        await self._broadcast_alert(notification)
-        return notification.id
-
     async def alert_resource_critical(
         self,
         agent_name: str,

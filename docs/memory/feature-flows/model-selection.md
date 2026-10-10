@@ -366,14 +366,16 @@ def create_execution(self, ..., model_used: str = None):
     # INSERT INTO schedule_executions (..., model_used) VALUES (?, ..., ?)
 ```
 
-**File**: `src/scheduler/agent_client.py:107, 138-139`
+**File**: `src/scheduler/service.py` (`_call_backend_execute_task`)
 ```python
-async def task(self, message, ..., model: Optional[str] = None):
+async def _call_backend_execute_task(self, agent_name, message, triggered_by,
+                                     model: Optional[str] = None, ...):
     if model:
         payload["model"] = model
+    # POST {backend_url}/api/internal/execute-task; the backend forwards model to the agent
 ```
 
-**File**: `src/scheduler/service.py:564, 591-598`
+**File**: `src/scheduler/service.py` (`_execute_schedule_with_lock`)
 ```python
 # Create execution record with model
 execution = self.db.create_execution(
@@ -381,13 +383,16 @@ execution = self.db.create_execution(
     model_used=schedule.model
 )
 
-# Send task to agent with model
-task_response = await client.task(
-    schedule.message,
-    timeout=schedule.timeout_seconds,
-    execution_id=execution.id,
+# Dispatch through the backend with model
+result = await self._call_backend_execute_task(
+    agent_name=schedule.agent_name,
+    message=effective_message,
+    triggered_by=triggered_by,
+    model=schedule.model,
+    timeout_seconds=schedule.timeout_seconds,
     allowed_tools=schedule.allowed_tools,
-    model=schedule.model
+    execution_id=execution.id,
+    ...
 )
 ```
 
@@ -404,12 +409,18 @@ POST /schedules              schedules.py                 (sync within 60s)
                                                           _execute_schedule_with_lock()
                                                           |
                                                           v
-                                                          db.create_execution(         POST /api/task
-                                                            model_used="opus")         { message: "...",
-                                                          |                              model: "opus" }
-                                                          v                            |
-                                                          client.task(                 v
-                                                            model="opus")              claude --model opus
+                                                          db.create_execution(
+                                                            model_used="opus")
+                                                          |
+                                                          v
+                         POST /api/internal/              _call_backend_execute_task(
+                           execute-task  <--------------    model="opus")
+                         TaskExecutionService                                         POST /api/task
+                         agent_post_with_retry(  -----------------------------------> { message: "...",
+                           model="opus")                                                model: "opus" }
+                                                                                      |
+                                                                                      v
+                                                                                      claude --model opus
 ```
 
 ---

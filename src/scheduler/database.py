@@ -469,14 +469,6 @@ class SchedulerDatabase:
                 retry_of_execution_id=retry_of_execution_id
             )
 
-    def should_freeze_schedules(self, agent_name: str) -> bool:
-        """Is this agent's cron firing frozen by its git sync? (#389/#1808, ent#706)
-
-        A bool view of :meth:`sync_freeze_reason` — kept for callers that only
-        need the yes/no.
-        """
-        return self.sync_freeze_reason(agent_name) is not None
-
     def sync_freeze_reason(self, agent_name: str) -> Optional[str]:
         """Why this agent's cron firing is frozen, or None when it may fire.
 
@@ -711,17 +703,6 @@ class SchedulerDatabase:
             cursor.execute("SELECT * FROM schedule_executions WHERE id = ?", (execution_id,))
             row = cursor.fetchone()
             return self._row_to_execution(row) if row else None
-
-    def get_recent_executions(self, limit: int = 50) -> List[ScheduleExecution]:
-        """Get recent executions across all schedules."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM schedule_executions
-                ORDER BY started_at DESC
-                LIMIT ?
-            """, (limit,))
-            return [self._row_to_execution(row) for row in cursor.fetchall()]
 
     # =========================================================================
     # Retry Operations (RETRY-001)

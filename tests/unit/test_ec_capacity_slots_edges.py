@@ -6,7 +6,7 @@ Modules under test:
 
 Why this file exists: before it, the unit suite never executed
 ``SlotService.acquire_slot`` / ``release_slot`` / ``get_slot_state`` /
-``get_all_slot_states`` / ``is_at_capacity`` / ``force_clear_slots`` at all —
+``get_all_slot_states`` / ``force_clear_slots`` at all —
 ``test_capacity_manager.py`` drives the facade against an ``AsyncMock`` slot
 service, so the one function that decides "admit or 429" had 0% branch
 coverage. Everything here runs the REAL SlotService on ``fakeredis`` (the same
@@ -447,7 +447,7 @@ def test_r33_fleet_sweep_ignores_metadata_hash_keys(clock):
 
 
 # ===========================================================================
-# SlotService meters — get_slot_state / get_all_slot_states / is_at_capacity
+# SlotService meters — get_slot_state / get_all_slot_states
 # ===========================================================================
 
 
@@ -495,21 +495,6 @@ def test_r38_bulk_meter_empty_and_fail_open():
 
     svc.redis = _Broken()
     assert _run(svc.get_all_slot_states({"a": 3})) == {"a": {"max": 3, "active": 0}}
-
-
-@pytest.mark.parametrize(
-    "held, cap, expected",
-    [
-        pytest.param(2, 3, False, id="r39-below-cap"),
-        pytest.param(3, 3, True, id="r40-exactly-cap"),
-        pytest.param(0, 0, True, id="r41-cap0-always-full"),
-    ],
-)
-def test_is_at_capacity_boundary(held, cap, expected):
-    svc = _svc()
-    for i in range(held):
-        _run(svc.acquire_slot("a", f"e{i}", 99))
-    assert _run(svc.is_at_capacity("a", cap)) is expected
 
 
 def test_r42_force_clear_counts_clears_metadata_and_is_idempotent():

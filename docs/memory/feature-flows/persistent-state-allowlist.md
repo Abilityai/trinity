@@ -111,7 +111,7 @@ The heredoc quotes preserve glob characters verbatim.
 
 ## Flow 2: Runtime read
 
-### Backend helper (`src/backend/services/git_service.py::_persistent_state_for`)
+### Backend helper (`src/backend/services/git_service/trinity_files.py::_read_trinity_yaml_list`)
 
 For platform-side consumers (e.g. the future reset endpoint):
 
@@ -215,7 +215,7 @@ End-to-end verification (optional, once S0/#387 lands):
 2. `docker exec agent-<name> cat /home/developer/.trinity/persistent-state.yaml`
    → returns the default YAML.
 3. Edit the file inside the container.
-4. `_persistent_state_for("<name>")` returns the edited list.
+4. `_read_trinity_yaml_list("<name>", path=_PERSISTENT_STATE_PATH, key="persistent_state", default=DEFAULT_PERSISTENT_STATE)` returns the edited list.
 
 ---
 

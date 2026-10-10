@@ -246,9 +246,6 @@ class TestDerivation:
         b = idem_service.derive_webhook_key("tok2", b"body")
         assert a != b
 
-    def test_schedule_key(self, idem_service):
-        assert idem_service.derive_schedule_key("exec-9") == "sched:exec-9"
-
     def test_scope_helpers(self, idem_service):
         assert idem_service.make_agent_scope("bob") == "agent:bob"
         assert idem_service.make_webhook_scope("zzz") == "webhook:zzz"

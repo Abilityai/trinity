@@ -180,7 +180,6 @@ CREATE UNIQUE INDEX idx_schedules_webhook_token
 | `generate_webhook_token(schedule_id)` | `UPDATE SET webhook_token=?, webhook_enabled=1` | `secrets.token_urlsafe(32)` — 43 chars |
 | `get_schedule_by_webhook_token(token)` | `SELECT … JOIN agent_ownership WHERE webhook_token=? AND schedule.deleted_at IS NULL AND agent.deleted_at IS NULL` | O(1) via partial index. **INNER JOIN** on `agent_ownership` (#1423) skips a soft-deleted schedule AND a schedule whose *agent* is soft-deleted — so a schedule with no live owning agent resolves to `None` → 404. Unchanged by #1445 (the creation gate keeps this from ever seeing an orphan schedule) |
 | `is_agent_live(name)` *(db/agents.py)* | `SELECT 1 FROM agent_ownership WHERE agent_name=? AND deleted_at IS NULL` | #1445 creation-gate predicate. No `users` join — matches the token-lookup JOIN exactly so the gate never false-negatives a live agent whose owner-user row is missing (FKs off platform-wide). Used by `create_schedule` + `generate_webhook` (routers) and the `create_schedule` db chokepoint |
-| `set_webhook_enabled(schedule_id, enabled)` | `UPDATE SET webhook_enabled=?` | enable/disable without revoking token |
 | `revoke_webhook_token(schedule_id)` | `UPDATE SET webhook_token=NULL, webhook_enabled=0` | nulling token drops it from the partial index |
 | `get_webhook_status(schedule_id)` | `SELECT webhook_token, webhook_enabled` | returns `{webhook_token, webhook_enabled, has_token}` |
 

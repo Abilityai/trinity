@@ -313,32 +313,6 @@ class SchedulerService:
             asyncio.ensure_future(self._execute_schedule(schedule.id))
         self._missed_schedules = []
 
-    async def run_forever(self):
-        """Run the scheduler until interrupted."""
-        self.initialize()
-        await self.fire_missed_schedules()
-
-        sync_interval = config.schedule_reload_interval
-        heartbeat_interval = 30
-        last_sync = datetime.utcnow()
-
-        try:
-            # Keep the service running with periodic heartbeat and sync
-            while True:
-                self.lock_manager.set_heartbeat(self._instance_id)
-
-                # Check if it's time to sync schedules
-                now = datetime.utcnow()
-                if (now - last_sync).total_seconds() >= sync_interval:
-                    await self._sync_schedules()
-                    last_sync = now
-
-                await asyncio.sleep(heartbeat_interval)
-        except asyncio.CancelledError:
-            logger.info("Scheduler received cancel signal")
-        finally:
-            self.shutdown()
-
     # =========================================================================
     # Job Management
     # =========================================================================
@@ -2338,56 +2312,6 @@ class SchedulerService:
                 WHERE id = ?
             """, (business_status, to_utc_iso(datetime.utcnow()), execution_id))
             conn.commit()
-
-    # =========================================================================
-    # Schedule Management (for runtime updates)
-    # =========================================================================
-
-    def add_schedule(self, schedule: Schedule):
-        """Add a new schedule to the scheduler."""
-        if schedule.enabled:
-            self._add_job(schedule)
-
-    def remove_schedule(self, schedule_id: str):
-        """Remove a schedule from the scheduler."""
-        self._remove_job(schedule_id)
-
-    def update_schedule(self, schedule: Schedule):
-        """Update an existing schedule in the scheduler."""
-        self._remove_job(schedule.id)
-        if schedule.enabled:
-            self._add_job(schedule)
-
-    def reload_schedules(self):
-        """Reload all schedules from the database."""
-        if not self.scheduler:
-            return
-
-        # Remove all existing jobs
-        for job in self.scheduler.get_jobs():
-            if job.id.startswith("schedule_") or job.id.startswith("process_schedule_"):
-                self.scheduler.remove_job(job.id)
-
-        # Reload agent schedules from database
-        schedules = self.db.list_all_enabled_schedules()
-        for schedule in schedules:
-            self._add_job(schedule)
-
-        # Reload process schedules from database
-        process_schedules = self.db.list_all_enabled_process_schedules()
-        for process_schedule in process_schedules:
-            self._add_process_job(process_schedule)
-
-        # #1296: the full-reload path removes only schedule_/process_schedule_
-        # jobs (Codex C6), so rebuild/reclaim reminder jobs too. The reconcile is
-        # idempotent — it only arms MISSING reminder_ jobs and never blanket-
-        # removes them, so this doesn't disturb already-armed reminders.
-        try:
-            self._reconcile_reminders()
-        except Exception as e:
-            logger.error(f"Reminder reconcile during reload failed: {e}")
-
-        logger.info(f"Reloaded {len(schedules)} agent schedules, {len(process_schedules)} process schedules")
 
     # =========================================================================
     # Process Schedule Management

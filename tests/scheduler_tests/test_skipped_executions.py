@@ -250,10 +250,12 @@ class TestSchedulerServiceSkippedEvents:
             service._record_skipped_agent_schedule("schedule-1")
 
         # Verify execution was created
-        recent = db_with_data.get_recent_executions(limit=10)
-        skipped = [e for e in recent if e.status == "skipped"]
+        with db_with_data.get_connection() as conn:
+            skipped = conn.execute(
+                "SELECT error FROM schedule_executions WHERE status = 'skipped'"
+            ).fetchall()
         assert len(skipped) >= 1
-        assert "max_instances" in skipped[0].error
+        assert "max_instances" in skipped[0]["error"]
 
 
 class TestSkippedExecutionModel:
