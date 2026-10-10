@@ -258,6 +258,8 @@ async def get_execution(
     return ExecutionResponse(**execution.model_dump())
 ```
 
+**trinity-enterprise#754**: the handler (now `routers/schedules.py:920-938`) also takes `current_user` and returns `gate_self_approved` / `gate_self_approved_by_viewer` (`models.py:4178-4179`), read through `skill_gate_map_service.self_approved_flags` from the run's `self_approved` record in `skill_gate_requests` — see [skills-tab.md](skills-tab.md).
+
 ### Endpoint: Get Execution Log
 
 **File**: `src/backend/routers/schedules.py:335-375`
@@ -384,6 +386,10 @@ def get_execution(self, execution_id: str) -> Optional[ScheduleExecution]:
 | Cost | Dollar | Green | `execution.cost` | `$0.0000` |
 | Context | Chart | Purple | `execution.context_used/max` | `"X.XK / Y.YK"` |
 | Trigger | Calendar/Click/Lightning | Purple/Amber/Cyan | `execution.triggered_by` | "schedule", "manual", "user" |
+
+### Execution Origin Card (`views/ExecutionDetail.vue:177-211`)
+
+The AUDIT-001 origin card (User / Source Agent / MCP Key). Since trinity-enterprise#754 it also renders `ExecutionGateMarker` (`variant="line"`, `:205-210`) when `execution.gate_self_approved` is true: "Ran without approval: you are the approver." for the requester (`gate_self_approved_by_viewer`), else "Ran without approval: its approver started it.". The card shows when the run has origin data **or** that flag (`:179`).
 
 ### Status Badge Colors (Lines 322-329)
 
@@ -529,6 +535,7 @@ location /api/ {
 
 | Date | Changes |
 |------|---------|
+| 2026-10-08 | **trinity-enterprise#754**: the origin card says when the run went through without approval because its requester is the approver (`ExecutionGateMarker`, from `gate_self_approved` / `gate_self_approved_by_viewer` on the detail read) — [skills-tab.md](skills-tab.md). |
 | 2026-03-04 | **Paid/Public trigger types**: Added `paid` (yellow bg/icon) and `public` (teal bg/icon) to Trigger Icon Colors table. |
 | 2026-02-21 | **PERF-001**: Added note distinguishing `ExecutionResponse` (full, used here) from `ExecutionSummary` (lightweight, used by list endpoint). Execution Detail page continues to fetch full data via `GET /api/agents/{name}/executions/{id}`. |
 | 2026-02-20 | Added "Continue as Chat" button (EXEC-023) - visible when `claude_session_id` exists and status is not "running". Navigates to Chat tab with `resumeSessionId` and `executionId` query params. See [continue-execution-as-chat.md](continue-execution-as-chat.md) for full flow. |

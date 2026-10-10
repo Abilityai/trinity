@@ -11,7 +11,7 @@
  * versions; a partial set cannot be assigned; assign goes to the per-agent set
  * route (the ent#596 fence) and patches holder chips in place.
  *
- * Mount harness per #2918 (skillsPanelDraftSurvivesSync.spec.js).
+ * Mount harness per #2918 (skillAssignDraftSurvivesSync.spec.js).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -25,7 +25,7 @@ vi.mock('@/stores/auth', () => ({
   useAuthStore: () => ({ role: 'admin', isAuthenticated: true }),
 }))
 
-import SkillsPanel from '../../src/components/SkillsPanel.vue'
+import SkillsTab from '../../src/components/skills/SkillsTab.vue'
 import LibrarySkillsSection from '../../src/components/LibrarySkillsSection.vue'
 import { useSkillsLibraryStore } from '../../src/stores/skillsLibrary'
 
@@ -91,12 +91,24 @@ function respond({ sets = AGENT_SETS, libSets = LIB_SETS, setsFail = false, rows
   })
 }
 
+// trinity-enterprise#754: the Skills tab is one grid of cards; the library
+// picker and the sets list open as dialogs (rendered inline here — Teleport is
+// stubbed). A manager opens both from the Shared head; a viewer reaches the
+// read-only sets dialog through the set chips.
 async function mountPanel(canManage = true) {
-  const wrapper = mount(SkillsPanel, {
-    props: { agentName: AGENT, canManage, agentRunning: true },
+  const wrapper = mount(SkillsTab, {
+    props: { agentName: AGENT, agentStatus: 'running', canManage },
     attachTo: document.body,
-    global: { stubs: { SkillContractChips: true } },
+    global: { stubs: { SkillContractChips: true, teleport: true, 'router-link': true } },
   })
+  await flushPromises()
+  if (canManage) {
+    await wrapper.find('[data-testid="skills-assign-open"]').trigger('click')
+    await wrapper.find('[data-testid="skills-sets-open"]').trigger('click')
+  } else {
+    const chip = wrapper.find('[data-testid="skills-set-chips"] button')
+    if (chip.exists()) await chip.trigger('click')
+  }
   await flushPromises()
   return wrapper
 }

@@ -41,7 +41,7 @@ from ._runtime_config import (
     _load_guardrails,
     merged_disallowed_tools,
 )
-from .execution_env import build_execution_env
+from .execution_env import build_execution_env, auth_override_env_layers
 from .error_classifier import (
     _classify_empty_result,
     _classify_signal_exit,
@@ -653,6 +653,10 @@ class HeadlessRunContext:
     # _finalize_headless_result snapshots its read fields before reading them.
     reader_may_be_live: bool = False
 
+    # #3470: the request's per-spawn credential (an `AuthOverride`), applied as
+    # the top env layer of THIS spawn only. None = the container's baseline.
+    auth_override: Optional[object] = None
+
     # Shared mutable buffers (populated by stream_parser via process_stream_line)
     response_parts: List[str] = field(default_factory=list)
     execution_log: List[ExecutionLogEntry] = field(default_factory=list)
@@ -702,6 +706,7 @@ def _setup_headless_command(
     resume_session_id: Optional[str],
     persist_session: bool,
     images: Optional[List[Dict]],
+    auth_override=None,
 ) -> HeadlessRunContext:
     """Build the claude CLI command and initialise the run context.
 
@@ -823,6 +828,7 @@ def _setup_headless_command(
         images=images,
         prompt=prompt,
         claude_session_uuid=claude_session_uuid,
+        auth_override=auth_override,
         # #1521: seed the fallback context window from the model catalog. The
         # stream parser overwrites it from the runtime's modelUsage.contextWindow
         # when present; this catalog value is the fallback for the salvage /
@@ -875,6 +881,10 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
     # descendant across fork/exec/setsid/double-fork. Cleanup uses it
     # to identify and kill orphans that escape both the pgid sweep
     # and the FD-based pipe-writer sweep.
+    # #3470: a SUB-003 re-issue carries the credential it must run on; it is a
+    # layer of THIS spawn's env and nothing else (the container's own auth is
+    # untouched, so a concurrent turn is unaffected).
+    auth_extra, auth_drop = auth_override_env_layers(ctx.auth_override)
     process = subprocess.Popen(
         ctx.cmd,
         stdin=subprocess.PIPE,
@@ -884,6 +894,7 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
         bufsize=1,  # Line buffered
         start_new_session=True,
         env=build_execution_env({
+            **auth_extra,
             EXECUTION_TAG_NAME: ctx.task_session_id,
             # #2127: how long `claude --print` waits for background subagents /
             # workflows before giving up on them. Its own default is 10 min,
@@ -898,7 +909,7 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
             # the single authority. Not set to 0 (wait forever) deliberately —
             # that would delete the CLI's runaway guard entirely.
             "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": str(int(ctx.effective_timeout * 1000)),
-        }),
+        }, drop=auth_drop),
     )
     ctx.process = process
     # #2127: seed the idle clock HERE, at spawn — before the reader threads
@@ -1648,6 +1659,7 @@ async def execute_headless_task(
     resume_session_id: Optional[str] = None,
     persist_session: bool = False,
     images: Optional[List[Dict]] = None,
+    auth_override=None,
 ) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
     """
     Execute Claude Code in headless mode for parallel task execution.
@@ -1698,6 +1710,7 @@ async def execute_headless_task(
             resume_session_id=resume_session_id,
             persist_session=persist_session,
             images=images,
+            auth_override=auth_override,
         )
 
         registry = get_process_registry()

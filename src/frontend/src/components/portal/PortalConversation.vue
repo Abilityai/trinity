@@ -360,6 +360,7 @@
               <div
                 v-if="t.role === 'user'"
                 class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-2 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white"
+                :class="BUBBLE_WRAP_CLASS"
               >{{ t.content }}</div>
               <div v-else class="max-w-[85%]">
                 <PortalAgentBubble :content="t.content" />
@@ -402,7 +403,7 @@
             />
             <div
               class="rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap"
-              :class="item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white'"
+              :class="[BUBBLE_WRAP_CLASS, item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white']"
             >{{ item.message.content }}</div>
             <!-- ent#551: a task the agent ran during a voice call lands as an
                  ordinary turn (it was not spoken, so it is not in the block);
@@ -467,6 +468,14 @@
                 :initial-rating="item.message.myRating"
               />
             </PortalAgentBubble>
+            <!-- trinity-enterprise#754: this turn went through without approval
+                 because the person who asked IS the approver (server-decided). -->
+            <ExecutionGateMarker
+              class="mt-1"
+              variant="line"
+              :self-approved="!!item.message.selfApproved"
+              :by-viewer="!!item.message.selfApprovedByViewer"
+            />
           </div>
         </div>
         </div>
@@ -483,7 +492,7 @@
           <PortalWorkCard
             :item="liveCardItem"
             :live-step="liveStepLine"
-            :elapsed-seconds="elapsed"
+            :elapsed-seconds="cardElapsedSeconds"
             :children="liveChildren"
             :can-stop="canCancelTurn"
             :stopping="cancelling"
@@ -624,6 +633,17 @@
             <span v-else-if="attachmentState(f) === 'failed'" class="max-w-[16rem] truncate opacity-90">· {{ f.error }}</span>
           </span>
         </div>
+        <!-- #3460: the server bounds a message, so the composer says so FIRST —
+             a count for the last stretch, then a named refusal with Send held.
+             Before this the limit was first mentioned by a 422, after the words
+             had left the composer. One line, mutually exclusive ink arms. -->
+        <p
+          v-if="messageLimit.near"
+          class="mb-2 text-xs tabular-nums"
+          :class="messageLimit.over ? 'text-status-danger-700 dark:text-status-danger-400' : META_INK_CLASS"
+          :role="messageLimit.over ? 'alert' : undefined"
+          data-testid="portal-message-limit"
+        >{{ messageLimit.message }}</p>
         <!-- ent#534: the composer is visible but inert while a call is on —
              the orb has the conversation; typing resumes the moment it ends. -->
         <!-- ent#547: the inert class moved off the <form> and onto the WRAPPER
@@ -868,8 +888,8 @@
                     v-else
                     type="submit"
                     class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 disabled:hover:bg-action-primary-600 transition"
-                    :disabled="sending || !input.trim() || voiceCallActive"
-                    title="Send"
+                    :disabled="sending || !input.trim() || voiceCallActive || messageLimit.over"
+                    :title="messageLimit.over ? messageLimit.message : 'Send'"
                   >
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
                   </button>
@@ -892,15 +912,17 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, useId } fro
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { agentDisplayName } from '@/utils/agentName'
 import PortalAgentBubble from './PortalAgentBubble.vue'
+import { BUBBLE_WRAP_CLASS } from './portalBubble'
+import { messageLimitState, messageRefusalReason } from './portalMessageLimit'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
-import { askAboutItPrefill, childrenForChat, clockRestartsAt, itemById, pendingTurnOutcome, previewTitle } from './portalWork'
+import { askAboutItPrefill, childrenForChat, clockRestartsAt, itemById, liveElapsedSeconds, pendingTurnOutcome, previewTitle } from './portalWork'
 import { activityFromStreamEvent, resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags } from './portalUtils'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
@@ -926,6 +948,7 @@ import PortalDeliverables from './PortalDeliverables.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import { workSignalFrom } from './portalRail'
 import PortalRating from './PortalRating.vue'
+import ExecutionGateMarker from '../skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
 import {
   deliveryFailureReason,
   mentionedAgents,
@@ -1131,6 +1154,8 @@ const draftKey = computed(() => draftKeyFor({
 }))
 const { restored: draftRestored } = useComposerDraft({ key: draftKey, input })
 const sending = ref(false)
+// #3460: measured on what `send()` sends — the trimmed text.
+const messageLimit = computed(() => messageLimitState(input.value.trim()))
 // ent#523 — Reset, offered on Main only.
 const resetting = ref(false)
 // ent#523 AC 10 — the same pure rule the sidebar chip and the details header
@@ -1578,9 +1603,7 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
   // stop — without the id, `canCancelTurn` stayed false after every reload.
   activeExecutionId.value = executionId || null
   liveStreamActivity.value = null
-  elapsed.value = 0
-  clearInterval(elapsedTimer)
-  elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
+  startElapsedClock()
   // The baseline is what is on screen right now: this client reloaded INTO a
   // running turn, so every assistant message it can see predates that turn.
   // Passing nothing made the poll's comparison false on every poll, so the
@@ -1613,7 +1636,9 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
     if (data?.response) {
       // #2580: `id` + `myRating` from the persisted row, so a reattached reply is
       // rateable the moment it lands rather than on the next load.
-      messages.value.push({ ...assistantRow({ content: data.response, id: data.id, my_rating: data.myRating }), at: data.at || null })
+      messages.value.push({ ...assistantRow({ content: data.response, id: data.id, my_rating: data.myRating,
+        ...turnGateFlags(data) }),
+      at: data.at || null })
       refreshAsksAfterTurn()
       // A reattached reply is still a reply the user just watched land, so it
       // has to announce itself like `deliver()` does. Without this the thread
@@ -1729,6 +1754,7 @@ function onViewportResize() {
 }
 
 onBeforeUnmount(() => {
+  clearInterval(elapsedTimer)
   window.removeEventListener('online', onNet)
   window.removeEventListener('offline', onNet)
   document.removeEventListener('click', onDocClick)
@@ -1865,7 +1891,7 @@ watch(typeaheadBound, (b) => { activeIndex.value = clampActiveIndex(activeIndex.
 // promising something the build cannot do is the #2128 dead end in text form.
 const composerPlaceholder = computed(() => {
   if (listening.value) return 'Listening…'
-  const base = `Message ${agentDisplayName(props.agent)}…  ·  / for playbooks`
+  const base = `Message ${agentDisplayName(props.agent)}…  ·  / for skills`
   return store.multiAgentChatAvailable ? `${base}  ·  @ to add an agent` : base
 })
 
@@ -2011,13 +2037,27 @@ let elapsedTimer = null
 // ent#525: the card renders the clock (`formatElapsed`); the three-tier
 // "Thinking… / Working on it… / Still working…" label went with the dots.
 const elapsed = ref(0)
+// #3431: the instant the feed's `elapsed_seconds` was true, advanced from it by
+// the same 1 s tick, so the card re-reads the row's age exactly the way the
+// Work tab and Rooms do (`liveElapsedSeconds`), and one turn shows one age on
+// every surface. `elapsed` above stays the pending placeholder's clock: while
+// the feed has not read the turn there is no anchor but the page's own load,
+// and a page cannot know a run's age.
+const clockMs = ref(Date.now())
+const cardElapsedSeconds = computed(() =>
+  liveElapsedSeconds(liveCardItem.value, { fetchedAtMs: workStore.fetchedAt, nowMs: clockMs.value })
+    ?? elapsed.value)
+function startElapsedClock() {
+  elapsed.value = 0
+  clockMs.value = Date.now()
+  clearInterval(elapsedTimer)
+  elapsedTimer = setInterval(() => { elapsed.value += 1; clockMs.value = Date.now() }, 1000)
+}
 
 async function deliver(text, { replyId = null, attachments = null } = {}) {
   terminalOutcome.value = null
   sending.value = true
-  elapsed.value = 0
-  clearInterval(elapsedTimer)
-  elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
+  startElapsedClock()
   const startedNew = currentSessionId.value === null
   try {
     // ent#286: stream the turn so tool activity is visible while it runs.
@@ -2153,6 +2193,9 @@ async function deliver(text, { replyId = null, attachments = null } = {}) {
         content: data.response || '(no response)',
         id: data.id || data.message_id,
         my_rating: data.myRating,
+        // trinity-enterprise#754: read off the persisted reply, like the id —
+        // either spelling, since the synchronous body is snake_case.
+        ...turnGateFlags(data),
       }),
       at: data.at || null,
     })
@@ -2181,6 +2224,12 @@ async function deliver(text, { replyId = null, attachments = null } = {}) {
     store.markUploadsCarried(props.agent?.name)
     return true
   } catch (err) {
+    // #3460: a validation refusal (a 422 carrying Pydantic's list) is said in
+    // words, never as a status code. It is also the one failure a Retry cannot
+    // fix — the same words earn the same answer — so the draft goes back to
+    // the composer to be edited instead (`settleDelivery`).
+    const refused = messageRefusalReason(err)
+    if (refused) return { error: refused, retryable: false, restoreText: text }
     return { error: deliveryFailureReason(err) }
   } finally {
     sending.value = false
@@ -2475,6 +2524,10 @@ const settlingUploads = ref(false)
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value || escalatingNow.value || settlingUploads.value) return
+  // #3460: over the server's limit, the message stays where it can be edited.
+  // Checked HERE as well as on the button — Enter reaches `send()` directly —
+  // and before anything below clears the composer.
+  if (messageLimit.value.over) return
   // The composer is about to be cleared programmatically, which fires no input
   // event — so the popup and its Esc sentinel are cleared here rather than left
   // armed against a message that no longer exists.
@@ -2641,6 +2694,12 @@ function settleDelivery(index, text, res) {
   // AFTER `markFailed` deliberately: `turnCancel.spec.js` pins the adjacency of
   // the cancel check to `markFailed`, and that rule is the more important one.
   clearModelChoiceOnFailure(res)
+  // #3460: a message the server refused as invalid is handed back to edit.
+  // `restoreDraft` prepends, so anything typed meanwhile is kept.
+  if (res?.restoreText) {
+    input.value = restoreDraft(res.restoreText, input.value)
+    autoGrowAfterUpdate()
+  }
   terminalOutcome.value = { category: res?.category || (res?.lost ? 'lost' : 'failed'),
                             message: res?.error || 'Something went wrong.',
                             retryable: res?.retryable ?? !res?.lost, execution_id: lastDeliveredExecutionId.value }

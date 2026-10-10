@@ -50,12 +50,50 @@ def _resp(status: int, body: dict) -> MagicMock:
     resp.status_code = status
     resp.text = json.dumps(body)
     resp.json.return_value = body
+    # #3470: a current image echoes the applied per-spawn credential.
+    resp.headers = {"X-Trinity-Auth-Override": "oauth_token"}
     if status >= 400:
         err = httpx.HTTPStatusError(f"HTTP {status}", request=MagicMock(), response=resp)
         resp.raise_for_status = MagicMock(side_effect=err)
     else:
         resp.raise_for_status = MagicMock()
     return resp
+
+
+def _walk_seam(switch_result):
+    """#3470: `execute_task` drives `advance_subscription_walk`, not
+    `handle_subscription_failure`. A truthy `switch_result` ⇒ one alternative
+    exists: the first refusal gets a rung, later ones find the pool exhausted.
+    (Mirrors `test_792_subscription_retry._walk_seam`.)"""
+    from services.subscription_auto_switch import Rung
+
+    async def _advance(walk, *, failure_kind, error_message="", budget_ok=True):
+        walk.attempts.append(
+            {"attempt": len(walk.attempts) + 1, "on": "sub-a", "failure": failure_kind}
+        )
+        if switch_result and len(walk.attempts) == 1 and budget_ok:
+            rung = Rung(
+                kind="subscription", subscription_id="sub-b",
+                subscription_name=switch_result.get("new_subscription", "sub-b"),
+                credential="tok-b",
+            )
+            walk.active = rung
+            walk.attempts[-1]["next"] = f"try '{rung.subscription_name}'"
+            return rung
+        walk.active = None
+        walk.stop_reason = "budget" if not budget_ok else "exhausted"
+        return None
+
+    return AsyncMock(side_effect=_advance)
+
+
+def _switch_db():
+    sw_db = MagicMock(name="switch_db")
+    sw_db.get_agent_subscription_id.return_value = "sub-a"
+    sw_db.get_subscription.return_value = MagicMock(id="sub-a", name="sub-a")
+    sw_db.list_subscriptions.return_value = [MagicMock(), MagicMock()]
+    sw_db.get_setting_value.return_value = "true"
+    return sw_db
 
 
 def _resp_429() -> MagicMock:
@@ -124,7 +162,7 @@ def _run(*, responses, switch_result, timeout_seconds):
             raise AssertionError("agent_post_with_retry called more times than responses provided")
         return responses.pop(0)
 
-    mock_switch = AsyncMock(return_value=switch_result)
+    mock_switch = _walk_seam(switch_result)
 
     with (
         patch("services.task_execution_service.db", mock_db),
@@ -136,7 +174,11 @@ def _run(*, responses, switch_result, timeout_seconds):
         patch("services.task_execution_service._record_dispatch_terminal", AsyncMock()),
         patch("services.task_execution_service.platform_audit_service", MagicMock(log=AsyncMock())),
         patch("services.task_execution_service._SWITCH_RETRY_DELAY_S", 0),
-        patch("services.subscription_auto_switch.handle_subscription_failure", mock_switch),
+        patch("services.subscription_auto_switch.db", _switch_db()),
+        patch("services.subscription_auto_switch.ensure_serviceable_subscription", AsyncMock(return_value=None)),
+        patch("services.subscription_auto_switch.advance_subscription_walk", mock_switch),
+        patch("services.subscription_auto_switch.commit_subscription_walk", AsyncMock(return_value=None)),
+        patch("services.subscription_auto_switch.notify_pool_exhausted", MagicMock()),
     ):
         svc = TaskExecutionService()
         result = _await(svc.execute_task(
@@ -271,10 +313,17 @@ class _Clock:
         return self.now
 
 
-def _run_interplay_with_clock(*, timeout_seconds: int, attempt_seconds: list):
+def _run_interplay_with_clock(
+    *, timeout_seconds: int, attempt_seconds: list,
+    expect_success: bool = True, expected_dispatches: int = 3,
+):
     """502 (reader-race) → #678 retry → 429 → SUB-003 retry, with each agent
     call advancing a fake clock by the next value in `attempt_seconds`. Returns
-    (clock_at_each_dispatch, http_timeout_at_each_dispatch, payload_timeouts)."""
+    (clock_at_each_dispatch, http_timeout_at_each_dispatch, payload_timeouts).
+
+    `expect_success=False, expected_dispatches=2` (#3470): the walk REFUSES a
+    re-issue whose remaining budget is under `_SWITCH_RETRY_MIN_REMAINING_S` —
+    the turn then ends FAILED after two dispatches, with `budget_exhausted`."""
     from datetime import datetime as _real_dt
     from services.task_execution_service import TaskExecutionService
 
@@ -314,15 +363,25 @@ def _run_interplay_with_clock(*, timeout_seconds: int, attempt_seconds: list):
         patch("services.task_execution_service._record_dispatch_terminal", AsyncMock()),
         patch("services.task_execution_service.platform_audit_service", MagicMock(log=AsyncMock())),
         patch("services.task_execution_service._SWITCH_RETRY_DELAY_S", 0),
-        patch("services.subscription_auto_switch.handle_subscription_failure", AsyncMock(return_value=_SWITCHED)),
+        patch("services.subscription_auto_switch.db", _switch_db()),
+        patch("services.subscription_auto_switch.ensure_serviceable_subscription", AsyncMock(return_value=None)),
+        patch("services.subscription_auto_switch.advance_subscription_walk", _walk_seam(_SWITCHED)),
+        patch("services.subscription_auto_switch.commit_subscription_walk", AsyncMock(return_value=None)),
+        patch("services.subscription_auto_switch.notify_pool_exhausted", MagicMock()),
     ):
         svc = TaskExecutionService()
         result = _await(svc.execute_task(
             agent_name="test-agent", message="hello", triggered_by="schedule",
             execution_id="exec-2789", timeout_seconds=timeout_seconds, model="sonnet",
         ))
-    assert result.status == "success", result
-    assert len(dispatched_at) == 3, "expected attempt 1, the reader-race retry and the SUB-003 retry"
+    if expect_success:
+        assert result.status == "success", result
+    else:
+        assert result.status == "failed", result
+        assert result.subscription_switch["budget_exhausted"] is True, result.subscription_switch
+    assert len(dispatched_at) == expected_dispatches, (
+        f"expected {expected_dispatches} dispatches, got {len(dispatched_at)}"
+    )
     return dispatched_at, http_timeouts, agent_timeouts
 
 
@@ -361,16 +420,40 @@ def test_the_portal_marker_covers_the_executed_worst_case():
     attempt 1 runs to its cap, the reader-race retry runs to its ceiling, and
     the SUB-003 retry gets what is left — the sum must fit the marker."""
     from client_portal import service as svc
-    from services.task_execution_service import _AUTO_RETRY_MAX_TIMEOUT_S
+    from services.task_execution_service import (
+        _AGENT_HTTP_SLACK_S, _SWITCH_RETRY_MIN_REMAINING_S,
+    )
 
     t = 3600
+    # #3470: the worst case that still RE-ISSUES — attempt 1 and the reader-race
+    # retry together leave exactly the floor plus one second of the turn's
+    # `t + slack` budget. Below the floor the walk refuses (next test), so this
+    # is the longest the third dispatch can ever run.
+    leftover = _SWITCH_RETRY_MIN_REMAINING_S + 1
     dispatched_at, http_timeouts, _ = _run_interplay_with_clock(
-        timeout_seconds=t, attempt_seconds=[t, _AUTO_RETRY_MAX_TIMEOUT_S],
+        timeout_seconds=t, attempt_seconds=[t + _AGENT_HTTP_SLACK_S - leftover - 5, 5],
     )
     worst_wallclock = dispatched_at[2] + http_timeouts[2]
     assert worst_wallclock <= svc.portal_attempt_ceiling_seconds(t), (
         f"executed worst case {worst_wallclock}s exceeds the marker's "
         f"{svc.portal_attempt_ceiling_seconds(t)}s"
+    )
+
+
+def test_a_re_issue_with_no_room_to_run_is_refused_not_billed():
+    """#3470: attempt 1 ran to its cap and the reader-race retry to its
+    ceiling, so the turn's budget is spent. Before #3470 the SUB-003 retry was
+    still dispatched with `max(1, …)` = 1s — a guaranteed, billed TIMEOUT
+    mis-blamed on the turn. The walk now refuses a re-issue whose remaining
+    budget is under `_SWITCH_RETRY_MIN_REMAINING_S` (a floor, not a second
+    ceiling — the remaining budget stays the only bound on a re-issue that
+    does run) and the turn ends honestly after two dispatches."""
+    from services.task_execution_service import _AUTO_RETRY_MAX_TIMEOUT_S
+
+    t = 3600
+    _run_interplay_with_clock(
+        timeout_seconds=t, attempt_seconds=[t, _AUTO_RETRY_MAX_TIMEOUT_S],
+        expect_success=False, expected_dispatches=2,
     )
 
 

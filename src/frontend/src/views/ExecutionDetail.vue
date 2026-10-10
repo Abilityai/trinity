@@ -174,8 +174,9 @@
         </div>
       </div>
 
-      <!-- Origin Information (AUDIT-001) -->
-      <div v-if="hasOriginInfo" class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+      <!-- Origin Information (AUDIT-001); trinity-enterprise#754 adds whether the
+           run went through without approval because its requester is the approver. -->
+      <div v-if="hasOriginInfo || execution.gate_self_approved" class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
         <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-3">Execution Origin</h3>
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
           <!-- User -->
@@ -201,6 +202,12 @@
             <span v-if="execution.source_mcp_key_id" class="ml-1 text-xs text-gray-500 dark:text-gray-400 font-mono">({{ execution.source_mcp_key_id.substring(0, 8) }}...)</span>
           </div>
         </div>
+        <ExecutionGateMarker
+          class="mt-3"
+          variant="line"
+          :self-approved="!!execution.gate_self_approved"
+          :by-viewer="!!execution.gate_self_approved_by_viewer"
+        />
       </div>
 
       <!-- Timestamps -->
@@ -410,6 +417,7 @@ import { formatCost } from '../composables/useFormatters'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
 import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
+import ExecutionGateMarker from '../components/skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
 
 const route = useRoute()
 const router = useRouter()

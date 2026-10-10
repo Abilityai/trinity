@@ -22,7 +22,7 @@
       >
         <!-- Header hint -->
         <div class="px-3 py-1.5 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
-          <span class="text-xs text-gray-500 dark:text-gray-400 font-medium">Playbooks</span>
+          <span class="text-xs text-gray-500 dark:text-gray-400 font-medium">Skills</span>
           <span class="text-xs text-gray-500 dark:text-gray-400">
             <kbd class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-[10px] font-mono">↑↓</kbd>
             navigate &nbsp;
@@ -245,7 +245,7 @@ const props = defineProps({
   },
   placeholder: {
     type: String,
-    default: 'Type your message or / for playbooks…'
+    default: 'Type your message or / for skills…'
   },
   disabled: {
     type: Boolean,

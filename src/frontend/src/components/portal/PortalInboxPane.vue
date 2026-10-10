@@ -212,6 +212,7 @@
                   v-for="(m, i) in run.messages"
                   :key="m.id || i"
                   class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white"
+                  :class="BUBBLE_WRAP_CLASS"
                   :data-testid="`inbox-pane-message-${m.id || i}`"
                 >{{ m.content }}</div>
               </div>
@@ -278,6 +279,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
+import { BUBBLE_WRAP_CLASS } from './portalBubble'
 import BaseCard from '@/components/base/BaseCard.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'

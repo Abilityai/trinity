@@ -21,6 +21,7 @@ export const useAuthStore = defineStore('auth', {
     authError: null,
     // Runtime mode detection (from backend)
     emailAuthEnabled: null,  // Email-based authentication
+    emailCodeLoginEnabled: null,  // ent#849: email-code form allowed (SSO policy can turn it off)
     modeDetected: false,
     // Enterprise 2FA (#5): set when a login returns an MFA challenge instead
     // of a token. { token, enrolled, enrollmentRequired }. The Login view
@@ -85,6 +86,9 @@ export const useAuthStore = defineStore('auth', {
       try {
         const response = await axios.get('/api/auth/mode')
         this.emailAuthEnabled = response.data.email_auth_enabled !== false
+        // ent#849: an older backend has no field; it follows email_auth_enabled there.
+        this.emailCodeLoginEnabled = this.emailAuthEnabled &&
+          response.data.email_code_login_enabled !== false
         this.modeDetected = true
 
         console.log(`🔐 Auth mode: EMAIL=${this.emailAuthEnabled}`)
@@ -93,6 +97,7 @@ export const useAuthStore = defineStore('auth', {
         console.error('Failed to detect auth mode:', error)
         // Default to email auth if detection fails
         this.emailAuthEnabled = true
+        this.emailCodeLoginEnabled = true
         this.modeDetected = true
         return true
       }
@@ -378,9 +383,9 @@ export const useAuthStore = defineStore('auth', {
 
     // Request a verification code via email
     async requestEmailCode(email) {
-      if (!this.emailAuthEnabled) {
-        this.authError = 'Email authentication is disabled'
-        return { success: false, error: 'Email authentication is disabled' }
+      if (!this.emailCodeLoginEnabled) {
+        this.authError = 'Email-code sign-in is disabled'
+        return { success: false, error: 'Email-code sign-in is disabled' }
       }
 
       try {
@@ -392,7 +397,8 @@ export const useAuthStore = defineStore('auth', {
         }
       } catch (error) {
         console.error('Request email code failed:', error)
-        const detail = error.response?.data?.detail || 'Failed to send verification code'
+        let detail = error.response?.data?.detail || 'Failed to send verification code'
+        if (detail === 'email_code_disabled') detail = await this._emailCodeTurnedOff()
         this.authError = detail
         return { success: false, error: detail }
       }
@@ -400,8 +406,8 @@ export const useAuthStore = defineStore('auth', {
 
     // Verify email code and login
     async verifyEmailCode(email, code) {
-      if (!this.emailAuthEnabled) {
-        this.authError = 'Email authentication is disabled'
+      if (!this.emailCodeLoginEnabled) {
+        this.authError = 'Email-code sign-in is disabled'
         return false
       }
 
@@ -419,10 +425,18 @@ export const useAuthStore = defineStore('auth', {
         return true
       } catch (error) {
         console.error('Verify email code failed:', error)
-        const detail = error.response?.data?.detail || 'Invalid or expired verification code'
+        let detail = error.response?.data?.detail || 'Invalid or expired verification code'
+        if (detail === 'email_code_disabled') detail = await this._emailCodeTurnedOff()
         this.authError = detail
         return false
       }
+    },
+
+    // ent#849: the policy was switched off after this page loaded. Re-read the
+    // mode so the form disappears, and say what to do instead.
+    async _emailCodeTurnedOff() {
+      await this.detectAuthMode()
+      return 'Email-code sign-in is turned off. Sign in with SSO.'
     },
 
     // =========================================================================

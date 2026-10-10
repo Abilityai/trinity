@@ -39,7 +39,8 @@ deliberately does **not** re-render any header element; where it references one
   │                                                       reads the same URL)
   ├── window selector 7/14/30d → watch(window) → loadAnalytics()  (per-window cache)
   ├── "New task" / "Full details →" → emit navigate-tab(tab)  → AgentDetail.activeTab
-  └── recent row click → emit open-task(execId) → activeTab='tasks' + ?execution=
+  └── recent row click → emit open-task(execId) → selectTab('tasks', { query: { execution } })
+                                                    (one push: ?tab=tasks&execution=, #2900)
 ```
 
 ## Frontend Layer

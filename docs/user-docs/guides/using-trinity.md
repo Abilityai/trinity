@@ -65,14 +65,13 @@ Click any agent to open its detail page. Tabs appear based on what the agent has
 | **Canvas** | The surface the agent keeps current — its living sibling to Reports |
 | **Schedules** | Cron jobs, trigger history, next run times |
 | **Loops** | Bounded sequential task runs |
-| **Playbooks** | Reusable prompts the agent exposes |
+| **Skills** | The agent's own skills and those shared from the library, each with **Run**; owners and admins also set approval and assign skills |
 | **Credentials** | Per-agent credential setup and status |
 | **Payments** | Nevermined payment configuration |
 | **Access** / **Sharing** / **Permissions** | Who can reach the agent, and which agents it may call (owners and admins) |
 | **A2A** | Inbound A2A exposure (owner-only, entitled installations) |
 | **Git** | Repository binding, sync status, and history (only when the agent has a repository binding) |
 | **Files** / **Folders** | Browse the agent workspace, download files, shared folders (Folders: owners and admins) |
-| **Skills** | Assign and sync skills from the library (owners and admins) |
 | **Settings** | Guardrails, autonomy, resources, timeouts, runtime options (owners and admins) |
 | **Info** | Template metadata and "what you can ask" |
 
