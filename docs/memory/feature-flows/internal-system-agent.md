@@ -350,7 +350,7 @@ The `/api/ops/costs` endpoint provides an ops-focused view of OpenTelemetry metr
 
 **Integration with OTel**:
 - Fetches raw metrics from OTel Collector's Prometheus endpoint (`:8889/metrics`)
-- Reuses parsing from `observability.py` (decoupled architecture)
+- Reuses `parse_prometheus_metrics()` / `calculate_totals()` in `services/ops_costs_service.py` (moved there from the removed `routers/observability.py`, #3434)
 - Adds ops-specific analysis: threshold checks, alerts, formatted output
 - System agent interprets the data via `/ops/costs` slash command
 

@@ -137,7 +137,7 @@ The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing 
 | POST | `/api/agents/{name}/credentials/inject` | Write credential files directly to agent (`files` text + `files_b64` binary) |
 | POST | `/api/agents/{name}/credentials/export` | Export to `.credentials.enc` (AES-256-GCM) |
 | POST | `/api/agents/{name}/credentials/import` | Import from encrypted file |
-| POST | `/api/internal/decrypt-and-inject` | Auto-import on agent startup (internal, no auth) |
+| POST | `/api/internal/decrypt-and-inject` | Auto-import on agent startup (internal; `verify_internal_secret` — `X-Internal-Secret`) |
 | GET | `/api/agents/{name}/credential-requirements` | Per-variable credential checklist + live set/missing status. **Owner-only AND human-only** (`get_owned_agent_by_name` + `reject_agent_principal`) — the inventory is an operator surface, so the read gate equals the write gate it drives; the coarse `/credentials/status` keeps the read gate because it returns a count and names nothing. Rate-limited + single-flight (each uncached call spawns a container process against the shared 4-slot Docker pool); 200 with a degraded body for a stopped agent (ent#127) |
 
 **Credential-path policy (#11):** injection accepts a **curated set of credential file types**, not a fixed 3-path list — the policy lives in `services/credential_paths.py` (`is_allowed_credential_path`), vendored **byte-identically** into `docker/base-image/agent_server/credential_paths.py` for the agent-server second layer (Invariant #5; parity test). Allows `.env`/`.credentials.enc`/`.mcp.json` (the last still content-validated, #598) + `.config/gcloud/**`, `.kube/config`, `*.pem`/`*.key`/`*.crt`/`*.cert`/`*.p12`/`*.pfx`, `.ssh/id_*`; deny-list (precedence) blocks anything executed/sourced at startup (shell rc, `CLAUDE.md`/`AGENTS.md`/`.claude/**`, `.mcp.json.template`, `.ssh/authorized_keys`/`config`, `.git*`, `bin/**`) plus `..`/absolute traversal. Binary creds round-trip as base64 (`files_b64`); the `.credentials.enc` archive is a v2 `{files, files_b64}` envelope (legacy flat archives still decrypt) and export captures the **full** injected set via the agent `GET /api/credentials/list`.
@@ -406,7 +406,6 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 |--------|------|------|-------------|
 | GET | `/api/files/{file_id}` | Token (`?sig=`) | Public download: 401 bad/missing sig, 404 unknown id, 410 revoked/expired, 416 unsatisfiable range; disposition is the server's `is_inline_safe` allowlist (ent#461) — optional **one-way** `?download=1` may only force `attachment` (#2582); `X-Content-Type-Options: nosniff`, `Accept-Ranges: bytes`; per-IP rate limit; audit `file_share_download` (a ranged prefix read is audited `ranged_prefix: true` and does NOT bump `download_count`) |
 | HEAD | `/api/files/{file_id}` | Token (`?sig=`) | Same validation and same headers as GET, no body, no counter, no audit row. Accepts the same `?download=1`, because a disposition that disagrees with GET mis-plans the player that probed |
-| POST | `/api/internal/agent-files/share` | `X-Internal-Secret` | Agent-server path to mint a download URL |
 
 ### MCP Inline Email Auth (#848 — flag-gated, default OFF)
 

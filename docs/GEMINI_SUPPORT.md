@@ -214,5 +214,5 @@ agents:
 1. **Test:** Create a test agent with `local:test-gemini` template
 2. **Compare:** Run same task on Claude and Gemini agents
 3. **Optimize:** Move simple tasks to Gemini, keep complex ones on Claude
-4. **Monitor:** Track costs via `/api/observability/metrics`
+4. **Monitor:** Track costs via `GET /api/ops/costs`
 

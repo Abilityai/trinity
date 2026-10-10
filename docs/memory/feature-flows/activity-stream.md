@@ -18,9 +18,7 @@ As a platform operator, I want to track all agent activities in a unified system
 ## Entry Points
 - **Backend Service**: `src/backend/services/activity_service.py:46-107` - `track_activity()` method
 - **Backend Service**: `src/backend/services/activity_service.py:109-159` - `complete_activity()` method
-- **API Endpoints**:
-  - `GET /api/agents/{name}/activities` - Per-agent query
-  - `GET /api/activities/timeline` - Cross-agent timeline query
+- **API Endpoint**: `GET /api/activities/timeline` - Cross-agent timeline query (the per-agent `GET /api/agents/{name}/activities` had no callers and was removed in #3434)
 
 ---
 
@@ -468,66 +466,14 @@ await activity_service.track_activity(
 )
 ```
 
-### Schedule Integration (via Internal API)
+### Schedule Integration (via `execute-task`)
 
-> **Note (2026-02-11)**: The embedded scheduler (`src/backend/services/scheduler_service.py`) has been removed. Schedule activity tracking is now handled by the **Dedicated Scheduler Service** (`src/scheduler/`) which calls internal API endpoints.
+> **Note**: The embedded scheduler (`src/backend/services/scheduler_service.py`) was removed on 2026-02-11. The **Dedicated Scheduler Service** (`src/scheduler/`) makes no activity-tracking calls of its own; the former `POST /api/internal/activities/track` and `POST /api/internal/activities/{id}/complete` endpoints had no callers and were removed in #3434.
 
-**Internal API Endpoints** (used by dedicated scheduler):
-- `POST /api/internal/activities/track` - Start tracking an activity
-- `POST /api/internal/activities/{id}/complete` - Mark activity as completed/failed
-
-**Schedule Start Tracking** (dedicated scheduler calls internal API):
-```python
-# Dedicated scheduler makes HTTP call to backend
-response = await httpx.post(
-    f"{BACKEND_URL}/api/internal/activities/track",
-    json={
-        "agent_name": schedule.agent_name,
-        "activity_type": "schedule_start",
-        "user_id": schedule.owner_id,
-        "triggered_by": "schedule",  # or "manual" for manual triggers
-        "related_execution_id": execution.id,
-        "details": {
-            "schedule_id": schedule.id,
-            "schedule_name": schedule.name,
-            "cron_expression": schedule.cron_expression
-        }
-    }
-)
-activity_id = response.json()["activity_id"]
-```
-
-**Schedule Completion** (dedicated scheduler calls internal API):
-```python
-await httpx.post(
-    f"{BACKEND_URL}/api/internal/activities/{activity_id}/complete",
-    json={
-        "status": "completed",
-        "details": {
-            "context_used": task_response.metrics.context_used,
-            "context_max": task_response.metrics.context_max,
-            "cost_usd": task_response.metrics.cost_usd,
-            "tool_count": len(execution_log) if execution_log else 0
-        }
-    }
-)
-```
-
-**Schedule Failure** (dedicated scheduler calls internal API):
-```python
-await httpx.post(
-    f"{BACKEND_URL}/api/internal/activities/{activity_id}/complete",
-    json={
-        "status": "failed",
-        "error": error_msg
-    }
-)
-```
-
-**Backend Internal Router** (`src/backend/routers/internal.py`):
-- Receives activity tracking requests from scheduler
-- Calls `activity_service.track_activity()` and `activity_service.complete_activity()`
-- No external authentication (internal Docker network only)
+**Flow**:
+1. The scheduler dispatches each run with `POST /api/internal/execute-task` (`src/backend/routers/internal.py`, `X-Internal-Secret` auth), carrying `triggered_by="schedule"` (cron) or `"manual"` plus the `execution_id`.
+2. The router hands the run to `TaskExecutionService.execute_task()` (`src/backend/services/task_execution_service.py`), which creates the activity row **in-process** via `activity_service.track_activity()` — `activity_type=chat_start`, `triggered_by` as passed, `related_execution_id=execution_id`.
+3. The same service closes that activity in-process via `activity_service.complete_activity()` when the run reaches a terminal state (completed / failed), so the start and completion rows always share one writer.
 
 ### Agent Collaboration Tracking (`src/backend/routers/chat.py:194-206`)
 
@@ -552,58 +498,15 @@ collaboration_activity_id = await activity_service.track_activity(
 
 ## API Layer
 
-### Per-Agent Activity Query (`src/backend/routers/agents.py:576-599`)
+### Per-Agent Activity Query (removed)
 
-**Endpoint**: `GET /api/agents/{agent_name}/activities`
-
-**Parameters**:
-- `activity_type` (optional): Filter by type (chat_start, tool_call, etc.)
-- `activity_state` (optional): Filter by state (started, completed, failed, cancelled)
-- `limit` (default: 100): Max activities to return
-
-**Authorization**: Uses `AuthorizedAgentByName` dependency - owner, shared, or admin
-
-**Response**:
-```json
-{
-  "agent_name": "my-agent",
-  "count": 25,
-  "activities": [
-    {
-      "id": "uuid-123",
-      "agent_name": "my-agent",
-      "activity_type": "chat_start",
-      "activity_state": "completed",
-      "parent_activity_id": null,
-      "started_at": "2025-12-02T10:30:00.000Z",
-      "completed_at": "2025-12-02T10:30:05.234Z",
-      "duration_ms": 5234,
-      "user_id": 1,
-      "triggered_by": "user",
-      "related_chat_message_id": "msg-456",
-      "related_execution_id": null,
-      "details": {
-        "message_preview": "Hello, list files...",
-        "context_used": 2500,
-        "context_max": 200000,
-        "cost_usd": 0.003,
-        "tool_count": 3
-      },
-      "error": null,
-      "created_at": "2025-12-02T10:30:00.000Z"
-    }
-  ]
-}
-```
+`GET /api/agents/{agent_name}/activities` (`routers/agents.py`) had no callers and was removed in #3434. Use the cross-agent timeline below; it returns the same activity row shape, filtered to agents the caller can access.
 
 ### Cross-Agent Timeline Query
 
-Two endpoints are available:
+One endpoint serves it (the duplicate `GET /api/agents/activities/timeline` in `routers/agents.py` had no callers and was removed in #3434):
 
-**1. agents.py** (`routers/agents.py:602-634`)
-- **Endpoint**: `GET /api/agents/activities/timeline`
-
-**2. activities.py** (`routers/activities.py:15-55`)
+**activities.py** (`routers/activities.py`)
 - **Endpoint**: `GET /api/activities/timeline`
 
 **Parameters**:
@@ -941,45 +844,7 @@ sqlite3 ~/trinity-data/trinity.db "SELECT id, activity_type, parent_activity_id 
 - [ ] Context percentage calculated if present
 - [ ] Tool call events include tool_name
 
-### 4. Test Per-Agent Query API
-**Action**:
-```bash
-curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:8000/api/agents/my-agent/activities?limit=10"
-```
-
-**Expected**:
-```json
-{
-  "agent_name": "my-agent",
-  "count": 10,
-  "activities": [...]
-}
-```
-
-**Verify**:
-- [ ] Returns expected count
-- [ ] Activities sorted by created_at DESC
-- [ ] All fields populated
-- [ ] details parsed as JSON
-
-**Test Filters**:
-```bash
-# Filter by type
-curl "http://localhost:8000/api/agents/my-agent/activities?activity_type=tool_call"
-
-# Filter by state
-curl "http://localhost:8000/api/agents/my-agent/activities?activity_state=completed"
-
-# Combine filters
-curl "http://localhost:8000/api/agents/my-agent/activities?activity_type=chat_start&activity_state=completed&limit=5"
-```
-
-- [ ] Type filter works
-- [ ] State filter works
-- [ ] Limit respected
-
-### 5. Test Timeline Query API
+### 4. Test Timeline Query API
 **Action**:
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
@@ -1004,27 +869,25 @@ curl -H "Authorization: Bearer $TOKEN" \
 - [ ] Regular user only sees owned/shared agents
 - [ ] Unauthorized agent activities filtered out
 
-### 6. Test Schedule Integration
+### 5. Test Schedule Integration
 **Action**:
 - Create schedule: `POST /api/agents/{name}/schedules`
 - Trigger manually: `POST /api/agents/{name}/schedules/{id}/trigger`
 - Wait for completion
 
-**Expected**:
-- schedule_start activity created
-- schedule_start activity completed with execution details
+**Expected** (rows are written in-process by `TaskExecutionService` on `execute-task`):
+- chat_start activity created with `triggered_by` = `schedule` or `manual`
+- the same activity completed when the run reaches a terminal state
 
 **Verify**:
 ```bash
-sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_activities WHERE activity_type='schedule_start' ORDER BY created_at DESC LIMIT 5"
+sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_activities WHERE triggered_by IN ('schedule','manual') ORDER BY created_at DESC LIMIT 5"
 ```
 
-- [ ] schedule_start activity exists
+- [ ] activity exists
 - [ ] related_execution_id links to schedule_executions
-- [ ] details contains schedule_id, schedule_name, cron_expression
-- [ ] cost and tool_count in completion details
 
-### 7. Test Error Handling
+### 6. Test Error Handling
 **Action**:
 - Send chat to stopped agent (should fail quickly)
 - Check activity status
@@ -1042,10 +905,10 @@ sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_activities WHERE activity
 - Create schedule with invalid agent
 - Trigger execution
 
-- [ ] schedule_start marked as "failed"
+- [ ] the run's activity marked as "failed"
 - [ ] error field contains error message
 
-### 8. Test Agent Collaboration Tracking
+### 7. Test Agent Collaboration Tracking
 **Action**:
 - Send chat from one agent to another using X-Source-Agent header
 - Check activities for both agents
@@ -1063,7 +926,7 @@ sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_activities WHERE activity
 **Large Result Sets**:
 ```bash
 # Request more than 100 activities
-curl "http://localhost:8000/api/agents/my-agent/activities?limit=500"
+curl "http://localhost:8000/api/activities/timeline?limit=500"
 ```
 - [ ] Verify limit is respected (no more than limit returned)
 

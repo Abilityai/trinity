@@ -639,10 +639,7 @@ async def get_agent_logs_endpoint(agent_name: AuthorizedAgentByName, request: Re
 
 #### Activity Stream Endpoints
 
-| Endpoint | Line | Description |
-|----------|------|-------------|
-| `GET /api/agents/{agent_name}/activities` | :568-591 | Agent activity history. Params: `activity_type`, `activity_state`, `limit` |
-| `GET /api/agents/activities/timeline` | :594-626 | Cross-agent activity timeline. Params: `start_time`, `end_time`, `activity_types` (CSV), `limit`. Filters by user access |
+None in `routers/agents.py` — the per-agent `GET /api/agents/{agent_name}/activities` and `GET /api/agents/activities/timeline` had no callers and were removed in #3434. The cross-agent timeline is `GET /api/activities/timeline` (`routers/activities.py`); see [activity-stream.md](activity-stream.md).
 
 ### Docker Service (`src/backend/services/docker_service.py`)
 

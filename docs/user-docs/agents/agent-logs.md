@@ -47,7 +47,7 @@ docker exec trinity-vector sh -c "tail -50 /data/logs/agents-$(date -u +%F).json
 
 ### OpenTelemetry
 
-Claude Code agents export OTel metrics — cost and tokens by model, lines added and removed, sessions, active time, commits, and pull requests — to Trinity's OTel collector (on by default; `OTEL_ENABLED=0` turns it off). Read the rollup with `GET /api/observability/metrics` (and `GET /api/observability/status` for whether the collector is reachable). There is no UI panel for these metrics today.
+Claude Code agents export OTel metrics — cost and tokens by model, lines added and removed, sessions, active time, commits, and pull requests — to Trinity's OTel collector (on by default; `OTEL_ENABLED=0` turns it off). Read the rollup with `GET /api/ops/costs` (admin, or an `ops`-scope key): it returns the totals, cost per model, tokens by type, productivity counts and daily-cost-limit alerts, and reports `enabled: false` when OTel is off or `available: false` when the collector cannot be reached. There is no UI panel for these metrics today.
 
 ## For Agents
 

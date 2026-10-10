@@ -68,7 +68,6 @@ from routers.analytics import router as analytics_router  # #1107 — Agent Over
 from routers.activities import router as activities_router
 from routers.settings import router as settings_router
 from routers.systems import router as systems_router
-from routers.observability import router as observability_router
 from routers.system_agent import router as system_agent_router
 from routers.ops import router as ops_router
 from routers.public_links import router as public_links_router, set_websocket_manager as set_public_links_ws_manager
@@ -1355,7 +1354,6 @@ app.include_router(executions_router)  # EXEC-022 / Issue #18 — Unified Execut
 app.include_router(analytics_router)  # #1107 — Agent Detail Overview analytics
 app.include_router(settings_router)
 app.include_router(systems_router)
-app.include_router(observability_router)
 app.include_router(system_agent_router)
 app.include_router(ops_router)
 app.include_router(public_links_router)
@@ -1369,7 +1367,7 @@ app.include_router(audit_log_router)  # SEC-001 / #20: Platform audit log (Phase
 app.include_router(canary_router)  # CANARY-001 / #411: Invariant violations
 app.include_router(compatibility_router)  # #668: Agent compatibility validation
 app.include_router(skills_router) # Skills Management System
-app.include_router(internal_router)  # Internal agent-to-backend endpoints (no auth)
+app.include_router(internal_router)  # Internal agent-to-backend endpoints (verify_internal_secret: X-Internal-Secret, not a user principal)
 app.include_router(internal_pull_router)  # #1081 pull seams — dual auth: internal secret OR agent's own scoped MCP key
 app.include_router(tags_router)  # Agent Tags (ORG-001)
 app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)

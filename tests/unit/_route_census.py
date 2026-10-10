@@ -592,18 +592,13 @@ _PULL = "pull seam: internal secret OR the agent's own scoped key (#1081)"
 _INLINE = "internal secret + inline-auth flag (#848)"
 
 OWN_AUTH: Dict[str, Tuple[str, str]] = {
-    "routers/internal.py::agent_files_share": ("POST /api/internal/agent-files/share", _SECRET),
-    "routers/internal.py::complete_activity": ("POST /api/internal/activities/{activity_id}/complete", _SECRET),
     "routers/internal.py::execute_task_internal": ("POST /api/internal/execute-task", _SECRET),
     "routers/internal.py::internal_agent_brief_readiness": ("GET /api/internal/agents/{agent_name}/brief-readiness", _SECRET),
     "routers/internal.py::internal_agent_pre_check": ("POST /api/internal/agents/{agent_name}/pre-check", _SECRET),
-    "routers/internal.py::internal_agent_sync_health": ("GET /api/internal/agents/{agent_name}/sync-health-status", _SECRET),
-    "routers/internal.py::internal_health": ("GET /api/internal/health", _SECRET),
     "routers/internal.py::internal_next_task": ("GET /api/internal/next-task", _PULL),
     "routers/internal.py::internal_task_result": ("POST /api/internal/tasks/{execution_id}/result", _PULL),
     "routers/internal.py::log_audit_entry": ("POST /api/internal/audit", _SECRET),
     "routers/internal.py::mcp_exposed_agents": ("GET /api/internal/mcp-exposed-agents", _SECRET),
-    "routers/internal.py::track_activity": ("POST /api/internal/activities/track", _SECRET),
     "routers/internal.py::validate_execution": ("POST /api/internal/validate-execution", _SECRET),
     "routers/setup.py::get_setup_status": ("GET /api/setup/status", "unauthenticated by design (first-run status)"),
     "routers/setup.py::set_admin_password": ("POST /api/setup/admin-password", "unauthenticated by design until setup completes, then refused"),
@@ -666,7 +661,7 @@ WEBSOCKET_ROUTES = frozenset({
 
 # The exact size of the frozen baseline. Lower it in the same change that
 # removes an entry; it never goes up.
-FROZEN_BASELINE_COUNT = 359
+FROZEN_BASELINE_COUNT = 355
 
 
 def load_baseline(path: Path = BASELINE_PATH) -> Dict[str, str]:

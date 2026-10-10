@@ -637,18 +637,6 @@
       "description": "The sync-health read surfaces carry the backend's verdict (trinity-enterprise#706); real DB via db_harness, handlers called directly with the Docker-backed accessibility lookup stubbed. Shared reader db.list_sync_health_rows: config flags + sync-state row per live git-bound agent in one query, soft-deleted and sync_enabled=0 agents excluded, state None before the first poll, scoped by name, empty scope -> {}. GET /api/agents/sync-health: every pre-#706 key kept with its meaning plus state / reason / recommendation / binding / dirty_files / divergence_age_s / last_successful_push_at / freeze; a work agent diverged 26 h is red + frozen with the issue's reason string, a deployment the same age is yellow and not frozen, an agent with no git binding is unknown with the old defaults; scoped to accessible agents. GET /api/agents/{name}/git/sync-state: the raw row (new columns included) plus the verdict; no row -> the old minimal dict plus state unknown."
     },
     {
-      "file": "unit/test_ent706_internal_sync_health.py",
-      "feature": "ent#706",
-      "added": "2026-09-27",
-      "categories": [
-        "backend",
-        "unit",
-        "git-sync",
-        "scheduling"
-      ],
-      "description": "GET /api/internal/agents/{name}/sync-health-status after trinity-enterprise#706 (real DB via db_harness, handler called directly): the pre-#706 keys (agent_name, freeze_schedules_if_sync_failing, sync_failing, should_freeze, consecutive_failures) keep their names and meaning; a work agent diverged 7 ahead for 26 h with a fresh observation reports should_freeze with freeze_reason 'diverged 0 behind / 7 ahead for 26h', divergence_age_s ~26 h and work_agent; three failed polls still freeze as sync_failing with the failed-sync reason; control arm: an in-sync row does not freeze and carries no reason; an agent with no git binding is not frozen and is not a work agent."
-    },
-    {
       "file": "unit/test_1808_sync_freeze_enforcement.py",
       "feature": "#1808, ent#706",
       "added": "2026-09-27",
@@ -5512,6 +5500,17 @@
         "unit"
       ],
       "description": "Email-code sign-in policy seam: gate fail-open, web /api/auth/email/* 403 before any lookup, /api/auth/mode flag, /token never consults the gate, MCP inline / Workspace / Telegram / WhatsApp refusals, and an AST guard that every login-code caller asks the gate."
+    },
+    {
+      "file": "unit/test_3434_removed_routes.py",
+      "feature": "#3434",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "unit",
+        "api"
+      ],
+      "description": "Nine routes nothing calls stay removed: five secret-gated /api/internal routes (health, activities/track, activities/{id}/complete, agent-files/share, agents/{name}/sync-health-status), GET /api/agents/{name}/activities, GET /api/agents/activities/timeline and the observability router (GET /api/observability/{metrics,status}); checked in the AST census and in the live route table of the real app. Pins the OTel parse helpers at their new home services/ops_costs_service.py (GET /api/ops/costs)."
     }
   ]
 }
