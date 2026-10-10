@@ -173,6 +173,28 @@ def _format_rate_limit_error(metadata: "ExecutionMetadata") -> str:
     )
 
 
+# Surfaced when a result is flagged is_error but carries no reportable cause.
+# Deliberately NOT the bare "Execution error": ``headless_executor`` renders the
+# detail as f"Execution error: {…}", which would read "Execution error:
+# Execution error". Word choice is load-bearing — it must trip none of
+# is_auth_failure / _is_resume_not_found / _is_rate_limit_message. Pinned by
+# tests/unit/test_1849_ede_diagnostic_filtered.py.
+_NO_ERROR_DETAIL = "Claude Code reported no error detail"
+
+
+def _stream_error_reason(metadata: Optional["ExecutionMetadata"]) -> str:
+    """The error text the stream parser recorded for this run, else "".
+
+    #3340: Claude Code names an API error in its stream ("API Error: 400 Output
+    blocked by content filtering policy") and exits 1 with nothing on stderr.
+    The ``_NO_ERROR_DETAIL`` placeholder is not a reason.
+    """
+    message = ((metadata.error_message if metadata else "") or "").strip()
+    if not message or message.startswith(_NO_ERROR_DETAIL):
+        return ""
+    return sanitize_text(message)
+
+
 def _diagnose_exit_failure(return_code: int, metadata: Optional["ExecutionMetadata"] = None) -> str:
     """Diagnose common Claude Code exit failures when stderr is empty."""
     # Check for rate limit detected during stream parsing
@@ -195,6 +217,12 @@ def _diagnose_exit_failure(return_code: int, metadata: Optional["ExecutionMetada
             f"The agent's configured model may not be available with the current subscription. "
             f"Try using a different model (sonnet, opus) or check subscription settings."
         )
+
+    # #3340: the stream said why it failed — report that, not a guess from the
+    # environment's shape. The callers run their auth checks on the result.
+    stream_error = _stream_error_reason(metadata)
+    if stream_error:
+        return stream_error
 
     # Check for missing credentials
     has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))

@@ -5524,6 +5524,17 @@
         "unit"
       ],
       "description": "Email-code sign-in policy seam: gate fail-open, web /api/auth/email/* 403 before any lookup, /api/auth/mode flag, /token never consults the gate, MCP inline / Workspace / Telegram / WhatsApp refusals, and an AST guard that every login-code caller asks the gate."
+    },
+    {
+      "file": "unit/test_3340_stream_api_error_detail.py",
+      "feature": "#3340",
+      "added": "2026-10-09",
+      "categories": [
+        "agent-server",
+        "execution",
+        "unit"
+      ],
+      "description": "#3340 — an API error the stream parser recorded (content-filter refusal, exit 1, zero tokens, empty stderr) is the failure detail on the headless finalize path (zero-token 503 and the generic 500) and on the chat path, and outranks unrelated stderr; a run where neither stream nor stderr said why keeps the OOM/timeout guess verbatim; the no-detail placeholder is not a reason; billing keeps its wording; stream/stderr auth signals still answer through the auth branch and auth-patterned stream text never reaches the new wording; the backend text classifier does not read the new detail as auth. No Docker, no network."
     }
   ]
 }
