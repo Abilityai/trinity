@@ -132,16 +132,25 @@ class QueueMentionOperations:
             row = conn.execute(select(*self._COLS).where(mine)).mappings().first()
         return _row(row) if row else None
 
-    def list_by_request_prefix(self, prefix: str, limit: int = 2000) -> List[Dict]:
+    def list_by_request_prefix(self, prefix: str, limit: int = 2000,
+                               agent_names: Optional[List[str]] = None) -> List[Dict]:
         """Every tag whose idempotency key starts with `prefix` — one
-        conversation's tags, for the tagger's delivered/read marks. Served by
-        `idx_operator_queue_type`: only tag rows are scanned."""
+        conversation's tags, for the tagger's delivered/read marks. With
+        `agent_names` (the conversation's agents) the read is served by the
+        `(agent_name, request_id)` unique index; without, by
+        `idx_operator_queue_type` (only tag rows are scanned)."""
         if not prefix:
             return []
         esc = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        conds = [operator_queue.c.type == MENTION_TYPE,
+                 operator_queue.c.request_id.like(f"{esc}%", escape="\\")]
+        if agent_names is not None:
+            names = sorted({a for a in agent_names if a})
+            if not names:
+                return []
+            conds.append(operator_queue.c.agent_name.in_(names))
         stmt = (select(*self._COLS)
-                .where(and_(operator_queue.c.type == MENTION_TYPE,
-                            operator_queue.c.request_id.like(f"{esc}%", escape="\\")))
+                .where(and_(*conds))
                 .order_by(operator_queue.c.created_at.asc(), operator_queue.c.id.asc())
                 .limit(limit))
         with get_engine().connect() as conn:

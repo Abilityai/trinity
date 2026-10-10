@@ -497,7 +497,7 @@ def test_a_chat_tag_lands_and_the_tagger_sees_it_on_their_message(mention_db):
     service.deliver_chat_tags(AGENT, "sess-9", "msg-9", tags)       # a retried turn
     assert len(_rows(mention_db)) == 1
     messages = [{"id": "msg-9", "role": "user"}, {"id": "msg-10", "role": "assistant"}]
-    service._attach_own_tags(messages, "sess-9")
+    service._attach_own_tags(messages, "sess-9", AGENT)
     assert messages[0]["tags"] == [{"label": "Bob Baker", "state": "delivered", "read_at": None}]
     assert messages[1]["tags"] is None
 
@@ -527,3 +527,21 @@ def test_the_inbox_door_lists_opens_and_reads_only_the_callers_own(mention_db, q
         door.read_mention(listed[0].id, principal=_portal(BOB, is_person=False))
     assert not_person.value.status_code == 403
     assert door.read_mention(listed[0].id, principal=_portal(BOB)).state == "read"
+
+
+def test_a_read_tag_is_swept_by_retention_and_an_unread_one_is_kept(mention_db, quiet_room):
+    """A read tag is settled history (pruned with the ledger's terminal rows);
+    an unread one is never swept, like a pending ask."""
+    from sqlalchemy import text
+    from database import db
+    from services import person_mention_service as pms
+    room = _room()
+    _post(room["id"], "@Bob Baker @Carol Chen", tags=[BOB, CAROL])
+    bob_item = pms.list_for_reader(_reader(BOB))[0]
+    pms.mark_read(_reader(BOB), bob_item.id)
+    with mention_db.begin() as conn:
+        conn.execute(text("UPDATE operator_queue SET created_at = '2020-01-01T00:00:00Z' WHERE type = 'mention'"))
+    assert db.prune_operator_queue_terminal_items(30, 30) == 1
+    left = _rows(mention_db)
+    assert [r["addressed_to_email"] for r in left] == [CAROL]
+    assert left[0]["status"] == "delivered"

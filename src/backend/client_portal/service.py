@@ -3681,7 +3681,7 @@ def deliver_chat_tags(agent_name: str, session_id: str | None, message_id: str |
                        exc_info=True)
 
 
-def _attach_own_tags(messages: list, session_id: str | None) -> None:
+def _attach_own_tags(messages: list, session_id: str | None, agent_name: str | None = None) -> None:
     """The tagger's marks on their own messages: delivered, then read."""
     for m in messages:
         m["tags"] = None
@@ -3692,7 +3692,8 @@ def _attach_own_tags(messages: list, session_id: str | None) -> None:
         return
     try:
         from services import person_mention_service as pms
-        marks = pms.tags_by_message("chat", session_id, mine)
+        marks = pms.tags_by_message("chat", session_id, mine,
+                                    agent_names=[agent_name] if agent_name else None)
     except Exception:  # noqa: BLE001 — a courtesy; the thread must load
         logger.warning("portal: could not read tag marks for %s", session_id, exc_info=True)
         return
@@ -4769,7 +4770,7 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     # trinity-enterprise#631: on the caller's own messages, who they tagged and
     # whether it was read. A thread is only ever its owner's, so these marks
     # are always the reader's own.
-    _attach_own_tags(messages, session_id)
+    _attach_own_tags(messages, session_id, agent_name)
     # ent#286: a client that reloaded mid-turn has lost the execution id it was
     # streaming. It arrives here, on the fetch the client already makes on
     # mount, so reattaching costs no extra round trip.

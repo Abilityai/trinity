@@ -3845,8 +3845,8 @@ class DatabaseManager:
     def mark_person_mention_read(self, item_id, email, now):
         return self._queue_mention_ops.mark_read(item_id, email, now)
 
-    def list_person_mentions_by_prefix(self, prefix, limit=2000):
-        return self._queue_mention_ops.list_by_request_prefix(prefix, limit)
+    def list_person_mentions_by_prefix(self, prefix, limit=2000, agent_names=None):
+        return self._queue_mention_ops.list_by_request_prefix(prefix, limit, agent_names)
 
     # =========================================================================
     # Operator Queue (delegated to db/operator_queue.py) - OPS-001

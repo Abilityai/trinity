@@ -821,8 +821,11 @@ def _deliver_tags(room_id: str, room: dict, participants: list[dict], message_id
 
 def tags_by_message(room_id: str, message_ids: Optional[list[str]] = None,
                     tagged_by: Optional[str] = None) -> dict[str, list[dict]]:
+    # Every agent the room has had (left ones too): a tag's row is anchored on
+    # the room's first live agent AT THE TIME, so the index read names them all.
+    agents = [p["identity"] for p in db.list_participants(room_id) if p.get("kind") == "agent"]
     return person_mention_service.tags_by_message("room", room_id, message_ids,
-                                                  tagged_by=tagged_by)
+                                                  tagged_by=tagged_by, agent_names=agents)
 
 
 def _own_tags(current_user, room_id: str) -> dict[str, list[dict]]:

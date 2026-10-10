@@ -162,7 +162,10 @@ def _operator_queue_prune_predicate(
     responded_cutoff = iso_cutoff(hours=resp_days * 24)
     return or_(
         and_(
-            operator_queue.c.status.in_(("acknowledged", "cancelled", "expired")),
+            # trinity-enterprise#631: a person tag that was READ is settled
+            # history like an acknowledged alert; an unread one (`delivered`)
+            # is never swept, like `pending`.
+            operator_queue.c.status.in_(("acknowledged", "cancelled", "expired", "read")),
             operator_queue.c.created_at < terminal_cutoff,
         ),
         and_(
@@ -1732,7 +1735,8 @@ class OperatorQueueOperations:
         still ``pending`` in the agent file). By retention age those rows are long
         settled, so they can be removed:
 
-        - ``acknowledged`` / ``cancelled`` / ``expired`` older than ``retention_days``;
+        - ``acknowledged`` / ``cancelled`` / ``expired`` — and a READ person tag
+          (``read``, trinity-enterprise#631) — older than ``retention_days``;
         - ``responded`` only older than the more generous ``responded_retention_days``
           — the write-back loop still has to deliver the operator's answer to the
           agent file, and a stopped agent picks it up on restart, so a young

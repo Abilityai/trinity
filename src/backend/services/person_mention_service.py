@@ -265,16 +265,19 @@ def deliver(conv: Conversation, message_id: str, seq: Optional[int],
 
 
 def tags_by_message(kind: str, conversation_id: str, message_ids: Optional[Iterable[str]] = None,
-                    *, tagged_by: Optional[str] = None) -> Dict[str, List[Dict]]:
+                    *, tagged_by: Optional[str] = None,
+                    agent_names: Optional[List[str]] = None) -> Dict[str, List[Dict]]:
     """The tagger's marks: message id → `[{label, state, read_at}]`, one read
     for the whole conversation. `message_ids` narrows to those messages;
     `tagged_by` (a username) to one tagger's tags — a read receipt is the
-    sender's, never the room's."""
+    sender's, never the room's. `agent_names` (every agent the conversation
+    has had) lets the read use the ledger's `(agent_name, request_id)` index."""
     wanted = None if message_ids is None else {m for m in message_ids if m}
     if wanted is not None and not wanted:
         return {}
     out: Dict[str, List[Dict]] = {}
-    for row in db.list_person_mentions_by_prefix(conversation_prefix(kind, conversation_id)):
+    for row in db.list_person_mentions_by_prefix(conversation_prefix(kind, conversation_id),
+                                                 agent_names=agent_names):
         ctx = ((row.get("context") or {}).get("mention") or {})
         mid = ctx.get("message_id")
         if wanted is not None and mid not in wanted:
