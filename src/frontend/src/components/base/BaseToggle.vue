@@ -10,7 +10,7 @@
     type="button"
     role="switch"
     :aria-checked="String(!!modelValue)"
-    :aria-label="label ? undefined : ariaLabel"
+    :aria-label="ariaLabel || (label ? undefined : ariaLabel)"
     :disabled="disabled"
     class="group inline-flex items-center gap-2.5 focus-visible:outline-none disabled:opacity-45 disabled:cursor-not-allowed"
     @click="$emit('update:modelValue', !modelValue)"
@@ -47,7 +47,9 @@ defineProps({
     type: String,
     default: '',
   },
-  // Required for screen readers when no visible label is rendered.
+  // Required for screen readers when no visible label is rendered. Beside a
+  // visible label it names the switch when the label alone is ambiguous (one
+  // per card); it must contain the label's words (WCAG 2.5.3, label in name).
   ariaLabel: {
     type: String,
     default: '',

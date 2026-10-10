@@ -8,7 +8,8 @@ it is returned exactly once — under concurrent inserts, endings and platform
 alert priority changes.
 
 Two writes would move a row's sort key mid-walk, and each has its fix:
-  * pending → ended (five writers). The walk sorts "as of" a watermark
+  * pending → ended (five writers, plus an agent's replace and the expire-now
+    beside it, #3247 — K5). The walk sorts "as of" a watermark
     `W = start − 300 s`: a row ended after `W` keeps its pending-section key
     for the whole walk. The bound: a write must commit within the margin of
     the timestamp it stamped; a breach is logged at error (`_note_commit_lag`).
@@ -386,6 +387,39 @@ def test_k5_a_commit_past_the_margin_is_logged_at_error(qdb, monkeypatch, caplog
     errors = [r for r in caplog.records if r.levelno == logging.ERROR and "ent#815" in r.getMessage()]
     assert errors, [r.getMessage() for r in caplog.records]
     assert "cursor walks" in errors[0].getMessage()
+
+
+@pytest.mark.parametrize("past_deadline, ended_as", [(False, "cancelled"), (True, "expired")])
+def test_k5_a_replace_that_commits_past_the_margin_is_logged_at_error(
+        qdb, monkeypatch, caplog, past_deadline, ended_as):
+    """K5, the sixth and seventh writers (#3247): an agent's replace ends its
+    predecessor by compare-and-set, and a predecessor already past its deadline
+    is expired in that same transaction. Both stamp `disposed_at`, so both are
+    held to the margin like the five above."""
+    a = "k5-replace"
+    ops = type(qdb._operator_queue_ops)
+    g = ops.create_native_item.__globals__
+    caplog.set_level(logging.ERROR)
+
+    def replace(rid, stamp_age):
+        old = qdb.create_native_operator_queue_item(
+            a, {"id": f"old-{rid}", "type": "approval", "title": "t", "question": "q"},
+            max_pending=None, channel="mcp", raised_by="agent", to_role=None,
+            resolved_to=None, proposal=None, supersedes_expired=None)["row"]
+        if past_deadline:
+            _update(old["id"], expires_at=_ago(3600))
+        monkeypatch.setitem(g, "utc_now_iso", lambda: _ago(stamp_age))
+        out = qdb.create_native_operator_queue_item(
+            a, {"id": f"new-{rid}", "type": "approval", "title": "t", "question": "q"},
+            max_pending=None, channel="mcp", raised_by="agent", to_role=None,
+            resolved_to=None, proposal=None, supersedes_expired=None, replaces=old["id"])
+        monkeypatch.setitem(g, "utc_now_iso", utc_now_iso)
+        assert qdb.get_operator_queue_item(old["id"])["status"] == ended_as, out
+        return [r for r in caplog.records if r.levelno == logging.ERROR and "ent#815" in r.getMessage()]
+
+    from utils.helpers import utc_now_iso
+    assert not replace("prompt", 10)
+    assert replace("late", 301)
 
 
 def _valid_token(qdb, **params):

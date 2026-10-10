@@ -1757,6 +1757,8 @@ TABLES = {
             supersedes_expired TEXT,
             subject TEXT,
             last_seen_at TEXT,
+            replaces TEXT,
+            replaced_by TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,

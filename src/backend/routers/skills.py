@@ -289,6 +289,9 @@ async def list_skills(current_user: User = Depends(get_current_user)):
             # #672 lifecycle — named here for the same reason.
             deprecated=bool(s.get("deprecated")),
             superseded_by=s.get("superseded_by"),
+            # trinity-enterprise#753/#754: the author's `approval` declaration —
+            # declared on SkillInfo but never named here, so it was always null.
+            approval=s.get("approval"),
         )
         for s in skills
     ]

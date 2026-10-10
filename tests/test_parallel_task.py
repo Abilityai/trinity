@@ -506,9 +506,12 @@ class TestAsyncModeExecution:
 
         execution = matching[0]
         assert execution["agent_name"] == created_agent["name"]
-        # Status should be "running" or "success" (if task completed quickly)
-        assert execution["status"] in ["running", "success", "failed"], \
-            f"Expected status running/success/failed, got {execution['status']}"
+        # "queued" is the row's legitimate first state (create → QUEUED →
+        # RUNNING): an async task read one second after it was accepted may
+        # not have been claimed yet. Then "running", or already terminal if
+        # the task completed quickly.
+        assert execution["status"] in ["queued", "running", "success", "failed"], \
+            f"Expected status queued/running/success/failed, got {execution['status']}"
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
@@ -555,7 +558,7 @@ class TestAsyncModeExecution:
         ])
         assert execution["id"] == execution_id
         assert execution["agent_name"] == created_agent["name"]
-        assert execution["status"] in ["running", "success", "failed"]
+        assert execution["status"] in ["queued", "running", "success", "failed"]
 
     @pytest.mark.slow
     @pytest.mark.requires_agent

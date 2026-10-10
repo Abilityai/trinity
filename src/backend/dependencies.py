@@ -1162,9 +1162,11 @@ PERSON_SCOPES = frozenset({None, "user"})
 def is_person_principal(current_user: User) -> bool:
     """Is this caller a PERSON — the only author an ask's ending may record?
 
-    The endings ledger records `disposed_by` as `person`, `timeout` or — for a
-    platform alert the platform itself ended (#3130/#3246) — `platform`; only
-    `person` is a principal (trinity-enterprise#611). An agent-scoped key resolves to its OWNER
+    The endings ledger records `disposed_by` as `person`, `timeout`, — for a
+    platform alert the platform itself ended (#3130/#3246) — `platform`, or
+    `agent` (#3247: an agent replacing its OWN pending ask, the one ending an
+    agent may author); only `person` is a principal (trinity-enterprise#611).
+    This gate decides who may record `person`. An agent-scoped key resolves to its OWNER
     carrying the owner's role, so before this an agent could answer or cancel any
     ask its owner could reach — its own approval included — and the row recorded
     the owner. Recording that as `person` would make the ledger lie.
@@ -1852,6 +1854,14 @@ _CAPABILITY_REFUSALS = {
         "ephemeral helper does not). Even with it, an agent reaches only agents "
         "its owner owns, deletes only agents it spawned, and cannot change its "
         "own read-only mode or guardrails." + _ask_for_it("agents.manage"),
+    ),
+    "projects.manage": (
+        "project_management_not_permitted",
+        "This agent does not hold the project-management permission, which creating "
+        "a Workspace project on its owner's behalf, or importing one of its own "
+        "folder projects, requires. Working on a project it is already on needs no "
+        "grant; adding people or changing who can see a project is never granted."
+        + _ask_for_it("projects.manage"),
     ),
 }
 

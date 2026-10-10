@@ -124,10 +124,10 @@ Shared primitives are the unit of consistency: **compose them, never re-implemen
 |---|---|---|
 | BaseButton | `components/base/BaseButton.vue` | `ConfirmDialog.vue` actions · TemplateRegistryPanel Save/Reset |
 | BaseInput | `components/base/BaseInput.vue` | TemplateRegistryPanel registry URL |
-| BaseSelect | `components/base/BaseSelect.vue` | `ResourceModal.vue` memory/CPU (`field`) · `PortalConversation.vue` model picker (`ghost`, #2662) |
+| BaseSelect | `components/base/BaseSelect.vue` | `ResourceModal.vue` memory/CPU (`field`) · `PortalConversation.vue` model picker (`ghost`, #2662) · `SkillCard.vue` approver picker (`field`, `size="sm"`, trinity-enterprise#754) |
 | BaseToggle | `components/base/BaseToggle.vue` | TemplateRegistryPanel enable switch |
 | BaseTextarea | `components/base/BaseTextarea.vue` | `SystemInstallPanel.vue` manifest editor (mono) |
-| BaseBadge | `components/base/BaseBadge.vue` | TemplateRegistryPanel status + Default chips |
+| BaseBadge | `components/base/BaseBadge.vue` | TemplateRegistryPanel status + Default chips · `SkillCard.vue` author-mode chip (`size="sm"`, trinity-enterprise#754) |
 | BaseCard | `components/base/BaseCard.vue` | `CredentialSetupChecklist.vue` surface |
 
 The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16` because the config extends the opacity scale with `16` — before #2122 those classes silently compiled to **nothing** (16 is not in Tailwind's default scale), so the dark chips that used them shipped without a background. The behavioral/state primitives were already shipped and keep their homes: `ConfirmDialog.vue`, `OverflowTabs.vue`, `LoadFailed.vue`/`InlineError.vue`, `ScanlineReveal.vue`.
@@ -166,6 +166,8 @@ Two variants, both native `<select>` under the hood — keyboard operation, the 
 
 **`variant="field"` (default).** Same field recipe as BaseInput. `appearance: none`, custom 14px chevron absolutely positioned right 10px (tertiary ink, pointer-events none), padding-right 32px so text never collides. Same focus/error treatment.
 
+**`size` (trinity-enterprise#754), on `field` only.** `md` (default) is the form field above. `sm` is BaseButton sm's box: 12.5 ink, padding 4×10, and ghost's 12px chevron at right 8px with a 28px gutter — **28.8px** tall in Chromium against `md`'s 38.3px. It is for a select inside a card row beside sm buttons and a toggle: the Skills card's approver picker sits in a 40px row, where `md` filled the row edge to edge and `ghost` (44px) overflowed it. Disabled, it keeps its border at .45, so it still reads as a control. Both sizes come from one builder in `fieldClasses.js` (`FIELD_CLASS` / `FIELD_SM_CLASS`), so they differ in the box only, and `FIELD_CLASS` — which BaseInput and BaseTextarea wear — is unchanged. `ghost` takes no size: it is the composer's 44px box by definition. Guarded by `tests/unit/baseSelectSize.spec.js`.
+
 **`variant="ghost"` (#2662).** The same control wearing chat chrome instead of form chrome: no border, no fill, **content-width** (no `w-full`), `h-11` so it is the same 44px box as the icon buttons it sits beside, 13.5 ink like every sibling recipe, 12px chevron at right 8px with a 28px gutter. Hover tints the **ground only** (`gray-100` / dark `gray-750`, the chrome shade — a `gray-800` tint is invisible on the `gray-800` composer shell). It carries a 1px `border` with **no colour in the base string** — the width is reserved so the focus border costs no layout shift, and which colour it takes is the valid/invalid arms' business, exactly as on `field`. Resting-transparent lives on the valid arm; the disabled hover reset is spelled in **both** theme arms. Both of those are cascade fixes, not style: with `border-transparent` in the base string a ghost select carrying an `error` rendered with no danger border, and with only the unvariated `disabled:hover:bg-transparent` a disabled one still lit up under the cursor in dark mode — see the ordering rule below. Live at `PortalConversation.vue`'s composer control row.
 
 **Open-state chevron (#2662, `ghost` only).** The chevron points **up while the picker is open** and animates the flip over 150ms, held still under `prefers-reduced-motion`. This is the chevron idiom the rest of the app already follows — `ChatHistoryDropdown`, `OverflowTabs`, `InfoPanel`, and the disclosure rows in `LoopsPanel` / `TasksPanel` / `PortalAgentDetails` / `PortalDeliverables` / `ChannelDisclosure` all flip on open — and selects were the one control excluded from it, because all nine of those own their open state in JS while a **native** `<select>`'s picker is drawn by the platform and reports nothing to the page. `:open` is the only hook that exists for it (Baseline newly-available 2026-05: Chrome 133, Firefox 136, Safari 26.5); on an older engine the chevron simply stays static, so nothing depends on it. The rule is a **sibling** selector on the select (`[&:open~svg]:rotate-180`), not `:has()` on the wrapper, because the chevron is the select's next sibling — so no group class is needed on the parent. `~` is the GENERAL sibling combinator, so the precondition is that the svg FOLLOWS the select as a sibling, not that it is adjacent to it: an element inserted between the two still matches (`select ~ svg` does, `select + svg` does not — measured in Chrome 151). The two edits that do kill it silently are wrapping the svg in an element and moving it above the select. It is resolved in the one `recipe` computed (`flip`), **not** on the shared `<select>`: #2662 is a Workspace composer bug and `field` is what Settings and `ResourceModal` render, so `field` keeps a byte-identical class string and a static chevron. Bringing every select into the idiom is the right end state, but it changes surfaces this issue does not own and belongs in its own issue. Guarded by `tests/unit/baseSelectChevron.spec.js`, which strips comments before matching, pins the sibling adjacency, and fails if the flip is widened onto the shared element.
@@ -174,7 +176,7 @@ Both recipes live in `base/fieldClasses.js` (`FIELD_CLASS` / `FIELD_GHOST_CLASS`
 
 **Ordering rule for every field recipe (#2662).** Never let two utilities of the same CSS property sit in one class string and rely on which Tailwind emits last — the class attribute's order is not the stylesheet's order, and the stylesheet's order is a per-plugin implementation detail. State-dependent colour goes on **mutually exclusive arms** (base string carries the width, arms carry the colour), and a `dark:`-variant utility needs its state resets spelled in the dark arm too, because `dark:hover:bg-*` compiles to `:hover:is(.dark *)` and TIES an unvariated `disabled:hover:*` on specificity while being emitted later. Both mistakes shipped on this variant and both were green under `npm run test:unit`, `check:tokens` and the raw-colour ratchet: a class-string assertion is structurally blind to the cascade. `tests/unit/portalComposerAlignment.spec.js` pins the arrangement (colour on the arms, every dark hover tint paired with a dark disabled reset); the cascade itself is only checkable by reading `getComputedStyle` off a live render, in both themes.
 
-- **Do:** reuse the shared select for every dropdown; pick `ghost` when the select is a preference beside content, `field` when it is a field in a form.
+- **Do:** reuse the shared select for every dropdown; pick `ghost` when the select is a preference beside content, `field` when it is a field in a form, and `field` with `size="sm"` when it sits in a card row beside sm buttons.
 - **Don't:** ship a per-view custom dropdown when a select does the job — including a "just borderless" one in chat chrome, which is what `ghost` exists to absorb.
 - **Note:** `ghost` here is gray-inked chrome; `BaseButton`'s `ghost` is accent-inked. Same word, two recipes — see the open naming question in #2662.
 
@@ -182,6 +184,7 @@ Both recipes live in `base/fieldClasses.js` (`FIELD_CLASS` / `FIELD_GHOST_CLASS`
 
 **Recipe:** 36×20 pill track; 16px white knob inset 2px, travels left 2→18; track border-strong when off, action-primary accent when on; 150ms ease; label 13.5 alongside.
 **Rules:** toggles are for **instant-apply binary settings**. Keyboard: focusable, Space toggles, visible focus ring.
+When the same visible label repeats (one switch per card), pass `aria-label` to name the item; it overrides the label for assistive tech and must contain the label's words (WCAG 2.5.3, label in name), e.g. "Requires approval for /daily-report".
 
 - **Do:** "Schedule enabled" — flips immediately, state is the feedback.
 - **Don't:** use a toggle for something that requires a Save button — that's a checkbox in a form.
@@ -200,6 +203,7 @@ Textareas are a primitive, not a styled `<textarea>` in place (design session, 2
 
 Driven directly by the token families — the badge variant *is* the token family name.
 **Recipe:** pill (radius full), 11.5/550, letter-spacing .01em, padding 2.5×9, `white-space: nowrap`; optional 6px status dot in `currentColor`.
+**Sizes:** `md` (default) — the recipe above · `sm` (trinity-enterprise#754) — 11/550, padding 1.5×7, 4px icon gap: the 11px step of the type scale, for a card's small fact chip (the Skills card's author-mode chip). One fact per badge at either size. Guarded by `tests/unit/baseBadgeSize.spec.js`.
 
 | Theme | Ground | Text |
 |---|---|---|

@@ -449,6 +449,8 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   link_to_project: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
   get_steward_digest: { kind: "none", why: "the calling agent's own stewarded projects (ent#661 v3)" },
   set_project_health: { kind: "none", why: "a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
+  create_project: { kind: "none", why: "creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
+  import_project: { kind: "none", why: "a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },
   // --- assignments.ts ---
   get_agent_assignments: { kind: "in-tool", how: ASSIGNMENTS_SELF },
   // --- connector.ts (connector / anonymous tiers) ---

@@ -59,6 +59,18 @@ def _insert_queue_item(api_client: TrinityApiClient, **overrides) -> dict:
 # Authentication Tests
 # ============================================================================
 
+def _a_valid_decision(item: dict, fallback: str) -> str:
+    """A decision the server will accept for THIS item.
+
+    An approval that carries its own `options` only accepts one of them (422
+    `response_not_an_offered_option` otherwise), and these tests answer
+    whatever happens to be pending on the target — so a hardcoded "approve"
+    fails as soon as the first pending item is an approval with custom options.
+    """
+    options = item.get("options") or []
+    return options[0] if options else fallback
+
+
 class TestOperatorQueueAuthentication:
     """Tests for operator queue endpoint authentication requirements."""
 
@@ -320,15 +332,16 @@ class TestRespondToQueueItem:
             pytest.skip("No pending queue items available for testing")
 
         item_id = items[0]["id"]
+        decision = _a_valid_decision(items[0], "approve")
         response = api_client.post(
             f"/api/operator-queue/{item_id}/respond",
-            json={"response": "approve", "response_text": "Looks good"}
+            json={"response": decision, "response_text": "Looks good"}
         )
         assert_status(response, 200)
         data = response.json()
         assert data["id"] == item_id
         assert data["status"] == "responded"
-        assert data["response"] == "approve"
+        assert data["response"] == decision
         assert data["response_text"] == "Looks good"
         assert data["responded_at"] is not None
         assert data["responded_by_email"] is not None
@@ -361,7 +374,7 @@ class TestRespondToQueueItem:
         response = api_client.post(
             f"/api/operator-queue/{item_id}/respond",
             json={
-                "response": "reject",
+                "response": _a_valid_decision(items[0], "reject"),
                 "response_text": "Not ready yet, needs more testing"
             }
         )
