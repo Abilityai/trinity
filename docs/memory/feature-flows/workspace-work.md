@@ -177,6 +177,16 @@ job and how it ended; it never sends.
 every reattached turn — Stop was dead after any reload (review E3). It sets it
 now and clears it with the turn, pinned by a source guard.
 
+### One clock for one turn (#3431)
+
+The chat card's clock used to be a local counter reset by `reattach`/`deliver`,
+so rejoining a running turn read "Working 0s" while the Work tab showed the
+same execution's real age. The card now reads `liveElapsedSeconds` off the
+feed's row (advanced from `fetchedAt` by the same 1 s tick), exactly like the
+Work tab and Rooms; the local counter survives only as the pending
+placeholder's clock, for the window before the feed has read the turn, and
+`clockRestartsAt` still resets it on a queued pickup.
+
 ## Doors and disclosure
 
 - Platform-authenticated only, twice: the route 404s a portal token before any
