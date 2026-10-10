@@ -411,7 +411,13 @@ export function parseRateLimitedRun(
     } else if (d && typeof d === "object") {
       const e = (d as { error?: unknown }).error;
       if (typeof e === "string") error = e;
-      switched = Boolean((d as { auto_switch?: unknown }).auto_switch);
+      // #3470's exhausted-walk 429 carries `auto_switch: walk.summary()` — a
+      // non-empty dict whose `switched` is false — so the key's presence alone
+      // does not mean a switch happened. Read `switched` when the body says it;
+      // fall back to presence only for bodies that predate the key.
+      const autoSwitch = (d as { auto_switch?: unknown }).auto_switch;
+      const switchedFlag = (autoSwitch as { switched?: unknown } | null | undefined)?.switched;
+      switched = typeof switchedFlag === "boolean" ? switchedFlag : Boolean(autoSwitch);
     }
   } catch {
     // not JSON (a proxy's 429): nothing to quote
