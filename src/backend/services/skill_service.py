@@ -219,15 +219,24 @@ def _read_last_fleet_reinject() -> Optional[Dict[str, Any]]:
 
     Status must never 500 over a malformed blob, and a non-dict value is
     treated as absent rather than passed on for a projection to choke on.
+    "Malformed" includes a parseable dict whose fields have the wrong TYPE:
+    the open status route projects this through `FleetReinjectSummary` as its
+    `response_model`, so a `null`/string count would fail response validation
+    and 500 the route every agent's Skills tab reads. The blob is checked
+    against that same model here, once, for both consumers.
     """
     try:
         from services.skills_sync_service import FLEET_LAST_RUN_KEY
+        from models import FleetReinjectSummary
 
         raw = db.get_setting_value(FLEET_LAST_RUN_KEY, None)
         report = json.loads(raw) if raw else None
+        if not isinstance(report, dict):
+            return None
+        FleetReinjectSummary.model_validate(report)
     except Exception:  # noqa: BLE001
         return None
-    return report if isinstance(report, dict) else None
+    return report
 
 
 class AmbiguousSkillSource(Exception):
@@ -270,7 +279,10 @@ def apply_skill_source(
     Matching uses `_same_skills_repo`, so the scheme-less spelling the bundled
     default is seeded with matches its normalized form (#2763). A concurrent
     apply that inserts the same (url, ref) first makes our insert lose at the
-    DB constraint; that is folded into an update of the row it created.
+    DB constraint; that is folded into an update of the row it created. A
+    concurrent DELETE of the matched row between our read and our update makes
+    the update answer None; that re-resolves (and so re-creates the declared
+    source) rather than reporting `updated` over a row that no longer exists.
     """
     from db.skill_sources import DuplicateSkillSource
 
@@ -282,37 +294,56 @@ def apply_skill_source(
             if _same_skills_repo(strip_url_credentials(s.url or ""), url)
         ]
 
-    def _update(existing) -> Tuple[str, Any]:
+    def _update(existing) -> Optional[Tuple[str, Any]]:
         changed = {k: v for k, v in named.items() if getattr(existing, k) != v}
         if not changed:
             return "unchanged", existing
-        return "updated", db.update_skill_source(existing.id, **changed)
+        updated = db.update_skill_source(existing.id, **changed)
+        # None: the row was deleted between the match and the update (another
+        # admin's DELETE). Reporting `updated` with no row would be a lie the
+        # router then 500s on; the caller re-resolves instead.
+        return None if updated is None else ("updated", updated)
 
-    matches = _matches()
-    if len(matches) > 1:
-        raise AmbiguousSkillSource(sorted(s.id for s in matches))
-    if matches:
-        return _update(matches[0])
-
-    try:
-        created = db.create_skill_source(
-            name=named.get("name") or _default_source_name(url),
-            url=url,
-            ref=named.get("ref", "main"),
-            ref_type=named.get("ref_type", "branch"),
-            enabled=named.get("enabled", True),
-            priority=named.get("priority"),
-            is_default=False,
-            created_by=created_by,
-        )
-        return "created", created
-    except DuplicateSkillSource:
-        matches = _matches()
-        if not matches:
-            raise
+    def _resolve(matches) -> Optional[Tuple[str, Any]]:
         if len(matches) > 1:
             raise AmbiguousSkillSource(sorted(s.id for s in matches))
         return _update(matches[0])
+
+    # Bounded: each retry needs a concurrent writer to have changed the rows
+    # between two of our statements, so a second pass practically always
+    # settles; a third failure surfaces as the constraint error it is.
+    for _ in range(3):
+        matches = _matches()
+        if matches:
+            outcome = _resolve(matches)
+            if outcome is not None:
+                return outcome
+            continue  # matched row vanished — re-resolve (likely now: create)
+
+        try:
+            created = db.create_skill_source(
+                name=named.get("name") or _default_source_name(url),
+                url=url,
+                ref=named.get("ref", "main"),
+                ref_type=named.get("ref_type", "branch"),
+                enabled=named.get("enabled", True),
+                priority=named.get("priority"),
+                is_default=False,
+                created_by=created_by,
+            )
+            return "created", created
+        except DuplicateSkillSource:
+            # A concurrent apply inserted the same (url, ref) first: fold
+            # into an update of the row it created.
+            matches = _matches()
+            if not matches:
+                raise
+            outcome = _resolve(matches)
+            if outcome is not None:
+                return outcome
+    raise DuplicateSkillSource(
+        "the source changed concurrently while it was being applied; retry"
+    )
 
 
 def _same_skills_repo(stored_url: str, normalized_url: str) -> bool:

@@ -389,3 +389,64 @@ def test_router_mcp_header_points_at_the_source_tools():
     for tool in ("list_skill_sources", "register_skill_source", "update_skill_source",
                  "delete_skill_source", "sync_skill_source", "sync_skill_library"):
         assert tool in first, tool
+
+
+# =============================================================================
+# Review fixes — a concurrent delete, and a type-malformed re-inject report
+# =============================================================================
+
+class TestApplyRacesAConcurrentDelete:
+    def test_row_deleted_between_match_and_update_is_recreated_not_a_500(
+        self, monkeypatch, facade, sources_ops
+    ):
+        """The matched row vanishes (another admin's DELETE) before the update
+        lands: `update_source` answers None. That must not surface as a 500 off
+        `source.id`, nor as `updated` with a null source — the declared source is
+        simply absent now, so the apply creates it."""
+        existing = sources_ops.create_source(name="a", url=REPO, ref="main")
+        real_update = facade.update_skill_source
+        calls = {"n": 0}
+
+        def _racing_update(source_id, **fields):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                sources_ops.delete_source(source_id)  # the concurrent DELETE
+            return real_update(source_id, **fields)
+
+        monkeypatch.setattr(facade, "update_skill_source", _racing_update)
+        c = _client(monkeypatch, facade, user=_user())
+
+        resp = c.post("/api/skills/sources/apply", json={"url": REPO, "ref": "v2"})
+
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["action"] == "created"
+        assert body["source"]["ref"] == "v2"
+        rows = sources_ops.list_sources()
+        assert [r.ref for r in rows] == ["v2"]
+        assert rows[0].id != existing.id
+
+
+class TestStatusSurvivesATypeMalformedReport:
+    @pytest.mark.parametrize("blob", [
+        {"agents_total": None},
+        {"agents_total": "three"},
+        {"agents_failed": ["a", "b"]},
+        {"trigger": {"nested": 1}},
+        {"started_at": 12345},
+    ], ids=["null-count", "str-count", "list-count", "dict-trigger", "int-timestamp"])
+    def test_open_status_never_500s(self, monkeypatch, facade, blob):
+        """`_read_last_fleet_reinject` promises status never 500s over a
+        malformed blob — but a parseable dict with a wrong-typed field passed
+        the isinstance check and failed the `FleetReinjectSummary` response
+        model, 500-ing the route every agent's Skills tab reads."""
+        import json
+        from services.skills_sync_service import FLEET_LAST_RUN_KEY
+
+        facade.settings[FLEET_LAST_RUN_KEY] = json.dumps({**REPORT, **blob})
+        c = _client(monkeypatch, facade, user=_user(role="user", mcp_scope="user"))
+
+        resp = c.get("/api/skills/library/status")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["last_fleet_reinject"] is None
