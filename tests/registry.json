@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3088_retention_ack_env_window.py",
+      "feature": "#3088",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "retention",
+        "settings",
+        "unit"
+      ],
+      "description": "#3088 — POST /api/settings/retention/acknowledge binds the approval to the window the sweep reads: with METRICS_RETENTION_DAYS set and no row, approving the env window succeeds and records it (and equals cleanup_service._read_retention_setting); a stored row wins over env; env in force does not make the code default approvable (409); an empty-string row on agent_soft_delete_retention_days is still 422 with nothing recorded. Drives the real handler with both db bindings patched and non-default values. No Docker, no network."
+    },
+    {
       "file": "unit/test_3247_replace_ask.py",
       "feature": "#3247",
       "added": "2026-10-05",
