@@ -204,6 +204,23 @@ async def update_setting(
             ),
         )
 
+    # trinity-enterprise#709: the admin-password-source marker decides whether
+    # boot may overwrite the admin's stored hash with ADMIN_PASSWORD. Only the
+    # human-only `PUT /api/users/me/password` writes it. Writable here (this
+    # route is admin-gated but not human-only, so an admin's user-scoped MCP key
+    # reaches it), it would be a way to pin or unpin the boot rule without the
+    # re-authentication that route demands.
+    from utils.admin_identity import ADMIN_PASSWORD_SOURCE_KEY
+
+    if key == ADMIN_PASSWORD_SOURCE_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{ADMIN_PASSWORD_SOURCE_KEY} is recorded by PUT /api/users/me/password "
+                "(change your password from Settings) and is not writable through this API."
+            ),
+        )
+
     # #506: the fleet ceiling must go through the dedicated range-validated
     # route; block the generic PUT so it can't be written to junk/out-of-range
     # (same pattern as the skills_library_url SSRF special-case below).
@@ -612,6 +629,23 @@ async def delete_setting(
             detail=(
                 f"{INSTALL_SOURCE_SETTING_KEY} records how this instance was "
                 "installed and cannot be cleared through the API."
+            ),
+        )
+
+    # trinity-enterprise#709: the #2380 shape again. Deleting the
+    # admin-password-source marker is the move that UNDOES a password rotation:
+    # delete the row, restart, and boot re-syncs the admin's hash to whatever
+    # ADMIN_PASSWORD still holds — very likely the value the admin rotated away
+    # from because it leaked. The change itself is human-only and
+    # re-authenticated; reverting it must not be one admin-gated DELETE away.
+    from utils.admin_identity import ADMIN_PASSWORD_SOURCE_KEY
+
+    if key == ADMIN_PASSWORD_SOURCE_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{ADMIN_PASSWORD_SOURCE_KEY} records that the admin password was "
+                "changed from the UI and cannot be cleared through the API."
             ),
         )
 

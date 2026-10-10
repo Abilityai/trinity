@@ -39,11 +39,11 @@ Refusals are `{detail: {code, message, errors?}}` with 400/409/429/503 — never
 
 ## Sessions
 
-`create_access_token` adds `iat`. `revoke_user_sessions` writes `auth:sessions_revoked_before:{username}` = `{cutoff}:{keep_jti}` with the access-token TTL. `is_user_session_revoked` (in `get_current_user`, `decode_token`, `/api/auth/validate`) rejects `iat <= cutoff` (or no `iat`) unless `jti == keep_jti`. Fail-open on Redis (#187 posture).
+`create_access_token` adds `iat`. `revoke_user_sessions` writes `auth:sessions_revoked_before:{username}` = `{cutoff}:{keep_jti}` with the access-token TTL. `is_user_session_revoked` (in `get_current_user`, `decode_token`, `/api/auth/validate`) rejects `iat <= cutoff` (or no `iat`) unless `jti == keep_jti`. Fail-open on Redis (#187 posture). Event-loopback tokens (EVT-001, `sub` = the admin, no `iat`, 5-minute single-route) are not sessions and are exempt. Without the exemption, event dispatch would be rejected for the cutoff's whole TTL after an admin password change.
 
 ## Boot reconciliation
 
-`database._ensure_admin_user` (SQLite) and `_ensure_admin_user_engine` (PostgreSQL) both ask `utils/admin_identity.env_may_resync_admin_password(stored_hash, admin_password_source)`. With the `ui` marker and a usable hash, `ADMIN_PASSWORD` no longer overwrites the stored hash (a boot note says the env value is ignored); it still seeds a missing or empty hash. No marker → unchanged behaviour.
+`database._ensure_admin_user` (SQLite) and `_ensure_admin_user_engine` (PostgreSQL) both ask `utils/admin_identity.env_may_resync_admin_password(stored_hash, admin_password_source)`. With the `ui` marker and a usable hash, `ADMIN_PASSWORD` no longer overwrites the stored hash (a boot note says the env value is ignored); it still seeds a missing or empty hash. No marker → unchanged behaviour. The generic `PUT`/`DELETE /api/settings/{key}` refuse `admin_password_source` (422), so the marker can't be set or cleared there. Clearing it plus a restart would revert a rotation to the `.env` value.
 
 ## Second factor (mfa_gate seam)
 

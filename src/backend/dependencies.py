@@ -205,6 +205,13 @@ def is_user_session_revoked(username: Optional[str], payload: dict) -> bool:
     """
     if not username:
         return False
+    # An event-loopback token is not a session: the backend mints one per
+    # dispatch (5-minute lifetime, fenced to a single route) with `sub` = the
+    # provisioned admin and no `iat`. Without this exemption the no-`iat` rule
+    # below would reject every EVT-001 dispatch for the cutoff's whole TTL (the
+    # access-token lifetime) after the admin changes their password.
+    if payload.get("scope") == EVENT_LOOPBACK_SCOPE:
+        return False
     r = get_breaker_redis()
     if r is None:
         return False

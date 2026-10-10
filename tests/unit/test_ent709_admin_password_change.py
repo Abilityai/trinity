@@ -322,6 +322,75 @@ class TestSuccess:
             asyncio.run(deps["get_current_user"](request, old_token))
         assert e.value.status_code == 401
 
+    def test_the_websocket_decoder_rejects_a_cut_off_session_too(self, api):
+        """`decode_token` is the WebSocket auth path; a signed-out session must
+        not keep a live socket channel open after the rotation."""
+        deps = api["deps"]
+        old_token = deps["create_access_token"]({"sub": api["admin"]})
+        time.sleep(1.01)
+        r = api["as"]().put("/api/users/me/password", json=_body())
+        assert deps["decode_token"](old_token) is None
+        assert deps["decode_token"](r.json()["access_token"])["sub"] == api["admin"]
+
+    def test_an_event_loopback_dispatch_survives_the_admin_changing_their_password(self, api):
+        """EVT-001 loopback tokens are minted per dispatch with `sub` = the
+        provisioned admin and no `iat`. They are not sessions, so a password
+        change must not reject them — otherwise every event subscription stops
+        dispatching for the cutoff's whole TTL (the access-token lifetime)."""
+        import asyncio
+        from starlette.requests import Request
+        from services.event_dispatch_service import _get_internal_token
+        deps = api["deps"]
+        api["as"]().put("/api/users/me/password", json=_body())
+        loopback = _get_internal_token()
+        request = Request({"type": "http", "method": "POST",
+                           "path": "/api/agents/subscriber/task", "headers": []})
+        user = asyncio.run(deps["get_current_user"](request, loopback))
+        assert user.username == api["admin"] and user.is_event_loopback is True
+
+
+class TestTheMarkerIsNotOnTheGenericSettingsRoutes:
+    """The `admin_password_source` row decides whether boot reverts the admin's
+    password to ADMIN_PASSWORD. The generic `/api/settings/{key}` routes are
+    admin-gated but not human-only, so they must not be a way to clear or pin it
+    without the re-authentication `PUT /api/users/me/password` demands."""
+
+    def _admin(self, api):
+        from models import User
+        row = api["db"].get_user_by_username(api["admin"])
+        return User(id=row["id"], username=row["username"], email=row.get("email"),
+                    role="admin", mcp_scope="user")
+
+    def _request(self, method, key):
+        from starlette.requests import Request
+        return Request({"type": "http", "method": method, "path": f"/api/settings/{key}",
+                        "headers": [], "client": ("127.0.0.1", 1)})
+
+    def test_delete_cannot_undo_a_rotation(self, api):
+        import asyncio
+        from fastapi import HTTPException
+        from routers.settings import generic
+        api["as"]().put("/api/users/me/password", json=_body())
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(generic.delete_setting("admin_password_source",
+                                               self._request("DELETE", "admin_password_source"),
+                                               self._admin(api)))
+        assert e.value.status_code == 422
+        assert api["db"].get_setting_value("admin_password_source") == "ui"
+
+    def test_put_cannot_write_it(self, api):
+        import asyncio
+        from fastapi import HTTPException
+        from database import SystemSettingUpdate
+        from routers.settings import generic
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(generic.update_setting("admin_password_source",
+                                               SystemSettingUpdate(value="ui"),
+                                               self._request("PUT", "admin_password_source"),
+                                               self._admin(api)))
+        assert e.value.status_code == 422
+        assert api["db"].get_setting_value("admin_password_source") is None
+
 
 # =============================================================================
 # Step 2 — the second factor, only when the gate says so
