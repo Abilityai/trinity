@@ -15,9 +15,12 @@ ISO-Z timestamps so the aggregation is dialect-agnostic.
 """
 
 import json
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, insert, func, and_, text
+from sqlalchemy import select, insert, func, and_, case, text
+
+from utils.helpers import to_utc_iso
 
 from .engine import get_engine
 from .tables import audit_log
@@ -195,10 +198,31 @@ class PlatformAuditOperations:
             conditions.append(audit_log.c.target_id == target_id)
         if source:
             conditions.append(audit_log.c.source == source)
-        if start_time:
-            conditions.append(audit_log.c.timestamp >= start_time)
-        if end_time:
-            conditions.append(audit_log.c.timestamp <= end_time)
+        if start_time or end_time:
+            timestamp = audit_log.c.timestamp
+            # UTC-Z storage has optional fractional seconds. Remove Z, pad the
+            # fraction to six digits, and compare without lossy SQL date casts.
+            # This is a read expression only: stored bytes feed the hash chain.
+            comparable = case(
+                (func.length(timestamp) == 20, func.substr(timestamp, 1, 19) + ".000000"),
+                else_=func.substr(func.replace(timestamp, "Z", "000000"), 1, 26),
+            )
+            for bound, is_start in ((start_time, True), (end_time, False)):
+                if not bound:
+                    continue
+                try:
+                    normalized = to_utc_iso(datetime.fromisoformat(bound))[:-1]
+                except ValueError:
+                    # Preserve the legacy unvalidated-string behavior for
+                    # malformed bounds rather than introducing a new API error.
+                    conditions.append(timestamp >= bound if is_start else timestamp <= bound)
+                    continue
+                # Keep an indexable coarse range on the raw timestamp column;
+                # the padded expression resolves precision within edge seconds.
+                if is_start:
+                    conditions.extend((timestamp >= normalized[:19], comparable >= normalized))
+                else:
+                    conditions.extend((timestamp <= normalized[:19] + "Z", comparable <= normalized))
         # #905: filter by request correlation id so an MCP `mcp_operation` row and
         # the backend `git_operation` row it triggered can be retrieved together.
         if request_id:

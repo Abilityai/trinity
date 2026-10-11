@@ -503,6 +503,13 @@ range returns `valid: null, status: "unverifiable"`; an empty range returns
 
 - **JSON**: Returns `{entries: [...], count: N, format: "json"}`
 - **CSV**: Returns downloadable CSV file with `Content-Disposition: attachment`
+- Time bounds are inclusive instants, shared with list, count, stats, calendar and
+  heatmap queries (#3555). A whole-second upper bound includes that instant,
+  not the rest of the second. ISO bounds with fractional seconds or UTC offsets
+  are normalized to UTC for comparison against stored UTC-Z timestamps, whose
+  fractions can be absent or contain up to six digits. Stored timestamps and
+  hash-chain fields are never rewritten. Malformed bounds retain the legacy
+  raw-string comparison; this fix does not add API validation.
 
 ### Endpoints Added
 

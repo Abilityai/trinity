@@ -1,6 +1,13 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3555_audit_time_bounds.py",
+      "feature": "#3555",
+      "added": "2026-10-11",
+      "categories": ["backend", "audit", "database", "unit"],
+      "description": "Inclusive audit time bounds on real temporary SQLite across list/count/stats/calendar/heatmap and in-process JSON/CSV export; optional fractions, offsets, exact microseconds, other filters, pagination, unchanged hash payloads, legacy malformed bounds and non-admin rejection."
+    },
+    {
       "file": "unit/test_ent844_expired_approval_outcome.py",
       "feature": "abilityai/trinity-enterprise#844",
       "added": "2026-10-10",
