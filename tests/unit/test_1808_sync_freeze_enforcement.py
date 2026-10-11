@@ -137,14 +137,14 @@ def _db(db_path: Path):
 def test_freeze_predicate(tmp_path, freeze, status, failures, expected):
     db_path = tmp_path / "t.db"
     _seed(db_path, freeze=freeze, status=status, failures=failures)
-    assert _db(db_path).should_freeze_schedules("a1") is expected
+    assert (_db(db_path).sync_freeze_reason("a1") is not None) is expected
 
 
 def test_unknown_agent_does_not_freeze(tmp_path):
     """An agent with no git config must never be frozen."""
     db_path = tmp_path / "t.db"
     _seed(db_path, freeze=1, status="failed", failures=5)
-    assert _db(db_path).should_freeze_schedules("someone-else") is False
+    assert _db(db_path).sync_freeze_reason("someone-else") is None
 
 
 def test_fails_open_when_the_query_breaks(tmp_path):
@@ -155,7 +155,7 @@ def test_fails_open_when_the_query_breaks(tmp_path):
     """
     db_path = tmp_path / "t.db"
     sqlite3.connect(db_path).close()  # valid DB, no tables at all
-    assert _db(db_path).should_freeze_schedules("a1") is False
+    assert _db(db_path).sync_freeze_reason("a1") is None
 
 
 def test_threshold_matches_the_backend(tmp_path):
@@ -209,7 +209,7 @@ def test_mapping_only_rows_still_freeze(tmp_path, monkeypatch):
             conn.close()
 
     monkeypatch.setattr(db, "get_connection", dict_row_connection)
-    assert db.should_freeze_schedules("a1") is True
+    assert db.sync_freeze_reason("a1") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +234,6 @@ def test_divergence_past_24h_freezes_a_work_agent(tmp_path):
     db = _db(db_path)
     reason = db.sync_freeze_reason("a1")
     assert reason is not None and reason.startswith("diverged 0 behind / 7 ahead for 24h")
-    assert db.should_freeze_schedules("a1") is True
 
 
 def test_divergence_under_24h_fires(tmp_path):
@@ -260,7 +259,7 @@ def test_a_deployment_never_divergence_freezes(tmp_path):
 def test_fork_to_own_divergence_freezes(tmp_path):
     db_path = tmp_path / "t.db"
     _diverged_seed(db_path, age=timedelta(hours=30), source_mode=1, auto_sync=1)
-    assert _db(db_path).should_freeze_schedules("a1") is True
+    assert _db(db_path).sync_freeze_reason("a1") is not None
 
 
 def test_a_stale_observation_does_not_divergence_freeze(tmp_path):
@@ -318,7 +317,7 @@ def test_mapping_only_rows_divergence_freeze(tmp_path, monkeypatch):
             conn.close()
 
     monkeypatch.setattr(db, "get_connection", dict_row_connection)
-    assert db.should_freeze_schedules("a1") is True
+    assert db.sync_freeze_reason("a1") is not None
 
 
 # ---------------------------------------------------------------------------

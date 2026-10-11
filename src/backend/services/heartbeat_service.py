@@ -235,20 +235,6 @@ def _unsupported_status() -> Dict:
     }
 
 
-def heartbeat_status(agent_name: str) -> Dict:
-    """Single-agent liveness compute. Redis-None fails open to ``unsupported``."""
-    redis = _get_redis()
-    if redis is None:
-        return _unsupported_status()
-    try:
-        raw = redis.get(_hb_key(agent_name))
-        seen = bool(redis.get(_seen_key(agent_name)))
-    except Exception:  # noqa: BLE001
-        logger.debug("heartbeat: status failed for %s", agent_name, exc_info=True)
-        return _unsupported_status()
-    return _compute_status(_parse_payload(raw), seen, time.time())
-
-
 def heartbeat_status_bulk(agent_names: List[str]) -> Dict[str, Dict]:
     """Fleet-wide liveness in a single Redis round-trip (D4).
 

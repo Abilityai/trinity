@@ -120,12 +120,6 @@ class TestParser:
         big = self._parse({"big": [f"m{i}" for i in range(MAX_MEMBERS + 3)]})["big"]
         assert len(big.members) == MAX_MEMBERS and "too_many" in big.problems
 
-    def test_split_set_ref(self):
-        from services.skill_sets import split_set_ref
-        assert split_set_ref("set:dev-backlog") == "dev-backlog"
-        assert split_set_ref("dev-backlog") is None
-        assert split_set_ref("set:../x") is None
-
 
 # =============================================================================
 # 2. the pure rule

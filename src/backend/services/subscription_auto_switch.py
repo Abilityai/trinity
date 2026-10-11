@@ -1545,21 +1545,6 @@ async def _guarded_switch(
         )
 
 
-async def handle_rate_limit_error(
-    agent_name: str,
-    error_message: str = "",
-) -> Optional[dict]:
-    """Backward-compatible shim — delegates to `handle_subscription_failure`
-    with `failure_kind="rate_limit"`. Existing 429 callers don't need to
-    migrate atomically.
-    """
-    return await handle_subscription_failure(
-        agent_name=agent_name,
-        error_message=error_message,
-        failure_kind="rate_limit",
-    )
-
-
 def _failure_phrase(failure_kind: str, *, pre_dispatch: bool = False) -> str:
     """Notification + log wording per failure kind.
 
