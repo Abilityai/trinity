@@ -266,6 +266,18 @@
             {{ authStore.emailCodeLoginEnabled ? '← Back to email login' : '← Back to sign-in options' }}
           </button>
         </div>
+
+        <!-- trinity-enterprise#837: sharing an agent no longer creates a sign-in
+             here. A person an agent was shared with signs in to the Workspace
+             with an emailed code, so name the way there. -->
+        <p :class="[HELP_CLASS, 'text-center']">
+          Was an agent shared with you?
+          <a
+            href="/workspace"
+            data-testid="login-workspace-pointer"
+            class="font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline"
+          >Sign in to the Workspace</a>
+        </p>
       </div>
     </div>
   </div>
@@ -275,7 +287,8 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
-import { safeRedirect } from '../utils/safeRedirect'
+import { landingAfterSignIn } from '../utils/workspaceOnly'
+import { HELP_CLASS } from '../components/base/fieldClasses'
 import QrCode from '../components/QrCode.vue'
 
 const router = useRouter()
@@ -285,7 +298,9 @@ const authStore = useAuthStore()
 // #3406 — back to the page that sent the person here (a shared canvas's own
 // "Sign in" carries `?redirect=`), or the dashboard. SSO still lands on the
 // dashboard: the round trip through the identity provider drops the query.
-const afterLogin = () => router.push(safeRedirect(route.query.redirect))
+// trinity-enterprise#837 — a Workspace-only member lands in the Workspace; the
+// role comes from the profile every login path fetches before resolving.
+const afterLogin = () => router.push(landingAfterSignIn(route.query.redirect, authStore.user?.role))
 
 // Local state for admin login form. #82 Phase 1: the admin may sign in with the
 // email they registered at setup (or in Settings) instead of the fixed 'admin'.
@@ -427,7 +442,7 @@ onMounted(async () => {
     history.replaceState(null, '', window.location.pathname + window.location.search)
     const res = await authStore.completeSsoLogin(params)
     if (res.ok && !res.mfa) {
-      router.push('/')
+      router.push(landingAfterSignIn(undefined, authStore.user?.role))
       return
     }
     // mfa → the existing 2FA challenge UI takes over; error → authError shows.

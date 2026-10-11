@@ -26,12 +26,20 @@
       >
         <p class="text-sm font-semibold">{{ problem.title }}</p>
         <p class="mx-auto mt-2 max-w-md text-xs text-gray-500 dark:text-gray-400">{{ problem.body }}</p>
-        <router-link
-          v-if="problem.action === 'sign-in'"
-          :to="{ path: '/login', query: { redirect: $route.fullPath } }"
-          class="mt-4 inline-block rounded-lg bg-action-primary-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-action-primary-700"
-          data-testid="shared-canvas-signin"
-        >Sign in</router-link>
+        <!-- trinity-enterprise#837: someone the agent is shared with signs in to
+             the Workspace with an emailed code; a Trinity account still has /login. -->
+        <div v-if="problem.action === 'sign-in'" class="mt-4 flex flex-col items-center gap-2">
+          <router-link
+            :to="{ path: '/workspace', query: { redirect: $route.fullPath } }"
+            class="inline-block rounded-lg bg-action-primary-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-action-primary-700"
+            data-testid="shared-canvas-signin"
+          >Sign in with an emailed code</router-link>
+          <router-link
+            :to="{ path: '/login', query: { redirect: $route.fullPath } }"
+            class="text-xs font-medium text-action-primary-600 hover:underline"
+            data-testid="shared-canvas-signin-platform"
+          >Have a Trinity account? Sign in</router-link>
+        </div>
       </div>
 
       <template v-else-if="canvas">
@@ -92,10 +100,12 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import api from '../api'
+import { portalHttp, useClientPortalStore } from '../stores/clientPortal'
+import { readStoredToken } from '../utils/platformSession'
 import CanvasDocument from '../components/canvas/CanvasDocument.vue'
 import { freshness } from '../components/canvas/canvasUtils'
 import { viewState } from '../utils/loadingState'
-import { shareProblem } from '../components/canvas/canvasShare'
+import { shareFetchClient, shareProblem } from '../components/canvas/canvasShare'
 
 const route = useRoute()
 // #1927 / design-system p13-p15: `loading` means "no data yet", never "a fetch
@@ -122,7 +132,11 @@ const view = computed(() => viewState({
 async function load() {
   problem.value = null
   try {
-    const { data } = await api.get(`/api/public/canvas/${encodeURIComponent(route.params.token)}`)
+    const client = shareFetchClient({
+      hasPlatformSession: !!readStoredToken(),
+      hasWorkspaceSession: !!useClientPortalStore().portalToken,
+    }) === 'workspace' ? portalHttp : api
+    const { data } = await client.get(`/api/public/canvas/${encodeURIComponent(route.params.token)}`)
     canvas.value = data.canvas
     agentName.value = data.agent_name
   } catch (e) {

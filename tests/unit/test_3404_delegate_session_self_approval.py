@@ -123,7 +123,9 @@ def test_a_platform_principal_self_approves_only_as_a_person(portal, monkeypatch
 
     async def current_user(request, token):
         return user
-    monkeypatch.setattr(portal.auth, "get_current_user", current_user)
+    # trinity-enterprise#837: the Workspace door resolves a platform credential
+    # through the unfloored resolver, not `get_current_user`.
+    monkeypatch.setattr(portal.auth, "resolve_platform_user_unfloored", current_user)
     monkeypatch.setattr(database.db, "get_user_by_username", lambda name: {"email": "U1@Example.com"})
     principal = _principal_for(portal, "not-a-portal-session")
     assert (principal.is_person, principal.self_approves) == (person, person)

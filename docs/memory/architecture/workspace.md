@@ -25,6 +25,29 @@ The field defaults to False, and the principal also carries `self_approves` + `c
 portal session token says how it was minted (`minted_by`: `otp` | `delegate`), and only a platform
 person or an `otp`-minted session may self-approve a gated skill — see `feature-flows/skill-gate.md`.
 
+**The `user` rung is Workspace-only (trinity-enterprise#837).** A platform account whose role is
+`user` is a member who works with agents here and nowhere else: `get_current_user` refuses it on
+every operator route (403 `workspace_only`, `architecture/security.md` §1). The Workspace doors —
+`get_portal_principal`, `shared_sessions/router.py::get_room_principal`, the Workspace voice start —
+resolve the credential through `resolve_platform_user_unfloored`, so such a member reaches this
+surface exactly as before, roster included (shared agents plus any they own). The handful of
+operator-side routes the Workspace calls (session identity, sign-out, the `/ws` ticket, preferences,
+loops, the voice canvas, an `authorized` canvas link, the public chat page's history) carry
+`@workspace_route` and admit a browser
+session only; the census in
+`tests/unit/test_837_workspace_route_census.py` fails when a Workspace file calls an operator route
+that is neither a door nor marked. In the SPA, `/login` lands a `user` in `/workspace` and the router
+guard sends one on an operator URL there (`/agents/:name/*` → `/workspace?agent=:name`,
+`utils/workspaceOnly.js`). Sharing an agent writes no login whitelist row: the person signs in here
+with the code. Inside the Workspace such a member keeps the **team view**: signed in with the platform login,
+`get_portal_principal` resolves them as a platform account (`is_platform=True`), so they read every canvas audience
+(`agent_page.canvas_audience_for`), the agent's whole activity, loop runs included
+(`agent_page._client_scope`), voice and model choice — the narrower client view is for people
+without an account (decided at #837; nothing new is exposed, a `user` saw all of it on Agent Detail
+before). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
+reads (`WORKSPACE_WS_EVENT_TYPES` / `_FIELDS`, `architecture/integrations.md`). An agent whose owner
+is Workspace-only is refused at the rooms door.
+
 **Sign-out ends whichever credential is live — never a derivation of it (#2258).** The
 implicit entry above runs the other way too: `isPlatformSession = !portalToken &&
 isAuthenticated`, so clearing only the portal token is what *activates* the platform
@@ -32,7 +55,7 @@ fallback, and the Workspace's "Sign out" used to re-enter as the operator on ref
 re-authenticate a client as the co-resident operator). `stores/clientPortal.js::
 signOutEverywhere()` ends the platform session (`authStore.logout()`) **first**, then
 clears portal state, and routes by principal — operator → `/login`, client → the OTP
-form. A persisted suppression flag was rejected on evidence: the JWT is an axios
+form (a `user` signing back in at `/login` lands in `/workspace`, ent#837). A persisted suppression flag was rejected on evidence: the JWT is an axios
 **default** header and per-request headers merge over defaults, so a flag hides the
 disclosure while every portal request still carries the operator's credential.
 `auth.logout()` clears local state **before** the network revoke, because the global 401

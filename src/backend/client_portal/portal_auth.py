@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 from fastapi import Depends, HTTPException, Request, Response
 
@@ -28,12 +28,12 @@ from dependencies import (
     PORTAL_MINT_OTP,
     oauth2_scheme,
     decode_portal_session,
-    get_current_user,
     is_person_principal,
     portal_session_minted_by,
     portal_session_needs_rotation,
     reject_agent_principal,
     renew_portal_session,
+    resolve_platform_user_unfloored,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,6 +149,24 @@ def _maybe_rotate(token: str, response: Response) -> None:
         logger.warning("[ent#375] session rotation skipped: %s", exc)
 
 
+def workspace_email_from_request(request: Request) -> Optional[str]:
+    """The email of a Workspace session presented as a bearer token, or None.
+
+    For a route that also serves anonymous visitors (an `authorized` shared
+    canvas, trinity-enterprise#837): a missing or non-Workspace credential is
+    None, never a 401, and the session is not slid. A blocked client is refused
+    here as on every other Workspace route.
+    """
+    scheme, _, token = (request.headers.get("authorization") or "").partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    email = decode_portal_session(token.strip())
+    if not email:
+        return None
+    _reject_if_blocked(email)
+    return email
+
+
 async def get_portal_principal(
     request: Request, response: Response, token: str = Depends(oauth2_scheme)
 ) -> PortalPrincipal:
@@ -173,8 +191,9 @@ async def get_portal_principal(
         )
 
     # Otherwise a platform principal (operator preview / signed-in user) →
-    # resolve their email.
-    user = await get_current_user(request, token)  # raises 401 if the token is invalid
+    # resolve their email. The Workspace is where a Workspace-only member
+    # belongs, so this door skips the operator floor (ent#837).
+    user = await resolve_platform_user_unfloored(request, token)  # raises 401 if the token is invalid
 
     # #2198 — the Workspace is HUMAN-only for platform principals. An
     # agent-scoped MCP key resolves to its OWNER carrying the owner's role

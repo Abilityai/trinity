@@ -140,6 +140,7 @@ def auth_module(monkeypatch):
     deps_mod.is_token_revoked = lambda *a, **k: False
     deps_mod.oauth2_scheme = lambda *a, **k: None
     deps_mod.revoke_token_jti = lambda *a, **k: None
+    deps_mod.workspace_route = lambda reason: (lambda endpoint: endpoint)  # ent#837 marker
     stubs["dependencies"] = deps_mod
 
     # Token must be a real Pydantic model — FastAPI validates response_model=

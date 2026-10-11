@@ -4,9 +4,10 @@
     <div>
       <h3 class="text-lg font-medium text-gray-900 dark:text-white">Access</h3>
       <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-        Trinity <strong>operators</strong> (platform users) with access to this agent. External
-        clients who reach the agent through channels are managed on the
-        <span class="font-medium">Sharing</span> tab.
+        People this agent is shared with. They use it in the Workspace, signing in with an
+        emailed code; whether someone also gets the operator UI is their platform role, which an
+        admin sets in Settings → Access. External clients who reach the agent through channels are
+        managed on the <span class="font-medium">Sharing</span> tab.
       </p>
     </div>
 
@@ -16,7 +17,7 @@
         v-model="newEmail"
         type="email"
         required
-        placeholder="operator@company.com"
+        placeholder="name@company.com"
         :disabled="adding"
         class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
       />
@@ -29,7 +30,7 @@
           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
         </svg>
-        {{ adding ? 'Adding…' : 'Add operator' }}
+        {{ adding ? 'Adding…' : 'Add person' }}
       </button>
     </form>
 
@@ -60,7 +61,7 @@
       v-else-if="operators.length === 0"
       class="text-center py-8 text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-dashed border-gray-300 dark:border-gray-700"
     >
-      No operators yet. Add a Trinity user by email above.
+      No one yet. Add a person by email above.
     </div>
     <ul v-else class="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
       <li
@@ -84,7 +85,7 @@
             >{{ op.role }}</span>
           </div>
           <p class="text-xs text-gray-500 dark:text-gray-400 truncate">
-            {{ op.username ? op.email : 'Invited — no account yet' }}
+            {{ op.username ? op.email : 'No platform account — uses the Workspace' }}
             <span v-if="op.last_active"> · last active {{ formatLastActive(op.last_active) }}</span>
           </p>
         </div>
@@ -168,7 +169,7 @@ async function addOperator() {
     message.value = { type: 'success', text: `Added ${email}.` }
     await load()
   } catch (e) {
-    message.value = { type: 'error', text: e?.response?.data?.detail || 'Failed to add operator.' }
+    message.value = { type: 'error', text: e?.response?.data?.detail || 'Failed to add this person.' }
   } finally {
     adding.value = false
   }

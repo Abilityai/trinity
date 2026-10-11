@@ -122,7 +122,7 @@ db = os.getenv("TRINITY_DB_PATH", str(Path.home() / "trinity-data" / "trinity.db
 conn = sqlite3.connect(db)
 conn.execute(
     "INSERT OR IGNORE INTO users (username, password_hash, role, email, created_at, updated_at) "
-    "VALUES (?, ?, 'user', ?, datetime('now'), datetime('now'))",
+    "VALUES (?, ?, 'operator', ?, datetime('now'), datetime('now'))",
     ("{_ISO_USERNAME}", pw, "{_ISO_EMAIL}"),
 )
 admin_id = conn.execute("SELECT id FROM users WHERE username='admin'").fetchone()[0]

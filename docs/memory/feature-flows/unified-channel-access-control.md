@@ -442,7 +442,7 @@ All four are owner-only via the `OwnedAgentByName` dependency (architectural inv
 On approval the endpoint:
 1. Calls `db.decide_access_request(id, True, user_id)` to mark the request approved.
 2. Calls `db.share_agent(agent_name, current_user.username, email)` — idempotent insert into `agent_sharing`. Future messages from this email are admitted by `email_has_agent_access`.
-3. If `email_auth_enabled` setting is true, auto-adds the email to the platform whitelist with `source="access_request"`.
+3. Writes **no** login whitelist row (trinity-enterprise#837): the requester signs in to the Workspace with the emailed code; a platform account is an admin's decision. (Until #837 it added one with `source="access_request"`.)
 4. Broadcasts a `agent_shared` WebSocket event so the Sharing panel refreshes for owners viewing it.
 5. **Notifies the requester on their originating channel** (#951). For `telegram | slack | whatsapp`, fires `proactive_message_service.send_access_grant_notification` as an `asyncio.create_task` so a missing binding or transport hiccup can't block the HTTP response. The notification bypasses the `allow_proactive` opt-in (the user explicitly initiated the request) and the per-recipient rate limit (one-shot). Delivery outcome (`delivered` / `recipient_not_found` / channel error) is captured in the `proactive_message` audit event. Rejection is intentionally silent.
 
@@ -563,8 +563,8 @@ The component uses raw `axios` (matching the existing pattern in this file) rath
 ### Email
 On `/login email`, an email is sent via `EmailService.send_verification_code` — same path as web email auth (see [email-authentication.md](email-authentication.md)).
 
-### Whitelist auto-add
-On approval, if `email_auth_enabled` is true, the email is added to the platform email whitelist with `source="access_request"` (parity with `/share` endpoint).
+### Whitelist auto-add — retired (trinity-enterprise#837)
+Approval no longer adds the email to the platform whitelist, matching `/share`. Rows written before the change keep `source="access_request"` and yield Workspace-only `user` accounts ([workspace-only-role.md](workspace-only-role.md)).
 
 ### Auto-promotion to `agent_sharing`
 Approving an access request inserts the email into `agent_sharing` so all future messages from that email — across any channel — are admitted by the existing `email_has_agent_access` check, no further owner action needed.
@@ -644,7 +644,7 @@ sqlite3 ~/trinity-data/trinity.db "SELECT COUNT(*) FROM access_requests WHERE ag
 ## Related Flows
 
 - **MEM-001 per-user memory** ([public-agent-links.md](public-agent-links.md)) — keyed off `source_user_email`, which is now the verified email. Cross-channel users converge on one memory key automatically.
-- **Email authentication** ([email-authentication.md](email-authentication.md)) — the `/login` flow reuses `db.create_login_code`, `db.verify_login_code`, and `EmailService.send_verification_code` from the platform email auth path. The whitelist auto-add on approval matches the existing `/share` endpoint.
+- **Email authentication** ([email-authentication.md](email-authentication.md)) — the `/login` flow reuses `db.create_login_code`, `db.verify_login_code`, and `EmailService.send_verification_code` from the platform email auth path. Neither approval nor `/share` writes the whitelist since trinity-enterprise#837.
 - **Agent sharing** ([agent-sharing.md](agent-sharing.md)) — `agent_sharing` is the unified allow-list. Approving an access request just calls `db.share_agent`. The cross-channel `email_has_agent_access` helper extends `is_agent_shared_with_email` with owner+admin checks.
 - **Telegram integration** ([telegram-integration.md](telegram-integration.md)) — bindings and chat links remain the durable Telegram-side state; #311 only adds two columns and the `/login` command.
 - **Slack channel routing** ([slack-channel-routing.md](slack-channel-routing.md)) — the channel router gate runs uniformly; Slack just resolves email via OAuth.
@@ -663,6 +663,7 @@ Working. Telegram, Slack, and web public-chat all run the same gate.
 
 | Date | Changes |
 |------|---------|
+| 2026-10-09 | **trinity-enterprise#837** — approving an access request no longer adds the email to the login whitelist; the requester signs in to the Workspace with the code. |
 | 2026-04-22 | **#446 — team-share gate hardening + Sharing UX**: (1) `share_agent` now deletes any stale pending `access_requests` row for the same `(agent, email)` atomically with the share insert, so a manual Team Share add clears the owner's Pending list. (2) Defense-in-depth email normalization (`.strip().lower()`) added in `email_has_agent_access`, `is_agent_shared_with_email`, `routers/public.py` gate, and both DM+group branches of `adapters/message_router.py` so mixed-case session emails can't bypass the allow-list. (3) `SharingPanel.vue` restructured: new framing banner distinguishes "Identity proof" (verify who the user is) from "Authorization" (allow-list + approval queue); "Team Sharing" heading tagged "— allow-list"; dead-end warning banner when `require_email=true && !open_access && shares.length===0`. New unit tests: `tests/test_team_share_gate_unit.py` (8 tests). |
 | 2026-04-12 | Initial implementation (#311). New migration `access_control`, `AccessPolicyMixin`, `AccessRequestOperations`, ABC additions, Telegram `/login` state machine, Slack `users.info` resolver, four owner endpoints, SharingPanel UI. |
 | 2026-04-13 | Web public-chat unified. `routers/public.py` now runs the same gate as `message_router.py`, keyed on `agent_ownership.require_email` instead of per-link `agent_public_links.require_email`. New migration `public_link_require_email_unified` ORs legacy per-link flags into the agent-level flag. Access requests from web use `channel="web"`. Closes the #252 follow-up. |
