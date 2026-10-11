@@ -183,26 +183,16 @@ const exportToGit = async () => {
 
 ### Backend (`src/backend/routers/credentials.py`)
 ```python
-@router.post("/agents/{agent_name}/credentials/export", response_model=CredentialExportResponse)
-async def export_credentials(agent_name: str, current_user: User = Depends(get_current_user)):
-    """Export agent credentials to encrypted file in workspace."""
-    encryption_service = CredentialEncryptionService()
-
-    # Read credential files from agent
-    file_paths = ['.env', '.mcp.json']
-    files = await encryption_service.read_agent_credential_files(agent_name, file_paths)
-
-    # Encrypt and write to agent
-    encrypted = encryption_service.encrypt(files)
-    await encryption_service.write_agent_credential_files(
-        agent_name, {'.credentials.enc': encrypted}
-    )
-
-    return CredentialExportResponse(
-        status="success",
-        files_exported=len(files),
-        encrypted_file=".credentials.enc"
-    )
+@router.post("/agents/{agent_name}/credentials/export")
+async def export_credentials(
+    request: Request,
+    agent_name: str = Depends(get_owned_agent_by_name),   # owner or admin, else uniform 404 (#186); connector -> 403
+    current_user: User = Depends(get_current_user)
+):
+    reject_agent_principal(current_user)                  # agent-scoped key -> 403 "human-only" (ent#69 Part 2)
+    # container missing -> 404; not running -> 400
+    encrypted_file, files_exported = await get_credential_encryption_service().export_to_agent(agent_name)
+    # audited (SEC-001); agent server unreachable -> 503
 ```
 
 ### Encryption Service (`src/backend/services/credential_encryption.py`)
@@ -260,30 +250,16 @@ const importFromGit = async () => {
 
 ### Backend (`src/backend/routers/credentials.py`)
 ```python
-@router.post("/agents/{agent_name}/credentials/import", response_model=CredentialImportResponse)
-async def import_credentials(agent_name: str, current_user: User = Depends(get_current_user)):
-    """Import credentials from encrypted file in agent workspace."""
-    encryption_service = CredentialEncryptionService()
-
-    # Read encrypted file
-    enc_files = await encryption_service.read_agent_credential_files(
-        agent_name, ['.credentials.enc']
-    )
-
-    if '.credentials.enc' not in enc_files:
-        raise HTTPException(status_code=404, detail="No .credentials.enc file found")
-
-    # Decrypt
-    files = encryption_service.decrypt(enc_files['.credentials.enc'])
-
-    # Write decrypted files to agent
-    await encryption_service.write_agent_credential_files(agent_name, files)
-
-    return CredentialImportResponse(
-        status="success",
-        files_imported=list(files.keys()),
-        message=f"Imported {len(files)} file(s)"
-    )
+@router.post("/agents/{agent_name}/credentials/import")
+async def import_credentials(
+    request: Request,
+    agent_name: str = Depends(get_owned_agent_by_name),   # owner or admin, else uniform 404 (#186); connector -> 403
+    current_user: User = Depends(get_current_user)
+):
+    reject_agent_principal(current_user)                  # agent-scoped key -> 403 "human-only" (ent#69 Part 2)
+    # container missing -> 404; not running -> 400
+    files = await get_credential_encryption_service().import_to_agent(agent_name)
+    # missing .credentials.enc / wrong key -> 400; agent server unreachable -> 503; audited (SEC-001)
 ```
 
 ---
@@ -329,6 +305,8 @@ async def decrypt_and_inject(request: InternalDecryptInjectRequest):
 ---
 
 ## MCP Tools
+
+**Who sees which tool (#3435).** `export_credentials`, `import_credentials` and `get_credential_encryption_key` each carry a per-tool `canAccess` allow-list `{user, system}` — exactly the scopes their backend gates admit — so an agent-scoped session neither lists nor can call them (FastMCP answers "not found"). Their descriptions name the caller class (owner or admin for export/import, administrator for the key). A backend 403 comes back as `{success:false, error, human_only|admin_only|not_authorized}` through `accessDenied`, so the audit row reads `denied` (#2807); 400/404/503 are still thrown. No backend gate changed. `inject_credentials` is still advertised to agent sessions (shrink-only baseline in `tool-visibility.test.ts`).
 
 ### inject_credentials
 ```typescript

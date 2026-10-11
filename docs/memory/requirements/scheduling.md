@@ -703,10 +703,9 @@
   activity types have no owning closer and can be arbitrarily old — the §10.15 class) or
   `voip_call_logs` (`VOIP_MAX_CALL_DURATION` is an unvalidated env int). So the helper is required
   **regardless of column width**, and widening is an independent, optional hardening — deferred, not
-  an alternative. Widening would also fix neither the poison-transaction property above nor
-  `process_schedule_executions.duration_ms`, which exists in no migration track at all. Four OSS
+  an alternative. Widening would also not fix the poison-transaction property above. Four OSS
   tables carry the column (`schedule_executions`, `agent_loop_runs`, `agent_activities`,
-  `voip_call_logs`), not the six the issue names, plus that scheduler-only fifth.
+  `voip_call_logs`), not the six the issue names.
 - **Hostile input path closed in the same change**: `models.TaskResultPayload.execution_time_ms` is
   agent-supplied and was unbounded, arriving on the #1083 async result callback and landing in two
   `Integer` columns — bounded to `ge=0, le=2**31-1`.
@@ -1506,7 +1505,7 @@ schedules:
 - **Restart recovery**: the cleanup-service startup hook re-marks
   any `agent_loops` row in `running` status as `interrupted` with
   `stop_reason="interrupted"`. Loops do not auto-resume —
-  callers re-issue if needed.
+  callers re-issue if needed. *(Superseded by #2523 — see §38.8.)*
 - **WebSocket events**: `loop_run_completed` per iteration (carries
   `run_number`, `execution_id`, `cost`, `duration_ms`),
   `loop_completed` once when the loop exits any terminal state.
@@ -1742,6 +1741,35 @@ failed iteration and proceeds, bounded so a fully-broken agent still terminates.
 - **AC #3 (loop history)** landed with ent#525: a loop run is one execution
   kind (`loop`) in the rail's Work tab — *Now* and *Earlier* — and there is
   no parallel surface (core-agent §5.21).
+
+### 38.8 Loops survive a backend restart — terminal-driven advance (#2523)
+- **Status**: ✅ Implemented
+- **Implements**: Issue #2523
+- **Description**: the `agent_loops` row is the loop. Each iteration is advanced
+  from its execution's terminal, and a `delay_seconds` pause parks the loop on
+  `agent_loops.next_run_at` for the due-loop sweep to bring back. A restart no
+  longer marks loops `interrupted`: the cleanup-service startup hook
+  (`LoopService.reconcile_after_restart`) leaves parked loops and loops with a
+  live execution alone, advances a loop whose execution already ended, and re-arms
+  a loop that lost its dispatch. This supersedes §38.1's restart-recovery bullet.
+  Full flow: [run-agent-loop.md](../feature-flows/run-agent-loop.md#restart-recovery-2523--loops-now-resume).
+
+### 38.9 Idle cost of the due-loop sweep (#3436)
+- **Status**: ✅ Decided — no change
+- **Implements**: Issue #3436
+- **Description**: the due-loop sweep (§38.8) runs every 5–6s in every backend
+  worker whether or not any loop exists. With no loop parked, each tick is one
+  index seek on `idx_loops_next_run` that returns no rows — about 6 µs per query
+  and roughly 15,700 queries a day per worker, as measured on a development
+  database. That cost is accepted.
+- **Deliberately not gated.** Skipping the read while no loop is parked would add
+  arm/disarm state to loop recovery, and a loop parked by a stuck worker would not
+  be picked up until that worker was respawned. Today any worker's next tick picks
+  it up.
+- **Other loop-table reads on an idle instance**: the once-per-worker boot
+  reconcile (§38.8), and one indexed point read per execution terminal asking
+  "is this a loop run?" — see
+  [run-agent-loop.md](../feature-flows/run-agent-loop.md#who-reads-the-loop-tables-unasked-3436).
 
 
 ### 10.18 A schedule can deliver its output into a Workspace conversation (trinity-enterprise#498)
