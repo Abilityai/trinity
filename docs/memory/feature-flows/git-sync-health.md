@@ -60,7 +60,6 @@ diverged from origin for more than 24 h. See §2b and §5.
 | **API** | `GET/PUT /api/agents/{name}/git/auto-sync` | Toggle the per-agent auto-sync flag |
 | **API** | `GET/PUT /api/agents/{name}/git/freeze-schedules-if-failing` | Toggle the freeze-schedules-on-sync-failure flag |
 | **API** | `GET /api/fleet/sync-audit` | Fleet-wide audit including `duplicate_binding` flag (admins see all; non-admins filtered) |
-| **API** | `GET /api/internal/agents/{name}/sync-health-status` | The backend's read of the freeze decision (`should_freeze`, `freeze_reason`, `divergence_age_s`, `work_agent` — ent#706). The scheduler reads the DB directly with the vendored policy, not this endpoint |
 | **Operator Queue** | type=`sync_failing` | Inserted by `SyncHealthService` when `consecutive_failures` crosses 3 |
 | **Operator Queue** | type=`sync_diverged` | ent#706: one per divergence episode, only while a divergence freeze is in force (id `sync-diverged-{agent}-{diverged_since}`) |
 | **Scheduler** | `SchedulerDatabase.sync_freeze_reason` | ent#706: the cron gate's reason, written into the skipped row as `Git sync frozen: <reason>` |
@@ -615,8 +614,6 @@ scheduler  _execute_schedule_with_lock (cron only)
                 → _record_skipped_agent_schedule(skip_reason="Git sync frozen: <reason>")
                   (one row per cron tick while frozen; retention prunes)
                 → _advance_next_run_only; un-freezes on the first tick after it clears
-backend    GET /api/internal/agents/{name}/sync-health-status
-                → pre-#706 keys unchanged + freeze_reason / divergence_age_s / work_agent
 ```
 
 `sync_freeze_reason` returns a string, never a `(bool, reason)` tuple — a tuple
@@ -795,7 +792,6 @@ the data-loss setup.
 | `routers/git.py` | `/git/auto-sync`, `/git/freeze-schedules-if-failing`, `/git/sync-state` |
 | `routers/agents.py` | `GET /api/agents/sync-health` (batch) |
 | `routers/fleet.py` | `GET /api/fleet/sync-audit` (new router) |
-| `routers/internal.py` | `GET /api/internal/agents/{name}/sync-health-status` (ent#706: via `sync_view`) |
 | `services/sync_freeze_policy.py` | ent#706: the one rule — `classify`, the constants, `format_age`; stdlib leaf |
 | `services/sync_health_view.py` | ent#706: `sync_view(row, config)` — the backend's single call into the policy |
 | `db/migrations.py`, `migrations/versions/0082_agent_sync_state_divergence.py`, `db/schema.py`, `db/tables.py` | ent#706: the four columns on both tracks |
@@ -888,9 +884,9 @@ trinity-enterprise#706 (divergence age and the freeze):
   real SQLite file: divergence freezes at 24 h + 1 s, not at 24 h − 1 s;
   **control arm**: the same row with `diverged_since` NULL fires; the skipped
   row carries the reason.
-- `tests/unit/test_ent706_internal_sync_health.py`,
-  `tests/unit/test_ent706_sync_health_surfaces.py` — the three read surfaces
-  keep their old keys and add the verdict.
+- `tests/unit/test_ent706_sync_health_surfaces.py` — the read surfaces
+  keep their old keys and add the verdict (the internal sync-health route and
+  its test were removed in #3434: nothing called it).
 - `src/frontend/tests/unit/syncHealth.spec.js` — the dot renders the backend
   state and reason and holds no threshold.
 - `tests/unit/test_ent707_fleet_health_sync.py` — `/api/monitoring/status`:

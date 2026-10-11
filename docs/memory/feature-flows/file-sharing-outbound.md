@@ -29,7 +29,6 @@ As an agent user (web, Slack, Telegram, WhatsApp), I want the agent to produce a
 - **MCP tool**: `share_file({ filename, display_name?, expires_in?, execution_id?, audience_email?, dedup_label? })` — from inside any agent with file sharing enabled
 - **Owner UI**: Agent Detail → Sharing tab → File Sharing panel
 - **Owner API**: `POST /api/agents/{name}/shared-files`
-- **Agent-server path**: `POST /api/internal/agent-files/share` (agent-scoped internal call)
 - **Public download**: `GET /api/files/{file_id}?sig={token}`
 
 ---
@@ -160,8 +159,6 @@ Two callers create share rows with no agent tool call, and both already HOLD the
 
 The email is whatever the binding verified for that number (`db.get_whatsapp_verified_email`), or `None` — the file is then in nobody's Files tab, and the owner's panel shows the number. `whatsapp_recipient` never raises: a failed lookup is "no email", never lost media. Neither argument given = the owner only.
 
-`POST /api/internal/agent-files/share` has no callers and passes no `actor_is_agent`, so its rows are owner-only (`none`).
-
 ### Readers
 
 | Reader | Read | Lists |
@@ -216,7 +213,6 @@ No WebSocket updates yet — manual refresh on action (acceptable because volume
 |-------|------|---------|
 | Router | `src/backend/routers/agent_files.py` (toggle + list/revoke) | GET/PUT `/file-sharing`, POST/GET/DELETE `/shared-files` |
 | Router | `src/backend/routers/files.py` (download) | GET `/api/files/{id}` |
-| Router | `src/backend/routers/internal.py` (share) | POST `/api/internal/agent-files/share` (agent-server path, `X-Internal-Secret` auth) |
 | Service | `src/backend/services/agent_shared_files_service.py` | `create_share()` orchestrator, path validation, MIME detection, quota, extraction; `create_share_from_bytes()` for platform-side callers |
 | Service | `src/backend/services/turn_audience.py` | Who a file is for — `audience_of()`, `resolve_turn_audience()`, `whatsapp_recipient()`; a leaf, no HTTP, no SQL |
 | Service | `src/backend/client_portal/service.py` | `portal_documents()` — the Workspace Files tab's listing, narrowed to the viewer |
@@ -234,7 +230,6 @@ No WebSocket updates yet — manual refresh on action (acceptable because volume
 | POST | `/api/agents/{name}/shared-files` | JWT (owner/admin) OR agent-scoped MCP key (same agent) | Mint a download URL. Optional `audience_email` names a rostered person instead of the person the turn was for. The route passes `audience_email=body.audience_email` and `actor_is_agent=bool(actor_agent)` — only the agent's own key is ever resolved to a turn. Response adds `visible_to_requester` / `visibility_note` / `addressed_to` |
 | GET | `/api/agents/{name}/shared-files` | Owner/admin (`assert_agent_owner`) — a JWT, or an MCP key that resolves to the owner | List active shares and who each is for: `addressed_to`, `addressed_to_channel`, `audience_source`. All three are withheld from every key-authenticated caller (`is_interactive_principal`, #2955) |
 | DELETE | `/api/agents/{name}/shared-files/{file_id}` | JWT (owner/admin) | Revoke (idempotent) |
-| POST | `/api/internal/agent-files/share` | `X-Internal-Secret` | Agent-server direct path; takes `agent_name` in body. No callers; its rows are owner-only |
 | GET | `/api/files/{file_id}` | Token (`?sig=`) | Public download. Optional **one-way** `?download=1` forces `attachment` (#2582); tolerantly parsed, so a malformed value is ignored rather than 422'd. The `session_token` parameter is gone since #568 |
 | HEAD | `/api/files/{file_id}` | Token (`?sig=`) | Same validation and headers as GET, no body, no counter, no audit row. Honours the same `?download=1`, because a disposition that disagrees with GET mis-plans the player that probed |
 

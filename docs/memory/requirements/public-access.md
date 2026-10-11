@@ -798,11 +798,12 @@ degrade quietly). #2086 centralizes it.
   selectable Claude model, add one `ModelEntry` to `MODEL_CATALOG` and re-run
   `python scripts/gen_model_catalog.py`.** This is the docs/PR-checklist step the
   AC requires ("docs say where the file is").
-- **FR-7 — Known-deferred display drift**: `routers/ops.py::_format_model_name` and
-  its frontend twin `stores/observability.js::formatModelName` are display
-  prettifiers with no model list (a new id renders via their title-case fallback).
-  They are the same drift class but are **deliberately out of scope** for #2086 —
-  tracked as a follow-up, not silently folded into the centralized catalog.
+- **FR-7 — Known-deferred display drift**: `services/ops_costs_service.py::_format_model_name`
+  (formerly in `routers/ops.py`) is a display prettifier with no model list (a new
+  id renders via its title-case fallback). It is the same drift class but is
+  **deliberately out of scope** for #2086 — tracked as a follow-up, not silently
+  folded into the centralized catalog. Its former frontend twin,
+  `stores/observability.js::formatModelName`, was removed with the store in #3434.
 
 ### 48.1 Voice Replies v2 — Voice as a Per-Message Capability (trinity-enterprise#117)
 
