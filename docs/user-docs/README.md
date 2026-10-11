@@ -110,7 +110,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 - [Slack Integration](integrations/slack-integration.md) — Multi-agent channels, DMs, thread routing
 - [Telegram Integration](integrations/telegram-integration.md) — Bot setup, group chats, privacy mode, trigger modes
 - [WhatsApp Integration](integrations/whatsapp-integration.md) — Twilio binding, sandbox setup, email verification
-- [MCP Server](integrations/mcp-server.md) — 154 MCP tools, API keys, inline email sign-in, dedicated per-agent tools
+- [MCP Server](integrations/mcp-server.md) — 160 MCP tools, API keys, inline email sign-in, dedicated per-agent tools
 - [A2A Protocol](integrations/a2a-protocol.md) — A2A `0.3.0` in both directions: inbound tasking, outbound calls to external agents, x402 payments
 - [Nevermined Payments](integrations/nevermined-payments.md) — x402 payment monetization
 

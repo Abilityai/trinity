@@ -214,6 +214,138 @@ def _scrub_pat(text: str) -> str:
 RECONCILE_ALARM_AGENT_NAME = "_skills-sync"
 
 
+def _read_last_fleet_reinject() -> Optional[Dict[str, Any]]:
+    """The persisted last fleet re-inject report, or None. Never raises.
+
+    Status must never 500 over a malformed blob, and a non-dict value is
+    treated as absent rather than passed on for a projection to choke on.
+    "Malformed" includes a parseable dict whose fields have the wrong TYPE:
+    the open status route projects this through `FleetReinjectSummary` as its
+    `response_model`, so a `null`/string count would fail response validation
+    and 500 the route every agent's Skills tab reads. The blob is checked
+    against that same model here, once, for both consumers.
+    """
+    try:
+        from services.skills_sync_service import FLEET_LAST_RUN_KEY
+        from models import FleetReinjectSummary
+
+        raw = db.get_setting_value(FLEET_LAST_RUN_KEY, None)
+        report = json.loads(raw) if raw else None
+        if not isinstance(report, dict):
+            return None
+        FleetReinjectSummary.model_validate(report)
+    except Exception:  # noqa: BLE001
+        return None
+    return report
+
+
+class AmbiguousSkillSource(Exception):
+    """More than one source row names this repository (trinity-enterprise#692)."""
+
+    def __init__(self, source_ids: List[str]):
+        super().__init__(
+            "more than one source is registered for this repository; "
+            "update the intended one by id"
+        )
+        self.source_ids = source_ids
+
+
+# Fields `apply_skill_source` patches when the caller names them.
+_APPLY_FIELDS = ("name", "ref", "ref_type", "priority", "enabled")
+
+
+def _default_source_name(url: str) -> str:
+    """`owner/repo` from a normalized repository URL, for a source created by
+    an apply that named none."""
+    path = urlparse(url).path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return (path or url)[:100]
+
+
+def apply_skill_source(
+    *, url: str, fields: Dict[str, Any], created_by: Optional[str] = None
+) -> Tuple[str, Any]:
+    """Register-or-update a source keyed on its repository (trinity-enterprise#692).
+
+    `url` must already be validated and normalized by the caller (the router
+    runs the same `reject_embedded_credentials` + `validate_skills_library_url`
+    as the create route). `fields` holds only what the caller NAMED.
+
+    Returns `(action, source)` with action `created` | `updated` | `unchanged`.
+    Raises `AmbiguousSkillSource` when two or more rows name the repository
+    (same url, different refs) — picking one would be a guess.
+
+    Matching uses `_same_skills_repo`, so the scheme-less spelling the bundled
+    default is seeded with matches its normalized form (#2763). A concurrent
+    apply that inserts the same (url, ref) first makes our insert lose at the
+    DB constraint; that is folded into an update of the row it created. A
+    concurrent DELETE of the matched row between our read and our update makes
+    the update answer None; that re-resolves (and so re-creates the declared
+    source) rather than reporting `updated` over a row that no longer exists.
+    """
+    from db.skill_sources import DuplicateSkillSource
+
+    named = {k: v for k, v in fields.items() if k in _APPLY_FIELDS and v is not None}
+
+    def _matches():
+        return [
+            s for s in db.list_skill_sources()
+            if _same_skills_repo(strip_url_credentials(s.url or ""), url)
+        ]
+
+    def _update(existing) -> Optional[Tuple[str, Any]]:
+        changed = {k: v for k, v in named.items() if getattr(existing, k) != v}
+        if not changed:
+            return "unchanged", existing
+        updated = db.update_skill_source(existing.id, **changed)
+        # None: the row was deleted between the match and the update (another
+        # admin's DELETE). Reporting `updated` with no row would be a lie the
+        # router then 500s on; the caller re-resolves instead.
+        return None if updated is None else ("updated", updated)
+
+    def _resolve(matches) -> Optional[Tuple[str, Any]]:
+        if len(matches) > 1:
+            raise AmbiguousSkillSource(sorted(s.id for s in matches))
+        return _update(matches[0])
+
+    # Bounded: each retry needs a concurrent writer to have changed the rows
+    # between two of our statements, so a second pass practically always
+    # settles; a third failure surfaces as the constraint error it is.
+    for _ in range(3):
+        matches = _matches()
+        if matches:
+            outcome = _resolve(matches)
+            if outcome is not None:
+                return outcome
+            continue  # matched row vanished — re-resolve (likely now: create)
+
+        try:
+            created = db.create_skill_source(
+                name=named.get("name") or _default_source_name(url),
+                url=url,
+                ref=named.get("ref", "main"),
+                ref_type=named.get("ref_type", "branch"),
+                enabled=named.get("enabled", True),
+                priority=named.get("priority"),
+                is_default=False,
+                created_by=created_by,
+            )
+            return "created", created
+        except DuplicateSkillSource:
+            # A concurrent apply inserted the same (url, ref) first: fold
+            # into an update of the row it created.
+            matches = _matches()
+            if not matches:
+                raise
+            outcome = _resolve(matches)
+            if outcome is not None:
+                return outcome
+    raise DuplicateSkillSource(
+        "the source changed concurrently while it was being applied; retry"
+    )
+
+
 def _same_skills_repo(stored_url: str, normalized_url: str) -> bool:
     """Do these two strings name the same skills repository? (#2763)
 
@@ -1314,6 +1446,11 @@ class SkillService:
             "branch": first.get("ref"),
             "cloned": any(s["cloned"] for s in source_status),
             "commit_sha": first.get("commit_sha"),
+            # trinity-enterprise#692: the last fleet re-inject's report. The
+            # full blob (per-agent `failures` included) reaches only the admin
+            # `GET /skills/sources`; the open status route projects it to
+            # counts through `FleetReinjectSummary`.
+            "last_fleet_reinject": _read_last_fleet_reinject(),
         }
 
     # =========================================================================
