@@ -22,7 +22,7 @@ PortalConversation.vue
   <header>  [agent picker] [title, renameable]        [+ New chat ⌘J] [★] [voice] [files]
   <slot #band>       [the agent's numbers]                             ← the shell mounts it
   <PortalChatTabs>   🔖 Main | New chat | Q3 invoi… | Onboardi… | 3 more ▾
-                     └─ OverflowTabs, dense + fixed-width (160px each)
+                     └─ OverflowTabs, dense + fixed-width (192px each)
   <slot #notice>     ⚠ Workspace chat titles aren't being generated …  [Dismiss]
                      └─ the shell mounts it; platform admins only (#2579)
   <thread>
@@ -86,7 +86,8 @@ surface rather than only within one owner's share:
 | ⌥⇧↓ / ⌥⇧↑ (Alt+Shift+↓ / ↑) | Next / previous chat with this agent | shell |
 | ⌘. / Ctrl+. | Show or hide the rail | shell |
 | ⌥. (Alt+.) | Next rail tab | shell |
-| ⌘/ / Ctrl+/ | The keyboard-shortcuts list | shell |
+| ⌘/ / Ctrl+/ | Cursor into the sidebar's search field; again from the field, back to the message field | shell |
+| ⌥/ (Alt+/) | The keyboard-shortcuts list | shell |
 | Esc, the call's `M`, the preview's ←/→, tab roving, a dialog's Tab cycle, the composer typeahead's bare arrows | — | the component that owns the overlay |
 | ⌘K / Ctrl+K | nothing — **reserved** for search (ent#577) | nobody |
 
@@ -139,7 +140,7 @@ protocol entry the map declares, not a second dispatcher), armed above `bootstra
 6. `keymapSuppressed`: a nearer owner already claimed the event
    (`defaultPrevented`, which is how the Esc protocol and the typeahead's bare
    arrows win), anything modal (`[aria-modal="true"]`, with a per-action
-   exemption so ⌘/ can close its own dialog and the rail sheet does not count
+   exemption so ⌥/ can close its own dialog and the rail sheet does not count
    as something modal over the rail), the mobile drawer, or a voice call —
    which suppresses the moving and rail keys silently.
 
@@ -164,7 +165,23 @@ inverted here, since the hands that want the next chat are already typing.
   rule's own arms rather than a second rule. Memory is in-memory and
   session-scoped, as the acceptance criteria asked: a reload starts fresh.
 
-**Discoverability.** ⌘/ opens `PortalKeyList` — a `BaseModal` dialog built
+**Search key.** ⌘/ runs `Portal.vue::focusSearch`: at and above `sm` it calls
+the desktop `PortalSidebar`'s exposed `focusSearch()` (focus + select), or —
+when that field already has focus (`searchHasFocus()`) — hands the caret back
+through `focusConversationComposer`; below `sm` it opens the drawer and focuses
+that instance's field on the next tick. The field shows the chord in a
+`PortalKeyCap` while it is empty and unfocused.
+
+**Tips panel.** `PortalKeyTips.vue` is pinned to the bottom of the OPEN rail
+(`PortalRail`'s `keyTips` prop; an icon button at the foot of the collapsed
+strip is the same door; the sheet has neither). Its rows are
+`keyTipRows(platform)` over `KEY_TIPS`, laid out as two rows of two with the
+two controls stacked beside them (`keyHintCompact` packs a chord pair into one
+cap; labels truncate, caps never wrap). Its keyboard button emits `open-keys`, and its
+close emits `dismiss-key-tips`, which the shell persists with
+`saveKeyTipsDismissed` (`localStorage['trinity-workspace-key-tips']`).
+
+**Discoverability.** ⌥/ opens `PortalKeyList` — a `BaseModal` dialog built
 from `keyListRows(WORKSPACE_KEYMAP, platform)`, so a key cannot exist without
 appearing in the list (minus the reserved row). The sidebar footer has a
 "Keyboard shortcuts" button carrying the same chord, and the surfaces a key
@@ -308,14 +325,15 @@ no routing at all: once the agent page IS the conversation, a recent-chat row's
 existing `/workspace/c/:sid` push is already "the agent page with that chat
 active". `agentChatTabs` gained the Main pin.
 
-**An archived chat IS a tab.** An earlier draft filtered them out, reasoning
-that Reset would grow the strip by one permanent entry per use; the operator
-ruled the other way — "one system line in Main names the archived chat, which
-becomes the newest tab" — and that draft was reverted. It was solving a problem
-`OverflowTabs` already solves: the strip renders what fits and counts the rest.
-You simply never LAND in an archived chat by default. (A stale line here said
-the opposite until #2579; the code never did.) See
-[workspace-agents-at-the-centre.md](workspace-agents-at-the-centre.md).
+**An archived chat is NOT a tab (ent#841, 2026-10-08).** ent#523 ruled that
+Reset's archive "becomes the newest tab". ent#841 added a close × to every tab
+(archive, never delete), and a tab that came straight back would be a close that
+did nothing — so the operator ruled ONE archive rule: any archived chat, a
+retired Main included, leaves the strip and the sidebar's active groups and is
+found under the sidebar's **Archived** group; opening it there reopens it. The
+chat on screen keeps its tab even when archived. The strip also carries each
+background chat's unread count (primary blue, the sidebar row's badge). See
+requirements §5.41.
 
 ## The four defects #2579 fixed
 
@@ -359,7 +377,7 @@ has not listed yet would wear a "New chat" label over a real conversation.
 
 `OverflowTabs` takes an opt-in `fixedWidth` (default **false**; the three other
 consumers pass nothing and are byte-identical). Under it every tab is
-`FIXED_TAB_WIDTH` (`w-40`, 160px, **Main included** — the operator ruled the
+`FIXED_TAB_WIDTH` (`w-48`, 192px — widened from 160 on 2026-10-08 to carry the star, the unread count and the ×, **Main included** — the operator ruled the
 width uniform), the label clamps in a `min-w-0 truncate` span, and the full text
 rides `title=` on the button and on the overflow-menu row.
 
@@ -576,7 +594,7 @@ never-opened chat count at all.
   the tabs). `portalRosterRow.spec.js` mounts the sidebar for the bound and the
   handed-down order — the lift's own regression.
 - `src/frontend/e2e/workspace-chat-tabs.spec.js` (**#2579**) — the geometry no
-  node-env pin can execute: every visible tab exactly 160px (Main included), a
+  node-env pin can execute: every visible tab exactly 192px (Main included), a
   long title clipped with its full text on `title=`, the counted "N more"
   appearing as the column narrows, and no horizontal page overflow. Learning
   #1500 is why it exists — the last structural change to a shared tab strip

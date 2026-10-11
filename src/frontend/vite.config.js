@@ -103,6 +103,15 @@ export default defineConfig({
       '/a2a/': {
         target: `http://${backendHost}:8000`,
         changeOrigin: false,
+        // trinity-enterprise#838: the backend reads X-Real-IP from this proxy
+        // to decide whether a caller is on a trusted network. Overwrite it from
+        // the socket, as prod nginx does with $remote_addr — a client-sent
+        // value must never pass through.
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq, req) => {
+            proxyReq.setHeader('X-Real-IP', req.socket.remoteAddress || '')
+          })
+        },
       },
       '/ws': {
         target: `ws://${backendHost}:8000`,

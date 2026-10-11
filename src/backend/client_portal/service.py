@@ -45,7 +45,7 @@ from services.chat_title import (
 # #2157: the surface stamp written onto every portal execution — see
 # `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
 from config import PORTAL_SOURCE_CHANNEL
-from services import turn_context
+from services import login_policy_gate, skill_gate_map_service, turn_context
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.channel_completion_report import COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED
 
@@ -297,6 +297,9 @@ def portal_signin_request(email: str | None) -> str | None:
     email = (email or "").strip().lower()
     if not email or not email_has_access(email):
         return None
+    # ent#849: members of an SSO-only org sign in with SSO; outsiders keep codes.
+    if not login_policy_gate.email_code_allowed_for(email):
+        return None
     from database import db as core_db
     return core_db.create_login_code(email, expiry_minutes=10)["code"]
 
@@ -305,13 +308,16 @@ def portal_signin_verify(email: str | None, code: str | None) -> str | None:
     """Step 2: verify the code AND re-check access, then mint a portal session
     token (a verified email, no platform account). Returns None on any failure."""
     email = (email or "").strip().lower()
+    # ent#849: before redeeming, so a refused member's code is not consumed.
+    if not login_policy_gate.email_code_allowed_for(email):
+        return None
     from database import db as core_db
     if not core_db.verify_login_code(email, code or ""):
         return None
     if not email_has_access(email):
         return None
-    from dependencies import create_portal_session_token
-    return create_portal_session_token(email)
+    from dependencies import PORTAL_MINT_OTP, create_portal_session_token
+    return create_portal_session_token(email, minted_by=PORTAL_MINT_OTP)
 
 
 def portal_exchange(email: str | None) -> str | None:
@@ -327,12 +333,16 @@ def portal_exchange(email: str | None) -> str | None:
     re-checks that at least one agent is actually shared with this address, so a
     delegate key cannot conjure a session for someone with no share. Returns
     None when it cannot; the router turns that into an explicit 403.
+
+    #3404: the token says it was minted here (`minted_by=delegate`), because
+    the person did not prove themselves to Trinity — such a session may not
+    self-approve a gated skill.
     """
     email = (email or "").strip().lower()
     if not email or not email_has_access(email):
         return None
-    from dependencies import create_portal_session_token
-    return create_portal_session_token(email)
+    from dependencies import PORTAL_MINT_DELEGATE, create_portal_session_token
+    return create_portal_session_token(email, minted_by=PORTAL_MINT_DELEGATE)
 
 
 # #2128 — the rooms substrate that backs a multi-agent Workspace chat used to be
@@ -518,13 +528,17 @@ def _refusal_detail(availability: str) -> str:
     )
 
 
-def _usage_limit_detail(agent_name: str) -> str:
+def _usage_limit_detail(agent_name: str, subscription_ids=None) -> str:
     """The 502 body when NO subscription can serve and nothing was switched.
 
     Names the earliest reset instant the headroom sampler already knows (#2638
     AC#4). "Please try again later" is true and nearly useless: the person has
     no way to know whether later means ten minutes or two days, so they either
     give up or re-send in a loop that cannot succeed.
+
+    `subscription_ids` (#3470): every subscription the turn's walk ran on — the
+    reset the person is told about is the EARLIEST across all of them, not only
+    the assigned one.
 
     Degrades to the original sentence whenever the instant is unknown or
     unreadable — a fabricated time would be worse than a vague one, and this
@@ -539,10 +553,13 @@ def _usage_limit_detail(agent_name: str) -> str:
         from database import db as _db
         from services.subscription_auto_switch import earliest_known_reset
 
+        ids = {s for s in (subscription_ids or []) if s}
         sub_id = _db.get_agent_subscription_id(agent_name)
-        if not sub_id:
+        if sub_id:
+            ids.add(sub_id)
+        if not ids:
             return fallback
-        resets_at = earliest_known_reset([sub_id])
+        resets_at = earliest_known_reset(sorted(ids))
         if not resets_at:
             return fallback
         when = parse_iso_timestamp(resets_at).strftime("%H:%M UTC on %-d %b")
@@ -2834,13 +2851,21 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       # request field.
                       reply_context: str = "",
                       # trinity-enterprise#751 — the ROUTE proved this caller is a
-                      # person (`PortalPrincipal.is_person`), so an approver may run
-                      # their own gated request. False for any caller that did not
-                      # (voice relays a model's paraphrase of the speech).
+                      # person (`PortalPrincipal.self_approves`), so an approver may
+                      # run their own gated request. False for any caller that did
+                      # not (voice relays a model's paraphrase of the speech; a
+                      # delegate-minted session, #3404).
                       gate_is_person: bool = False,
+                      # #3404 — which credential the route saw
+                      # (`PortalPrincipal.credential`), for the self-approval audit.
+                      gate_credential: str | None = None,
                       # #3265 — the turn's attachments, already resolved by
                       # `resolve_turn_attachments` (JSON). Stored on the user row.
-                      attachments: str | None = None) -> dict:
+                      attachments: str | None = None,
+                      # trinity-enterprise#631 — `(tagger, people)` resolved and
+                      # refused at the router, BEFORE anything was written.
+                      # Delivered once the user's row exists. None = no tags.
+                      person_tags: tuple | None = None) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -3025,8 +3050,11 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # the thread's title before this writes the derived one, and the history
     # context below must not contain the very message it is context FOR. Both
     # reads happen first, deliberately.
-    _persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id,
-                       attachments=attachments)
+    user_row_id = _persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id,
+                                     attachments=attachments, execution_id=execution_id)
+    # trinity-enterprise#631: the people this message tagged, pointed at the row
+    # that now stands for it. Best-effort — a tag that fails never fails a turn.
+    deliver_chat_tags(agent_name, session_id, user_row_id, person_tags)
 
     # ent#186 / #2579: title the thread NOW, concurrently with the turn.
     #
@@ -3165,12 +3193,17 @@ async def portal_chat(agent_name: str, message: str, email: str,
                 agent_name, message, email, session_id, resolved_model,
                 open_canvas_id=open_canvas_id)
             if execution_id:
+                # #3166: the user row was written before this turn had an id.
+                _stamp_user_turn(user_row_id, execution_id)
                 # #3114: plus the claim waits a pull pilot's turn and its cold
                 # retry may spend.
                 from services.pull_pilot import pull_queue_allowance
+                from services.session_turn_service import resolve_lock_ttl
                 mark_turn_inflight(
                     session_id, execution_id,
-                    turn_timeout + 60 + 2 * pull_queue_allowance(agent_name),
+                    # #3166: plus the wait for the thread's lock.
+                    turn_timeout + 60 + 2 * pull_queue_allowance(agent_name)
+                    + resolve_lock_ttl(agent_name),
                 )
                 owns_marker = True
 
@@ -3213,13 +3246,18 @@ async def portal_chat(agent_name: str, message: str, email: str,
             # The quoted message is part of the request: a reply to the client's
             # own held `/x` would otherwise send it to the agent unread.
             request_text=reply_prefix + client_text,
-            gate_requester=_gate_requester(email, gate_is_person),
+            gate_requester=_gate_requester(email, gate_is_person, gate_credential),
+            # #3166: a second message on this thread queues behind the first
+            # for as long as the first can hold the lock, instead of a 429
+            # after 30s. The wait budget below covers it.
+            wait_for_lock=True,
         )
     except SkillApprovalRequired as e:
         # trinity-enterprise#751: the message names a gated skill — nothing ran,
         # an approval was raised. Waiting is not failing: the thread renders a
         # non-retryable error as a Failed turn, so the notice is the reply.
-        return _persist_reply(agent_name, email, session_id, e.message, None, voice_call_id)
+        return _persist_reply(agent_name, email, session_id, e.message, None, voice_call_id,
+                              execution_id, viewer_is_person=gate_is_person)
     except SkillGateError as e:
         raise ClientPortalError(e.status_code, str(e), category="gated", retryable=False)
     except ResumeLockBusy:
@@ -3292,8 +3330,25 @@ async def portal_chat(agent_name: str, message: str, email: str,
             # first refusal), in which case the sentence below was telling a
             # person their message could not be retried while the agent sat on
             # a fresh subscription that would have served it.
+            #
+            # #3470: the platform now WALKS the pool itself — every other
+            # subscription, then the API key — and re-issues the message, so a
+            # switch is no longer something the person has to act on. The only
+            # case that still hands the retry back is a turn whose time budget
+            # ran out before a re-issue could run (`budget_exhausted`): a fresh
+            # send gets a fresh budget. Everything else here means the pool
+            # really is exhausted.
             switch = getattr(result, "subscription_switch", None)
-            if isinstance(switch, dict) and switch.get("switched"):
+            if isinstance(switch, dict) and switch.get("budget_exhausted"):
+                raise ClientPortalError(
+                    503,
+                    "The agent hit its usage limit and ran out of time to retry on "
+                    "another subscription. Send that again and it should go through.",
+                    category="auth_switched", retryable=True)
+            if (
+                isinstance(switch, dict) and switch.get("switched")
+                and not switch.get("retried") and not switch.get("exhausted")
+            ):
                 where = switch.get("new_subscription")
                 moved = (
                     f"moved onto '{where}'" if where
@@ -3304,13 +3359,14 @@ async def portal_chat(agent_name: str, message: str, email: str,
                     f"The agent hit its usage limit, so it was {moved}. "
                     "Send that again and it should go through.",
                     category="auth_switched", retryable=True)
-            # Nothing changed: the pool really is exhausted. Say WHEN, if the
-            # provider told us — the headroom sampler already caches the reset
-            # instants, and "try again later" is the least useful true thing
-            # the platform can say when it knows the hour.
+            # The pool really is exhausted. Say WHEN, if the provider told us —
+            # the headroom sampler already caches the reset instants, and "try
+            # again later" is the least useful true thing the platform can say
+            # when it knows the hour. Earliest across EVERY credential tried.
+            tried = switch.get("tried_subscription_ids") if isinstance(switch, dict) else None
             raise ClientPortalError(
                 502,
-                _usage_limit_detail(agent_name),
+                _usage_limit_detail(agent_name, subscription_ids=tried),
                 category="auth", retryable=False)
         if code == "CAPACITY" or "at capacity" in err:
             # Admission refused before any agent work — unbilled, and the queue
@@ -3394,18 +3450,26 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # It now runs concurrently with the turn, immediately after
     # `_persist_user_turn` — see the comment there for why, and for the two
     # behaviour changes that buys.
-    return _persist_reply(agent_name, email, session_id, reply, cost, voice_call_id)
+    return _persist_reply(agent_name, email, session_id, reply, cost, voice_call_id, execution_id,
+                          viewer_is_person=gate_is_person)
 
 
 def _persist_reply(agent_name: str, email: str, session_id: str, reply: str, cost,
-                   voice_call_id: str | None) -> dict:
-    """Persist the assistant half of a turn and build the turn's answer."""
+                   voice_call_id: str | None, execution_id: str | None = None, *,
+                   viewer_is_person: bool = False) -> dict:
+    """Persist the assistant half of a turn and build the turn's answer.
+
+    #3166: `execution_id` is the DISPATCHED turn's id — the one the client is
+    watching — never a cold retry's second row. The client accepts only the
+    reply carrying it, so a reply from another turn on the same thread is not
+    shown as this turn's answer."""
     message_id = None
     try:
         now = utc_now_iso()
         new_message_id = uuid.uuid4().hex
         db.add_portal_message(new_message_id, agent_name, email, "assistant", reply, cost, now,
-                              session_id=session_id, **_voice_attribution(voice_call_id))
+                              session_id=session_id, **_voice_attribution(voice_call_id),
+                              **_turn_attribution(execution_id))
         message_id = new_message_id
         db.touch_portal_session(session_id, now, added=1)
     except Exception as e:  # noqa: BLE001
@@ -3415,17 +3479,27 @@ def _persist_reply(agent_name: str, email: str, session_id: str, reply: str, cos
     # only because `PortalChatResponse` DECLARES it. The route's `response_model`
     # strips undeclared keys in silence, so adding a key here alone is a no-op
     # that every service-layer test would still pass.
+    # trinity-enterprise#754: on this fallback the answer is all the bubble has
+    # before a reload, so it says, like the history read, whether the turn
+    # skipped approval because the asker is the approver — for a person only.
+    turn = {"role": "assistant", "execution_id": execution_id}
+    skill_gate_map_service.annotate_self_approved_turns(
+        agent_name, [turn], email, viewer_is_person=viewer_is_person)
     return {"response": reply, "cost": cost, "session_id": session_id,
-            "message_id": message_id}
+            "message_id": message_id,
+            "gate_self_approved": turn["gate_self_approved"],
+            "gate_self_approved_by_viewer": turn["gate_self_approved_by_viewer"]}
 
 
-def _gate_requester(email: str, is_person: bool):
+def _gate_requester(email: str, is_person: bool, credential: str | None = None):
     """trinity-enterprise#751: who asked, for the skill gate — the Workspace
-    caller is a person; `is_person` says whether the route proved it."""
+    caller is a person; `is_person` says whether the route proved it, and
+    `credential` (#3404) which credential it saw."""
     from services import skill_gate_service
     return skill_gate_service.Requester(kind=skill_gate_service.KIND_PERSON,
                                         key=f"person:{email.casefold()}",
-                                        email=email, is_person=is_person)
+                                        email=email, is_person=is_person,
+                                        credential=credential)
 
 
 def _voice_attribution(voice_call_id: str | None) -> dict:
@@ -3490,9 +3564,16 @@ def decode_turn_attachments(raw) -> list | None:
     return [i for i in items if isinstance(i, dict) and i.get("filename")] or None
 
 
+def _turn_attribution(execution_id: str | None) -> dict:
+    """#3166: the `add_portal_message` kwarg naming the turn that wrote a row —
+    and NOTHING when there is no turn, so an unattributed write is unchanged."""
+    return {"execution_id": execution_id} if execution_id else {}
+
+
 def _persist_user_turn(agent_name: str, email: str, session_id: str, content: str,
                        voice_call_id: str | None = None,
-                       attachments: str | None = None) -> None:
+                       attachments: str | None = None,
+                       execution_id: str | None = None) -> str | None:
     """Write the client's own message, before the turn runs. Best-effort.
 
     Idempotent against a RETRY. The message is written before the turn so a
@@ -3505,6 +3586,10 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
     The test is "is this already the last thing said, with no answer since" —
     which is exactly the state a failed turn leaves behind, and never the state
     of someone deliberately sending the same message again after a reply.
+
+    #3166: returns the id of the row that now stands for this message (new, or
+    the reused one on a retry), or None when nothing could be written. A reused
+    row is moved to the retrying turn, so its reply sits under it after a reload.
     """
     try:
         recent = db.get_portal_messages(agent_name, email, limit=1, session_id=session_id)
@@ -3513,22 +3598,119 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
         if (recent and recent[-1].get("role") == "user" and recent[-1].get("content") == content
                 and recent[-1].get("source") is None):
             logger.info("portal: skipping duplicate user row on retry for session %s", session_id)
-            return
+            _stamp_user_turn(recent[-1].get("id"), execution_id)
+            return recent[-1].get("id")
     except Exception as e:  # noqa: BLE001 — a read failure must not block the turn
         logger.warning("portal duplicate-check failed for %s: %s", session_id, e)
 
+    row_id = None
     try:
         now = utc_now_iso()
-        db.add_portal_message(uuid.uuid4().hex, agent_name, email, "user", content,
+        new_id = uuid.uuid4().hex
+        db.add_portal_message(new_id, agent_name, email, "user", content,
                               None, now, session_id=session_id,
                               **_voice_attribution(voice_call_id),
                               # #3265: only when the turn carried files, so the
                               # ordinary write is byte-identical to before.
-                              **({"attachments": attachments} if attachments else {}))
+                              **({"attachments": attachments} if attachments else {}),
+                              **_turn_attribution(execution_id))
+        row_id = new_id
         db.touch_portal_session(session_id, now, added=1,
                                 title_if_empty=_derive_title(content))
     except Exception as e:  # noqa: BLE001 — never block a turn on bookkeeping
         logger.warning("portal user-message persist failed for %s/%s: %s", agent_name, email, e)
+    return row_id
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#631 — tagging a person from a 1:1 chat
+# ---------------------------------------------------------------------------
+# The chat is the tagger's own: a tagged colleague is POINTED at it (one Unread
+# item naming who tagged them and in which chat), never shown it. The rules —
+# who may tag, who may be tagged, the named refusals, the ledger row — are
+# `services/person_mention_service`'s, shared with rooms.
+
+class ChatTagError(Exception):
+    """A refused tag, with the fields the route answers with."""
+
+    def __init__(self, status_code: int, detail: dict):
+        super().__init__(detail.get("message"))
+        self.status_code = status_code
+        self.detail = detail
+
+
+def resolve_chat_tags(principal, agent_name: str, tags) -> tuple | None:
+    """`(tagger, people)` for a turn's tags, refused BEFORE anything is
+    written. None when the turn tags no one."""
+    if not tags:
+        return None
+    from services import person_mention_service as pms
+    try:
+        tagger = pms.tagger_for_portal(principal, is_person=bool(getattr(principal, "is_person", False)))
+        people = pms.resolve_tags(tags, [agent_name], tagger)
+    except pms.TagError as e:
+        raise ChatTagError(e.status_code, {"code": e.code, "message": e.detail, **e.extra}) from e
+    return (tagger, people) if people else None
+
+
+def chat_people(principal, agent_name: str, query: str) -> list[dict]:
+    """The 1:1 composer's people picker: who can be tagged in a chat with this
+    agent. Roster-scoped by the route; a query is required (ent#450 bound)."""
+    from services import person_mention_service as pms
+    try:
+        tagger = pms.tagger_for_portal(principal, is_person=bool(getattr(principal, "is_person", False)))
+    except pms.TagError as e:
+        raise ChatTagError(e.status_code, {"code": e.code, "message": e.detail, **e.extra}) from e
+    if not (query or "").strip():
+        return []
+    return pms.taggable_people([agent_name], query.strip()[:64], tagger)
+
+
+def deliver_chat_tags(agent_name: str, session_id: str | None, message_id: str | None,
+                      person_tags: tuple | None) -> None:
+    if not person_tags or not session_id or not message_id:
+        return
+    from services import person_mention_service as pms
+    tagger, people = person_tags
+    try:
+        pms.deliver(pms.Conversation(kind="chat", id=session_id, agent_name=agent_name,
+                                     label=f"a chat with {agent_name}"),
+                    message_id, None, people, tagger)
+    except Exception:  # noqa: BLE001 — the turn stands; the tagger's marks show what landed
+        logger.warning("portal: tags on %s/%s could not be delivered", session_id, message_id,
+                       exc_info=True)
+
+
+def _attach_own_tags(messages: list, session_id: str | None, agent_name: str | None = None) -> None:
+    """The tagger's marks on their own messages: delivered, then read."""
+    for m in messages:
+        m["tags"] = None
+    if not session_id:
+        return
+    mine = [m.get("id") for m in messages if m.get("role") == "user" and m.get("id")]
+    if not mine:
+        return
+    try:
+        from services import person_mention_service as pms
+        marks = pms.tags_by_message("chat", session_id, mine,
+                                    agent_names=[agent_name] if agent_name else None)
+    except Exception:  # noqa: BLE001 — a courtesy; the thread must load
+        logger.warning("portal: could not read tag marks for %s", session_id, exc_info=True)
+        return
+    for m in messages:
+        if m.get("id") in marks:
+            m["tags"] = marks[m["id"]]
+
+
+def _stamp_user_turn(row_id: str | None, execution_id: str | None) -> None:
+    """#3166: name the turn a user row belongs to, after the fact. Best-effort —
+    a missed stamp costs only where the reply sits after a reload."""
+    if not row_id or not execution_id:
+        return
+    try:
+        db.set_portal_message_execution_id(row_id, execution_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal user-row execution stamp failed for %s: %s", row_id, e)
 
 
 def _inflight_key(session_id: str) -> str:
@@ -3608,6 +3790,18 @@ def portal_max_turn_seconds(turn_timeout: int) -> int:
     `tests/unit/test_2133_*` pins this arithmetic so a change drifts loudly.
     """
     return 2 * portal_attempt_ceiling_seconds(turn_timeout) + 60
+
+
+def portal_wait_budget_seconds(agent_name: str, turn_timeout: int) -> int:
+    """How long a Workspace client may wait for one turn: the turn's own bound,
+    the pull-pilot claim allowance (#3114), and the wait for the thread's lock
+    (#3166) — a turn sent while another runs on the same thread queues behind
+    it for up to the lock's TTL before it starts. The marker TTL and the 202
+    budget are this one number."""
+    from services.pull_pilot import pull_queue_allowance
+    from services.session_turn_service import resolve_lock_ttl
+    return (portal_max_turn_seconds(turn_timeout) + 2 * pull_queue_allowance(agent_name)
+            + resolve_lock_ttl(agent_name))
 
 
 def mark_turn_inflight(session_id: str, execution_id: str,
@@ -3955,8 +4149,12 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             reply_context: str = "",
                             # trinity-enterprise#751 — see `portal_chat`.
                             gate_is_person: bool = False,
+                            # #3404 — see `portal_chat`.
+                            gate_credential: str | None = None,
                             # #3265 — see `portal_chat`.
-                            attachments: str | None = None) -> dict:
+                            attachments: str | None = None,
+                            # trinity-enterprise#631 — see `portal_chat`.
+                            person_tags: tuple | None = None) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -4041,10 +4239,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
     # the client's budget and the actual turn disagree about one turn's life.
     from services.session_turn_service import resolve_turn_timeout
     turn_timeout = resolve_turn_timeout(agent_name)
-    # #3114: on a pull pilot each of the two attempts may first wait up to one
-    # agent timeout for a worker to claim it.
-    from services.pull_pilot import pull_queue_allowance
-    wait_budget = portal_max_turn_seconds(turn_timeout) + 2 * pull_queue_allowance(agent_name)
+    # #3114 / #3166: plus the pull-pilot claim allowance and the wait for the
+    # thread's lock — see `portal_wait_budget_seconds`.
+    wait_budget = portal_wait_budget_seconds(agent_name, turn_timeout)
 
     # #2320: drop any verdict left by the PREVIOUS turn on this thread before
     # the new marker lands. Without this, a client polling turn N+1 is handed
@@ -4067,7 +4264,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               model=model, resolved_model=resolved_model,
                               open_canvas_id=open_canvas_id,
                               reply_context=reply_context,
-                              gate_is_person=gate_is_person)
+                              gate_is_person=gate_is_person,
+                              gate_credential=gate_credential,
+                              person_tags=person_tags)
         except ClientPortalError as e:
             # There is no request left to raise into — the 202 went out long ago
             # — so the ONLY way this reaches the client is the record written
@@ -4368,6 +4567,37 @@ def rename_session(agent_name: str, email: str, session_id: str, title,
     }
 
 
+def set_session_archived(agent_name: str, email: str, session_id: str,
+                         archived: bool, include_owned: bool = False) -> dict:
+    """Close a chat from its tab (ent#841), or reopen it. Archive, never delete.
+
+    Roster-scoped (miss → 404), then the UPDATE is scoped to (agent, client) so
+    an unowned or unknown id is the same uniform 404 (Invariant #8). The live
+    Main is refused with a named 409 rather than a 404: it exists and is
+    theirs, and the person needs to be told that Reset is its retire action.
+    The star (per-viewer chat state) is untouched, so a starred chat that is
+    closed and reopened comes back starred.
+    """
+    if not agent_on_roster(agent_name, email, include_owned):
+        raise ClientPortalError(404, "Agent not found")
+    row = db.get_portal_session(session_id, agent_name, email)
+    if not row:
+        raise ClientPortalError(404, "Conversation not found")
+    if row.get("is_main"):
+        raise ClientPortalError(409, "Main can't be closed — use Reset to start it fresh")
+    db.set_portal_session_archived(session_id, agent_name, email, archived, utc_now_iso())
+    row = db.get_portal_session(session_id, agent_name, email) or row
+    return {
+        "id": session_id,
+        "title": row.get("title"),
+        "created_at": row.get("created_at"),
+        "last_message_at": row.get("last_message_at"),
+        "message_count": int(row.get("message_count") or 0),
+        "is_main": bool(row.get("is_main")),
+        "archived_at": row.get("archived_at"),
+    }
+
+
 _SEARCH_MIN_LEN = 2       # a 1-char query is too noisy to be useful
 _SNIPPET_RADIUS = 60      # chars of context on each side of the match
 
@@ -4495,7 +4725,8 @@ def _attach_own_ratings(messages: list, email: str, *, is_platform: bool = False
 
 
 def get_history(agent_name: str, email: str, session_id: str | None = None,
-                include_owned: bool = False, limit: int | None = None) -> dict:
+                include_owned: bool = False, limit: int | None = None,
+                viewer_is_person: bool = True) -> dict:
     """A client's conversation with a rostered agent (oldest-first). Roster-scoped
     (miss → 404). With ``session_id`` it returns that thread (validated to belong
     to the caller — miss → 404); with none it returns the client's most-recent
@@ -4527,9 +4758,19 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     # the thumb they already gave. One query for the thread rather than one per
     # message, and scoped to this evaluator — nobody sees anyone else's rating.
     _attach_own_ratings(messages, email, is_platform=include_owned)
+    # trinity-enterprise#754: a reply whose turn skipped approval because the
+    # asker IS the approver says so (one read for the thread; no email added).
+    # People only: a machine principal (a system key on the platform session)
+    # reads no flag (the executions rule).
+    skill_gate_map_service.annotate_self_approved_turns(
+        agent_name, messages, email, viewer_is_person=viewer_is_person)
     # #3265: the stored JSON becomes the list the bubble renders.
     for m in messages:
         m["attachments"] = decode_turn_attachments(m.get("attachments"))
+    # trinity-enterprise#631: on the caller's own messages, who they tagged and
+    # whether it was read. A thread is only ever its owner's, so these marks
+    # are always the reader's own.
+    _attach_own_tags(messages, session_id, agent_name)
     # ent#286: a client that reloaded mid-turn has lost the execution id it was
     # streaming. It arrives here, on the fetch the client already makes on
     # mount, so reattaching costs no extra round trip.
@@ -4561,12 +4802,9 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
                     # (#2133) — a `lost` verdict never retries, so under-waiting
                     # only costs a premature "check shortly" message, but it is
                     # still the dishonest one.
-                    from services.pull_pilot import pull_queue_allowance
                     from services.session_turn_service import resolve_turn_timeout
-                    wait_budget = (
-                        portal_max_turn_seconds(resolve_turn_timeout(agent_name))
-                        + 2 * pull_queue_allowance(agent_name)  # #3114
-                    )
+                    wait_budget = portal_wait_budget_seconds(
+                        agent_name, resolve_turn_timeout(agent_name))
                 else:
                     wait_budget = ttl
         except Exception as e:  # noqa: BLE001 — budget None → the client falls back

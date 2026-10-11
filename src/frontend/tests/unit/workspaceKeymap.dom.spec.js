@@ -11,7 +11,7 @@
  * overlay that says it is modal — including ones that do not exist yet, which
  * is why this is a probe and not a registry — and it must NOT see the one the
  * pressed key belongs to: the rail's own sheet for the rail keys, the key list
- * itself for ⌘/. That exemption is per action, which is what keeps `⌥↓` from
+ * itself for ⌥/. That exemption is per action, which is what keeps `⌥↓` from
  * switching agent behind an open sheet.
  */
 import { describe, it, expect, afterEach } from 'vitest'
@@ -58,7 +58,7 @@ describe('hasModalOpen', () => {
     expect(hasModalOpen(document, { ignore: ['[data-ws-rail-sheet]', '[data-ws-key-list]'] })).toBe(false)
   })
 
-  it('lets ⌘/ close its own list while every other key stays suppressed', () => {
+  it('lets ⌥/ close its own list while every other key stays suppressed', () => {
     add('<div role="dialog" aria-modal="true" data-ws-key-list></div>')
     expect(hasModalOpen(document, { ignore: '[data-ws-key-list]' })).toBe(false)
     expect(hasModalOpen(document)).toBe(true)

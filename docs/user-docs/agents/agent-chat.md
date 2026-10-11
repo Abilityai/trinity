@@ -2,7 +2,7 @@
 
 The Chat tab in Agent Detail provides a bubble UI for conversing with agents, with persistent history and real-time status updates.
 
-This tab is **stateless**: each message starts fresh, replaying the last 20 messages of the visible transcript as text. It is labelled as such — *Stateless chat — each message starts fresh.* — with a **Continue in Workspace →** link beside it that opens the Workspace in its own browser tab.
+Each message on this tab runs as a new agent session, and the last 20 messages of the visible transcript are included as text for context. The tab says so in a banner (*Each message runs as a new agent session; the last 20 messages are included for context.*), with a **Continue in Workspace →** link beside it that opens the Workspace in its own browser tab.
 
 For a conversation where the agent keeps its working memory between turns — tool results, mid-task state, reasoning — use the [Workspace](../sharing-and-access/workspace.md) instead. The Session-mode toggle that used to live here has been retired in its favour, and `?tab=session` links now redirect there.
 
@@ -14,7 +14,7 @@ The tab is **text only**. Voice lives in the Workspace: the **Talk** button in t
 
 - **Chat Session** -- A conversation thread stored in the database. Each agent can have multiple sessions.
 - **Dynamic Thinking Status** -- Real-time labels showing what the agent is doing (replaces static "Thinking..."). Each tool call becomes a short line such as *Reading …/src/app.py...* or *Running pytest -q...*; each label stays up at least 500 ms so fast tool calls don't flicker.
-- **Playbook Autocomplete** -- Type `/` in the chat input to trigger a dropdown of available playbooks. Ghost text shows command syntax with argument hints.
+- **Skill Autocomplete** -- Type `/` in the chat input to open a **Skills** dropdown of the agent's skills. Ghost text shows command syntax with argument hints.
 - **Continue as Chat** -- Resume a completed or failed execution as an interactive chat, preserving the full context (150K+ tokens) via Claude Code's `--resume` flag.
 
 ## How It Works
@@ -25,7 +25,7 @@ The tab is **text only**. Voice lives in the Workspace: the **Talk** button in t
 4. Type a message and press Enter.
 5. The agent processes the message -- the status label updates in real-time (e.g., *Reading …/src/app.py...*, *Running pytest -q...*, *Processing results...*).
 6. The response appears as a chat bubble.
-7. Type `/` to autocomplete playbook commands.
+7. Type `/` to autocomplete skill commands.
 
 The agent must be running; a stopped agent shows **Agent Not Running** in place of the input.
 

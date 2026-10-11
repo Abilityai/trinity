@@ -1,7 +1,7 @@
 """
 Pydantic models for the agent server.
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -16,6 +16,45 @@ class ChatMessage(BaseModel):
     timestamp: datetime = None
 
 
+class AuthOverride(BaseModel):
+    """A credential for THIS ONE spawn (#3470 — SUB-003 walks the pool).
+
+    Exactly one of the two is set. The backend sends it when it re-issues a
+    refused turn on another credential: the agent applies it as the top env
+    layer of that single `claude` subprocess and changes nothing in the
+    container, so concurrent turns may run on different credentials and a
+    plain `docker restart` cannot desynchronise anything. Claude Code only;
+    other runtimes ignore it (they authenticate from their own `.env`).
+    """
+    # SecretStr: a `repr()` of the request, a validation error's echoed
+    # `input`, or a stray `logger.info(f"{request}")` prints `**********`,
+    # never the credential. Read with `.get_secret_value()`.
+    oauth_token: Optional[SecretStr] = None  # CLAUDE_CODE_OAUTH_TOKEN for this spawn
+    api_key: Optional[SecretStr] = None      # ANTHROPIC_API_KEY for this spawn
+
+    @staticmethod
+    def _value(secret: Optional[SecretStr]) -> Optional[str]:
+        return secret.get_secret_value() if secret is not None else None
+
+    def kind(self) -> Optional[str]:
+        """``"oauth_token"`` / ``"api_key"`` / None when neither is usable."""
+        token, key = self._value(self.oauth_token), self._value(self.api_key)
+        if token and not key:
+            return "oauth_token"
+        if key and not token:
+            return "api_key"
+        return None
+
+    def secret(self) -> Optional[str]:
+        """The one usable credential's plaintext, or None."""
+        kind = self.kind()
+        if kind == "oauth_token":
+            return self._value(self.oauth_token)
+        if kind == "api_key":
+            return self._value(self.api_key)
+        return None
+
+
 class ChatRequest(BaseModel):
     message: str
     stream: bool = False
@@ -26,6 +65,8 @@ class ChatRequest(BaseModel):
     # fresh session that is NOT kept as the agent's chat session, so the next
     # caller never resumes a context with the skill loaded. Claude Code only.
     isolated_session: bool = False
+    # #3470: per-spawn credential for a SUB-003 re-issue. Ignored by old images.
+    auth_override: Optional[AuthOverride] = None
 
 
 class ChatResponse(BaseModel):
@@ -255,6 +296,8 @@ class ParallelTaskRequest(BaseModel):
     # result-callback endpoint. Ignored by non-Claude runtimes / old images
     # (they run synchronously and return 200 — the backend's non-202 fallback).
     async_result: Optional[bool] = False
+    # #3470: per-spawn credential for a SUB-003 re-issue (see AuthOverride).
+    auth_override: Optional[AuthOverride] = None
 
 
 class ParallelTaskResponse(BaseModel):

@@ -247,6 +247,27 @@ stranger guessing tokens learns nothing from the difference. An unparseable
 `expires_at` reads as expired: a link whose lifetime cannot be read is one we
 cannot promise is live.
 
+**Signing in from an `authorized` link (#3406).** A signed-out visitor gets
+`401 sign_in_required`, and `SharedCanvas.vue` renders its own card ("Sign in to
+view this canvas") whose link carries `/login?redirect=<the canvas>`. Two things
+used to defeat it.
+- The global 401 handler treated `/canvas/s/` as an operator page and pushed
+  `/login` before the card ever rendered.
+- `Login.vue` read no `redirect`, so every sign-in landed on the dashboard.
+
+Now:
+- **The 401 verdict** (`utils/platformSession.js`) answers `ignore` there when
+  nothing is stored, and `logout-in-place` when a stored token failed. Every 401
+  on this page is the platform credential's, because `get_optional_user` reads a
+  bad token as anonymous. Ending it in place keeps the card, and its Sign in
+  reaches the login form instead of the `/login → /` guard.
+- **`Login.vue`** sends every non-SSO success through `safeRedirect()`
+  (`utils/safeRedirect.js`). That honours an in-app path only: `//host`,
+  backslashes, control characters, absolute URLs, a repeated parameter and
+  `/login` itself all fall back to `/`.
+- **SSO** still lands on the dashboard, because the round trip through the
+  identity provider drops the query.
+
 ### The PDF
 
 **Print-first**, per the issue's own guidance: a print stylesheet over the
@@ -985,3 +1006,4 @@ rail's Canvas tab outside a call still refreshes on its own triggers.
 | 2026-09-07 | claude | One rich block vocabulary: `image` + `diagram` kinds, `chart` widened to six types on the metric series shape, rich fences in markdown, block ids + `patch_canvas`, the `main` default canvas, voice tools as block edits through the one write path with the write-side audience rule, `### Your Canvas` prompt guidance (ent#536) |
 | 2026-09-14 | claude | Freshness is two facts, never a verdict (#2734): the header renders `updated_at` and the new `agent_last_run_at` and derives nothing; the `may be out of date` badge and its note are deleted; `stale` stays computed and unrendered in the header |
 | 2026-10-05 | claude | A newly created canvas is followed when another is open; deferred while managing, searching or sharing; a rewrite of another canvas does not pull focus (#3218) |
+| 2026-10-08 | claude | #3406: an `authorized` share's own Sign in card is no longer pre-empted by the global 401 redirect (verdict `ignore` / `logout-in-place` on `/canvas/s/`), and signing in from it returns to the canvas (`Login.vue` → `safeRedirect`; SSO still lands on the dashboard) |

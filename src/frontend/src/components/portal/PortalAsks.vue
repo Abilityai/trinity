@@ -112,6 +112,15 @@
       >
         {{ endingLine(ask) }}
       </p>
+      <!-- #3247: the agent's replacement names the ask it replaced, by
+           request_id only — there is no deep link to a single item. -->
+      <p
+        v-if="workspaceReplacesText(ask)"
+        class="mt-2 text-xs"
+        :data-testid="`${tid.prefix}-replaces`"
+      >
+        {{ workspaceReplacesText(ask) }}
+      </p>
 
       <!-- trinity-enterprise#748: a dismissal is undoable for a few seconds,
            here on the card it ended — nothing is sent until the window lapses. -->
@@ -334,7 +343,7 @@ import { queueResponseKind, buildQueueResponse, queueTypeLabel } from '@/utils/o
 // #2915: the same home; a second line so the #2375 import pin above stays byte-exact.
 import { respondRefusedAsDiverged, QUEUE_RESPONSE_DIVERGED } from '@/utils/operatorQueue'
 // trinity-enterprise#611: the one ending rule, a third line for the same reason.
-import { queueEnding, queueEndingText } from '@/utils/operatorQueue'
+import { queueEnding, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
 // trinity-enterprise#610 §3g B3/B5: the Workspace's badge and a question's quick picks.
 import { workspaceAskBadge, questionQuickPicks } from '@/utils/operatorQueue'
 // trinity-enterprise#610 §3g L6 (E2 seam): the brief's per-option consequence.
@@ -509,7 +518,7 @@ function endingLine(ask) {
   const ending = queueEnding(ask)
   // An expiry keeps its own sentence: the deadline is the fact a person reads.
   if (!ending || ending.kind === 'expired') return expiredLabel(ask.expires_at)
-  const text = queueEndingText(ending)
+  const text = workspaceEndingText(ask)
   return ending.when ? `${text} · ${formatRelativeTime(ending.when)}` : text
 }
 const endedAtAbsolute = (ask) => {
@@ -566,11 +575,14 @@ const controlsKind = (ask) => queueResponseKind({ type: ask.kind, options: ask.o
 
 // trinity-enterprise#747: an alert has nothing to decide, so nothing to
 // discuss; and the chat already discussing this ask needs no link to itself.
-const canDiscuss = (ask) => ask.kind !== 'alert'
+// trinity-enterprise#816: not on a SHARED ask (one delivered to everyone a role
+// resolves to) — the server refuses both (`shared_ask`) until they are per
+// person, so the card does not offer them.
+const canDiscuss = (ask) => ask.kind !== 'alert' && !ask.shared
   && !(ask.discussion_chat_id && ask.discussion_chat_id === props.currentSessionId)
 // trinity-enterprise#748: a question or an approval can be declined; an alert
 // is acknowledged ("Got it"), which already ends it without a decision.
-const canDismiss = (ask) => ask.kind !== 'alert'
+const canDismiss = (ask) => ask.kind !== 'alert' && !ask.shared
 // Not once the dismissal is on the wire: the server may already have told the agent.
 const undoable = (ask) => !!store.askDismissals[ask.id] && !store.askDismissals[ask.id].committing
 const discussingId = ref(null)

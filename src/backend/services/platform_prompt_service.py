@@ -44,6 +44,14 @@ MAX_STAKEHOLDER_LEN = 140
 MAX_ENDED_ASKS = 5
 MAX_REQUEST_ID_LEN = 64
 ENDED_ASKS_WINDOW_HOURS = 24
+# Pending asks (#3247): the agent's own still-open asks, oldest first — a
+# scheduled run that cannot see them re-asks what it already asked.
+MAX_PENDING_ASKS = 8
+# An entry is `request_id (type, age)` and nothing more — never the ask's title.
+# A trigger label cannot say who reads the reply (an `operator_response` resume
+# answers the addressee in their Workspace chat, a `schedule` can deliver to a
+# Workspace seat, a delegated `agent` child reports into its parent's channel
+# thread), so no label is trusted with a title; `get_my_ask` returns it.
 
 # Static platform instructions — moved from agent-side trinity.py
 PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
@@ -140,7 +148,7 @@ All operator communication is **asynchronous**. A human may answer in minutes or
 
 1. **Park** your request: call `ask_operator` (or append an entry to the queue file).
 2. **End your turn.** Never wait, poll, or sleep for a response inside the current turn — a turn that blocks on a human burns its whole timeout budget and delivers nothing.
-3. **Act on the outcome in a later turn.** Read how an ask ended with `get_my_ask`; the Execution Context block also lists your asks that ended in the last 24 hours. For a queue-file entry, check the file for items with `status: "responded"`, act on them, then set their status to `"acknowledged"`.
+3. **Act on the outcome in a later turn.** Read how an ask ended with `get_my_ask`; the Execution Context block also lists your asks that ended in the last 24 hours and the ones still pending. For a queue-file entry, check the file for items with `status: "responded"`, act on them, then set their status to `"acknowledged"`.
 
 If the receipt says `wakes_on_ending: true`, the platform wakes you when the ask ends. Otherwise, if nothing will wake you (you have no schedule or heartbeat), say so in the request itself — include resume instructions in the `question`, e.g. "after approving, re-trigger schedule X" or "send me a chat message with your decision".
 
@@ -153,6 +161,8 @@ Before performing an action that cannot be undone or verified afterwards — pay
 `ask_operator` takes a `request_id` and a `title`, plus optional `question`, `type`, `options`, `priority`, `context`, `proposal`, `to` and `expires_at`; its description has the details and the named refusals.
 
 **Write atomic asks.** One decision per ask; a title a person reads at a glance (by default at most 120 characters); options that name the choice only (by default at most 5 options, each at most 60 characters — the person can always answer `(something else)`), with the reasoning in `question` and what an option does in `proposal`; `context` as a few labelled facts for a person. The `ask_operator` description has the full rules.
+
+**Do not re-ask what is still pending.** The Execution Context lists your pending asks beside the ended ones. If the facts changed, raise the new ask with `replaces` set to the pending ask's `request_id`: the earlier ask ends as replaced and the person sees the new one — an ask is never changed in place. If the person answered first, the replace is refused (`replaces_ended`): the answer stands, read it with `get_my_ask`. Repeating a pending ask's `proposal` without `replaces` is refused (`already_pending`). A queue-file entry cannot replace anything; its `status` turns `cancelled` when a native ask replaces it.
 
 **Request IDs must be globally unique.** Derive the `request_id` from your current execution ID (see the Execution Context block), e.g. `approval-{execution_id}-{short-slug}`. Never use date-serial IDs like `req-20260307-001` — a second task that picks the same ID gets the first ask's receipt instead of a new ask. Re-using your own derived ID when the same task runs again is safe and intentional: it prevents duplicate requests.
 
@@ -288,7 +298,7 @@ DELEGATION_CONTRACT = """\
 - Never re-send because a call timed out or its delivery could not be confirmed. An exact repeat is normally answered with the original; a reworded one can run the work twice.
 - Read the result with `get_execution_result(agent_name, execution_id)` (`get_fan_out_result` for a batch); `running` is not stuck. To finish later, call `set_reminder` with a message naming the `execution_id`, then end your turn. A receipt is not a result: never report the work as done.
 - Confirmed `failed` or `cancelled`: re-send word for word to retry; same `execution_id` back: `set_reminder`, end your turn.
-- An error without an `execution_id`, `agent_busy` included, is not proof that nothing ran. Look for your exact message in `list_recent_executions(agent_name)`: one match is your receipt; otherwise re-send it word for word, same options (for `agent_busy`, after `retry_after_seconds`).
+- An error without an `execution_id` is not proof that nothing ran. Look for your exact message in `list_recent_executions(agent_name)`: one match is your receipt; otherwise re-send it word for word, same options. On `agent_busy` nothing ran: re-send after `retry_after_seconds`.
 - `pending_approval`: nothing ran. Do not retry or route it through another agent; its `message` says whether you will hear the outcome. On `retryable: false`, do what it says.
 - For long work use `parallel=true, async=true`: the receipt comes back at once, and the run's end fires the target's `agent.task.completed` / `agent.task.failed`. A `subscribe_to_event` subscription to those wakes you for every run of that agent, so match the `execution_id`."""
 PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace("__DELEGATION_CONTRACT__", DELEGATION_CONTRACT)
@@ -733,6 +743,11 @@ class ExecutionContext:
     # from the DB; stateless, so a wake that was lost (a crash, a stopped agent)
     # still reaches the agent on its next turn.
     ended_asks: Optional[List[dict]] = None
+    # #3247: this agent's own PENDING asks, oldest first — `{request_id, type,
+    # title, created_at}` each, at most MAX_PENDING_ASKS — and how many there
+    # are in all (the rest are named as a count). Auto-filled from the DB.
+    pending_asks: Optional[List[dict]] = None
+    pending_asks_total: Optional[int] = None
     # trinity-enterprise#814: the person a scheduled seat run is addressed to
     # (ent#637 — the Workspace delivery address on the execution row). NEVER
     # rendered: it only picks which seat `role_id` names. A chat turn uses
@@ -827,6 +842,8 @@ def _render_ended_asks(ctx: ExecutionContext) -> Optional[str]:
     for ask in ctx.ended_asks[:MAX_ENDED_ASKS]:
         rid = _sanitize_field(ask.get("request_id"), max_len=MAX_REQUEST_ID_LEN)
         how = _sanitize_field(ask.get("disposition"), max_len=16)
+        if ask.get("disposed_by") == "agent":
+            how = "replaced"  # #3247: the agent ended it itself by replacing it
         when = _sanitize_field(ask.get("disposed_at"), max_len=MAX_TIMESTAMP_LEN)
         if rid and how:
             entries.append(" ".join(x for x in (rid, how, when) if x))
@@ -834,6 +851,60 @@ def _render_ended_asks(ctx: ExecutionContext) -> Optional[str]:
         return None
     more = ", and more" if len(ctx.ended_asks) > MAX_ENDED_ASKS else ""
     return "; ".join(entries) + f"{more} — read one with get_my_ask"
+
+
+def _coarse_age(created_at: Optional[str], now: Optional[datetime] = None) -> Optional[str]:
+    """`<1h`, `3h`, `2d` — how long an ask has waited. The raw timestamp when it
+    does not parse; None when there is none."""
+    if not created_at:
+        return None
+    try:
+        at = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        hours = int(((now or datetime.now(timezone.utc)) - at).total_seconds() // 3600)
+    except (TypeError, ValueError):
+        return _sanitize_field(created_at, max_len=MAX_TIMESTAMP_LEN)
+    if hours < 1:
+        return "<1h"
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def _render_pending_asks(ctx: ExecutionContext) -> Optional[str]:
+    """The `Pending asks` line body (#3247): `request_id (type, age)`, oldest
+    first, bounded, the rest as a count. Never a title, a question or anything
+    a person wrote — the turn's trigger label does not say who reads the reply,
+    and `get_my_ask` returns the title when the agent needs it. A row the agent
+    did not raise itself (a pre-#611 NULL raiser) spends the same budget, so it
+    stays on the line, marked `not replaceable`: a replace of it is refused."""
+    if not ctx.pending_asks:
+        return None
+    entries: List[str] = []
+    replaceable = False
+    for ask in ctx.pending_asks[:MAX_PENDING_ASKS]:
+        rid = _sanitize_field(ask.get("request_id"), max_len=MAX_REQUEST_ID_LEN)
+        if not rid:
+            continue
+        own = ask.get("raised_by") == "agent"
+        replaceable = replaceable or own
+        meta = ", ".join(x for x in (
+            _sanitize_field(ask.get("type"), max_len=16),
+            _coarse_age(ask.get("created_at")),
+            None if own else "not replaceable",
+        ) if x)
+        entries.append(f"{rid} ({meta})" if meta else rid)
+    if not entries:
+        return None
+    total = max(ctx.pending_asks_total or 0, len(ctx.pending_asks))
+    shown = min(len(ctx.pending_asks), MAX_PENDING_ASKS)
+    more = (f", and {total - shown} more — list them with list_operator_queue"
+            if total > shown else "")
+    advice = " — do not re-ask one of these"
+    if replaceable:
+        advice += "; if the facts changed, replace it (ask_operator, replaces)"
+    return "; ".join(entries) + more + advice
 
 
 def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
@@ -955,6 +1026,10 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         if collaborators:
             lines.append(f"- **Collaborators**: {collaborators}")
 
+        pending_asks = _render_pending_asks(ctx)
+        if pending_asks:
+            lines.append(f"- **Pending asks**: {pending_asks}")
+
         ended_asks = _render_ended_asks(ctx)
         if ended_asks:
             lines.append(f"- **Ended asks (last {ENDED_ASKS_WINDOW_HOURS} h)**: {ended_asks}")
@@ -1047,6 +1122,30 @@ def _resolve_ended_asks(agent_name: Optional[str]) -> List[dict]:
         return []
 
 
+def _resolve_pending_asks(agent_name: Optional[str]) -> tuple:
+    """This agent's own pending asks, oldest first, and how many there are —
+    `(rows ≤ MAX_PENDING_ASKS, total)`. Drawn from the predicate that spends the
+    open-ask budget. `([], 0)` on any failure: the line is omitted, never the
+    turn (#3247)."""
+    if not agent_name:
+        return [], 0
+    try:
+        from services.operator_queue_service import _RESERVED_ID_PREFIXES
+
+        rows = db.list_pending_operator_queue_asks(
+            agent_name, MAX_PENDING_ASKS,
+            exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+        ) or []
+        total = len(rows)
+        if total >= MAX_PENDING_ASKS:
+            total = db.count_operator_queue_pending_for_agent(
+                agent_name, exclude_request_id_prefixes=_RESERVED_ID_PREFIXES)
+        return rows, max(total, len(rows))
+    except Exception as e:
+        logger.debug(f"_resolve_pending_asks({agent_name}) failed: {e}")
+        return [], 0
+
+
 def _resolve_platform_url() -> Optional[str]:
     """Best-effort lookup of the platform's public URL."""
     try:
@@ -1106,11 +1205,17 @@ def compose_system_prompt(
         # otherwise skip the whole replace block, and the assignment fields
         # would silently never render.
         if (ctx.collaborators is None or ctx.platform_url is None or needs_assignment
-                or ctx.ended_asks is None):
+                or ctx.ended_asks is None or ctx.pending_asks is None):
             assignment = (
                 _resolve_assignment(ctx.agent_name, ctx.triggered_by)
                 if needs_assignment
                 else {}
+            )
+            # The rows and their total are one answer, resolved once (#3247).
+            pending, pending_total = (
+                (ctx.pending_asks, ctx.pending_asks_total)
+                if ctx.pending_asks is not None
+                else _resolve_pending_asks(ctx.agent_name)
             )
             served_role = (
                 _served_role(ctx) if assignment and ctx.served_role_id is None else None
@@ -1152,6 +1257,8 @@ def compose_system_prompt(
                     if ctx.ended_asks is not None
                     else _resolve_ended_asks(ctx.agent_name)
                 ),
+                pending_asks=pending,
+                pending_asks_total=pending_total,
                 served_role_id=(
                     ctx.served_role_id if ctx.served_role_id is not None else served_role
                 ),

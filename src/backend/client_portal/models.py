@@ -1,9 +1,11 @@
 """Pydantic models for the enterprise client-portal exposure config (#79)."""
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+from models import PersonTagState  # trinity-enterprise#631 — one definition, shared with rooms
 
 
 class PortalExposureConfig(BaseModel):
@@ -389,6 +391,11 @@ class PortalChatRequest(BaseModel):
     # the first 20 rather than rejecting: a message that sent fine before #3265
     # must not start failing with a 422 because of what it carries.
     attachments: Optional[list[PortalTurnAttachment]] = None
+    # trinity-enterprise#631 — the PEOPLE this turn tags, by address, as picked
+    # in the composer. Optional; every existing caller is unaffected. Refused by
+    # name before anything is written; the service enforces the per-message cap.
+    tags: Optional[list[Annotated[str, Field(min_length=1, max_length=320)]]] = Field(
+        default=None, max_length=50)
 
     @field_validator("attachments", mode="before")
     @classmethod
@@ -429,6 +436,10 @@ class PortalChatResponse(BaseModel):
     # it. `None` then, and the client's `v-if="message.id"` correctly withholds
     # the thumbs rather than offering a control whose POST would 404.
     message_id: Optional[str] = None
+    # trinity-enterprise#754: the turn went through without approval because the
+    # asker is the approver (and the asker is this caller) — as on history rows.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
 
 class PortalTurnStarted(BaseModel):
@@ -641,6 +652,9 @@ class PortalRoleMetric(BaseModel):
     projection of the objective ↔ metric join (`ObjectiveMetricRead`), never
     that model whole. A field added here is a disclosure decision."""
     name: str
+    # primary | guard (ent#731) — a fixed value, so a guard row can be labelled
+    # without any author text crossing.
+    role: str = "primary"
     # The registry's declared type and unit — what the card formats the two
     # numbers with. None for a metric this agent does not declare.
     type: Optional[str] = None
@@ -999,6 +1013,21 @@ class PortalHistoryMessage(BaseModel):
     # #3265: the files a user turn carried, so a reload shows them on the
     # message. None for every other row.
     attachments: Optional[list[PortalMessageAttachment]] = None
+    # trinity-enterprise#631: on the reader's OWN message, the people it tagged
+    # and whether each has read it. None on every other row.
+    tags: Optional[list[PersonTagState]] = None
+    # #3166: the turn that wrote this row, so the client can take its own reply
+    # off a thread another turn is also writing to, and place each reply under
+    # its own question. The caller already holds these ids (the dispatch
+    # response, `in_flight_execution_id`, `last_turn_outcome`); NULL on rows
+    # written before the column existed and on rows no turn wrote (reports).
+    execution_id: Optional[str] = None
+    # trinity-enterprise#754: on an agent reply, its turn went through without
+    # approval because the asker IS the approver (ent#752's self-approved
+    # record), and whether the viewer is that person. Booleans only — derived
+    # server-side; false on questions and rows no turn wrote.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
 
 class PortalTurnOutcome(BaseModel):

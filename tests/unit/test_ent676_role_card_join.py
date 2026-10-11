@@ -56,7 +56,7 @@ VIEWER = "gary@example.com"
 
 #: What a Workspace client may see of one joined metric. A literal on purpose:
 #: a key the join grows later must turn this red before it reaches a client.
-METRIC_KEYS = {"name", "type", "unit", "target", "actual", "last_point_at",
+METRIC_KEYS = {"name", "role", "type", "unit", "target", "actual", "last_point_at",
                "stale", "freshness", "gap", "finding"}
 OBJECTIVE_KEYS = {"id", "statement", "horizon", "status", "owned", "metrics"}
 
@@ -326,7 +326,8 @@ def test_a_metric_crosses_as_exactly_the_client_fields():
 
     assert set(row) == METRIC_KEYS
     assert row == {
-        "name": "close_rate", "type": "percentage", "unit": "%",
+        "name": "close_rate", "role": "primary", "type": "percentage",
+        "unit": "%",
         "target": 35, "actual": 30.0,
         "last_point_at": "2026-09-22T11:59:00.000000Z",
         "stale": False, "freshness": "fresh",

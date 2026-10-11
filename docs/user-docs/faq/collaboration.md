@@ -40,7 +40,7 @@ Each thing the permission controls stops at a different moment. Calls (`chat_wit
 
 ## My agent's call to another agent timed out — should it send the message again?
 
-No. If the call came back with an `execution_id`, that is a receipt: the work arrived and is queued, running or done. Read the outcome with `get_execution_result(agent_name, execution_id)`, or set a reminder naming that `execution_id` and check back later. A reworded re-send can run the work twice. Even an error without an `execution_id`, `agent_busy` included, is not proof that nothing ran, so look for the exact message in `list_recent_executions` before re-sending word for word. Every agent is taught these rules in its platform prompt as the delegation contract. See [Agent Network](../collaboration/agent-network.md#concepts).
+No. If the call came back with an `execution_id`, that is a receipt: the work arrived and is queued, running or done. Read the outcome with `get_execution_result(agent_name, execution_id)`, or set a reminder naming that `execution_id` and check back later. A reworded re-send can run the work twice. Even an error without an `execution_id` is not proof that nothing ran, so look for the exact message in `list_recent_executions` before re-sending word for word (`agent_busy` is the exception: the queue was full and nothing ran). Every agent is taught these rules in its platform prompt as the delegation contract. See [Agent Network](../collaboration/agent-network.md#concepts).
 
 ## How do I share files between two agents?
 

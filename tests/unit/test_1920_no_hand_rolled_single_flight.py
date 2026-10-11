@@ -77,6 +77,10 @@ _ALLOWED = {
     "do NOT merge onto the weaker GET-then-DELETE release (#1920)",
     "services/monitoring_service.py": "monitoring:leader — leader lease, stable cross-cycle worker id (#1464)",
     "services/operator_queue_service.py": "opqueue:leader — leader lease, verbatim copy of monitoring (#1632)",
+    # --- genuine non-lock nx uses ---
+    "services/subscription_auto_switch.py": "once-per-window NOTIFICATION dedupe markers for the SUB-003 walk (#3470: "
+    "agent:api_key_route:, agent:pool_exhausted_notice:) — nothing waits on, releases or renews them, and a lost "
+    "marker costs one repeated notice, never a correctness failure; not a single-flight lock",
     "services/skills_sync_service.py": "skills:sync:leader — leader lease (ent#236)",
     "services/canary_service.py": "canary:leader — Lua-CAD leader lease, the 8th shape (#1881)",
     "services/sync_health_service.py": "synchealth:leader — leader lease in the #1464 monitoring shape (#2742). NOT adoptable: SingleFlightLock mints a unique token per acquire, so a lease could never recognise — and therefore never refresh — its own grant across cycles; a stable per-worker id is kept for exactly that",

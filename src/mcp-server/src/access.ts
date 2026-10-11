@@ -214,6 +214,8 @@ const SKILL_MANAGER_FENCE =
   "backend fence: routers/skills.py get_skill_managed_agent_by_name refuses an agent key whose agent does not hold the skills.manage capability — on a sibling AND on itself (abilityai/trinity-enterprise#596)";
 const SKILL_GATE_FENCE =
   "backend fence: routers/skill_gate.py — writes take require_person_or_capability(skills.manage, self_person_only): a person who owns the agent or an admin, or a holder on an agent its owner owns, never itself; reads are own-gates-only for an agent key (get_skill_gate_readable_agent_by_name) (abilityai/trinity-enterprise#753)";
+const SKILL_SOURCES_ADMIN =
+  "no agent target — library source management; backend require_admin + reject_agent_principal refuse agent and connector principals (#1890), and the tool's own canAccess allow-lists user/system scope (abilityai/trinity-enterprise#692)";
 const CONNECTOR_SCOPE = "connector scope — the key is bound to one agent; backend _enforce_connector_scope (ent#46)";
 const ROOMS_SERVICE = "room membership is the rooms service's decision (ent#169, ent#443), not a per-agent permission edge";
 const EVENT_EDGE = "backend gates by agent_permissions edge itself (event_subscriptions.py, uniform 403)";
@@ -299,6 +301,13 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   set_skill_gate: { kind: "baselined", owner: SKILL_GATE_FENCE },
   clear_skill_gate: { kind: "baselined", owner: SKILL_GATE_FENCE },
   run_skill: { kind: "none", why: "runs on the calling agent; a skill name, not an agent" },
+  // --- skill_sources.ts (ent#692) ---
+  list_skill_sources: { kind: "none", why: SKILL_SOURCES_ADMIN },
+  register_skill_source: { kind: "none", why: SKILL_SOURCES_ADMIN },
+  update_skill_source: { kind: "none", why: SKILL_SOURCES_ADMIN },
+  delete_skill_source: { kind: "none", why: SKILL_SOURCES_ADMIN },
+  sync_skill_source: { kind: "none", why: SKILL_SOURCES_ADMIN },
+  sync_skill_library: { kind: "none", why: SKILL_SOURCES_ADMIN },
   list_runnable_skills: { kind: "none", why: "no agent target" },
   // --- schedules.ts ---
   list_agent_schedules: { kind: "in-tool", how: SCHEDULES_GATE },
@@ -449,6 +458,8 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   link_to_project: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
   get_steward_digest: { kind: "none", why: "the calling agent's own stewarded projects (ent#661 v3)" },
   set_project_health: { kind: "none", why: "a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
+  create_project: { kind: "none", why: "creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
+  import_project: { kind: "none", why: "a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },
   // --- assignments.ts ---
   get_agent_assignments: { kind: "in-tool", how: ASSIGNMENTS_SELF },
   // --- connector.ts (connector / anonymous tiers) ---

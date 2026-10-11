@@ -39,12 +39,19 @@ CAPABILITY_INSTRUCTIONS_MANAGE = "instructions.manage"
 #: them (resources, timeout, guardrails, read-only, models, rename). Autonomy is
 #: NOT in it: raising autonomy stays person-only and is never granted.
 CAPABILITY_AGENTS_MANAGE = "agents.manage"
+#: trinity-enterprise#588 (ent#661's planned agent right): create a Workspace
+#: project ON BEHALF OF the agent's owner — the owner is its creator and first
+#: member, the agent its steward — and import one of the agent's OWN folder
+#: projects. Members and visibility stay person-only; nothing here adds a person
+#: or widens who can see a project.
+CAPABILITY_PROJECTS_MANAGE = "projects.manage"
 
 #: The closed set. A grant for anything else is refused at the sink, so a typo
 #: can never persist a capability nothing checks.
 CAPABILITIES = frozenset({
     CAPABILITY_SKILLS_MANAGE, CAPABILITY_SCHEDULES_MANAGE,
     CAPABILITY_INSTRUCTIONS_MANAGE, CAPABILITY_AGENTS_MANAGE,
+    CAPABILITY_PROJECTS_MANAGE,
 })
 
 

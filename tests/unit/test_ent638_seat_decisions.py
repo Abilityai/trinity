@@ -333,6 +333,11 @@ def _execution(**over):
     return SimpleNamespace(**base)
 
 
+# A person principal: `agent_name` None, as `get_current_user` returns for a
+# signed-in session. The router's ent#839 self-gate reads the attribute.
+_PERSON = SimpleNamespace(id=1, agent_name=None)
+
+
 class TestAgentRouter:
     @pytest.fixture
     def wired(self, monkeypatch, svc):
@@ -362,7 +367,7 @@ class TestAgentRouter:
     def test_a_seat_run_records_for_its_seat_with_the_providers_role_and_no_email_back(self, wired):
         r, store, recorded = wired
         store["execution"] = _execution()
-        out = asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=SimpleNamespace(id=1)))
+        out = asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_PERSON))
         assert recorded[0]["seat_email"] == SEAT and recorded[0]["decided_by_person"] == SEAT
         assert recorded[0]["payload"]["decided_by_role"] == "sales-lead"
         assert recorded[0]["source_execution_id"] == "e1"
@@ -373,22 +378,22 @@ class TestAgentRouter:
         r, store, recorded = wired
         store["execution"] = _execution(triggered_by="public", schedule_id=None, source_channel_client=None,
                                         source_user_email="Client@Example.com")
-        asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=None))
+        asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_PERSON))
         assert recorded[-1]["seat_email"] == "client@example.com"
         store["execution"] = _execution(triggered_by="mcp", schedule_id=None, source_channel_client=None)
         with pytest.raises(HTTPException) as e:
-            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=None))
+            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_PERSON))
         assert e.value.status_code == 422 and e.value.detail["code"] == "no_seat"
 
     def test_a_foreign_execution_is_403_and_a_missing_one_404(self, wired):
         r, store, _ = wired
         store["execution"] = _execution(agent_name="someone-else")
         with pytest.raises(HTTPException) as e:
-            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=None))
+            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_PERSON))
         assert e.value.status_code == 403
         store["execution"] = None
         with pytest.raises(HTTPException) as e:
-            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=None))
+            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_PERSON))
         assert e.value.status_code == 404
 
     def test_a_refusal_is_the_named_receipt_and_the_idempotency_claim_is_released(self, wired, monkeypatch, svc):
@@ -401,7 +406,7 @@ class TestAgentRouter:
             svc.DecisionRefused("decision_prose_only", "prose", receipt={"fields": {"criterion": "one line"}})))
         store["execution"] = _execution()
         with pytest.raises(HTTPException) as e:
-            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=None, idempotency_key="k"))
+            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_PERSON, idempotency_key="k"))
         assert e.value.status_code == 422 and e.value.detail["code"] == "decision_prose_only"
         assert e.value.detail["receipt"]["fields"] == {"criterion": "one line"}
         assert released
@@ -412,7 +417,7 @@ class TestAgentRouter:
         monkeypatch.setattr(idem, "begin", lambda scope, key: SimpleNamespace(
             enabled=True, replay=True, in_flight=False, snapshot={"success": True, "decision": {"id": "d1"}}))
         store["execution"] = _execution()
-        out = asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=None, idempotency_key="k"))
+        out = asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_PERSON, idempotency_key="k"))
         assert out["replayed"] is True and out["decision"]["id"] == "d1" and recorded == []
 
     def test_list_returns_active_only_by_default_email_free_with_stats(self, wired, monkeypatch):
@@ -425,10 +430,10 @@ class TestAgentRouter:
                      alternatives=["y"], criterion="c", reversal="r", decided_at="2026-09-19T00:00:00Z",
                      review_by=FUTURE, status="closed", cites=[])]
         monkeypatch.setattr(r.db, "list_seat_decisions", lambda a, e, limit=500: rows)
-        out = asyncio.run(r.list_seat_decisions(AGENT, execution_id="e1", current_user=None))
+        out = asyncio.run(r.list_seat_decisions(AGENT, execution_id="e1", current_user=_PERSON))
         assert [d["id"] for d in out["decisions"]] == ["d1"] and out["stats"]["recorded"] == 2
         assert OWNER not in str(out) and SEAT not in str(out)
-        out = asyncio.run(r.list_seat_decisions(AGENT, execution_id="e1", include_history=True, current_user=None))
+        out = asyncio.run(r.list_seat_decisions(AGENT, execution_id="e1", include_history=True, current_user=_PERSON))
         assert [d["id"] for d in out["decisions"]] == ["d1", "d0"]
 
 

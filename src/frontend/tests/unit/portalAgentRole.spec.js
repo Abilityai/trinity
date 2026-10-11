@@ -193,6 +193,8 @@ describe('PortalAgentRole (mounted)', () => {
     ['metric_retired', 'no longer measured'],
     ['direction_mismatch', 'disagree on which way is good'],
     ['direction_undeclared', 'whether higher or lower is better'],
+    ['guard_target_unset', 'Target not set'],
+    ['guard_direction_invalid', 'only checked for staying put'],
     ['a_code_this_build_has_never_heard_of', "can't be compared with its target"],
   ])('finding %s is the Workspace\'s own sentence, never a blank', async (code, copy) => {
     const w = await mountWith(card({ objectives: [{ id: 'o', statement: 'S', owned: true, metrics: [
@@ -202,6 +204,20 @@ describe('PortalAgentRole (mounted)', () => {
     expect(line.text()).toContain(copy)
     // A row with no point has no time to show — never a dangling "as of".
     expect(row(w, 'm').text()).not.toContain('as of')
+  })
+
+  // trinity-enterprise#731: a guard must not move while the objective is
+  // pursued. Unlabelled, its off_target would read as a missed goal.
+  it('a guard row carries a Guard badge and a primary row does not', async () => {
+    const w = await mountWith(card({ objectives: [{ id: 'o', statement: 'S', owned: true, metrics: [
+      metric('close_rate', { role: 'primary', target: 35, actual: 30, gap: { status: 'behind' } }),
+      metric('spend', { role: 'guard', target: 4000, actual: 5000, gap: { status: 'off_target' } }),
+    ] }] }))
+    const guard = row(w, 'spend').find('[data-testid="portal-role-metric-guard"]')
+    expect(guard.exists()).toBe(true)
+    expect(guard.text()).toBe('Guard')
+    expect(row(w, 'spend').text()).toContain('off target')
+    expect(row(w, 'close_rate').find('[data-testid="portal-role-metric-guard"]').exists()).toBe(false)
   })
 
   it('a row with no finding shows no finding line', async () => {

@@ -5,13 +5,18 @@
  * (the settings/fieldStyles.js lesson, ent#375).
  */
 
-// Field bg, border-strong, radius 6px, padding 8×11, 13.5 primary ink.
-export const FIELD_CLASS =
+// Field bg, border-strong, radius 6px, 13.5 primary ink at padding 8×11 —
+// or, for BaseSelect's `size="sm"`, 12.5 ink at padding 4×10 (BaseButton sm's
+// box, for a select inside a card row). One builder, so the two cannot drift.
+const fieldRecipe = (box) =>
   'w-full rounded-md border bg-white dark:bg-gray-900 ' +
-  'px-[11px] py-2 text-[13.5px] text-gray-900 dark:text-gray-100 ' +
+  box + ' text-gray-900 dark:text-gray-100 ' +
   'placeholder:text-gray-500 dark:placeholder:text-gray-500 ' +
   'focus:outline-none focus:ring-[3px] ' +
   'disabled:opacity-45 disabled:cursor-not-allowed'
+
+export const FIELD_CLASS = fieldRecipe('px-[11px] py-2 text-[13.5px]')
+export const FIELD_SM_CLASS = fieldRecipe('px-2.5 py-1 text-[12.5px]')
 
 // Focus = accent border + ring; the ring replaces the outline.
 export const FIELD_VALID_CLASS =

@@ -101,6 +101,7 @@ class ScheduleExecutionsMixin:
             # Binding-agent for channel report-back (ent#265)
             source_channel_agent=row["source_channel_agent"] if "source_channel_agent" in row_keys else None,
             source_channel_client=row["source_channel_client"] if "source_channel_client" in row_keys else None,
+            source_host=row["source_host"] if "source_host" in row_keys else None,
             open_canvas_id=row["open_canvas_id"] if "open_canvas_id" in row_keys else None,
             # Inter-agent chain depth (#2806); NULL = root.
             chain_depth=row["chain_depth"] if "chain_depth" in row_keys else None,
@@ -908,6 +909,26 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             rows = conn.execute(stmt).mappings().all()
         return [self._row_to_schedule_execution(r) for r in rows]
+
+    def set_execution_subscription(
+        self, execution_id: str, subscription_id: Optional[str]
+    ) -> bool:
+        """Re-point an execution's SUB-004 usage attribution (#3470).
+
+        `subscription_id` is snapshotted at INSERT as the agent's assignment.
+        When a SUB-003 walk completes the turn on ANOTHER subscription (a
+        trial that then served), the spend belongs to that one; writing it
+        here keeps the per-subscription usage windows honest. Unconditional
+        on status — it is called by the dispatcher that owns the turn, before
+        the terminal write. Returns whether a row was updated.
+        """
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(schedule_executions)
+                .where(schedule_executions.c.id == execution_id)
+                .values(subscription_id=subscription_id)
+            )
+            return result.rowcount > 0
 
     def stamp_execution_channel_context(
         self,

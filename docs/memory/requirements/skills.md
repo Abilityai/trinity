@@ -18,7 +18,7 @@
 - **Key Features**:
   - Sources live in the `skill_sources` table (id, name, url, ref, ref_type, is_default, enabled, priority, per-source sync status) — **replaces** the single `skills_library_url` system setting
   - Per-source clone at `/data/skills-library/<source_id>/`; `SkillSourceClone` owns one checkout's git lifecycle, `skill_service` orchestrates N of them
-  - Manage via `GET/POST/PUT/DELETE /api/skills/sources` + `POST /api/skills/sources/{id}/sync`; URLs locked to github.com (SSRF guard, SEC-179) validated **on write**
+  - Manage via `GET/POST/PUT/DELETE /api/skills/sources` + `POST /api/skills/sources/{id}/sync` (+ the idempotent `POST /api/skills/sources/apply` and the MCP tools of §21.5.1); URLs locked to github.com (SSRF guard, SEC-179) validated **on write**
   - **An edit must reach disk.** Repointing `url` re-clones (the checkout's `origin` is compared against the configured remote, credentials stripped so a PAT-bearing `origin` is not a false repoint; discard-and-re-clone rather than `remote set-url`, which would leave the old repo's tag refs behind); changing `url`/`ref`/`ref_type` clears the sync bookkeeping so a tag **bump** is not refused as a tag **move**; deleting a source reclaims its checkout, with a fail-closed orphan sweep on full syncs as the backstop. Non-identity edits (name/enabled/priority) keep the recorded SHA — clearing it on disable would let a tag moved during the disabled window be adopted silently on re-enable
   - **Both sync routes are human-only** (`reject_agent_principal` on top of `require_admin`): a sync clones executable material and, when the commit moves with auto-reinject on, spawns the fleet-wide re-inject. Grant-vs-use is a claim about *effect*, and fleet-wide executable delivery is not "use"
   - One source failing never blinds the others: per-source outcomes reported individually, aggregate succeeds if any source synced. A source whose first clone failed has no directory, and every git read tolerates that (a raising read would 500 the whole merged listing over one unreachable repo)
@@ -145,7 +145,7 @@
 ### 21.6 Skill Package Contract (Frontmatter)
 - **Status**: ✅ Implemented (trinity-enterprise#183, 2026-07-19)
 - **Description**: SKILL.md frontmatter is parsed platform-side into a skill **contract** surfaced via `GET /api/skills/library`(+`/{name}`, `/status`) and the MCP skill tools
-- **Fields** (flat keys — the existing catalog convention; a `trinity:` mapping takes precedence when present): `description`, `automation` (surfaced, not enforced — feeds abilityai/trinity#518 later), `user_invocable` (default true), `allowed-tools` (verbatim), `requires: {packages, binaries, env}` — plus derived package metadata (`multi_file`, `file_count`, `size_bytes`, `version` = git tree SHA)
+- **Fields** (flat keys — the existing catalog convention; a `trinity:` mapping takes precedence when present): `description`, `automation` (surfaced, not enforced — feeds abilityai/trinity#518 later), `user-invocable` / `user_invocable` (default true; both spellings read, hyphen first — #3134), `allowed-tools` (verbatim), `requires: {packages, binaries, env}` — plus derived package metadata (`multi_file`, `file_count`, `size_bytes`, `version` = git tree SHA)
 - **Hardening**: 64 KiB frontmatter cap; alias-refusing SafeLoader (billion-laughs guard, #919 convention); every field isinstance-guarded (unknown keys/garbage tolerated — skills are authored for Claude Code first); dep names regex-gated before any in-container probe (`binaries: ^[A-Za-z0-9._+-]+$`, `env: ^[A-Z][A-Z0-9_]*$`) so library-derived strings never reach a shell
 - **Parse failure**: named `frontmatter_invalid` warning + first-paragraph description fallback — never a 500, never a dropped skill
 - **Lifecycle keys — never a silent retirement (trinity-enterprise#672)**: `deprecated` (a real YAML boolean; absent / null = not deprecated) and `superseded-by` (wire name `superseded_by`; the underscore spelling is read too, and a `trinity:` mapping wins over the flat keys whichever spelling it uses). These are the two keys the library's contributor guide documents for retiring a skill; before this the parser dropped both, so a retired skill was listed, assignable and injected exactly like a live one until its directory was deleted.
@@ -160,9 +160,24 @@
 - **Description**: Library + assignment tools in `src/mcp-server/src/tools/skills.ts`
 - **Tools**: `list_skills`, `get_skill`, `get_skills_library_status`, `assign_skill_to_agent`, `set_agent_skills`, `sync_agent_skills`, `get_agent_skills`
 - **Contract surface (ent#183)**: `list_skills`/`get_skill` carry the §21.6 contract fields (`automation`, `user_invocable`, `requires`, `multi_file`, `file_count`, `size_bytes`, `version`); `sync_agent_skills` surfaces per-skill warnings even on success (honest results)
-- **Provenance surface (ent#237)**: `list_skills` carries each skill's `source` (name only — never a URL, since the tool is reachable by agent-scoped keys) and `shadowed_by`; `get_skills_library_status` carries the per-source array. Source *management* is deliberately REST-only, not an MCP tool — it is the grant action of §21.1.2
+- **Provenance surface (ent#237)**: `list_skills` carries each skill's `source` (name only — never a URL, since the tool is reachable by agent-scoped keys) and `shadowed_by`; `get_skills_library_status` carries the per-source array. Source *management* is the grant action of §21.1.2 and is fenced by **principal, not by transport**: agent-scoped and connector keys are refused on every source route (REST and MCP alike), while the principals `require_admin` already admits — an admin's JWT, an admin owner's user-scoped key, the system agent — reach it over MCP too (§21.5.1, trinity-enterprise#692). The earlier "REST-only" wording drew the fence at the transport, which also fenced out the admin's own key without fencing out anyone the gate did not already refuse
 - **Lifecycle surface (ent#672)**: `list_skills` / `get_skill` carry `deprecated` and `superseded_by` (§21.6); `assign_skill_to_agent` and `set_agent_skills` return the backend `delivery` block unchanged, including `skills[<name>].warnings` for a deprecated name; `sync_agent_skills` carries the code in each per-skill `warnings`. `get_agent_skills` lists assignment rows only — its description points the reader at `list_skills` for the lifecycle fields
 - **Removed from original design**: create/update/delete (use GitHub), execute_procedure (use scheduling)
+
+#### 21.5.1 Skill-library source management over MCP (trinity-enterprise#692)
+- **Status**: ✅ Implemented. OSS-core, like the rest of §21.1 (assumed; maintainer to confirm)
+- **Requirement ID**: SKILL_SOURCES_MCP
+- **Tools** (`src/mcp-server/src/tools/skill_sources.ts`), each a thin proxy over the §21.1 route it names:
+  - `list_skill_sources` → `GET /api/skills/sources` — resolution order, per-source `url`, `ref`, `ref_type`, `priority`, `last_sync`, `last_error`
+  - `register_skill_source` → `POST /api/skills/sources/apply` — **idempotent on `url`** (below)
+  - `update_skill_source` / `delete_skill_source` → `PUT` / `DELETE /api/skills/sources/{id}`
+  - `sync_skill_source` → `POST /api/skills/sources/{id}/sync`; `sync_skill_library` → `POST /api/skills/library/sync`
+- **The fence is the principal, not the transport.** Every route keeps `require_admin` (which refuses agent and connector principals itself, #1890/#2323) plus its `reject_agent_principal`. The MCP tools add nothing the REST gate did not already grant: their `canAccess` is an **allowlist** of `user` and `system` scope, so an agent-scoped, connector, anonymous or unknown-scope session is never advertised them, and each tool re-checks the scope before any round trip. A user-scoped key whose owner is not an admin sees the tools and is refused by the backend with its own `Admin access required`. A controller scope (trinity-enterprise#693) does not exist yet; when it does it joins the MCP allowlist and the routes opt it in per route (`require_admin_allowing(...)`), the ops-key pattern — never by widening `ADMIN_GATE_SCOPES`
+- **Idempotent register** (`POST /api/skills/sources/apply`): the body names `url` (required) and optionally `name`, `ref`, `ref_type`, `priority`, `enabled`. The URL goes through the same `reject_embedded_credentials` + `validate_skills_library_url` as the create route (same 400 text). Matching is on the repository (`_same_skills_repo`, so the scheme-less bundled-default form matches its normalized spelling): no row → created (201, `action: "created"`; `name` defaults to the URL's `owner/repo`, `ref` to `main`); exactly one row → the named fields are patched in place through the same update path as `PUT` (200, `action: "updated"`, or `"unchanged"` with no write when nothing differs); two or more rows for the URL (different refs) → 409 `ambiguous_source` naming their ids, never a guess. A concurrent duplicate insert is folded into the update. `POST /api/skills/sources` keeps its 409-on-duplicate contract (the Settings panel relies on it) and gains an optional `priority`
+- **Honest sync results**: the sync tools return `outcome: "ran"` (the route's body, including per-source results), `"refused_busy"` (the route's 409 — the single library-wide lock is held; retryable), or `"failed"` (the route's 400), never a success the caller cannot tell from a no-op. A sync that started the fleet re-inject says so (`fleet_reinject_started`) and names where its outcome lands
+- **Re-inject outcome for every reader**: `GET /api/skills/library/status` carries `last_fleet_reinject` — timestamps, trigger, commit and the four counts (`agents_total`/`_injected`/`_skipped`/`_failed`) — but **not** the per-agent `failures` map, which stays on the admin routes (`GET /api/skills/sources`, `GET /api/settings/skills-library`). The public status projection still omits per-source `url` and `last_error` (ent#334)
+- **Errors are the route's**: a refusal comes back as `{success: false, status, error: <the route's detail>}` — the same named text as REST (e.g. the embedded-credential refusal), never a generic failure
+- **Zero-config unchanged**: no source is created, no automation switch flips; an install that never calls these tools behaves exactly as before
 
 ### 21.7 Library Lifecycle Automation
 - **Status**: ✅ Implemented (trinity-enterprise#236; OSS-core by decision, consistent with §21.4)
@@ -238,28 +253,61 @@ entries (`actor_type=system` for the automated paths).
 
 ---
 
-## 22. Playbooks Tab (Agent Local Skills)
+## 22. Skills Tab (Agent Detail): own and shared skills
 
-> **Design**: Browse and invoke agent's local skills directly from UI.
-> Spec: `docs/requirements/PLAYBOOKS_TAB.md`
-> Flow: `docs/memory/feature-flows/playbooks-tab.md`
+> **Design**: one place to see, run and configure everything an agent can do.
+> Flow: `docs/memory/feature-flows/skills-tab.md` (absorbs the retired `playbooks-tab.md`)
 
-### 22.1 Playbooks Tab
-- **Status**: ✅ Implemented (2026-02-27)
-- **Requirement ID**: PLAYBOOK-001
-- **Description**: UI tab to view and invoke agent's local `.claude/skills/` directory
-- **Key Features**:
-  - Grid display of skills parsed from SKILL.md YAML frontmatter
-  - One-click run (sends `/{skill-name}` to `/task` endpoint)
-  - Run with instructions (prefills Tasks tab input)
-  - Search/filter by name or description
-  - Automation badge (autonomous/gated/manual)
-- **Agent Endpoint**: `GET /api/skills` - Lists skills from `.claude/skills/`
-- **Backend Proxy**: `GET /api/agents/{name}/playbooks`
-- **Frontend**: `PlaybooksPanel.vue` component
+### 22.1 Skills Tab (trinity-enterprise#754, supersedes PLAYBOOK-001)
+- **Status**: ✅ Implemented (2026-10-08). It replaces the Playbooks tab (PLAYBOOK-001, 2026-02-27) and the library-only Skills tab (§22.2's surface), which are now one tab. OSS-core, per ent#753's edition ruling. The `approver` kind appears only where the assignments provider resolves it.
+- **Tab**: one tab, labelled **Skills**. It is visible to everyone with access to the agent, the system agent included. The old `?tab=playbooks` deep link resolves to it (`TAB_ALIASES`, in both the mount and KeepAlive-activate paths).
+- **Two sections of fixed-size cards** (approved design, 2026-10-08):
+  - **Own skills**: every skill the agent reports (its `.claude/skills/`, `GET /api/skills` via `GET /api/agents/{name}/playbooks`) that the Shared section does not render.
+  - **Shared skills**: library assignments and sets (§22.2).
+  - Every name renders in exactly one section. A #2914 name conflict shows in both, as today: the agent's own copy runs.
+  - A skill dir that carries the platform marker but has no assignment renders under Own, with a "left from the library" note.
+- **One card shape on both sections**. Fixed slots, in order:
+  - name;
+  - one top-left badge area: the author's mode chip first, then platform facts;
+  - description (two lines);
+  - argument hint;
+  - a note line;
+  - the gate line;
+  - **Run** and **Edit & Run**;
+  - for the owner or an admin, the approval row.
 
-### 22.2 Skills Tab (Platform Library)
-- **Status**: ✅ Implemented (visible — unhidden & rebuilt, trinity-enterprise#235 / PR #1877, 2026-07-29)
+  Long text clips, with the full text on hover or in a details dialog, so content never changes a card's size. Verb errors render inside the card.
+- **Mode chip** (the author's `automation:` frontmatter, a declaration nothing enforces, ent#754 Q4): `autonomous` → "runs unattended" (amber `state-autonomous`), `gated` → "asks mid-run" (`status-info`), `manual` → "start by hand" (neutral). Each has an icon and the raw value on hover. The words "approval" and "gated" belong only to the enforced gate.
+- **Run** sends `POST /api/agents/{name}/task` with `{message: "/<name>", async_mode: true}`.
+  - A **202** pending answer means an approval was raised and nothing ran. The page shows the server's own message as an info notice and does not navigate (trinity#3274).
+  - A named refusal shows as an error notice.
+  - Otherwise the page opens the run on the Tasks tab.
+  - Run needs the agent running, the skill present in the LIVE list, and `user_invocable`.
+  - Run is disabled on a Shared card whose name the agent's own skill shadows. **Edit & Run** prefills the Tasks tab.
+- **Approval (ent#753's gate map, `GET/PUT/DELETE /api/agents/{name}/skill-gates[/{skill}]`)**:
+  - **Everyone sees the gate.** A gated card shows a lock and "Needs approval from <kind>". When the viewer fills the approver kind, it reads "you approve this" (server-computed `viewer_fills`). When nobody fills the kind, it reads "nobody fills it yet". The line names a **kind**, never a person: the map is readable by every viewer and by agent keys.
+  - **Only the owner or an admin**, as a person, gets the controls: the Requires approval toggle and an approver picker over the install's kinds (`primary`, plus `approver` where the assignments provider resolves it). A kind nobody fills is shown and cannot be selected.
+  - No approval controls on an **ephemeral** agent (ent#753 refuses them) or on the system agent.
+  - Turning approval on sends the selected kind: by default the first kind someone fills on the map as last read (it is re-read after every write). An existing gate is changed and cleared under the key it is stored on, which may be the skill's directory; only a new gate takes the skill's name, the one a request types.
+  - A gate whose skill is not in the agent's list is kept (ent#753: sticky until cleared). It renders as "Not in this agent's skills list: gate kept", with Clear for the owner or an admin.
+- **Approval recommended**: a skill whose metadata says `approval: recommended` and that is not gated shows the owner an "Author recommends approval: not gated" line. Library skills read it from the library contract (§21.6). Own skills read it from the agent server's `approval` field (agent images built after ent#754).
+- **In-agent enforcement**: when the agent has gates, the owner sees a warning if the agent's `/health → skill_gate_hook` is not `ok`:
+  - a runtime without hooks (Codex, Gemini);
+  - an image older than the hook (no field);
+  - a hook that is missing or was altered.
+
+  `GET /skill-gates?probe=true` reads it, honoured only for a person who may write gates. No answer is "unknown" and shows nothing.
+- **Nothing is drawn from a read that has not answered**: Own draws once the agent's list, the assignments and the gate map have answered or failed; Shared, once the assignments and the map have. So a skill never moves between sections, and no toggle reads "off" before the gates are known. A failed read is named, with Retry: Shared shows a failed state; a failed gate map gets a line for everyone, and the toggles are held. A running agent that isn't answering yet offers "Check again". A failed refresh keeps the list and says so. Assign skills, Manage sets and Sync wait for the assignments, so a draft is never built from an unknown list.
+- **Unassign** (a Shared card, owner or admin) asks first, and says the approval requirement goes with it when the skill is gated; the dialog opens on Cancel (design principle 19). The details and Manage sets dialogs open on a safe control, never on an unassign.
+- **An agent switch** (AgentDetail is KeepAlive'd, and the tab stays open) carries nothing over: the outcome line, card errors, open dialogs, the filter, and the answer of a run, sync or save still in flight for the previous agent.
+- **Stopped agent**: the Own section shows the **last-known list** with Run disabled and "Start the agent to run". The list is a Redis copy of the last successful listing, `agent:skills_list:{name}`, with no TTL, cleared on delete / rename / purge, never on stop; it is served by `GET /playbooks?last_known=true`. With no copy it says so, never an empty grid. An unreachable running agent is labelled as such. The last-known list never drives Run.
+- **Self-approved runs** (the 10-03 eyeball): a run that went through without approval because its requester is the approver is marked on the Tasks row, the execution page and the Workspace turn: "Ran without approval: you are the approver" (or "its approver started it" for another viewer). It is derived from ent#752's `skill_gate_requests` self-approved record. No email leaves the server. It is shown to people only: an agent, connector or system key, or an agent-scoped MCP key, reads both flags false, because beside a run's `source_user_email` the marker says that person fills the approver kind (operator ruling 2026-10-08; the gate map's `set_by` rule, #715). A person's own user-scoped MCP key acts as that person (the line `enforce` draws to let them self-approve), so it reads what they read in the browser. Every person with access to the agent reads it, people it is shared with included: knowing who fills the approver kind is within the ruling (PR review design note).
+- **Vocabulary**: UI copy on agent surfaces says "skills". That covers the chat `/` menu, the Workspace `/` menu, the placeholders, the Sharing/Connector panels and the exposed-skills list. API names (`/playbooks`, `exposed_playbooks`, `run_playbook`) are unchanged.
+- **Deviation from AC5**: the approver picker offers assignment **kinds** only. Canon roles that resolve to people are follow-up trinity-enterprise#848 (ent#753 stores kinds in v1; operator ruling 2026-10-08).
+- **Agent endpoint**: `GET /api/skills` reports per skill `source` (`platform` when the platform's `.trinity-skill.json` marker is present, else `agent`), `dir` and `approval` (closed set `recommended`, read with the backend contract's precedence). These are informational only, never access-deciding. The public link (`/api/public/playbooks/{token}`) strips all three.
+
+### 22.2 Shared Skills Section (Platform Library)
+- **Status**: ✅ Implemented (unhidden & rebuilt, trinity-enterprise#235 / PR #1877, 2026-07-29). Since ent#754 it is the **Shared skills** section of the §22.1 tab: the assigned list became cards, the library picker opens in an "Assign skills" dialog, and sets show as status chips with a "Manage sets" dialog.
 - **Description**: Per-agent skill assignment from the platform library, on Agent Detail
 - **Key Features**: assigned-skills list with honest per-skill injection status (§21.4 results incl. warnings), assign/unassign against the library list, manual re-inject; agent-scoped store `stores/skills.js` (its `emptyReason` discriminator is agent-scoped — do not reuse it on fleet surfaces)
 - **Deprecated skills (trinity-enterprise#672)**: a skill the library marks `deprecated` (§21.6) carries a warning `deprecated` badge beside its name and a "Superseded by …" line on both lists — the assigned rows (so an agent already holding one shows it on load, with nothing else about it changed) and the library picker (so it is visible before ticking). Saving a draft that adds one succeeds, and a warning line under the save note names the skill and, where the successor is a skill name, what supersedes it — on every delivery outcome, a stopped agent included. A manual sync's per-skill warning list leaves the code out — that list is for what went wrong with the delivery, and the row's badge already says it. Never hidden, never refused, never a confirm dialog
@@ -270,11 +318,11 @@ entries (`actor_type=system` for the automated paths).
 - **Description**: The Library page (`/library`, core-agent.md §4.5) carries a fleet-level **browse** section over the shared skills library — read-only discovery, NOT a second assignment path (strategy epic trinity-enterprise#182: one skill model, no parallel mechanisms). Assignment stays on each agent's Skills tab (§22.2); cards link there via the agents list.
 - **Key Features**:
   - Reads ONLY the existing surfaces: `GET /api/skills/library/status` + `GET /api/skills/library` (list fetched only when `configured` — the no-swallow rule: a fetch error renders as an error with retry, never a confident wrong "empty"); zero new endpoints
-  - Own Pinia store `stores/skillsLibrary.js`, deliberately separate from the agent-scoped `stores/skills.js`: `App.vue` KeepAlives AgentDetail, so `SkillsPanel`'s unmount-clear never fires on nav-away — shared refs would render the Library page's state (including fetch errors) inside the cached per-agent Skills tab
+  - Own Pinia store `stores/skillsLibrary.js`, deliberately separate from the agent-scoped `stores/skills.js`: `App.vue` KeepAlives AgentDetail, so the Skills tab's (`SkillsTab`'s) unmount-clear never fires on nav-away — shared refs would render the Library page's state (including fetch errors) inside the cached per-agent Skills tab
   - Fleet-scoped 4-state empty discriminator: `unconfigured` (admin → Settings CTA; non-admin → "ask your admin"), `not_cloned` (configured, never synced → Sync CTA), `empty` (cloned, zero skills → "add a skill directory, then Sync"), plus error-carried-separately
   - Sync-state header leads with disk-derived truth (`commit_sha` short + `skill_count` + branch); `last_sync` rendered only when truthy (it is per-worker in-memory state and reads null on the other uvicorn worker / after restart); admin-only **Sync now** with a 180s client timeout and ECONNABORTED → status re-fetch (client timeout ≠ server failure on a long first clone)
   - Repo URL shown admin-only, **userinfo-stripped** (the clone path accepts and stores `https://user:token@host/...` verbatim), labeled "Primary source", and hidden when `status.sources` reports >1 source (ent#237 / PR #1901 forward-compat); dormant `source_name`/`shadowed_by` render slots light up when #1901 lands
-  - Per-skill cards render the §21.6 contract via the shared chips seam `components/skills/{SkillContractChips.vue, contract.js}` (extracted from `SkillsPanel.vue` so both surfaces render package facts from ONE seam); interpolation only — no `v-html`, no `:href` bound to library-derived strings (skills come from a synced repo — semi-trusted)
+  - Per-skill cards render the §21.6 contract via the shared chips seam `components/skills/{SkillContractChips.vue, contract.js}` (extracted from the former `SkillsPanel.vue`, now the Skills tab's shared cards and picker, so both surfaces render package facts from ONE seam); interpolation only — no `v-html`, no `:href` bound to library-derived strings (skills come from a synced repo — semi-trusted)
   - **Deprecated skills (trinity-enterprise#672)**: a deprecated card stays in the grid, in place, with a warning `deprecated` badge beside the name (the `shadowed` precedent) and one "Superseded by …" line under the description showing the author's text (§21.6; clamped to two lines, full text on hover). Assigning one from the card's control succeeds, and a warning line under the delivery note says the skill is deprecated — no dimming, no separate section, no confirm. Once the library deletes the directory the skill moves to "Assigned but no longer in the library" (§22.4), unchanged
 - **Not Built**: per-source display (post-#1901)
 

@@ -338,6 +338,12 @@ Verified! You can now chat with me.
 What would you like to know?
 ```
 
+**Email-code policy (ent#849)**: when `login_policy_gate` refuses email codes,
+platform users and whitelisted addresses get no code and their code reply
+answers "That code doesn't match"; outsiders still get one. The reply to the
+email step is the same for every address, and the code is minted and sent in a
+detached task. See [email-authentication.md](email-authentication.md).
+
 ## OAuth Flow
 
 **Step-by-step**:

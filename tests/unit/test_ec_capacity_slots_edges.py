@@ -216,26 +216,22 @@ def test_r13_acquire_does_not_reap_live_long_slot_with_short_own_timeout(clock):
     assert svc.redis.zscore(svc._slots_key("a"), "long") is not None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: acquire_slot is ZCARD-then-ZADD (two round-trips), not the "
-        "'atomic N-ary counter' execution.md:15 / capacity_manager.py:367 claim; "
-        "two backend workers (docker-compose.prod.yml:511 --workers 2) admitting "
-        "concurrently both see count<cap and both ZADD, overshooting "
-        "max_parallel_tasks — #3318"
-    ),
-)
-def test_r14_concurrent_acquire_across_workers_never_overshoots_cap():
+def test_r14_concurrent_acquire_across_workers_never_overshoots_cap(monkeypatch):
+    """#3318 / #3305: two backend workers (docker-compose.prod.yml --workers 2)
+    admitting concurrently must not both pass a stale count<cap read. The other
+    worker admits right after this worker's capacity read; WATCH invalidates
+    that read, so the retry sees the cap as full."""
     server = fakeredis.FakeServer()
     worker_a = _svc(server)
     worker_b = _svc(server)
 
-    real_zcard = worker_a.redis.zcard
+    # The capacity read happens on the WATCHed pipeline, so hook it there.
+    pipeline_cls = type(worker_a.redis.pipeline())
+    real_zcard = pipeline_cls.zcard
     fired = []
 
-    def zcard_then_other_worker_admits(key):
-        n = real_zcard(key)
+    def zcard_then_other_worker_admits(self, key):
+        n = real_zcard(self, key)
         if not fired:
             fired.append(True)
             t = threading.Thread(
@@ -245,9 +241,11 @@ def test_r14_concurrent_acquire_across_workers_never_overshoots_cap():
             t.join()
         return n
 
-    worker_a.redis.zcard = zcard_then_other_worker_admits
-    _run(worker_a.acquire_slot("a", "eA", 1))
-    assert worker_b.redis.zcard("agent:slots:a") <= 1
+    monkeypatch.setattr(pipeline_cls, "zcard", zcard_then_other_worker_admits)
+    admitted_a = _run(worker_a.acquire_slot("a", "eA", 1))
+    assert fired, "the interleaving hook never ran — the test would be vacuous"
+    assert not admitted_a
+    assert worker_b.redis.zrange("agent:slots:a", 0, -1) == ["eB"]
 
 
 # ===========================================================================
@@ -670,16 +668,6 @@ def test_force_release_matrix(cm, setup, was_running, cleared):
     assert not cm._redis.exists(cm._mem_queue_key("a"))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: get_status surfaces slots[0] after a sort by slot_number, but "
-        "slot_number=ZCARD+1 at acquire (slot_service.py:146) is reused after "
-        "out-of-order releases, so current_execution is not the oldest running "
-        "slot (capacity_manager.py:514-516 promises 'the oldest active slot') — "
-        "#3319"
-    ),
-)
 def test_r56_get_status_current_execution_is_the_oldest_slot(cm, clock):
     for i, eid in enumerate(["A", "B", "C"]):
         clock.t = 1_000_000.0 + i
@@ -688,6 +676,21 @@ def test_r56_get_status_current_execution_is_the_oldest_slot(cm, clock):
     _run(cm.release("a", "B"))
     clock.t = 1_000_010.0
     _run(_acq(cm, "D", cap=3))  # gets slot_number 2 < C's 3
+    st = _run(cm.get_status("a", 3))
+    assert st.current_execution.id == "C"
+
+
+def test_r56b_get_status_orders_sub_second_slots_by_score_not_slot_number(cm, clock):
+    # #3319: all four slots start within one second, so every duration_seconds
+    # truncates to 0 at read time — only the ZSET score can tell C from D.
+    for i, eid in enumerate(["A", "B", "C"]):
+        clock.t = 1_000_000.0 + i * 0.2
+        _run(_acq(cm, eid, cap=3))
+    _run(cm.release("a", "A"))
+    _run(cm.release("a", "B"))
+    clock.t = 1_000_000.9
+    _run(_acq(cm, "D", cap=3))  # gets slot_number 2 < C's 3
+    clock.t = 1_000_000.95
     st = _run(cm.get_status("a", 3))
     assert st.current_execution.id == "C"
 

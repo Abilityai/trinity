@@ -7,7 +7,8 @@
  * the assignment SET is unchanged. The shipped defect was a deep watch on
  * that array: it called `resetDraft()` on each refetch and wiped whatever the
  * operator had ticked but not yet saved. The fix watches the set IDENTITY
- * (`SkillsPanel.vue`), and until now nothing executed it — the panel had no
+ * (now in `skills/SkillAssignModal.vue`, where trinity-enterprise#754 moved the
+ * library picker), and until now nothing executed it — the panel had no
  * spec at all, so reverting the fix left CI byte-identically green.
  *
  * Both directions are pinned, because "never reset" would also pass the first
@@ -29,7 +30,7 @@ vi.mock('@/stores/auth', () => ({
   useAuthStore: () => ({ role: 'admin', isAuthenticated: true }),
 }))
 
-import SkillsPanel from '../../src/components/SkillsPanel.vue'
+import SkillAssignModal from '../../src/components/skills/SkillAssignModal.vue'
 import { useSkillsStore } from '../../src/stores/skills'
 
 const AGENT = 'agent-x'
@@ -52,10 +53,12 @@ function respond({ assigned = rows(null) } = {}) {
 }
 
 async function mountPanel() {
-  const wrapper = mount(SkillsPanel, {
-    props: { agentName: AGENT, canManage: true, agentRunning: true },
+  // The tab loads the store; the picker dialog reads it (Teleport stubbed inline).
+  await useSkillsStore().load(AGENT)
+  const wrapper = mount(SkillAssignModal, {
+    props: { modelValue: true },
     attachTo: document.body,
-    global: { stubs: { SkillContractChips: true } },
+    global: { stubs: { SkillContractChips: true, teleport: true } },
   })
   await flushPromises()
   return wrapper

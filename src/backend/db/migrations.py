@@ -2992,6 +2992,33 @@ def _migrate_agent_ownership_a2a_exposed(cursor, conn):
     conn.commit()
 
 
+
+def _migrate_a2a_internal_scope(cursor, conn):
+    """trinity-enterprise#838 — A2A exposure scope and the keyless trusted caller.
+
+    ``agent_ownership.a2a_scope`` (``public`` | ``internal``, default
+    ``public`` — today's behaviour) and ``a2a_keyless_internal`` (default 1:
+    an internal-scope agent answers a trusted-network caller with no key), plus
+    ``schedule_executions.source_host``, the address a keyless trusted caller's
+    run is attributed to. Edition-agnostic OSS primitives the A2A server reads;
+    the scope WRITE is the entitled enterprise setter, like ``a2a_exposed``.
+    Mirrored by the Alembic revision 0096_a2a_internal_scope.
+    """
+    _safe_add_column(
+        cursor, "agent_ownership", "a2a_scope",
+        "ALTER TABLE agent_ownership ADD COLUMN a2a_scope TEXT DEFAULT 'public'",
+    )
+    _safe_add_column(
+        cursor, "agent_ownership", "a2a_keyless_internal",
+        "ALTER TABLE agent_ownership ADD COLUMN a2a_keyless_internal INTEGER DEFAULT 1",
+    )
+    _safe_add_column(
+        cursor, "schedule_executions", "source_host",
+        "ALTER TABLE schedule_executions ADD COLUMN source_host TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_operator_resume(cursor, conn):
     """ent#329 — owner opt-in: an operator answer re-triggers the agent.
 
@@ -3720,6 +3747,31 @@ def _migrate_operator_queue_ask_object(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_queue_replace(cursor, conn):
+    """#3247 — an agent replaces one of its OWN pending asks.
+
+    Two nullable TEXT link columns on `operator_queue`: `replaces` on the
+    successor (the predecessor row's uuid) and `replaced_by` on the predecessor
+    (the successor row's uuid). Both are stamped inside the one per-agent
+    locked transaction that ends the predecessor (`cancelled` /
+    `disposed_by='agent'` / `disposition_reason='replaced'`) and inserts the
+    successor, so each row is self-describing: a surface that holds only one
+    of the pair still knows the other.
+
+    No default and no backfill; nothing indexes them (nothing queries by them).
+    PostgreSQL twin: Alembic `0097_operator_queue_replace`.
+    """
+    for column in ("replaces", "replaced_by"):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for the replace link (#3247)",
+        )
+    conn.commit()
+
+
 def _migrate_channel_report_client(cursor, conn):
     """ent#457 review — WHICH client a portal channel context belongs to.
 
@@ -4388,6 +4440,25 @@ def _migrate_portal_messages_attachments(cursor, conn):
         "ALTER TABLE enterprise_portal_messages ADD COLUMN attachments TEXT",
     )
     conn.commit()
+
+
+def _migrate_portal_messages_execution_id(cursor, conn):
+    """#3166 — each Workspace message names the turn that wrote it.
+
+    One nullable column on `enterprise_portal_messages`. Two turns on one thread
+    (the chat open in two tabs) wrote replies the client could not tell apart,
+    so a tab could show the other turn's answer as its own. Additive, no
+    backfill: old rows stay NULL and the client keeps its old matching for them.
+    Mirrored by the Alembic revision 0095_portal_messages_execution_id.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "execution_id",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN execution_id TEXT",
+    )
+    conn.commit()
+
 
 def _migrate_portal_session_main_chat(cursor, conn):
     """ent#523 — the pinned Main chat, and the tombstone Reset leaves behind.
@@ -5200,7 +5271,7 @@ def _migrate_proactive_consent_not_asked(cursor, conn):
 
     Data only — the column and its DDL are unchanged, so no table rebuild. Who
     may be messaged is unchanged too: only 1 allows it, before and after.
-    Idempotent. Mirrored by Alembic 0095_proactive_consent_not_asked.
+    Idempotent. Mirrored by Alembic 0098_proactive_consent_not_asked.
     """
     cursor.execute("UPDATE agent_sharing SET allow_proactive = NULL WHERE allow_proactive = 0")
     conn.commit()
@@ -5633,5 +5704,8 @@ MIGRATIONS = [
     ("portal_messages_attachments", _migrate_portal_messages_attachments),
     ("platform_alert_responded_heal", _migrate_platform_alert_responded_heal),
     ("agent_skill_gates", _migrate_agent_skill_gates),
+    ("portal_messages_execution_id", _migrate_portal_messages_execution_id),
+    ("a2a_internal_scope", _migrate_a2a_internal_scope),
+    ("operator_queue_replace", _migrate_operator_queue_replace),
     ("proactive_consent_not_asked", _migrate_proactive_consent_not_asked),
 ]

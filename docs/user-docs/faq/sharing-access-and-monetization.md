@@ -60,7 +60,7 @@ The Workspace at `/workspace` is the signed-in chat app for the people you share
 
 ## How do I bring a second agent into a conversation?
 
-Type `@` and the other agent's name in an existing one-to-one chat. The Workspace opens a **room** containing both agents and posts your message there, leaving the original chat untouched. Inside a room, **+ Add agent** (or mentioning an agent that isn't yet a participant) recruits it — only a person can do that, never another agent — and `@` keeps working there while the `/` playbook picker is not offered in rooms. An `@name` that isn't one of your agents stays plain text. Multi-agent chat is part of the open-source platform — it used to be an enterprise capability, and against an older backend that lacks it the picker is single-select and mentions stay ordinary text. See [Workspace](../sharing-and-access/workspace.md#bringing-in-another-agent).
+Type `@` and the other agent's name in an existing one-to-one chat. The Workspace opens a **room** containing both agents and posts your message there, leaving the original chat untouched. Inside a room, **+ Add agent** (or mentioning an agent that isn't yet a participant) recruits it — only a person can do that, never another agent — and `@` keeps working there while the `/` skill picker is not offered in rooms. An `@name` that isn't one of your agents stays plain text. Multi-agent chat is part of the open-source platform — it used to be an enterprise capability, and against an older backend that lacks it the picker is single-select and mentions stay ordinary text. See [Workspace](../sharing-and-access/workspace.md#bringing-in-another-agent).
 
 ## What can a client see about an agent in the Workspace?
 
@@ -120,7 +120,7 @@ Most visits to an agent start new work, so opening an agent now starts a new cha
 
 ## Does the Workspace have keyboard shortcuts?
 
-Yes, and they work while you are typing in the message field. **⌘J** / **Ctrl+J** starts a new chat, **⌥↓** / **⌥↑** moves between agents, **⌥⇧↓** / **⌥⇧↑** between chats with the current agent, **⌘.** / **Ctrl+.** shows or hides the rail, **⌥.** steps through the rail's tabs, and **⌘/** / **Ctrl+/** opens the full list (also the **Keyboard shortcuts** button at the bottom of the sidebar). Esc closes the innermost thing first, then stops a running turn. The keys pause while a dialog is open, and during a voice call only ⌘J answers. See [Workspace](../sharing-and-access/workspace.md#keyboard-shortcuts).
+Yes, and they work while you are typing in the message field. **⌘J** / **Ctrl+J** starts a new chat, **⌥↓** / **⌥↑** moves between agents, **⌥⇧↓** / **⌥⇧↑** between chats with the current agent, **⌘.** / **Ctrl+.** shows or hides the rail, **⌥.** steps through the rail's tabs, **⌘/** / **Ctrl+/** jumps to the sidebar search, and **⌥/** / **Alt+/** opens the full list (also the **Keyboard shortcuts** button at the bottom of the sidebar). Esc closes the innermost thing first, then stops a running turn. The keys pause while a dialog is open, and during a voice call only ⌘J answers. See [Workspace](../sharing-and-access/workspace.md#keyboard-shortcuts).
 
 ## How do I reply to one specific message from the agent?
 

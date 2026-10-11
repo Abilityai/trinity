@@ -427,3 +427,190 @@ mistaken for done): the #526 AUTH dispatch breaker and the #1085 governor's
 `record_terminal_failure`. `apply_result` has both; `apply_task_result` has
 neither, and neither is a SUB-003 concern.
 
+
+## #3470 (2026-10-09) — the turn WALKS the pool; the API key is a rung, not a reassignment
+
+Reported from the Workspace: a turn on a rate-limited subscription failed with
+*"The agent has reached its usage limit"* while other subscriptions had
+headroom. Every remediation above was bounded to **one** switch (or one key
+fallback) and **one** re-issue per turn, and three surfaces then handed the
+retry back to the person (`/chat`'s *"auto-switched … Please retry"*, the
+Workspace's *"Send that again"*, the `_usage_limit_detail` 502 over a pool that
+was never fully walked). Part 2, confirmed on a live install: `fallback_to_api_key`
+cleared the assignment, set `use_platform_api_key` and **restarted** the
+container; a key with no credit then failed every turn in seconds and nothing
+could move the agent back — a few-hour limit became a permanent outage.
+
+### 1. Credential trial, then one commit
+
+```
+attempt on the baseline ──429/auth──▶ advance_subscription_walk
+                                        │ record the refusal where it RAN
+                                        │ next rung: another subscription …
+                                        │           … then the platform API key
+                                        ▼
+re-issue the SAME execution_id with  auth_override={oauth_token | api_key}
+                                        │  (the agent applies it to THAT spawn;
+                                        │   header X-Trinity-Auth-Override echoes it)
+                        served ─────────┴──▶ commit_subscription_walk
+                                               subscription: assign + hot-reload + ONE notification
+                                               api_key:      assignment untouched; transition notice
+```
+
+`subscription_auto_switch.SubscriptionWalk` / `Rung` / `advance_subscription_walk`
+are the shared decision core; `task_execution_service._call_agent_with_retries`
+and `chat_execution_service._walk_chat_dispatch` are the two dispatch loops
+(the twins share the core rather than copying it — learnings 2026-09). A rung is
+a **trial**: nothing in the DB or the container changes until a trial serves,
+and then the serving subscription is committed once (`_perform_auto_switch`,
+under the #799 lock, re-checking the assignment is still the one the turn
+started on — a concurrent commit wins). A key that served changes **no**
+assignment (Part 2 AC#3 — per-turn routing); "Switched to the platform API
+key" / "Returned to subscription" are transition notifications deduped by
+`agent:api_key_route:{name}` (informational only — EXEMPT in the #1560
+registry). The row's SUB-004 `subscription_id` is re-pointed to the serving
+subscription (`db.set_execution_subscription`), or to NULL for a key-served turn.
+
+**Attribution is exact by construction.** The failure event goes to the
+credential the walk SENT (`walk.ran_on()`), never to whatever the assignment
+reads after the fact — the #799 cascade (turn 2 blaming turn 1's destination)
+cannot happen. A refusal that arrives while a concurrent turn has already moved
+the assignment is a `concurrent_switch` rung: re-run on the new baseline, no
+second switch (AC#7).
+
+**Liveness is the walk's own property.** Every rung grows
+`tried_subscription_ids` or sets `tried_api_key`; a pick already tried ⇒
+exhausted; a hard cap of `len(subscriptions) + 2` rungs computed once. The
+dispatcher adds the only other bound — the turn's remaining wall clock (#2789,
+still the only *ceiling*) over a floor of settle + HTTP slack + 30 s
+(`_SWITCH_RETRY_MIN_REMAINING_S`): a re-issue with `max(1, …)` seconds of
+agent budget is a guaranteed, billed, mis-blamed TIMEOUT. A budget-stopped turn
+still records its refusal (#471).
+
+### 2. The candidate set
+
+`select_best_alternative_subscription(current, exclude_ids=…, last_resort_min_age_seconds=…)`:
+the walk excludes every subscription this TURN ran on. When nothing viable or
+readmitted (#2638) remains, the **last-resort rung** tries the skip-listed
+candidates (`db.list_recently_failed_alternatives`), still RANKED so a fresh
+provider refusal keeps excluding one (the skip-list is an inference from past
+events; live evidence is not overridden). Interactive triggers
+(`pull_pilot.INTERACTIVE_TRIGGERS`) take any untried candidate; autonomous
+triggers only one whose last failure is ≥ 30 min old
+(`LAST_RESORT_MIN_AGE_AUTONOMOUS_SECONDS`) — a schedule firing every five
+minutes must not re-probe a refused subscription on every run. Because a trial
+moves no assignment, #444's thrash (assignment flips + a notification per flip)
+cannot recur; the cost of a last-resort probe is one zero-token 429. A blocked
+window whose `resets_at` has already elapsed ranks UNKNOWN rather than REFUSED
+(the `_readmit_recovered` rule), and `earliest_known_reset` never reports a
+past instant. Legacy callers (`None`) keep the skip-list absolute — the #444
+pingpong contract is untouched.
+
+### 3. The platform key is a rung
+
+`api_key_rung(agent)` offers the key only when: the fallback setting is on; the
+agent is a Claude runtime; `use_platform_api_key` is not explicitly False (an
+operator's "never bill the key" is a hard rule — the column defaults to True);
+a key is configured; and the key is not **recently refused**
+(`platform_api_key:refused`, kind-aware: auth/billing ⇒ 2h, a 429 ⇒ 5 min — a
+burst is not "no credit", and a fleet-wide 2h skip for it would remove the last
+rung from every agent on one spike). A key refusal is one more exhausted
+candidate; the turn then fails honestly with the earliest reset across EVERY
+credential tried. When the assigned subscription is known-refused at dispatch
+and no alternative exists, `ensure_serviceable_subscription` answers
+`{"route": "api_key"}` and the FIRST attempt runs on the key by override — no
+doomed attempt, no commit. `fallback_to_api_key` survives as a credential-free
+"is the rung available?" answer and changes nothing.
+
+### 4. Old agent images: legacy mode
+
+An image that predates `auth_override` ignores the field and runs the attempt
+on its baseline; the response then lacks `X-Trinity-Auth-Override` and the walk
+flips to **legacy mode**: the rung is applied the #792 way (`apply_rung_legacy`
+→ `_perform_auto_switch`, assign + hot-reload) and the turn re-issued once more
+— capped at ONE restart-based rung (`restart_result != "hot_reloaded"`: a
+recreate kills the agent's concurrent work and takes longer than the settle +
+connect backoff) and with **no** key rung (the restart-based key path IS the
+stranding bug this replaces). No regression against #2638 on subscriptions.
+
+### 5. What the person and the operator see
+
+- **Workspace** (`client_portal/service.py` AUTH/BILLING ladder): a turn whose
+  budget ran out before a re-issue (`budget_exhausted`) keeps the retryable
+  "send that again" copy — a fresh send gets a fresh budget. Everything else is
+  the honest usage-limit 502 (`_usage_limit_detail(agent, subscription_ids=tried)`,
+  earliest reset across the walk).
+- **`/chat`** (`_apply_sub003_autoswitch(…, walk=)`): exhausted ⇒ 429/503 with
+  the usage-limit copy, the reset, the trail and `auto_switch.attempts`; budget
+  ⇒ the last-resort "Please retry". Without a walk the pre-#3470 behaviour is
+  byte-for-byte unchanged (test_2889 / test_3012 stub the module with two names).
+- **Executions view**: the trail is appended to the FAILED row's `error` —
+  `Tried: A (rate limit) -> B (auth) -> platform API key (billing); every
+  candidate refused.` — no schema change; the structured list rides
+  `TaskExecutionResult.subscription_switch.attempts` and the `auto_retry` audit
+  rows. One "No subscription could serve a turn" alert per agent per hour
+  (`agent:pool_exhausted_notice:`, EXEMPT).
+
+### Agent side
+
+`ParallelTaskRequest` / `ChatRequest` gain `auth_override: AuthOverride`
+(`oauth_token` XOR `api_key`). `execution_env.auth_override_env_layers` turns it
+into the top env layer of ONE spawn — `build_execution_env(extra, drop=…)`
+gained `drop`, because the oauth route must take `ANTHROPIC_API_KEY` away from
+that spawn (Claude Code prefers the key) and a mapping cannot express an
+absence. Both spawn sites (`headless_executor`, `claude_code`) apply it; the
+router stamps `X-Trinity-Auth-Override` on success AND on the HTTPException,
+stages the value for log redaction (`credential_sanitizer.add_credential_value`),
+and drops the field for a runtime without `supports_auth_override`. Nothing is
+persisted: a `docker restart` reverts to the DB baseline by construction.
+
+### Review hardening (pre-landing)
+
+- **The commit is a compare-and-set.** The #799 lock is process-local and prod
+  runs `--workers 2`, so `commit_subscription_walk` writes the assignment with
+  `db.assign_subscription_to_agent(…, expected_subscription_id=<the turn's
+  origin>)`: the first worker wins, the second reads `False` and skips its
+  hot-reload and notification. `apply_rung_legacy` keeps the plain write (it
+  runs before any re-issue, under the lock, as #792 did).
+- **A container-fault 503 never walks.** `classify_switch_failure` reads a bare
+  503 as `auth` (#285); the agent also answers 503 for *"Claude Code is not
+  available in this container"* / *"Permission bypass failed"*. Looping a
+  one-shot remediation multiplies every false-positive trigger by the pool
+  size, so `failure_classifier.is_container_fault` excludes those texts (pinned
+  against the agent source like #3012's markers).
+- **A key-only agent has no pool**: `advance_subscription_walk` stops with
+  `no_subscription` before recording anything (the pre-#3470 early return), so
+  the baseline key is never re-tried as a "rung" and the caller keeps its own
+  wording.
+- **Async dispatch (#1083) drops a pre-dispatch key route** before sending —
+  the agent's 202 branch runs before it reads the override, and the trail must
+  not claim a re-issue that never happened. The walk is inline-only.
+- The legacy re-issue obeys the same budget floor; an undecryptable token
+  re-selects (bounded) instead of falling straight to the key; the hot path pays
+  ONE db read until the first refusal (name and rung cap are lazy);
+  `Rung.credential` is `repr=False` and the agent's `AuthOverride` fields are
+  `SecretStr`, so no repr, validation echo or assertion message prints a secret.
+
+### Not covered
+
+Pull pilots: `public` ∈ `PULL_REACHABLE_NON_AUTONOMOUS`, so a Workspace turn on
+a piloted agent is claimed from the durable queue and the pull sink only runs
+the one-shot `spawn_subscription_failure` with **no re-delivery**. Follow-up
+filed with the PR. Multi-worker (`--workers 2`): the process-local #799 lock
+serialises commits within a worker; two workers committing different serving
+subscriptions is last-write-wins with two hot-reloads and two notifications,
+never a restart or a wedge (the module comment's standing limitation).
+
+**Tests:** `tests/unit/test_3470_subscription_walk.py` — the state machine
+(2-of-3 ⇒ the third; exhausted; budget stop still records; already-tried pick ⇒
+exhausted; rung cap; concurrent switch ⇒ re-run; disabled), the last-resort rung
+(interactive vs autonomous age gate; legacy callers absolute; fresh refusal still
+excludes; elapsed `resets_at` ranks UNKNOWN), the key rung (ordering; refusal ⇒
+honest failure with the assignment untouched and no restart; refused-key skip;
+kind-aware TTLs; explicit opt-out; pre-dispatch route), commit + transition
+notifications, legacy mode (header absent ⇒ one restart-based rung, no key),
+`earliest_known_reset` dropping past instants, four end-to-end turns through the
+real `execute_task` + real walk, the `/chat` re-issue, the portal ladder, and the
+agent's env layers / header / redaction. `test_792` / `test_2789` are re-seamed
+on `advance_subscription_walk`; `test_2638`'s one-remediation test became "the
+pre-dispatch switch feeds the walk and the origin is never retried".

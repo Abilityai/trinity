@@ -44,6 +44,43 @@
     </div>
 
     <template v-else>
+      <!-- Who can reach it (ent#838): public, or our own trusted networks
+           only. Primitives throughout (select, toggle, read-only field). -->
+      <div class="mt-4 space-y-3" data-testid="a2a-scope">
+        <BaseSelect
+          :model-value="scope"
+          label="Who can reach it"
+          :help="scopeHelp"
+          :disabled="toggleLoading"
+          data-testid="a2a-scope-select"
+          @update:model-value="onScope"
+        >
+          <option value="public">Anyone with a key</option>
+          <option value="internal">Our own networks only</option>
+        </BaseSelect>
+        <template v-if="scope === 'internal'">
+          <BaseToggle
+            :model-value="config.a2a_keyless_internal"
+            label="No key needed on our networks"
+            :disabled="toggleLoading"
+            data-testid="a2a-keyless"
+            @update:model-value="onKeyless"
+          />
+          <div v-if="config.internal_endpoint_url" class="flex items-end gap-2">
+            <BaseInput
+              class="flex-1"
+              :model-value="config.internal_endpoint_url"
+              label="Register this URL as an A2A endpoint on the calling instance"
+              readonly
+              data-testid="a2a-internal-url"
+            />
+            <BaseButton variant="secondary" @click="copyText(config.internal_endpoint_url, 'internal')">
+              {{ copied === 'internal' ? 'Copied!' : 'Copy' }}
+            </BaseButton>
+          </div>
+        </template>
+      </div>
+
       <!-- Agent Card URL (one-click copy, #1575 idiom) -->
       <div class="mt-5 pt-5 border-t border-gray-200 dark:border-gray-700">
         <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">Agent Card URL</h4>
@@ -250,6 +287,10 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import { copyToClipboard } from '../utils/clipboard'
+import BaseSelect from './base/BaseSelect.vue'
+import BaseToggle from './base/BaseToggle.vue'
+import BaseInput from './base/BaseInput.vue'
+import BaseButton from './base/BaseButton.vue'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -284,8 +325,11 @@ const newEndpoint = ref({ name: '', url: '', credentials: '' })
 
 // The canonical A2A discovery URL an external orchestrator fetches (the public,
 // unauthenticated well-known route served by the inbound server, ent#157).
-const cardUrl = computed(
-  () => `${window.location.origin}/a2a/${props.agentName}/.well-known/agent-card.json`
+// ent#838: an internal-scope agent's card lives on its internal address.
+const cardUrl = computed(() =>
+  config.value.a2a_scope === 'internal' && config.value.internal_endpoint_url
+    ? `${config.value.internal_endpoint_url}/.well-known/agent-card.json`
+    : `${window.location.origin}/a2a/${props.agentName}/.well-known/agent-card.json`
 )
 
 // Transient "Copied!" affordance.
@@ -372,6 +416,40 @@ async function loadSkills() {
   } finally {
     cardLoading.value = false
   }
+}
+
+// ent#838: exposure scope and the keyless switch.
+const scope = computed(() => (config.value.a2a_scope === 'internal' ? 'internal' : 'public'))
+const scopeHelp = computed(() => {
+  if (scope.value === 'public') return 'Through the public address, with a Trinity key or a payment.'
+  const base = 'Answers only callers on the trusted networks an admin declared; everyone else sees an unexposed agent. Keyless calls are rate-limited and attributed to the caller\'s address.'
+  return config.value.internal_endpoint_url
+    ? base
+    : `${base} An admin sets this instance's internal address in the trusted-networks settings.`
+})
+
+async function saveScope(extra, message) {
+  toggleLoading.value = true
+  try {
+    config.value = await agentsStore.setA2aExposure(props.agentName, config.value.a2a_exposed, extra)
+    notifyUser(message, 'success')
+  } catch (e) {
+    notifyUser(e.response?.data?.detail || `Failed to update A2A access: ${e.message}`, 'error')
+    await load()  // reflect actual state
+  } finally {
+    toggleLoading.value = false
+  }
+}
+
+function onScope(value) {
+  if (value === scope.value) return
+  saveScope({ scope: value },
+    value === 'internal' ? 'Now reachable from our own networks only.' : 'Reachable by anyone with a key.')
+}
+
+function onKeyless(enabled) {
+  saveScope({ keyless: enabled },
+    enabled ? 'Trusted networks need no key.' : 'Trusted networks now need a key.')
 }
 
 async function onToggle(enabled) {
