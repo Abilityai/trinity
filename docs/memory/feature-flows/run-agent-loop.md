@@ -94,6 +94,12 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 - The reconcile, per non-terminal loop: parked on `next_run_at` → left to the sweep. Open run whose execution is still non-terminal → **left alone** (that execution's terminal, or this service's own recovery of it, advances the loop). Open run whose execution is already terminal (or gone) → **advanced from that terminal**, because the event was lost with the restart and `runs_completed` has not moved — re-arming here would dispatch a second row for the same `run_number`. No open run at all → the dispatch was lost, so it is re-armed by making it due now. Nothing is marked `interrupted`.
 - Ordering with execution recovery does not matter: whichever runs first, `claim_loop_advance`'s CAS means the loop advances exactly once.
 
+### Who reads the loop tables unasked (#3436)
+With no loop on the instance, only three paths touch `agent_loops` / `agent_loop_runs` without a person or agent asking; every other reader (the router, the MCP tools, the Loops tab and Workspace strip, the agent delete/rename cascade) runs on demand.
+- **Due-loop sweep** — `main.py::_start_capacity_and_canary` → `_loop_due_sweep`, every 5–6s in every uvicorn worker, no leader lease: `LoopService.dispatch_due_loops` → `db.list_due_loops(now)`, one index seek on `idx_loops_next_run` that returns no rows when nothing is parked. Measured cost and the decision not to gate it: [scheduling §38.9](../requirements/scheduling.md#389-idle-cost-of-the-due-loop-sweep-3436).
+- **Boot reconcile** — `cleanup_service._cleanup_loop`'s startup hook → `LoopService.reconcile_after_restart` → `db.list_non_terminal_loops()`, once per worker per boot (above).
+- **Per-terminal hook** — every CAS-won execution terminal, whatever its trigger, goes through `event_dispatch_service.spawn_task_terminal_event` → `_terminal_side_effects` → `advance_loop_on_terminal` → `db.get_loop_run_by_execution(execution_id)`, one point read on `idx_loop_runs_execution` asking "is this a loop run?". It is event-driven, not a timer, and it cannot be gated on anything the process remembers: a loop run's terminal can land on a worker that never touched the loop (pull sink, lease reaper, cleanup recovery), and skipping the read there would strand the loop.
+
 ## WebSocket Events
 - `loop_run_completed` per iteration: `{type, loop_id, agent_name, run_number, execution_id, cost, duration_ms, timestamp}`.
 - `loop_completed` on terminal transition: `{type, loop_id, agent_name, status, stop_reason, runs_completed, timestamp}`.
