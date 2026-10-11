@@ -263,6 +263,13 @@ _RESERVED_ID_PREFIXES = (
                            # an unreserved prefix would let it pre-create the id
                            # of the alert about its own configuration
     GATE_ASK_ID_PREFIX,    # platform-raised asks (trinity-enterprise#611 / #164)
+    # trinity-enterprise#631: a PERSON's tag of another person. Reserved so an
+    # agent can neither forge one through its queue file (nothing lets an
+    # agent tag a person) nor pre-create a tag's deterministic id and swallow
+    # it through ON CONFLICT; `is_platform_minted` then also keeps the row out
+    # of the agent's file and its answer wake. Literal, not imported: this
+    # module is a leaf the tag service imports from.
+    "mention-",
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a
@@ -333,7 +340,17 @@ def is_platform_minted(item) -> bool:
 # (trinity-enterprise#751: the approval card names the person who asked, the
 # notice the person who decided; `gate-` covers `gate-note-`). A subset of
 # `_RESERVED_ID_PREFIXES`, so no agent can mint a row into it.
-_ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-", "gate-")
+_ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-", "gate-",
+                               # trinity-enterprise#631: who tagged whom, in what
+                               "mention-")
+
+
+def is_person_tag(item: Optional[dict]) -> bool:
+    """trinity-enterprise#631: is this row a person's tag of another person —
+    the reserved `mention-` id AND the type, never the agent-authored type
+    alone? The operator's door answers such a row as not there."""
+    from db.queue_mentions import is_person_tag as _is_tag
+    return _is_tag(item)
 
 
 def is_about_a_person(item: dict) -> bool:

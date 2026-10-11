@@ -172,11 +172,14 @@ export const useSettingsStore = defineStore('settings', {
      * (trimmed, lower-cased). A server refusal rejects with the Axios error,
      * whose `detail` is the server's own named reason. Admin-only.
      */
-    async addWhitelistEmail(raw) {
+    async addWhitelistEmail(raw, defaultRole = 'user') {
       const { email, error } = validateWhitelistEmail(raw)
       if (error) throw new Error(error)
-      await axios.post('/api/settings/email-whitelist', { email, source: 'manual' })
-      return email
+      // #837: the role the first login of this address receives (`user` = Workspace-only).
+      const response = await axios.post('/api/settings/email-whitelist', { email, source: 'manual', default_role: defaultRole })
+      // #837 review: a whitelist role applies only at a first sign-in, so the server
+      // names an existing account's role, for the form to say where it is changed.
+      return { email, existingAccountRole: response?.data?.existing_account_role ?? null }
     },
 
     /**

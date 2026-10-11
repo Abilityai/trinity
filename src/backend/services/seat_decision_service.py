@@ -60,6 +60,11 @@ PROMPT_BLOCK_MAX = 12    # decisions injected into a seat's turn
 PROMPT_BLOCK_BYTES = 1500
 
 _SLUG_RE = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,63}\Z")
+#: A canon role id, lowercased — `objective_join_service._ID_RE` (dots allowed:
+#: `<canon>/roles/head.of.sales.yaml` is a valid seat). Since ent#814 the seat on
+#: record wins over the agent's word here, so the check must accept every id the
+#: Access tab can put on record, or a dotted seat refuses every decision with 422.
+_ROLE_ID_RE = re.compile(r"\A[a-z0-9][a-z0-9._-]{0,63}\Z")
 _DATE_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
 
 CANON_PROPOSAL_HINT = (
@@ -192,8 +197,8 @@ def validate_record(payload: dict, *, today: Optional[date] = None) -> dict:
     if ask_class and not _SLUG_RE.match(ask_class):
         problems["ask_class"] = "ask_class must be a slug (a-z, 0-9, -, _; 64 max)"
     role = _clean(payload.get("decided_by_role")) or None
-    if role and not _SLUG_RE.match(role.lower()):
-        problems["decided_by_role"] = "decided_by_role must be a role id slug"
+    if role and not _ROLE_ID_RE.match(role.lower()):
+        problems["decided_by_role"] = "decided_by_role must be a role id (a-z, 0-9, ., -, _; 64 max)"
 
     raw_cites = payload.get("cites") or []
     cites = [c for c in raw_cites if isinstance(c, str) and c.strip()] if isinstance(raw_cites, (list, tuple)) else []

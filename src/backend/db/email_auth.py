@@ -29,6 +29,11 @@ from .users import EmailInUseError
 # Must stay in sync with dependencies.ROLE_HIERARCHY.
 _VALID_DEFAULT_ROLES = {"user", "operator", "creator", "admin"}
 
+# Sources that wrote whitelist rows nobody chose a role for: agent sharing and
+# access-request approval, both at `user`, until trinity-enterprise#837 stopped
+# them. A deliberate grant replaces such a row instead of bouncing off it.
+_SHARING_SOURCES = frozenset({"agent_sharing", "access_request"})
+
 
 class EmailAuthOperations:
     """Handles email-based authentication operations."""
@@ -68,7 +73,9 @@ class EmailAuthOperations:
                 so every callsite makes the role decision deliberately (#314).
 
         Returns:
-            True if added, False if already exists
+            True if added — or if it replaced a row that sharing or an
+            access-request approval wrote (trinity-enterprise#837) — False if
+            another row already exists.
 
         Raises:
             ValueError: If default_role is not a recognized role.
@@ -79,14 +86,25 @@ class EmailAuthOperations:
                 f"Must be one of {sorted(_VALID_DEFAULT_ROLES)}"
             )
 
-        # Check if already exists
-        if self.is_email_whitelisted(email):
+        existing_source = self._whitelist_source(email)
+        if existing_source is not None and existing_source not in _SHARING_SOURCES:
             return False
 
         # Get user ID
         user = self._user_ops.get_user_by_username(added_by)
         if not user:
             raise ValueError(f"User not found: {added_by}")
+
+        if existing_source is not None:
+            # A sharing-written row, replaced by this grant (trinity-enterprise#837).
+            with get_engine().begin() as conn:
+                conn.execute(
+                    update(email_whitelist)
+                    .where(func.lower(email_whitelist.c.email) == email.lower())
+                    .values(added_by=user["id"], added_at=utc_now_iso(),
+                            source=source, default_role=default_role)
+                )
+            return True
 
         stmt = insert(email_whitelist).values(
             email=email.lower(),
@@ -98,6 +116,18 @@ class EmailAuthOperations:
         with get_engine().begin() as conn:
             conn.execute(stmt)
         return True
+
+    def _whitelist_source(self, email: str) -> Optional[str]:
+        """The source of an email's whitelist row, `""` for a row with none,
+        or None when the email has no row."""
+        stmt = select(email_whitelist.c.source).where(
+            func.lower(email_whitelist.c.email) == email.lower()
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if not row:
+            return None
+        return row["source"] or ""
 
     def get_whitelist_default_role(self, email: str) -> Optional[str]:
         """Return the default_role for a whitelisted email, or None if not found."""

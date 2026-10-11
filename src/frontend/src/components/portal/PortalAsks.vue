@@ -575,11 +575,14 @@ const controlsKind = (ask) => queueResponseKind({ type: ask.kind, options: ask.o
 
 // trinity-enterprise#747: an alert has nothing to decide, so nothing to
 // discuss; and the chat already discussing this ask needs no link to itself.
-const canDiscuss = (ask) => ask.kind !== 'alert'
+// trinity-enterprise#816: not on a SHARED ask (one delivered to everyone a role
+// resolves to) — the server refuses both (`shared_ask`) until they are per
+// person, so the card does not offer them.
+const canDiscuss = (ask) => ask.kind !== 'alert' && !ask.shared
   && !(ask.discussion_chat_id && ask.discussion_chat_id === props.currentSessionId)
 // trinity-enterprise#748: a question or an approval can be declined; an alert
 // is acknowledged ("Got it"), which already ends it without a decision.
-const canDismiss = (ask) => ask.kind !== 'alert'
+const canDismiss = (ask) => ask.kind !== 'alert' && !ask.shared
 // Not once the dismissal is on the wire: the server may already have told the agent.
 const undoable = (ask) => !!store.askDismissals[ask.id] && !store.askDismissals[ask.id].committing
 const discussingId = ref(null)

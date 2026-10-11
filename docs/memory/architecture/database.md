@@ -104,7 +104,8 @@ CREATE TABLE agent_sharing (
     shared_with_email TEXT NOT NULL,
     shared_by_id INTEGER NOT NULL,
     created_at TEXT NOT NULL,
-    allow_proactive INTEGER DEFAULT 0,
+    allow_proactive INTEGER DEFAULT 0,  -- three-state since trinity-enterprise#817: NULL = not asked, 0 = declined, 1 = consented; code writes a new share NULL (the DDL default is unchanged, data-only migration
+                                       -- SQLite `proactive_consent_not_asked` / Alembic `0098_proactive_consent_not_asked` moved the legacy DEFAULT-0 rows to NULL); only 1 permits proactive contact, before and after
     UNIQUE(agent_name, shared_with_email),
     FOREIGN KEY (shared_by_id) REFERENCES users(id)
 );
@@ -755,7 +756,7 @@ CREATE TABLE operator_queue (
     disposed_at TEXT,
     disposed_by TEXT,                   -- person|timeout|platform|agent — only a person or the clock ends an ASK, bar one: `agent` is an agent replacing its OWN pending ask, reason `replaced` (#3247); `platform` ends only a platform alert (#3130 superseded flood alarms, #3246 condition_cleared)
     disposed_by_email TEXT,             -- NULL unless disposed_by = person; withheld from machine keys on get/list
-    disposition_reason TEXT,            -- the operator's optional cancel reason (≤ 500); never in an audit row, never to a Workspace client
+    disposition_reason TEXT,            -- the operator's optional cancel reason (≤ 500); never in an audit row, never to a Workspace client. Machine tokens: `replaced` (agent, #3247), `condition_cleared`/`superseded` (platform, #3246), `outcome_unknown` (timeout on an approval the platform did not hold — anything but a gate's — so expiry cannot vouch the action did not go ahead, trinity-enterprise#844)
     batch_id TEXT,                      -- one uuid per bulk-cancel sweep; its re-select is the sweep's CAS winners
     raised_by TEXT,                     -- agent|gate (PR B); NULL for a legacy row or a platform alarm
     channel TEXT,                       -- file|mcp|gate; keyword-only on create, never read from the agent's entry

@@ -262,6 +262,64 @@ class MetricPointOperations:
         with get_engine().connect() as conn:
             return [dict(r) for r in conn.execute(stmt).mappings()]
 
+    def series_points_for_dims(
+        self,
+        agent_name: str,
+        metric: str,
+        dims: Dict[str, str],
+        absent_keys: List[str],
+        since_iso: str,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        """The newest `limit` points of ONE dimension series, newest first (#3293).
+
+        `latest_points_for` returns a metric's newest rows across all of its
+        series, so a series that reports rarely beside a busy one is not in
+        them. This reads the one series a caller names: every `dims` pair must
+        match and every key in `absent_keys` (the metric's other declared
+        dimensions) must be missing, which is what keeps `channel=google` from
+        being answered, or crowded out of the limit, by `channel=google,
+        geo=us`. The caller still confirms identity with `canonical_dims`: a
+        row carrying a key that is no longer declared passes this filter.
+
+        No new index: the walk is `idx_metric_points_agent_metric_ts`, in the
+        order it is stored, filtering on `dims` and stopping at `limit`. A
+        match is a short walk; a series with fewer than `limit` points costs
+        the metric's rows back to `since_iso`, so the caller bounds that.
+
+        The filter is per key through the JSON column (`json_extract` on
+        SQLite, `->>` on PostgreSQL's JSONB) because `dims` is stored in
+        caller key order and cannot be compared as text.
+        """
+        if not dims or limit <= 0:
+            return []
+        t = metric_points
+        conditions = [
+            t.c.agent_name == agent_name,
+            t.c.metric == metric,
+            t.c.ts >= since_iso,
+        ]
+        for key, value in dims.items():
+            conditions.append(t.c.dims[key].as_string() == value)
+        for key in absent_keys:
+            if key not in dims:
+                conditions.append(t.c.dims[key].as_string().is_(None))
+        stmt = (
+            select(
+                t.c.metric,
+                t.c.ts,
+                t.c.value_numeric,
+                t.c.value_text,
+                t.c.dims,
+                t.c.idempotency_key,
+            )
+            .where(*conditions)
+            .order_by(t.c.ts.desc(), t.c.idempotency_key.desc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            return [dict(r) for r in conn.execute(stmt).mappings()]
+
     def count_metric_points_candidates(
         self, retention_days: int, limit: int
     ) -> int:

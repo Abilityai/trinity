@@ -640,7 +640,7 @@ def _seed_owner(db, agent, username, email, **owner_kw):
     """A real user and ownership row on the per-process SQLite (idempotent)."""
     from db_models import UserCreate
     if not db.get_user_by_username(username):
-        db.create_user(UserCreate(username=username, role="user", email=email))
+        db.create_user(UserCreate(username=username, role="operator", email=email))
     if not db.get_agent_owner(agent):
         db.register_agent_owner(agent, username, **owner_kw)
 

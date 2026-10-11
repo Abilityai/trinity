@@ -161,6 +161,17 @@
         />
       </template>
 
+      <!-- trinity-enterprise#631: a person tagged you. The card reads the item
+           itself and says `rendered` once it is on screen (the read waits for
+           that, like a chat's). -->
+      <PortalMentionCard
+        v-else-if="item.type === 'mention'"
+        ref="mentionCard"
+        :item="item"
+        @rendered="(k) => $emit('rendered', k)"
+        @open-chat="(url) => url && $emit('open-chat', url)"
+      />
+
       <template v-else>
         <div v-if="view.state === 'loading'" class="space-y-3" aria-busy="true" data-testid="inbox-pane-loading">
           <div v-for="i in 3" :key="i" class="animate-pulse motion-reduce:animate-none h-12 rounded-lg bg-gray-100 dark:bg-gray-800/60"></div>
@@ -289,6 +300,7 @@ import PortalAsks from './PortalAsks.vue'
 import PortalAskContext from './PortalAskContext.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalAgentBubble from './PortalAgentBubble.vue'
+import PortalMentionCard from './PortalMentionCard.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { relativeTime } from './portalUtils'
 import { PANE_HISTORY_LIMIT, paneWindow, paneRuns, openInChatTarget, paneHeading, replyExcerpt, messageReplyTarget } from './portalInbox'
@@ -399,7 +411,10 @@ async function retryPayload(d) {
 // A fresh read, from nothing. Also exposed: an explicit open of the chat the
 // pane is ALREADY showing (the desktop preview, a re-click) must draw what came
 // since, and say `rendered` again, before the container reads it (round 3).
+const mentionCard = ref(null)
 function reload() {
+  // trinity-enterprise#631: a tag's card reads its own item.
+  if (props.item.type === 'mention') { mentionCard.value?.reload?.(); return }
   messages.value = []; deliverables.value = []
   loaded.value = false; failed.value = false
   for (const k of Object.keys(payloads)) delete payloads[k]

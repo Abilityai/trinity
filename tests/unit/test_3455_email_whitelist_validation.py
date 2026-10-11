@@ -46,9 +46,11 @@ def _principal(role="admin"):
 
 
 class _Whitelist:
-    """The three accessors the router uses, with the DB layer's own matching
+    """The accessors the router uses, with the DB layer's own matching
     rule (case-insensitive exact match) so a delete is judged the way
-    `db/email_auth.py` judges it."""
+    `db/email_auth.py` judges it. The two #837 reads (the role a 409 names, and
+    an existing account's role on success) answer as for a table with no
+    accounts; their behaviour is pinned in `test_837_whitelist_grant.py`."""
 
     def __init__(self, rows=()):
         self.rows = list(rows)
@@ -61,6 +63,12 @@ class _Whitelist:
             return False
         self.rows.append(email)
         return True
+
+    def get_whitelist_default_role(self, email):
+        return "user" if any(r.lower() == email.lower() for r in self.rows) else None
+
+    def get_user_by_email(self, email):
+        return None
 
     def remove_from_whitelist(self, email):
         keep = [r for r in self.rows if r.lower() != email.lower()]

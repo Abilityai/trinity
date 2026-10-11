@@ -161,9 +161,22 @@ async def acknowledge_retention_prune(
     # Bind the ack to the window actually in force right now, not to whatever the
     # caller says. Otherwise an operator could be socially-engineered into acking a
     # window that isn't the one about to run, and the guard would honour it.
-    effective_raw = db.get_setting_value(
-        body.key, OPS_SETTINGS_DEFAULTS.get(body.key, "0")
-    )
+    #
+    # #3088: "in force" means what the key's SWEEP reads. The env-backed keys
+    # are swept through `resolve_ops_setting` (row → env → code default), so a
+    # verbatim row read here answered the code default for a window the
+    # environment supplies and 409'd its approval forever. Every other key keeps
+    # the verbatim read on purpose: its sweep reads an empty-string row as `0`
+    # (disabled) where the resolver reports the default, and an approval
+    # recorded at that default would be one no sweep consumes.
+    from config import ENV_BACKED_OPS_KEYS
+
+    if body.key in ENV_BACKED_OPS_KEYS:
+        effective_raw, _source = settings_service.resolve_ops_setting(body.key)
+    else:
+        effective_raw = db.get_setting_value(
+            body.key, OPS_SETTINGS_DEFAULTS.get(body.key, "0")
+        )
     try:
         effective = max(int(effective_raw), 0)
     except (TypeError, ValueError):
