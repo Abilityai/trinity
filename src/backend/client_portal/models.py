@@ -1,9 +1,11 @@
 """Pydantic models for the enterprise client-portal exposure config (#79)."""
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+from models import PersonTagState  # trinity-enterprise#631 — one definition, shared with rooms
 
 
 class PortalExposureConfig(BaseModel):
@@ -389,6 +391,11 @@ class PortalChatRequest(BaseModel):
     # the first 20 rather than rejecting: a message that sent fine before #3265
     # must not start failing with a 422 because of what it carries.
     attachments: Optional[list[PortalTurnAttachment]] = None
+    # trinity-enterprise#631 — the PEOPLE this turn tags, by address, as picked
+    # in the composer. Optional; every existing caller is unaffected. Refused by
+    # name before anything is written; the service enforces the per-message cap.
+    tags: Optional[list[Annotated[str, Field(min_length=1, max_length=320)]]] = Field(
+        default=None, max_length=50)
 
     @field_validator("attachments", mode="before")
     @classmethod
@@ -1002,6 +1009,9 @@ class PortalHistoryMessage(BaseModel):
     # #3265: the files a user turn carried, so a reload shows them on the
     # message. None for every other row.
     attachments: Optional[list[PortalMessageAttachment]] = None
+    # trinity-enterprise#631: on the reader's OWN message, the people it tagged
+    # and whether each has read it. None on every other row.
+    tags: Optional[list[PersonTagState]] = None
     # #3166: the turn that wrote this row, so the client can take its own reply
     # off a thread another turn is also writing to, and place each reply under
     # its own question. The caller already holds these ids (the dispatch

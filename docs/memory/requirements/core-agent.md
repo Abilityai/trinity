@@ -3962,3 +3962,59 @@ to localStorage in the clear.
     is listed in the sidebar so the header star has somewhere to show.
 - **API**: `PUT` / `DELETE /api/enterprise/client-portal/agents/{name}/sessions/{id}/archive`
   (roster- then session-scoped, uniform 404, idempotent, 60/min per viewer). No schema change.
+
+### 5.42 Workspace — tag a person into a conversation; the tag reaches their Inbox (trinity-enterprise#631)
+- **Status**: ✅ Implemented (2026-10-10)
+- **Requirement ID**: WORKSPACE_PERSON_TAG
+- **GitHub Issue**: abilityai/trinity-enterprise#631 (the pointer half of epic ent#630; the seat stays incubating)
+- **Description**: In a 1:1 chat or a room, a person can `@` a colleague on the same
+  instance and that colleague is told. A tag is a **pointer, not a seat**: it changes no
+  membership and grants no access. Before this, `@` and a person's name was inert text that
+  looked like it worked (`resolve_mentions` matches agent participants only).
+- **One item, on the existing ledger**: each tagged person gets ONE item in their Workspace
+  Inbox — an `operator_queue` row (the ent#610 ledger) of type `mention`, addressed to them,
+  carrying who tagged them, which conversation and which message. Kind **Unread**, never
+  **Action**: the row starts `delivered` and becomes `read`, never `pending`, so no ask budget,
+  expiry, ending observer or operator badge can see it. No new store, no fifth notification
+  path, no schema change.
+- **Who may tag**: a person with a platform account (on the platform door or a platform
+  Workspace session). Refused by name: an agent key (`agents_cannot_tag`) — nothing lets an
+  agent tag a person on its own initiative, and `mention-` is a platform-reserved queue id
+  prefix so its queue file cannot forge one either; a non-person platform key; an external
+  Workspace client (`tagging_unavailable` — the colleagues it would list are the
+  organisation's, an internal fact, #78).
+- **Who may be tagged (the ent#450 pattern)**: an account that exists, is not suspended, has
+  an email (the Inbox's address) and can already reach one of the conversation's agents
+  (owner, shared, or an admin). The picker reads them from the server only once there is a
+  query, capped at 8 and rate-limited — never a directory. The same predicate answers the
+  send: an unknown name (or one outside that set — one refusal, so it is not an account
+  oracle) is refused **by name, with the reason**, before anything is written (`422
+  unknown_person`, `name`); so is tagging yourself and more than 10 people in one message.
+- **Bounded and idempotent**: tags are deduplicated case-insensitively, and the row's id is
+  derived from (conversation, message, person), so the same person named twice — or a
+  message delivered twice, or a retried turn — is one item.
+- **Stored, and distinct from a wake**: the message's `mentions` stay the agents to wake,
+  computed from the text exactly as before; a person is never a wake target. The person
+  pointer is stored apart, on the ledger, keyed to the message. The tags travel beside the
+  text (`tags: [email]` on the post), not parsed out of it.
+- **What the tagged person sees**: the Inbox lists the item in Unread (New) and All, counted
+  as one thing that came back. Opening it shows the tagged message with a few messages around
+  it **only when they could already see the conversation** (a live room participant, or an
+  admin on the platform door — the admin bypass never rides a portal session, #78). Otherwise
+  the item says they can't see it — not even the tagger's own words cross — and names who can
+  let them in (a room's moderator; for a 1:1 chat, the tagger, whose chat it is). No cost,
+  no execution id, no addressee in the projection. It is marked read once its card is on screen.
+- **What the tagger sees**: under their own message, each tagged person and how far it got —
+  "in their Inbox", "read", or "not delivered" (the message landed but the write failed).
+  Only on the sender's own messages; a room carries the whole-room map so a tag on an older
+  message turns read on the next poll.
+- **In-app only, said plainly**: the item lives in the Trinity Inbox; nothing is emailed
+  (out-of-app reach is ent#564). The card says so, and the tagger's marks say "in their Inbox".
+- **Operator door**: a person's tag is not the operator's queue — the Operating Room's list,
+  totals and item read leave `mention` rows out.
+- **API**: `POST /api/rooms/{id}/messages` and `POST …/client-portal/agents/{name}/chat[/stream]`
+  take optional `tags`; `GET /api/rooms/{id}/people?q=` and
+  `GET …/client-portal/agents/{name}/people?q=` (the picker); `GET /api/rooms/{id}` adds
+  `own_tags` and per-message `tags`; history rows carry `tags` on the reader's own messages;
+  `GET /api/enterprise/client-portal/mentions`, `GET …/mentions/{id}`, `POST …/mentions/{id}/read`.
+- **Flow**: `feature-flows/workspace-person-tag.md`.

@@ -1143,7 +1143,7 @@ const unlandedAgentPage = computed(() => (
 const railFreePage = computed(() => unlandedAgentPage.value || (projectsRoute.value ? 'projects' : null))
 const activeAgent = computed(() => {
   if (isInboxRoute.value) {
-    return inboxSelectedAgent({ item: inboxSelection.value, threads: threads.value, asks: store.asks, agents: store.agents })
+    return inboxSelectedAgent({ item: inboxSelection.value, threads: threads.value, asks: store.asks, agents: store.agents, mentions: store.mentions })
   }
   // Never substitute a different agent for one the caller asked for by name.
   if (unreachableAgent.value) return null
@@ -1679,7 +1679,7 @@ const activeRoomCarryNotice = computed(() => (
     : null
 ))
 
-async function onEscalateToRoom({ agents, message, attachments = [] } = {}) {
+async function onEscalateToRoom({ agents, message, attachments = [], tags = [] } = {}) {
   if (escalating.value || !agents?.length) return
   escalating.value = true
   roomCarryNotice.value = null
@@ -1742,7 +1742,9 @@ async function onEscalateToRoom({ agents, message, attachments = [] } = {}) {
 
     if (message) {
       try {
-        await store.postRoomMessage(roomId, message)
+        // trinity-enterprise#631: the people the message tagged go with it.
+        if (tags && tags.length) await store.postRoomMessage(roomId, message, { tags })
+        else await store.postRoomMessage(roomId, message)
       } catch {
         // trinity-enterprise#657: the room is open in front of them, but the
         // 1:1's `send()` already emptied the composer, so without this the
@@ -3027,12 +3029,16 @@ function startAsksPoll() {
   stopAsksPoll()
   if (!store.isClientSignedIn) return
   store.fetchAsks()
+  // trinity-enterprise#631: the tags addressed to this person ride the same
+  // tick — a tag is a row, not an event, so a backgrounded tab loses nothing.
+  store.fetchMentions()
   asksTimer = setInterval(() => {
     // Visibility-aware: a backgrounded tab polls nothing. The next foreground
     // tick catches up, and an ask that arrived meanwhile is not lost — it is a
     // row, not an event.
     if (document.visibilityState !== 'visible') return
     store.fetchAsks()
+    store.fetchMentions()
     // ent#557: the SAME tick refreshes threads and their read state, which is
     // what makes an unread reply appear while the user is elsewhere in the
     // Workspace. `refreshThreads` was event-driven only — a send, a navigation,
