@@ -386,7 +386,8 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
  *     person's cancel, a timeout or a platform ending.
  *   - `who` — the person, for the Operating Room (`disposed_by_email`, or a
  *     legacy answer's `responded_by_email`); the Workspace projection's coarse
- *     `ended_by` (`you` / `the operator`); `timeout` for an expiry; `the
+ *     `ended_by` (`you` / `the operator`; `someone_else` → the projection's
+ *     `answered_by`, trinity-enterprise#816); `timeout` for an expiry; `the
  *     platform` for a row the platform itself ended (#3246: `disposed_by =
  *     'platform'`, or the projection's `ended_by = 'platform'`); `null` when the
  *     platform does not know.
@@ -447,6 +448,10 @@ export function queueEnding(item) {
     who = 'you'
   } else if (item.ended_by === 'operator') {
     who = 'the operator'
+  } else if (item.ended_by === 'someone_else') {
+    // trinity-enterprise#816: a shared ask — another person it was delivered
+    // to answered first. The projection names them only then (`answered_by`).
+    who = item.answered_by || 'someone else'
   } else {
     who = item.disposed_by_email || (kind === 'answered' ? item.responded_by_email : null) || null
   }
