@@ -4662,6 +4662,17 @@ class WhatsAppTestRequest(BaseModel):
 # Skill Sources (ent#237 — multi-source skills library)
 # ============================================================================
 
+def _clean_skill_source_text(v: str) -> str:
+    """Shared `name`/`ref` rule for the source bodies: stripped, non-blank, no
+    control characters."""
+    v = v.strip()
+    if not v:
+        raise ValueError("must not be blank")
+    if any(ord(c) < 32 or ord(c) == 127 for c in v):
+        raise ValueError("must not contain control characters")
+    return v
+
+
 class SkillSourceCreate(BaseModel):
     """Register a skills repo as a source.
 
@@ -4678,16 +4689,36 @@ class SkillSourceCreate(BaseModel):
     # should pin (ent#237 AC#5).
     ref_type: Literal["branch", "tag"] = "branch"
     enabled: bool = True
+    # trinity-enterprise#692: optional, so an omitted priority keeps the
+    # db layer's custom-source default and the Settings panel is unchanged.
+    priority: Optional[int] = Field(None, ge=1, le=10000)
 
     @field_validator("name", "ref")
     @classmethod
     def _no_control_chars(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("must not be blank")
-        if any(ord(c) < 32 or ord(c) == 127 for c in v):
-            raise ValueError("must not contain control characters")
-        return v
+        return _clean_skill_source_text(v)
+
+
+class SkillSourceApply(BaseModel):
+    """Register-or-update a source keyed on its repository URL (trinity-enterprise#692).
+
+    Body of `POST /api/skills/sources/apply` — the idempotent form a declared
+    source (and the MCP `register_skill_source` tool) re-applies. Only `url` is
+    required; every other field is applied only when it is NAMED, so a re-apply
+    that omits `ref_type` does not reset it. `is_default` is absent for the
+    same reason as on `SkillSourceCreate`.
+    """
+    url: str = Field(..., min_length=1, max_length=500)
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    ref: Optional[str] = Field(None, min_length=1, max_length=200)
+    ref_type: Optional[Literal["branch", "tag"]] = None
+    enabled: Optional[bool] = None
+    priority: Optional[int] = Field(None, ge=1, le=10000)
+
+    @field_validator("name", "ref")
+    @classmethod
+    def _no_control_chars(cls, v: Optional[str]) -> Optional[str]:
+        return v if v is None else _clean_skill_source_text(v)
 
 
 class SkillSourceUpdate(BaseModel):
@@ -4749,6 +4780,25 @@ class SkillsLibrarySourceStatus(BaseModel):
     # this projection to "help" a non-admin surface debug a sync.
 
 
+class FleetReinjectSummary(BaseModel):
+    """The last fleet re-inject, COUNTS ONLY (trinity-enterprise#692).
+
+    An allow-list, like the model below: the stored report also carries a
+    per-agent `failures` map (agent names + error text, which can embed library
+    paths), and that stays on the admin routes. What every reader may see is
+    whether a re-inject ran, against which commit, and how it went in numbers —
+    enough for whoever ran a sync to read the consequence of it.
+    """
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    trigger: Optional[str] = None
+    commit_sha: Optional[str] = None
+    agents_total: int = 0
+    agents_injected: int = 0
+    agents_skipped: int = 0
+    agents_failed: int = 0
+
+
 class SkillsLibraryStatus(BaseModel):
     """PUBLIC projection of `skill_service.get_library_status()` (ent#334).
 
@@ -4792,6 +4842,8 @@ class SkillsLibraryStatus(BaseModel):
     # Legacy flat fields (first source in resolution order). Not URLs.
     branch: Optional[str] = None
     commit_sha: Optional[str] = None
+    # trinity-enterprise#692: counts only — see `FleetReinjectSummary`.
+    last_fleet_reinject: Optional[FleetReinjectSummary] = None
 
 
 class SkillAssignmentAgent(BaseModel):

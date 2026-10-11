@@ -74,6 +74,20 @@ _DB_BELT_TYPE_MAX_BYTES = 1024
 # raises. NULL `raised_by` is a legacy or file row, so it counts.
 _NOT_A_GATE_ROW = or_(operator_queue.c.raised_by.is_(None), operator_queue.c.raised_by != "gate")
 
+# trinity-enterprise#844: what the clock writes as `disposition_reason` when it
+# ends a pending ask. A gated-skill approval (`raised_by='gate'`) is the one
+# approval whose action the PLATFORM holds — expiry runs nothing. Every other
+# approval names an action the agent holds: the platform cannot tell whether it
+# went ahead unanswered, so the ending says so instead of reading exactly like a
+# stale ask nobody acted on. Questions and alerts name no action: NULL, as before.
+# Evaluated in the same compare-and-set UPDATE that ends the row, so only the
+# writer that won records it; rows that ended earlier are never rewritten.
+OUTCOME_UNKNOWN = "outcome_unknown"
+_TIMEOUT_REASON = case(
+    (and_(operator_queue.c.type == "approval", _NOT_A_GATE_ROW), OUTCOME_UNKNOWN),
+    else_=None,
+)
+
 # trinity-enterprise#631: person tags share the ledger but not the operator's
 # door. A tag is the reserved `mention-` id AND the type (`queue_mentions`), so
 # an agent row that merely names its type `mention` stays an ordinary, listed
@@ -554,7 +568,8 @@ class OperatorQueueOperations:
                     update(operator_queue)
                     .where(and_(mine, operator_queue.c.status == "pending"))
                     .values(status="expired", disposition="expired",
-                            disposed_at=now, disposed_by="timeout")
+                            disposed_at=now, disposed_by="timeout",
+                            disposition_reason=_TIMEOUT_REASON)
                 ).rowcount
                 row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
                 return self._row_to_item(row), {"outcome": "replaces_ended", "expired_now": bool(expired)}
@@ -1135,10 +1150,17 @@ class OperatorQueueOperations:
             # match NOTHING rather than silently widening to everyone's. The
             # other filters narrow a view the caller is already entitled to see;
             # this one decides entitlement, which is why it diverges.
-            conds.append(
-                func.lower(operator_queue.c.addressed_to_email)
-                == addressed_to_email.strip().lower()
-            )
+            #
+            # trinity-enterprise#816: an ask to a role SEVERAL people fill has no
+            # single addressee — it is addressed to every person in its
+            # platform-written `resolved_to` (the 2026-10-07 ruling: one row,
+            # delivered to each of them). So "addressed to this person" is the
+            # single addressee OR membership of `resolved_to`.
+            viewer = addressed_to_email.strip().lower()
+            conds.append(or_(
+                func.lower(operator_queue.c.addressed_to_email) == viewer,
+                self._resolved_to_contains(viewer),
+            ))
         if since:
             conds.append(operator_queue.c.created_at >= since)
         if hide_ended_before:
@@ -1850,6 +1872,11 @@ class OperatorQueueOperations:
         UPDATE is the identity of the winner, so two overlapping sweeps (a Redis
         flap can briefly give two leaders) end — and later wake — each row once.
         Edge-triggered: a second pass over the same rows ends nothing.
+
+        trinity-enterprise#844: an approval whose action the platform does not
+        hold (anything but a gate's) is ended with `disposition_reason =
+        'outcome_unknown'` — the deadline passing says nothing about whether the
+        agent went ahead, and the record must not read as though it does.
         """
         now = utc_now_iso()
         candidates = (
@@ -1885,6 +1912,9 @@ class OperatorQueueOperations:
                         disposition="expired",
                         disposed_at=now,
                         disposed_by="timeout",
+                        # trinity-enterprise#844: an approval whose action the
+                        # platform did not hold ends as `outcome_unknown`.
+                        disposition_reason=_TIMEOUT_REASON,
                     )
                 )
                 if result.rowcount:
@@ -2211,6 +2241,27 @@ class OperatorQueueOperations:
         "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
         "\u2028\u2029\u202f\u205f\u3000"
     )
+
+    @staticmethod
+    def _resolved_to_contains(email: str):
+        """`email` is one of the people in the row's `resolved_to`
+        (trinity-enterprise#816) — a SQL condition, so the Workspace list pages
+        and counts over exactly what it shows (#3059).
+
+        `resolved_to` is TEXT holding `json.dumps(list_of_emails)`
+        (`create_native_item`), so membership is the JSON-quoted email as a
+        substring: the quotes bound it, so `a@x.com` never matches
+        `aa@x.com` or `a@x.community`. LIKE-escaped, so a `_` or `%` in an
+        address matches only itself. Lower-cased on both sides (the writers
+        already store lower-case; the read must not depend on it). `lower` and
+        `LIKE … ESCAPE` behave the same on SQLite and PostgreSQL over this
+        ASCII text (`json.dumps` escapes anything else) — no dialect branch.
+        A NULL `resolved_to` matches nothing. An empty `email` matches nothing:
+        `""` JSON-quotes to `""`, which no stored list of addresses contains.
+        """
+        fragment = json.dumps(email).lower()
+        escaped = fragment.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return func.lower(operator_queue.c.resolved_to).like(f"%{escaped}%", escape="\\")
 
     @staticmethod
     def _request_id_not_prefixed_ci(prefixes):
