@@ -227,7 +227,7 @@ def _record(r, store, email, **body):
         execution_id="e1", outcome="approved", decided="Renew the Acme contract",
         alternatives=["let it lapse"], criterion="margin above 20%", reversal="margin drops",
         review_by="2027-01-01", **body)
-    return asyncio.run(r.record_seat_decision(AGENT, req, current_user=SimpleNamespace(id=1)))
+    return asyncio.run(r.record_seat_decision(AGENT, req, current_user=SimpleNamespace(id=1, agent_name=None)))
 
 
 def test_a_decision_for_bob_is_stamped_with_bobs_seat_not_the_primarys(wired):
