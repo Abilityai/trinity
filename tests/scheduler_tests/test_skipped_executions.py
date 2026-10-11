@@ -100,30 +100,6 @@ class TestSkippedExecutionDatabase:
         assert execution.schedule_id == "non-existent-schedule"
 
 
-class TestSkippedProcessScheduleExecution:
-    """Tests for create_skipped_process_schedule_execution method."""
-
-    def test_create_skipped_process_execution(self, db):
-        """Test creating a skipped process schedule execution."""
-        # First ensure the process_schedule_executions table exists
-        db.ensure_process_schedules_table()
-
-        execution = db.create_skipped_process_schedule_execution(
-            schedule_id="process-schedule-1",
-            process_id="process-123",
-            process_name="Daily Report Process",
-            triggered_by="schedule",
-            skip_reason="Previous execution still running"
-        )
-
-        assert execution is not None
-        assert execution.status == "skipped"
-        assert execution.schedule_id == "process-schedule-1"
-        assert execution.process_id == "process-123"
-        assert execution.process_name == "Daily Report Process"
-        assert execution.error == "Previous execution still running"
-
-
 # Check if apscheduler is available (it runs in Docker, not locally)
 try:
     import apscheduler
@@ -168,34 +144,6 @@ class TestSchedulerServiceSkippedEvents:
             service._on_job_max_instances(event)
             mock_record.assert_called_once_with("schedule-1")
 
-    def test_on_job_max_instances_parses_process_schedule_job_id(self, db_with_data):
-        """Test that _on_job_max_instances correctly parses process_schedule_ prefix job IDs."""
-        from scheduler.service import SchedulerService
-        from scheduler.config import SchedulerConfig
-        from unittest.mock import patch
-
-        config = SchedulerConfig(
-            database_path=":memory:",
-            redis_url="redis://localhost:6379",
-            lock_timeout=60,
-            lock_auto_renewal=False,
-            health_port=8099,
-            log_level="DEBUG"
-        )
-
-        service = SchedulerService(config)
-        service.db = db_with_data
-
-        # Create a mock event with process_schedule_ prefix
-        event = MagicMock()
-        event.job_id = "process_schedule_process-schedule-abc123"
-        event.scheduled_run_time = datetime.utcnow()
-
-        # Mock _record_skipped_process_schedule to verify it's called with correct ID
-        with patch.object(service, '_record_skipped_process_schedule') as mock_record:
-            service._on_job_max_instances(event)
-            mock_record.assert_called_once_with("process-schedule-abc123")
-
     def test_on_job_max_instances_handles_unknown_prefix(self, db_with_data):
         """Test that _on_job_max_instances logs warning for unknown job ID format."""
         from scheduler.service import SchedulerService
@@ -219,12 +167,39 @@ class TestSchedulerServiceSkippedEvents:
         event.job_id = "unknown_prefix_some-id"
         event.scheduled_run_time = datetime.utcnow()
 
-        # Neither record method should be called
+        # The record method should not be called
         with patch.object(service, '_record_skipped_agent_schedule') as mock_agent:
-            with patch.object(service, '_record_skipped_process_schedule') as mock_process:
+            service._on_job_max_instances(event)
+            mock_agent.assert_not_called()
+
+    def test_on_job_max_instances_legacy_process_prefix_is_unknown(self, db_with_data, caplog):
+        """#3432: a legacy process_schedule_ id falls to the unknown-prefix warning."""
+        import logging
+        from scheduler.service import SchedulerService
+        from scheduler.config import SchedulerConfig
+        from unittest.mock import patch
+
+        config = SchedulerConfig(
+            database_path=":memory:",
+            redis_url="redis://localhost:6379",
+            lock_timeout=60,
+            lock_auto_renewal=False,
+            health_port=8099,
+            log_level="DEBUG"
+        )
+
+        service = SchedulerService(config)
+        service.db = db_with_data
+
+        event = MagicMock()
+        event.job_id = "process_schedule_legacy-1"
+        event.scheduled_run_time = datetime.utcnow()
+
+        with patch.object(service, '_record_skipped_agent_schedule') as mock_agent:
+            with caplog.at_level(logging.WARNING, logger="scheduler.service"):
                 service._on_job_max_instances(event)
-                mock_agent.assert_not_called()
-                mock_process.assert_not_called()
+            mock_agent.assert_not_called()
+        assert "Unknown job_id format" in caplog.text
 
     def test_record_skipped_agent_schedule_creates_execution(self, db_with_data):
         """Test that _record_skipped_agent_schedule creates a skipped execution record."""

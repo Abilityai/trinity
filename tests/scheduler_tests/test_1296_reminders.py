@@ -355,7 +355,6 @@ def test_reload_schedules_reclaims_reminders(initialized_db, mock_lock_manager):
     _setup_reminders(initialized_db)
     _insert_reminder(initialized_db, "r1")
     db = SchedulerDatabase(database_path=initialized_db)
-    db.ensure_process_schedules_table()  # normally created by initialize()
     svc = _service(db, mock_lock_manager)
     svc.scheduler.get_jobs.return_value = []
     svc.scheduler.get_job.return_value = None

@@ -21,5 +21,5 @@ echo ""
 # and was renamed to `tests/testkit` in #2080, so `utils` now unambiguously
 # means src/backend/utils. They stay separate because unit/ must not inherit
 # the root conftest's live-backend fixtures — a different, still-valid reason.
-time python -m pytest -m "not slow" --ignore=unit --ignore=process_engine -v --tb=short "$@"
+time python -m pytest -m "not slow" --ignore=unit -v --tb=short "$@"
 time python -m pytest unit/ -m "not slow" -v --tb=short

@@ -25,7 +25,7 @@ import httpx
 
 from .config import config
 from .models import (
-    Schedule, ScheduleExecution, ExecutionStatus, SchedulerStatus, ProcessSchedule,
+    Schedule, ScheduleExecution, ExecutionStatus, SchedulerStatus,
     ExecutionOrigin,
 )
 from .database import SchedulerDatabase
@@ -120,7 +120,6 @@ class SchedulerService:
         # Schedule state snapshots for sync detection
         # Maps schedule_id -> (enabled, updated_at_iso)
         self._schedule_snapshot: Dict[str, tuple] = {}
-        self._process_schedule_snapshot: Dict[str, tuple] = {}
 
         # #1472: schedule ids whose _add_job failed PERMANENTLY (bad cron/timezone).
         # Snapshotted-as-known so the sync loop doesn't retry them every tick; the
@@ -142,9 +141,6 @@ class SchedulerService:
         if self._initialized:
             logger.warning("Scheduler already initialized")
             return
-
-        # Ensure process schedules table exists
-        self.db.ensure_process_schedules_table()
 
         # Create scheduler with memory job store
         jobstores = {
@@ -175,16 +171,6 @@ class SchedulerService:
                     schedule.updated_at.isoformat() if schedule.updated_at else None
                 )
 
-        # Load all enabled process schedules from database
-        process_schedules = self.db.list_all_enabled_process_schedules()
-        for process_schedule in process_schedules:
-            self._add_process_job(process_schedule)
-            # Capture snapshot for sync detection
-            self._process_schedule_snapshot[process_schedule.id] = (
-                process_schedule.enabled,
-                process_schedule.updated_at.isoformat() if process_schedule.updated_at else None
-            )
-
         # Add listener for skipped executions (max_instances reached)
         # This records when a scheduled job is dropped because previous execution is still running
         self.scheduler.add_listener(
@@ -197,7 +183,7 @@ class SchedulerService:
         self._initialized = True
         self._start_time = datetime.utcnow()
 
-        logger.info(f"Scheduler initialized with {len(schedules)} agent schedules, {len(process_schedules)} process schedules")
+        logger.info(f"Scheduler initialized with {len(schedules)} agent schedules")
         logger.info(f"Instance ID: {self._instance_id}")
         logger.info(f"Schedule sync interval: {config.schedule_reload_interval}s")
         logger.info(f"Misfire grace time: {config.misfire_grace_time}s")
@@ -565,12 +551,11 @@ class SchedulerService:
         """
         try:
             await self._sync_agent_schedules()
-            await self._sync_process_schedules()
         except Exception as e:
             logger.error(f"Schedule sync failed: {e}")
 
-        # #1296: reminder reconcile in its OWN try/except, NOT under the cron/
-        # process try above (Codex C5) — a cron-sync error must not starve
+        # #1296: reminder reconcile in its OWN try/except, NOT under the
+        # cron-sync try above (Codex C5) — a cron-sync error must not starve
         # reminder pickup. Latency ≤ one schedule_reload_interval, same as a
         # brand-new cron schedule.
         try:
@@ -654,64 +639,6 @@ class SchedulerService:
         if new_ids or deleted_ids:
             logger.info(f"Sync complete: {len(new_ids)} added, {len(deleted_ids)} removed")
 
-    async def _sync_process_schedules(self):
-        """Sync process schedules with database."""
-        # Get all process schedules from database
-        all_schedules = self.db.list_all_process_schedules()
-
-        # Build current state map
-        current_state: Dict[str, tuple] = {}
-        schedule_map: Dict[str, ProcessSchedule] = {}
-        for schedule in all_schedules:
-            current_state[schedule.id] = (
-                schedule.enabled,
-                schedule.updated_at.isoformat() if schedule.updated_at else None
-            )
-            schedule_map[schedule.id] = schedule
-
-        # Detect changes
-        snapshot_ids = set(self._process_schedule_snapshot.keys())
-        current_ids = set(current_state.keys())
-
-        # New schedules
-        new_ids = current_ids - snapshot_ids
-        for schedule_id in new_ids:
-            schedule = schedule_map[schedule_id]
-            if schedule.enabled:
-                logger.info(f"Sync: Adding new process schedule {schedule.process_name}/{schedule.trigger_id}")
-                self._add_process_job(schedule)
-            self._process_schedule_snapshot[schedule_id] = current_state[schedule_id]
-
-        # Deleted schedules
-        deleted_ids = snapshot_ids - current_ids
-        for schedule_id in deleted_ids:
-            logger.info(f"Sync: Removing deleted process schedule {schedule_id}")
-            self._remove_process_job(schedule_id)
-            del self._process_schedule_snapshot[schedule_id]
-
-        # Updated schedules
-        for schedule_id in (snapshot_ids & current_ids):
-            old_state = self._process_schedule_snapshot[schedule_id]
-            new_state = current_state[schedule_id]
-
-            if old_state != new_state:
-                schedule = schedule_map[schedule_id]
-                old_enabled, old_updated = old_state
-                new_enabled, new_updated = new_state
-
-                if old_enabled and not new_enabled:
-                    logger.info(f"Sync: Disabling process schedule {schedule.process_name}/{schedule.trigger_id}")
-                    self._remove_process_job(schedule_id)
-                elif not old_enabled and new_enabled:
-                    logger.info(f"Sync: Enabling process schedule {schedule.process_name}/{schedule.trigger_id}")
-                    self._add_process_job(schedule)
-                elif new_enabled and old_updated != new_updated:
-                    logger.info(f"Sync: Updating process schedule {schedule.process_name}/{schedule.trigger_id}")
-                    self._remove_process_job(schedule_id)
-                    self._add_process_job(schedule)
-
-                self._process_schedule_snapshot[schedule_id] = new_state
-
     # =========================================================================
     # Skipped Execution Tracking (Issue #46)
     # =========================================================================
@@ -730,13 +657,10 @@ class SchedulerService:
         job_id = event.job_id
         logger.warning(f"Job {job_id} skipped: previous execution still running (max_instances reached)")
 
-        # Extract schedule_id from job_id (format: "schedule_{schedule_id}" or "process_schedule_{schedule_id}")
+        # Extract schedule_id from job_id (format: "schedule_{schedule_id}")
         if job_id.startswith("schedule_"):
             schedule_id = job_id[len("schedule_"):]
             self._record_skipped_agent_schedule(schedule_id)
-        elif job_id.startswith("process_schedule_"):
-            schedule_id = job_id[len("process_schedule_"):]
-            self._record_skipped_process_schedule(schedule_id)
         else:
             logger.warning(f"Unknown job_id format for skipped job: {job_id}")
 
@@ -789,59 +713,6 @@ class SchedulerService:
 
         except Exception as e:
             logger.error(f"Error recording skipped execution for schedule {schedule_id}: {e}")
-
-    def _record_skipped_process_schedule(
-        self,
-        schedule_id: str,
-        skip_reason: str = "Previous execution still running (max_instances reached)",
-        event_reason: str = "Previous execution still running",
-    ):
-        """
-        Record a skipped process schedule execution in the database.
-
-        Creates an execution record with status='skipped' so it appears in
-        the execution history and provides an audit trail.
-
-        `skip_reason` / `event_reason` are parameterised (#1994) so the
-        lock-denial branch of `_execute_process_schedule` can reuse this exact
-        audit path and still name the mechanism that actually suppressed the
-        run; the defaults preserve the original max_instances wording for the
-        EVENT_JOB_MAX_INSTANCES caller. Mirrors the agent-schedule sibling,
-        which gained the same parameters in #1808.
-        """
-        try:
-            schedule = self.db.get_process_schedule(schedule_id)
-            if not schedule:
-                logger.error(f"Cannot record skipped execution: process schedule {schedule_id} not found")
-                return
-
-            # Create execution record with 'skipped' status
-            execution = self.db.create_skipped_process_schedule_execution(
-                schedule_id=schedule.id,
-                process_id=schedule.process_id,
-                process_name=schedule.process_name,
-                triggered_by="schedule",
-                skip_reason=skip_reason
-            )
-
-            if execution:
-                logger.info(f"Recorded skipped process execution {execution.id} for {schedule.process_name}/{schedule.trigger_id}")
-
-                # Publish event for WebSocket notification
-                asyncio.create_task(self._publish_event({
-                    "type": "process_schedule_execution_skipped",
-                    "process_id": schedule.process_id,
-                    "process_name": schedule.process_name,
-                    "schedule_id": schedule.id,
-                    "trigger_id": schedule.trigger_id,
-                    "execution_id": execution.id,
-                    "reason": event_reason
-                }))
-            else:
-                logger.error(f"Failed to create skipped execution record for process schedule {schedule_id}")
-
-        except Exception as e:
-            logger.error(f"Error recording skipped execution for process schedule {schedule_id}: {e}")
 
     # =========================================================================
     # Schedule Execution
@@ -2365,7 +2236,7 @@ class SchedulerService:
 
         # Remove all existing jobs
         for job in self.scheduler.get_jobs():
-            if job.id.startswith("schedule_") or job.id.startswith("process_schedule_"):
+            if job.id.startswith("schedule_"):
                 self.scheduler.remove_job(job.id)
 
         # Reload agent schedules from database
@@ -2373,13 +2244,8 @@ class SchedulerService:
         for schedule in schedules:
             self._add_job(schedule)
 
-        # Reload process schedules from database
-        process_schedules = self.db.list_all_enabled_process_schedules()
-        for process_schedule in process_schedules:
-            self._add_process_job(process_schedule)
-
-        # #1296: the full-reload path removes only schedule_/process_schedule_
-        # jobs (Codex C6), so rebuild/reclaim reminder jobs too. The reconcile is
+        # #1296: the full-reload path removes only schedule_ jobs (Codex C6),
+        # so rebuild/reclaim reminder jobs too. The reconcile is
         # idempotent — it only arms MISSING reminder_ jobs and never blanket-
         # removes them, so this doesn't disturb already-armed reminders.
         try:
@@ -2387,269 +2253,7 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"Reminder reconcile during reload failed: {e}")
 
-        logger.info(f"Reloaded {len(schedules)} agent schedules, {len(process_schedules)} process schedules")
-
-    # =========================================================================
-    # Process Schedule Management
-    # =========================================================================
-
-    def _get_process_job_id(self, schedule_id: str) -> str:
-        """Generate a unique job ID for process schedules."""
-        return f"process_schedule_{schedule_id}"
-
-    def _add_process_job(self, schedule: ProcessSchedule):
-        """Add a process schedule as an APScheduler job."""
-        if not self.scheduler:
-            return
-
-        job_id = self._get_process_job_id(schedule.id)
-
-        try:
-            # Parse cron expression
-            cron_kwargs = self._parse_cron(schedule.cron_expression)
-
-            # Build APScheduler trigger kwargs, translating day_of_week from
-            # Unix cron convention (0=Sun, 1=Mon) to APScheduler named days
-            # to prevent a one-day shift on weekday-based schedules (Issue #220).
-            trigger_kwargs = dict(cron_kwargs)
-            trigger_kwargs['day_of_week'] = self._cron_dow_to_apscheduler(
-                cron_kwargs['day_of_week']
-            )
-
-            # Create timezone-aware trigger
-            timezone = pytz.timezone(schedule.timezone) if schedule.timezone else pytz.UTC
-            trigger = CronTrigger(timezone=timezone, **trigger_kwargs)
-
-            # Add the job
-            self.scheduler.add_job(
-                self._execute_process_schedule,
-                trigger=trigger,
-                id=job_id,
-                args=[schedule.id],
-                replace_existing=True,
-                name=f"process:{schedule.process_name}:{schedule.trigger_id}",
-                misfire_grace_time=config.misfire_grace_time,
-                coalesce=True,
-                max_instances=1,
-            )
-
-            # Calculate and store next run time
-            next_run = self._get_next_run_time(schedule.cron_expression, schedule.timezone)
-            if next_run:
-                self.db.update_process_schedule_run_times(schedule.id, next_run_at=next_run)
-
-            logger.info(f"Added process schedule job: {job_id} ({schedule.process_name}/{schedule.trigger_id})")
-        except Exception as e:
-            logger.error(f"Failed to add process schedule job {job_id}: {e}")
-
-    def _remove_process_job(self, schedule_id: str):
-        """Remove a process schedule job from APScheduler."""
-        if not self.scheduler:
-            return
-
-        job_id = self._get_process_job_id(schedule_id)
-        try:
-            self.scheduler.remove_job(job_id)
-            logger.info(f"Removed process schedule job: {job_id}")
-        except Exception as e:
-            logger.warning(f"Failed to remove process schedule job {job_id}: {e}")
-
-    async def _execute_process_schedule(self, schedule_id: str):
-        """
-        Execute a scheduled process.
-
-        This is called by APScheduler when a process schedule is due.
-        Uses distributed locking to prevent duplicate executions.
-        """
-        # Try to acquire lock - if failed, another instance is executing
-        lock = self.lock_manager.try_acquire_schedule_lock(f"process_{schedule_id}")
-        if not lock:
-            logger.info(f"Process schedule {schedule_id} already being executed by another instance")
-            # #1994: the sibling of #1969, on the process-schedule path.
-            # Suppression is correct — two concurrent runs of one schedule is
-            # what the lock exists to prevent. What was missing is the evidence
-            # it happened: with only the INFO line above, a denied tick is
-            # indistinguishable from a tick that never fired, in the execution
-            # history, the UI, and monitoring alike.
-            #
-            # The two suppression paths do not overlap, which is what makes
-            # calling the same helper from both safe (no #91-style duplicate
-            # skipped+success pairing). APScheduler's `max_instances=1` refusal
-            # fires EVENT_JOB_MAX_INSTANCES -> _on_job_max_instances -> a skipped
-            # row, and the job never starts, so this function is never entered.
-            # Reaching this line means APScheduler already let the job start,
-            # so no max-instances event fires. Exactly one of the two per tick.
-            self._record_skipped_process_schedule(
-                schedule_id,
-                skip_reason="Previous execution still running (distributed lock held)",
-                event_reason="Previous execution still running",
-            )
-            return
-
-        try:
-            await self._execute_process_schedule_with_lock(schedule_id)
-        finally:
-            lock.release()
-
-    async def _execute_process_schedule_with_lock(self, schedule_id: str):
-        """Execute process schedule after acquiring lock."""
-        schedule = self.db.get_process_schedule(schedule_id)
-        if not schedule:
-            logger.error(f"Process schedule {schedule_id} not found")
-            return
-
-        if not schedule.enabled:
-            logger.info(f"Process schedule {schedule_id} is disabled, skipping")
-            return
-
-        logger.info(f"Executing process schedule: {schedule.process_name}/{schedule.trigger_id}")
-
-        # Create execution record
-        execution = self.db.create_process_schedule_execution(
-            schedule_id=schedule.id,
-            process_id=schedule.process_id,
-            process_name=schedule.process_name,
-            triggered_by="schedule"
-        )
-
-        if not execution:
-            logger.error(f"Failed to create execution record for process schedule {schedule_id}")
-            return
-
-        # Broadcast execution started
-        await self._publish_event({
-            "type": "process_schedule_execution_started",
-            "process_id": schedule.process_id,
-            "process_name": schedule.process_name,
-            "schedule_id": schedule.id,
-            "trigger_id": schedule.trigger_id,
-            "execution_id": execution.id
-        })
-
-        try:
-            # Call backend API to start process execution
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{config.backend_url}/api/processes/{schedule.process_id}/execute",
-                    json={
-                        "triggered_by": "schedule",
-                        "input_data": {
-                            "trigger": {
-                                "type": "schedule",
-                                "id": schedule.trigger_id,
-                                "schedule_id": schedule.id,
-                            }
-                        }
-                    },
-                    timeout=60.0
-                )
-
-                if response.status_code == 200 or response.status_code == 201:
-                    result = response.json()
-                    process_execution_id = result.get("id")
-
-                    # Update execution status
-                    self.db.update_process_schedule_execution(
-                        execution_id=execution.id,
-                        status=ExecutionStatus.SUCCESS,
-                        process_execution_id=process_execution_id
-                    )
-
-                    # Update schedule last run time
-                    now = datetime.utcnow()
-                    next_run = self._get_next_run_time(schedule.cron_expression, schedule.timezone)
-                    self.db.update_process_schedule_run_times(schedule.id, last_run_at=now, next_run_at=next_run)
-
-                    logger.info(f"Process schedule {schedule.process_name}/{schedule.trigger_id} executed successfully, execution_id={process_execution_id}")
-
-                    # Broadcast execution completed
-                    await self._publish_event({
-                        "type": "process_schedule_execution_completed",
-                        "process_id": schedule.process_id,
-                        "process_name": schedule.process_name,
-                        "schedule_id": schedule.id,
-                        "execution_id": execution.id,
-                        "process_execution_id": process_execution_id,
-                        "status": "success"
-                    })
-
-                else:
-                    error_msg = f"Backend returned {response.status_code}: {response.text[:200]}"
-                    logger.error(f"Process schedule {schedule.process_name} execution failed: {error_msg}")
-
-                    self.db.update_process_schedule_execution(
-                        execution_id=execution.id,
-                        status=ExecutionStatus.FAILED,
-                        error=error_msg
-                    )
-
-                    await self._publish_event({
-                        "type": "process_schedule_execution_completed",
-                        "process_id": schedule.process_id,
-                        "process_name": schedule.process_name,
-                        "schedule_id": schedule.id,
-                        "execution_id": execution.id,
-                        "status": "failed",
-                        "error": error_msg
-                    })
-
-        except httpx.TimeoutException:
-            error_msg = "Backend request timed out"
-            logger.error(f"Process schedule {schedule.process_name} execution failed: {error_msg}")
-
-            self.db.update_process_schedule_execution(
-                execution_id=execution.id,
-                status=ExecutionStatus.FAILED,
-                error=error_msg
-            )
-
-            await self._publish_event({
-                "type": "process_schedule_execution_completed",
-                "process_id": schedule.process_id,
-                "process_name": schedule.process_name,
-                "schedule_id": schedule.id,
-                "execution_id": execution.id,
-                "status": "failed",
-                "error": error_msg
-            })
-
-        except Exception as e:
-            # #1022 defense-in-depth: process-schedule timeouts already have a
-            # dedicated non-empty handler above; this only sees other blank
-            # exceptions, normalized here for consistency.
-            error_msg = _describe_exception(e)
-            logger.error(f"Process schedule {schedule.process_name} execution failed: {error_msg}")
-
-            self.db.update_process_schedule_execution(
-                execution_id=execution.id,
-                status=ExecutionStatus.FAILED,
-                error=error_msg
-            )
-
-            await self._publish_event({
-                "type": "process_schedule_execution_completed",
-                "process_id": schedule.process_id,
-                "process_name": schedule.process_name,
-                "schedule_id": schedule.id,
-                "execution_id": execution.id,
-                "status": "failed",
-                "error": error_msg
-            })
-
-    def add_process_schedule(self, schedule: ProcessSchedule):
-        """Add a new process schedule to the scheduler."""
-        if schedule.enabled:
-            self._add_process_job(schedule)
-
-    def remove_process_schedule(self, schedule_id: str):
-        """Remove a process schedule from the scheduler."""
-        self._remove_process_job(schedule_id)
-
-    def update_process_schedule(self, schedule: ProcessSchedule):
-        """Update an existing process schedule in the scheduler."""
-        self._remove_process_job(schedule.id)
-        if schedule.enabled:
-            self._add_process_job(schedule)
+        logger.info(f"Reloaded {len(schedules)} agent schedules")
 
     # =========================================================================
     # Event Publishing

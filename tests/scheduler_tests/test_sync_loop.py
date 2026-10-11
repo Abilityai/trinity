@@ -56,48 +56,6 @@ class TestSyncLoopIdempotence:
         assert after.next_run_at is not None
 
     @pytest.mark.asyncio
-    async def test_update_process_run_times_does_not_bump_updated_at(
-        self, initialized_db: str
-    ):
-        """Same invariant for process schedules."""
-        db = SchedulerDatabase(database_path=initialized_db)
-        db.ensure_process_schedules_table()
-
-        import sqlite3
-        now_iso = datetime.utcnow().isoformat()
-        conn = sqlite3.connect(initialized_db)
-        try:
-            conn.execute(
-                """
-                INSERT INTO process_schedules (
-                    id, process_id, process_name, trigger_id,
-                    cron_expression, enabled, timezone,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                ("ps-1", "proc-1", "test-process", "trig-1",
-                 "0 * * * *", 1, "UTC", now_iso, now_iso),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        before = db.get_process_schedule("ps-1")
-        assert before is not None
-
-        db.update_process_schedule_run_times(
-            "ps-1",
-            last_run_at=datetime.utcnow(),
-            next_run_at=datetime(2099, 1, 1, 0, 0, 0),
-        )
-
-        after = db.get_process_schedule("ps-1")
-        assert after.updated_at == before.updated_at, (
-            "update_process_schedule_run_times must not modify updated_at "
-            "(Issue #420)"
-        )
-
-    @pytest.mark.asyncio
     async def test_sync_is_noop_when_db_unchanged(
         self, db_with_data: SchedulerDatabase, mock_lock_manager: LockManager
     ):
@@ -171,5 +129,89 @@ class TestSyncLoopIdempotence:
                     f"Edited schedule not re-added (got {len(add_calls)} calls)"
                 )
                 assert len(remove_calls) == 1
+        finally:
+            service.shutdown()
+
+
+# Legacy DDL the scheduler's boot path used to create ad hoc (#3432). Existing
+# installs still carry these tables; nothing may read them any more.
+_LEGACY_PROCESS_SCHEDULE_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS process_schedules (
+        id TEXT PRIMARY KEY,
+        process_id TEXT NOT NULL,
+        process_name TEXT NOT NULL,
+        trigger_id TEXT NOT NULL,
+        cron_expression TEXT NOT NULL,
+        enabled INTEGER DEFAULT 1,
+        timezone TEXT DEFAULT 'UTC',
+        description TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_run_at TEXT,
+        next_run_at TEXT,
+        UNIQUE(process_id, trigger_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS process_schedule_executions (
+        id TEXT PRIMARY KEY,
+        schedule_id TEXT NOT NULL,
+        process_id TEXT NOT NULL,
+        process_name TEXT NOT NULL,
+        execution_id TEXT,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        duration_ms INTEGER,
+        triggered_by TEXT NOT NULL,
+        error TEXT,
+        FOREIGN KEY (schedule_id) REFERENCES process_schedules(id)
+    )
+    """,
+)
+
+
+class TestLegacyProcessScheduleTables:
+    """#3432: the process-schedule remnant is gone; its tables stay inert."""
+
+    @pytest.mark.asyncio
+    async def test_legacy_process_schedule_tables_are_ignored(
+        self, db_with_data: SchedulerDatabase, mock_lock_manager: LockManager
+    ):
+        """
+        An upgraded install still has both legacy tables and possibly an
+        enabled row. Boot and the sync tick must register agent jobs only —
+        never a `process_schedule_*` job — and must not raise.
+        """
+        import sqlite3
+        now_iso = datetime.utcnow().isoformat()
+        conn = sqlite3.connect(db_with_data.database_path)
+        try:
+            for ddl in _LEGACY_PROCESS_SCHEDULE_DDL:
+                conn.execute(ddl)
+            conn.execute(
+                "INSERT INTO process_schedules (id, process_id, process_name, "
+                "trigger_id, cron_expression, enabled, timezone, created_at, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("ps-legacy", "proc-1", "legacy", "trig-1",
+                 "0 * * * *", 1, "UTC", now_iso, now_iso),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        service = SchedulerService(
+            database=db_with_data,
+            lock_manager=mock_lock_manager,
+        )
+        service.initialize()
+        try:
+            await service._sync_schedules()
+            job_ids = [job.id for job in service.scheduler.get_jobs()]
+            assert any(j.startswith("schedule_") for j in job_ids), job_ids
+            assert not [j for j in job_ids if j.startswith("process_schedule_")], (
+                f"legacy process schedule registered as a job: {job_ids}"
+            )
         finally:
             service.shutdown()
