@@ -6,6 +6,8 @@
  * permission — these only decide what to OFFER, never what is allowed.
  */
 
+import { askUrgencyCompare } from '../portalInbox'
+
 export const STATUS_BADGE = Object.freeze({ active: 'success', paused: 'warning', done: 'neutral' })
 const STATUS_LABEL = { active: 'Active', paused: 'Paused', done: 'Done' }
 const VISIBILITY_LABEL = { members: 'Members only', company: 'Company' }
@@ -277,4 +279,35 @@ export function metricStateLabel(tile) {
   if (tile.freshness === 'no_points' || !tile.latest) return 'Not measured yet'
   if (tile.stale === true) return 'Stale'
   return ''
+}
+
+// #3574 — a project's "Needs you" rows. The Overview is a list, not a second
+// Inbox pane: a row is the Inbox's own list row (agent, when, one-line title)
+// and the full ask card (`PortalAsks`) mounts only for a row the person opened.
+// Three rules, in one place so the hub cannot drift from the Inbox:
+//   * pending asks among `mineIds` (the server's project read, already the
+//     viewer's own), in the Inbox's urgency order (`askUrgencyCompare`);
+//   * a row the person opened stays while its ask is in the list even after it
+//     ends, drawn by PortalAsks as ended (the Inbox pane's own rule — the
+//     ent#468 confirmation must not vanish the instant the answer lands);
+//   * a row inside its Undo window (ent#748, `askDismissals`) is forced OPEN:
+//     Undo lives on the card, and a collapsed row would offer "Answer" to a
+//     dismissed ask and no way back.
+export function projectNeedsYouRows(asks, mineIds, { expanded = {}, dismissals = {} } = {}, now = Date.now()) {
+  const ids = new Set((Array.isArray(mineIds) ? mineIds : []).filter(Boolean))
+  if (!ids.size) return []
+  return (Array.isArray(asks) ? asks : [])
+    .filter((a) => a && ids.has(a.id))
+    .filter((a) => a.status === 'pending' || Boolean(expanded[a.id]) || Boolean(dismissals[a.id]))
+    .sort((a, b) => askUrgencyCompare(a, b, now))
+    .map((a) => ({
+      id: a.id,
+      agent_name: a.agent_name,
+      kind: a.kind,
+      status: a.status,
+      title: a.title || a.question || '',
+      at: a.created_at,
+      open: Boolean(expanded[a.id]) || Boolean(dismissals[a.id]),
+      ask: a,
+    }))
 }

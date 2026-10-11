@@ -1497,6 +1497,24 @@ is the edition-agnostic surface it plugs into:
   narrow view (the server omits the log, tasks, decisions and members); the
   controls it cannot use are absent, not disabled. `ProjectImportModal.vue`
   imports a folder project once.
+- **Project hub (v3, `ProjectHub.vue`)** — four cards in ONE grid with
+  `lg:items-start` (#3574: a grid row stretches every cell to its tallest
+  sibling, so a tall "Needs you" once made the empty Metrics card beside it
+  screen-tall). **Needs you** is `ProjectNeedsYou.vue`: the Overview is a
+  list, not a second Inbox pane — a pending ask is the Inbox's own list row
+  (agent, when, one-line inline-markdown title; rows from the pure
+  `projectsUtils.projectNeedsYouRows`, pending in `askUrgencyCompare` order),
+  with **Answer** mounting `PortalAsks` narrowed by `askIds` in place (the one
+  answer surface, unchanged) and **Open in Inbox** going to
+  `askInboxRoute` (`?tab=action&from=<agent>&item=ask:<id>`). An opened row
+  stays after its ask ends until collapsed (PortalAsks draws the ending and
+  the ent#468 confirmation); a row inside its ent#748 Undo window is forced
+  open, since Undo lives on the card. Gates: read failed → loading (ids but
+  no list yet — never "nothing waiting" before the read) → nothing waiting
+  (on the ROWS, not the ids) → rows. Focus follows the toggle (the opened
+  card's `tabindex=-1`, then the Answer button back). The "Open in Inbox"
+  link class is `portalUtils.INBOX_LINK_CLASS`, shared with
+  `PortalAsksWaitingLine`.
 - **Chat and room header** — `ProjectChatControls.vue` (`kind` thread|room):
   the project badge + Detach, or one "Project" button (add to a project, or —
   for a 1:1 chat — make one from it). **Wrap up** in a linked chat sends the

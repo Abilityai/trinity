@@ -1066,9 +1066,12 @@ private module; this section is the edition-agnostic surface it needs.
   creator), where it stands (tasks by status, and what needs attention, each
   opening Tasks), the declared agent metrics a member picked (value, a small
   trend, and the platform's one stale verdict), and **Needs you**: the
-  viewer's own open asks on the project, answered in place with the Inbox's
-  component (`PortalAsks` narrowed by `askIds` — it can only narrow the
-  viewer's own list), with everyone else's as a count. The Projects list shows
+  viewer's own open asks on the project as Inbox-style list rows (agent,
+  when, one-line title — never the ask's body, #3574), each answered in place
+  behind **Answer** with the Inbox's component (`PortalAsks` narrowed by
+  `askIds` — it can only narrow the viewer's own list) or opened selected in
+  the Inbox, with everyone else's as a count; the hub's cards size to their
+  own content, never to a neighbour's. The Projects list shows
   health and an attention count per row, and an **I steward** tab lists what
   needs the steward across their projects. Guests see none of it. An ask an
   agent raises over MCP records the raising turn from the same
