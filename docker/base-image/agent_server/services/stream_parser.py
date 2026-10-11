@@ -37,7 +37,7 @@ from typing import Dict, List, Optional
 from ..model_context import pick_context_window
 from ..models import CompactEvent, ExecutionLogEntry, ExecutionMetadata
 from .activity_tracking import complete_tool_execution, start_tool_execution
-from .error_classifier import _is_rate_limit_message
+from .error_classifier import _NO_ERROR_DETAIL, _is_rate_limit_message
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +49,6 @@ logger = logging.getLogger(__name__)
 # Reading ``errors[0]`` surfaced the marker as the cause and dropped the real
 # errors at ``errors[1..]``. Upstream: anthropics/claude-code#82235.
 _EDE_DIAGNOSTIC_PREFIX = "[ede_diagnostic]"
-
-# Surfaced when a result is flagged is_error but carries no reportable cause.
-# Deliberately NOT the bare "Execution error": ``headless_executor`` renders the
-# detail as f"Execution error: {…}", which would read "Execution error:
-# Execution error". Word choice is load-bearing — it must trip none of
-# is_auth_failure / _is_resume_not_found / _is_rate_limit_message. Pinned by
-# tests/unit/test_1849_ede_diagnostic_filtered.py.
-_NO_ERROR_DETAIL = "Claude Code reported no error detail"
 
 # Bound the diagnostic tail so a chatty future variant cannot eat the 300-char
 # budget headless_executor applies to the whole message.

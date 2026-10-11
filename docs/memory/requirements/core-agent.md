@@ -3426,7 +3426,7 @@ to localStorage in the clear.
 - **Flow**: `docs/memory/feature-flows/workspace-drafts.md`
 
 ### 5.36 Workspace — the role card in Agent details: role, objectives with metric freshness, readiness (trinity-enterprise#527)
-- **Status**: ✅ Implemented (2026-09-21) — the Role + Readiness half; the relationship line waits for ent#500. OSS-core (Workspace).
+- **Status**: ✅ Implemented (2026-09-21); the role and the relationship line read the assignment record since 2026-10-07 (ent#811/#814 follow-up, the #3271 / ent#818 live check). OSS-core (Workspace).
 - **Requirement ID**: WORKSPACE_ROLE_CARD
 - **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness; + #676, 2026-09-30, the objectives cut over to the ent#666 join)
 - **Description**: When a companion has a role (Tandem, ent#497), the Info rail's
@@ -3437,17 +3437,24 @@ to localStorage in the clear.
 - **Files are truth, read through the platform, never a second store.** Everything the
   card shows about the role comes from the agent's own container on each read
   (`client_portal/role_card.py`, via the agent client — the same door the Files tab
-  uses): `template.yaml → x-role: {role, status, seat?}` (written by the
-  `create-agent:role-companion` wizard, #511) and `x-canon.clone_path` (default
-  `canon`); the role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
+  uses): `template.yaml → x-canon.clone_path` (default `canon`) and `x-role.status`
+  (the template's readiness claim, #511); the role file `<canon>/roles/<id>.yaml`
+  where `<id>` is **the seat on record** — the seat this agent serves for the
+  viewer (`assignment_provider.resolve_served_seat`: held → the viewer's own →
+  the primary's), never `x-role.role`. `seat_source` (holds / person / primary /
+  none) is rendered as words, never a person. No seat → `role.error = no_seat`
+  with the supported objectives still listed. **Your relationship** is the
+  viewer's assignment kind (`kinds_for` on the provider; primary / approver /
+  collaborator / viewer), "no assignment recorded" only when there is none.
+  The role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
   (framework §3.4 grammar — `owner: role:<id>` or `supporting_agents` names this
   agent). The role file is the card's own read; the objectives and their numbers
   are **not** — they come from the one objective ↔ metric join
   (`objective_join_service.read_objective_join`, §50 of
   `lifecycle-observability.md`), called in process with the template and the agent
   client the card already holds (trinity-enterprise#676). Nothing is cached or
-  copied platform-side. Every read is fail-soft and **named**: no `x-role` → no
-  card at all (the panel is unchanged, AC 5); a role file that cannot be read or
+  copied platform-side. Every read is fail-soft and **named**: no seat, no canon
+  and no `x-role` → no card at all (the panel is unchanged, AC 5); a role file that cannot be read or
   parsed → the card says so (`role.error`), never an empty role; a stopped agent
   → "the agent is stopped; the card reads its files when it runs"; objectives
   that could not be read → one line saying so (`objectives_error`), never an
@@ -3519,11 +3526,16 @@ to localStorage in the clear.
   for the verdict: a held brief is a `skipped` execution whose reason names the fix
   ("Held: … runs once its owner marks it ready"), a `schedule_execution_skipped` event, and
   advanced run times — never a failure, a retry or an alert. **Every ambiguity fails open
-  and is logged** (verdict call failed, container not running, Docker or template.yaml
-  unreadable within 3 s). The template is read only to learn whether the agent is a
-  companion; `x-role.status` is agent-writable and is never trusted (#663). Honest limit: an
-  *unstamped* companion can take itself out of scope (drop `x-role`, or stall the read into
-  fail-open); an owner's stamp is the one thing it cannot touch.
+  and is logged** (verdict call failed, stamp unreadable). `x-role.status` is
+  agent-writable and is never trusted (#663). **Who is a companion (trinity-enterprise#813,
+  ruling 2026-10-06):** asked only for an unstamped agent, and answered by the seat on
+  record (`assignment_provider.resolve_seat`), not the template — a companion is an agent
+  whose primary is assigned and holds a seat. An agent holding a seat itself (an autonomous
+  player), no primary with a seat, no seat lookup or a lookup error all read as "not a
+  companion", so the brief fires; each decision is logged with its reason. The template is
+  no longer read, so an agent cannot take itself out of scope by editing its own files —
+  the seat is admin-written. A companion template with no assigned primary therefore sends
+  its brief until its primary is assigned.
   - **Rollout (ruled 2026-09-24, amended from option 1 at plan review)**: a one-time,
     database-only seed on both migration tracks stamps `ready` (`changed_by =
     rollout:ent#689`) for every live agent with autonomy on and an enabled, non-deleted
@@ -3962,3 +3974,59 @@ to localStorage in the clear.
     is listed in the sidebar so the header star has somewhere to show.
 - **API**: `PUT` / `DELETE /api/enterprise/client-portal/agents/{name}/sessions/{id}/archive`
   (roster- then session-scoped, uniform 404, idempotent, 60/min per viewer). No schema change.
+
+### 5.42 Workspace — tag a person into a conversation; the tag reaches their Inbox (trinity-enterprise#631)
+- **Status**: ✅ Implemented (2026-10-10)
+- **Requirement ID**: WORKSPACE_PERSON_TAG
+- **GitHub Issue**: abilityai/trinity-enterprise#631 (the pointer half of epic ent#630; the seat stays incubating)
+- **Description**: In a 1:1 chat or a room, a person can `@` a colleague on the same
+  instance and that colleague is told. A tag is a **pointer, not a seat**: it changes no
+  membership and grants no access. Before this, `@` and a person's name was inert text that
+  looked like it worked (`resolve_mentions` matches agent participants only).
+- **One item, on the existing ledger**: each tagged person gets ONE item in their Workspace
+  Inbox — an `operator_queue` row (the ent#610 ledger) of type `mention`, addressed to them,
+  carrying who tagged them, which conversation and which message. Kind **Unread**, never
+  **Action**: the row starts `delivered` and becomes `read`, never `pending`, so no ask budget,
+  expiry, ending observer or operator badge can see it. No new store, no fifth notification
+  path, no schema change.
+- **Who may tag**: a person with a platform account (on the platform door or a platform
+  Workspace session). Refused by name: an agent key (`agents_cannot_tag`) — nothing lets an
+  agent tag a person on its own initiative, and `mention-` is a platform-reserved queue id
+  prefix so its queue file cannot forge one either; a non-person platform key; an external
+  Workspace client (`tagging_unavailable` — the colleagues it would list are the
+  organisation's, an internal fact, #78).
+- **Who may be tagged (the ent#450 pattern)**: an account that exists, is not suspended, has
+  an email (the Inbox's address) and can already reach one of the conversation's agents
+  (owner, shared, or an admin). The picker reads them from the server only once there is a
+  query, capped at 8 and rate-limited — never a directory. The same predicate answers the
+  send: an unknown name (or one outside that set — one refusal, so it is not an account
+  oracle) is refused **by name, with the reason**, before anything is written (`422
+  unknown_person`, `name`); so is tagging yourself and more than 10 people in one message.
+- **Bounded and idempotent**: tags are deduplicated case-insensitively, and the row's id is
+  derived from (conversation, message, person), so the same person named twice — or a
+  message delivered twice, or a retried turn — is one item.
+- **Stored, and distinct from a wake**: the message's `mentions` stay the agents to wake,
+  computed from the text exactly as before; a person is never a wake target. The person
+  pointer is stored apart, on the ledger, keyed to the message. The tags travel beside the
+  text (`tags: [email]` on the post), not parsed out of it.
+- **What the tagged person sees**: the Inbox lists the item in Unread (New) and All, counted
+  as one thing that came back. Opening it shows the tagged message with a few messages around
+  it **only when they could already see the conversation** (a live room participant, or an
+  admin on the platform door — the admin bypass never rides a portal session, #78). Otherwise
+  the item says they can't see it — not even the tagger's own words cross — and names who can
+  let them in (a room's moderator; for a 1:1 chat, the tagger, whose chat it is). No cost,
+  no execution id, no addressee in the projection. It is marked read once its card is on screen.
+- **What the tagger sees**: under their own message, each tagged person and how far it got —
+  "in their Inbox", "read", or "not delivered" (the message landed but the write failed).
+  Only on the sender's own messages; a room carries the whole-room map so a tag on an older
+  message turns read on the next poll.
+- **In-app only, said plainly**: the item lives in the Trinity Inbox; nothing is emailed
+  (out-of-app reach is ent#564). The card says so, and the tagger's marks say "in their Inbox".
+- **Operator door**: a person's tag is not the operator's queue — the Operating Room's list,
+  totals and item read leave `mention` rows out.
+- **API**: `POST /api/rooms/{id}/messages` and `POST …/client-portal/agents/{name}/chat[/stream]`
+  take optional `tags`; `GET /api/rooms/{id}/people?q=` and
+  `GET …/client-portal/agents/{name}/people?q=` (the picker); `GET /api/rooms/{id}` adds
+  `own_tags` and per-message `tags`; history rows carry `tags` on the reader's own messages;
+  `GET /api/enterprise/client-portal/mentions`, `GET …/mentions/{id}`, `POST …/mentions/{id}/read`.
+- **Flow**: `feature-flows/workspace-person-tag.md`.

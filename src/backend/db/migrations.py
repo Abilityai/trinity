@@ -5260,6 +5260,22 @@ WHERE status = 'pending'
 """
 
 
+def _migrate_proactive_consent_not_asked(cursor, conn):
+    """trinity-enterprise#817 — proactive consent says "not asked" apart from "no".
+
+    `agent_sharing.allow_proactive` was 0 by DEFAULT for every share, so "nobody
+    asked this person" and "this person declined" were one value. From now on
+    NULL = not asked, 0 = declined, 1 = consented, and a new share is written
+    NULL. The existing 0s are moved to NULL: the default wrote 0 for everyone,
+    so almost none of them was ever an answer (operator ruling 2026-10-06).
+
+    Data only — the column and its DDL are unchanged, so no table rebuild. Who
+    may be messaged is unchanged too: only 1 allows it, before and after.
+    Idempotent. Mirrored by Alembic 0098_proactive_consent_not_asked.
+    """
+    cursor.execute("UPDATE agent_sharing SET allow_proactive = NULL WHERE allow_proactive = 0")
+    conn.commit()
+
 def _migrate_supersede_queue_flood_backlog(cursor, conn):
     """#3130: collapse the flood-alert backlog to one pending alert per agent.
 
@@ -5691,4 +5707,5 @@ MIGRATIONS = [
     ("portal_messages_execution_id", _migrate_portal_messages_execution_id),
     ("a2a_internal_scope", _migrate_a2a_internal_scope),
     ("operator_queue_replace", _migrate_operator_queue_replace),
+    ("proactive_consent_not_asked", _migrate_proactive_consent_not_asked),
 ]

@@ -298,7 +298,7 @@ DELEGATION_CONTRACT = """\
 - Never re-send because a call timed out or its delivery could not be confirmed. An exact repeat is normally answered with the original; a reworded one can run the work twice.
 - Read the result with `get_execution_result(agent_name, execution_id)` (`get_fan_out_result` for a batch); `running` is not stuck. To finish later, call `set_reminder` with a message naming the `execution_id`, then end your turn. A receipt is not a result: never report the work as done.
 - Confirmed `failed` or `cancelled`: re-send word for word to retry; same `execution_id` back: `set_reminder`, end your turn.
-- An error without an `execution_id`, `agent_busy` included, is not proof that nothing ran. Look for your exact message in `list_recent_executions(agent_name)`: one match is your receipt; otherwise re-send it word for word, same options (for `agent_busy`, after `retry_after_seconds`).
+- An error without an `execution_id` is not proof that nothing ran. Look for your exact message in `list_recent_executions(agent_name)`: one match is your receipt; otherwise re-send it word for word, same options. On `agent_busy` nothing ran: re-send after `retry_after_seconds`.
 - `pending_approval`: nothing ran. Do not retry or route it through another agent; its `message` says whether you will hear the outcome. On `retryable: false`, do what it says.
 - For long work use `parallel=true, async=true`: the receipt comes back at once, and the run's end fires the target's `agent.task.completed` / `agent.task.failed`. A `subscribe_to_event` subscription to those wakes you for every run of that agent, so match the `execution_id`."""
 PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace("__DELEGATION_CONTRACT__", DELEGATION_CONTRACT)
@@ -748,6 +748,16 @@ class ExecutionContext:
     # are in all (the rest are named as a count). Auto-filled from the DB.
     pending_asks: Optional[List[dict]] = None
     pending_asks_total: Optional[int] = None
+    # trinity-enterprise#814: the person a scheduled seat run is addressed to
+    # (ent#637 — the Workspace delivery address on the execution row). NEVER
+    # rendered: it only picks which seat `role_id` names. A chat turn uses
+    # `source_user_email` for the same purpose.
+    served_person_email: Optional[str] = None
+    # trinity-enterprise#814: the seat THIS run serves when it is not the
+    # primary's (a shared companion working for someone else, or an agent that
+    # holds a seat itself). Rendered as its own line; the `Primary human` line
+    # and its role stay the primary's.
+    served_role_id: Optional[str] = None
 
     @staticmethod
     def derive_mode(triggered_by: Optional[str]) -> str:
@@ -1005,6 +1015,9 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         if assignment:
             lines.append(f"- **Primary human**: {assignment}")
 
+        served = _sanitize_field(ctx.served_role_id, max_len=MAX_ROLE_ID_LEN)
+        if served and served != _sanitize_field(ctx.role_id, max_len=MAX_ROLE_ID_LEN):
+            lines.append(f"- **Seat this run serves**: {served}")
         stakeholders = _render_stakeholders(ctx)
         if stakeholders:
             lines.append(f"- **Stakeholders**: {stakeholders}")
@@ -1064,6 +1077,30 @@ def _resolve_assignment(
     from services.assignment_provider import resolve_assignment
 
     return resolve_assignment(agent_name, triggered_by) or {}
+
+
+def _served_role(ctx: ExecutionContext) -> Optional[str]:
+    """The seat THIS run serves, when it is not the primary's (trinity-enterprise#814).
+
+    A shared companion serves several people; the provider's answer carries the
+    primary's seat. When the run is addressed to a person — the chat user, or
+    the Workspace a brief is delivered to — their own seat is the one served,
+    and the agent's own seat when it holds one. Asked only when the provider
+    already answered, so an audience it suppressed still renders nothing.
+    """
+    person = ctx.served_person_email or ctx.source_user_email
+    if not person:
+        return None
+    try:
+        from services.assignment_provider import resolve_served_seat
+
+        served = resolve_served_seat(ctx.agent_name, person)
+    except Exception as e:  # noqa: BLE001 — the line degrades, never the turn
+        logger.debug(f"_served_role({ctx.agent_name}) failed: {e}")
+        return None
+    if served.get("source") in ("holds", "person"):
+        return served.get("role_id")
+    return None
 
 
 def _resolve_ended_asks(agent_name: Optional[str]) -> List[dict]:
@@ -1180,6 +1217,9 @@ def compose_system_prompt(
                 if ctx.pending_asks is not None
                 else _resolve_pending_asks(ctx.agent_name)
             )
+            served_role = (
+                _served_role(ctx) if assignment and ctx.served_role_id is None else None
+            )
             ctx = replace(
                 ctx,
                 collaborators=(
@@ -1219,6 +1259,9 @@ def compose_system_prompt(
                 ),
                 pending_asks=pending,
                 pending_asks_total=pending_total,
+                served_role_id=(
+                    ctx.served_role_id if ctx.served_role_id is not None else served_role
+                ),
             )
         block = build_execution_context(ctx)
         if block:

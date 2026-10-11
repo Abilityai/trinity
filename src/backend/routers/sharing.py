@@ -101,20 +101,11 @@ async def share_agent_endpoint(
     if not share:
         raise HTTPException(status_code=409, detail=f"Agent is already shared with {share_request.email}")
 
-    # Auto-add email to whitelist if email auth is enabled (Phase 12.4)
-    from config import EMAIL_AUTH_ENABLED
-    email_auth_setting = db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
-    if email_auth_setting.lower() == "true":
-        try:
-            db.add_to_whitelist(
-                share_request.email,
-                current_user.username,
-                source="agent_sharing",
-                default_role="user",  # chat-only grant; don't promote to creator (#314)
-            )
-        except Exception:
-            # Already whitelisted or error - continue anyway
-            pass
+    # trinity-enterprise#837: sharing grants the agent, never a platform login.
+    # The person signs in to the Workspace with the emailed code (the share row
+    # IS that access); a platform account is an admin's decision, made on the
+    # login whitelist or the Users table. Whitelist rows earlier shares wrote
+    # stay, and now yield Workspace-only `user` accounts.
 
     if manager:
         await manager.broadcast(json.dumps({
@@ -328,21 +319,9 @@ async def decide_access_request_endpoint(
         # share_agent is idempotent (returns None if already shared).
         db.share_agent(agent_name, current_user.username, existing["email"])
 
-        # Auto-add to whitelist if email auth is enabled (parity with /share endpoint)
-        from config import EMAIL_AUTH_ENABLED
-        email_auth_setting = db.get_setting_value(
-            "email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower()
-        )
-        if email_auth_setting.lower() == "true":
-            try:
-                db.add_to_whitelist(
-                    existing["email"],
-                    current_user.username,
-                    source="access_request",
-                    default_role="user",  # chat-only grant; don't promote to creator (#314)
-                )
-            except Exception:
-                pass
+        # trinity-enterprise#837: like /share, approval grants the agent (and its
+        # channels), never a platform login; the requester signs in to the
+        # Workspace with the emailed code.
 
         if manager:
             await manager.broadcast(json.dumps({

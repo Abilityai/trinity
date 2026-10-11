@@ -598,3 +598,23 @@ def test_the_objectives_route_passes_a_viewer_predicate_and_audits_servers(
     assert can_view(SERVER) is True and can_view(OTHER) is False
     assert access_calls[-1] == ("operator", OTHER)
     assert audits == [(READER, SERVER, "objectives")]
+
+
+@pytest.fixture(autouse=True)
+def _seat_on_record():
+    """trinity-enterprise#812: the join reads the seat from Trinity's record,
+    not from `x-role`. Record the seat these tests' templates used to declare,
+    as a companion whose primary holds it; the `x-role` left in a template is
+    now simply not read."""
+    from services import assignment_provider as ap
+
+    class _Seats:
+        def assignment_for(self, agent_name, triggered_by):
+            return None
+
+        def seat_for(self, agent_name):
+            return {"case": "serves", "role_id": "revenue-lead", "seats": ["revenue-lead"]}
+
+    ap.register_provider(_Seats())
+    yield
+    ap.clear_provider()

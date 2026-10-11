@@ -514,6 +514,10 @@ ADMIN_WIDENED: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
 # Reviewed uses an agent key may make. key -> ("METHOD /full/path", reason)
 AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     # The agent's own runtime surface (#2996 §3.4 regression set).
+    "routers/agent_files.py::get_agent_canon_roles": (
+        "GET /api/agents/{agent_name}/canon/roles",
+        "a READ of the agent's own canon seats (trinity-enterprise#817); an agent key is "
+        "self-gated to its own canon, the same rule and budget as its objectives"),
     "routers/agents.py::agent_heartbeat": (
         "POST /api/agents/{agent_name}/heartbeat",
         "liveness; authenticates the agent's own agent-scoped key outside get_current_user (#307)"),
@@ -647,7 +651,16 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
 }
 
 # Check lives in services/. key -> ("METHOD /full/path", service function, behavioural test id)
-DELEGATED: Dict[str, Tuple[str, str, str]] = {}
+DELEGATED: Dict[str, Tuple[str, str, str]] = {
+    # trinity-enterprise#631: the people picker of a room. Its principal is
+    # `get_room_principal` (a platform user OR a Workspace client), so no
+    # dependency gate fits; the refusal of agents, system keys and external
+    # clients is `person_mention_service.tagger_for`, reached first.
+    "shared_sessions/router.py::room_people": (
+        "GET /api/rooms/{room_id}/people",
+        "shared_sessions.service.room_people -> person_mention_service.tagger_for",
+        "tests/unit/test_ent631_person_mention.py::test_an_agent_key_cannot_list_people_to_tag"),
+}
 
 # WebSocket routes — out of the HTTP census, pinned so a new one is a visible edit.
 WEBSOCKET_ROUTES = frozenset({

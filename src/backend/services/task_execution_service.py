@@ -86,6 +86,21 @@ from services.platform_prompt_service import (
 from db.write_params import ExecutionResult, TaskExecutionFields
 
 
+def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str]) -> Optional[str]:
+    """The person a scheduled seat run is addressed to (ent#637), or None —
+    picks the seat the prompt names (trinity-enterprise#814). One row read, and
+    only for a schedule fire; fail-soft."""
+    from services import schedule_seat_memory
+
+    if not execution_id or (triggered_by or "").lower() not in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS:
+        return None
+    try:
+        return schedule_seat_memory.seat_for_execution(db.get_execution(execution_id))
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_served_person_for({execution_id}) failed: {e}")
+        return None
+
+
 def _resolve_agent_runtime(agent_name: str) -> str:
     """Best-effort resolve an agent's runtime for the platform prompt (#1187).
 
@@ -1977,7 +1992,10 @@ class TaskExecutionService:
                 agent_name, decision, current_user=None,
                 endpoint=f"execute_task:{triggered_by}", execution_id=execution_id,
                 request_text=message if request_text is None else request_text,
-                triggered_by=triggered_by)
+                triggered_by=triggered_by,
+                # #3404: no principal reaches here, so the producer's own
+                # account of the credential is what the audit row carries.
+                credential=requester.credential)
         except SkillGateError as exc:
             if execution_id:
                 if isinstance(exc, SkillApprovalRequired):
@@ -2302,6 +2320,7 @@ class TaskExecutionService:
                 schedule_cron=(schedule_context or {}).get("cron"),
                 schedule_next_run=(schedule_context or {}).get("next_run"),
                 execution_id=execution_id,
+                served_person_email=_served_person_for(execution_id, triggered_by),
             )
             effective_system_prompt = compose_system_prompt(
                 execution_context=exec_ctx,

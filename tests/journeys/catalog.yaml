@@ -352,3 +352,24 @@ journeys:
     # `partial` until it does.
     # L-02: the declared metric is in the registry the create wrote.
     invariants: [L-02]
+
+  - id: J20
+    # abilityai/trinity-enterprise#630 named this journey "J12-a-colleague-joins-
+    # the-work"; J12 was already the declared metrics (and J13–J19 taken since),
+    # so it ships as J20. ent#631 is its first half — the POINTER (a tag reaches
+    # the colleague's Inbox); the seat (the colleague joins the room) is the
+    # epic's incubating half. `built: false`: the unit island proves the rules
+    # and the doors (test_ent631_person_mention.py) and a mount proves the
+    # picker and the Inbox item (portalPersonMention.mount.spec.js); neither is
+    # two real people on one instance.
+    issue: "abilityai/trinity-enterprise#630"
+    promise: "I can tell a colleague about the work from inside the conversation, and they are told — without being given anything they could not already see."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: tests/journeys/test_j20_colleague_tagged_journey.py
+    built: false
+    owner: trinity
+    # No catalog invariant covers "a pointer grants no access" yet — an empty
+    # list, not an invented id.
+    invariants: []
