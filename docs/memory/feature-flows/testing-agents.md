@@ -183,52 +183,6 @@ tests/
     test_config.py               # Configuration (5 tests)
     test_locking.py              # Distributed locking (15 tests)
     test_service.py              # Scheduler service (16 tests)
-  process_engine/                # Process engine tests (737 tests total)
-    conftest.py                  # Process engine fixtures
-    unit/                        # Unit tests (32 test files, 692 tests)
-      test_agent_handler.py      # Agent task handler (10 tests)
-      test_alerts.py             # Alert system (28 tests)
-      test_analytics.py          # Analytics service (16 tests)
-      test_api.py                # API endpoints (21 tests)
-      test_approval_handler.py   # Human approval (27 tests)
-      test_audit.py              # Audit logging (22 tests)
-      test_authorization.py      # RBAC authorization (42 tests)
-      test_compensation.py       # Saga compensation (20 tests)
-      test_cost_tracking.py      # Cost tracking (22 tests)
-      test_error_handling.py     # Error handlers (3 tests)
-      test_event_repository.py   # Event storage (3 tests)
-      test_events.py             # Event system (23 tests)
-      test_execution_engine.py   # Execution engine (20 tests)
-      test_execution_repository.py # Execution storage (21 tests)
-      test_executions_api.py     # Executions API (13 tests)
-      test_expression_evaluator.py # Expression eval (30 tests)
-      test_gateway_handler.py    # Gateway routing (15 tests)
-      test_informed_notifier.py  # Notifications (16 tests)
-      test_notification_handler.py # Notification steps (20 tests)
-      test_output_storage.py     # Output storage (23 tests)
-      test_process_definition.py # Process definitions (27 tests)
-      test_process_execution.py  # Process execution (31 tests)
-      test_repositories.py       # Repository layer (22 tests)
-      test_roles.py              # Role management (25 tests)
-      test_schedule_triggers.py  # Schedule triggers (23 tests)
-      test_sub_process.py        # Sub-processes (21 tests)
-      test_sub_process_validation.py # Sub-process validation (10 tests)
-      test_templates.py          # Process templates (20 tests)
-      test_timer_handler.py      # Timer handling (11 tests)
-      test_validator.py          # YAML validation (26 tests)
-      test_value_objects.py      # Value objects (67 tests)
-      test_webhook_triggers.py   # Webhook triggers (14 tests)
-    integration/                 # Integration tests (9 test files, 45 tests)
-      conftest.py                # Integration fixtures
-      test_error_retry.py        # Error retry flow (5 tests)
-      test_event_publishing.py   # Event publishing (5 tests)
-      test_execution_lifecycle.py # Full lifecycle (4 tests)
-      test_execution_recovery.py # Recovery scenarios (12 tests)
-      test_gateway_routing.py    # Gateway routing (4 tests)
-      test_output_persistence.py # Output persistence (3 tests)
-      test_parallel_execution.py # Parallel execution (5 tests)
-      test_sequential_execution.py # Sequential execution (4 tests)
-      test_timer_steps.py        # Timer steps (3 tests)
   reports/                       # Test reports directory
 ```
 
@@ -497,7 +451,6 @@ test-agent-{name}/
 | Test Fixtures | `tests/conftest.py` | 368 |
 | Agent Server Test Fixtures | `tests/agent_server/conftest.py` | 63 |
 | Scheduler Test Fixtures | `tests/scheduler_tests/conftest.py` | - |
-| Process Engine Test Fixtures | `tests/process_engine/conftest.py` | - |
 
 ### Pytest Configuration
 

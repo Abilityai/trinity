@@ -46,7 +46,7 @@
 - **Description**: When a Claude subprocess inside an agent container is killed by an external signal (SIGKILL from cgroup OOM, schedule timeout, operator cancel), the error path must classify it as a signal kill — not as a subscription auth failure. Previously, the chat (`/api/chat`) path on the agent server lacked the `_classify_signal_exit` call that the headless path had (added by #516), so the same OOM kill produced different error strings depending on which entry point dispatched the work. The fallback heuristic in `headless_executor.py` also worded the zero-tokens 503 detail as "(possible authentication issue)", which downstream substring matchers in `services/subscription_auto_switch.py` and `src/scheduler/service.py` treated as a real auth signal — firing a futile SUB-003 auto-switch on every cgroup OOM and burning the 2h skip-list slot for the alternative subscription.
 - **Key Features**:
   - Chat path (`docker/base-image/agent_server/services/claude_code.py`) now calls `_classify_signal_exit(return_code, metadata)` before the generic `if return_code != 0` block — same contract as the headless path. SIGKILL/SIGTERM/SIGINT exits raise 504 with the explicit "Execution terminated by SIGKILL after N tool calls / M turns" detail.
-  - `headless_executor.py` zero-tokens fallback (the `return_code > 0 and input_tokens == 0 and output_tokens == 0` branch) no longer says "authentication issue" — the new detail is `"Execution failed with no output (exit code N): {stderr}"`. The dedicated "Authentication failure" 503 raised on a confirmed `is_auth_failure_message` match a few lines above remains the only path that surfaces the auth phrasing.
+  - `headless_executor.py` zero-tokens fallback (the `return_code > 0 and input_tokens == 0 and output_tokens == 0` branch) no longer says "authentication issue" — the new detail is `"Execution failed with no output (exit code N): {stderr}"`. The dedicated "Authentication failure" 503 raised on a confirmed `is_auth_failure_message` match a few lines above remains the only path that surfaces the auth phrasing. When the stream itself named an error (`metadata.error_message`, e.g. `API Error: 400 Output blocked by content filtering policy`), that text is the detail instead — `"Execution failed: {error}"` — and outranks stderr; the "no output" wording and the OOM/timeout guess are for a run where neither said why (#3340).
   - `_diagnose_exit_failure` (line 155, `error_classifier.py`) no longer returns the bare "Subscription token may be expired or revoked. Generate a new one with 'claude setup-token'." string for the OAuth-without-API-key case. The new wording is "Process failed with exit code N and no diagnostic output. Common causes: OOM kill (raise agent memory), schedule timeout (extend timeout_seconds), expired subscription token (`claude setup-token`)." — it lists token expiry as one of several possibilities instead of declaring it the diagnosis.
 - **SUB-003 interaction**: see §20.4 — `is_auth_failure` now skips messages containing signal/OOM/timeout markers so even if a residual wording carries an indicator, an unambiguous SIGKILL won't trigger auto-switch.
 - **Files**:
@@ -703,10 +703,9 @@
   activity types have no owning closer and can be arbitrarily old — the §10.15 class) or
   `voip_call_logs` (`VOIP_MAX_CALL_DURATION` is an unvalidated env int). So the helper is required
   **regardless of column width**, and widening is an independent, optional hardening — deferred, not
-  an alternative. Widening would also fix neither the poison-transaction property above nor
-  `process_schedule_executions.duration_ms`, which exists in no migration track at all. Four OSS
+  an alternative. Widening would also not fix the poison-transaction property above. Four OSS
   tables carry the column (`schedule_executions`, `agent_loop_runs`, `agent_activities`,
-  `voip_call_logs`), not the six the issue names, plus that scheduler-only fifth.
+  `voip_call_logs`), not the six the issue names.
 - **Hostile input path closed in the same change**: `models.TaskResultPayload.execution_time_ms` is
   agent-supplied and was unbounded, arriving on the #1083 async result callback and landing in two
   `Integer` columns — bounded to `ge=0, le=2**31-1`.
@@ -1378,10 +1377,12 @@ schedules:
     attempt; if the same `execution_id` comes back (a `lease_expired` failure
     keeps replaying until its hold window ends, §10.10), `set_reminder` and end
     the turn (#3245). An error without an
-    `execution_id` — `agent_busy` included — is checked against
-    `list_recent_executions` before a word-for-word re-send (`agent_busy` after
-    `retry_after_seconds`). `agent_busy` is not "nothing ran": the MCP client
-    also labels the usage-limit 429 that comes after a turn already ran (#3244).
+    `execution_id` is checked against `list_recent_executions` before a
+    word-for-word re-send. `agent_busy` means nothing ran (re-send after
+    `retry_after_seconds`): since #3244 the MCP client answers it only for the
+    admission 429 (`X-Trinity-Error-Code: capacity`); any other `/chat` 429 is a
+    `rate_limited` result, `retryable: false`, naming the failed run from
+    `X-Trinity-Execution-Id` when the backend sent one.
     `pending_approval` (ent#751): nothing ran, do not retry or route it through
     another agent. A `retryable: false` result: do what its `message` says.
     Long work: `parallel=true, async=true`; that run's end fires the target's
@@ -1437,7 +1438,7 @@ schedules:
   layer + chain budget), `send_message`'s caller-declared key (ent#665), the
   typed outcome (ent#569), the unforwarded `chat_with_agent` `execution_id`
   (#3232), the system-scoped gate-outcome gap (#3233), the post-run 429
-  labelled `agent_busy` (#3244), the async receipt replayed after a failed run
+  labelled `agent_busy` (#3244 — since fixed, above), the async receipt replayed after a failed run
   (#3245 — since fixed, §10.10), and the trinity-pm canon pointer (AC6, post-merge).
 
 ## 38. Sequential Agent Loops (#740)
@@ -1504,7 +1505,7 @@ schedules:
 - **Restart recovery**: the cleanup-service startup hook re-marks
   any `agent_loops` row in `running` status as `interrupted` with
   `stop_reason="interrupted"`. Loops do not auto-resume —
-  callers re-issue if needed.
+  callers re-issue if needed. *(Superseded by #2523 — see §38.8.)*
 - **WebSocket events**: `loop_run_completed` per iteration (carries
   `run_number`, `execution_id`, `cost`, `duration_ms`),
   `loop_completed` once when the loop exits any terminal state.
@@ -1740,6 +1741,35 @@ failed iteration and proceeds, bounded so a fully-broken agent still terminates.
 - **AC #3 (loop history)** landed with ent#525: a loop run is one execution
   kind (`loop`) in the rail's Work tab — *Now* and *Earlier* — and there is
   no parallel surface (core-agent §5.21).
+
+### 38.8 Loops survive a backend restart — terminal-driven advance (#2523)
+- **Status**: ✅ Implemented
+- **Implements**: Issue #2523
+- **Description**: the `agent_loops` row is the loop. Each iteration is advanced
+  from its execution's terminal, and a `delay_seconds` pause parks the loop on
+  `agent_loops.next_run_at` for the due-loop sweep to bring back. A restart no
+  longer marks loops `interrupted`: the cleanup-service startup hook
+  (`LoopService.reconcile_after_restart`) leaves parked loops and loops with a
+  live execution alone, advances a loop whose execution already ended, and re-arms
+  a loop that lost its dispatch. This supersedes §38.1's restart-recovery bullet.
+  Full flow: [run-agent-loop.md](../feature-flows/run-agent-loop.md#restart-recovery-2523--loops-now-resume).
+
+### 38.9 Idle cost of the due-loop sweep (#3436)
+- **Status**: ✅ Decided — no change
+- **Implements**: Issue #3436
+- **Description**: the due-loop sweep (§38.8) runs every 5–6s in every backend
+  worker whether or not any loop exists. With no loop parked, each tick is one
+  index seek on `idx_loops_next_run` that returns no rows — about 6 µs per query
+  and roughly 15,700 queries a day per worker, as measured on a development
+  database. That cost is accepted.
+- **Deliberately not gated.** Skipping the read while no loop is parked would add
+  arm/disarm state to loop recovery, and a loop parked by a stuck worker would not
+  be picked up until that worker was respawned. Today any worker's next tick picks
+  it up.
+- **Other loop-table reads on an idle instance**: the once-per-worker boot
+  reconcile (§38.8), and one indexed point read per execution terminal asking
+  "is this a loop run?" — see
+  [run-agent-loop.md](../feature-flows/run-agent-loop.md#who-reads-the-loop-tables-unasked-3436).
 
 
 ### 10.18 A schedule can deliver its output into a Workspace conversation (trinity-enterprise#498)

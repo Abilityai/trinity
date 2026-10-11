@@ -156,3 +156,71 @@ describe('Login sends the person back where they were', () => {
     expect(nav.push).not.toHaveBeenCalled()
   })
 })
+
+describe('A Workspace-only member lands in the Workspace (trinity-enterprise#837)', () => {
+  let wrapper
+  let authStore
+
+  async function mountAs(role, { redirect, authenticated = false } = {}) {
+    nav.query = redirect === undefined ? {} : { redirect }
+    authStore = useAuthStore()
+    authStore.modeDetected = true
+    authStore.isLoading = false
+    authStore.isAuthenticated = authenticated
+    authStore.user = { email: 'member@example.com', role }
+    vi.spyOn(authStore, 'fetchSsoProviders').mockResolvedValue([])
+    wrapper = mount(Login, { global: { stubs: { QrCode: true } } })
+    for (let i = 0; i < 3; i++) { await nextTick(); await flushPromises() }
+    return wrapper
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    nav.push = vi.fn()
+  })
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = null
+    vi.restoreAllMocks()
+  })
+
+  it('an email-code sign-in by a `user` goes to the Workspace, not the dashboard', async () => {
+    const w = await mountAs('user')
+    vi.spyOn(authStore, 'verifyEmailCode').mockResolvedValue(true)
+    await w.vm.handleVerifyCode()
+    expect(nav.push).toHaveBeenCalledWith({ path: '/workspace' })
+  })
+
+  it("an operator page in ?redirect= opens that agent's Workspace conversation instead", async () => {
+    const w = await mountAs('user', { redirect: '/agents/scout' })
+    vi.spyOn(authStore, 'loginWithCredentials').mockResolvedValue(true)
+    await w.vm.handleAdminLogin()
+    expect(nav.push).toHaveBeenCalledWith({ path: '/workspace', query: { agent: 'scout' } })
+  })
+
+  it('a shared canvas in ?redirect= is still honoured for a member', async () => {
+    const w = await mountAs('user', { redirect: CANVAS })
+    vi.spyOn(authStore, 'verifyEmailCode').mockResolvedValue(true)
+    await w.vm.handleVerifyCode()
+    expect(nav.push).toHaveBeenCalledWith(CANVAS)
+  })
+
+  it('a member already signed in goes straight to the Workspace', async () => {
+    await mountAs('user', { authenticated: true })
+    expect(nav.push).toHaveBeenCalledWith({ path: '/workspace' })
+  })
+
+  it('an operator still lands on the dashboard', async () => {
+    const w = await mountAs('operator')
+    vi.spyOn(authStore, 'verifyEmailCode').mockResolvedValue(true)
+    await w.vm.handleVerifyCode()
+    expect(nav.push).toHaveBeenCalledWith('/')
+  })
+
+  it('the sign-in page points a person an agent was shared with to the Workspace', async () => {
+    const w = await mountAs(undefined)
+    const link = w.find('[data-testid="login-workspace-pointer"]')
+    expect(link.exists()).toBe(true)
+    expect(link.attributes('href')).toBe('/workspace')
+  })
+})

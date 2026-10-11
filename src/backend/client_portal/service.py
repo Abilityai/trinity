@@ -316,8 +316,8 @@ def portal_signin_verify(email: str | None, code: str | None) -> str | None:
         return None
     if not email_has_access(email):
         return None
-    from dependencies import create_portal_session_token
-    return create_portal_session_token(email)
+    from dependencies import PORTAL_MINT_OTP, create_portal_session_token
+    return create_portal_session_token(email, minted_by=PORTAL_MINT_OTP)
 
 
 def portal_exchange(email: str | None) -> str | None:
@@ -333,12 +333,16 @@ def portal_exchange(email: str | None) -> str | None:
     re-checks that at least one agent is actually shared with this address, so a
     delegate key cannot conjure a session for someone with no share. Returns
     None when it cannot; the router turns that into an explicit 403.
+
+    #3404: the token says it was minted here (`minted_by=delegate`), because
+    the person did not prove themselves to Trinity — such a session may not
+    self-approve a gated skill.
     """
     email = (email or "").strip().lower()
     if not email or not email_has_access(email):
         return None
-    from dependencies import create_portal_session_token
-    return create_portal_session_token(email)
+    from dependencies import PORTAL_MINT_DELEGATE, create_portal_session_token
+    return create_portal_session_token(email, minted_by=PORTAL_MINT_DELEGATE)
 
 
 # #2128 — the rooms substrate that backs a multi-agent Workspace chat used to be
@@ -2847,13 +2851,21 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       # request field.
                       reply_context: str = "",
                       # trinity-enterprise#751 — the ROUTE proved this caller is a
-                      # person (`PortalPrincipal.is_person`), so an approver may run
-                      # their own gated request. False for any caller that did not
-                      # (voice relays a model's paraphrase of the speech).
+                      # person (`PortalPrincipal.self_approves`), so an approver may
+                      # run their own gated request. False for any caller that did
+                      # not (voice relays a model's paraphrase of the speech; a
+                      # delegate-minted session, #3404).
                       gate_is_person: bool = False,
+                      # #3404 — which credential the route saw
+                      # (`PortalPrincipal.credential`), for the self-approval audit.
+                      gate_credential: str | None = None,
                       # #3265 — the turn's attachments, already resolved by
                       # `resolve_turn_attachments` (JSON). Stored on the user row.
-                      attachments: str | None = None) -> dict:
+                      attachments: str | None = None,
+                      # trinity-enterprise#631 — `(tagger, people)` resolved and
+                      # refused at the router, BEFORE anything was written.
+                      # Delivered once the user's row exists. None = no tags.
+                      person_tags: tuple | None = None) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -3040,6 +3052,9 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # reads happen first, deliberately.
     user_row_id = _persist_user_turn(agent_name, email, session_id, client_message, voice_call_id=voice_call_id,
                                      attachments=attachments, execution_id=execution_id)
+    # trinity-enterprise#631: the people this message tagged, pointed at the row
+    # that now stands for it. Best-effort — a tag that fails never fails a turn.
+    deliver_chat_tags(agent_name, session_id, user_row_id, person_tags)
 
     # ent#186 / #2579: title the thread NOW, concurrently with the turn.
     #
@@ -3231,7 +3246,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
             # The quoted message is part of the request: a reply to the client's
             # own held `/x` would otherwise send it to the agent unread.
             request_text=reply_prefix + client_text,
-            gate_requester=_gate_requester(email, gate_is_person),
+            gate_requester=_gate_requester(email, gate_is_person, gate_credential),
             # #3166: a second message on this thread queues behind the first
             # for as long as the first can hold the lock, instead of a 429
             # after 30s. The wait budget below covers it.
@@ -3476,13 +3491,15 @@ def _persist_reply(agent_name: str, email: str, session_id: str, reply: str, cos
             "gate_self_approved_by_viewer": turn["gate_self_approved_by_viewer"]}
 
 
-def _gate_requester(email: str, is_person: bool):
+def _gate_requester(email: str, is_person: bool, credential: str | None = None):
     """trinity-enterprise#751: who asked, for the skill gate — the Workspace
-    caller is a person; `is_person` says whether the route proved it."""
+    caller is a person; `is_person` says whether the route proved it, and
+    `credential` (#3404) which credential it saw."""
     from services import skill_gate_service
     return skill_gate_service.Requester(kind=skill_gate_service.KIND_PERSON,
                                         key=f"person:{email.casefold()}",
-                                        email=email, is_person=is_person)
+                                        email=email, is_person=is_person,
+                                        credential=credential)
 
 
 def _voice_attribution(voice_call_id: str | None) -> dict:
@@ -3603,6 +3620,86 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
     except Exception as e:  # noqa: BLE001 — never block a turn on bookkeeping
         logger.warning("portal user-message persist failed for %s/%s: %s", agent_name, email, e)
     return row_id
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#631 — tagging a person from a 1:1 chat
+# ---------------------------------------------------------------------------
+# The chat is the tagger's own: a tagged colleague is POINTED at it (one Unread
+# item naming who tagged them and in which chat), never shown it. The rules —
+# who may tag, who may be tagged, the named refusals, the ledger row — are
+# `services/person_mention_service`'s, shared with rooms.
+
+class ChatTagError(Exception):
+    """A refused tag, with the fields the route answers with."""
+
+    def __init__(self, status_code: int, detail: dict):
+        super().__init__(detail.get("message"))
+        self.status_code = status_code
+        self.detail = detail
+
+
+def resolve_chat_tags(principal, agent_name: str, tags) -> tuple | None:
+    """`(tagger, people)` for a turn's tags, refused BEFORE anything is
+    written. None when the turn tags no one."""
+    if not tags:
+        return None
+    from services import person_mention_service as pms
+    try:
+        tagger = pms.tagger_for_portal(principal, is_person=bool(getattr(principal, "is_person", False)))
+        people = pms.resolve_tags(tags, [agent_name], tagger)
+    except pms.TagError as e:
+        raise ChatTagError(e.status_code, {"code": e.code, "message": e.detail, **e.extra}) from e
+    return (tagger, people) if people else None
+
+
+def chat_people(principal, agent_name: str, query: str) -> list[dict]:
+    """The 1:1 composer's people picker: who can be tagged in a chat with this
+    agent. Roster-scoped by the route; a query is required (ent#450 bound)."""
+    from services import person_mention_service as pms
+    try:
+        tagger = pms.tagger_for_portal(principal, is_person=bool(getattr(principal, "is_person", False)))
+    except pms.TagError as e:
+        raise ChatTagError(e.status_code, {"code": e.code, "message": e.detail, **e.extra}) from e
+    if not (query or "").strip():
+        return []
+    return pms.taggable_people([agent_name], query.strip()[:64], tagger)
+
+
+def deliver_chat_tags(agent_name: str, session_id: str | None, message_id: str | None,
+                      person_tags: tuple | None) -> None:
+    if not person_tags or not session_id or not message_id:
+        return
+    from services import person_mention_service as pms
+    tagger, people = person_tags
+    try:
+        pms.deliver(pms.Conversation(kind="chat", id=session_id, agent_name=agent_name,
+                                     label=f"a chat with {agent_name}"),
+                    message_id, None, people, tagger)
+    except Exception:  # noqa: BLE001 — the turn stands; the tagger's marks show what landed
+        logger.warning("portal: tags on %s/%s could not be delivered", session_id, message_id,
+                       exc_info=True)
+
+
+def _attach_own_tags(messages: list, session_id: str | None, agent_name: str | None = None) -> None:
+    """The tagger's marks on their own messages: delivered, then read."""
+    for m in messages:
+        m["tags"] = None
+    if not session_id:
+        return
+    mine = [m.get("id") for m in messages if m.get("role") == "user" and m.get("id")]
+    if not mine:
+        return
+    try:
+        from services import person_mention_service as pms
+        marks = pms.tags_by_message("chat", session_id, mine,
+                                    agent_names=[agent_name] if agent_name else None)
+    except Exception:  # noqa: BLE001 — a courtesy; the thread must load
+        logger.warning("portal: could not read tag marks for %s", session_id, exc_info=True)
+        return
+    for m in messages:
+        if m.get("id") in marks:
+            m["tags"] = marks[m["id"]]
 
 
 def _stamp_user_turn(row_id: str | None, execution_id: str | None) -> None:
@@ -4052,8 +4149,12 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             reply_context: str = "",
                             # trinity-enterprise#751 — see `portal_chat`.
                             gate_is_person: bool = False,
+                            # #3404 — see `portal_chat`.
+                            gate_credential: str | None = None,
                             # #3265 — see `portal_chat`.
-                            attachments: str | None = None) -> dict:
+                            attachments: str | None = None,
+                            # trinity-enterprise#631 — see `portal_chat`.
+                            person_tags: tuple | None = None) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -4163,7 +4264,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               model=model, resolved_model=resolved_model,
                               open_canvas_id=open_canvas_id,
                               reply_context=reply_context,
-                              gate_is_person=gate_is_person)
+                              gate_is_person=gate_is_person,
+                              gate_credential=gate_credential,
+                              person_tags=person_tags)
         except ClientPortalError as e:
             # There is no request left to raise into — the 202 went out long ago
             # — so the ONLY way this reaches the client is the record written
@@ -4664,6 +4767,10 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     # #3265: the stored JSON becomes the list the bubble renders.
     for m in messages:
         m["attachments"] = decode_turn_attachments(m.get("attachments"))
+    # trinity-enterprise#631: on the caller's own messages, who they tagged and
+    # whether it was read. A thread is only ever its owner's, so these marks
+    # are always the reader's own.
+    _attach_own_tags(messages, session_id, agent_name)
     # ent#286: a client that reloaded mid-turn has lost the execution id it was
     # streaming. It arrives here, on the fetch the client already makes on
     # mount, so reattaching costs no extra round trip.

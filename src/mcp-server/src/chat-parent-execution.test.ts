@@ -156,7 +156,7 @@ async function boot(opts: { pull?: boolean; reportBackEnabled?: boolean } = {}):
         case "error":
           return json(res, 500, { detail: "boom" });
         case "busy":
-          return json(res, 429, { retry_after: 12 });
+          return json(res, 429, { retry_after: 12 }, { "x-trinity-error-code": "capacity" });
         case "replay409":
           return json(res, 409, { detail: { execution_id: "exec-child-replay" } });
         case "queued":

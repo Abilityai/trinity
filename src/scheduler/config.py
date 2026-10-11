@@ -117,7 +117,7 @@ class SchedulerConfig:
         "MAX_REMINDER_FIRE_ATTEMPTS", "3"
     )))
 
-    # Backend API (for process executions)
+    # Backend API (task dispatch, pre-checks, reminders)
     backend_url: str = field(default_factory=lambda: os.getenv(
         "BACKEND_URL", "http://backend:8000"
     ))
