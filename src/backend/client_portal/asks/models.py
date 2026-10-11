@@ -35,13 +35,23 @@ class WorkspaceAsk(BaseModel):
     # (trinity-enterprise#611); the ANSWER response projects the row it recorded.
     status: str
     # How the ask ended, COARSE on purpose (trinity-enterprise#611): `ended_by`
-    # is `you` | `operator` | `platform` (#3246) | `agent` | `timeout`, never an
+    # is `you` | `operator` | `someone_else` (ent#816) | `platform` (#3246) |
+    # `agent` | `timeout`, never an
     # email (`agent`: the agent replaced it with a newer ask, #3247), and the operator's
     # cancel reason never crosses. `ended_at` is when it ended — None when the
     # platform does not know (a row that ended before the ledger), never the
     # time the ask was filed.
     ended_at: Optional[str] = None
     ended_by: Optional[str] = None
+    # trinity-enterprise#816: an ask to a role several people fill is ONE row
+    # delivered to each of them (`shared`); the first answer wins. The others
+    # read `ended_by = someone_else` and `answered_by` — that co-addressee's
+    # account name, else their address. Set ONLY for a co-addressee's answer:
+    # an operator's ending stays the coarse `operator`, unnamed. Dismiss and
+    # Discuss are refused on a shared ask (`shared_ask`) until they are per
+    # person.
+    answered_by: Optional[str] = None
+    shared: bool = False
     chat_id: Optional[str] = None   # the thread it was attached to, when known
     # ent#734: raised BY the turn serving `chat_id` (draw it as a tile there),
     # as opposed to a background ask (schedule / loop / gate) whose `chat_id` is
