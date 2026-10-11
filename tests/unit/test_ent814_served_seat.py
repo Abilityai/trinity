@@ -255,3 +255,36 @@ def test_a_person_without_a_seat_gets_the_primarys_and_no_record_at_all_keeps_th
     ap.clear_provider()
     _record(r, store, CAT, decided_by_role="named-by-agent")
     assert recorded[-1]["payload"]["decided_by_role"] == "named-by-agent"
+
+
+# --- the seat on record must pass the record's own validation -----------------
+# Since ent#814 the seat on record wins over the agent's word, so every id the
+# Access tab can put on record has to validate here. Canon role ids follow
+# `objective_join_service._ID_RE`, which allows dots (`roles/head.of.sales.yaml`);
+# the decision slug did not, so a dotted seat refused every decision with 422.
+
+def _validation_payload(**over):
+    body = dict(outcome="approved", decided="Renew the Acme contract",
+                alternatives=["let it lapse"], criterion="margin above 20%",
+                reversal="margin drops", review_by="2027-01-01")
+    body.update(over)
+    return body
+
+
+def test_a_dotted_seat_on_record_validates_as_a_role_id():
+    from services import seat_decision_service as sds
+    out = sds.validate_record(_validation_payload(decided_by_role="Head.Of.Sales"))
+    assert out["decided_by_role"] == "head.of.sales"
+
+
+@pytest.mark.parametrize("bad", ["../etc", "a b", ".leading", "x" * 65])
+def test_a_role_id_that_is_not_a_canon_id_is_still_refused(bad):
+    from services import seat_decision_service as sds
+    with pytest.raises(sds.DecisionRefused):
+        sds.validate_record(_validation_payload(decided_by_role=bad))
+
+
+def test_ask_class_keeps_the_strict_slug():
+    from services import seat_decision_service as sds
+    with pytest.raises(sds.DecisionRefused):
+        sds.validate_record(_validation_payload(ask_class="vendor.renewal"))
