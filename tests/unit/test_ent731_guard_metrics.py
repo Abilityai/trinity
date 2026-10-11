@@ -23,6 +23,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_ent666_objective_join import (  # noqa: E402
     AGENT, NOW, ROLE, TEMPLATE, _FakeClient, _definition, _join, _latest,
+    _seat_on_record,  # autouse: the seat on record (ent#812) — x-role is not read
     running, store, svc,
 )
 

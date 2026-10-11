@@ -514,6 +514,10 @@ ADMIN_WIDENED: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
 # Reviewed uses an agent key may make. key -> ("METHOD /full/path", reason)
 AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     # The agent's own runtime surface (#2996 §3.4 regression set).
+    "routers/agent_files.py::get_agent_canon_roles": (
+        "GET /api/agents/{agent_name}/canon/roles",
+        "a READ of the agent's own canon seats (trinity-enterprise#817); an agent key is "
+        "self-gated to its own canon, the same rule and budget as its objectives"),
     "routers/agents.py::agent_heartbeat": (
         "POST /api/agents/{agent_name}/heartbeat",
         "liveness; authenticates the agent's own agent-scoped key outside get_current_user (#307)"),
