@@ -620,7 +620,6 @@ async def _send_degradation_alert(self, ...):
 **Specific Alert Types** (lines 272-410):
 - `alert_container_stopped()` - OOM kill, crash, unexpected stop
 - `alert_high_restart_count()` - Container restarting frequently
-- `alert_stuck_execution()` - Execution running > 30 min
 - `alert_resource_critical()` - High CPU/memory usage
 - ~~`alert_subscription_credentials_missing()`~~ - **Removed** (SUB-002): credential file monitoring no longer needed
 

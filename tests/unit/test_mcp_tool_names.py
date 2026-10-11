@@ -21,22 +21,21 @@ mcp_tool_names = pytest.importorskip(
     reason="backend on sys.path required",
 )
 compute_tool_names = mcp_tool_names.compute_tool_names
-compute_tool_name = mcp_tool_names.compute_tool_name
 resolve_tool_name = mcp_tool_names.resolve_tool_name
 build_tool_description = mcp_tool_names.build_tool_description
 
 
 def test_basic_slug():
-    assert compute_tool_name("support-bot") == "chat_with_support_bot"
+    assert compute_tool_names(["support-bot"])["support-bot"] == "chat_with_support_bot"
 
 
 def test_uppercase_and_spaces_normalized():
-    assert compute_tool_name("Sales Desk") == "chat_with_sales_desk"
+    assert compute_tool_names(["Sales Desk"])["Sales Desk"] == "chat_with_sales_desk"
 
 
 def test_special_chars_collapse_and_trim():
     # leading/trailing/duplicate separators collapse
-    assert compute_tool_name("--My__Agent!!") == "chat_with_my_agent"
+    assert compute_tool_names(["--My__Agent!!"])["--My__Agent!!"] == "chat_with_my_agent"
 
 
 def test_collision_gets_distinct_stable_suffixes():
