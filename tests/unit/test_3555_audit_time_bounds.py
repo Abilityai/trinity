@@ -8,6 +8,7 @@ operations, so they need no running stack, account, Redis or Docker.
 import csv
 import importlib.util
 import io
+import json
 import sys
 import types
 from datetime import datetime
@@ -151,6 +152,7 @@ def test_3555_other_filters_and_pagination_are_preserved(audit_db):
         entry = operations.get_audit_entry("event-7")
         entry["event_id"] = f"excluded-{field}"
         entry[field] = "other"
+        entry["details"] = json.dumps(entry["details"])
         operations.create_audit_entry(entry)
     expected = _expected(filters["start_time"], filters["end_time"])
     rows = operations.get_audit_entries(**filters)
@@ -227,6 +229,38 @@ def test_3555_read_routes_still_reject_non_admin(audit_client, path):
     })
     assert response.status_code == 403
     assert response.json()["detail"] == "Admin access required"
+
+
+def test_3555_list_route_keeps_count_and_page_consistent(audit_client):
+    client, _ = audit_client
+    response = client.get("/api/audit-log", params={
+        "start_time": "2026-10-11T10:30:52Z",
+        "end_time": "2026-10-11T10:30:52Z",
+        "event_type": "mcp_operation", "source": "mcp",
+        "mcp_key_id": "key-a", "mcp_scope": "user", "limit": 2, "offset": 1,
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 3
+    assert len(data["entries"]) == 2
+    assert data["limit"] == 2
+    assert data["offset"] == 1
+    assert {row["event_id"] for row in data["entries"]} == {"event-3", "event-2"}
+
+
+@pytest.mark.parametrize("filters", [
+    {"start_time": "not-a-timestamp"}, {"end_time": "not-a-timestamp"},
+    {"start_time": "", "end_time": ""},
+])
+def test_3555_invalid_bounds_retain_legacy_string_behavior(audit_db, filters):
+    operations, _, _ = audit_db
+    expected = {
+        f"event-{index}" for index, timestamp in enumerate(_TIMESTAMPS)
+        if (not filters.get("start_time") or timestamp >= filters["start_time"])
+        and (not filters.get("end_time") or timestamp <= filters["end_time"])
+    }
+    assert {row["event_id"] for row in operations.get_audit_entries(**filters)} == expected
+    assert operations.count_audit_entries(**filters) == len(expected)
 
 
 def test_3555_export_still_requires_bounds_and_valid_format(audit_client):
