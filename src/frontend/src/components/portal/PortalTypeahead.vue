@@ -96,12 +96,15 @@ const props = defineProps({
   // searchable at all. Distinct from `overflow` (present but not rendered).
   hiddenCount: { type: Number, default: 0 },
   emptyMessage: { type: String, default: '' },
+  // trinity-enterprise#631: an `@` popup that also offers people names itself
+  // so ("Agents and people"); empty keeps the kind's own heading.
+  title: { type: String, default: '' },
 })
 defineEmits(['pick', 'hover'])
 
 const listEl = ref(null)
 
-const heading = computed(() => (props.kind === '/' ? 'Skills' : 'Agents'))
+const heading = computed(() => props.title || (props.kind === '/' ? 'Skills' : 'Agents'))
 
 const status = computed(() => {
   if (!props.rows.length) return props.emptyMessage || 'No suggestions'

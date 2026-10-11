@@ -39,6 +39,7 @@ from models import (
     REPORT_ROWS_PAGE_MAX,
     CanvasBulkDelete,
     CanvasPinRequest,
+    TaggablePerson,
     User,
 )
 from services.agent_auth import agent_httpx_client
@@ -1286,6 +1287,9 @@ async def portal_chat(
         # ent#610 — resolved (and refused, loudly) BEFORE anything is written.
         reply_context = service.reply_context(
             agent_name, email, body.session_id, getattr(body, "reply_to_message_id", None))
+        # trinity-enterprise#631 — the people this turn tags, refused by name
+        # BEFORE anything is written (same rule on the streaming path below).
+        person_tags = service.resolve_chat_tags(principal, agent_name, getattr(body, "tags", None))
         result = await service.portal_chat(agent_name, body.message, email, session_id=body.session_id,
                                           include_owned=include_owned,
                                           # #3265 — resolved against the caller's
@@ -1308,7 +1312,10 @@ async def portal_chat(
                                           # #3404: not `is_person` — a
                                           # delegate-minted session is one, unproven.
                                           gate_is_person=principal.self_approves,
-                                          gate_credential=principal.credential)
+                                          gate_credential=principal.credential,
+                                          person_tags=person_tags)
+    except service.ChatTagError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
@@ -1650,6 +1657,25 @@ def _set_session_archived(agent_name: str, session_id: str,
             agent_name, principal.email, session_id, archived,
             include_owned=principal.is_platform)
     except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.get("/agents/{agent_name}/people", response_model=list[TaggablePerson])
+def portal_people(agent_name: str, q: str = Query("", max_length=64),
+                  principal: PortalPrincipal = Depends(get_portal_principal)):
+    """People who can be TAGGED in a chat with this agent (trinity-enterprise#631):
+    accounts on this instance that can already reach it, matching `q`.
+
+    The ent#450 shape: roster-scoped first (uniform 404), a query required,
+    capped, rate-limited — a picker, never a directory. A platform person only:
+    an external client is refused by name (the colleagues it would list are the
+    organisation's, an internal fact — #78)."""
+    from services import rate_limiter
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    rate_limiter.enforce(f"portal_people:{principal.email}", 120, 60)
+    try:
+        return service.chat_people(principal, agent_name, q)
+    except service.ChatTagError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
@@ -2008,6 +2034,7 @@ async def portal_chat_stream(
         # ent#610 — same resolution on the streaming path (the ent#555 lesson).
         reply_context = service.reply_context(
             agent_name, email, body.session_id, getattr(body, "reply_to_message_id", None))
+        person_tags = service.resolve_chat_tags(principal, agent_name, getattr(body, "tags", None))
         started = await service.start_portal_turn(
             agent_name, body.message, email,
             session_id=body.session_id, include_owned=include_owned,
@@ -2027,7 +2054,11 @@ async def portal_chat_stream(
             # #3265 — same resolution as the sync path above.
             attachments=await service.resolve_turn_attachments(
                 agent_name, email, getattr(body, "attachments", None)),
+            person_tags=person_tags,   # trinity-enterprise#631, same rule
         )
+    except service.ChatTagError as e:
+        idempotency_service.fail(decision)
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
     except ClientPortalError as e:
         idempotency_service.fail(decision)
         raise HTTPException(status_code=e.status_code, detail=e.detail)

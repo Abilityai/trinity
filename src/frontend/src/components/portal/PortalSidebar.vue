@@ -531,7 +531,8 @@ const waitingFor = (name) => waiting.value[name] || 0
 const asksStore = useClientPortalStore()
 // trinity-enterprise#610 (D13): the pinned Inbox row's two counts — `needs` is
 // `askCount` (pending asks), `came` is `totalUnread` over these threads.
-const inbox = computed(() => inboxCounts(props.threads, asksStore.openAsks))
+// trinity-enterprise#631: plus the tags not yet opened.
+const inbox = computed(() => inboxCounts(props.threads, asksStore.openAsks, asksStore.mentions))
 // #2424: the ask twin of `waiting`. Kept a separate map on purpose — see the
 // Inbox-row comment in the template.
 const asksPerAgent = computed(() => asksByAgent(asksStore.openAsks))
