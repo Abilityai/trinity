@@ -2361,6 +2361,9 @@ class DatabaseManager:
     def list_gate_requests_with_ended_asks(self, limit: int = 200):
         return self._skill_gate_request_ops.list_gate_requests_with_ended_asks(limit)
 
+    def list_gate_requests_ended_unreported(self, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_ended_unreported(limit)
+
     def list_gate_requests_lost_in_dispatch(self, claimed_before: str, limit: int = 200):
         return self._skill_gate_request_ops.list_gate_requests_lost_in_dispatch(claimed_before, limit)
 
