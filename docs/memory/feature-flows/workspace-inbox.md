@@ -145,7 +145,12 @@ Sign-in / reload on bare /workspace
               background ask has no origin section) → Delivered in
               that chat (verified only, fetchSessionDeliverablesStrict → ?anchor=d:<id>,
               read BEFORE the context paints; a failed read is LoadFailed dense with its own
-              retry) → Your recent answers
+              retry) → Your recent answers (a gate ask's entry adds its request
+              line, `request` — every gate ask on an agent shares a title, trinity#3524)
+              An ask the viewer answered says which answer: the projection's `answer` /
+              `answer_note` (only for `ended_by = you`) → "You approved" / "You rejected" /
+              "You answered “…”" + "Your note: “…”" on the card (`workspaceOwnAnswer`), and
+              "Approved · you" / "Rejected · you" on an approval's row
       chat  → store.fetchHistory(agent, id, {limit: 50})  render from first_unread_message_id
               store.fetchSessionDeliverablesStrict → ReportRenderer (+ ReportSummary fallback)
                                                a failed read is LoadFailed, never "no deliverables"
@@ -390,6 +395,8 @@ an ask that ends while selected; a deep-linked `?item=`; previews read failing m
 | `src/frontend/tests/unit/portalSidebarInboxRow.spec.js` | the pinned row's counts and link |
 | `src/frontend/tests/unit/portalAsksTestidPrefix.mount.spec.js` | default ids unchanged, prefix over every id, disjoint id sets |
 | `src/frontend/tests/unit/portalConversationAnchor.mount.spec.js`, `stickToBottom.spec.js` | `?anchor=` found / missing / one-shot, `detach()` |
+| `tests/unit/test_3524_gate_approval_card.py` | trinity#3524: the viewer's own answer and note on the projection (never someone else's), a gate answer's request line |
+| `src/frontend/tests/unit/gateAnsweredVerdict3524.mount.spec.js` | trinity#3524: the verdict and note on the card, the row's verdict, "1 minute ago" |
 | `tests/unit/test_ent610_ask_context.py` | PR A2 §3g L7: origin only from a verified thread, run gates (agent, live window, audience), schedule name for platform only, recent answers, no `cost`/`execution_id`, one 404 body, 503 on a roster outage, the `# mcp:` header |
 | `src/frontend/tests/unit/portalAskAnswerFlow.mount.spec.js`, `queueBrief.mount.spec.js`, `portalAskContext.mount.spec.js` | PR A2: B2/B3/B5 + focus after Send; the brief seam order, impact hints, XSS; the context below the card, its states, anchors |
 | `src/frontend/tests/unit/portalInboxActionSort.spec.js`, `portalInboxAgentFilter.spec.js`, `portalChatAsksElsewhere.spec.js` | PR A2: C1 urgency order, C2 `?from=` facets (+ mount cases in `portalInbox.mount.spec.js`), B1 a client's link to the Inbox |

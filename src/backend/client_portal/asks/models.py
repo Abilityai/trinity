@@ -51,6 +51,12 @@ class WorkspaceAsk(BaseModel):
     # Discuss are refused on a shared ask (`shared_ask`) until they are per
     # person.
     answered_by: Optional[str] = None
+    # trinity#3524: the viewer's OWN answer to an ask they answered (`ended_by
+    # = you`) — the decision as `WorkspaceAskAnswered.answer` reads it, and
+    # their note when they gave one; both excerpts. None on every other ask:
+    # an operator's or a co-addressee's note never crosses.
+    answer: Optional[str] = None
+    answer_note: Optional[str] = None
     shared: bool = False
     chat_id: Optional[str] = None   # the thread it was attached to, when known
     # ent#734: raised BY the turn serving `chat_id` (draw it as a tile there),
@@ -152,6 +158,10 @@ class WorkspaceAskAnswered(BaseModel):
     title: str
     answer: Optional[str] = None
     ended_at: Optional[str] = None
+    # trinity#3524: what a gated-skill approval asked for — every gate ask on
+    # one agent shares a title — as a short excerpt of the request typed that
+    # turn. None for any other ask.
+    request: Optional[str] = None
 
 
 class WorkspaceAskContext(BaseModel):

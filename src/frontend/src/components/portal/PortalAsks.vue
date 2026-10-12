@@ -111,6 +111,12 @@
         :data-testid="tid.ending"
       >
         {{ endingLine(ask) }}
+        <!-- trinity#3524: the note the viewer gave with their own answer. -->
+        <span
+          v-if="ask.answer_note && workspaceOwnAnswer(ask)"
+          class="mt-0.5 block"
+          :data-testid="`${tid.prefix}-answer-note-${ask.id}`"
+        >Your note: “{{ ask.answer_note }}”</span>
       </p>
       <!-- #3247: the agent's replacement names the ask it replaced, by
            request_id only — there is no deep link to a single item. -->
@@ -165,8 +171,10 @@
       <template v-if="!isEnded(ask)">
         <!-- #2375: controls come from the shared kind rule (queueResponseKind),
              so this surface cannot drift from desktop QueueCard and /m. An
-             approval is select → optional note → explicit Send — never a
-             one-tap irreversible answer; the tapped option only arms Send. -->
+             approval is select → optional note → explicit Send; the tapped
+             option only arms Send. trinity#3527: except a skill gate's
+             (`decidedByOptions`) — Approve / Reject IS the decision, so the
+             option sends, with the note typed before it, and there is no Send. -->
         <template v-if="controlsKind(ask) === 'approval'">
           <!-- ent#610 §3g L6: when the brief says what an option DOES
                (impact), the options stack full-width — the label, then the
@@ -224,13 +232,21 @@
               type="text"
               maxlength="4000"
               :disabled="busyId === ask.id"
-              :placeholder="somethingElseArmed(ask) ? 'What should it do instead? None of the options will run.' : 'Add a note (optional)…'"
+              :placeholder="somethingElseArmed(ask) ? 'What should it do instead? None of the options will run.'
+                : oneClick(ask) ? 'Add a note (optional), then choose above…' : 'Add a note (optional)…'"
               :aria-label="somethingElseArmed(ask) ? 'Instruction' : 'Note'"
               :class="FIELD"
               :data-testid="`${tid.prefix}-note-${ask.id}`"
-              @keydown.enter="!picks[ask.id] && $event.preventDefault()"
+              @keydown.enter="(oneClick(ask) || !picks[ask.id]) && $event.preventDefault()"
             />
+            <span
+              v-if="oneClick(ask) && busyId === ask.id"
+              class="text-xs"
+              role="status"
+              :data-testid="`${tid.prefix}-sending-${ask.id}`"
+            >Sending…</span>
             <button
+              v-if="!oneClick(ask)"
               type="submit"
               :disabled="busyId === ask.id || !approvalSendable(ask)"
               :class="SEND"
@@ -344,6 +360,8 @@ import { queueResponseKind, buildQueueResponse, queueTypeLabel } from '@/utils/o
 import { respondRefusedAsDiverged, QUEUE_RESPONSE_DIVERGED } from '@/utils/operatorQueue'
 // trinity-enterprise#611: the one ending rule, a third line for the same reason.
 import { queueEnding, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
+// trinity#3524: the viewer's own answer on an answered card.
+import { workspaceOwnAnswer } from '@/utils/operatorQueue'
 // trinity-enterprise#610 §3g B3/B5: the Workspace's badge and a question's quick picks.
 import { workspaceAskBadge, questionQuickPicks } from '@/utils/operatorQueue'
 // trinity-enterprise#610 §3g L6 (E2 seam): the brief's per-option consequence.
@@ -447,8 +465,17 @@ const coarsePointer = () => (
 )
 
 // B2: a pick arms Send and moves to the note, so Enter sends; an un-pick
-// only disarms. Still two steps (#2375) — the pick never sends.
+// only disarms. Still two steps (#2375) — the pick never sends — except on a
+// skill gate (trinity#3527), whose options are the whole decision: the pick
+// sends, with whatever note was typed first.
+const oneClick = (ask) => decidedByOptions(ask)
 function pick(ask, opt) {
+  if (oneClick(ask)) {
+    if (busyId.value === ask.id) return
+    picks[ask.id] = opt
+    submit(ask)
+    return
+  }
   const next = picks[ask.id] === opt ? null : opt
   picks[ask.id] = next
   if (!next || coarsePointer()) return
@@ -518,7 +545,8 @@ function endingLine(ask) {
   const ending = queueEnding(ask)
   // An expiry keeps its own sentence: the deadline is the fact a person reads.
   if (!ending || ending.kind === 'expired') return expiredLabel(ask.expires_at)
-  const text = workspaceEndingText(ask)
+  // trinity#3524: an ask the viewer answered says WHICH answer, not just "by you".
+  const text = workspaceOwnAnswer(ask)?.text || workspaceEndingText(ask)
   return ending.when ? `${text} · ${formatRelativeTime(ending.when)}` : text
 }
 const endedAtAbsolute = (ask) => {

@@ -494,6 +494,20 @@ export function workspaceEndingText(ask) {
   return ending?.kind === 'replaced' && ask.replaced_by ? `${text} with ${ask.replaced_by}` : text
 }
 
+/** trinity#3524 — the viewer's own answer to an ask they answered, from the
+ *  projection's `answer` (set only when `ended_by` is `you`). An approval
+ *  answered Approve / Reject reads as a verdict ("You approved"); any other
+ *  answer is quoted ("You answered “Ship it”"). `past` is the verdict word, or
+ *  null. Null when the viewer did not answer it. */
+const VERDICT_PAST = { approve: 'approved', reject: 'rejected' }
+export function workspaceOwnAnswer(ask) {
+  if (!ask || ask.ended_by !== 'you' || !ask.answer) return null
+  const past = ask.kind === 'approval'
+    ? VERDICT_PAST[String(ask.answer).trim().toLowerCase()] || null
+    : null
+  return { past, text: past ? `You ${past}` : `You answered “${ask.answer}”` }
+}
+
 /** #3247 — the successor's own line: "Replaces <request_id>", or '' . */
 export function workspaceReplacesText(ask) {
   return ask && ask.replaces ? `Replaces ${ask.replaces}` : ''

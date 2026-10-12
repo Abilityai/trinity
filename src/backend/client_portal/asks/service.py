@@ -268,6 +268,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         ended_at=ended_at,
         ended_by=ended_by,
         answered_by=_answered_by(item, ended_by),
+        **_own_answer(item, ended_by),
         shared=_is_shared(item),
         chat_id=chat_id if isinstance(chat_id, str) else None,
         raised_in_turn=raised_in_turn,
@@ -1013,6 +1014,34 @@ def _answer_label(row: dict, excerpt) -> str:
     return excerpt(row.get("response"), limit=RECENT_ANSWER_EXCERPT_MAX)
 
 
+def _own_answer(item: dict, ended_by: Optional[str]) -> dict:
+    """trinity#3524: the viewer's own decision and note on an ask they
+    answered, so the card says which answer it was. Empty for anyone else's
+    ending — the coarse rule (`_ending_of`) still holds for those."""
+    if ended_by != "you" or _status_of(item) != "answered":
+        return {}
+    from client_portal.chat_previews import _arrival_excerpt
+    # The reserved decision already quotes its instruction (`_answer_label`).
+    note = None if item.get("response") == SOMETHING_ELSE \
+        else _arrival_excerpt(item.get("response_text"))
+    return {"answer": _answer_label(item, _arrival_excerpt), "answer_note": note}
+
+
+# How much of a gated request a recent answer quotes (trinity#3524).
+RECENT_ANSWER_REQUEST_MAX = 120
+
+
+def _request_line(row: dict, excerpt) -> Optional[str]:
+    """The words a gated-skill approval asked to run — the message typed that
+    turn, ahead of any chat history it carried — or None for any other ask."""
+    proposal = row.get("proposal")
+    if not isinstance(proposal, dict) or proposal.get("kind") != "gated_skill":
+        return None
+    from services.skill_gate_service import split_chat_history
+    message, _ = split_chat_history(str(proposal.get("input") or ""))
+    return excerpt(message, limit=RECENT_ANSWER_REQUEST_MAX)
+
+
 def _recent_answers(item: dict, email: str):
     from client_portal.chat_previews import _arrival_excerpt
     from .models import WorkspaceAskAnswered
@@ -1042,6 +1071,7 @@ def _recent_answers(item: dict, email: str):
             id=row["id"], title=row.get("title") or "",
             answer=_answer_label(row, _arrival_excerpt),
             ended_at=ended_at,
+            request=_request_line(row, _arrival_excerpt),
         )
         for _, row, ended_at in mine[:RECENT_ANSWERS]
     ]
