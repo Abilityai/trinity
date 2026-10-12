@@ -293,3 +293,41 @@ def test_two_workers_that_both_read_dispatched_send_one_notice(run, monkeypatch)
     results = asyncio.run(_both())
     assert sorted(results, key=str) == [None, "succeeded"]
     assert len(_completions(run)) == 1
+
+
+# --- the outcome first: a clipped preview still says what happened --------------
+
+PREVIEW_CHARS = 60   # well under the Work panel's two-line clip
+
+
+def test_running_and_finished_differ_within_a_clipped_preview(run):
+    rid, eid = run.approve()
+    run.end(eid, TaskExecutionStatus.SUCCESS, response="done")
+    _fanout(eid)
+    started = next(t for _w, t in run.woken if "is running as execution" in t)
+    (finished,) = _completions(run)
+    assert started.startswith("[Trinity] Approved, now running — your request ")
+    assert finished.startswith("[Trinity] Finished successfully — your request ")
+    assert started[:PREVIEW_CHARS] != finished[:PREVIEW_CHARS]
+
+
+@pytest.mark.parametrize("status, head", [
+    (TaskExecutionStatus.FAILED, "Failed"),
+    (TaskExecutionStatus.CANCELLED, "Cancelled"),
+])
+def test_a_run_that_did_not_succeed_leads_with_how_it_ended(run, status, head):
+    rid, eid = run.approve()
+    run.end(eid, status, error="boom")
+    _fanout(eid)
+    (text,) = _completions(run)
+    assert text.startswith(f"[Trinity] {head} — your request ")
+
+
+@pytest.mark.parametrize("outcome, head", [
+    ("denied", "Rejected"), ("expired", "Expired"), ("cancelled", "Cancelled"),
+    ("stale", "Not run"), ("not_run", "Not run"), ("unknown", "Not confirmed"),
+])
+def test_every_outcome_has_a_headline_and_a_persons_copy_has_no_marker(outcome, head):
+    record = {"request_id": "gate-x", "agent_name": FIN, "skills": ["pay-invoice"]}
+    assert _GATE.outcome_text(record, outcome).startswith(f"[Trinity] {head} — your request gate-x")
+    assert _GATE.outcome_text(record, outcome, for_person=True).startswith(f"{head} — your request")

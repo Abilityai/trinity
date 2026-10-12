@@ -1573,19 +1573,41 @@ async def report_completion_on_terminal(execution_id: Optional[str]) -> Optional
         excerpt = getattr(execution, "response", None) if status == "success" \
             else getattr(execution, "error", None)
         await _notify_completion(record, outcome, execution_id=execution_id,
-                                 detail=completion_detail(status, excerpt))
+                                 detail=completion_detail(status, excerpt),
+                                 headline=_FAILED_HEADLINE.get(status))
         return outcome
     except Exception:  # noqa: BLE001 — never affect the terminal that called us
         logger.warning("[SkillGate] completion report failed for %s", execution_id, exc_info=True)
         return None
 
 
+# The outcome first, in a few words (trinity#3520 follow-up): the Workspace
+# Work panel and the Inbox clip a notice after about 90 characters, and every
+# notice used to open with the same "Your request gate-… to run the skill … on
+# … was approv…", so "is running" and "finished" read identically until opened.
+_HEADLINE = {
+    "approved": "Approved, now running",
+    "succeeded": "Finished successfully",
+    "failed": "Failed",
+    "denied": "Rejected",
+    "expired": "Expired",
+    "cancelled": "Cancelled",
+    "stale": "Not run",
+    "not_run": "Not run",
+    "unknown": "Not confirmed",
+}
+# A run that ended without succeeding, by its execution status.
+_FAILED_HEADLINE = {"failed": "Failed", "cancelled": "Cancelled", "skipped": "Skipped"}
+
+
 def outcome_text(record: Dict[str, Any], outcome: str, *, decider: Optional[str] = None,
                  execution_id: Optional[str] = None, detail: Optional[str] = None,
-                 for_person: bool = False) -> str:
-    """One sentence a requester can act on. Skill names without a slash, so the
-    notice itself never reads as a request to run one. An agent's copy carries
-    the platform's `[Trinity]` marker; a person's Inbox copy does not."""
+                 for_person: bool = False, headline: Optional[str] = None) -> str:
+    """One sentence a requester can act on, led by the outcome in a few words
+    (`_HEADLINE`, or `headline`) so a clipped preview still says what happened.
+    Skill names without a slash, so the notice itself never reads as a request
+    to run one. An agent's copy carries the platform's `[Trinity]` marker; a
+    person's Inbox copy does not."""
     skills = ", ".join(record.get("skills") or []) or "a gated skill"
     body = _OUTCOME.get(outcome, "ended ({outcome})").replace("{outcome}", outcome)
     body = (body.replace("{by}", f" by {decider}" if decider else "")
@@ -1595,8 +1617,9 @@ def outcome_text(record: Dict[str, Any], outcome: str, *, decider: Optional[str]
     origin = record.get("requester_execution_id")
     tail = f" (Your request came from execution {origin}.)" if origin else ""
     marker = "" if for_person else "[Trinity] "
-    return (f"{marker}Your request {record['request_id']} to run the skill {skills} on "
-            f"{record['agent_name']} {body}.{tail}")
+    head = headline or _HEADLINE.get(outcome) or outcome.replace("_", " ").capitalize()
+    return (f"{marker}{head} — your request {record['request_id']} to run the skill {skills} "
+            f"on {record['agent_name']} {body}.{tail}")
 
 
 # Outcomes that are exactly what the decider did. A person who decided their own
@@ -1676,7 +1699,7 @@ async def _notify(record: Dict[str, Any], outcome: str, *, decider: Optional[str
 
 
 async def _notify_completion(record: Dict[str, Any], outcome: str, *, execution_id: str,
-                             detail: str) -> None:
+                             detail: str, headline: Optional[str] = None) -> None:
     """The second notice (trinity#3520): how the approved run ended, delivered
     the way the first was (`outcome_delivery`). Not gated by `notified_at` —
     that stamps the first notice; the state compare-and-set in
@@ -1688,10 +1711,11 @@ async def _notify_completion(record: Dict[str, Any], outcome: str, *, execution_
     try:
         if delivery == OUTCOME_DELIVERY_AGENT_TASK:
             await _wake_requester_agent(record, outcome_text(
-                record, outcome, execution_id=execution_id, detail=detail))
+                record, outcome, execution_id=execution_id, detail=detail, headline=headline))
         elif delivery == OUTCOME_DELIVERY_INBOX:
             _note_to_person(record, record["requester_email"], outcome, outcome_text(
-                record, outcome, execution_id=execution_id, detail=detail, for_person=True))
+                record, outcome, execution_id=execution_id, detail=detail, for_person=True,
+                headline=headline))
     except Exception:  # noqa: BLE001 — the outcome stands on the record either way
         logger.warning("[SkillGate] could not send the completion for %s",
                        record["request_id"], exc_info=True)
