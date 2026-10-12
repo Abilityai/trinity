@@ -467,12 +467,19 @@ def _also_sent_head(agent_name: str) -> str:
     return f"Also sent to {agent_name} with this request:\n"
 
 
-def _also_sent(question: Optional[str], agent_name: str) -> str:
+def _preview(clean_text: str) -> str:
+    return clean_text if len(clean_text) <= QUESTION_PREVIEW_CHARS \
+        else clean_text[:QUESTION_PREVIEW_CHARS] + "… (the full request is shown below)"
+
+
+def _also_sent(question: Optional[str], agent_name: str, clean_text: str) -> str:
     """The context lines `_ask_body` wrote into the question, for the card,
-    which shows them in a row of their own and drops the question."""
+    which shows them in a row of their own and drops the question. Found only
+    AFTER the whole request preview, so a request that quotes the heading
+    itself puts nothing in the row."""
+    head = f"Request:\n{_preview(clean_text)}\n\n{_also_sent_head(agent_name)}"
     body = (question or "").removesuffix(ASK_FOOTER)
-    head = _also_sent_head(agent_name)
-    at = body.rfind(head)
+    at = body.find(head)
     return body[at + len(head):].strip() if at >= 0 else ""
 
 
@@ -483,8 +490,7 @@ def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints
     the context the agent also receives (`requester_context_text`)."""
     skills = _skill_list(names)
     who = requester.display()
-    preview = clean_text if len(clean_text) <= QUESTION_PREVIEW_CHARS \
-        else clean_text[:QUESTION_PREVIEW_CHARS] + "… (the full request is shown below)"
+    preview = _preview(clean_text)
     beside = f"{_also_sent_head(agent_name)}{card_context}\n\n" if card_context else ""
     return {
         "request_id": request_id,
@@ -1778,7 +1784,8 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
             "agent": record.get("source_agent"),
             "execution_id": record.get("requester_execution_id") if with_run_ids else None,
         },
-        "also_sent": _also_sent(item.get("question"), record["agent_name"]),
+        "also_sent": _also_sent(item.get("question"), record["agent_name"],
+                                str(proposal.get("input") or "")),
         "state": record.get("state"),
         "execution_id": record.get("dispatched_execution_id") if with_run_ids else None,
         "waiting_on": [_person_label(p) for p in people] if name_approvers else [],
