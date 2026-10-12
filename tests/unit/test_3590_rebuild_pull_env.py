@@ -394,3 +394,77 @@ def test_every_env_assembler_applies_pull_env_through_the_one_helper():
                 f"{path.name}::{name} calls pull_mode_env_vars directly — route it "
                 "through apply_pull_mode_env so the set-or-clear idiom stays in one place"
             )
+
+
+# ---------------------------------------------------------------------------
+# Structural half of the guard. `_WRITERS` above pins the KNOWN assemblers; this
+# half FINDS an unknown fourth. Two shapes reach Docker with an agent env — a
+# caller of the shared provision tail, or a direct `containers_run(...,
+# environment=...)` site — and both are discovered by AST over services/ (rglob,
+# the Invariant #1 note: a one-level glob went blind on routers/settings/).
+# ---------------------------------------------------------------------------
+
+_SERVICES = _BACKEND / "services"
+_TAIL = "_provision_folders_and_run_agent_container"
+
+# Every function that hands Docker an `environment=` directly, with the assembler
+# that feeds it. A set difference here is a new container-creating site.
+_KNOWN_RUNNERS = {
+    "agent_service/crud.py::_create_agent_container": "env from _build_env_vars (pinned in _WRITERS)",
+    f"agent_service/lifecycle.py::{_TAIL}": "env from its callers (each must apply the helper, below)",
+    "system_agent_service.py::_create_system_agent": (
+        "trinity-system assembles its own env and is not a pull pilot; if an operator "
+        "ever lists it, check_pull_mode_env_matches recreates it on its next cold start "
+        "through the drift path, which applies the helper"
+    ),
+}
+
+
+def _functions(path: Path):
+    for fn in ast.walk(ast.parse(path.read_text())):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield fn
+
+
+def _runs_container_with_env(fn: ast.AST) -> bool:
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
+        if name in ("containers_run", "run") and any(k.arg == "environment" for k in node.keywords):
+            return True
+    return False
+
+
+def test_every_docker_run_site_with_an_env_is_a_registered_runner():
+    found = set()
+    for path in sorted(_SERVICES.rglob("*.py")):
+        rel = path.relative_to(_SERVICES).as_posix()
+        for fn in _functions(path):
+            if _runs_container_with_env(fn):
+                found.add(f"{rel}::{fn.name}")
+    assert found == set(_KNOWN_RUNNERS), (
+        f"container-creating sites changed — new: {sorted(found - set(_KNOWN_RUNNERS))}, "
+        f"gone: {sorted(set(_KNOWN_RUNNERS) - found)}. A new site assembles an agent env: "
+        "route it through apply_pull_mode_env and register it in _KNOWN_RUNNERS with the "
+        "assembler that feeds it (#3590)"
+    )
+
+
+def test_every_caller_of_the_provision_tail_applies_pull_env():
+    callers: dict[str, set[str]] = {}
+    for path in sorted(_SERVICES.rglob("*.py")):
+        rel = path.relative_to(_SERVICES).as_posix()
+        for fn in _functions(path):
+            if fn.name == _TAIL:
+                continue
+            calls = _calls_in(fn)
+            if _TAIL in calls:
+                callers[f"{rel}::{fn.name}"] = calls
+    assert len(callers) >= 2, f"the provision-tail scan found {sorted(callers)} — the scan is broken"
+    missing = sorted(name for name, calls in callers.items() if "apply_pull_mode_env" not in calls)
+    assert not missing, (
+        f"{missing} hand an env to the provision tail without calling apply_pull_mode_env — "
+        "a pilot built there runs no pull worker (#3590)"
+    )

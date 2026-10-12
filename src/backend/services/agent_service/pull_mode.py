@@ -49,9 +49,9 @@ from services.pull_pilot import (  # noqa: F401 — re-exported for back-compat
 logger = logging.getLogger(__name__)
 
 
-# The container env keys this module manages. Recreate (``lifecycle.py``) pops
-# these BEFORE re-applying ``pull_mode_env_vars`` so de-piloting an agent
-# actually clears the baked pull flag: ``pull_mode_env_vars`` returns ``{}`` for
+# The container env keys this module manages. ``apply_pull_mode_env`` pops these
+# BEFORE re-applying ``pull_mode_env_vars`` so de-piloting an agent actually
+# clears the baked pull flag: ``pull_mode_env_vars`` returns ``{}`` for
 # a non-pilot, so a bare ``.update()`` would leave a stale ``TRINITY_PULL_MODE=
 # true`` baked in and the worker would keep running after de-pilot (#1081 B1 —
 # mirrors the guardrails / stall-limit set-or-clear idiom in ``lifecycle.py``).
