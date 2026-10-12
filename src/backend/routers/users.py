@@ -27,6 +27,7 @@ from services.platform_audit_service import AuditEventType, platform_audit_servi
 from dependencies import (
     require_admin,
     get_current_user,
+    workspace_route,
     reject_non_interactive_principal,
     require_interactive,
 )
@@ -202,6 +203,10 @@ async def get_my_github_pat_status(current_user: User = Depends(get_current_user
 
     return {
         "configured": db.has_user_github_pat(current_user.id),
+        # #3164: present AND decryptable — what fork-to-own and repo binding can
+        # actually use. `configured` alone said "using your saved token" for a
+        # row that reads back as None, and the submit then got FORK_PAT_REQUIRED.
+        "usable": db.get_user_github_pat(current_user.id) is not None,
         # Lets the UI say "your agents fall back to the platform token" when the
         # user has none of their own but a global PAT exists.
         "has_global": bool(get_github_pat()),
@@ -277,6 +282,7 @@ async def clear_my_github_pat(current_user: User = Depends(require_interactive))
 
 
 @router.get("/me/preferences", response_model=UserPreferencesResponse)
+@workspace_route("the Workspace conversation reads the person's UI preferences")
 async def get_my_preferences(current_user: User = Depends(get_current_user)):
     """Every stored UI preference of the caller, in one round trip."""
     reject_non_interactive_principal(current_user)
@@ -284,6 +290,7 @@ async def get_my_preferences(current_user: User = Depends(get_current_user)):
 
 
 @router.put("/me/preferences/{key}", response_model=UserPreferenceRecord)
+@workspace_route("the Workspace conversation saves the person's UI preferences")
 async def put_my_preference(
     key: str,
     body: UserPreferenceWrite,

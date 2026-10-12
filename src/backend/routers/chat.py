@@ -14,6 +14,7 @@ from typing import NoReturn, Optional
 
 from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, TaskExecutionStatus
 from dependencies import (
+    capability_fence,
     get_current_user,
     get_authorized_agent,
     get_owned_agent,
@@ -763,7 +764,7 @@ async def get_agent_model(
         )
 
 
-@router.put("/{name}/model")
+@router.put("/{name}/model", dependencies=[Depends(capability_fence("agents.manage"))])
 async def set_agent_model(
     request: ModelChangeRequest,
     name: str = Depends(get_authorized_agent),

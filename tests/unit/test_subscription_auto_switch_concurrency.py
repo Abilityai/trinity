@@ -141,7 +141,9 @@ def _install_perform_spy(mod, db):
 
     async def spy(*, agent_name, old_subscription_name,
                   new_subscription, failure_kind, event_count,
-                  destination_headroom=None):
+                  destination_headroom=None, **_additive):
+        # `**_additive`: #3470 added `old_subscription_id` — a spy pinned to
+        # the exact keyword set would fail on every additive argument.
         calls.append(new_subscription.id)
         db._state["current"] = new_subscription.id  # the real assign side effect
         return {

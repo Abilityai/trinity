@@ -42,13 +42,31 @@
       <!-- Search -->
       <div class="relative">
         <svg class="w-4 h-4 text-gray-400 absolute left-3 top-2.5 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" /></svg>
+        <!-- ent#621 (follow-up): `⌘/` lands here (`focusSearch`, exposed for
+             the shell). The chord is shown three ways — `title`,
+             `aria-keyshortcuts`, and the key cap below — all read from the map. -->
         <input
+          ref="searchInput"
           :value="search"
           type="search"
+          :title="`${SEARCH_PLACEHOLDER} (${SEARCH_KEY_HINT})`"
+          :aria-keyshortcuts="SEARCH_KEY_SHORTCUTS"
           :placeholder="SEARCH_PLACEHOLDER"
           class="w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm pl-9 pr-3 py-2 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none"
           @input="$emit('update:search', $event.target.value)"
+          @focus="searchFocused = true"
+          @blur="searchFocused = false"
         />
+        <!-- Only while the field is empty and unfocused: it sits where the
+             field's own clear control appears, and a hint over what you are
+             typing is worse than none. Hidden below `sm`, where this sidebar is
+             the phone drawer and there is no keyboard to press it on. -->
+        <PortalKeyCap
+          v-if="!search && !searchFocused"
+          class="hidden sm:block absolute right-2.5 top-2 pointer-events-none"
+          data-testid="portal-sidebar-search-key"
+          aria-hidden="true"
+        >{{ SEARCH_KEY_HINT }}</PortalKeyCap>
       </div>
     </div>
 
@@ -175,9 +193,17 @@
                agent row's "needs you" mark — the same feed (`openAsks`) and
                the same hover words as the pinned Inbox row's, so the two read
                as one fact. -->
+          <!-- trinity-enterprise#836: an UNFILLED orange circle — a ring, the
+               count in urgent ink at the AA tier (700 light / 400 dark) — not
+               the filled pill (operator ask, 2026-10-07: "more alarming than it
+               needs to be"). Still a different SHAPE from the filled unread
+               pill beside it (principle 24), still counted, still named. The
+               pinned Inbox row and the Inbox's Action counter keep their filled
+               700 pills; the rail's Asks tab wears this same recipe
+               (`OverflowTabs` `urgent-outline`). -->
           <span
             v-if="askCountFor(a.name)"
-            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-700 text-white text-[11px] font-semibold flex items-center justify-center"
+            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full ring-1 ring-inset ring-status-urgent-600 dark:ring-status-urgent-400 text-status-urgent-700 dark:text-status-urgent-400 text-[11px] font-semibold tabular-nums flex items-center justify-center"
             :title="askBadgeTitle(askCountFor(a.name))"
             aria-hidden="true"
             data-testid="agent-ask-count"
@@ -228,7 +254,7 @@
              depends on who is looking — a platform user can go make an agent,
              an external client can only ask whoever invited them. -->
         <div v-if="!roster.length && !loadingRoster" class="px-2 py-3 text-xs text-gray-500 dark:text-gray-400">
-          <template v-if="isPlatformSession">
+          <template v-if="isPlatformSession && !workspaceOnly">
             No agents yet.
             <a href="/" class="text-action-primary-600 hover:underline">Create one →</a>
           </template>
@@ -306,6 +332,35 @@
             @toggle-star="$emit('toggle-star', t)"
           />
         </div>
+
+        <!-- ent#841: closed (archived) chats — nothing is deleted, and this is
+             where they are found again. Collapsed by default: they are out of
+             the way on purpose. Opening one reopens it as an active chat. -->
+        <div v-if="archived.length" class="mt-3" data-testid="sidebar-archived">
+          <button
+            type="button"
+            class="w-full flex items-center gap-1 px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide"
+            :class="META_INK"
+            :aria-expanded="archivedOpen"
+            data-testid="sidebar-archived-toggle"
+            @click="archivedOpen = !archivedOpen"
+          >
+            <svg class="w-3 h-3 transition-transform" :class="archivedOpen ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7" /></svg>
+            Archived · {{ archived.length }}
+          </button>
+          <template v-if="archivedOpen">
+            <ChatRow
+              v-for="t in archived"
+              :key="rowKey(t)"
+              :thread="t"
+              :active="isActive(t)"
+              :avatar-for="avatarFor"
+              :rename="rename"
+              @open="$emit('open-thread', t)"
+              @toggle-star="$emit('toggle-star', t)"
+            />
+          </template>
+        </div>
       </template>
     </div>
 
@@ -323,7 +378,7 @@
       </div>
       <!-- ent#621: the keys are only discoverable if something shows them, and
            a key chord cannot show itself. Mouse and touch reach the same list
-           the `⌘/` chord opens (the ent#261 `<kbd>` precedent). -->
+           the `⌥/` chord opens (the ent#261 `<kbd>` precedent). -->
       <button
         type="button"
         :class="FOOTER_BTN"
@@ -352,6 +407,7 @@
 import PortalSidebarProjectsLink from './projects/PortalSidebarProjectsLink.vue'
 import { computed, ref, watch } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalKeyCap from './PortalKeyCap.vue'
 import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
 import PortalInboxRow from './PortalInboxRow.vue'
@@ -402,6 +458,9 @@ const props = defineProps({
   // active row class, the auto-expand below, and `visibleAgentRows`' `keep`.
   activeAgentName: { type: String, default: null },
   isPlatformSession: { type: Boolean, default: false },
+  // trinity-enterprise#837: a `user` cannot make an agent, so the empty roster
+  // asks for a share instead of pointing at the operator UI.
+  workspaceOnly: { type: Boolean, default: false },
   // ent#661 — the roster's capability, and whether a Projects page is on screen.
   projectsAvailable: { type: Boolean, default: false },
   projectsActive: { type: Boolean, default: false },
@@ -431,11 +490,39 @@ const AGENT_KEY_HINT = keyHint(['agent-prev', 'agent-next'], KEY_PLATFORM)
 const AGENT_KEY_SHORTCUTS = keyShortcutsFor(['agent-prev', 'agent-next'], KEY_PLATFORM)
 const KEY_LIST_HINT = keyHint('key-list', KEY_PLATFORM)
 const KEY_LIST_SHORTCUTS = keyShortcutsFor('key-list', KEY_PLATFORM)
+const SEARCH_KEY_HINT = keyHint('search-focus', KEY_PLATFORM)
+const SEARCH_KEY_SHORTCUTS = keyShortcutsFor('search-focus', KEY_PLATFORM)
+
+// ent#621 (follow-up) — the search key's two questions, answered by the
+// instance that owns the field (the shell has two sidebars and asks the one on
+// screen). `select()` so a second search replaces the first without a
+// backspace; `searchHasFocus` is what lets a repeat press hand the caret back.
+const searchInput = ref(null)
+const searchFocused = ref(false)
+function focusSearch() {
+  const el = searchInput.value
+  if (!el) return false
+  el.focus()
+  el.select?.()
+  return true
+}
+function searchHasFocus() {
+  return !!searchInput.value && typeof document !== 'undefined' && document.activeElement === searchInput.value
+}
+defineExpose({ focusSearch, searchHasFocus })
 
 // #2258: the accessible name of the footer button, per principal kind.
 const signOutLabel = computed(() => signOutLabelFor(props.isPlatformSession))
 
-const split = computed(() => partitionStarred(props.threads))
+// ent#841: an archived chat is out of the active list — Starred included (a
+// closed starred chat keeps its star, and gets its pinned place back when it is
+// reopened) — and is listed once, under Archived, newest closed first.
+const activeThreads = computed(() => props.threads.filter((t) => !t.archived_at))
+const archived = computed(() => props.threads
+  .filter((t) => t.archived_at)
+  .sort((a, b) => String(b.archived_at).localeCompare(String(a.archived_at))))
+const archivedOpen = ref(false)
+const split = computed(() => partitionStarred(activeThreads.value))
 const starred = computed(() => split.value.starred)
 const grouped = computed(() => groupThreadsByDate(split.value.rest))
 
@@ -447,7 +534,8 @@ const waitingFor = (name) => waiting.value[name] || 0
 const asksStore = useClientPortalStore()
 // trinity-enterprise#610 (D13): the pinned Inbox row's two counts — `needs` is
 // `askCount` (pending asks), `came` is `totalUnread` over these threads.
-const inbox = computed(() => inboxCounts(props.threads, asksStore.openAsks))
+// trinity-enterprise#631: plus the tags not yet opened.
+const inbox = computed(() => inboxCounts(props.threads, asksStore.openAsks, asksStore.mentions))
 // #2424: the ask twin of `waiting`. Kept a separate map on purpose — see the
 // Inbox-row comment in the template.
 const asksPerAgent = computed(() => asksByAgent(asksStore.openAsks))

@@ -296,13 +296,27 @@ Content-Type: application/json
 }
 ```
 
-### MCP Tool
+### Per-agent PAT override
+
+An agent's own token sits on its **Git** tab under **GitHub Authentication** (**Configure** / **Change**, and **Clear agent PAT (revert to global)**). The agent must already have Git sync configured.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/agents/{name}/github-pat` | GET | Status only — `configured`, `source` (`agent` or `global`), `has_global`; never the token |
+| `/api/agents/{name}/github-pat` | PUT | Set the agent's token (body `{pat}`, owner-only). Validated against GitHub (`400` when rejected), encrypted at rest, and pushed into the running agent at once; the response's `note` says whether it applied live |
+| `/api/agents/{name}/github-pat` | DELETE | Clear it; the agent falls back to the global PAT. Restart the agent to apply the change |
+
+A stopped agent picks up a newly set token on its next start.
+
+### MCP Tools
 
 ```
 initialize_github_sync(agent_name, repo_owner, repo_name, create_repo?, private?, description?)
+get_agent_github_pat_status(agent_name)
+set_agent_github_pat(agent_name, pat)      # pass an empty string to clear
 ```
 
-Uses the configured PAT to create (by default, private) or connect a GitHub repository for the agent.
+`initialize_github_sync` uses the configured PAT to create (by default, private) or connect a GitHub repository for the agent. `get_agent_github_pat_status` and `set_agent_github_pat` read and set the per-agent override above; the status never includes the token.
 
 ## Troubleshooting
 

@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, capability_fence
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -528,6 +528,18 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     return agent_dict
 
 
+async def _require_create_capability(request: Request, current_user, config) -> None:
+    """trinity-enterprise#164: an agent creating a DURABLE agent needs
+    `agents.manage`. Spawning an ephemeral ("ghost") helper does not — ent#69
+    already bounds it (TTL, quota, the ephemeral key fence) and agents rely on
+    it (decided 2026-10-05). Humans pass by scope, as everywhere."""
+    if getattr(config, "ephemeral", None):
+        return
+    from dependencies import enforce_agent_capability
+    await enforce_agent_capability(request, current_user, "agents.manage",
+                                   target=getattr(config, "name", None))
+
+
 @router.post("")
 async def create_agent_endpoint(
     config: AgentConfig,
@@ -545,6 +557,8 @@ async def create_agent_endpoint(
     caller (2026-07-20 learning: another user's identical key must never replay
     a foreign create response).
     """
+    # Before the idempotency claim: a refused create must not hold a key.
+    await _require_create_capability(request, current_user, config)
     idem = None
     if idempotency_key:
         scope = f"agent_create:{current_user.id}"
@@ -628,7 +642,7 @@ async def create_agent_endpoint(
     return result
 
 
-@router.post("/deploy-local")
+@router.post("/deploy-local", dependencies=[Depends(capability_fence("agents.manage"))])
 async def deploy_local_agent(
     body: DeployLocalRequest,
     request: Request,
@@ -707,7 +721,7 @@ async def deploy_local_agent(
     return result
 
 
-@router.delete("/{agent_name}")
+@router.delete("/{agent_name}", dependencies=[Depends(capability_fence("agents.manage", ephemeral_target_exempt=True))])
 async def delete_agent_endpoint(agent_name: str, request: Request, current_user: User = Depends(get_current_user)):
     """Delete an agent."""
     # Check for system agent first - no one can delete these
@@ -1497,6 +1511,13 @@ async def send_voice_reply_endpoint(
 
     # Only user-facing channel turns have a deliverable voice destination.
     channel = execution.source_channel or execution.triggered_by
+    # #3232: a delegated child carries its parent's channel context only so its
+    # completion report (consent-gated, ent#224/ent#265) can find the way back.
+    # It must not speak into that conversation itself — this route has no
+    # proactive-consent check. `source_channel_agent` is set by inheritance and
+    # by nothing else (`turn_audience._is_delegated`), so non-NULL = inherited.
+    if getattr(execution, "source_channel_agent", None):
+        return {"delivered": False, "channel": channel, "reason": "delegated_turn"}
     if channel == app_config.PORTAL_SOURCE_CHANNEL:
         # #2157: the Workspace has no audio destination — but it is NOT text-only;
         # it narrates the agent's text whenever the client turns the speaker on.
@@ -1791,71 +1812,6 @@ async def agent_execution_result(
             execution_id, result.status, payload.terminal_reason,
         )
     return {"ok": True, "replayed": False, "status": result.status}
-
-
-# ============================================================================
-# Activity Stream Endpoints
-# ============================================================================
-
-@router.get("/{agent_name}/activities")
-async def get_agent_activities(
-    agent_name: AuthorizedAgentByName,
-    activity_type: Optional[str] = None,
-    activity_state: Optional[str] = None,
-    limit: int = 100
-):
-    """Get activity history for a specific agent."""
-    container = get_agent_container(agent_name)
-    if not container:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    activities = db.get_agent_activities(
-        agent_name=agent_name,
-        activity_type=activity_type,
-        activity_state=activity_state,
-        limit=limit
-    )
-
-    return {
-        "agent_name": agent_name,
-        "count": len(activities),
-        "activities": activities
-    }
-
-
-@router.get("/activities/timeline")
-async def get_activity_timeline(
-    start_time: Optional[str] = None,
-    end_time: Optional[str] = None,
-    activity_types: Optional[str] = None,
-    limit: int = 100,
-    current_user: User = Depends(get_current_user)
-):
-    """Get cross-agent activity timeline."""
-    types_list = activity_types.split(",") if activity_types else None
-
-    all_activities = db.get_activities_in_range(
-        start_time=start_time,
-        end_time=end_time,
-        activity_types=types_list,
-        limit=limit * 2
-    )
-
-    filtered_activities = []
-    for activity in all_activities:
-        agent_name = activity.get("agent_name")
-        if db.can_user_access_agent(current_user.username, agent_name):
-            filtered_activities.append(activity)
-            if len(filtered_activities) >= limit:
-                break
-
-    return {
-        "count": len(filtered_activities),
-        "start_time": start_time,
-        "end_time": end_time,
-        "activity_types": types_list,
-        "activities": filtered_activities  # Frontend expects "activities" (fixed 2026-01-15)
-    }
 
 
 # ============================================================================

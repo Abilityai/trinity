@@ -65,13 +65,21 @@ def _iso(dt: datetime) -> str:
 
 
 def _svc():
-    import services.subscription_headroom_service as headroom
-    return headroom
+    # `importlib.import_module` answers from `sys.modules` — the same object a
+    # production `from services.X import f` binds — never from a `services`
+    # package ATTRIBUTE that an earlier test's `monkeypatch.delitem(sys.modules,
+    # …)` + re-import left pointing at a different module object (#3470: the
+    # end-to-end turns patched `db` on the attribute's module while
+    # `execute_task` imported the walk from the sys.modules one, so the real
+    # `db` answered "no subscription" and the pool read as exhausted — only in
+    # full-suite order, never in isolation).
+    import importlib
+    return importlib.import_module("services.subscription_headroom_service")
 
 
 def _auto_switch():
-    import services.subscription_auto_switch as auto_switch
-    return auto_switch
+    import importlib
+    return importlib.import_module("services.subscription_auto_switch")
 
 
 def _sub(sid, *, agents=0, name=None):
@@ -408,7 +416,9 @@ class TestEarliestKnownReset:
 
     def test_it_picks_the_soonest_blocked_window(self, monkeypatch):
         auto_switch, svc = _auto_switch(), _svc()
-        soon, late = NOW + timedelta(hours=1), NOW + timedelta(days=3)
+        # Real-clock-relative since #3470: an instant already in the past is
+        # never reported (a stale snapshot keeps its instants for 7 days).
+        soon, late = _real_now() + timedelta(hours=1), _real_now() + timedelta(days=3)
         monkeypatch.setattr(
             svc, "cached_headroom_readings",
             lambda ids, **k: {
@@ -611,6 +621,9 @@ class TestTheTurnCompletesOnAnotherSubscription:
             r.status_code = status
             r.text = json.dumps(body)
             r.json.return_value = body
+            # #3470: a current agent image echoes the per-spawn credential it
+            # applied; without it the walk reads "old image" and commits nothing.
+            r.headers = {"X-Trinity-Auth-Override": "oauth_token"}
             if status >= 400:
                 r.raise_for_status.side_effect = httpx.HTTPStatusError(
                     f"HTTP {status}", request=MagicMock(), response=r,
@@ -630,10 +643,28 @@ class TestTheTurnCompletesOnAnotherSubscription:
 
         # --- the switcher's own world -------------------------------------
         sw_db = MagicMock(name="switch_db")
-        sw_db.get_agent_subscription_id.return_value = "sub-a"
+        # The assignment is STATE the switch mutates (#3470's commit re-reads it
+        # under the lock and refuses to commit over a concurrent move) — a
+        # constant return value would read every commit as "someone else moved
+        # the agent". Model the real assign side effect.
+        _assignment = {"current": "sub-a"}
+        sw_db.get_agent_subscription_id.side_effect = lambda name: _assignment["current"]
+        def _assign(name, sid, expected_subscription_id=None, **_kw):
+            # #3470: the commit is a compare-and-set on the turn's origin.
+            if "expected_subscription_id" in _kw or expected_subscription_id is not None:
+                if _assignment["current"] != expected_subscription_id:
+                    return False
+            _assignment["current"] = sid
+            return True
+        sw_db.assign_subscription_to_agent.side_effect = _assign
         sw_db.record_rate_limit_event.return_value = 1
         sw_db.get_setting_value.return_value = "true"
-        sw_db.get_subscription.return_value = _sub("sub-a", name="A")
+        # By id, not one row for every id: #3470 commits the subscription that
+        # SERVED, and the notification must name it rather than the origin.
+        _by_id = {s.id: s for s in [_sub("sub-a", name="A"), *(viable or []), *(refused or [])]}
+        sw_db.get_subscription.side_effect = lambda sid: _by_id.get(sid)
+        sw_db.get_subscription_token.return_value = "tok"
+        sw_db.list_subscriptions.return_value = list(_by_id.values())
         # `pre_limited` is the pre-dispatch evidence arm: the platform's own 2h
         # 429 record says the ASSIGNED subscription cannot serve, so the switch
         # happens before the first attempt rather than after a refusal.
@@ -754,7 +785,13 @@ class TestTheTurnCompletesOnAnotherSubscription:
         the portal's job is to say WHEN it can be retried."""
         result, sw_db, Status = self._run_turn(monkeypatch, viable=[], refused=[])
         assert result.status == Status.FAILED
-        assert result.subscription_switch is None
+        # #3470: the result now carries the walk's trail even when nothing
+        # could be switched — the assignment did NOT change, the pool is
+        # exhausted, and exactly one credential was tried.
+        assert result.subscription_switch["switched"] is False
+        assert result.subscription_switch["exhausted"] is True
+        assert len(result.subscription_switch["attempts"]) == 1
+        assert "Tried:" in result.error
         # The assertion that would have caught the inert client-facing half: a
         # subscription usage limit arrives as 429, and until #2638's review that
         # produced `error_code = None` because only 503 was classified. The
@@ -769,28 +806,31 @@ class TestTheTurnCompletesOnAnotherSubscription:
         assert result.error_code.value == "billing"
         assert result.error_code.name == "BILLING"
 
-    def test_a_pre_dispatch_switch_spends_the_turns_one_remediation(self, monkeypatch):
-        """The turn's budget is ONE switch, and the pre-dispatch path spends it.
+    def test_a_pre_dispatch_switch_feeds_the_walk_and_the_origin_is_never_retried(self, monkeypatch):
+        """#3470 reframes the #2638 one-remediation rule: the pre-dispatch
+        switch is the walk's FIRST step, not its only one.
 
-        Before the review fix the pre-dispatch arm set `subscription_switch`
-        but not `subscription_switch_attempted`, so a turn moved before its
-        first attempt and refused again would switch a SECOND time, re-issue,
-        and burn a further rate-limit event — churning towards a third
-        never-used subscription, which is the cascade the flag exists to stop.
-
-        Here the assigned subscription is already known limited, so the switch
-        happens up front; the destination then refuses too. One switch, one
-        notification, and the turn ends FAILED rather than being retried.
+        The assigned subscription A is already known limited, so the agent is
+        moved to B before the first attempt. B refuses too. Before #3470 the
+        turn ended FAILED here ("one switch per turn"). Now the walk continues
+        to C — excluding A (the known-refused origin, so it is never retried)
+        and B (just refused) — and the turn completes. Two assignment changes,
+        two notifications, three dispatches at most, and A is never dispatched.
         """
         result, sw_db, Status = self._run_turn(
-            monkeypatch, viable=[_sub("sub-b", name="B")], pre_limited=True,
+            monkeypatch, viable=[_sub("sub-b", name="B"), _sub("sub-c", name="C")],
+            pre_limited=True,
         )
-        assert result.status == Status.FAILED
-        # It DID move, and the caller can still see where — that half is AC#5.
-        assert result.subscription_switch["new_subscription"] == "B"
-        # ...but only once. Two switches would be two notifications and a
-        # second dispatch, which would have come back SUCCESS.
-        assert sw_db.create_notification.call_count == 1
+        assert result.status == Status.SUCCESS
+        # The caller sees where the turn ended up (AC#5) — the subscription
+        # that SERVED, not the pre-dispatch destination that refused.
+        assert result.subscription_switch["new_subscription"] == "C"
+        attempts = result.subscription_switch["attempts"]
+        assert [a["on"] for a in attempts] == ["B"], attempts
+        # Pre-dispatch switch A→B, then the commit B→C: one notification each.
+        assert sw_db.create_notification.call_count == 2
+        # A was evacuated pre-dispatch and is excluded from every later pick.
+        assert "sub-a" in result.subscription_switch["tried_subscription_ids"]
 
 
 # =============================================================================

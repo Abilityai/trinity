@@ -148,6 +148,7 @@ class TestCreateExecution:
             "source_channel_chat_id": "C1", "source_channel_thread": "T1",
             "source_channel_agent": "binder", "source_channel_client": "client@example.com",
             "open_canvas_id": "canvas-1", "chain_depth": 2,
+            "source_host": "100.70.1.2",
         }
         # Guard the guard: this test covers every field the object has.
         assert set(values) == {f.name for f in dataclasses.fields(TaskExecutionFields)}

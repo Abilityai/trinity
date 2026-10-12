@@ -5,7 +5,7 @@ Run Trinity on a Linux VPS or dedicated server with a stable URL. Two install me
 - **Option A — prebuilt images** (`./scripts/deploy/start.sh --hosted`): every platform image and the agent base image are pulled from GHCR. A fresh VM is serving in about two minutes. **This is the path you want on a server.**
 - **Option B — build from source** (`docker compose -f docker-compose.prod.yml`): the server compiles its own images, including the ~1.9 GB agent base image (5–10 minutes). Use it when you carry local patches or the enterprise overlay.
 
-Both use the production compose shape: no hot-reload, health checks and `unless-stopped` restart policies on every service, Redis off the agent network. Two more paths are Option A on a DigitalOcean Droplet: the [Marketplace 1-Click](#digitalocean-marketplace-1-click) (a snapshot with the images already pulled) and the [installer script](#digitalocean-installer-script) (creates a stock Droplet from your terminal). Both provision Docker, Caddy with an HTTPS certificate for the Droplet's own IP, and a host firewall before running the same `start.sh --hosted`.
+Both use the production compose shape: no hot-reload, health checks and `unless-stopped` restart policies on every service, Redis off the agent network. The cloud paths are Option A with the machine prepared for you: on DigitalOcean, the [Marketplace 1-Click](#digitalocean-marketplace-1-click) (a snapshot with the images already pulled) and the [installer script](#digitalocean-installer-script) (creates a stock Droplet from your terminal); on AWS, a script install on your own EC2 instance or the CloudFormation template ([Deploy on AWS](aws.md)); on [Vultr](#vultr), the same script. Each provisions Docker, Caddy with an HTTPS certificate for the instance's own IP, and a host firewall before running the same `start.sh --hosted`.
 
 ## Prerequisites
 
@@ -23,7 +23,7 @@ Trinity ships **three complete stacks**, not one base file plus overlays. `docke
 |---|---|---|
 | Dev (source build, localhost) | `./scripts/deploy/start.sh` — i.e. `docker compose up -d` (auto-merges `docker-compose.override.yml` if present) | named volume `trinity-data` |
 | Production (source build) | `docker compose -f docker-compose.prod.yml up -d` (+ `-f docker-compose.prod.enterprise.yml` with the enterprise submodule) | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
-| Hosted (prebuilt GHCR images) | `./scripts/deploy/start.sh --hosted` — day-two: `docker compose -f docker-compose.hosted.yml …` | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
+| Hosted (prebuilt GHCR images) | `./scripts/deploy/start.sh --hosted` — day-two: `docker compose -f docker-compose.hosted.yml …` | bind mount `${TRINITY_DATA_PATH:-./trinity-data}`, plus the named volume `postgres-data` for the bundled PostgreSQL |
 
 The remaining files are narrow overlays and never a third stack: `docker-compose.override.example.yml` (the Docker Desktop Vector log source — `start.sh` copies it to `docker-compose.override.yml` on Docker Desktop and appends it by name under `--hosted`), `docker-compose.gitea.yml` (dev-only: a local Gitea for git-sync testing, layered on the dev file), `docker-compose.prod.enterprise.yml` (layers the private enterprise submodule onto prod), and `docker-compose.sibling.yml` (a Redis-only stack for integration tests).
 
@@ -40,14 +40,15 @@ cp .env.example .env
 
 # Pin the release you want, in .env — `latest` moves on every Trinity release,
 # so an unpinned install turns your next re-run into an unscheduled upgrade.
-echo 'TRINITY_IMAGE_TAG=v0.9.0' >> .env
+echo 'TRINITY_IMAGE_TAG=v0.9.5' >> .env
 
 ./scripts/deploy/start.sh --hosted --unattended
 ```
 
 What `--hosted` changes, and nothing else:
 
-- **Compose file.** `docker-compose.hosted.yml` — `docker-compose.prod.yml` with every `build:` block replaced by a GHCR `image:` reference. Same ports, volumes, networks, `.env` keys and security posture; a CI guard fails the build if the two files ever disagree.
+- **Compose file.** `docker-compose.hosted.yml` — `docker-compose.prod.yml` with every `build:` block replaced by a GHCR `image:` reference. Same ports, volumes, networks, `.env` keys and security posture; a CI guard fails the build if the two files ever disagree. The one deliberate difference is the database (next bullet).
+- **Database.** The hosted file adds a bundled PostgreSQL service (`trinity-postgres`, `postgres:16-alpine`, on the platform network only — agents cannot reach it). `start.sh --hosted` generates `POSTGRES_PASSWORD` into `.env`. On a fresh install it also writes a `DATABASE_URL` pointing at the bundled server. On an install that already has a `trinity.db` it writes an empty `DATABASE_URL=` instead, so the install stays on SQLite and prints a pointer to the migration guide. A `DATABASE_URL` you set yourself is never touched. Details: [Database backend](#database-backend).
 - **Image tag.** `TRINITY_IMAGE_TAG` selects the image set (default `latest`). Precedence: a value in the shell or CI → `.env` → `latest`. Put it in `.env`: that is where the pin survives a reboot and whoever runs the next upgrade. Each release publishes `v0.9.0`, `0.9.0`, `0.9`, `latest` and `sha-<short>` for one digest, so either version spelling works. A pre-release tag (for example `v0.9.5-rc1`) publishes its own tags but never moves `latest`.
 - **Agent base image.** The backend creates agent containers from the local tag `trinity-agent-base:latest`, which is not a compose service. `start.sh --hosted` pulls `ghcr.io/abilityai/trinity-agent-base:<tag>` and tags it locally before bringing the stack up. A bare `docker compose -f docker-compose.hosted.yml up -d` starts a platform that cannot create a single agent and does not fail until the first agent-create.
 - **No fallback to building.** A failed pull is fatal and the message names the likely causes: the tag is not published (check the release list), the GHCR package is private (`denied` / `unauthorized` — a publishing fault, report it), or no route to `ghcr.io`. Drop `--hosted` to build from source instead.
@@ -182,23 +183,35 @@ The automatic database backups land in `backups/` under this directory — see [
 
 #### Database backend
 
-Trinity stores platform state in **SQLite** by default, in `trinity.db` under your `TRINITY_DATA_PATH` bind mount (`/data/trinity.db` inside the container). SQLite works with zero configuration — but **PostgreSQL is the recommended backend for production**, and **SQLite support ends September 1, 2026** (after that date it stops receiving schema migrations and fixes).
+SQLite reached **end-of-support on September 1, 2026**: it no longer receives schema migrations or fixes. **PostgreSQL is the backend for every new server install.**
 
-To run on PostgreSQL, set one variable in `.env`:
+**Hosted installs** (`start.sh --hosted`, and every one-click image) start on the PostgreSQL service bundled in `docker-compose.hosted.yml` (releases after v0.9.5). You configure nothing: `start.sh --hosted` generates `POSTGRES_PASSWORD` and writes the matching `DATABASE_URL` to `.env`. How the hosted file reads `DATABASE_URL`:
+
+| `.env` line | Database |
+|---|---|
+| No `DATABASE_URL` line | The bundled PostgreSQL |
+| `DATABASE_URL=` (present, empty) | SQLite, in `trinity.db` under `TRINITY_DATA_PATH` |
+| `DATABASE_URL=postgresql://…` | That server — bundled or one you operate |
+
+An existing hosted install that already has a `trinity.db` is **not** moved: the first `start.sh --hosted` run after upgrading writes `DATABASE_URL=` so the platform never boots an empty PostgreSQL beside your populated SQLite file, and it prints a warning on every run until you migrate. The `trinity-postgres` container still starts, idle.
+
+> **Never lose `POSTGRES_PASSWORD`.** The PostgreSQL image applies the password only when it initialises an empty volume. If the `postgres-data` volume exists but `.env` has no `POSTGRES_PASSWORD`, `start.sh --hosted` refuses to run rather than generate a new one that cannot open your data. Back it up with the rest of `.env`.
+
+**Source-built production** (`docker-compose.prod.yml`) ships no PostgreSQL service. Point `DATABASE_URL` at an operator-managed instance (a managed cloud database or your own server):
 
 ```
 DATABASE_URL=postgresql://trinity:your-postgres-password@your-db-host:5432/trinity
 ```
 
-Both the backend and the scheduler pick it up (`DB_POOL_SIZE` and `DB_MAX_OVERFLOW` tune the pool; both default sensibly). Notes for the prod and hosted compose:
+Notes for both server files:
 
-- Neither ships a **bundled PostgreSQL service** — point `DATABASE_URL` at an operator-managed instance (a managed cloud database or your own PostgreSQL server). The bundled `--profile postgres` container exists only in the dev compose.
-- Selection is non-sticky and non-destructive: comment `DATABASE_URL` out and the next restart is back on SQLite.
+- Both the backend and the scheduler pick it up (`DB_POOL_SIZE` and `DB_MAX_OVERFLOW` tune the pool; defaults 10 and 20).
+- On prod, selection is non-sticky and non-destructive: comment `DATABASE_URL` out and the next restart is back on SQLite. On hosted, an absent line means the bundled PostgreSQL, so use `DATABASE_URL=` to select SQLite.
 - A fresh PostgreSQL database is initialized automatically on first boot (Alembic-managed migrations).
-- **Migrating an existing SQLite instance?** Use the Trinity Ops Agent's `/migrate-to-postgres` skill ([ops-agent guide](ops-agent.md)) — a validate-then-cutover flow that never writes to your SQLite file, so rollback is one line. New-instance setup details: `docs/POSTGRESQL_SETUP.md` in the repo.
+- **Migrating an existing SQLite instance?** Use the Trinity Ops Agent's `/migrate-to-postgres` skill ([ops-agent guide](ops-agent.md)) — a validate-then-cutover flow that never writes to your SQLite file, so rollback is one line. The repo's `docs/migrations/SQLITE_TO_POSTGRES.md` covers the manual path, including moving a hosted install onto its bundled server. New-instance setup details: `docs/POSTGRESQL_SETUP.md`.
 - On PostgreSQL, the automatic backups are `pg_dump` archives, and a manual backup is `pg_dump` too — never a copy of `trinity.db`. See [Backup and Restore](backup-and-restore.md).
 
-On every backend boot, a versioned migration runner brings the schema up to date (the bespoke SQLite runner or Alembic for PostgreSQL). The runner is crash-safe and concurrency-safe: a cross-process lock serialises it so multiple workers and the scheduler cannot race each other, and table rebuilds run inside a transaction that rolls back cleanly on a mid-migration crash. If a migration is still pending or has failed, the backend's `/health` endpoint returns `503` with a `migrations` block (`applied`, `expected`, `first_pending`) naming the stuck migration — so a 503 from `curl http://localhost:8000/health` during an upgrade is actionable, not opaque. Before any migration runs, the backend takes a `pre-migration-<timestamp>.db` copy (SQLite) into `backups/`.
+On every backend boot, a versioned migration runner brings the schema up to date (the bespoke SQLite runner or Alembic for PostgreSQL). The runner is crash-safe and concurrency-safe: a cross-process lock serialises it so multiple workers and the scheduler cannot race each other, and table rebuilds run inside a transaction that rolls back cleanly on a mid-migration crash. If a migration is still pending or has failed, the backend's `/health` endpoint returns `503` with a `migrations` block (`applied`, `expected`, `first_pending`) naming the stuck migration — so a 503 from `curl http://localhost:8000/health` during an upgrade is actionable, not opaque. On SQLite, the backend takes a `pre-migration-<timestamp>.db` copy into `backups/` before any migration runs.
 
 ### 3. Build the Base Agent Image
 
@@ -225,7 +238,7 @@ Open your domain (or `http://your-server-ip`, or `http://your-server-ip:$FRONTEN
 - **Username:** `admin` (or `ADMIN_USERNAME` if you changed it)
 - **Password:** the `ADMIN_PASSWORD` you set in `.env` (re-applied on every backend boot — change it there, not in the UI, then recreate the backend container with `docker compose -f <file> up -d backend`; a plain `restart` does not re-read `.env`)
 
-There is no setup wizard on a server install: setting `ADMIN_PASSWORD` provisions the admin account during startup, and the unauthenticated first-run form refuses to run once a usable admin exists. The one exception is a Marketplace 1-Click Droplet created without a password, which deliberately boots with no admin and is claimed in the browser — see [DigitalOcean 1-Click](#digitalocean-marketplace-1-click). What you see instead is the Dashboard with a fresh install's starter fleet and the first-run setup sequence — a **Sign-in email** step (so you can log in with email + password), the required **Connect Claude** step, and optional keys — see [First-Time Setup](../../getting-started/setup.md).
+There is no setup wizard on a server install: setting `ADMIN_PASSWORD` provisions the admin account during startup, and the unauthenticated first-run form refuses to run once a usable admin exists. The exceptions are installs that deliberately boot with no admin: a Marketplace 1-Click Droplet created without a password, claimed in the browser — see [DigitalOcean 1-Click](#digitalocean-marketplace-1-click) — and an AWS install without one, claimed with the EC2 instance ID — see [Deploy on AWS](aws.md). What you see instead is the Dashboard with a fresh install's starter fleet and the first-run setup sequence — a **Sign-in email** step (so you can log in with email + password), the required **Connect Claude** step, and optional keys — see [First-Time Setup](../../getting-started/setup.md).
 
 After login, go to **Settings → Access → Email Whitelist** to allow team members to log in via email verification.
 
@@ -305,7 +318,7 @@ Trinity serves plain HTTP and terminates TLS **outside** the application. There 
 | **Private network** (Tailscale / WireGuard / VPC) | Encrypted transport, instance not on the public internet | HTTP over a WireGuard tunnel is encrypted — this is a finished posture, not a compromise. |
 | **Reverse proxy you run** (Caddy / nginx + Let's Encrypt) | HTTPS at your own domain | You already operate a proxy, or you need a domain the tunnel can't serve. |
 
-Plain HTTP on a public IPv4 with none of the above is the one combination to avoid: credentials and JWTs cross the network in the clear. A provisioned DigitalOcean Droplet — the 1-Click or the installer script below — is the deliberate exception: it ships its own Caddy with a short-lived certificate for the Droplet's IP, and the first-run setup then prompts you to add a domain and a tunnel. Tunnel setup: [Public Access](public-access.md).
+Plain HTTP on a public IPv4 with none of the above is the one combination to avoid: credentials and JWTs cross the network in the clear. An instance prepared by `start.sh --provision` — the DigitalOcean 1-Click and installer script below, an [AWS](aws.md) install, or a [Vultr](#vultr) install — is the deliberate exception: it ships its own Caddy with a short-lived certificate for the instance's IP, and the first-run setup then prompts you to add a domain and a tunnel. Tunnel setup: [Public Access](public-access.md).
 
 ## DigitalOcean Marketplace 1-Click
 
@@ -325,6 +338,8 @@ Prefer to choose the admin password before the Droplet exists? `trinity-do-creat
 
 The baked images occupy a significant share of the disk before any agent exists; agent workspaces grow from there. Disk can be increased on a running Droplet, never decreased.
 
+On a 2-vCPU size, an agent configured for more CPUs than the host has runs at the host's count instead: Docker refuses a CPU limit above the host's CPU count, so Trinity caps it and logs a warning. The built-in system agent asks for 4 CPUs and is capped the same way.
+
 ### What first boot does
 
 First boot runs once per Droplet, about ninety seconds, with no input from you:
@@ -337,7 +352,7 @@ First boot runs once per Droplet, about ninety seconds, with no input from you:
 
 ### Claim the admin account
 
-Open `https://<droplet-ip>` as soon as the Droplet is up. You land on a **Create your admin account** form: enter your email (it becomes your sign-in identity), choose a password (12+ characters with uppercase, lowercase, a digit and a special character), and you are signed straight in. No terminal, no console, no password to copy.
+Open `https://<droplet-ip>` as soon as the Droplet is up. You land on a **Create your admin account** form: enter your email (it becomes your sign-in identity), choose a password (12+ characters with uppercase, lowercase, a digit and a special character), and you are signed straight in. No terminal, no console, no password to copy. Creating the admin also deploys the built-in system agent (`trinity-system`) in the background, so it appears on the Dashboard shortly after you sign in.
 
 > **The window between creating the Droplet and that first visit is the accepted risk of this path: anyone who finds the IP first can claim the instance.** It holds nothing at that moment and can simply be destroyed and recreated. To keep the window short, open the URL right after creating the Droplet (first boot takes about ninety seconds), or restrict port 443 to your own IP with a cloud firewall until you have claimed it (leave 80 open — Let's Encrypt validates the IP certificate over it, and it serves only a redirect). If a Droplet you have never opened shows the **login** page instead of the form, someone else got there first: destroy it and create another.
 
@@ -416,6 +431,24 @@ The installer does not ask for a Claude credential. When you first sign in, the 
 
 The install records `do-script` as its provenance, so the first-run **Secure this instance** step appears exactly as on the 1-Click. Day-two operations are identical — see [Managing the Droplet](#managing-the-droplet). The script pins the release it was fetched from; set `TRINITY_IMAGE_TAG` in the environment before running it to pick another.
 
+## AWS
+
+Three ways onto EC2 share the same installer (`start.sh --provision --cloud aws`): a script install on your own Ubuntu 24.04 instance, a CloudFormation stack, and an AWS Marketplace listing (pending). With no admin password supplied, the setup page asks for the instance's **EC2 instance ID** before it creates the admin, so someone who finds the IP cannot claim it. A timer follows a changed public IP after a stop/start. Step by step: [Deploy on AWS](aws.md).
+
+## Vultr
+
+The same provisioning runs on a Vultr instance (Ubuntu 24.04, 8 GB plan or larger, with a public IPv4). As root, on a fresh instance:
+
+```bash
+git clone --depth 1 --branch <release-tag> https://github.com/abilityai/trinity.git /opt/trinity
+cd /opt/trinity
+./scripts/deploy/start.sh --provision --cloud vultr --hosted --unattended
+```
+
+It reads the public IP from Vultr's metadata service, installs Docker, Caddy with the IP certificate and the host firewall, then installs Trinity. Use a release that includes Vultr support: v0.9.5 and earlier stop with `unsupported --cloud 'vultr'`. With no `ADMIN_PASSWORD` in the environment or `.env`, `--unattended` generates one and prints it in the final summary. The install records `script` as its provenance, which does not show the first-run **Secure this instance** step, so add a domain and a tunnel by following [Hardening a Marketplace Install](hardening.md) directly. Day-two commands are the ones in [Managing the Droplet](#managing-the-droplet), run from `/opt/trinity`.
+
+A Vultr Marketplace app is prepared as an imageless listing: Vultr runs a first-boot script on a stock Ubuntu 24.04, which installs the latest stable release (about four minutes) and leaves the admin to be claimed in the browser, like the DigitalOcean 1-Click. Its install log is `/var/log/trinity-install.log`, and `/etc/trinity/ready` or `/etc/trinity/firstboot-failed` records the outcome.
+
 ## `.env` reference
 
 Every key in `.env.example`, with the compose files that forward it. **A key a compose file does not forward does nothing on that install.** Legend: `dev` = `docker-compose.yml`, `prod` = `docker-compose.prod.yml`, `hosted` = `docker-compose.hosted.yml`. Keys marked "commented" ship commented out in `.env.example` and take effect only when you uncomment them.
@@ -431,7 +464,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `AGENT_AUTH_SECRET` | dev · prod · hosted | Master for per-agent in-container auth tokens. Generated if blank; never rotate. |
 | `ADMIN_USERNAME` | dev · prod · hosted | Admin account username (default `admin`). |
 | `ADMIN_PASSWORD` | dev · prod · hosted | Admin password; also the MCP server's legacy password auth. Prod refuses to render if unset or blank; hosted refuses only unset (blank is the marketplace browser-claim path). |
-| `ADMIN_PASSWORD_SOURCE` (commented) | hosted | `browser` marks a deliberately blank `ADMIN_PASSWORD` on a marketplace image: no admin is provisioned and the first visitor creates one at `/setup`. Written by first boot; leave unset on every other install (a blank password without it is refused). |
+| `ADMIN_PASSWORD_SOURCE` (commented) | hosted | `browser` marks a deliberately blank `ADMIN_PASSWORD` on a marketplace image: no admin is provisioned and the first visitor creates one at `/setup`. `instance-id` is the AWS variant: `/setup` also asks for the EC2 instance ID. Written by provisioning; leave unset on every other install (a blank password without it is refused). |
 | `ANTHROPIC_API_KEY` | dev · prod · hosted | Platform-wide Claude API key for agents (or set it in Settings). |
 | `PUBLIC_ACCESS_REQUESTS_ENABLED` | dev · prod · hosted | `true` lets anyone reaching the backend add their own email to the login whitelist (`POST /api/access/request`). Default `false`. |
 | `DOCKER_GID` | dev · prod · hosted | Group of the Docker socket inside the backend container (default `999`; `start.sh` detects it). |
@@ -471,6 +504,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET` | prod · hosted | Slack OAuth app. |
 | `SLACK_SIGNING_SECRET` | dev · prod · hosted | Verifies Slack webhook requests. |
 | `SLACK_SOCKET_CONNECTION_COUNT` | dev · prod · hosted | Concurrent Slack Socket Mode connections (1–10, default 2). |
+| `TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES` / `TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS` | dev · prod · hosted | How much recent group conversation a tagged Telegram turn carries (defaults 40 messages, 24 hours). |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | prod · hosted | GitHub OAuth app. |
 | `GITHUB_PAT` | dev · prod · hosted | Platform PAT for cloning private template repos. |
 | `TRINITY_GIT_BASE_URL` / `TRINITY_GIT_API_BASE` (commented) | gitea overlay only | Self-hosted git (GitHub Enterprise, Gitea); active only under `-f docker-compose.gitea.yml`. |
@@ -498,6 +532,9 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | Key | Forwarded by | What it does |
 |---|---|---|
 | `REPORT_RATE_LIMIT` | dev · prod · hosted | Structured reports an agent may create per 60 s. |
+| `METRICS_RATE_LIMIT` / `METRICS_READ_RATE_LIMIT` / `OBJECTIVES_READ_RATE_LIMIT` | dev · prod · hosted | Per-agent metric writes, metric reads and objective reads per 60 s. |
+| `METRICS_RETENTION_DAYS` / `METRICS_DAILY_POINT_CAP` (commented) | dev · prod · hosted | Metric point retention (default 365 days) and per-agent daily cap (default 100,000). Fallbacks: a value saved in **Settings → Retention** wins. Setting one here pins it and makes that row read-only. |
+| `INTER_AGENT_MAX_CHAIN_DEPTH` (commented) | dev · prod · hosted | Agent-to-agent hops one call chain may take (1–32, default 8). A fallback, like the metric knobs. |
 | `CANVAS_MAX_PER_AGENT` | dev · prod · hosted | Canvases an agent may hold before writes are refused (default 100). |
 | `PORTAL_CHAT_BURST_LIMIT` / `PORTAL_CHAT_HOURLY_LIMIT` | dev · prod · hosted | Workspace chat sends per (email, agent). |
 | `PORTAL_UPLOAD_BURST_LIMIT` / `PORTAL_UPLOAD_HOURLY_LIMIT` | dev · prod · hosted | Workspace uploads per email. |
@@ -508,6 +545,8 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `WEBHOOK_RATE_LIMIT` / `WEBHOOK_IP_RATE_LIMIT` / `WEBHOOK_MAX_BODY_BYTES` | dev · prod · hosted | Public webhook trigger limits. |
 | `REMINDER_MESSAGE_MAX_CHARS` / `REMINDER_MIN_DELAY_SECONDS` / `REMINDER_MAX_DELAY_SECONDS` / `MAX_PENDING_REMINDERS_PER_AGENT` / `MAX_REMINDERS_PER_AGENT_PER_DAY` / `REMINDER_RATE_LIMIT` | dev · prod · hosted | Agent self-reminder caps. |
 | `OPERATOR_QUEUE_MAX_PENDING_PER_AGENT` / `OPERATOR_QUEUE_CREATE_RATE_LIMIT` / `OPERATOR_QUEUE_CREATE_RATE_WINDOW` / `OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT` / `OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE` / `OPERATOR_QUEUE_MAX_FILE_BYTES` / `OPERATOR_QUEUE_TITLE_MAX` / `OPERATOR_QUEUE_QUESTION_MAX` / `OPERATOR_QUEUE_CONTEXT_MAX_BYTES` / `OPERATOR_QUEUE_OPTIONS_MAX_BYTES` / `OPERATOR_QUEUE_MAX_OPTIONS` / `OPERATOR_QUEUE_OPTION_MAX_CHARS` / `OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS` / `OPERATOR_QUEUE_PROPOSAL_MAX_BYTES` / `OPERATOR_QUEUE_ID_MAX` / `OPERATOR_QUEUE_EXECUTION_ID_MAX` / `OPERATOR_QUEUE_EMAIL_MAX` / `OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS` / `OPERATOR_ALERT_MAX_PENDING_PER_TYPE` | dev · prod · hosted | Operator-queue ingestion caps (bound a runaway agent). |
+| `OPERATOR_PLATFORM_ALERT_LIFETIME_DAYS` / `OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS` | dev · prod · hosted | A platform alert expires this many days after its last reading (default 14); once a person ends one, the same reading files nothing for this many days unless its priority rises (default 7). |
+| `NEVERMINED_MAX_INFLIGHT` / `NEVERMINED_FACILITATOR_WAIT_SECONDS` | dev · prod · hosted | Fleet-wide ceiling on concurrent payment verify/settle calls (default 8) and how long a call waits for a slot before answering "busy, retry" (default 5 s). |
 
 ### Install identity, URLs, ports, data
 
@@ -520,6 +559,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `PUBLIC_CHAT_URL` | dev · prod · hosted | External base URL for public chat links and webhooks. |
 | `TRINITY_IMAGE_TAG` | hosted | Which published image set to pull (default `latest`). Ignored by source builds. |
 | `TUNNEL_TOKEN` | prod · hosted | Cloudflare Tunnel token; the `cloudflared` service is profile-gated. |
+| `PRIVATE_NETWORK_CIDRS` | none — read by `start.sh --provision` | Source ranges served over plain HTTP by the Caddy that provisioning installs (a VPN-only instance). Empty = every HTTP request redirects to HTTPS. Apply a change with `--caddy-only` — see [Hardening](hardening.md#reaching-the-ui-over-the-tailnet). |
 | `SSH_HOST` | dev · prod · hosted | Host advertised for agent SSH access (auto-detected from `FRONTEND_URL` when empty). |
 | `TRINITY_DATA_PATH` | prod · hosted | Bind-mount directory for `/data` (default `./trinity-data`). Dev uses a named volume. |
 | `HOST_TEMPLATES_PATH` | prod · hosted | Host path of the agent-template directory when compose runs outside the repo root. |
@@ -538,9 +578,9 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 
 | Key | Forwarded by | What it does |
 |---|---|---|
-| `DATABASE_URL` (commented) | dev · prod · hosted | `postgresql://…` switches the backend and scheduler to PostgreSQL; unset = SQLite. |
+| `DATABASE_URL` (commented) | dev · prod · hosted | `postgresql://…` switches the backend and scheduler to PostgreSQL. Dev and prod: unset = SQLite. Hosted: unset = the bundled PostgreSQL, empty = SQLite (see [Database backend](#database-backend)). Keep the `.env.example` line commented: `start.sh --hosted` treats any uncommented line, even an empty one, as a choice already made. |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` (commented) | dev · prod · hosted | PostgreSQL connection pool (defaults 10 / 20). |
-| `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` (commented) | dev only (`--profile postgres`) | Credentials of the bundled dev PostgreSQL container. |
+| `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` (commented) | dev (`--profile postgres`) · hosted | Credentials of the bundled PostgreSQL container. Hosted fixes the database and user at `trinity` and requires `POSTGRES_PASSWORD` (`start.sh --hosted` generates it). |
 
 ### Logs, backups, retention
 

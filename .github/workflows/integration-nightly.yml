@@ -7,9 +7,8 @@ name: integration-nightly
 # so they gated nothing — the sibling of #1895 (which relocates the files that
 # can pass under `tests/unit/`).
 #
-# Membership is directory-based, not a file list: `--ignore=unit
-# --ignore=process_engine`, exactly as `tests/run-core.sh:22` already defines
-# it. So every file #1895 relocates leaves this job's scope automatically and
+# Membership is directory-based, not a file list: `--ignore=unit`, exactly
+# as `tests/run-core.sh` already defines it. So every file #1895 relocates leaves this job's scope automatically and
 # this workflow needs no edit — which is also why this did not have to wait for
 # #1895 to land, despite the issue's sequencing note.
 #
@@ -261,7 +260,7 @@ jobs:
               teardown_stack
               return 1
             fi
-            # Membership matches tests/run-core.sh:22 — directory-based, so
+            # Membership matches tests/run-core.sh — directory-based, so
             # #1895's relocations shrink this automatically.
             # `-m "not slow"`: the 99 slow-marked tests are excluded to keep the
             # budget above honest; they are a documented gap, not an oversight.
@@ -277,7 +276,7 @@ jobs:
             # as a new failure. Those 3 are pre-existing and belong to the
             # #1895/#1896 cleanup, not to whichever PR runs first.
             ( cd tests && python -m pytest -m "not slow" \
-                --ignore=unit --ignore=process_engine \
+                --ignore=unit \
                 --continue-on-collection-errors \
                 --junit-xml="$GITHUB_WORKSPACE/junit-${side}-pr${{ matrix.pr_number }}.xml" \
                 --tb=no -q ) || true

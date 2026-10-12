@@ -26,6 +26,8 @@ View, monitor, and manage task executions across all agents. Executions are crea
 | `a2a` | A task sent in by an external A2A orchestrator |
 | `operator_response` | An answer to a parked request waking the agent, on an agent with the ask-ending wake turned on (see [Approvals](../automation/approvals.md)) |
 | `operator_ending` | A parked request that was cancelled or expired waking the agent — one turn per agent per sweep or expiry, same switch |
+| `validation` | The audit run that follows a scheduled run with post-run validation on (see [Scheduling](../automation/scheduling.md#post-run-validation)). Recorded and shown on the row, but not accepted as a `triggered_by` filter |
+| `skill_gate` | A request for a gated skill that waited for an operator's approval, run once it was approved (see [Approvals](../automation/approvals.md)) |
 
 Channel and voice triggers (`telegram`, `slack`, `whatsapp`, `voip`, `voice`, `paid`) are recorded too and are folded into the **Channels**, **Voice**, and **Public** groups on the analytics charts. Rooms and operator answers get their own **Rooms** and **Operator queue** groups, beside **Loops** and **Reminders**.
 
@@ -39,6 +41,8 @@ Channel and voice triggers (`telegram`, `slack`, `whatsapp`, `voip`, `voice`, `p
 
 **Turn integrity** -- A turn that ends while a background command it started is still running has that command killed a few seconds later, so its announced result may describe work that never happened. Such a run is not recorded as a clean success: the stored response opens with a visible notice (*⚠️ Background work lost: N background task(s) … were still running when this turn ended and were killed at CLI exit*), and the row carries a structured `turn_integrity` record on the API. An empty record means "no evidence", never "verified healthy".
 
+A chat turn the runtime itself reports as an error is recorded as `failed`, with the runtime's error as the cause — even when the turn had already printed some text (an `API Error: …` line, say). The one exception: when the agent's own transcript proves the turn finished, the finished answer is kept and opens with a recovery notice.
+
 ## How It Works
 
 ### Executions Tab (Operations Page)
@@ -49,7 +53,7 @@ The fleet execution list lives on the **Executions** tab of the [Operations page
 
 1. Lists all executions across the fleet. Admins see every agent; other users see only agents they own or that are shared with them.
 2. Stat cards show Total, **Completion**, Failed, and Cost for the selected time window. Running and queued counts are always live, regardless of the window.
-3. Filter by agent, status, trigger type, time range (1h to 30d, or all time), and free-text search over task messages.
+3. Filter by agent, status, trigger type, time range (1h to 30d, or all time), and free-text search over task messages. The trigger drop-down offers the common triggers (schedule, manual, chat, session, agent, mcp, public, webhook, fan_out, loop); the API accepts the others too.
 4. The list loads 50 rows at a time; **Load more** appends the next page.
 5. A "N running now" strip appears whenever executions are in flight.
 6. A status dot shows **Live** when WebSocket updates are connected, or **Polling** (every 30s) as fallback.
@@ -115,7 +119,7 @@ Each row is labelled by kind — **You asked**, **Handed on** (a job the agent d
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/executions` | GET | Fleet execution list. Filters: `status`, `triggered_by`, `hours` (0 = all-time), `agent`, `search`; `limit` (max 200, default 50), `offset` |
+| `/api/executions` | GET | Fleet execution list. Filters: `status`, `triggered_by`, `hours` (default 24; 0 = all-time), `agent`, `search`; `limit` (max 200, default 50), `offset`. An unrecognised `status` or `triggered_by` is ignored rather than rejected — the list comes back unfiltered, not empty — and an unrecognised `hours` falls back to 24 |
 | `/api/executions/stats` | GET | Fleet stat cards: total, success/failed counts, total cost for the `hours` window; running and queued counts always live |
 | `/api/executions/timeline` | GET | Bucketed fleet rollups for charts. `group_by` = `hour`\|`day`\|`trigger`\|`agent` (default `day`); `hours` ∈ {0, 1, 6, 24, 168, 720} (default 168); optional `agent`. Each bucket carries total, success, failed, cost, and context use. `split=trigger` (with a time grouping) folds a per-trigger breakdown into each bucket and returns the `trigger_order` to draw it in |
 | `/api/agents/{name}/executions` | GET | List executions for an agent |

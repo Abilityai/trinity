@@ -1,6 +1,6 @@
 # Skills and Playbooks
 
-Reusable capability packages that Trinity syncs from git repositories, assigns to agents, and delivers into their containers — invocable from the Playbooks tab, from chat autocomplete, or by the agent itself.
+Reusable capability packages that Trinity syncs from git repositories, assigns to agents, and delivers into their containers — invocable from the agent's Skills tab, from chat autocomplete, or by the agent itself.
 
 > 📺 **Watch:** [Building Agents — Playbooks, Plugins, Deployment](https://youtu.be/MDxRZBikf70) *(Apr 2026)* · [Build an AI Recruiter Agent](https://youtu.be/K7hFWyFIf-Y) *(Jun 2026)* · [all videos](../videos.md)
 
@@ -10,8 +10,8 @@ Reusable capability packages that Trinity syncs from git repositories, assigns t
 - **Skill source** — A GitHub repository Trinity syncs skills from. An installation can have several.
 - **Skills library** — The merged view of every enabled source. This is what you browse and assign from.
 - **Skill assignment** — An owner assigns skills to an agent, from the agent's Skills tab or from the Library. Assigning delivers the package to a running agent immediately; a stopped agent receives it on its next start.
-- **Playbook** — A skill invoked from the UI. The Playbooks tab shows assigned, user-invocable skills with a **Run** button.
-- **Playbook autocomplete** — Type `/` in the Chat tab to see available playbooks with argument hints.
+- **Skills tab** — The agent's one place for its skills, visible to everyone with access to the agent. **Own skills** are the agent's own `.claude/skills/`; **Shared skills** are the ones assigned from the library. Each skill is a card with **Run** and **Edit & Run**.
+- **Skill autocomplete** — Type `/` in the Chat tab to see the agent's skills with argument hints.
 
 ## How It Works
 
@@ -25,7 +25,7 @@ A private source repository authenticates with the platform GitHub PAT. Trinity 
 
 **When two sources ship the same skill name**, resolution is by priority (lower wins), then by age. Custom sources default to priority 100 and the bundled community source to 1000 — so **your own repository always wins** a name clash, and a source you add later needs no reordering.
 
-Nothing is overwritten silently. The winning skill carries a `shadowed_by` marker naming the sources whose copy is unreachable, shown in the library listing, on the source status, and as a warning at injection time. Skill names stay bare (`pdf-export`, never `community/pdf-export`), so an agent's `/skill-name` invocation never changes because a source was added.
+Nothing is overwritten silently. The winning skill carries a `shadowed_by` marker naming the sources whose copy is unreachable. The Library card shows it as a **shadowed** badge whose tooltip names those sources; it also appears on the source status and as a warning at injection time. Skill names stay bare (`pdf-export`, never `community/pdf-export`), so an agent's `/skill-name` invocation never changes because a source was added.
 
 Deleting a source does **not** unassign its skills — they keep resolving through whatever source still provides them.
 
@@ -33,7 +33,7 @@ Deleting a source does **not** unassign its skills — they keep resolving throu
 
 An installation that predates multiple sources carries one legacy skills-library URL setting. On the first sync after upgrading, an install with no sources adopts that URL as a custom source named **Migrated library** (tracking the branch it tracked before) and clears the setting — no admin action needed. If the install already has sources, the URL is matched against them by repository, so `https://github.com/Org/repo.git`, `https://github.com/Org/repo/` and `github.com/Org/repo` all count as the same source, and nothing happens.
 
-A legacy URL that names a repository which is **not** one of your sources is refused — adding a source is an admin action, never an automatic one — and Trinity files one low-priority **Legacy skills-library adoption refused** heads-up in the Operations queue, from `_skills-sync`. It is one row per refused URL, however many syncs run; a different URL raises its own. Dismiss it by **cancelling** it (`POST /api/operator-queue/{id}/cancel`, or **Clear All** on the Needs Response tab, which cancels every open item) rather than clicking **Got it**: an acknowledged alert waits for an agent reply that never comes and cannot be cleared, while a cancelled one stays gone. If you want that repository, add it as a source in the panel above. The legacy setting itself can no longer be written through the settings API.
+A legacy URL that names a repository which is **not** one of your sources is refused — adding a source is an admin action, never an automatic one — and Trinity files one low-priority **Legacy skills-library adoption refused** heads-up in the Operations queue, from `_skills-sync`. It is one row per refused URL, however many syncs run: each later sync updates that row (*seen N times*) instead of filing another, and a different URL raises its own. The platform ends the row itself once the URL is adopted or no longer configured, and it expires 14 days after the last sync that saw it (see [Approvals → Platform heads-ups](approvals.md#how-it-works)). To dismiss it sooner, **cancel** it (`POST /api/operator-queue/{id}/cancel`, or **Clear All** on the Needs Response tab, which cancels every open item) rather than clicking **Got it**: an acknowledged alert waits for an agent reply that never comes and cannot be cleared, while a cancelled one stays gone. After you end it, the same refusal files nothing for 7 days. If you want that repository, add it as a source in the panel above. The legacy setting itself can no longer be written through the settings API.
 
 #### Repository layout
 
@@ -49,11 +49,41 @@ Existing repositories keep working with no configuration. The resolved root is r
 
 Skills carry executable `scripts/`, and library automation can push them to your whole fleet unattended. So:
 
-- The bundled **community source is pinned to a tag**, not a branch head — currently `v0.2.0` of `trinity-skills`. New upstream commits do not reach your fleet until the tag is bumped and you sync. The pin is a fresh-install seed: an existing instance keeps the source row it already has. To move it to a newer tag, an admin updates the source's ref through `PUT /api/skills/sources/{id}` (the Settings panel adds, syncs, disables, and removes sources but does not edit a ref in place) or removes the source and adds it again with the new tag. `TRINITY_DEFAULT_SKILL_SOURCE_REF` in `.env` changes the tag a fresh install is seeded with; `TRINITY_DEFAULT_SKILL_SOURCE=""` disables the seed entirely.
+- The bundled **community source is pinned to a tag**, not a branch head — currently `v0.3.0` of `trinity-skills`. New upstream commits do not reach your fleet until the tag is bumped and you sync. The pin is a fresh-install seed: an existing instance keeps the source row it already has. To move it to a newer tag, an admin updates the source's ref through `PUT /api/skills/sources/{id}` (the Settings panel adds, syncs, disables, and removes sources but does not edit a ref in place) — the steps are below. Removing the source and adding it again with the new tag is **not** equivalent: a source added through `POST /api/skills/sources` is always a custom source, so it loses the bundled badge and gets the custom-source priority, which can change which source wins when two sources ship a skill with the same name. `TRINITY_DEFAULT_SKILL_SOURCE_REF` in `.env` changes the tag a fresh install is seeded with; `TRINITY_DEFAULT_SKILL_SOURCE=""` disables the seed entirely.
+
+  **Moving an existing instance to a newer catalog tag** (replace `<tag>` with the tag you are moving to):
+
+  1. **Before you move.** A newer tag can drop skills — for example, `v0.3.0` dropped the four `add-*` installers (`add-backlog`, `add-project-management`, `add-canon`, `add-orchestrator`). An agent still assigned a dropped skill keeps its old files, but every later delivery reports "Skill not found in library". Unassign those skills first. An agent that still needs one can get it from the abilities marketplace as `/agent-dev:<name>` — a marketplace plugin, outside the Library.
+  2. **Find the bundled row.** With an admin token (`POST /api/token`; agent MCP keys are refused), call `GET /api/skills/sources` and find the entry in `sources` with `"is_default": true`. Note its `id`, and its current `ref` for rollback.
+     - No such row (an instance migrated from the legacy single-repository setting, or one where the bundled source was removed): add the catalog as a custom source pinned to the tag instead (Settings → **Track: Tag**).
+     - The row is disabled: enable it.
+  3. **Change the ref.** `PUT /api/skills/sources/{id}` with `{"ref": "<tag>"}`. Changing the ref resets the source's sync status to `never`.
+  4. **Sync the whole library.** Use **Sync all** in the Settings skill-sources panel or **Sync now** on the Library's Skills tab (both call `POST /api/skills/library/sync`), not the per-source **Sync** button. Only the full sync starts the fleet re-inject, and only when automatic re-inject is on; a per-source sync leaves running agents on their old files. If scheduled auto-sync is enabled, it also picks up the change on its next run and may re-inject across the fleet. If a per-source **Sync** has already run on the new tag, a full sync — manual or scheduled — finds that source unchanged and starts no re-inject (unless another source also moved) — restart the affected agents, since an agent's skills are delivered again when it starts, or re-deliver one agent's skills with `POST /api/agents/{name}/skills/inject`.
+  5. **Check.** Confirm the skills you expect from the new tag are in the Library (for `v0.3.0`, `update-dashboard`).
+
+  **Rollback:** the same `PUT` with the `ref` you noted, then sync the whole library again. Any agent assigned a skill that only the newer tag carries will then report it missing.
 - **Custom sources track a branch by default**, because you control who can write to them. Choose **Tag** under **Track** to pin one instead.
 - **A pinned tag that moves is refused**, not adopted. If a tag now resolves to a different commit than the last sync, the sync reports `moved_tag` and leaves your fleet alone. Moving to new content means pointing the source at a new tag name — an explicit admin action. Annotated and lightweight tags are both compared by the commit they point at, so a release tag that has not moved is never refused.
 
 To revoke a skill from the community catalog, a new tag is cut without it.
+
+### Deprecated skills
+
+A library retires a skill by marking it in the skill's `SKILL.md` frontmatter:
+
+```yaml
+deprecated: true             # a real boolean
+superseded-by: new-skill     # optional: the successor, or a short sentence
+```
+
+A deprecated skill stays **listed, assignable and injected** — Trinity flags it, never hides or refuses it:
+
+- The Library card, the skill's card under **Shared skills** on an agent's Skills tab, and the **Assign skills** picker show a **deprecated** badge beside the name, and a *Superseded by …* line when the library named a successor. Hovering the badge says the skill still works and a later library release removes it.
+- Assigning one succeeds, and a warning line under the delivery note says *<skill> is deprecated — superseded by <successor>.*, even when the agent is stopped.
+- An agent that already holds the skill keeps it unchanged; its `CLAUDE.md` is not annotated.
+- Once the library deletes the skill's directory, it moves to **Assigned but no longer in the library**.
+
+A `deprecated` value that is not a boolean, or a `superseded-by` that is not text, produces a named `frontmatter_invalid` warning and is ignored. Skill sets do not mark a deprecated member yet.
 
 ### Browsing and assigning
 
@@ -62,13 +92,13 @@ Two surfaces, two starting points:
 | Surface | Purpose |
 |---------|---------|
 | **Library** page → **Skills** tab (`/library?tab=skills`) | Start from a skill. See every skill, its contract, its source, the library's sync state, and **which agents hold it** — then assign it to one more agent or unassign it, without opening the agent. |
-| Agent detail → **Skills** tab | Start from an agent. Tick the skills this agent should have, save, and see the per-skill outcome of the last delivery. |
+| Agent detail → **Skills** tab | Start from an agent. **Assign skills** opens the library picker: tick the skills this agent should have, save, and see each skill's last delivery on its card. |
 
 Both surfaces write the same per-agent assignment, so there is one skill model whichever way you come at it.
 
 #### From the agent's Skills tab
 
-The tab shows two lists: **Assigned to this agent** (each skill's version short-SHA, description, and the outcome of its last delivery) and **Library** (everything available, with its declared dependencies). Tick or untick skills and click **Save assignments**. The save delivers straight away, and the note beside the button says what happened:
+Library skills assigned to the agent are the cards under **Shared skills**, each with its version short-SHA, description, and the outcome of its last delivery. The owner or an admin manages them from the section's header. **Assign skills** opens the library picker: everything available, with its declared dependencies. Tick or untick skills and click **Save assignments**. The save delivers straight away, and the note under the button says what happened:
 
 | Note | Meaning |
 |------|---------|
@@ -78,9 +108,9 @@ The tab shows two lists: **Assigned to this agent** (each skill's version short-
 | *Saved; some skills did not install (…). Sync now to retry.* | Named skills failed; the rest landed. |
 | *Saved but not delivered: <why>. Sync now, or the agent picks it up on next start.* | The agent was mid-sync, still starting, its container state could not be read, or the install failed. The assignment is kept either way. |
 
-**Sync now** (running agents only) is the repair action: it re-copies every assigned skill unconditionally and is highlighted only when a delivery did not land. Per-skill outcomes are shown honestly — a skill that landed but is missing a declared binary or environment variable is flagged with a warning, not reported as a clean success.
+**Sync now** (running agents only), in the same header, is the repair action: it re-copies every assigned skill unconditionally and is highlighted only when a delivery did not land. Per-skill outcomes are shown honestly — a skill that landed but is missing a declared binary or environment variable is flagged with a warning on its card, not reported as a clean success. The card's note line opens a details dialog for a name conflict, a delivery error or warnings, and the full *Superseded by …* text. **Unassign** on a card removes that one skill; a skill that only a set brought is removed by unassigning the set.
 
-**Name conflict.** If the agent already has its own `.claude/skills/<name>/` directory that the platform did not create — usually a skill the agent wrote itself — the library skill of the same name is **not** installed. The agent's copy is left intact and is the one that runs. The skill shows a **name conflict** badge, on every load, with two ways out: **Unassign library skill** keeps the agent's copy, or rename or remove the agent's directory and sync again to install the library version. **Sync now** does not override a conflict.
+**Name conflict.** If the agent already has its own `.claude/skills/<name>/` directory that the platform did not create — usually a skill the agent wrote itself — the library skill of the same name is **not** installed. The agent's copy is left intact, is listed under **Own skills**, and is the one that runs. The Shared card shows a **name conflict** badge on every load, with **Run** disabled, and its note opens the two ways out: **Unassign library skill** keeps the agent's copy, or rename or remove the agent's directory and sync again to install the library version. **Sync now** does not override a conflict.
 
 #### From the Library
 
@@ -96,7 +126,7 @@ Below the library listing sits **Assigned but no longer in the library** — ass
 
 #### Lists follow the assignment
 
-Every change to an agent's assignments — assign, unassign, save, a manual sync, a background delivery finishing, a fleet re-inject — refreshes the open screens that list its skills: the **Playbooks** tab, the `/` autocomplete in **Chat**, and the `/` popup in the [Workspace](../sharing-and-access/workspace.md). Nothing needs a reload.
+Every change to an agent's assignments — assign, unassign, save, a manual sync, a background delivery finishing, a fleet re-inject — refreshes the open screens that list its skills: the **Skills** tab, the `/` autocomplete in **Chat**, and the `/` popup in the [Workspace](../sharing-and-access/workspace.md). Nothing needs a reload.
 
 ### Skill sets
 
@@ -117,7 +147,7 @@ sets:
 A set names skills from **its own** source. If it names one that source does not ship, it is listed as **partial** and cannot be assigned until the source is fixed. Set names resolve like skill names: the custom source wins, and a later source declaring the same name is shown as shadowed.
 
 - **Library → Skills** lists the sets above the skills. Expand one to see its members and each member's version, then assign it to an agent.
-- **An agent's Skills tab** shows its sets, each with a status: **complete**, **partial** (a member is missing upstream, not yet delivered, or in a name conflict), or **unresolved** (the set's source is disabled, removed or unreadable — its skills are kept until it can be read again). A skill that is present because of a set is labelled **via <set>**, and it is ticked and locked in the checklist. **Unassign set** removes only what that set alone brought: a skill you also assigned on its own, or that another assigned set names, stays.
+- **An agent's Skills tab** shows the sets it holds as chips under **Shared skills**. A chip opens the sets, each with a status: **complete**, **partial** (a member is missing upstream, not yet delivered, or in a name conflict), or **unresolved** (the set's source is disabled, removed or unreadable — its skills are kept until it can be read again). The owner or an admin opens the same dialog with **Manage sets**, and assigns or unassigns sets there. A skill that is present because of a set is labelled **via <set>** on its card, and it is ticked and locked in the **Assign skills** picker. **Unassign set** removes only what that set alone brought: a skill you also assigned on its own, or that another assigned set names, stays.
 - **Prerequisites** are never a silent failure. If the agent lacks a credential the set declares, or one its members declare, the set says so and points you to the Credentials tab. The check runs inside the agent while it is running, and only for a viewer who may change this agent's skills. Anyone else, and anyone viewing a stopped agent, sees *Credentials are checked while the agent runs.*
 - **Suggested schedules** are shown, never created. Add the ones you want on the agent's Schedules tab.
 - Assigning or unassigning a set is governed by the same permission as assigning a skill. An agent needs the skill-management permission an admin grants (see below). Re-assigning a set records who made the change and when.
@@ -174,25 +204,44 @@ Sync failures are never silent, and a sync contended by another worker reports `
 
 A skill's `SKILL.md` frontmatter can declare:
 
-- `description:` — shown in the library and in autocomplete.
-- `automation:` — the skill's intended automation level.
-- `user_invocable:` — whether the skill appears as a runnable playbook (default true).
+- `description:` — shown in the library, on the skill's card, and in autocomplete.
+- `automation:` — the skill's intended automation level, shown on its card as a chip: *runs unattended* (`autonomous`), *asks mid-run* (`gated`) or *start by hand* (`manual`). It is the author's declaration; nothing enforces it.
+- `user-invocable:` — whether the skill can be run from its card and is offered in `/` autocomplete (default true).
 - `allowed-tools:` — the tools the skill may use, as Claude Code reads it. Write it in Claude Code's comma-separated form (`allowed-tools: Read, Bash, Bash(git:*)`) or as a YAML list (`[Read, Bash]`); both give the same list, and a comma inside parentheses (`Bash(npm run lint, npm test)`) stays part of one entry. Trinity reports this list in the agent's skill listing but does not enforce it — a Trinity run is restricted by the schedule, loop, or task's own allowed tools.
-- `argument-hint:` — the argument syntax shown in `/` autocomplete. The unquoted bracket idiom (`argument-hint: [file]`) is kept as written.
+- `argument-hint:` — the argument syntax shown on the skill's card and in `/` autocomplete. The unquoted bracket idiom (`argument-hint: [file]`) is kept as written.
 - `requires:` with `packages`, `binaries`, and `env` lists.
+- `deprecated:` and `superseded-by:` — retire a skill (see [Deprecated skills](#deprecated-skills)).
+- `approval: recommended` — the author recommends approval before the skill runs (see [Requiring approval for a skill](#requiring-approval-for-a-skill)).
 
 At injection, Trinity runs a **declaration-only** dependency check and produces per-skill warnings (a missing binary, a missing environment variable) instead of failing. Declared package installs are surfaced but not performed. Environment checks report variable **names** only — values are never read.
 
 A skill whose frontmatter fails to parse gets a named warning and a description falling back to its first paragraph. It is never silently dropped.
 
-Inside the agent, the Playbooks tab, the `/` popup, and the chat empty state read each frontmatter field on its own. A field the agent cannot use — a list or mapping where text belongs, or an `allowed-tools` value that is a bare `yes`, a number, or has unbalanced parentheses — is dropped by itself, and the agent log warns once, naming the file and field. The skill keeps its description and every other field. Agents on an older base image instead lost the whole record over one such field, most often a comma-separated `allowed-tools`, and showed "No description available". The fix ships in the agent base image, so an existing agent picks it up after the base image is rebuilt (or re-pulled) and the agent is started cold — see [Upgrading → Base Image Upgrade](../guides/deploying/upgrading.md#base-image-upgrade-if-needed).
+Inside the agent, the Skills tab, the `/` popup, and the chat empty state read each frontmatter field on its own. A field the agent cannot use — a list or mapping where text belongs, or an `allowed-tools` value that is a bare `yes`, a number, or has unbalanced parentheses — is dropped by itself, and the agent log warns once, naming the file and field. The skill keeps its description and every other field. Agents on an older base image instead lost the whole record over one such field, most often a comma-separated `allowed-tools`, and showed no description. The fix ships in the agent base image, so an existing agent picks it up after the base image is rebuilt (or re-pulled) and the agent is started cold — see [Upgrading → Base Image Upgrade](../guides/deploying/upgrading.md#base-image-upgrade-if-needed).
 
-### Running playbooks
+### Running skills
 
-1. Open agent detail → **Playbooks** tab.
-2. See assigned, user-invocable skills with descriptions.
-3. Click **Run** to send the skill as a task to the agent.
-4. Or, in **Chat**, type `/` to autocomplete a playbook command.
+1. Open agent detail → **Skills** tab.
+2. Find the skill under **Own skills** or **Shared skills**.
+3. Click **Run** to start the skill as a task; the run opens on the **Tasks** tab. **Edit & Run** opens the Tasks tab with the command filled in, so you can add instructions first.
+4. Or, in **Chat**, type `/` to autocomplete a skill command.
+
+**Run** needs the agent running. On a stopped agent, **Own skills** still shows the last list the platform saw (*Showing its skills as of …*) with **Run** disabled, and says *Start the agent to see its own skills* only if there is no such list.
+
+### Requiring approval for a skill
+
+The owner of an agent, or an admin, can make any of its skills wait for a person's approval. Each card shows them a **Requires approval** toggle and a picker for who approves:
+
+- **Primary contact** — the person the agent serves; its owner unless the agent is assigned to someone else.
+- **Approver** — offered where your install provides that role.
+
+A kind nobody fills yet is listed but cannot be picked. The controls work on a stopped agent's last-known list too, and are not offered on ephemeral agents or the system agent. A gate on a skill the agent no longer lists is kept, as *Not in this agent's skills list: gate kept*, until it is removed with **Clear gate**.
+
+Everyone with access sees a gated card's line, which names the kind of approver, never a person: *Needs approval from the primary contact*, or *Needs approval: you approve this* if you are that approver. **Run** on a gated skill asks the approver instead, and the page says so (*Not run: … needs approval before it can run*); nothing runs until they approve (see [Approvals](approvals.md)). When the approver runs it themselves, it runs at once and is marked *Ran without approval: you are the approver* (others see *its approver started it*) on its Tasks row, its execution page and the Workspace reply.
+
+A skill's author can recommend approval with `approval: recommended`. A library skill that carries it is gated by default on every agent it is assigned to, and the owner can turn that off; an own skill is not gated for it. Where such a skill has no gate, the owner sees *Author recommends approval: not gated*.
+
+Trinity checks every request that names a gated skill. Inside the agent, a second check stops a run from loading a gated skill on its own. When an agent has gates but cannot run that check, its owner sees a warning at the top of the tab: its image predates the check (recreate the agent), or its runtime has no hooks, such as Codex or Gemini.
 
 ### Running skills without assignment (Skill Runner)
 
@@ -209,15 +258,15 @@ The Skill Runner is an **entitled** surface. In a community build, `run_skill` a
 
 ## For Agents
 
-MCP tools for skills and playbooks:
+MCP tools for skills:
 
 | Tool | Description |
 |------|-------------|
-| `list_skills()` | List library skills. Each entry carries its `source` name and any `shadowed_by` sources. |
-| `get_skill(name)` | Skill details and contract |
+| `list_skills()` | List library skills. Each entry carries its `source` name, any `shadowed_by` sources, and `deprecated` / `superseded_by`. |
+| `get_skill(name)` | Skill details and contract, including `deprecated` / `superseded_by` |
 | `get_skills_library_status()` | Library sync status, including the per-source array |
 | `list_skill_sets()` | The skill sets the library declares: status (`ok` / `partial` / `invalid`; only `ok` can be assigned), members and their versions, problems and prerequisites |
-| `assign_skill_to_agent(skill_name, agent_name)` | Assign one skill — or a set, as `set:<name>` — and deliver it. The response's `delivery` block reports `injected`, `pending_start`, `in_progress`, or `not_delivered` with a `reason` |
+| `assign_skill_to_agent(skill_name, agent_name)` | Assign one skill — or a set, as `set:<name>` — and deliver it. The response's `delivery` block reports `injected`, `pending_start`, `in_progress`, or `not_delivered` with a `reason`; for a deprecated skill, `delivery.skills[<name>].warnings` carries `deprecated` or `deprecated:<successor>` |
 | `set_agent_skills(agent_name, skill_names)` | Set the full skill list. `set:<name>` entries add sets; the agent's other sets are left alone. Remove a set with `unassign_skill_set`. Added names are delivered, dropped names are removed; `delivery` and `removal` report each half |
 | `sync_agent_skills(agent_name)` | Force re-inject into a running agent — the manual retry after a `not_delivered` |
 | `get_agent_skills(agent_name)` | List an agent's assigned skills. Each carries `via_sets` (the sets that brought it) and `individual`; the agent's `sets` are listed too |

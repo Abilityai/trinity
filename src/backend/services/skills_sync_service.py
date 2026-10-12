@@ -326,14 +326,27 @@ class SkillsLibrarySyncService:
             if sets_lib is not None:
                 from services import skill_set_service
                 _, dropped = await asyncio.to_thread(skill_set_service.reconcile_agent, agent_name, sets_lib)
+            # trinity-enterprise#753: a library change can newly recommend
+            # approval for a skill this agent holds — gated before the re-inject;
+            # defaults of members the sync dropped go after the prune removed
+            # their packages (never raises).
+            from services import skill_gate_map_service
+            gate_ctx = skill_gate_map_service.GateContext(trigger="library_sync")
+            await skill_gate_map_service.reconcile_library_gates(agent_name, ctx=gate_ctx)
             skill_names = await asyncio.to_thread(db.get_agent_skill_names, agent_name)
             if not skill_names:
                 if dropped:
-                    await skill_service.reconcile_agent_skills(agent_name, [])
+                    prune = await skill_service.reconcile_agent_skills(agent_name, [])
+                    await skill_gate_map_service.reconcile_library_gates(
+                        agent_name, ctx=gate_ctx, add=False,
+                        drop_defaults=skill_gate_map_service.drop_after_prune(prune))
                 return {"status": "skipped", "reason": "no_skills"}
             result = await skill_service.inject_skills(agent_name, skill_names, force=False)
             if dropped:
-                await skill_service.reconcile_agent_skills(agent_name, skill_names)
+                prune = await skill_service.reconcile_agent_skills(agent_name, skill_names)
+                await skill_gate_map_service.reconcile_library_gates(
+                    agent_name, ctx=gate_ctx, add=False,
+                    drop_defaults=skill_gate_map_service.drop_after_prune(prune))
             # #2703: the sweep changes the listing — open surfaces refetch.
             from services.skill_service import broadcast_skills_changed
             await broadcast_skills_changed(agent_name)

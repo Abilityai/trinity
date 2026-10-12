@@ -326,6 +326,13 @@ export const useClientPortalStore = defineStore('clientPortal', {
     asksLoaded: false,
     asksFailed: false,
     asksLoadedAt: null,
+    // trinity-enterprise#631 — people who tagged this person in a chat or a
+    // room. Unread items in the Inbox (never Action). Same honesty as asks: a
+    // failed read keeps the last good list; 404/403 is absence (an older
+    // backend), not an error.
+    mentions: [],
+    mentionsLoaded: false,
+    mentionsFailed: false,
     // trinity-enterprise#748: dismissals not yet confirmed by the server, by ask
     // id → `{ before, committing }`: the row as it was, and — once the POST is
     // on the wire, when it can no longer be undone — that request's token. The list shows the
@@ -641,6 +648,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.asksLoaded = false
       this.asksFailed = false
       this.asksLoadedAt = null
+      // trinity-enterprise#631 — tags are the session's like asks.
+      this.mentions = []
+      this.mentionsLoaded = false
+      this.mentionsFailed = false
       // trinity-enterprise#748: a dismissal still in its Undo window belongs to
       // the session that made it — it is dropped, never sent under the next one.
       askDismissTimers.forEach(clearTimeout)
@@ -756,7 +767,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // on BOTH turn actions — a field honoured by only one brings the bug back
     // exactly when streaming fails and this fallback runs.
     async sendPortalChat(agentName, message, sessionId = null,
-                    { newThread = false, openCanvasId = null, model = null, replyToMessageId = null } = {}) {
+                    { newThread = false, openCanvasId = null, model = null, replyToMessageId = null,
+                      attachments = null, tags = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat`,
         {
@@ -772,6 +784,13 @@ export const useClientPortalStore = defineStore('clientPortal', {
           // quotes the stored row into the prompt, and refuses (422) one that
           // is not in this caller's thread.
           reply_to_message_id: replyToMessageId || null,
+          // #3265 — the files this message carries, by upload name. The server
+          // keeps only names in this caller's own uploads, and stores them on
+          // the user row so a reload shows them.
+          attachments: attachments && attachments.length ? attachments : null,
+          // trinity-enterprise#631 — the people this message tags (addresses,
+          // as picked). Only when there are some: every other body is unchanged.
+          ...(tags && tags.length ? { tags } : {}),
         },
         { headers: this.authHeader }
       )
@@ -784,7 +803,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // for headless clients (ent#83), and is still the fallback when streaming
     // is unavailable.
     async startPortalChat(agentName, message, sessionId = null,
-                    { newThread = false, openCanvasId = null, model = null, replyToMessageId = null } = {}) {
+                    { newThread = false, openCanvasId = null, model = null, replyToMessageId = null,
+                      attachments = null, tags = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
         {
@@ -800,6 +820,13 @@ export const useClientPortalStore = defineStore('clientPortal', {
           // quotes the stored row into the prompt, and refuses (422) one that
           // is not in this caller's thread.
           reply_to_message_id: replyToMessageId || null,
+          // #3265 — the files this message carries, by upload name. The server
+          // keeps only names in this caller's own uploads, and stores them on
+          // the user row so a reload shows them.
+          attachments: attachments && attachments.length ? attachments : null,
+          // trinity-enterprise#631 — the people this message tags (addresses,
+          // as picked). Only when there are some: every other body is unchanged.
+          ...(tags && tags.length ? { tags } : {}),
         },
         { headers: this.authHeader }
       )
@@ -1578,14 +1605,18 @@ export const useClientPortalStore = defineStore('clientPortal', {
       }
     },
 
-    async postRoomMessage(roomId, content) {
+    // trinity-enterprise#631: `tags` are the PEOPLE the message tags (addresses,
+    // as picked) — sent only when there are some, so every other post's body
+    // is byte-identical to before.
+    async postRoomMessage(roomId, content, { tags = [] } = {}) {
       this._requireRooms()
       try {
         const { data } = await portalHttp.post(
-          `/api/rooms/${roomId}/messages`, { content },
+          `/api/rooms/${roomId}/messages`,
+          tags && tags.length ? { content, tags } : { content },
           { headers: this.authHeader }
         )
-        return data   // {room_id, seq, mentions, woke}
+        return data   // {room_id, seq, mentions, woke, tags}
       } catch (err) {
         throw this._noteRoomsRefusal(err)
       }
@@ -1656,6 +1687,15 @@ export const useClientPortalStore = defineStore('clientPortal', {
         { title },
         { headers: this.authHeader }
       )
+      return data
+    },
+
+    // ent#841 — close a chat from its tab (archive, never delete), or reopen
+    // it. Rethrows: the shell reverts its optimistic move and names the refusal.
+    async setThreadArchived(agentName, sessionId, archived) {
+      const url = `/api/enterprise/client-portal/agents/${agentName}/sessions/${encodeURIComponent(sessionId)}/archive`
+      const cfg = { headers: this.authHeader }
+      const { data } = archived ? await portalHttp.put(url, null, cfg) : await portalHttp.delete(url, cfg)
       return data
     },
 
@@ -2202,6 +2242,81 @@ export const useClientPortalStore = defineStore('clientPortal', {
         this.asksFailed = true
         return this.asks
       }
+    },
+
+    // ---- trinity-enterprise#631: person tags -------------------------------------
+
+    // The tags addressed to this person (Unread + All). Absence (404/403 — an
+    // older backend) leaves an empty, loaded list; a failure keeps the last
+    // good list and says so (never a synthetic empty, ent#253).
+    async fetchMentions() {
+      if (!this.isClientSignedIn) return []
+      const issuedUnder = this.portalToken
+      const stale = () => this.portalToken !== issuedUnder || !this.isClientSignedIn
+      try {
+        const { data } = await portalHttp.get('/api/enterprise/client-portal/mentions', {
+          headers: this.authHeader,
+        })
+        if (stale()) return []
+        this.mentions = Array.isArray(data) ? data : []
+        this.mentionsLoaded = true
+        this.mentionsFailed = false
+        return this.mentions
+      } catch (err) {
+        if (stale()) return []
+        if ([403, 404].includes(err.response?.status)) {
+          this.mentions = []
+          this.mentionsLoaded = true
+          this.mentionsFailed = false
+          return []
+        }
+        console.warn('[workspace] mentions unavailable:', err?.message || err)
+        this.mentionsFailed = true
+        return this.mentions
+      }
+    },
+
+    // One tag, opened. RETHROWS: the pane must tell "can't see" (an answer)
+    // from "couldn't load" (a failure).
+    async openMention(id) {
+      const { data } = await portalHttp.get(
+        `/api/enterprise/client-portal/mentions/${encodeURIComponent(id)}`,
+        { headers: this.authHeader },
+      )
+      return data
+    },
+
+    // Mark a tag read; the row is REPLACED by the server's projection. Resolves
+    // true / false, never rejects (the Inbox's `markRead` contract).
+    async markMentionRead(id) {
+      try {
+        const { data } = await portalHttp.post(
+          `/api/enterprise/client-portal/mentions/${encodeURIComponent(id)}/read`, {},
+          { headers: this.authHeader },
+        )
+        if (data && data.id === id) this.mentions = this.mentions.map((m) => (m.id === id ? data : m))
+        return true
+      } catch (err) {
+        console.warn('[workspace] could not mark a mention read:', err?.message || err)
+        return false
+      }
+    },
+
+    // The people picker: who can be tagged in a room / a 1:1 chat with an
+    // agent, matching `q`. RETHROWS — a refusal (403: this principal may not
+    // tag) is how the composer learns to offer agents only.
+    async fetchRoomPeople(roomId, q) {
+      const { data } = await portalHttp.get(`/api/rooms/${encodeURIComponent(roomId)}/people`, {
+        headers: this.authHeader, params: { q },
+      })
+      return Array.isArray(data) ? data : []
+    },
+    async fetchChatPeople(agentName, q) {
+      const { data } = await portalHttp.get(
+        `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/people`,
+        { headers: this.authHeader, params: { q } },
+      )
+      return Array.isArray(data) ? data : []
     },
 
     // trinity-enterprise#610 (the 09-30 ruling, amended): ONE chat's chat-turn

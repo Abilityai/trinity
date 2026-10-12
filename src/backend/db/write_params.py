@@ -46,6 +46,9 @@ class TaskExecutionFields(ExecutionSource):
     source_channel_thread: Optional[str] = None
     source_channel_agent: Optional[str] = None
     source_channel_client: Optional[str] = None
+    # trinity-enterprise#838: the address a keyless trusted-network A2A caller
+    # came from — the run's attribution when there is no user or key.
+    source_host: Optional[str] = None
     open_canvas_id: Optional[str] = None
     chain_depth: Optional[int] = None
 

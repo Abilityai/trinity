@@ -45,6 +45,12 @@ class AgentRuntime(ABC):
     - is_available(): Check if runtime is installed
     """
 
+    # #3470: whether `execute`/`execute_headless` accept a per-spawn
+    # `auth_override` (a Claude subscription token or the platform API key).
+    # Only the Claude runtime does — the others authenticate from their own
+    # `.env` and must never receive a Claude credential (#1187 decision 7).
+    supports_auth_override: bool = False
+
     @abstractmethod
     async def execute(
         self,

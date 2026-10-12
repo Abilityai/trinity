@@ -342,7 +342,7 @@ delete the file.
 | Errors | 422 `window_invalid` · 422 `metric_undeclared` (retired names get "retired at T — pass `include_retired=true`") · 503 `metric_store_unavailable` + `Retry-After: 30` |
 | Series | Bucketed (≤ 120/series) by default; raw `points` only on the `metric=` path, truncation keeps the **newest**. A bucket covers the **window**: a point outside `[since, until]` is dropped before indexing, never clamped into bucket 0 |
 | Dimensions | Grouped by `canonical_dims`, folded by the declared `aggregation`, with `latest_by_series[]` carrying each series' own freshness |
-| Chart | `chart` is the one bucket list the sparkline, `stats` and a bound widget's `history` all read, so they describe the same thing as `latest.value`: `basis: "folded"` (the cross-series fold, for `sum`/`avg`) or `basis: "series"` + `dims` (for `last`, where a cross-series fold is undefined — the UI labels it) |
+| Chart | `chart` is the one bucket list the sparkline, `stats` and a bound widget's `history` all read, so they describe the same thing as `latest.value`: `basis: "folded"` (the cross-series fold, for `sum`/`avg`) or `basis: "series"` + `dims` (for `last`, where a cross-series fold is undefined — the UI labels it). A `dims:`-bound widget (ent#730) draws its own series' buckets from `series`, not `chart` |
 
 ### The one staleness rule
 
@@ -428,6 +428,7 @@ objectives/<id>.yaml  ──┐                    (Tandem §3.4, in the agent's
 | `gap.status` | `behind` · `on_target` · `ahead` · `off_target` (the `hold` arm) · `not_computable` — **position, never pace**. `by` and `horizon` ride the row so a consumer can judge pace itself |
 | Stale | orthogonal: a stale metric keeps its gap and carries `stale: true`. The join reports; the consumer decides |
 | Direction | registry first; `neutral` (the column default — no bundled template declares one) falls through to the objective's `up`/`down`/`hold` with `direction_source: objective`. The wire value stays inside the **registry's** three (`up_good`/`down_good`/`neutral`), so a declared `hold` is `neutral` and a direction-aware formatter needs no fourth case; the author's word rides along as `objective_direction`. Two *declared* directions that disagree are a `direction_mismatch` finding |
+| Guards (ent#731) | an objective's `guard_metrics:` join as rows with `role: guard` in the same `metrics` list (so they are fetched and served through a grant like any row), always judged as a hold (`neutral` / `direction_source: objective`, no mismatch), counted in `summary.guards` and kept out of every other bucket. `guard_target_unset` / `guard_direction_invalid` / `guard_metrics_invalid` name the defects |
 | Never a blank | an undeclared metric is a `metric_undeclared` finding with the fix; a **supporting-only** agent gets `metric_not_declared_here` instead, because "declare it and refresh" is advice it cannot take |
 | Bounds | scan 100 files → filter → cap the **output** at 20; 12 metrics/objective; ≤ 2 reads in flight; 5 s per read and a 30 s budget for the whole fan-out (a *slow* agent raises no typed error, so the abort alone does not bound it) |
 | Findings | belong to the objectives returned — another role's or a finished objective's parse defect never lands on this agent's read, since a shared fleet canon would otherwise put every role's mistakes on every card. File-level (`objective_invalid`, `objective_unreadable`, `objective_file_skipped`, `objectives_read_timeout`) are unconditional: nothing there says whose they are |
@@ -492,10 +493,10 @@ locally before pushing — the first must report exactly **one** head.
 | Budget | `src/backend/services/objectives_read_budget.py` | The per-agent bucket on the objective fan-out — `enforce` for the operator route, `admit` for the Workspace role card (ent#676) |
 | Route | `src/backend/routers/agent_files.py` | `GET/POST .../metrics*`, `GET .../objectives` |
 | Health | `src/backend/routers/monitoring.py`, `db_models.AgentHealthDetail` | The informational block |
-| Compat | `src/backend/services/compatibility/static_checks.py` | D-009 (shape), D-010 (`metrics.json` superseded) |
+| Compat | `src/backend/services/compatibility/static_checks.py` | D-009 (shape), D-010 (`metrics.json` superseded), X-009 (`dashboard.yaml` `metric:`/`dims:` bindings that can never resolve, ent#730) |
 | MCP | `src/mcp-server/src/tools/metrics.ts` | `record_metrics`, `get_metrics`, `get_objectives` |
 | Frontend | `src/frontend/src/components/DeclaredMetricsTiles.vue` | The tiles |
-| Frontend | `src/frontend/src/components/BoundMetricMark.vue` | A bound widget's point time / stale mark / binding error |
+| Frontend | `src/frontend/src/components/BoundMetricMark.vue` | A bound widget's point time / stale mark / binding error / which series (ent#730 caption) / threshold verdict badge |
 | Frontend | `src/frontend/src/utils/metricFormat.js` | Type- and direction-aware formatting, shared by both surfaces |
 | Frontend | `src/frontend/src/utils/agentTabs.js` | `buildTabs({hasDashboardFlag, hasDeclaredMetrics})` |
 | Store | `src/frontend/src/stores/agents.js` | `getAgentMetrics`, the two-flag `checkDashboardExists` |
@@ -676,3 +677,4 @@ Still open:
 | 2026-09-29 | Settings → Retention rows for both knobs (ent#671): the `quotas` block on `GET /api/settings/retention`, env-sourced rows read-only, changed-fields-only Save |
 | 2026-09-30 | ent#676: the role card cut over to the objective join — the rebase note became the landed section; one limiter bucket for both doors in `services/objectives_read_budget.py` (the card degrades, the route 429s) |
 | 2026-10-01 | ent#729 (R45): a different value at an existing `(metric, ts, dims)` restates the row (`revision`, `recorded_at`, `execution_id` follow the write; `ts`, `created_at`, freshness unmoved); the receipt gains `corrected` on REST and MCP; dual-track migration `0086` |
+| 2026-10-09 | ent#731: guard metrics in the join — `role` on every row, the always-hold rule, `summary.guards`, three guard findings; the MCP `get_objectives` description names them |

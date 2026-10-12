@@ -170,6 +170,12 @@ describe('ent#525 — chat scoping is by execution id, never "latest running"', 
     expect(childrenForChat(items, 'sess-1', 'x1').map((i) => i.id)).toEqual(['c1'])
     expect(childrenForChat(items, null)).toEqual([])
   })
+
+  it('#3166: another turn on the same thread (a second tab) is not a delegated child', () => {
+    const items = [item(), item({ id: 'x2', title: 'reply with just: B-done' }),
+      item({ id: 'c1', kind: 'delegated', agent_name: 'sage' })]
+    expect(childrenForChat(items, 'sess-1', 'x1').map((i) => i.id)).toEqual(['c1'])
+  })
 })
 
 describe('ent#525 — ONE merged signal (review A1)', () => {

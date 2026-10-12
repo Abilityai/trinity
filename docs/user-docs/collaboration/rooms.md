@@ -41,6 +41,16 @@ Topic, scribe, and a per-room budget are set through the API or MCP tools rather
 
 **When a client is reading.** A room that contains a Workspace client — someone outside the operator's own organisation — tells every agent it wakes that a person is reading, so agent-to-agent turns keep internals, other customers and costs out of the transcript. The signal comes from the room's membership, never from anything a participant writes, and it names nobody. A room holding only agents and operators carries no such notice.
 
+### Message sizes and safety limits
+
+- **What you post** — one message holds up to 8,000 characters. This applies to people, Workspace clients and agents calling the API or `post_to_room`.
+- **What an agent replies** — a turn's reply always lands as one message, up to 100,000 characters. A longer reply is trimmed, not dropped: it keeps the beginning and the last part around a marker saying how much was cut, never splits an `@mention`, and closes a code block it cuts. Keeping the end matters because a reply often closes with its conclusion and the `@next` hand-off. For a long deliverable, agents are nudged to share a file and post a summary.
+- **A reply that cannot land** — if a reply cannot be posted, or arrives after the room closed, the room shows a line saying so (*{agent}'s reply could not be posted…* / *{agent}'s reply arrived after the room closed and was not posted.*) instead of going quiet. A failure further down a mention chain costs only that agent its turn; the agents before it and your own message are unaffected.
+- **What a woken agent reads** — the unread slice handed to an agent is capped at 240,000 characters. Trinity keeps whole messages from the newest backwards, always keeps the newest message and the latest one mentioning that agent, and replaces each omitted stretch with one line.
+- **Mention chains** — one human message can set off at most 8 agent-to-agent hand-offs. Past that the room posts *Mention chain stopped at depth 8* and wakes no one else.
+- **Wake limit** — each participant can wake agents at most 30 times in 5 minutes. Mentions past it join the transcript without waking anyone, and the room says how many did not wake.
+- **Participants** — a room holds up to 12 agents.
+
 ### Budget defaults (admin)
 
 **Settings → Retention → Room budgets** sets the limits applied to every room started from the Workspace: **Messages** (up to 500), **Cost cap (USD)** (empty means no cap), and **Expires after** N hours (up to 168; `0` means no expiry). Changes apply to rooms created from then on. A room closes with a visible reason when it reaches one. A platform caller creating a room over the API or MCP may still pass its own budget; a Workspace client's values are ignored and the defaults apply.
@@ -81,6 +91,7 @@ These endpoints back the tools above. See the [API reference](http://localhost:8
 
 - **Per-message cost is not shown in the transcript** yet. Only the room-level cost total is displayed.
 - **Roles are advisory for posting.** A scribe designation is recorded but does not change who may post. The moderator role does gate managing the room (close, add, remove).
+- **Reading a room is not paginated.** `GET /api/rooms/{room_id}` and `read_room` return the whole transcript unless you pass `since`, so a room with many long messages makes a large response. Pass `since` to read only what is new.
 - **Turn chains run synchronously.** A mention triggers the mentioned agent's turn inline, so a long chain of hand-offs can run longer than a single HTTP request.
 - **Rooms show no unread badge** in the Workspace sidebar. Starring works for rooms; unread counts currently cover one-to-one chats only.
 - **Live cards and Stop are for platform users.** A Workspace client in a room sees *… is thinking…* and cannot stop a turn.

@@ -6,8 +6,8 @@ Install Trinity, log in as the admin, and meet the starter fleet a fresh install
 
 ## Concepts
 
-- **Admin Account** -- The primary account with full platform access. It is created from `ADMIN_PASSWORD` in `.env` when the backend first starts; the installer (`start.sh`) requires that value, so on a normal install the account exists before you open the browser. `.env` stays the source of truth: every backend start re-applies `ADMIN_PASSWORD`, so to change the admin password edit that line and restart the backend (there is no change-password form in the UI). The one exception is a DigitalOcean Marketplace 1-Click droplet created without a password: it boots with **no admin account**, and the first person to open it in a browser creates one. The admin signs in with the username `admin` (or `ADMIN_USERNAME`) **or** a registered email address, plus the password.
-- **First-run form** -- A one-page "Create your admin account" screen at `/setup` that appears **only on an install with no admin account** — a Marketplace 1-Click droplet claimed in the browser, a blank `ADMIN_PASSWORD` brought up without the installer, or a hand-rolled backend. It refuses to run once a usable admin exists, whatever the setup flag says.
+- **Admin Account** -- The primary account with full platform access. It is created from `ADMIN_PASSWORD` in `.env` when the backend first starts; the installer (`start.sh`) requires that value, so on a normal install the account exists before you open the browser. `.env` stays the source of truth: every backend start re-applies `ADMIN_PASSWORD`, so to change the admin password edit that line and restart the backend (there is no change-password form in the UI). The exception is a cloud install created without a password — a DigitalOcean Marketplace 1-Click droplet, a Vultr Marketplace server, or an AWS install: it boots with **no admin account**, and the first person to open it in a browser creates one (on AWS, only after proving the instance ID). The admin signs in with the username `admin` (or `ADMIN_USERNAME`) **or** a registered email address, plus the password.
+- **First-run form** -- A one-page "Create your admin account" screen at `/setup` that appears **only on an install with no admin account** — a one-click marketplace or AWS install claimed in the browser, a blank `ADMIN_PASSWORD` brought up without the installer, or a hand-rolled backend. It refuses to run once a usable admin exists, whatever the setup flag says.
 - **Email Login** -- A passwordless authentication method where users receive a one-time code via email. Requires an email service to be configured.
 - **Starter fleet** -- The agents a fresh install seeds for you: the Cornelius second-brain agent plus a three-agent starter team. Nothing to configure; deleting them does not bring them back.
 
@@ -21,7 +21,10 @@ Install Trinity, log in as the admin, and meet the starter fleet a fresh install
 
 - Docker Desktop installed and running (or Docker Engine + the Compose v2 plugin on Linux)
 - Git (required for GitHub-based agent templates)
+- At least 8 GB of RAM
 - A modern web browser
+
+**Database.** A local install runs on SQLite, which reached end-of-support on 2026-09-01: it still works, but PostgreSQL is now the supported backend. A fresh server or one-click install (`start.sh --hosted`) starts on a bundled PostgreSQL automatically; an existing SQLite install stays on SQLite until you migrate. See [Backup and Restore](../guides/deploying/backup-and-restore.md) and the [SQLite → PostgreSQL guide](../../migrations/SQLITE_TO_POSTGRES.md).
 
 ### Installation
 
@@ -55,14 +58,15 @@ Install Trinity, log in as the admin, and meet the starter fleet a fresh install
 
 ### The first-run form (installs with no admin only)
 
-If the backend started with a **blank** `ADMIN_PASSWORD`, every page redirects to a one-page **"Create your admin account"** form at `/setup` until an admin exists. Two installs land here:
+If the backend started with a **blank** `ADMIN_PASSWORD`, every page redirects to a one-page **"Create your admin account"** form at `/setup` until an admin exists. These installs land here:
 
-- **A DigitalOcean Marketplace 1-Click droplet created without a password.** This is by design: the 1-Click create page has no input form, so the image boots with `ADMIN_PASSWORD` blank and `ADMIN_PASSWORD_SOURCE=browser`, and the droplet's login banner prints the URL to claim it — never a password. A droplet you gave a password at create time (cloud-init user-data, or the `trinity-do-create.sh` installer) has its admin provisioned at boot and never shows the form.
+- **A DigitalOcean Marketplace 1-Click droplet created without a password.** This is by design: the 1-Click create page has no input form, so the image boots with `ADMIN_PASSWORD` blank and `ADMIN_PASSWORD_SOURCE=browser`, and the droplet's login banner prints the URL to claim it — never a password. A droplet you gave a password at create time (cloud-init user-data, or the `trinity-do-create.sh` installer) has its admin provisioned at boot and never shows the form. A Vultr Marketplace server behaves the same way.
+- **An AWS install created without a password** (`start.sh --provision --cloud aws`, the CloudFormation stack, or the AWS image). The form also asks for the EC2 instance ID — see **Instance-ID claim** below.
 - **A bare `docker compose up -d` or a hand-rolled backend** brought up with the password blank. The installer does not allow this on a normal install. A hosted compose started by hand with a blank password and no `ADMIN_PASSWORD_SOURCE=browser` marker is refused: set `ADMIN_PASSWORD` in `.env` and restart, or run `./scripts/deploy/start.sh --hosted`.
 
-On the form, enter your **admin email** (required — it becomes your sign-in identity), a password (12+ characters with uppercase, lowercase, number, and special character; a live checklist guides you), confirm it, and optionally your company name and an opt-in to security and product update emails. Submitting signs you straight in and opens the Dashboard. The form disables itself permanently after the account is created, and the backend refuses it outright whenever a usable admin already exists — so an install that booted with `ADMIN_PASSWORD` set is never in this window.
+On the form, enter your **admin email** (required — it becomes your sign-in identity), a password (12+ characters with uppercase, lowercase, number, and special character; a live checklist guides you), confirm it, and optionally your company name and an opt-in to security and product update emails. Submitting signs you straight in and opens the Dashboard. In the background, Trinity then deploys the system agent (`trinity-system`) and seeds the [starter fleet](#your-starter-fleet) — on these installs both wait until the admin exists, because they are owned by it. The form disables itself permanently after the account is created, and the backend refuses it outright whenever a usable admin already exists — so an install that booted with `ADMIN_PASSWORD` set is never in this window.
 
-**Instance-ID claim.** An install whose `.env` sets `ADMIN_PASSWORD_SOURCE=instance-id` (the mode for an AWS EC2 image) adds one field to the form: the server's **EC2 instance ID**, found in the AWS console under **EC2 → Instances**. Provisioning stores that ID in a `setup-claim` file in the data directory, and the form works only when you enter the same ID. Any mismatch gets one answer, *That instance ID does not match this server.*, and repeated wrong guesses are rate-limited like failed logins. Email is optional on this path; without one, the admin signs in as `admin` with the password. The stored ID is deleted once the account exists. If the file is missing, every attempt is refused. Trinity's own install scripts do not write it — only an image that sets this mode does.
+**Instance-ID claim.** An install whose `.env` sets `ADMIN_PASSWORD_SOURCE=instance-id` adds one field to the form: the server's **EC2 instance ID**, found in the AWS console under **EC2 → Instances**. Provisioning stores that ID in a `setup-claim` file in the data directory, and the form works only when you enter the same ID. Any mismatch gets one answer, *That instance ID does not match this server.*, and repeated wrong guesses are rate-limited like failed logins. Email is optional on this path; without one, the admin signs in as `admin` with the password. The stored ID is deleted once the account exists. If the file is missing, every attempt is refused. An AWS install with no password takes this mode by default: `start.sh --provision --cloud aws` (which the AWS image and the CloudFormation stack also run) reads the ID from the instance metadata service and writes the file. Supply `ADMIN_PASSWORD` to skip the claim. Other clouds never use it.
 
 On a claimed droplet, `.env` keeps `ADMIN_PASSWORD` blank on purpose — the password lives only in the database, and reboots and `start.sh --hosted` updates leave it alone. Forgot it? Set `ADMIN_PASSWORD` in `.env` and recreate the backend container (`./scripts/deploy/start.sh --hosted`, or `docker compose up -d backend`); `docker compose restart` does not re-read `.env`. The backend adopts the value on that boot.
 
@@ -80,8 +84,8 @@ Password login is rate-limited: five failed attempts on one account within 15 mi
 
 On a fresh install the Dashboard opens **first-run setup**: one sequence over a dashboard that does not move underneath it. A rail on the left lists the steps this install actually needs — steps that do not apply to you never appear — and marks each one done as you go. The order is fixed, and you can go back:
 
-- **Secure this instance** -- Only on an install provisioned onto a cloud VM at a bare IP (the DigitalOcean 1-Click, or the [`trinity-do-create.sh` installer](../guides/deploying/digitalocean.md)), for admins, until a domain is configured. Point a domain at the server, enter it as the **Public URL** and click **Save domain**, then optionally serve it through a Cloudflare Tunnel. Saving completes the step. Its badge reads **Domain saved** until the first visit to that name reaches the server, then **Domain reached**. **Why this matters** explains both stages and links the full [hardening guide](../guides/deploying/hardening.md). See [Single Server → DigitalOcean 1-Click](../guides/deploying/single-server.md#digitalocean-marketplace-1-click).
-- **Sign-in email** -- Only when the admin account has no email yet, so you can log in with email + password. An install you claimed in the browser collected it at `/setup`, so this step does not appear. Also at **Settings → General → Admin sign-in email**.
+- **Secure this instance** -- Only on an install provisioned onto a cloud VM at a bare IP (the DigitalOcean 1-Click or [`trinity-do-create.sh` installer](../guides/deploying/digitalocean.md), the Vultr Marketplace app, or an AWS install), for admins, until a domain is configured. Point a domain at the server, enter it as the **Public URL** and click **Save domain**, then optionally serve it through a Cloudflare Tunnel. Saving completes the step. Its badge reads **Domain saved** until the first visit to that name reaches the server, then **Domain reached**. **Why this matters** explains both stages and links the full [hardening guide](../guides/deploying/hardening.md). See [Single Server → DigitalOcean 1-Click](../guides/deploying/single-server.md#digitalocean-marketplace-1-click).
+- **Sign-in email** -- Only when the admin account has no email yet, so you can log in with email + password. Trinity mails a 6-digit code to the address (valid 10 minutes) and binds it only once you enter that code, so nobody can claim an address they do not own. One address belongs to one account: an email already used by another account is refused. On an install whose email provider is still `console` (codes go only to the server log), the admin may bind without a code. An install you claimed in the browser collected the email at `/setup`, so this step does not appear. Also at **Settings → General → Admin sign-in email**.
 - **Connect Claude** -- The one required step. Paste a Claude subscription token or an Anthropic API key; it is checked with Anthropic before it is saved, and the first credential is handed to the agents that had none. Until this is done, no agent can run.
 - **Other keys** -- Optional: a GitHub token, an email-provider key (needed for email sign-in codes), and a Gemini key (voice features and generated agent avatars). Each says what skipping it costs, and all of them live at **Settings → Integrations** afterwards.
 - **Your first agent** -- Two doors: **Show me** (**Watch Cornelius work**) opens a seeded agent's chat so you can see one at work, and **Make me one** creates one from a purpose you pick — the details are in [Quick Start → Guided Onboarding](quick-start.md#guided-onboarding-first-run). Already running a fleet? A link takes you to migrating an existing one. Whichever door you take, **Done** at the end of the sequence opens that agent's chat. The step counts as done once you own an agent Trinity did not seed.
@@ -99,10 +103,10 @@ After setup, a **Getting started** checklist can keep you going. It ticks off yo
 
 On a **fresh install**, Trinity seeds agents so you land on something working without cloning or configuring a template:
 
-- **Cornelius** -- a ready-to-use second-brain agent, cloned from its public template at first boot, with the **Brain Orb** enabled — a self-rendering 3D knowledge graph on its **Brain** tab (see [Dynamic Dashboards → the Brain Orb](../advanced/dynamic-dashboards.md#related-the-brain-orb)).
+- **Cornelius** -- a ready-to-use second-brain agent, cloned from its public template at first boot and kept pull-only (it never pushes your knowledge back to that shared upstream), with the **Brain Orb** enabled — a self-rendering 3D knowledge graph on its **Brain** tab (see [Dynamic Dashboards → the Brain Orb](../advanced/dynamic-dashboards.md#related-the-brain-orb)).
 - **The `acme` starter team** -- three collaborating agents from the bundled default system manifest: `acme-scout` (research), `acme-sage` (strategy) and `acme-scribe` (content), sharing folders and able to call each other. They ship with no schedules and need no credentials at seed time. Skip or replace this fleet with `TRINITY_DEFAULT_SYSTEM_MANIFEST` — see [System Manifests → Default System on First Run](../collaboration/system-manifest.md#default-system-on-first-run).
 
-Seeding runs **once, only on a truly fresh install**: it is skipped when the instance already has agents, and deleting a seeded agent does **not** re-create it. Installs without Docker (demo mode) skip it entirely. The seeded agents cannot think until you add a model credential — the **Connect Claude** step of first-run setup, or an Anthropic API key or a Claude subscription under **Settings → Integrations**; the first credential you add is connected to every agent that has never run successfully. The three `acme` agents ship with a bundled default avatar; Cornelius shows initials until a Gemini key exists and **Generate Default Avatars** (Settings → General) has run.
+Seeded agents appear on the Dashboard as soon as they exist; closing first-run setup refreshes the fleet. Seeding runs **once, only on a truly fresh install**: it is skipped when the instance already has agents, and deleting a seeded agent does **not** re-create it. Installs without Docker (demo mode) skip it entirely. The seeded agents cannot think until you add a model credential — the **Connect Claude** step of first-run setup, or an Anthropic API key or a Claude subscription under **Settings → Integrations**; the first credential you add is connected to every agent that has never run successfully. The three `acme` agents ship with a bundled default avatar; Cornelius shows initials until a Gemini key exists and **Generate Default Avatars** (Settings → General) has run.
 
 ### Security & product updates (optional)
 
@@ -179,8 +183,15 @@ The following endpoints do not require authentication:
 
 - `GET /api/auth/mode` -- Returns the current authentication mode and whether setup is complete.
 - `GET /api/setup/status` -- Returns whether initial setup is complete, and `claim_required: "instance-id"` when the first-run form must also be given the EC2 instance ID (otherwise `null`).
-- `POST /api/setup/admin-password` -- The first-run form's endpoint; refuses (403) once a usable admin exists, and on a hosted compose whose blank password was not marked for browser claim.
+- `POST /api/setup/admin-password` -- The first-run form's endpoint; refuses (403) once a usable admin exists, and on a hosted compose whose blank password was not marked for browser claim. On success it also schedules the system-agent deploy and first-run seeding.
 - `POST /api/token` -- The login endpoint itself.
+
+### Binding a sign-in email
+
+Both calls take a signed-in browser session; no MCP key can change a sign-in identity.
+
+- `POST /api/users/me/email/code` -- Body `{"email": "user@example.com"}`. Mails a 6-digit code to the new address (at most 3 per 10 minutes).
+- `PUT /api/users/me/email` -- Body `{"email": "user@example.com", "code": "123456"}`. Binds the address. Without a code it answers `400 code_required`; an address held by another account gets `409 email_in_use`; five wrong codes in 10 minutes lock that bind with `429`.
 
 ### First-run state
 
@@ -194,6 +205,7 @@ The following endpoints do not require authentication:
 - Email login requires a configured email service. Without it, only admin password login is available.
 - Trinity requires Docker. It cannot run without it.
 - Seeding Cornelius needs outbound access to GitHub at first boot; a failed pass is retried on the next start.
+- SQLite is past its end-of-support date (2026-09-01) and PostgreSQL is the supported backend. A local install still defaults to SQLite, so plan a move to PostgreSQL for any instance you keep.
 
 ## See Also
 

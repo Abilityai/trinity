@@ -40,6 +40,16 @@
       :model-value="current"
       :more-label="moreTabsLabel"
       @update:model-value="onSelect"
+      @close="onClose"
+    />
+    <!-- ent#841: a close that the server refused. The tab is back by then (the
+         shell reverts it), and this says why, next to the control that failed. -->
+    <InlineError
+      v-if="closeError"
+      class="my-1"
+      :message="closeError"
+      data-testid="chat-tab-close-error"
+      @dismiss="emit('dismiss-close-error')"
     />
   </div>
 </template>
@@ -47,6 +57,7 @@
 <script setup>
 import { computed } from 'vue'
 import OverflowTabs from '@/components/OverflowTabs.vue'
+import InlineError from '@/components/InlineError.vue'
 import { agentChatTabs, moreTabsLabel, NEW_CHAT_TAB_ID } from './portalUtils'
 import { keyHint, keyShortcutsFor, hostPlatform } from './portalKeymap'
 
@@ -62,8 +73,16 @@ const props = defineProps({
   // trinity-enterprise#657: the drafts store's key set (`thread:<id>` /
   // `new:<agent>`), from the conversation that owns the store binding.
   draftKeys: { type: Object, default: null },
+  // ent#841: a reply is in flight in the ACTIVE chat. Its × is inert and says
+  // why, rather than archiving a chat out from under a turn the person is
+  // watching (the reply would still land — nothing is lost — but the chat would
+  // vanish mid-answer). Other chats' turns are safe to close: the reply lands
+  // in the archived chat and is there when it is reopened.
+  busy: { type: Boolean, default: false },
+  // ent#841: why the last close failed, from the shell; '' when none.
+  closeError: { type: String, default: '' },
 })
-const emit = defineEmits(['select', 'new-chat'])
+const emit = defineEmits(['select', 'new-chat', 'close', 'dismiss-close-error'])
 
 // ent#621: the chat keys are discoverable from the strip they walk. The hint
 // rides `signalTitle` (the title channel `OverflowTabs` already renders) and
@@ -80,8 +99,26 @@ const tabs = computed(() =>
       ...t,
       signalTitle: `${t.signalTitle || t.label} · ${CHAT_KEY_HINT} switch chat`,
       ariaKeyshortcuts: CHAT_KEY_SHORTCUTS,
+      ...(t.closable ? closeFields(t) : {}),
     }))
 )
+
+// ent#841: the × names its verb — it archives, and the label says so.
+function closeFields(t) {
+  const busyHere = props.busy && t.id === props.activeId
+  return {
+    closeLabel: 'Archive chat',
+    closeDisabled: busyHere,
+    closeTitle: busyHere ? 'Wait for the reply to finish, then archive this chat' : 'Archive chat',
+  }
+}
+
+function onClose(id) {
+  if (props.disabled) return
+  const tab = tabs.value.find((t) => t.id === id)
+  if (!tab?.thread || !tab.closable || tab.closeDisabled) return
+  emit('close', tab.thread)
+}
 
 // The strip's EFFECTIVE selection — the same expression `:model-value` binds.
 // Comparing against `activeId` alone is wrong while the active chat is

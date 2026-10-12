@@ -14,6 +14,8 @@
 
 ### SQLite (`/data/trinity.db`)
 
+**Orphan tables (#3432):** installs upgraded from before #3432 — SQLite and PostgreSQL alike — may carry `process_schedules` and `process_schedule_executions`, which the scheduler's boot path created ad hoc outside both migration tracks; the scheduler no longer creates or reads them, nothing else references them, and they are deliberately left in place (no migration), so #746 autogenerate will surface them as unknown tables.
+
 **users:**
 ```sql
 CREATE TABLE users (
@@ -104,7 +106,8 @@ CREATE TABLE agent_sharing (
     shared_with_email TEXT NOT NULL,
     shared_by_id INTEGER NOT NULL,
     created_at TEXT NOT NULL,
-    allow_proactive INTEGER DEFAULT 0,
+    allow_proactive INTEGER DEFAULT 0,  -- three-state since trinity-enterprise#817: NULL = not asked, 0 = declined, 1 = consented; code writes a new share NULL (the DDL default is unchanged, data-only migration
+                                       -- SQLite `proactive_consent_not_asked` / Alembic `0098_proactive_consent_not_asked` moved the legacy DEFAULT-0 rows to NULL); only 1 permits proactive contact, before and after
     UNIQUE(agent_name, shared_with_email),
     FOREIGN KEY (shared_by_id) REFERENCES users(id)
 );
@@ -753,9 +756,9 @@ CREATE TABLE operator_queue (
     -- trinity-enterprise#611 (SQLite `operator_queue_ask_object` / Alembic `0076_operator_queue_ask_object`; nullable, no backfill):
     disposition TEXT,                   -- answered|cancelled|expired — written in the SAME CAS UPDATE that flips `status`; NULL = ended before the ledger
     disposed_at TEXT,
-    disposed_by TEXT,                   -- person|timeout|platform — only a person or the clock ends an ASK; `platform` ends only a platform alert (#3130 superseded flood alarms, #3246 condition_cleared)
-    disposed_by_email TEXT,             -- NULL for timeout; withheld from machine keys on get/list
-    disposition_reason TEXT,            -- the operator's optional cancel reason (≤ 500); never in an audit row, never to a Workspace client
+    disposed_by TEXT,                   -- person|timeout|platform|agent — only a person or the clock ends an ASK, bar one: `agent` is an agent replacing its OWN pending ask, reason `replaced` (#3247); `platform` ends only a platform alert (#3130 superseded flood alarms, #3246 condition_cleared)
+    disposed_by_email TEXT,             -- NULL unless disposed_by = person; withheld from machine keys on get/list
+    disposition_reason TEXT,            -- the operator's optional cancel reason (≤ 500); never in an audit row, never to a Workspace client. Machine tokens: `replaced` (agent, #3247), `condition_cleared`/`superseded` (platform, #3246), `outcome_unknown` (timeout on an approval the platform did not hold — anything but a gate's — so expiry cannot vouch the action did not go ahead, trinity-enterprise#844)
     batch_id TEXT,                      -- one uuid per bulk-cancel sweep; its re-select is the sweep's CAS winners
     raised_by TEXT,                     -- agent|gate (PR B); NULL for a legacy row or a platform alarm
     channel TEXT,                       -- file|mcp|gate; keyword-only on create, never read from the agent's entry
@@ -765,6 +768,9 @@ CREATE TABLE operator_queue (
     supersedes_expired TEXT,            -- PR B: the agent's own expired predecessor (row uuid)
     subject TEXT,                       -- #3246: a platform alert's condition key `<kind>:<key>`; at most one PENDING row per (agent_name, subject) — partial unique index uq_operator_queue_pending_subject
     last_seen_at TEXT,                  -- #3246: the latest reading of that condition (the count rides in context.seen_count)
+    -- #3247 (SQLite `operator_queue_replace` / Alembic `0097_operator_queue_replace`; nullable, no index):
+    replaces TEXT,                      -- on the successor: the replaced predecessor (row uuid)
+    replaced_by TEXT,                   -- on the predecessor: its successor (row uuid); both stamped in one transaction
     FOREIGN KEY (responded_by_id) REFERENCES users(id)
 );
 CREATE INDEX idx_operator_queue_agent ON operator_queue(agent_name);
@@ -1151,7 +1157,7 @@ to a named agent:
 ```sql
 CREATE TABLE agent_capability_grants (
     agent_name TEXT NOT NULL,
-    capability TEXT NOT NULL,          -- closed set: 'skills.manage'
+    capability TEXT NOT NULL,          -- closed set: 'skills.manage', 'schedules.manage', 'instructions.manage', 'agents.manage' (ent#164; enforced in code, no CHECK)
     granted_by TEXT NOT NULL,
     granted_at TEXT NOT NULL,
     PRIMARY KEY (agent_name, capability)
@@ -1161,6 +1167,28 @@ CREATE INDEX idx_agent_capability_grants_cap ON agent_capability_grants(capabili
 Both tracks: SQLite `agent_capability_grants`, Alembic `0072_agent_capability_grants` (← `0071`).
 `AgentRef(..., CASCADE)` — rename re-keys, delete removes. Every read joins `agent_ownership`
 and filters `deleted_at`, so a soft-deleted agent holds nothing and recovery restores its grant.
+
+**skill_gate_requests** (trinity-enterprise#751) — a gated-skill request frozen while its approval ask is open (`db/skill_gate_requests.py`); the ask records the decision, this row the effect: `pending → dispatching` is a CAS and `dispatched_execution_id` is UNIQUE, so an approval runs exactly once; a `self_approved` row (#752) is the clearance the in-container hook honours. Both tracks (SQLite `skill_gate_requests_table`, Alembic `0088`); `agent_name` and `source_agent` are CASCADE AgentRefs; machine keys never read these rows (#715).
+
+**agent_skill_gates** (trinity-enterprise#753) — the per-agent skill gate map the gated-skill
+check reads (`skill_gate_service.list_skill_gates`; writes only through
+`services/skill_gate_map_service.py`):
+```sql
+CREATE TABLE agent_skill_gates (
+    agent_name TEXT NOT NULL,
+    skill_name TEXT NOT NULL,          -- lowercased; every matcher casefolds
+    approver TEXT NOT NULL,            -- primary | approver
+    deadline_hours INTEGER,            -- 1..168; NULL → the 24h default
+    origin TEXT NOT NULL,              -- set | library_default | cleared (tombstone, gates nothing)
+    set_by TEXT NOT NULL,
+    set_by_agent TEXT,                 -- R29 provenance; not an AgentRef
+    set_at TEXT NOT NULL,
+    PRIMARY KEY (agent_name, skill_name)
+);
+```
+Both tracks: SQLite `agent_skill_gates`, Alembic `0094_agent_skill_gates` (← `0093_platform_alert_responded_heal`).
+`AgentRef(..., CASCADE)`. Writes run under `lock_agent_rows` and land only while the agent has a
+live ownership row; the PK is the ON CONFLICT target, declared in `tables.py` as well.
 
 **Tag pinning is the supply-chain control (AC#5).** Skills carry executable `scripts/`
 that the ent#139 runner executes and ent#236 re-injects fleet-wide unattended, so the

@@ -90,6 +90,17 @@ export function shareProblem(status, detail) {
  * minted; the origin is added here, at the moment of copying, which is the
  * only point where the right answer is known.
  */
+/**
+ * Which credential a share view is fetched with (trinity-enterprise#837).
+ * Someone an agent is shared with signs in to the Workspace, not at /login, so
+ * without a platform session the Workspace session is the credential; with
+ * neither, the visitor goes as a stranger through the platform client.
+ */
+export function shareFetchClient({ hasPlatformSession, hasWorkspaceSession }) {
+  if (hasPlatformSession) return 'platform'
+  return hasWorkspaceSession ? 'workspace' : 'platform'
+}
+
 export function shareUrl(path, origin) {
   const base = String(origin || '').replace(/\/+$/, '')
   const rel = String(path || '')

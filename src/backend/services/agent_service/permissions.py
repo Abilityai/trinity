@@ -9,7 +9,7 @@ from fastapi import HTTPException, Request
 
 from models import User
 from database import db
-from services.docker_service import get_agent_container
+from services.docker_service import agent_container_states, get_agent_container
 from .helpers import get_accessible_agents
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 async def get_agent_permissions_logic(
     agent_name: str,
-    current_user: User
+    current_user: User,
+    strict: bool = False,
 ) -> dict:
     """
     Get permissions for an agent.
@@ -26,9 +27,16 @@ async def get_agent_permissions_logic(
     - source_agent: The agent name
     - permitted_agents: List of agents this agent can communicate with
     - available_agents: List of all other accessible agents with permission status
+
+    `strict` (trinity-enterprise#815): never answer a Docker fault with a
+    confident, smaller set — see `_strict_permissions`. Without it the
+    behaviour is unchanged (the frontend and the lenient MCP callers).
     """
     if not db.can_user_access_agent(current_user.username, agent_name):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
+
+    if strict:
+        return _strict_permissions(agent_name, current_user)
 
     container = get_agent_container(agent_name)
     if not container:
@@ -62,6 +70,61 @@ async def get_agent_permissions_logic(
         "source_agent": agent_name,
         "permitted_agents": permitted_agents,
         "available_agents": available_agents
+    }
+
+
+def _strict_permissions(agent_name: str, current_user: User) -> dict:
+    """The permissions answer built from ONE tri-state Docker snapshot
+    (trinity-enterprise#815).
+
+    The lenient path reads Docker twice through helpers that swallow faults:
+    `get_agent_container` turns any error into a 404, and `get_accessible_agents`
+    → `list_all_agents_fast` turns one into an empty fleet, so the answer is
+    "200, no peers". A caller that must not mistake that for "no peers" — the
+    MCP deciding whether a broad queue read is complete — asks for this mode:
+    `agent_container_states()` is read once; `None` (Docker unreadable) is a
+    503; otherwise both "the agent exists" and "which permitted peers have a
+    container" come from that one snapshot plus the same DB access rules
+    `get_accessible_agents` applies (admin ⇒ every container, orphans included;
+    else owned or shared).
+    """
+    states = agent_container_states()
+    if states is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Docker could not be read; the permitted agents cannot be verified",
+        )
+    if agent_name not in states:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    permitted_list = db.get_permitted_agents(agent_name)
+    user_data = db.get_user_by_username(current_user.username)
+    is_admin = bool(user_data) and user_data["role"] == "admin"
+    all_metadata = db.get_all_agent_metadata(user_data.get("email")) if user_data else {}
+
+    permitted_agents = []
+    available_agents = []
+    for name in sorted(states):
+        if name == agent_name or not user_data:
+            continue
+        metadata = all_metadata.get(name)
+        if metadata:
+            visible = (is_admin
+                       or metadata.get("owner_username") == current_user.username
+                       or bool(metadata.get("is_shared_with_user")))
+        else:
+            visible = is_admin  # an orphan container: admin only, as today
+        if not visible:
+            continue
+        agent_info = {"name": name, "status": states[name], "permitted": name in permitted_list}
+        if agent_info["permitted"]:
+            permitted_agents.append(agent_info)
+        available_agents.append(agent_info)
+
+    return {
+        "source_agent": agent_name,
+        "permitted_agents": permitted_agents,
+        "available_agents": available_agents,
     }
 
 

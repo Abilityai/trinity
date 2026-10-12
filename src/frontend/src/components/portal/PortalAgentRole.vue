@@ -23,20 +23,26 @@
         </p>
         <p v-else-if="card.role.mission" class="mt-1 text-sm">{{ card.role.mission }}</p>
         <p v-if="card.role.path" class="mt-1 text-[11px] text-gray-400 font-mono break-all">{{ card.role.path }}</p>
-        <p v-if="card.seat" class="mt-1 text-[11px] text-gray-400">Seat · {{ card.seat }}</p>
+        <!-- ent#814: where this seat comes from, for you — never a person. -->
+        <p v-if="seatSourceText" class="mt-1 text-[11px] text-gray-400" data-testid="portal-role-seat-source">{{ seatSourceText }}</p>
       </div>
 
       <!-- Objectives with metric freshness — the portal projection of the ONE
            objective ↔ metric join (ent#676). An agent that simply has none
            renders nothing here, as before. -->
-      <template v-if="card.objectives.length || card.objectives_error">
+      <template v-if="card.objectives.length || card.objectives_error || (noSeat && card.role.error !== 'no_seat')">
         <h3 class="mt-3 mb-1 text-[11px] font-medium text-gray-400">Objectives</h3>
+        <!-- trinity-enterprise#812: owning nothing because nobody's seat is on
+             record is a named state, with what to do — never a silent blank. -->
+        <p v-if="noSeat && card.role.error !== 'no_seat'" class="mb-1.5 text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-no-seat">
+          {{ roleErrorText('no_seat') }}
+        </p>
         <!-- Zero objectives for a NAMED reason: a read that did not happen is
              never shown as "this agent has none" (principle 15). -->
-        <p v-if="!card.objectives.length" class="text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-objectives-error">
+        <p v-if="!card.objectives.length && card.objectives_error" class="text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-objectives-error">
           {{ objectivesErrorText(card.objectives_error) }}
         </p>
-        <ul v-else class="space-y-1.5">
+        <ul v-if="card.objectives.length" class="space-y-1.5">
           <li v-for="o in card.objectives" :key="o.id"
               class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-[12.5px]"
               data-testid="portal-role-objective">
@@ -50,6 +56,8 @@
                 <!-- Wraps: two badges beside the numbers must not crush the name in a narrow rail. -->
                 <div class="flex items-center gap-x-2 gap-y-0.5 flex-wrap tabular-nums">
                   <span class="font-mono text-[11.5px] min-w-0 truncate">{{ m.name }}</span>
+                  <!-- ent#731: a number that must not move while the objective is pursued. -->
+                  <BaseBadge v-if="m.role === 'guard'" variant="neutral" title="Must stay where it is while this objective is pursued" data-testid="portal-role-metric-guard">Guard</BaseBadge>
                   <span class="text-gray-400">{{ shown(m.actual, m) }}<template v-if="m.target != null"> / {{ shown(m.target, m) }}</template></span>
                   <!-- Position against the target, never pace. Stale is orthogonal: both can show. -->
                   <BaseBadge v-if="gapBadge(m)" :variant="gapBadge(m).variant" dot data-testid="portal-role-metric-gap">{{ gapBadge(m).label }}</BaseBadge>
@@ -77,7 +85,7 @@
 
       <!-- Your relationship (ent#500 when it lands; stated, never blank). -->
       <p class="mt-3 text-[12.5px]" data-testid="portal-role-relationship">
-        <span class="text-gray-400">Your relationship · </span>{{ card.relationship || 'no assignment recorded' }}
+        <span class="text-gray-400">Your relationship · </span>{{ relationshipText }}
       </p>
 
       <!-- Readiness: the owner's stamp, never the template's word. -->
@@ -168,12 +176,35 @@ function flip() {
   return store.flipAgentReadiness(props.agentName, next)
 }
 
+// ent#814: the seat on the card is the one this agent serves for YOU.
+const SEAT_SOURCE_TEXT = {
+  holds: 'The agent holds this seat itself',
+  person: 'Your seat on this agent',
+  primary: "Its primary's seat",
+}
+const seatSourceText = computed(() => SEAT_SOURCE_TEXT[card.value?.seat_source] || '')
+
+// ent#638 kinds — the viewer's assignment on this agent.
+const RELATIONSHIP_TEXT = {
+  primary: 'primary — it works for you',
+  approver: 'approver',
+  collaborator: 'collaborator',
+  viewer: 'viewer',
+}
+const relationshipText = computed(() =>
+  RELATIONSHIP_TEXT[card.value?.relationship] || 'no assignment recorded')
+
+// trinity-enterprise#812: the join's `no_seat` finding, carried on the card.
+const noSeat = computed(() => (card.value?.finding_codes || []).includes('no_seat'))
+
 function roleErrorText(code) {
   return {
     role_file_not_found: "The role file is not in the agent's canon yet — it will show once the file exists.",
     role_file_unreadable: 'The role file could not be read from the agent. Try again in a moment.',
     role_file_invalid: 'The role file is not valid YAML (or not a role) — fix the file; nothing is edited here.',
     role_id_invalid: 'The role id in template.yaml is not a valid id.',
+    // trinity-enterprise#812: owned objectives come from the seat on record.
+    no_seat: 'This agent neither holds a seat nor serves someone who holds one, so it owns no objective yet.',
     canon_path_invalid: 'The canon path in template.yaml is not a valid path.',
   }[code] || 'The role could not be loaded.'
 }
@@ -206,6 +237,8 @@ function findingText(code) {
     metric_retired: "This metric is no longer measured, so its last number isn't shown.",
     direction_mismatch: "The objective and the metric disagree on which way is good. The comparison follows the metric's own setting.",
     direction_undeclared: "Nothing says whether higher or lower is better here, so it can't be compared with its target.",
+    guard_target_unset: 'Target not set. This guard gets a level to hold once there is a baseline.',
+    guard_direction_invalid: 'This guard names a direction. A guard is only checked for staying put, so the direction is ignored.',
   }[code] || "This metric can't be compared with its target right now."
 }
 

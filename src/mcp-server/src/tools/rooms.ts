@@ -145,12 +145,14 @@ export function createRoomTools(client: TrinityClient, requireApiKey: boolean) {
     postToRoom: {
       name: "post_to_room",
       description:
-        "Post a message to a room. @mention a participant by name to wake them — " +
+        "Post a message to a room. @mention an agent participant by name to wake it — " +
         "a message with no mention joins the transcript without waking anyone. " +
+        "A person's name is plain text: agents cannot tag people (a person tags a " +
+        "colleague from the Workspace composer). " +
         "You post as yourself; you cannot post as another participant.",
       parameters: z.object({
         room_id: z.string(),
-        content: z.string().describe("Message text; @mention participants to wake them"),
+        content: z.string().describe("Message text; @mention agent participants to wake them"),
       }),
       execute: async (
         { room_id, content }: { room_id: string; content: string },

@@ -222,6 +222,7 @@ View them on the Operations page's Executions tab, or read the whole batch with 
 - **Self-only**: Currently fan-out only works on the calling agent itself. Cross-agent fan-out is planned.
 - **No UI**: API and MCP access only.
 - **Capacity slots**: Each subtask consumes a parallel execution slot.
+- **Chain depth**: A fan-out called by an agent counts as one hop in its agent-to-agent call chain, and every subtask carries that depth. Past the chain-depth limit (default 8) the call is refused with `403` `inter_agent_depth_exceeded` before any subtask starts. See [Agent Network → Chain-Depth Limit](../collaboration/agent-network.md#concepts).
 - **Deadlines don't cancel**: Reaching `timeout_seconds` ends the wait, not the tasks. To stop a subtask, terminate its execution.
 - **Restarts**: Subtasks that were still waiting for a slot when the backend restarted are not dispatched afterwards. Tasks already dispatched are unaffected.
 

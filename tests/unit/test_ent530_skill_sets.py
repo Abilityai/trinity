@@ -120,12 +120,6 @@ class TestParser:
         big = self._parse({"big": [f"m{i}" for i in range(MAX_MEMBERS + 3)]})["big"]
         assert len(big.members) == MAX_MEMBERS and "too_many" in big.problems
 
-    def test_split_set_ref(self):
-        from services.skill_sets import split_set_ref
-        assert split_set_ref("set:dev-backlog") == "dev-backlog"
-        assert split_set_ref("dev-backlog") is None
-        assert split_set_ref("set:../x") is None
-
 
 # =============================================================================
 # 2. the pure rule
@@ -840,8 +834,13 @@ def test_agent_start_reconciles_sets_before_reading_the_names(monkeypatch):
                         AsyncMock(side_effect=lambda *a, **k: calls.append("inject") or {"success": True}))
     monkeypatch.setattr(lifecycle.skill_service, "reconcile_agent_skills",
                         AsyncMock(side_effect=lambda *a, **k: calls.append("prune") or {}))
+    # trinity-enterprise#753: library-default gates follow the rows the set
+    # reconcile just wrote, before the names are read for injection.
+    from services import skill_gate_map_service
+    monkeypatch.setattr(skill_gate_map_service, "reconcile_library_gates",
+                        AsyncMock(side_effect=lambda *a, **k: calls.append("gates")))
     asyncio.run(lifecycle.inject_assigned_skills(AGENT))
-    assert calls[:3] == ["sets", "names", "inject"] and "prune" in calls
+    assert calls[:4] == ["sets", "gates", "names", "inject"] and "prune" in calls
 
 
 def test_manual_inject_reconciles_sets_then_injects_then_prunes(app_client, monkeypatch):

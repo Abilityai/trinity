@@ -14,6 +14,10 @@ import { readStoredToken } from '../utils/platformSession'
 export const useNotificationsStore = defineStore('notifications', () => {
   // State
   const notifications = ref([])
+  // #3449: the GLOBAL pending count — every accessible agent, every page. It is
+  // a server figure (fetchPendingCount) and is never derived from
+  // `notifications`, which is one filtered, page-capped slice: the Operations
+  // header, the tab badge and the NavBar badge all read this.
   const pendingCount = ref(0)
   const loading = ref(false)
   const error = ref(null)
@@ -110,9 +114,11 @@ export const useNotificationsStore = defineStore('notifications', () => {
       totalCount.value = response.data.count || 0
       hasMore.value = notifications.value.length < totalCount.value
 
-      // Update pending count from filtered results
-      updatePendingCount()
       hasLoaded.value = true
+      // #3449: the list never writes pendingCount. Re-read the true count
+      // beside a first-page load so the badge and the rows are of one moment;
+      // not awaited — the list must not wait on, or fail with, the badge.
+      if (offset === 0) fetchPendingCount()
     } catch (err) {
       console.error('Failed to fetch notifications:', err)
       error.value = err.response?.data?.detail || 'Failed to load notifications'
@@ -135,10 +141,6 @@ export const useNotificationsStore = defineStore('notifications', () => {
     }
   }
 
-  function updatePendingCount() {
-    pendingCount.value = notifications.value.filter(n => n.status === 'pending').length
-  }
-
   async function acknowledgeNotification(notificationId) {
     try {
       const token = readStoredToken()
@@ -148,11 +150,13 @@ export const useNotificationsStore = defineStore('notifications', () => {
 
       // Update local state
       const notification = notifications.value.find(n => n.id === notificationId)
+      const wasPending = !notification || notification.status === 'pending'
       if (notification) {
         notification.status = 'acknowledged'
         notification.acknowledged_at = new Date().toISOString()
       }
-      pendingCount.value = Math.max(0, pendingCount.value - 1)
+      // #3449: only a row that WAS pending leaves the pending count.
+      if (wasPending) pendingCount.value = Math.max(0, pendingCount.value - 1)
 
       return true
     } catch (err) {
@@ -170,6 +174,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
 
       // Update local state
       const notification = notifications.value.find(n => n.id === notificationId)
+      const wasPending = !notification || notification.status === 'pending'
       if (notification) {
         notification.status = 'dismissed'
       }
@@ -179,7 +184,8 @@ export const useNotificationsStore = defineStore('notifications', () => {
         notifications.value = notifications.value.filter(n => n.id !== notificationId)
       }
 
-      pendingCount.value = Math.max(0, pendingCount.value - 1)
+      // #3449: dismissing an acknowledged row removes no pending item.
+      if (wasPending) pendingCount.value = Math.max(0, pendingCount.value - 1)
 
       return true
     } catch (err) {

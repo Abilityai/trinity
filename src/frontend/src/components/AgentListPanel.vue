@@ -552,8 +552,14 @@
              desktop grid needs). `md:list-wide:hidden`, not `list-wide:hidden`:
              Tailwind 3 emits screen variants after custom ones, so a bare
              `list-wide:hidden` loses to `md:flex`, and this block then sits in
-             the row subgrid as an extra item that widens track 1. -->
-        <div class="hidden md:flex md:flex-col md:list-wide:hidden pl-8 pr-4 py-3 gap-2">
+             the row subgrid as an extra item that widens track 1.
+             It also needs the LIST to be at least 40rem wide (`list-mid:`,
+             #3465): its second line holds three reserved toggles, the success
+             bar, the meter and the task counts, about 610px. Behind the open
+             systems rail a 768 window leaves the list 496px — the success cell
+             collapsed to 0 and the task counts ran past the row — so there the
+             compact layout below renders instead. -->
+        <div class="hidden md:list-mid:flex md:list-mid:flex-col md:list-wide:hidden pl-8 pr-4 py-3 gap-2">
           <div class="flex items-center gap-3">
             <input
               type="checkbox"
@@ -737,8 +743,10 @@
           </div>
         </div>
 
-        <!-- Mobile layout (< md) -->
-        <div class="flex flex-col md:hidden pl-8 pr-4 py-3 gap-2">
+        <!-- Compact layout: a window below md, or a list narrower than the
+             tablet row needs (`md:list-mid:hidden` is the exact complement of
+             the tablet block's `md:list-mid:flex`, #3465). -->
+        <div class="flex flex-col md:list-mid:hidden pl-8 pr-4 py-3 gap-2">
           <div class="flex items-center gap-3">
             <input
               type="checkbox"

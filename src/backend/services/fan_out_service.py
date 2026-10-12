@@ -91,6 +91,7 @@ from services.sync_waiter import (
     wait_for_fan_out_batch,
 )
 from services.task_execution_service import get_task_execution_service
+from services import skill_gate_service
 from services.skill_gate_errors import SkillGateError
 from db.write_params import ExecutionResult, TaskExecutionFields
 
@@ -521,6 +522,8 @@ class FanOutService:
                         # system_prompt reaches this subtask's executor too, so
                         # the skill gate reads it with the subtask's message.
                         request_text="\n".join(t for t in (task.message, system_prompt) if t),
+                        # trinity#3274: an approved subtask is sent the two apart.
+                        gate_replay=skill_gate_service.frozen_replay(task.message, system_prompt),
                         triggered_by="fan_out",
                         source_user_id=source_user_id,
                         source_user_email=source_user_email,

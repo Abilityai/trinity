@@ -20,18 +20,20 @@ from __future__ import annotations
 
 import logging
 
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 from fastapi import Depends, HTTPException, Request, Response
 
 from dependencies import (
+    PORTAL_MINT_OTP,
     oauth2_scheme,
     decode_portal_session,
-    get_current_user,
     is_person_principal,
+    portal_session_minted_by,
     portal_session_needs_rotation,
     reject_agent_principal,
     renew_portal_session,
+    resolve_platform_user_unfloored,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,7 +97,8 @@ class PortalPrincipal(NamedTuple):
     # a verified person. A platform principal is one only when
     # `is_person_principal` holds: a system-scoped key keeps its read breadth
     # here (#2198) but is not a person, and an answer is recorded as a person's.
-    is_person: bool = True
+    # Defaults False (#3404): a construction that does not say proves nothing.
+    is_person: bool = False
     #: trinity-enterprise#465 — whether the platform principal is an instance
     #: admin, for ONE decision: who sees a suggestion that deep-links to agent
     #: configuration. Everywhere else a non-owner admin stays a viewer in the
@@ -103,6 +106,16 @@ class PortalPrincipal(NamedTuple):
     #: default so every positional construction keeps its meaning; always False
     #: for a portal token, which carries no platform identity.
     is_admin: bool = False
+    #: #3404 — may this principal run its OWN gated-skill request without a
+    #: second approval? Narrower than `is_person`: a session a `portal_delegate`
+    #: key minted is a person for the ask routes (ent#611, unchanged) but the
+    #: person never proved themselves to Trinity, so it is False there; True
+    #: only for a session minted by the emailed code, or a platform person.
+    self_approves: bool = False
+    #: #3404 — the credential kind, for the self-approval audit row only (never
+    #: an authorization input): `portal_session:<minted_by>`, `platform_session`
+    #: or `mcp_key:<scope>`.
+    credential: str = "unknown"
 
 
 #: Response header carrying a rotated Workspace session token (ent#375). The
@@ -136,6 +149,24 @@ def _maybe_rotate(token: str, response: Response) -> None:
         logger.warning("[ent#375] session rotation skipped: %s", exc)
 
 
+def workspace_email_from_request(request: Request) -> Optional[str]:
+    """The email of a Workspace session presented as a bearer token, or None.
+
+    For a route that also serves anonymous visitors (an `authorized` shared
+    canvas, trinity-enterprise#837): a missing or non-Workspace credential is
+    None, never a 401, and the session is not slid. A blocked client is refused
+    here as on every other Workspace route.
+    """
+    scheme, _, token = (request.headers.get("authorization") or "").partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    email = decode_portal_session(token.strip())
+    if not email:
+        return None
+    _reject_if_blocked(email)
+    return email
+
+
 async def get_portal_principal(
     request: Request, response: Response, token: str = Depends(oauth2_scheme)
 ) -> PortalPrincipal:
@@ -147,11 +178,22 @@ async def get_portal_principal(
         # Slide the session AFTER the block check, so a blocked client is never
         # handed a fresh token on its way out.
         _maybe_rotate(token, response)
-        return PortalPrincipal(email, False)
+        # #3404: only a session the person's own emailed code minted may
+        # self-approve. A token with no `minted_by` predates the claim and
+        # cannot be shown to be one, so it is unproven until the next sign-in
+        # (its own request is held for approval like anyone's; nothing else
+        # about the session changes).
+        minted_by = portal_session_minted_by(token)
+        return PortalPrincipal(
+            email, False, True, False,
+            self_approves=minted_by == PORTAL_MINT_OTP,
+            credential=f"portal_session:{minted_by or 'unmarked'}",
+        )
 
     # Otherwise a platform principal (operator preview / signed-in user) →
-    # resolve their email.
-    user = await get_current_user(request, token)  # raises 401 if the token is invalid
+    # resolve their email. The Workspace is where a Workspace-only member
+    # belongs, so this door skips the operator floor (ent#837).
+    user = await resolve_platform_user_unfloored(request, token)  # raises 401 if the token is invalid
 
     # #2198 — the Workspace is HUMAN-only for platform principals. An
     # agent-scoped MCP key resolves to its OWNER carrying the owner's role
@@ -182,7 +224,13 @@ async def get_portal_principal(
     # show what that client sees, and an operator whose OWN email is blocked has
     # been blocked as a client — the block is on the identity, not on the route.
     _reject_if_blocked(email)
-    return PortalPrincipal(email, True, is_person_principal(user), _is_admin_principal(user))
+    is_person = is_person_principal(user)
+    scope = getattr(user, "mcp_scope", "unknown")
+    return PortalPrincipal(
+        email, True, is_person, _is_admin_principal(user),
+        self_approves=is_person,
+        credential="platform_session" if scope is None else f"mcp_key:{scope}",
+    )
 
 
 async def get_portal_identity(

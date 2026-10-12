@@ -456,7 +456,7 @@ def test_07_env_overrides_carry_both_key_and_url(keys_db, monkeypatch):
     from services import agent_mcp_key_service as svc
 
     _mk_agent("scout")
-    overrides = svc.build_mcp_key_env_overrides("scout", description="test")
+    overrides, _key = svc._mint_and_build_env("scout", "test")
 
     assert set(overrides) >= {"TRINITY_MCP_API_KEY", "TRINITY_MCP_URL"}
     assert overrides["TRINITY_MCP_API_KEY"].startswith("trinity_mcp_")

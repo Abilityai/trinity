@@ -102,7 +102,9 @@ describe('ent#557 — honest counts, and an ask is not an unread reply', () => {
     // Different tokens, deliberately — the colours carry the distinction.
     // ent#610 §3g A3b, REVERSED on purpose: both counters moved to the 700
     // tier (white on urgent-500 was 2.80:1) — still two different tokens.
-    expect(SIDEBAR).toMatch(/bg-status-urgent-700/)
+    // trinity-enterprise#836: the ask mark is an unfilled urgent RING now, the
+    // unread pill a filled primary ground — two tokens AND two shapes.
+    expect(SIDEBAR).toMatch(/ring-status-urgent-600/)
     expect(SIDEBAR).toMatch(/bg-action-primary-700/)
   })
 })

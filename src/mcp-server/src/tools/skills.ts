@@ -8,6 +8,8 @@
  * - assign_skill_to_agent: Assign a skill (or `set:<name>`) to an agent
  * - unassign_skill_set: Remove a skill set from an agent (ent#530)
  * - sync_agent_skills: Inject assigned skills to a running agent
+ * - list_skill_gates / set_skill_gate / clear_skill_gate: which skills on an
+ *   agent need approval (trinity-enterprise#753)
  */
 
 import { z } from "zod";
@@ -43,6 +45,8 @@ interface SkillInfo {
   // <= 200 chars), not a resolved skill name, and is null unless deprecated.
   deprecated?: boolean;
   superseded_by?: string | null;
+  // trinity-enterprise#753: `recommended` — gated by default where assigned.
+  approval?: string | null;
 }
 
 /**
@@ -149,6 +153,8 @@ export function createSkillsTools(
         "A skill the library is retiring carries `deprecated: true` and stays assignable; " +
         "`superseded_by` is the author's note on what replaces it (free text, not checked " +
         "against the library; null unless deprecated). " +
+        "`approval: \"recommended\"` means the skill needs approval by default on every agent it is " +
+        "assigned to (see list_skill_gates); null otherwise. " +
         "Use get_skill to get the full content of a specific skill.",
       parameters: z.object({}),
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
@@ -190,7 +196,10 @@ export function createSkillsTools(
             // ent#672: named here because this map drops anything it does
             // not name — the lifecycle keys would stop at REST otherwise.
             deprecated: s.deprecated ?? false,
-            superseded_by: s.superseded_by ?? null
+            superseded_by: s.superseded_by ?? null,
+            // trinity-enterprise#753: `recommended` — the skill is gated by
+            // default on every agent it is assigned to (list_skill_gates).
+            approval: s.approval ?? null
           }))
         }, null, 2);
       },
@@ -521,6 +530,103 @@ export function createSkillsTools(
         const result = await apiClient.request<unknown>(
           "DELETE",
           `/api/agents/${encodeURIComponent(agent_name)}/skill-sets/${encodeURIComponent(name)}`
+        );
+        return JSON.stringify(result, null, 2);
+      },
+    },
+
+    // ========================================================================
+    // Skill gates — which skills on an agent need approval (trinity-enterprise#753)
+    // ========================================================================
+    listSkillGates: {
+      name: "list_skill_gates",
+      description:
+        "List the skill gates on an agent: which of its skills need approval before they run, " +
+        "who approves each (`approver`: `primary` = the agent's primary person, or `approver` where " +
+        "the install offers it — see `approver_kinds`), and the approval deadline in hours " +
+        "(null = the 24-hour default). `origin` is `set` (set by a person or an orchestrator) or " +
+        "`library_default` (the skills library recommends approval for that skill). " +
+        "`approver_reachable: false` means nobody fills that approver kind right now, so a gated " +
+        "request would be refused until someone does. `cleared_defaults` are library defaults the " +
+        "owner cleared. Called with an agent key, this reads the calling agent's OWN gates; an " +
+        "agent holding the skill-management permission may also read an agent its owner owns.",
+      parameters: z.object({
+        agent_name: z.string().describe("Name of the agent"),
+      }),
+      execute: async (
+        { agent_name }: { agent_name: string },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const apiClient = getClient(context?.session);
+        const result = await apiClient.request<unknown>(
+          "GET",
+          `/api/agents/${encodeURIComponent(agent_name)}/skill-gates`
+        );
+        return JSON.stringify(result, null, 2);
+      },
+    },
+
+    setSkillGate: {
+      name: "set_skill_gate",
+      description:
+        "Require approval before a skill runs on an agent, or change who approves it and how long " +
+        "they have. Once gated, a request that invokes the skill on that agent waits for an approval " +
+        "(the approver can run it directly), and the agent itself cannot load the skill outside an " +
+        "approved run. Per agent: the same skill can be gated on one agent and not another. " +
+        "`approver` is `primary` (default) or `approver` where the install offers it; " +
+        "`deadline_hours` is 1 to 168, or null for the 24-hour default. On an existing gate, a field " +
+        "you omit keeps its value. Any well-formed skill name may be gated — one the agent does not " +
+        "have gates nothing until it does. Refused by name: `invalid_skill_name`, " +
+        "`invalid_approver`, `approver_unavailable`, `invalid_deadline`, `ephemeral_agent`. " +
+        "`warnings` may say `approver_unassigned` (nobody fills that kind yet). " +
+        "Needs the agent's owner or an admin; with an agent key, the skill-management permission, " +
+        "only on an agent its owner owns, and never on the calling agent itself.",
+      parameters: z.object({
+        agent_name: z.string().describe("Name of the agent the skill runs on"),
+        skill_name: z.string().describe("Name of the skill to gate"),
+        approver: z.enum(["primary", "approver"]).optional()
+          .describe("Who approves: `primary` (default) or `approver`"),
+        deadline_hours: z.number().int().min(1).max(168).nullable().optional()
+          .describe("Hours an approver has (1-168); null for the 24-hour default"),
+      }),
+      execute: async (
+        args: { agent_name: string; skill_name: string; approver?: string; deadline_hours?: number | null },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const apiClient = getClient(context?.session);
+        // Only the fields the caller sent — an omitted field keeps its stored value.
+        const body: Record<string, unknown> = {};
+        if (args.approver !== undefined) body.approver = args.approver;
+        if (args.deadline_hours !== undefined) body.deadline_hours = args.deadline_hours;
+        const result = await apiClient.request<unknown>(
+          "PUT",
+          `/api/agents/${encodeURIComponent(args.agent_name)}/skill-gates/${encodeURIComponent(args.skill_name)}`,
+          body
+        );
+        return JSON.stringify(result, null, 2);
+      },
+    },
+
+    clearSkillGate: {
+      name: "clear_skill_gate",
+      description:
+        "Remove the approval requirement from a skill on an agent. Idempotent: `changed` is false " +
+        "when it was not gated. Clearing a library default on a skill the agent still holds keeps it " +
+        "off (`cleared: tombstoned`) until the skill is unassigned. Needs the agent's owner or an " +
+        "admin; with an agent key, the skill-management permission, only on an agent its owner owns, " +
+        "and never on the calling agent itself — an agent cannot lift its own gate.",
+      parameters: z.object({
+        agent_name: z.string().describe("Name of the agent the skill runs on"),
+        skill_name: z.string().describe("Name of the gated skill"),
+      }),
+      execute: async (
+        { agent_name, skill_name }: { agent_name: string; skill_name: string },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const apiClient = getClient(context?.session);
+        const result = await apiClient.request<unknown>(
+          "DELETE",
+          `/api/agents/${encodeURIComponent(agent_name)}/skill-gates/${encodeURIComponent(skill_name)}`
         );
         return JSON.stringify(result, null, 2);
       },

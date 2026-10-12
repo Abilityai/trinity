@@ -60,6 +60,10 @@ SENTINELS = (
     # #3243: atomic asks — the rules point at the tool; the file hold reason.
     "One decision per ask",
     "invalid_options",
+    # #3247: replace a pending ask instead of re-asking it.
+    "Do not re-ask what is still pending",
+    "replaces_ended",
+    "already_pending",
 )
 
 # The pre-#1402 wording that invited in-turn polling. Must not reappear.

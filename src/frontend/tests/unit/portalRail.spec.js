@@ -127,7 +127,7 @@ describe('ent#474 — the tab contract', () => {
   })
 
   it('registers the design\'s four tabs with their doors, icons and signals (ent#475)', () => {
-    expect(RAIL_TABS.map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'projects', 'info'])
+    expect(RAIL_TABS.map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'projects', 'info', 'asks'])
     expect(tab('loops')).toMatchObject({ door: RAIL_DOORS.PLATFORM, signal: RAIL_SIGNAL_LIVE, icon: 'refresh' })
     expect(tab('canvas')).toMatchObject({ door: RAIL_DOORS.AUDIENCE, signal: RAIL_SIGNAL_UPDATED, icon: 'template' })
     expect(tab('files')).toMatchObject({ door: RAIL_DOORS.AGENT, signal: RAIL_SIGNAL_UPDATED, icon: 'paperclip' })
@@ -135,7 +135,10 @@ describe('ent#474 — the tab contract', () => {
     // `PortalRail.vue`'s ICONS map; `iconPath` falls back to `bolt` for an
     // unknown id, so a missing entry is silent and shows Work's glyph.
     expect(tab('info')).toMatchObject({ door: RAIL_DOORS.SOLO_AGENT, signal: RAIL_SIGNAL_UPDATED, icon: 'info', empty: null })
-    expect(src('components/portal/PortalRail.vue')).toMatch(/\n\s*info:\s*'M/)
+    const railSrc = src('components/portal/PortalRail.vue')
+    expect(railSrc).toMatch(/\n\s*info:\s*'M/)
+    // ent#836 — Asks: the same silent-fallback trap, so its glyph is pinned too.
+    expect(railSrc).toMatch(/\n\s*asks:\s*'M/)
     // Each teaches its next action (design pass, "Tab contract").
     expect(railEmptyCopy(tab('loops'), ['scout'])).toMatchObject({ title: 'No loops running', action: 'Start a loop', event: 'start-loop' })
     expect(railEmptyCopy(tab('canvas'), ['scout'])).toMatchObject({ title: 'No canvas yet', action: 'Ask for a canvas', event: 'ask-canvas' })
@@ -155,7 +158,9 @@ describe('ent#474 — the tab contract', () => {
   })
 
   it('keeps the fixed order Work · Loops · Canvas · Files', () => {
-    expect(RAIL_TAB_ORDER).toEqual(['work', 'loops', 'canvas', 'files', 'projects', 'info'])
+    // ent#836: Asks is last — the one tab that comes and goes with data, placed
+    // where its arrival moves no other tab.
+    expect(RAIL_TAB_ORDER).toEqual(['work', 'loops', 'canvas', 'files', 'projects', 'info', 'asks'])
     // PLATFORM has exactly one participant, so Info's SOLO_AGENT door passes.
     expect(visibleTabs(ALL_TABS, PLATFORM).map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'info'])
   })

@@ -239,8 +239,10 @@ run_tier journeys 900 journeys/
 # TIER_DIRS is the single list. `NON_TIER_DIRS` are directories `api` must also
 # not collect but that no tier owns: `manual/` and `deploy/` are opt-in, and
 # `harness/` and the support packages hold no tests of their own.
+# `system_chains/` is opt-in too: the 1.0 system chains run against a rolled-out
+# fleet through `scripts/system/run_chains.sh` (TRINITY_CHAIN_TESTS=1), never here.
 TIER_DIRS=(unit integration git_sync security scheduler_tests agent_server journeys)
-NON_TIER_DIRS=(manual deploy harness fixtures testing_utils testkit)
+NON_TIER_DIRS=(manual deploy harness fixtures testing_utils testkit system_chains)
 
 # And the list is CHECKED against the tree, because a derived list is only as
 # good as its inputs: a new directory under tests/ that nobody wired would still

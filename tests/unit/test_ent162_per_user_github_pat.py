@@ -254,7 +254,7 @@ class TestReadEndpointNoEcho:
         current = User(id=1, username="owner", role="creator")
         result = asyncio.run(get_my_github_pat_status(current_user=current))
 
-        assert result == {"configured": True, "has_global": True}
+        assert result == {"configured": True, "usable": True, "has_global": True}
         # Belt-and-suspenders: the token never appears in the response, whatever
         # keys are present.
         assert "ghp_should_never_be_echoed" not in str(result)

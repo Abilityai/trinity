@@ -66,7 +66,11 @@ const THREADS = [{ id: 't1', session_id: 't1', agent_name: 'scout', title: 'One'
 const ASKS = [{ id: 'a1', agent_name: 'scout', status: 'pending', title: 'Ok?', created_at: new Date().toISOString() }]
 
 describe('the sidebar agent row', () => {
-  it('its ask pill is urgent-700 and its unread pill primary-700, one ground each', async () => {
+  // trinity-enterprise#836: the agent row's ask mark is an UNFILLED ring in
+  // urgent ink (700 light / 400 dark) — no ground at all; the unread pill
+  // beside it keeps its primary-700 ground. The pinned Inbox row and the
+  // Inbox's Action counter keep urgent-700 (below).
+  it('its ask mark is an unfilled urgent ring and its unread pill primary-700', async () => {
     const store = useClientPortalStore()
     store.asks = ASKS
     const w = mount(PortalSidebar, { props: { roster: [{ name: 'scout' }], threads: THREADS }, global: { plugins: [router] } })
@@ -75,7 +79,8 @@ describe('the sidebar agent row', () => {
     const unread = w.find('[data-testid="agent-unread-count"]')
     expect(ask.exists()).toBe(true)
     expect(unread.exists()).toBe(true)
-    expect(grounds(ask)).toEqual([NEEDS])
+    expect(grounds(ask)).toEqual([])
+    expect(ask.classes()).toEqual(expect.arrayContaining(['ring-status-urgent-600', 'text-status-urgent-700', 'dark:text-status-urgent-400']))
     expect(grounds(unread)).toEqual([NEW])
   })
 })

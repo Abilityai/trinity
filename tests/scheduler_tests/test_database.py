@@ -144,20 +144,6 @@ class TestSchedulerDatabase:
         assert updated.cost == 0.05
         assert updated.duration_ms is not None
 
-    def test_get_recent_executions(self, db_with_data: SchedulerDatabase):
-        """Test getting recent executions."""
-        # Create some executions
-        for i in range(5):
-            db_with_data.create_execution(
-                schedule_id="schedule-1",
-                agent_name="test-agent",
-                message=f"Message {i}",
-                triggered_by="schedule"
-            )
-
-        executions = db_with_data.get_recent_executions(limit=3)
-        assert len(executions) == 3
-
     def test_generate_id_uniqueness(self, db: SchedulerDatabase):
         """Test that generated IDs are unique."""
         ids = [db._generate_id() for _ in range(100)]

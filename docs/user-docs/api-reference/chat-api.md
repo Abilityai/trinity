@@ -15,8 +15,28 @@ API endpoints for agent chat, voice, streaming, and public chat access.
 | `/api/agents/{name}/chat/sessions/{id}` | GET | Session with messages |
 | `/api/agents/{name}/chat/sessions/{id}/close` | POST | Close session |
 | `/api/agents/{name}/chat/history/persistent` | GET | Persistent history |
-| `/api/agents/{name}/chat/history` | DELETE | Reset session |
-| `/api/agents/{name}/activity` | GET | Activity summary |
+| `/api/agents/{name}/chat/history` | GET | The agent's current `/chat` conversation |
+| `/api/agents/{name}/chat/history` | DELETE | Reset the `/chat` conversation so the next turn starts fresh (owner or admin) |
+| `/api/agents/{name}/chat/session` | GET | Current `/chat` session info, including context usage |
+| `/api/agents/{name}/model` | GET / PUT | Read or set the model the agent uses for subsequent messages |
+| `/api/agents/{name}/activity` | GET / DELETE | Session activity summary; clear it |
+| `/api/agents/{name}/activity/{tool_id}` | GET | Full detail of one tool call |
+
+`POST /chat` runs one turn at a time per agent. While the agent is busy, further requests queue (up to 3 waiting); beyond that the route answers **429** with `retry_after: 30`. A stopped agent answers **503**.
+
+#### Failed turns
+
+A turn whose run ends in an error is a failed execution, recorded with the run's real error — even when the agent had already written part of an answer, and on a resumed turn as well as a fresh one. `POST /chat` then answers with an error status rather than a `200` whose reply text is the error message. If the agent actually finished the turn and only the final result event was lost, Trinity recovers the reply instead of failing it.
+
+#### Pull-mode pilot agents
+
+Pull mode is an experimental, operator-only setting: agents named in `PULL_MODE_PILOT_AGENTS` take their work from Trinity's durable queue instead of having it pushed to them (see [Agent Network](../collaboration/agent-network.md)). On those agents only:
+
+- `POST /chat`, the Workspace, the session API, public links, Slack/Telegram/WhatsApp, rooms and paid chat all enqueue the turn and wait for a worker to claim it. A turn no worker claims within the agent's timeout fails as a capacity error (the session API answers `429`). A caller that disconnects while its turn is still queued cancels it.
+- `/chat` memory is per caller: each person (or key owner) gets their own conversation with the agent, resumed turn to turn, instead of the one conversation every caller shares. A second turn on the same conversation waits up to 30 seconds, then gets `429`; other callers' turns run in parallel.
+- `GET /chat/history` returns *your* conversation from the database. `DELETE /chat/history` makes every caller's next turn start fresh and closes the conversations `/chat` was using.
+
+Agents not in the pilot are unchanged.
 
 ### Voice Chat
 
@@ -100,12 +120,48 @@ curl -X POST http://localhost:8000/api/agents/my-agent/task \
   -d '{"message": "Summarize the latest reports"}'
 ```
 
-- The same key within 24 hours returns the original result with the header `X-Idempotent-Replay: true` — no second execution is created.
+- The same key within 24 hours returns the original result with the header `X-Idempotent-Replay: true` — no second execution is created. The one exception is a **receipt** whose run has ended without success (see the table below): then the same key starts a new run.
 - A duplicate sent while the first request is still running returns **409** with the original `execution_id` to poll (for `/fan-out`, that field carries the batch's `fan_out_id`).
 - If the first attempt was rejected before dispatch (e.g., at capacity), the key is released so the retry goes through.
 - The header is optional and fail-open: omitting it preserves normal behavior, and a dedup-layer error never blocks a real request.
 
-Wired boundaries: `/api/agents/{name}/chat`, `/api/agents/{name}/task`, `/api/agents/{name}/fan-out`, `/api/agents/{name}/voip/call`, [webhook triggers](webhook-triggers.md) (key auto-derived from token + body when the header is absent), and the MCP `chat_with_agent` / `fan_out` tools (deterministic key derived from the call arguments).
+### Retrying after a failed run (`/chat` and `/task`)
+
+An async `/task` answers with a receipt — `{"status": "accepted" | "queued" | "queued_timeout", "execution_id": ..., "async_mode": true}`. A sync `/task`, or a `/chat` turn on a pull-mode agent, that outlives its wait answers `504` but stores the same kind of receipt (`queued_timeout`). That stored receipt is what an identical request replays, as a `200` with `X-Idempotent-Replay: true`. Whether it is replayed depends on how its run is doing:
+
+| The receipt's run is… | An identical request with the same key gets |
+|---|---|
+| `queued`, `running` or `pending_retry` | the original receipt (`X-Idempotent-Replay: true`) |
+| `success` | the original receipt — read the result from the execution |
+| `failed`, `cancelled` or `skipped`, or the execution no longer exists | a **new** run with a new `execution_id`, no replay header |
+| `failed` with an error starting `lease_expired:` (no result arrived before the slot expired, so the run may still report back) | the original receipt until the agent's timeout + 5 minutes after the failure; after that, a new run |
+
+A non-receipt result (a completed sync reply) always replays. Scheduler-issued keys (`sched:…`) are never reclaimed, and a request for an approval-gated skill is answered by its approval record first.
+
+```bash
+# 1. Dispatch async with a key
+curl -s -X POST http://localhost:8000/api/agents/my-agent/task \
+  -H "Authorization: Bearer <token>" -H "Idempotency-Key: report-2026-10-06" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Summarize the latest reports", "async_mode": true}'
+# -> 200 {"status": "accepted", "execution_id": "<first-id>", "async_mode": true, ...}
+
+# 2. Check the outcome
+curl -s -H "Authorization: Bearer <token>" \
+  http://localhost:8000/api/agents/my-agent/executions/<first-id>
+# -> {"status": "failed", ...}
+
+# 3. Re-send the identical request: a new run, no X-Idempotent-Replay header
+curl -s -X POST http://localhost:8000/api/agents/my-agent/task \
+  -H "Authorization: Bearer <token>" -H "Idempotency-Key: report-2026-10-06" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Summarize the latest reports", "async_mode": true}'
+# -> 200 {"status": "accepted", "execution_id": "<second-id>", ...}
+```
+
+Checking the status tells you **whether** to retry; it cannot make a retry safe. Anything the failed run already did (a message sent, a file written) may happen again in the new run — effect de-duplication is per execution, and the new run has a new `execution_id`. Two identical retries that arrive together start one new run.
+
+Wired boundaries: `/api/agents/{name}/chat`, `/api/agents/{name}/task`, `/api/agents/{name}/fan-out`, `/api/agents/{name}/voip/call`, `/api/agents/{name}/data/import`, `/api/paid/{agent_name}/chat` (always keyed on the payment signature plus message, so a different client key never forks the execution), [webhook triggers](webhook-triggers.md) (key auto-derived from token + body when the header is absent), and the MCP `chat_with_agent` / `fan_out` tools (deterministic key derived from the call arguments).
 
 ## See Also
 

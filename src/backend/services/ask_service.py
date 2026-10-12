@@ -44,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from database import db
+from db.operator_queue import OUTCOME_UNKNOWN
 from services import operator_resume_service
 from services.operator_queue_choices import (
     SOMETHING_ELSE,
@@ -63,6 +64,13 @@ EXPIRED = "expired"
 # trinity-enterprise#748: the person the ask was addressed to chose not to
 # answer. A ledger value, not a status — the row's status is `cancelled`.
 DISMISSED = "dismissed"
+
+# #3247: the one ending an AGENT authors — it replaced its own pending ask with
+# a successor. Recorded as `cancelled` / `disposed_by='agent'` / this reason;
+# surfaces key on the pair, so it cannot collide with a person's cancel or the
+# platform's (#3130) `superseded`.
+REPLACED = "replaced"
+AGENT_ENDING_REASONS = (REPLACED,)
 
 # WebSocket manager injected from main.py
 _websocket_manager = None
@@ -216,6 +224,7 @@ def answer(
     validate_response_choice(item, response, response_text=response_text)
     if not may_end(item, actor):
         raise AskNotAddressee(item["id"])
+    from services.operator_queue_service import is_platform_minted
     updated = db.respond_to_operator_queue_item(
         item_id=item["id"],
         response=response,
@@ -223,6 +232,9 @@ def answer(
         responded_by_id=responded_by_id,
         responded_by_email=actor.email,
         divergence_acknowledged=divergence_acknowledged,
+        # #2372: a platform alert has no agent audience — nobody will ever
+        # acknowledge it from a file, so the person's answer is its last event.
+        terminal=is_platform_minted(item),
     )
     if not updated:
         raise AskNotFound(item["id"])
@@ -337,14 +349,27 @@ def expire() -> Ending:
     rows = db.mark_operator_queue_expired()
     if not rows:
         return Ending(rows=[])
-    audit = [{
+    audit = [_expired_audit(r) for r in rows]
+    return _ended(EndingEvent(EXPIRED, tuple(rows), None), audit, None)
+
+
+def _expired_audit(r: Mapping) -> Dict[str, Any]:
+    """The one `expired` audit row, shared by BOTH timeout writers — the sweep
+    (`expire`) and #3247's in-transaction expiry of a replaced predecessor.
+
+    trinity-enterprise#844: an approval whose action the platform did not hold
+    expired without telling anyone whether that action went ahead. A boolean,
+    never the reason text (no person's words in an audit row)."""
+    details: Dict[str, Any] = {"agent_name": r["agent_name"]}
+    if r.get("disposition_reason") == OUTCOME_UNKNOWN:
+        details["outcome_unknown"] = True
+    return {
         "event_action": "expired",
         "source": "system",
         "target_type": "operator_queue",
         "target_id": r["id"],
-        "details": {"agent_name": r["agent_name"]},
-    } for r in rows]
-    return _ended(EndingEvent(EXPIRED, tuple(rows), None), audit, None)
+        "details": details,
+    }
 
 
 # #3246: the platform ends its own alerts for exactly these reasons — DATA on
@@ -489,13 +514,30 @@ def raise_ask(
        (`services/skill_gate_service.py`) caps its own raises, per requester
        and per executor, before it calls this;
     4. the deadline floor (C5), the re-ask link (`supersedes_expired` must name
-       the agent's own expired ask) and its guard (C6), then the role (`to:`)
-       resolved to a person;
-    5. the create: replay, depth cap and insert in one per-agent serialized
-       step (`queue_full` → 429). The depth cap counts the agent's own asks
+       the agent's own expired ask) and its guard (C6), the replace target
+       (#3247: `replaces` must name the agent's OWN pending ask — a row with
+       `raised_by == 'agent'` under its name, checked on the column itself,
+       never inferred — one uniform 422 `invalid_replaces` otherwise) and the
+       then the role (`to:`) resolved to a person;
+    5. the create: replay, the replace's compare-and-set, the pending-proposal
+       guard (T8: an AGENT's approval whose non-empty `proposal` one of the
+       agent's own pending agent-raised approvals already carries, not
+       replaced here → 409 `already_pending`; a question, an alert, an empty
+       proposal and a gate raise are neither refused nor counted), depth cap
+       and insert in one per-agent serialized step (`queue_full` → 429); the
+       guard sits inside that lock so two concurrent raises with one
+       proposal have exactly one winner. The depth cap counts the agent's own asks
        and applies to them only — gate rows are neither counted nor capped
-       here (#751, same reason as step 3);
-    6. one audit row (`raised`, ids and enums only) and one thin broadcast.
+       here (#751, same reason as step 3). With `replaces`, the predecessor
+       is ended in that same transaction by compare-and-set (#3247): if it
+       already ended, 409 `replaces_ended` names its real state (ids and
+       enums only — a person's answer stands and is read with `get_my_ask`)
+       and nothing is created; still pending past its deadline, it is expired
+       in-transaction (the normal expiry event fires) and then refused;
+    6. one audit row (`raised`, ids and enums only) and one thin broadcast;
+       a replace adds the predecessor's ending — an agent-keyed `replaced`
+       audit row, `operator_queue_cancelled`, and the observers (the default
+       wake skips an ending the agent authored itself).
 
     The receipt names the ROLE an ask went to, never the resolved email, and
     who raised it. An unknown `raised_by` or `channel` is a programming error
@@ -524,6 +566,7 @@ def raise_ask(
     predecessor = _predecessor(agent_name, norm["supersedes_expired"], raised_by)
     if norm["proposal"] is not None and predecessor is None:
         _refuse_unlinked_reask(agent_name, norm["proposal"], raised_by)
+    target = _replace_target(agent_name, norm["replaces"])
     if named:
         people, addressee, resolved = [named], named, True
     else:
@@ -569,14 +612,46 @@ def raise_ask(
         # #3130: the cap counts the agent's own asks, never the platform's rows
         # about it (its flood alarm above all).
         exclude_request_id_prefixes=oqs._RESERVED_ID_PREFIXES,
+        replaces=target["id"] if target else None,
+        # T8 (#3247): an AGENT's approval with a non-empty proposal only. A
+        # question or an alert is never guarded; a missing or empty proposal is
+        # not a proposal. A gate raise is never refused by it and never counted
+        # by it (trinity-enterprise#751 raises one approval per occurrence).
+        guard_pending_proposal=(raised_by == "agent" and norm["type"] == "approval"
+                                and bool(norm["proposal"])),
     )
+    if out["outcome"] == "already_pending":
+        raise AskRejected(
+            409, "already_pending",
+            "You already asked this and it is still pending; replace it (set replaces to "
+            "that ask's request_id) or wait for the answer.",
+            request_id=out["request_id"])
     if out["outcome"] == "queue_full":
         raise AskRejected(429, "queue_full",
                           "You already have the maximum number of open asks; wait for one to end.",
                           max_pending=_max_pending())
+    if out["outcome"] == "replaces_not_own":
+        # the compare-and-set's belt held where the gate above did not: the
+        # same uniform refusal, nothing disclosed
+        raise AskRejected(422, "invalid_replaces", _INVALID_REPLACES)
+    if out["outcome"] == "replaces_ended":
+        if out.get("expired_now"):
+            # T5b: the predecessor was still pending past its deadline and the
+            # create's compare-and-set expired it — the normal expiry event,
+            # exactly as `expire()` announces its own per-id CAS winners. Plus
+            # a thin trigger: `expire()` leaves that to the poll cycle behind
+            # it, and this path has none, so without one an open page shows the
+            # ask as pending until its next poll. The agent-scoped "an ask
+            # ended, refetch" trigger — there is no expiry-specific type.
+            pred = out["predecessor"]
+            _ended(EndingEvent(EXPIRED, (pred,), None), [_expired_audit(pred)],
+                   _broadcast_payload({"type": "operator_queue_cancelled",
+                                       "data": {"id": pred["id"], "agent_name": pred["agent_name"]}}))
+        _refuse_ended_predecessor(out["predecessor"])
     row = out["row"]
     if out["outcome"] == "replayed":   # a concurrent call with the same id won
         return _replay(row, norm, oqs, raised_by)
+    replaced = out.get("predecessor") if target else None
 
     audit = [{
         "event_action": "raised",
@@ -599,6 +674,7 @@ def raise_ask(
             "raised_by": raised_by,
             "type": norm["type"],
             "to_role": norm["to"],
+            **({"replaces": replaced["id"]} if replaced else {}),
         },
     }]
     trigger = _broadcast_payload({"type": "operator_queue_new",
@@ -607,8 +683,32 @@ def raise_ask(
         operator_resume_service.spawn_on_loop(lambda: _announce(audit, trigger))
     except Exception:  # noqa: BLE001 — the ask is stored; it must stand
         logger.warning("[AskService] could not schedule the raised announcement", exc_info=True)
+    if replaced:
+        # #3247: the predecessor's ending — through the one sink every ending
+        # takes (audit, thin trigger, observers), with the row AS THE CAS LEFT
+        # IT. Agent-keyed like the `raised` row: there is no person `Actor`.
+        ending_audit = [{
+            "event_action": "replaced",
+            "source": "api",
+            "actor_agent_name": agent_name,
+            "actor_email": getattr(actor_user, "email", None),
+            "mcp_key_id": getattr(actor_user, "mcp_key_id", None),
+            "mcp_key_name": getattr(actor_user, "mcp_key_name", None),
+            "mcp_scope": getattr(actor_user, "mcp_scope", None),
+            "target_type": "operator_queue",
+            "target_id": replaced["id"],
+            "details": {
+                "agent_name": agent_name,
+                "request_id": replaced["request_id"],
+                "replaced_by": row["id"],
+            },
+        }]
+        ending_trigger = _broadcast_payload({"type": "operator_queue_cancelled",
+                                             "data": {"id": replaced["id"], "agent_name": agent_name}})
+        _ended(EndingEvent(CANCELLED, (replaced,), None, reason=REPLACED), ending_audit, ending_trigger)
     return _receipt(row, status="created", resolved=resolved,
-                    supersedes_request_id=norm["supersedes_expired"])
+                    supersedes_request_id=norm["supersedes_expired"],
+                    replaces_request_id=target["request_id"] if target else None)
 
 
 def _platform_turn(agent_name: str, execution_id: Optional[str]) -> Optional[str]:
@@ -759,6 +859,11 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
                                    or not oqs._ID_RE.match(supersedes)):
         raise AskRejected(422, "invalid_supersedes_expired",
                           "supersedes_expired must name one of your own asks that expired.")
+    replaces = ask.get("replaces")
+    if replaces is not None and (not isinstance(replaces, str) or not replaces
+                                 or len(replaces) > oqs.OPERATOR_QUEUE_ID_MAX
+                                 or not oqs._ID_RE.match(replaces) or replaces == rid):
+        raise AskRejected(422, "invalid_replaces", _INVALID_REPLACES)
     return {
         "request_id": rid,
         "type": kind,
@@ -771,6 +876,7 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
         "to": to,
         "expires_at": expires_at,
         "supersedes_expired": supersedes,
+        "replaces": replaces,
     }
 
 
@@ -856,6 +962,63 @@ def _refuse_unlinked_reask(agent_name: str, proposal: Dict[str, Any], raised_by:
                 expired_request_id=prior["request_id"])
 
 
+_INVALID_REPLACES = "replaces must name one of your own pending asks."
+
+
+def _replace_target(agent_name: str, request_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The agent's OWN pending ask a replace ends, or None when none is named
+    (#3247). The security gate of the replace: the lookup is scoped to
+    `(agent_name, request_id)` — another agent's row is not found — and the
+    row must carry `raised_by == 'agent'` ON THE COLUMN. Never `_raiser_of`:
+    it calls an unreserved NULL-raiser row "agent", and a row the platform
+    files under the agent's name with a NULL raiser is only kept apart by its
+    id prefix being on the reserved list (`skills-reconcile-` and
+    `retention-guard-` joined it in #3246) — an agent must never end the
+    alarm about its own leaked credential and stop it counting. One uniform
+    refusal for missing / another's / a gate's / a platform's / a pre-#611 row.
+    An own row that has ENDED is not refused here: it reaches the
+    compare-and-set so one refusal names its real state (no read-then-act
+    race)."""
+    if request_id is None:
+        return None
+    row = db.get_operator_queue_item_for_agent_by_request_id(agent_name, request_id)
+    if not row or row.get("raised_by") != "agent":
+        raise AskRejected(422, "invalid_replaces", _INVALID_REPLACES)
+    return row
+
+
+def _refuse_ended_predecessor(pred: Optional[Dict[str, Any]]) -> None:
+    """The predecessor ended before the replace could (#3247): one 409 that
+    names its real state — ids and enums only, never a person's words."""
+    if pred is None:
+        raise AskRejected(422, "invalid_replaces", _INVALID_REPLACES)
+    disposition = pred.get("disposition") or pred.get("status")
+    successor = request_id_of(pred.get("replaced_by"))
+    if disposition == ANSWERED:
+        message = "That ask was answered first; the answer stands — read it with get_my_ask."
+    elif disposition == EXPIRED:
+        message = ("That ask was denied by timeout; re-ask with supersedes_expired only "
+                   "with new information.")
+    elif pred.get("disposed_by") == "agent" and successor:
+        message = f"That ask was already replaced by {successor}."
+    elif pred.get("disposed_by") == "platform":
+        message = "The platform ended that ask; do not re-raise it unchanged."
+    elif pred.get("disposed_by") == "person":
+        message = "An operator cancelled that ask; do not re-raise it unchanged."
+    else:
+        message = "That ask was cancelled; do not re-raise it unchanged."
+    # `disposed_by` is an enum (person | timeout | platform | agent) — who ended
+    # it, never who they are; the message is branched on it so a platform
+    # ending (#3246) is not called an operator's.
+    raise AskRejected(409, "replaces_ended", message,
+                      replaces=pred.get("request_id"),
+                      ask_status=pred.get("status"),
+                      disposition=pred.get("disposition"),
+                      disposed_by=pred.get("disposed_by"),
+                      disposed_at=pred.get("disposed_at"),
+                      replaced_by=successor)
+
+
 def _named_addressee(addressee: Optional[str], raised_by: str) -> Optional[str]:
     """The lower-cased email a platform raise names, or None when none is named.
 
@@ -877,8 +1040,11 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
 
     The one resolution rule, `services/role_addressing.resolve` (ent#606) —
     shared with reports and messages so an ask and a report addressed to the
-    same role reach the same people. Several people are recorded, but none
-    becomes the single Workspace addressee. `role` is already validated
+    same role reach the same people. Several people are recorded in
+    `resolved_to` and none becomes the single Workspace addressee: the ONE ask
+    is delivered to each of them on read (trinity-enterprise#816, the
+    2026-10-07 ruling — the Workspace list and its doors match `resolved_to`
+    membership), so `resolved` is true because a person's Inbox shows it. `role` is already validated
     against `ASK_ROLES` by `_validated_ask` (the only caller passes its output),
     so the one refusal left to map is an unfilled role.
     """
@@ -949,6 +1115,7 @@ def _differs(row: Dict[str, Any], norm: Dict[str, Any], oqs) -> List[str]:
         "to": (norm["to"], row.get("to_role")),
         "proposal": (_canon(norm["proposal"]), _canon(row.get("proposal"))),
         "supersedes_expired": (norm["supersedes_expired"], request_id_of(row.get("supersedes_expired"))),
+        "replaces": (norm.get("replaces"), request_id_of(row.get("replaces"))),
     }
     return sorted(field for field, (asked, stored) in pairs.items() if asked != stored)
 
@@ -960,6 +1127,7 @@ def _receipt(
     resolved: Optional[bool] = None,
     differs: Optional[List[str]] = None,
     supersedes_request_id: Optional[str] = None,
+    replaces_request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The receipt an agent keeps: the ask's state and how it ended if it did
     (a replay of an ended ask must not wait for a wake that already fired), the
@@ -971,6 +1139,8 @@ def _receipt(
         resolved = row.get("to_role") == "operator" or bool(row.get("resolved_to"))
     if supersedes_request_id is None:
         supersedes_request_id = request_id_of(row.get("supersedes_expired"))
+    if replaces_request_id is None:
+        replaces_request_id = request_id_of(row.get("replaces"))
     receipt = {
         "status": status,
         "id": row["id"],
@@ -988,6 +1158,11 @@ def _receipt(
         # never promises a wake, whatever the owner opted in to.
         "wakes_on_ending": _opted_in(row["agent_name"]) and not is_platform_minted(row),
         "supersedes_expired": supersedes_request_id,
+        # #3247: the replace link both ways, and who ended it — a replay of a
+        # request that was itself replaced says so without a second read.
+        "replaces": replaces_request_id,
+        "replaced_by": request_id_of(row.get("replaced_by")),
+        "disposed_by": row.get("disposed_by"),
     }
     if differs is not None:
         receipt["differs"] = differs
@@ -1100,7 +1275,8 @@ def _wake_filer(event: EndingEvent) -> None:
     dispatch per agent per event. Only agents whose owner opted in are woken.
     A platform-minted row opened no loop for the agent to resume and carries text
     withheld from it by design (ent#499), so an answer to one never dispatches;
-    the ending wake applies the same rule itself.
+    the ending wake applies the same rule itself. An ending the agent authored
+    (`disposed_by == 'agent'`, #3247) is skipped: it holds the receipt already.
     """
     opted: Dict[str, bool] = {}
 
@@ -1123,7 +1299,10 @@ def _wake_filer(event: EndingEvent) -> None:
                 responded_by_email=event.actor_email,
             )
         return
-    rows = [row for row in event.rows if _wakes(row)]
+    # #3247: an ending the agent authored itself (it replaced the ask) wakes
+    # nobody — the agent holds the receipt in the same turn (ent#329's spend
+    # rule), and `_framed_ending` would otherwise say an operator cancelled it.
+    rows = [row for row in event.rows if row.get("disposed_by") != "agent" and _wakes(row)]
     if not rows:
         return
     operator_resume_service.spawn_ending_dispatch(

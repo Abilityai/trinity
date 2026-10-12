@@ -8,12 +8,17 @@
       stuck, untouched for a week), each opening the Tasks tab;
     * Metrics: the declared metrics a member picked, each as its value, a
       small trend and the one stale rule's verdict;
-    * Needs you: my own open asks on this project, answered in place with the
-      Inbox's component; everyone else's appear only as a count.
+    * Needs you: my own open asks on this project as Inbox list rows, each
+      answered in place behind Answer with the Inbox's component
+      (`ProjectNeedsYou`, #3574); everyone else's appear only as a count.
   Guests never see this component.
+
+  One grid, so `lg:items-start` (#3574): a grid row stretches every cell to its
+  tallest sibling, and before the fix an opened approval in "Needs you" made
+  the empty Metrics card beside it screen-tall.
 -->
 <template>
-  <div class="grid grid-cols-1 gap-4 lg:grid-cols-3" data-testid="project-hub">
+  <div class="grid grid-cols-1 gap-4 lg:grid-cols-3 lg:items-start" data-testid="project-hub">
     <BaseCard data-testid="project-health">
       <div class="flex items-center gap-2">
         <h2 class="flex-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Health</h2>
@@ -104,9 +109,7 @@
 
     <BaseCard data-testid="project-needs-you">
       <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Needs you</h2>
-      <p v-if="asks.unavailable" class="mt-2 text-sm text-gray-600 dark:text-gray-300">Couldn't read your Inbox just now. Your asks are still in the Inbox.</p>
-      <p v-else-if="!myAskIds.length" class="mt-2 text-sm text-gray-600 dark:text-gray-300">Nothing on this project is waiting on you.</p>
-      <PortalAsks v-else class="mt-2" :ask-ids="myAskIds" show-agent pending-only @open-thread="(t) => $emit('open-thread', t)" />
+      <ProjectNeedsYou :ask-ids="myAskIds" :unavailable="asks.unavailable === true" @open-thread="(t) => $emit('open-thread', t)" />
       <p v-if="asks.others_open" class="mt-3 border-t border-gray-100 dark:border-gray-750 pt-3 text-xs text-gray-500 dark:text-gray-400" data-testid="project-asks-others">
         <span class="tabular-nums">{{ asks.others_open }}</span> {{ asks.others_open === 1 ? 'ask is' : 'asks are' }} waiting on other people.
       </p>
@@ -124,7 +127,7 @@ import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import InlineError from '@/components/InlineError.vue'
-import PortalAsks from '@/components/portal/PortalAsks.vue'
+import ProjectNeedsYou from './ProjectNeedsYou.vue'
 import ProjectHealthModal from './ProjectHealthModal.vue'
 import ProjectMetricModal from './ProjectMetricModal.vue'
 import { useProjectsStore } from '@/stores/projects'

@@ -222,6 +222,13 @@ async def inject_assigned_skills(agent_name: str) -> dict:
     # fail-closed) BEFORE the names are read, so a member added upstream is
     # injected and one removed upstream is pruned by the reconcile below.
     await asyncio.to_thread(skill_set_service.reconcile_agent, agent_name)
+    # trinity-enterprise#753: an assigned skill the library recommends gating is
+    # gated BEFORE it is injected (agents that held it before the recommendation
+    # included). Defaults of unassigned skills go only after the prune below has
+    # removed their packages. Explicit gates are untouched. Never raises.
+    from services import skill_gate_map_service
+    gate_ctx = skill_gate_map_service.GateContext(trigger="start")
+    await skill_gate_map_service.reconcile_library_gates(agent_name, ctx=gate_ctx)
 
     # Get assigned skills
     skill_names = db.get_agent_skill_names(agent_name)
@@ -233,6 +240,9 @@ async def inject_assigned_skills(agent_name: str) -> dict:
         # agent was stopped — returning here would strand that package on the
         # agent permanently, which is the precise gap this closes.
         reconcile = await skill_service.reconcile_agent_skills(agent_name, [])
+        await skill_gate_map_service.reconcile_library_gates(
+            agent_name, ctx=gate_ctx, add=False,
+            drop_defaults=skill_gate_map_service.drop_after_prune(reconcile))
         return {"status": "skipped", "reason": "no_skills", "reconcile": reconcile}
 
     logger.info(f"Injecting {len(skill_names)} skills into agent {agent_name}: {skill_names}")
@@ -250,6 +260,9 @@ async def inject_assigned_skills(agent_name: str) -> dict:
     # take the same per-agent lock, so reconciling first (or inside) would
     # deadlock against the injection that just ran. Never raises.
     reconcile = await skill_service.reconcile_agent_skills(agent_name, skill_names)
+    await skill_gate_map_service.reconcile_library_gates(
+        agent_name, ctx=gate_ctx, add=False,
+        drop_defaults=skill_gate_map_service.drop_after_prune(reconcile))
 
     warning_count = sum(
         len(r.get("warnings") or []) for r in result.get("results", {}).values()

@@ -31,6 +31,10 @@ and not redefined in the file):
   ``assert_admin`` without ``allow_scopes=``. Counted and printed, not listed:
   the admin tier's own policy (which admits `trinity-system` by #2323 design) is
   guarded by test_293 / test_2323.
+* ``person_or_grant`` — ``Depends(require_person_or_capability(cap))``
+  (trinity-enterprise#164): a person, or an agent holding the named
+  self-change grant; every other machine principal is refused as by
+  ``require_person``. The grant itself is admin-and-interactive only.
 * ``admin_widened`` — ``Depends(require_admin_allowing(...))`` or
   ``assert_admin(..., allow_scopes=...)``. Each needs an ``ADMIN_WIDENED`` entry:
   a widening grants a scope and is reviewed per route.
@@ -38,7 +42,7 @@ and not redefined in the file):
   policy (#2198) owns it.
 
 A route carrying several recognised gates takes the strictest
-(``interactive > person > admin_widened > admin_tier > portal``).
+(``interactive > person > person_or_grant > admin_widened > admin_tier > portal``).
 
 Listed here, per route, with the registered ``"METHOD /full/path"`` pinned and
 checked against the live app by the runtime test:
@@ -92,6 +96,7 @@ HTTP_DECORATORS = {
 CODE_CLASSES = (
     "interactive",
     "person",
+    "person_or_grant",
     "admin_widened",
     "admin_tier",
     "portal",
@@ -105,7 +110,10 @@ _DEPENDS_GATES = {
     ("dependencies", "require_admin"): "admin_tier",
     ("client_portal.portal_auth", "get_portal_principal"): "portal",
 }
-_DEPENDS_FACTORIES = {("dependencies", "require_admin_allowing"): "admin_widened"}
+_DEPENDS_FACTORIES = {
+    ("dependencies", "require_admin_allowing"): "admin_widened",
+    ("dependencies", "require_person_or_capability"): "person_or_grant",
+}
 _IMPERATIVE_GATES = {
     ("dependencies", "reject_non_interactive_principal"): "interactive",
     ("dependencies", "assert_person"): "person",
@@ -506,6 +514,10 @@ ADMIN_WIDENED: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
 # Reviewed uses an agent key may make. key -> ("METHOD /full/path", reason)
 AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     # The agent's own runtime surface (#2996 §3.4 regression set).
+    "routers/agent_files.py::get_agent_canon_roles": (
+        "GET /api/agents/{agent_name}/canon/roles",
+        "a READ of the agent's own canon seats (trinity-enterprise#817); an agent key is "
+        "self-gated to its own canon, the same rule and budget as its objectives"),
     "routers/agents.py::agent_heartbeat": (
         "POST /api/agents/{agent_name}/heartbeat",
         "liveness; authenticates the agent's own agent-scoped key outside get_current_user (#307)"),
@@ -539,6 +551,7 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     "routers/agent_config.py::get_agent_timeout": ("GET /api/agents/{agent_name}/timeout", "a non-sensitive read of this agent's own setting (access-level)"),
     "routers/agent_config.py::get_public_channel_model": ("GET /api/agents/{agent_name}/public-channel-model", "a non-sensitive read of this agent's own setting (access-level)"),
     "routers/agent_config.py::get_agent_guardrails": ("GET /api/agents/{agent_name}/guardrails", "a non-sensitive read of this agent's own setting (access-level)"),
+    "routers/agent_config.py::list_agent_capability_grants": ("GET /api/agents/{agent_name}/capability-grants", "trinity-enterprise#164: an agent reads which self-change permissions it holds, so it knows when to raise a permission-request (owner-level; granting is interactive-admin)"),
     "routers/users.py::get_my_github_pat_status": (
         "GET /api/users/me/github-pat", "configured flags only, never the token (ent#162)"),
     # Skill sets (ent#530). The writes are the USE of the skills-manage capability, fenced like
@@ -560,6 +573,16 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     # run's clearance; the agent comes from the key (get_self_agent), every person is refused.
     "routers/skill_gate.py::check_skill_invocation": (
         "POST /api/skill-gate/check", "the in-container hook's check: own gates and own run only, agent from the key (get_self_agent)"),
+    # trinity-enterprise#753: the per-agent skill gate map. The writes take the #3236 shape
+    # (require_person_or_capability("skills.manage", self_person_only=True)): a person, or a
+    # skills.manage holder on an agent its owner owns — never itself; then the owner fence.
+    # The read: an agent key reads its own gates (the hook pulls), a holder an agent its owner owns.
+    "routers/skill_gate.py::list_agent_skill_gates": (
+        "GET /api/agents/{agent_name}/skill-gates", "ent#753 read: anyone with access; an agent key its own gates, a skills.manage holder an agent its owner owns"),
+    "routers/skill_gate.py::set_agent_skill_gate": (
+        "PUT /api/agents/{agent_name}/skill-gates/{skill_name}", "ent#753 skills.manage USE on an owner-owned agent, never itself; persons pass assert_person + owner fence"),
+    "routers/skill_gate.py::clear_agent_skill_gate": (
+        "DELETE /api/agents/{agent_name}/skill-gates/{skill_name}", "ent#753 skills.manage USE on an owner-owned agent, never itself; persons pass assert_person + owner fence"),
     # ent#703: the agent's pull loop reads its own switch every cycle with its own key.
     # The write (PUT .../git/pull-sync) is a setting, so it is person-only.
     "routers/git.py::get_pull_sync_config": (
@@ -573,18 +596,13 @@ _PULL = "pull seam: internal secret OR the agent's own scoped key (#1081)"
 _INLINE = "internal secret + inline-auth flag (#848)"
 
 OWN_AUTH: Dict[str, Tuple[str, str]] = {
-    "routers/internal.py::agent_files_share": ("POST /api/internal/agent-files/share", _SECRET),
-    "routers/internal.py::complete_activity": ("POST /api/internal/activities/{activity_id}/complete", _SECRET),
     "routers/internal.py::execute_task_internal": ("POST /api/internal/execute-task", _SECRET),
     "routers/internal.py::internal_agent_brief_readiness": ("GET /api/internal/agents/{agent_name}/brief-readiness", _SECRET),
     "routers/internal.py::internal_agent_pre_check": ("POST /api/internal/agents/{agent_name}/pre-check", _SECRET),
-    "routers/internal.py::internal_agent_sync_health": ("GET /api/internal/agents/{agent_name}/sync-health-status", _SECRET),
-    "routers/internal.py::internal_health": ("GET /api/internal/health", _SECRET),
     "routers/internal.py::internal_next_task": ("GET /api/internal/next-task", _PULL),
     "routers/internal.py::internal_task_result": ("POST /api/internal/tasks/{execution_id}/result", _PULL),
     "routers/internal.py::log_audit_entry": ("POST /api/internal/audit", _SECRET),
     "routers/internal.py::mcp_exposed_agents": ("GET /api/internal/mcp-exposed-agents", _SECRET),
-    "routers/internal.py::track_activity": ("POST /api/internal/activities/track", _SECRET),
     "routers/internal.py::validate_execution": ("POST /api/internal/validate-execution", _SECRET),
     "routers/setup.py::get_setup_status": ("GET /api/setup/status", "unauthenticated by design (first-run status)"),
     "routers/setup.py::set_admin_password": ("POST /api/setup/admin-password", "unauthenticated by design until setup completes, then refused"),
@@ -633,7 +651,16 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
 }
 
 # Check lives in services/. key -> ("METHOD /full/path", service function, behavioural test id)
-DELEGATED: Dict[str, Tuple[str, str, str]] = {}
+DELEGATED: Dict[str, Tuple[str, str, str]] = {
+    # trinity-enterprise#631: the people picker of a room. Its principal is
+    # `get_room_principal` (a platform user OR a Workspace client), so no
+    # dependency gate fits; the refusal of agents, system keys and external
+    # clients is `person_mention_service.tagger_for`, reached first.
+    "shared_sessions/router.py::room_people": (
+        "GET /api/rooms/{room_id}/people",
+        "shared_sessions.service.room_people -> person_mention_service.tagger_for",
+        "tests/unit/test_ent631_person_mention.py::test_an_agent_key_cannot_list_people_to_tag"),
+}
 
 # WebSocket routes — out of the HTTP census, pinned so a new one is a visible edit.
 WEBSOCKET_ROUTES = frozenset({
@@ -647,7 +674,7 @@ WEBSOCKET_ROUTES = frozenset({
 
 # The exact size of the frozen baseline. Lower it in the same change that
 # removes an entry; it never goes up.
-FROZEN_BASELINE_COUNT = 359
+FROZEN_BASELINE_COUNT = 355
 
 
 def load_baseline(path: Path = BASELINE_PATH) -> Dict[str, str]:

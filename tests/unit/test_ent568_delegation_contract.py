@@ -53,8 +53,11 @@ RUNTIMES = ("claude-code", "codex", "gemini-cli", "")
 # chars on `chat_with_agent`, one name-only line on a `chat_with_<agent>` tool).
 # The MCP suite pins the published descriptions themselves; this keeps the
 # shared text from eating that headroom. Raising it is a decision, not an
-# accident — the #1535 / ent#536 context-budget discipline.
-MAX_CONTRACT_CHARS = 1650
+# accident — the #1535 / ent#536 context-budget discipline. #3245 raised it
+# 1650 → 1730 for the confirmed-failure retry bullet (1,720 chars), and trimmed
+# `chat_with_agent`'s lead by 36 chars to keep its published description inside
+# the cap.
+MAX_CONTRACT_CHARS = 1730
 
 # Every backticked token in the contract, classified. A token outside these
 # sets fails the build until someone decides what it is and adds it to the set
@@ -82,6 +85,9 @@ STATUS_PRODUCERS = {
     "pending_approval": ["src/mcp-server/src/client.ts"],
     "agent_busy": ["src/mcp-server/src/tools/chat.ts"],
     "running": ["src/backend/models.py"],
+    # #3245: the terminal statuses `get_execution_result` reports.
+    "failed": ["src/backend/models.py"],
+    "cancelled": ["src/backend/models.py"],
 }
 # field -> a file whose answer carries it.
 FIELD_PRODUCERS = {
@@ -250,6 +256,21 @@ def test_extraction_sees_a_one_character_change():
 ])
 def test_the_contract_states_each_acceptance_term(term):
     assert term in DELEGATION_CONTRACT
+
+
+def test_a_confirmed_failure_is_retried_word_for_word():
+    """#3245 (UC2): the server now dispatches a verbatim re-send after a run
+    ended `failed`/`cancelled`, so the contract must say so — in ONE bullet,
+    together with what to do when the same `execution_id` comes back (a
+    `lease_expired` failure is held until its window ends): set a reminder and
+    end the turn, rather than re-sending in a loop."""
+    bullets = [b for b in DELEGATION_CONTRACT.split("\n")
+               if "`failed`" in b and "`cancelled`" in b]
+    assert len(bullets) == 1, bullets
+    bullet = bullets[0]
+    assert "re-send word for word to retry" in bullet
+    assert "same `execution_id` back" in bullet and "`set_reminder`" in bullet
+    assert "end your turn" in bullet
 
 
 def test_every_backticked_token_is_classified():

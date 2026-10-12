@@ -221,6 +221,8 @@ def test_loopback_round_trip_against_trinitys_own_inbound_server(monkeypatch):
     state = {"executions": {}}
     fake_db = types.SimpleNamespace(
         get_a2a_exposed=lambda name: name == "remotebot",
+        # ent#838: every agent here is public-scope — today's A2A behaviour.
+        get_a2a_scope=lambda name: {"scope": "public", "keyless": True},
         can_user_access_agent=lambda user, name: True,
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=lambda eid, reason=None: False,

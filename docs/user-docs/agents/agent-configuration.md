@@ -15,8 +15,9 @@ The Agent Detail page has a **Settings** tab (visible to owners only) -- a secti
 - **Expose via MCP** — publish the agent as a dedicated MCP tool; see [MCP Server](../integrations/mcp-server.md#dedicated-agent-tools-expose-via-mcp)
 - **Trinity access key** — the agent-scoped key the agent uses to call Trinity's own MCP tools, with health status and a **Regenerate** action (the running container is replaced to pick the new key up)
 - **Reliability** — the dispatch circuit breaker (below) and **Wake this agent when an ask it raised ends** (below)
+- **Git sync** — **Auto-sync to GitHub every 15 minutes**, **Pull changes from GitHub on every sync cycle**, and **Pause schedules while sync is failing**. Each applies on the next cycle with no restart. An agent with no GitHub repository shows a note pointing to the **Git** tab. See [GitHub Sync](../integrations/github-sync.md)
 - **Voice** — let the agent reply with spoken voice notes on messaging channels; see [Voice Replies](../advanced/voice-replies.md)
-- **Cross-model validation** — appears only on entitled installations
+- Further sections can appear on installations with an enterprise entitlement
 
 The remaining settings below are managed from the agent header controls, the Running/Autonomy toggles on the Dashboard, or the API.
 
@@ -42,8 +43,10 @@ Master gate for the agent's scheduled operations.
 Prevents modification of source files (`*.py`, `*.js`, etc.) inside the agent container.
 
 - Toggle in the Agent Header
-- Uses `PreToolUse` hooks to intercept `Write`, `Edit`, and `NotebookEdit` tool calls
-- Allowed patterns: `output/*`, `content/*` (generated files are permitted)
+- Uses a `PreToolUse` hook to intercept `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` tool calls. Codex agents enforce it through the Codex sandbox instead
+- Blocked by default: source and config files (`*.py`, `*.js`, `*.ts`, `*.sh`, `*.yaml`, `*.json`, `CLAUDE.md`, `.claude/*`, `.env`, and similar)
+- Allowed by default: `content/*`, `output/*`, `reports/*`, `exports/*`, `*.log`, `*.txt` (generated files are permitted)
+- The backend writes the mode's configuration to a root-owned file in the container (`/opt/trinity/read-only-config.json`), which the agent cannot edit. A copy under `~/.trinity/` decides only while the root-owned file is missing
 - API: `GET /api/agents/{name}/read-only` and `PUT /api/agents/{name}/read-only`
 
 ### Resource Allocation
@@ -53,6 +56,7 @@ Per-agent memory and CPU limits, enforced at the container level (Linux cgroups)
 - Open the resource modal from the agent header (gear button, "Configure resources"). Each limit can also be left as "Inherit default".
 - Memory options: 1g, 2g, 4g, 8g, 16g, 32g, 64g. CPU options: 1, 2, 4, 8, 16 cores.
 - Changes take effect on the next agent restart.
+- **CPU is capped at the host's CPU count.** Docker refuses a CPU limit above the number of CPUs on the host. If you choose more cores than the host has, the container gets the host's CPU count instead and a warning is logged. The setting keeps the value you chose, so the agent is not recreated on every start.
 - API: `GET /api/agents/{name}/resources` and `PUT /api/agents/{name}/resources`
 - **Full capabilities mode**: grants containers system-level access (Docker socket, network tools) when needed
 

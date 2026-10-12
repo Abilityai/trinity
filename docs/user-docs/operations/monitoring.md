@@ -74,6 +74,7 @@ A background service that automatically recovers stuck resources:
 - **Stale executions** -- Any execution with `status='running'` past its per-slot timeout is marked `failed`.
 - **Stale activities** -- Any activity with `activity_state='started'` past the configured threshold is marked `failed`.
 - **Stale Redis slots** -- Orphaned slot reservations are released.
+- **Orphan agent volumes** -- A Docker data volume whose agent no longer exists (left behind by a crash mid-create, or skipped because it was in use at purge time) is removed once it is at least an hour old and has been seen unattached on three consecutive cycles (about 15 minutes), up to 100 per cycle. Only volumes this Trinity install labelled as its own (`trinity.instance`) are candidates, so two Trinity stacks sharing one Docker daemon never remove each other's volumes. Volumes created before that label existed are never reclaimed automatically; unowned, unattached ones are named in one WARNING log line for a person to remove. Every removal is logged at WARNING, because it cannot be undone.
 - **Run frequency** -- Every 5 minutes, plus a one-shot sweep on backend restart.
 - **Startup recovery** -- Orphaned executions (container down, not in process registry, and not owned by a dispatcher in another worker) are marked `failed` immediately and their slots are released.
 - **Results recovered after a backend restart** -- A turn the backend was waiting on when it restarted is not failed just because the waiting connection died. The agent keeps each finished turn's result for up to 6 hours (the newest 50), and before marking such a row `failed` the watchdog asks the agent for it. If the agent has it, the execution is closed with its real result and cost, and a successful response opens with a *Recovered by the watchdog* notice. A chat thread that was waiting on that turn may not show the reply. Agents on an older base image keep the previous behaviour.
@@ -110,7 +111,7 @@ Fresh community installs are **seeded** with a 5-day minimum retention on the lo
 
 #### Every install owns its windows
 
-On every boot, Trinity writes an explicit row for any retention window that has none, at the value already in force — upgraded installs included, not just fresh ones. Nothing prunes differently the day this happens. The consequence is that retention is per-install configuration: a later change to the built-in defaults, in either direction, never silently changes how much data an existing install keeps. `GET /api/settings/retention` therefore reports every window with source `db-row`.
+On every boot, Trinity writes an explicit row for any retention window that has none, at the value already in force — upgraded installs included, not just fresh ones. Nothing prunes differently the day this happens. The consequence is that retention is per-install configuration: a later change to the built-in defaults, in either direction, never silently changes how much data an existing install keeps. `GET /api/settings/retention` therefore reports every window with source `db-row` — except the metric knobs below when their environment variable is set, which report `env`.
 
 #### Blast-radius guard & admin approval
 
@@ -124,11 +125,17 @@ The approval is:
 
 Agent-purge sweeps always require an acknowledgement because every one destroys data volumes.
 
+#### Metric points: window and daily quota
+
+Two knobs govern recorded metric points: the retention window `metrics_retention_days` (default 365) and the write quota `metrics_daily_point_cap` — how many points one agent may record per UTC day (default 100,000; `0` = unlimited). Unlike the other windows, both can come from the environment: `METRICS_RETENTION_DAYS` and `METRICS_DAILY_POINT_CAP` (left commented out in `.env.example`). A saved value wins over the variable, and the variable wins over the default. `GET /api/settings/retention` reports the quota under `quotas.metrics_daily_point_cap` with its `value` and `source` (`db-row`, `env`, or `code-default`).
+
 The recorded-metric-points sweep uses a larger threshold (100,000 rows, one agent-day at the default daily cap), because a busy fleet ages more than 1,000 points out of the window every cycle. It still stops for approval when you narrow the window and a large backlog expires at once, and one approval covers the whole backlog even when it takes several cycles to drain.
 
 #### Changing a window
 
-Retention windows have exactly **one** write path: `PUT /api/settings/ops/config`, reached from **Settings → Retention**. It type- and range-validates every value all-or-nothing (one bad value rejects the whole request with a 422) and writes an audit entry naming which windows moved. The generic settings endpoint refuses these keys and points you here.
+**Settings → Retention** shows every window with its source. In the Community edition the panel is read-only — it shows the windows and the approval banner, and editing windows from the panel requires an enterprise entitlement. Where the panel can save, a value supplied by an environment variable is shown with an **env** badge and is read-only; unset the variable and restart to edit it there.
+
+The OSS write path for retention windows is `PUT /api/settings/ops/config` (admin). It type- and range-validates every value all-or-nothing (one bad value rejects the whole request with a 422) and writes an audit entry naming which windows moved. The generic settings endpoint refuses these keys and points you here.
 
 Two things worth internalising, because the risk is counter-intuitive:
 
@@ -141,9 +148,13 @@ Endpoints:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/settings/retention` | GET | Effective windows (per-window value + source), edition, community-floor days, the read-only guard threshold, and pending acknowledgements (admin) |
+| `/api/settings/retention` | GET | Effective windows (per-window value + source), the metric point quota (`quotas`), edition, community-floor days, the read-only guard threshold, pending acknowledgements, sweeps the guard is blocking for another reason (`blocked_sweeps`), and the database backup status (`backup`) (admin) |
 | `/api/settings/ops/config` | PUT | The single validated, audited write path for retention windows (admin) |
 | `/api/settings/retention/acknowledge` | POST | Approve one over-threshold prune — body `{key, window_days}` (admin, human-only) |
+
+### Database Backups
+
+Trinity backs up its own database every night at 03:30 UTC and before migrations at boot, into `~/trinity-data/backups/`. The `backup` block of `GET /api/settings/retention` reports whether backups are enabled, the schedule, the last result and its age, `stale` (no success for more than 3 days), and the files on disk. A failed or skipped backup, or a stale run of them, raises an operator-queue alert. Backups sit on the same disk as the database: they protect against corruption and mistakes, not disk loss. See [Backup and Restore](../guides/deploying/backup-and-restore.md).
 
 ## Real-Time Event Reliability
 

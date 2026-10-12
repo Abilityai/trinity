@@ -56,7 +56,7 @@ VIEWER = "gary@example.com"
 
 #: What a Workspace client may see of one joined metric. A literal on purpose:
 #: a key the join grows later must turn this red before it reaches a client.
-METRIC_KEYS = {"name", "type", "unit", "target", "actual", "last_point_at",
+METRIC_KEYS = {"name", "role", "type", "unit", "target", "actual", "last_point_at",
                "stale", "freshness", "gap", "finding"}
 OBJECTIVE_KEYS = {"id", "statement", "horizon", "status", "owned", "metrics"}
 
@@ -326,7 +326,8 @@ def test_a_metric_crosses_as_exactly_the_client_fields():
 
     assert set(row) == METRIC_KEYS
     assert row == {
-        "name": "close_rate", "type": "percentage", "unit": "%",
+        "name": "close_rate", "role": "primary", "type": "percentage",
+        "unit": "%",
         "target": 35, "actual": 30.0,
         "last_point_at": "2026-09-22T11:59:00.000000Z",
         "stale": False, "freshness": "fresh",
@@ -882,3 +883,21 @@ def test_the_card_module_does_not_import_the_metrics_stack_at_module_top():
              if "objective_join" in name or "metric_read" in name
              or "metric_points" in name]
     assert heavy == []
+
+
+@pytest.fixture(autouse=True)
+def _seat_on_record():
+    """trinity-enterprise#812: the join reads the seat from Trinity's record,
+    not from `x-role`; record the seat these templates declare, as a companion's."""
+    from services import assignment_provider as ap
+
+    class _Seats:
+        def assignment_for(self, agent_name, triggered_by):
+            return None
+
+        def seat_for(self, agent_name):
+            return {"case": "serves", "role_id": ROLE, "seats": [ROLE]}
+
+    ap.register_provider(_Seats())
+    yield
+    ap.clear_provider()

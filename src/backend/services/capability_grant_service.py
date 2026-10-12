@@ -21,7 +21,15 @@ from __future__ import annotations
 from typing import List
 
 from database import db
-from db.capability_grants import CAPABILITIES
+from db.capability_grants import CAPABILITIES, CAPABILITY_INSTRUCTIONS_MANAGE
+
+
+def _is_calibrating(agent_name: str) -> bool:
+    """The owner's readiness stamp says `calibrating` (ent#527/#663). The stamp
+    is the only authority — the agent can't write it; an unstamped agent is not
+    treated as calibrating (the ent#689 honest limit)."""
+    stamp = db.get_agent_role_readiness(agent_name)
+    return bool(stamp) and stamp.get("status") == "calibrating"
 
 
 class CapabilityGrantRefused(Exception):
@@ -70,6 +78,15 @@ def set_grant(agent_name: str, capability: str, granted: bool, actor: str) -> di
             "system_agent_not_grantable",
             "The system agent already holds every capability by its scope; "
             "it needs no grant.",
+            422,
+        )
+    if capability == CAPABILITY_INSTRUCTIONS_MANAGE and _is_calibrating(agent_name):
+        # ent#164 / ent#663: a calibrating companion's instructions are still
+        # being tuned through the queue; it may not rewrite them itself.
+        raise CapabilityGrantRefused(
+            "calibrating_agent",
+            "This companion is still calibrating — its instructions change "
+            "through the operator queue until its owner marks it ready.",
             422,
         )
     info = db.get_agent_ephemeral_info(agent_name)

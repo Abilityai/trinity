@@ -8,14 +8,20 @@ brief, and records a `skipped` execution with the reason when the answer is no.
 Two properties are load-bearing:
 
 * **The owner's stamp is the only authority.** `x-role.status` in template.yaml
-  is written by the agent itself, so it is never read as a verdict. The template
-  is read only to learn whether the agent declares a role at all — a companion.
-  Honest limit: an UNSTAMPED agent can therefore take itself out of scope (drop
-  `x-role`, or stall the read into fail-open). A stamp it cannot touch: once an
-  owner has stamped `calibrating`, nothing the agent writes releases the brief.
+  is written by the agent itself, so it is never read as a verdict. Once an owner
+  has stamped `calibrating`, nothing the agent writes releases the brief.
 * **Every ambiguity fails open** (#1638: never mute working behaviour on an
-  ambiguous read). Stamp read failed, container not running, Docker unreadable,
-  template unreadable within the bound → the brief fires, and the reason is logged.
+  ambiguous read). Stamp read failed, no seat lookup, a lookup error → the brief
+  fires, and the reason is logged.
+
+**Who is a companion (trinity-enterprise#813, ruling 2026-10-06).** Asked only
+for an UNSTAMPED agent: an agent whose primary is assigned and holds a seat —
+`assignment_provider.resolve_seat` answers `serves`. The template is no longer
+read for it (`x-role` stopped being truth), so an agent can no longer take itself
+out of scope by editing its own files: the seat is admin-written. An agent that
+holds a seat ITSELF is an autonomous player, not a companion; no primary, no
+provider or a lookup error all read as "not a companion", so the brief fires as
+it did before.
 
 Grandfathering is not here: a one-time data seed (`role_readiness_rollout_seed`,
 both migration tracks) stamped every agent with a live seat brief at deploy.
@@ -32,10 +38,6 @@ logger = logging.getLogger(__name__)
 #: `agent_role_readiness.changed_by` of the one-time rollout seed. Not an email:
 #: the role card reads it and says "carried over", never "by <owner>".
 ROLLOUT_CHANGED_BY = "rollout:ent#689"
-
-#: The template read happens on the scheduler's dispatch path; the scheduler's
-#: own call is bounded at 5 s, so this must finish well inside it.
-TEMPLATE_READ_TIMEOUT_SECONDS = 3.0
 
 
 class AgentNotFound(Exception):
@@ -57,8 +59,10 @@ def held_reason(agent_name: str) -> str:
     )
 
 
-def decide(agent_name: str, stamp: Optional[dict], companion: Optional[bool]) -> Verdict:
-    """The rule, pure. `companion` is None when it could not be established."""
+def decide(agent_name: str, stamp: Optional[dict], companion: Optional[bool],
+           why: str = "") -> Verdict:
+    """The rule, pure. `companion` is None when it could not be established;
+    `why` is the seat reason behind a "not a companion" (#813)."""
     if stamp and stamp.get("status"):
         if stamp["status"] == "ready":
             return Verdict(True, "stamped ready", "stamp")
@@ -66,7 +70,7 @@ def decide(agent_name: str, stamp: Optional[dict], companion: Optional[bool]) ->
     if companion is None:
         return Verdict(True, "readiness could not be established — firing (fail open)", "fail_open")
     if not companion:
-        return Verdict(True, "not a companion (no x-role)", "not_companion")
+        return Verdict(True, f"not a companion ({why or 'no seat'})", "not_companion")
     return Verdict(False, held_reason(agent_name), "unstamped_companion")
 
 
@@ -122,40 +126,24 @@ def briefs_held_for_list(agents: list, readiness_by_name: dict) -> set:
     }
 
 
-async def _is_companion(agent_name: str) -> Optional[bool]:
-    """Whether template.yaml declares `x-role` — True / False, or None when that
-    cannot be read right now (not running, Docker unreadable, slow, unparsable)."""
-    from services import docker_utils
-    from services.agent_client import get_agent_client
-    from utils.safe_yaml import load_template_yaml
+def companion_from_seat(agent_name: str) -> tuple:
+    """(is it a companion, why) from the seat on record (trinity-enterprise#813).
 
-    try:
-        state = await docker_utils.agent_container_state_async(agent_name)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[ent#689] container state for %s unreadable (%s) — fail open", agent_name, e)
-        return None
-    if state != "running":
-        return None
-    try:
-        res = await asyncio.wait_for(
-            get_agent_client(agent_name).read_file("template.yaml", timeout=TEMPLATE_READ_TIMEOUT_SECONDS),
-            TEMPLATE_READ_TIMEOUT_SECONDS + 0.5,
-        )
-    except Exception as e:  # noqa: BLE001 — TimeoutError and circuit-open included
-        logger.warning("[ent#689] template.yaml for %s unreadable (%r) — fail open", agent_name, e)
-        return None
-    if not res or not res.get("success"):
-        return None
-    if res.get("not_found") or res.get("content") is None:
-        return False  # no template at all: not a companion
-    try:
-        data = load_template_yaml(res["content"])
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[ent#689] template.yaml for %s unparsable (%s) — fail open", agent_name, e)
-        return None
-    if not isinstance(data, dict):
-        return None
-    return isinstance(data.get("x-role"), dict)
+    A companion is an agent whose primary is assigned and holds a seat. Every
+    other answer — the agent holds a seat itself, no primary with a seat, no
+    seat lookup, a lookup error — is "not a companion", stated with its reason.
+    Never raises (`resolve_seat` never does).
+    """
+    from services.assignment_provider import resolve_seat
+
+    seat = resolve_seat(agent_name)
+    if seat["reason"] != "provider":
+        return False, f"seat lookup unavailable: {seat['reason']}"
+    if seat["case"] == "serves":
+        return True, f"its primary holds the seat {seat['role_id']}"
+    if seat["case"] == "holds":
+        return False, f"it holds the seat {seat['role_id']} itself"
+    return False, "no primary with a seat"
 
 
 async def brief_readiness(agent_name: str) -> Verdict:
@@ -169,8 +157,12 @@ async def brief_readiness(agent_name: str) -> Verdict:
     except Exception as e:  # noqa: BLE001
         logger.warning("[ent#689] readiness stamp for %s unreadable (%s) — fail open", agent_name, e)
         return Verdict(True, "readiness could not be established — firing (fail open)", "fail_open")
-    companion = None if stamp else await _is_companion(agent_name)
-    verdict = decide(agent_name, stamp, companion)
+    companion, why = (None, "") if stamp else companion_from_seat(agent_name)
+    verdict = decide(agent_name, stamp, companion, why)
     if verdict.basis == "fail_open":
         logger.warning("[ent#689] %s: %s", agent_name, verdict.reason)
+    elif not stamp:
+        # #813: the companion decision, with the reason it took.
+        logger.info("[ent#813] %s: %s → %s", agent_name, why,
+                    "held" if not verdict.fire else "fires")
     return verdict

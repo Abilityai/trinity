@@ -287,6 +287,10 @@ AGENT_REFS: List[AgentRef] = [
     # for it finds no record on its ending and runs nothing.
     AgentRef("skill_gate_requests",          "agent_name",        Policy.CASCADE),
     AgentRef("skill_gate_requests",          "source_agent",      Policy.CASCADE),
+    # trinity-enterprise#753 — the agent's skill gate map follows it (rename
+    # re-keys, purge removes). `set_by_agent` is audit-only provenance and
+    # deliberately not registered (the `assigned_by_agent` precedent).
+    AgentRef("agent_skill_gates",            "agent_name",        Policy.CASCADE),
     AgentRef("access_requests",              "agent_name",        Policy.CASCADE),
 
     # --- MCP keys (scope='agent' only — user/system keys are not per-agent)
@@ -524,54 +528,6 @@ def cascade_rename(conn, old_name: str, new_name: str) -> Dict[str, int]:
             updated[table] = updated.get(table, 0) + result.rowcount
 
     return updated
-
-
-def find_orphan_agent_names(conn) -> Dict[str, int]:
-    """
-    Return mapping of {orphan_agent_name: row_count} aggregated across
-    every CASCADE-policy table. Used by the backfill script and as the
-    truth source for what `cascade_delete()` would clean up.
-
-    An "orphan" is an agent_name value present in a registered table
-    but absent from `agent_ownership`.
-    """
-    from sqlalchemy import func, select as sa_select, text as sa_text
-
-    ao = _table("agent_ownership")
-    known = {
-        row[0]
-        for row in conn.execute(sa_select(ao.c.agent_name)).all()
-    }
-
-    if not known:
-        # No agents exist; every row everywhere is technically orphan.
-        # Refuse to operate to avoid wiping a fresh-install DB.
-        return {}
-
-    known_params = list(known)
-    counts: Dict[str, int] = {}
-
-    for ref in AGENT_REFS:
-        if ref.policy != Policy.CASCADE:
-            continue
-        if not _table_exists(conn, ref.table):
-            continue
-        tbl = _table(ref.table)
-        name_col = tbl.c[ref.column]
-        stmt = (
-            sa_select(name_col.label("name"), func.count().label("n"))
-            .where(name_col.notin_(known_params))
-        )
-        if ref.extra_filter:
-            stmt = stmt.where(sa_text(ref.extra_filter))
-        stmt = stmt.group_by(name_col)
-        for row in conn.execute(stmt).all():
-            name = row[0]
-            if name is None:
-                continue
-            counts[name] = counts.get(name, 0) + int(row[1])
-
-    return counts
 
 
 def _multi_column(table: str) -> bool:

@@ -16,7 +16,7 @@ Real-time voice conversations with agents, inside a Workspace chat. Audio stream
 
 **The Workspace is the only place a voice call runs.** There are two ways in, and they end up in the same call:
 
-- **From Agent Detail** — click **Talk** in the header, beside **Workspace**. Trinity opens the Workspace on that agent and starts the call. Talk is always there; if the instance cannot run a call, the Workspace tells you why.
+- **From Agent Detail** — click **Talk** in the header, beside **Workspace**. Trinity opens the Workspace on a new chat with that agent and starts the call there. Talk is always there; if the instance cannot run a call, the Workspace tells you why.
 - **From the Workspace** — click the call button, the leftmost control in the composer (**Start a voice call**), in whichever chat you want the call to belong to.
 
 Once the call is up:
@@ -50,7 +50,7 @@ Click **Mute** on the orb, or press **M**, to silence your microphone mid-sessio
 ## Requirements
 
 - A Gemini key in **Settings → Integrations** ([Platform Keys](../credentials/platform-keys.md#gemini)), or `GEMINI_API_KEY` in `.env`.
-- `VOICE_ENABLED` must be on (default: on when API key is present).
+- `VOICE_ENABLED` must be on (default `true`; it does nothing without a Gemini key).
 - Browser microphone permission granted, on a secure (https) page.
 - A signed-in platform user. External clients signed in with an email code do not get a call button.
 
@@ -123,7 +123,7 @@ The call button is shown to signed-in platform users. When the instance cannot r
 - A Workspace call lasts at most **30 minutes** by default (`WORKSPACE_VOICE_MAX_DURATION`). Thirty seconds before the limit the agent is told to wrap up out loud; at the limit the call ends and the chat records *ended at the 30-minute limit*.
 - A call cannot start while a reply to a typed message is still being written (*A reply is still being written — wait for it, then start the call.*), and a typed message is refused while a call is live in that chat, so a reply never lands in the middle of a call.
 - Microphone denied, an insecure (non-https) page, a provider error, a dropped connection — each ends or refuses the call with a sentence in the status line. The chat is never blocked by a failed call. The connection to the provider is renewed silently during a long call; the orb shows *Connecting…* for the swap.
-- Switching chats, New chat, ⌘J or opening a room mid-call asks first (**End the call?** — *End call and leave* or *Stay on the call*); only **End call** itself never asks. Leaving the page or pressing the browser's back button ends the call; the transcript is kept.
+- Switching chats, New chat, ⌘J or opening a room mid-call asks first (**End the call?** — *End call and leave* or *Stay on the call*); only **End call** itself never asks. The Workspace's other keyboard shortcuts (switching agents and chats, the rail keys) are off while a call is live. Leaving the page or pressing the browser's back button ends the call; the transcript is kept.
 - **Esc** ends the call — unless something is open on top of it. A file preview or a confirm dialog opened mid-call takes the first Esc for itself; the call ends on the next.
 
 ### Canvas tools

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from dependencies import get_current_user
+from dependencies import get_current_user, workspace_route
 from models import User
 from services.ws_ticket_service import mint_ticket
 
@@ -20,6 +20,7 @@ router = APIRouter(prefix="/api/ws", tags=["websocket"])
 
 
 @router.post("/ticket")
+@workspace_route("the Workspace stores take live updates over /ws; events are scoped to the agents the person can see (ent#467)")
 async def create_ws_ticket(current_user: User = Depends(get_current_user)) -> dict:
     """Mint a single-use 30-second WebSocket auth ticket for the caller.
 

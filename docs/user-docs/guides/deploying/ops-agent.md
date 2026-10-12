@@ -43,15 +43,17 @@ The ops agent connects to a Trinity instance via a `.env` file in its workspace.
 | `ADMIN_PASSWORD` | Required | — | Trinity admin password for API calls |
 | `MCP_API_KEY` | Optional | — | MCP API key for agent queries |
 | `ANTHROPIC_API_KEY` | Optional | — | Passed through for agent containers |
-| `TUNNEL_FRONTEND` / `TUNNEL_BACKEND` / `TUNNEL_MCP` | Optional | `13000` / `18000` / `18080` | Local ports `tunnel.sh` forwards to on a remote instance |
+| `TUNNEL_FRONTEND` / `TUNNEL_BACKEND` / `TUNNEL_MCP` | Optional | `13000` / `18000` / `18080` (`.env.example`; `tunnel.sh` falls back to `18180` for MCP when the variable is unset) | Local ports `tunnel.sh` forwards to on a remote instance |
 
 **Local mode:** Leave `SSH_HOST` empty. All commands run directly against the local Docker daemon.
 
 **Remote mode:** Set `SSH_HOST`. Commands are forwarded over SSH — no agent container is needed on the remote server.
 
+Every skill builds on `scripts/run.sh`, which runs a command locally or over SSH depending on `SSH_HOST`. Run `./scripts/status.sh` after filling in `.env` to confirm the connection works.
+
 **Hosted (pull-only) installs:** on an instance installed with `./scripts/deploy/start.sh --hosted` (prebuilt GHCR images, including both DigitalOcean paths), set `COMPOSE_FILE=docker-compose.hosted.yml`. `/update` and `update.sh` then switch to hosted mode: instead of building, they run `start.sh --hosted --unattended` on the server, which pulls the platform images and the agent base image. The release comes from `TRINITY_IMAGE_TAG` in the **server's** `.env`, so pin it there — see [Upgrading → Hosted installs](upgrading.md#hosted-pull-only-installs). Health checks, logs, restarts and backups work the same on either install.
 
-**A DigitalOcean Droplet** created by the [installer script](digitalocean.md) or the 1-Click needs `SSH_USER=root`, `TRINITY_PATH=/opt/trinity`, `COMPOSE_FILE=docker-compose.hosted.yml` and `FRONTEND_PORT=8081` (Caddy owns ports 80 and 443 there). The backend port is not reachable from outside the Droplet, so the scripts call it on the server itself over SSH, or you reach it through `tunnel.sh`.
+**A DigitalOcean Droplet** created by the [installer script](digitalocean.md) or the 1-Click needs `SSH_USER=root`, `TRINITY_PATH=/opt/trinity`, `COMPOSE_FILE=docker-compose.hosted.yml` and `FRONTEND_PORT=8081` (Caddy owns ports 80 and 443 there). The backend port is not reachable from outside the Droplet, so the scripts call it on the server itself over SSH, or you reach it through `tunnel.sh`. The AWS image and the Vultr marketplace app are provisioned the same way (`/opt/trinity`, hosted compose, Caddy in front, `FRONTEND_PORT=8081`); only the SSH user differs — `ubuntu` on the AWS image, `root` on Vultr.
 
 ## Day-to-Day Operations
 
@@ -157,7 +159,7 @@ On a **hosted** install there is nothing to rebuild. Set `TRINITY_IMAGE_TAG` in 
 
 ## Skills
 
-Open the repo in Claude Code and use the slash commands it ships with:
+Open the repo in Claude Code and use the slash commands it ships with. The repo's `CLAUDE.md` is the agent's system prompt, carrying the runbook knowledge the skills rely on. Day to day you mostly need four: `/status`, `/diagnose`, `/update`, and `/rollback`.
 
 | Skill | What it does |
 |-------|-------------|
@@ -171,7 +173,7 @@ Open the repo in Claude Code and use the slash commands it ships with:
 | `/telemetry` | CPU, memory, disk, container resource stats |
 | `/rollback [commit] [backup]` | Roll back to a previous commit, optionally restoring a DB backup |
 | `/cleanup [--execute]` | Prune Docker images, build cache, old backups |
-| `/migrate-to-postgres` | Migrate the database from SQLite to PostgreSQL — validate in parallel, then cut over; one-line rollback |
+| `/migrate-to-postgres` | Migrate the database from SQLite to PostgreSQL — validate in parallel, then cut over; one-line rollback. SQLite reached end of support on 2026-09-01 |
 | `/provision [provider]` | Step-by-step provisioning for Hetzner, GCP, AWS, DigitalOcean or localhost; for DigitalOcean it offers the one-command installer first |
 | `/sync-ops-knowledge` | Review recent Trinity changes and update the agent's own instructions |
 

@@ -31,7 +31,7 @@ A template can ship the recurring work its agent is designed to do in a `schedul
 1. Open the agent detail page and go to the scheduling section.
 2. Click **Create Schedule**.
 3. Configure: name, cron expression (e.g., `0 9 * * 1-5` for weekdays at 9 AM), message/task, timezone, and description. The presets **Daily 9 AM**, **Weekly Mon**, **Every 6h** and **Every 30m** fill the cron field for the common cadences.
-4. Optionally select a model override (Fable 5.1, Sonnet 5, Opus, Haiku, or custom). Fable 5.1 is the most capable model, for the longest and hardest tasks; Sonnet 5 is fast with a 1M-token context window.
+4. Optionally select a model override from the **Model** picker — Claude Opus 5.5, Fable 5.1, Sonnet 5, Haiku 4.5 and older models are listed, or type any model id. Left empty, the schedule uses the platform default model. Fable 5.1 is the most capable model, for the longest and hardest tasks; Sonnet 5 is fast with a 1M-token context window.
 5. Enable or disable individual schedules with the toggle.
 6. View execution history with status, duration, and cost.
 7. Click **Run now** to trigger a schedule immediately.
@@ -52,6 +52,12 @@ The server remains the authority: an expression the form accepts but the schedul
 2. Backend spawns a background task and returns immediately.
 3. Scheduler polls the database every 10 seconds until execution completes.
 4. Execution record is updated with response, cost, and duration.
+
+On an agent piloting pull dispatch, the backend may hand the run to the durable queue instead of running it directly. The scheduler then polls that row to its real outcome, so retries, post-run validation and the completion event still apply to a queued scheduled run.
+
+### Run now and chain depth
+
+**Run now** from the UI starts a fresh run. When an agent triggers a schedule with its own key (for example through `trigger_agent_schedule`), the run counts as one more hop in that agent's call chain, the same as a `chat_with_agent` call. A trigger past the chain-depth limit (8 hops by default) is refused with `403 inter_agent_depth_exceeded` before anything runs (`trigger_agent_schedule` returns it as a `retryable: false` result), and a retry of the run keeps its depth. Cron fires and webhook fires always start a new chain. See [Agent Network](../collaboration/agent-network.md#concepts).
 
 ## For Agents
 

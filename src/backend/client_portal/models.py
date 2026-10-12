@@ -1,9 +1,11 @@
 """Pydantic models for the enterprise client-portal exposure config (#79)."""
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from models import PersonTagState  # trinity-enterprise#631 — one definition, shared with rooms
 
 
 class PortalExposureConfig(BaseModel):
@@ -321,6 +323,42 @@ class PortalExchangeResponse(BaseModel):
     expires_in: int
 
 
+#: The most files one chat turn carries (#3265) — the composer's
+#: `MAX_BATCH_FILES`, mirrored.
+MAX_TURN_ATTACHMENTS = 20
+
+
+class PortalTurnAttachment(BaseModel):
+    """One file the client attached to a chat turn (#3265).
+
+    A NAME, never content: the upload already landed through
+    `POST /agents/{agent_name}/documents`. The server keeps a successful entry
+    only when that filename is in the caller's own uploads to this agent, and
+    takes its size and type from there. `failed` marks an upload that did not
+    land, so the message says so instead of dropping it.
+    """
+    filename: str = Field(min_length=1, max_length=255)
+    failed: bool = False
+    # Trimmed, not rejected: a long client-side upload error must never cost
+    # the person their message (a 422 here fails the whole turn, and Retry
+    # resends the same list).
+    error: Optional[str] = None
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def _trim_error(cls, v):
+        return v[:300] if isinstance(v, str) else v
+
+
+class PortalMessageAttachment(BaseModel):
+    """What a user turn carried, as stored on its row (#3265)."""
+    filename: str
+    size_bytes: Optional[int] = None
+    mime_type: Optional[str] = None
+    failed: bool = False
+    error: Optional[str] = None
+
+
 class PortalChatRequest(BaseModel):
     """A client's chat turn to a rostered agent. ``session_id`` targets a specific
     thread; when omitted the turn lands in the client's most-recent session (or a
@@ -346,6 +384,23 @@ class PortalChatRequest(BaseModel):
     # so a client cannot put words in the agent's mouth. Optional; every
     # existing caller is unaffected.
     reply_to_message_id: Optional[str] = Field(None, max_length=64)
+    # #3265 — the files attached to this turn, by upload filename. Optional;
+    # every existing caller is unaffected. Bounded like an upload batch
+    # (`MAX_BATCH_FILES`), and resolved against the caller's own uploads before
+    # anything is stored (`service.resolve_turn_attachments`). The bound KEEPS
+    # the first 20 rather than rejecting: a message that sent fine before #3265
+    # must not start failing with a 422 because of what it carries.
+    attachments: Optional[list[PortalTurnAttachment]] = None
+    # trinity-enterprise#631 — the PEOPLE this turn tags, by address, as picked
+    # in the composer. Optional; every existing caller is unaffected. Refused by
+    # name before anything is written; the service enforces the per-message cap.
+    tags: Optional[list[Annotated[str, Field(min_length=1, max_length=320)]]] = Field(
+        default=None, max_length=50)
+
+    @field_validator("attachments", mode="before")
+    @classmethod
+    def _keep_first_attachments(cls, v):
+        return v[:MAX_TURN_ATTACHMENTS] if isinstance(v, list) else v
     # ent#403 — the model this turn should run on. THREE states, preserving the
     # #894 shape rather than collapsing it to two: a curated id = an explicit
     # choice; `None`/`""`/whitespace = INHERIT (the agent's `public_channel_model`,
@@ -381,6 +436,10 @@ class PortalChatResponse(BaseModel):
     # it. `None` then, and the client's `v-if="message.id"` correctly withholds
     # the thumbs rather than offering a control whose POST would 404.
     message_id: Optional[str] = None
+    # trinity-enterprise#754: the turn went through without approval because the
+    # asker is the approver (and the asker is this caller) — as on history rows.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
 
 class PortalTurnStarted(BaseModel):
@@ -593,6 +652,9 @@ class PortalRoleMetric(BaseModel):
     projection of the objective ↔ metric join (`ObjectiveMetricRead`), never
     that model whole. A field added here is a disclosure decision."""
     name: str
+    # primary | guard (ent#731) — a fixed value, so a guard row can be labelled
+    # without any author text crossing.
+    role: str = "primary"
     # The registry's declared type and unit — what the card formats the two
     # numbers with. None for a metric this agent does not declare.
     type: Optional[str] = None
@@ -626,7 +688,7 @@ class PortalRoleInfo(BaseModel):
     stale: bool = False
     path: Optional[str] = None
     # role_file_not_found | role_file_unreadable | role_file_invalid |
-    # role_id_invalid | canon_path_invalid — the card SAYS the file failed.
+    # role_id_invalid | canon_path_invalid | no_seat — the card SAYS why.
     error: Optional[str] = None
 
 
@@ -642,7 +704,10 @@ class PortalRoleCard(BaseModel):
     `role` is None when the agent carries no `x-role` (no card is rendered)."""
     agent_name: str
     role: Optional[PortalRoleInfo] = None
-    seat: Optional[str] = None
+    # ent#814: where the seat on the card came from, for THIS viewer —
+    # holds (the agent's own) | person (the viewer's own) | primary | none.
+    # Never a person: the old `seat` carried x-role's email.
+    seat_source: Optional[Literal["holds", "person", "primary", "none"]] = None
     objectives: list[PortalRoleObjective] = Field(default_factory=list)
     # ent#676 — why `objectives` is empty when that is NOT simply true:
     # objectives_rate_limited | agent_unreachable | objectives_timeout |
@@ -656,7 +721,8 @@ class PortalRoleCard(BaseModel):
     finding_codes: list[str] = Field(default_factory=list)
     readiness: Optional[PortalRoleReadiness] = None
     walkthrough: Optional[PortalRoleWalkthrough] = None
-    # ent#500's assignment kind, when it lands; None renders as "no assignment recorded".
+    # The viewer's assignment kind on the agent (`kinds_for`): primary |
+    # approver | collaborator | viewer. None renders as "no assignment recorded".
     relationship: Optional[str] = None
     can_flip_readiness: bool = False
     # ent#689: a live seat-delivery schedule is being held because readiness is
@@ -944,6 +1010,24 @@ class PortalHistoryMessage(BaseModel):
     # rows into a single collapsed block keyed on this id.
     source: Optional[str] = None
     voice_call_id: Optional[str] = None
+    # #3265: the files a user turn carried, so a reload shows them on the
+    # message. None for every other row.
+    attachments: Optional[list[PortalMessageAttachment]] = None
+    # trinity-enterprise#631: on the reader's OWN message, the people it tagged
+    # and whether each has read it. None on every other row.
+    tags: Optional[list[PersonTagState]] = None
+    # #3166: the turn that wrote this row, so the client can take its own reply
+    # off a thread another turn is also writing to, and place each reply under
+    # its own question. The caller already holds these ids (the dispatch
+    # response, `in_flight_execution_id`, `last_turn_outcome`); NULL on rows
+    # written before the column existed and on rows no turn wrote (reports).
+    execution_id: Optional[str] = None
+    # trinity-enterprise#754: on an agent reply, its turn went through without
+    # approval because the asker IS the approver (ent#752's self-approved
+    # record), and whether the viewer is that person. Booleans only — derived
+    # server-side; false on questions and rows no turn wrote.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
 
 class PortalTurnOutcome(BaseModel):

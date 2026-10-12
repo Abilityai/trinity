@@ -12,6 +12,13 @@ from typing import Any, Dict, List, Optional
 
 APPROVAL_PENDING_CODE = "approval_pending"
 
+# How the requester will learn the outcome (trinity#3233): a platform task to a
+# requesting agent, an Inbox notice to a person, or nothing at all. Decided by
+# `skill_gate_service.outcome_delivery`, the one rule `_notify` also follows.
+OUTCOME_DELIVERY_AGENT_TASK = "agent_task"
+OUTCOME_DELIVERY_INBOX = "inbox"
+OUTCOME_DELIVERY_NONE = "none"
+
 
 class SkillGateError(Exception):
     """Base: the request names a gated skill and was not dispatched."""
@@ -30,12 +37,15 @@ class SkillApprovalRequired(SkillGateError):
     code = APPROVAL_PENDING_CODE
 
     def __init__(self, *, request_id: str, agent_name: str, skills: List[str],
-                 approver_role: str, expires_at: Optional[str]):
+                 approver_role: str, expires_at: Optional[str],
+                 outcome_delivery: str = OUTCOME_DELIVERY_NONE):
         self.request_id = request_id
         self.agent_name = agent_name
         self.skills = list(skills)
         self.approver_role = approver_role
         self.expires_at = expires_at
+        # Defaults to "none": an answer that does not know never promises.
+        self.outcome_delivery = outcome_delivery
         super().__init__(self.message)
 
     @property
@@ -46,9 +56,14 @@ class SkillApprovalRequired(SkillGateError):
         names = f"{noun} {', '.join(self.skills)}"
         # No role either: the requester needs to know it is waiting, not who
         # decides (`approver_role` stays in `detail()` for API callers). And no
-        # promise of a reply — not every requester has a channel back.
-        return (f"Not run: {names} on {self.agent_name} needs approval before it "
+        # promise of a reply — not every requester has a channel back; one that
+        # has none is told so, and where the outcome will show (trinity#3233).
+        text = (f"Not run: {names} on {self.agent_name} needs approval before it "
                 f"can run. Request {self.request_id} is waiting for a decision.")
+        if self.outcome_delivery == OUTCOME_DELIVERY_NONE:
+            text += (" Nothing will be sent back when it is decided: if it is approved, "
+                     f"it runs as a new execution on {self.agent_name}; if not, nothing runs.")
+        return text
 
     def detail(self) -> Dict[str, Any]:
         return {
@@ -59,6 +74,7 @@ class SkillApprovalRequired(SkillGateError):
             "skills": self.skills,
             "approver_role": self.approver_role,
             "expires_at": self.expires_at,
+            "outcome_delivery": self.outcome_delivery,
             "message": self.message,
         }
 

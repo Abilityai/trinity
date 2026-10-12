@@ -39,7 +39,7 @@ The append is idempotent and touches only the agent's own `.gitignore` — not a
 
 ### Exporting data
 
-Export captures everything under `/home/developer/data` as a tar archive with a `manifest.json` (declared data paths plus agent and version metadata). Run it on demand against a **running** agent.
+Export captures everything under `/home/developer/data` as a tar archive with a `manifest.json` (declared data paths plus agent and version metadata). Run it on demand against a **running** agent; import needs a running agent too.
 
 The platform never mounts the agent workspace to do this — it reads the directory out of the container directly, streams it to a temporary file, and returns it as a download.
 
@@ -60,8 +60,8 @@ All endpoints are owner/admin only. A per-agent operation lock serialises export
 
 Status codes:
 
-- `409` — export of a stopped agent (no running container), or a concurrent export/import on the same agent.
-- `413` — the data exceeds the export size cap (`AGENT_DATA_EXPORT_MAX_BYTES`, default 5 GB). `?format=base64` has its own, smaller inline cap (`AGENT_DATA_INLINE_MAX_BYTES`, default 10 MB); above it the response directs you to the streaming download instead.
+- `409` — export or import on a stopped agent (no running container), a concurrent export/import on the same agent, or an import whose `Idempotency-Key` is still being processed.
+- `413` — the data (or an uploaded import archive) exceeds the size cap (`AGENT_DATA_EXPORT_MAX_BYTES`, default 5 GB). `?format=base64` has its own, smaller inline cap (`AGENT_DATA_INLINE_MAX_BYTES`, default 10 MB); above it the response directs you to the streaming download instead.
 
 See [Backend API Docs](http://localhost:8000/docs) for full request/response schemas.
 
@@ -80,7 +80,7 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 
 ## Limitations
 
-The following are planned (PR2) and not yet available:
+The following are planned and not yet available:
 
 - **Scheduled background snapshots with retention.** Export/import is on demand only today.
 - **SQLite-quiesce pre-snapshot hook.** A `~/.trinity/pre-snapshot` hook to produce a consistent point-in-time copy of a live SQLite database (currently an export is a plain filesystem read).

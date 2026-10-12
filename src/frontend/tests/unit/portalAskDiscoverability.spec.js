@@ -115,7 +115,13 @@ describe('#2424 part 2 — asks are attributable to an agent', () => {
     // ent#610 §3g A3b, REVERSED on purpose: the 700 tier. White on urgent-500
     // is 2.80:1; on urgent-700 5.18 — and the same colour as every other
     // "needs you" counter (the pinned Inbox row, the Inbox's Action tab).
-    expect(src).toContain('bg-status-urgent-700')
+    // trinity-enterprise#836: the agent row's mark is now an UNFILLED ring —
+    // urgent ink at the AA tier, no ground — while the pinned row keeps its
+    // filled 700 pill (`PortalInboxRow.vue`); the mount proof is in
+    // `portalRailAsks.mount.spec.js`.
+    expect(src).toContain('ring-status-urgent-600')
+    expect(src).toContain('text-status-urgent-700')
+    expect(src).not.toContain('bg-status-urgent-700')
     expect(src).not.toContain('bg-status-urgent-500')
     // Raw palette classes are ratcheted to zero for new code (design contract).
     expect(src).not.toContain('bg-amber-500')

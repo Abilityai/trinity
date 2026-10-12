@@ -1,6 +1,6 @@
 # Hardening a Marketplace Install
 
-Take a one-click Trinity droplet from a bare public IP to an instance you would leave running: a real domain, then a Cloudflare Tunnel, a private network, or both, with the public ports closed behind you.
+Take a one-click Trinity droplet — or any instance prepared by `start.sh --provision` on DigitalOcean, AWS or Vultr — from a bare public IP to an instance you would leave running: a real domain, then a Cloudflare Tunnel, a private network, or both, with the public ports closed behind you.
 
 ## When to Run This
 
@@ -17,7 +17,7 @@ Not for you if Trinity already runs on a private network or behind a reverse pro
 | Caddy on ports 80 and 443 | A browser-trusted Let's Encrypt certificate for the droplet's **IP address**, so there is no warning and no domain required. Certificates on this profile last about six days and renew while the server runs — an instance switched off for longer comes back to a browser warning until renewal catches up |
 | Host firewall | Inbound 22, 80 and 443 only |
 | Container ports | Not reachable from off-box. Docker publishes past ordinary firewall rules, so Trinity installs its own rules that drop anything arriving at a container from outside. The backend, MCP server and log collector are reachable only through Caddy, or from the droplet itself |
-| Admin account | On a 1-Click droplet created without a password: none until someone claims it in a browser — **whoever opens it first becomes the admin**. The install script, or a password supplied at create time, provisions it at first boot instead |
+| Admin account | On a 1-Click droplet created without a password: none until someone claims it in a browser — **whoever opens it first becomes the admin**. On AWS the claim also requires the EC2 instance ID, so finding the IP is not enough. The install script, or a password supplied at create time, provisions it at first boot instead |
 
 Everything except the web interface is already closed. What stays open is Trinity itself: the web UI and the API answer anyone on the internet who finds the address, and your login is the only thing in the way.
 
@@ -59,7 +59,7 @@ All three end with nothing listening on the public interface. They differ in who
 |---|---|---|---|
 | Web UI, Workspace, MCP | Anyone with the address | Your devices only | Your devices only |
 | Telegram, WhatsApp, VoIP | Work | Broken | Work |
-| Public chat links, agent websites, webhook triggers, paid chat, inbound agent-to-agent | Work | Broken | Work |
+| Public chat links, webhook triggers, paid chat, inbound agent-to-agent | Work | Broken | Work |
 | Slack | Works | Works | Works |
 | Needs | A domain on Cloudflare | A Tailscale account and a device to connect from | Both |
 
@@ -67,7 +67,7 @@ All three end with nothing listening on the public interface. They differ in who
 
 **Tailnet only** — the interface is yours alone, and anything that calls in stops working. Pick it when nothing does.
 
-**Both** — the tunnel carries what calls in, the tailnet carries you. Pick it if you use Telegram, WhatsApp, voice, public chat links, agent websites or webhooks, and you want the interface private. Follow [Step 2a](#step-2a-cloudflare-tunnel), then [Step 2b](#step-2b-private-network-tailscale), then [Step 2c](#step-2c-both--the-tunnel-carries-the-callbacks-the-tailnet-carries-you) for the one setting that differs.
+**Both** — the tunnel carries what calls in, the tailnet carries you. Pick it if you use Telegram, WhatsApp, voice, public chat links or webhooks, and you want the interface private. Follow [Step 2a](#step-2a-cloudflare-tunnel), then [Step 2b](#step-2b-private-network-tailscale), then [Step 2c](#step-2c-both--the-tunnel-carries-the-callbacks-the-tailnet-carries-you) for the one setting that differs.
 
 Everything Broken above is a third party making a request **to** your instance, which is exactly what a private network stops. Slack is unaffected because Trinity connects outward to Slack. Telegram is on the broken list because Trinity registers a webhook for it.
 
@@ -145,7 +145,7 @@ By default there is nothing to browse to once the public ports are closed, and o
 PRIVATE_NETWORK_CIDRS="100.64.0.0/10 fd7a:115c:a1e0::/48"
 ```
 
-Those two ranges are the ones Tailscale hands out, so they are correct whatever address your droplet ends up with. WireGuard, Nebula and ZeroTier use different space — use your own. Then re-render the web server's configuration:
+Those two ranges are the ones Tailscale hands out, so they are correct whatever address your droplet ends up with. WireGuard, Nebula and ZeroTier use different space — use your own. Then re-render the web server's configuration, naming the cloud the instance runs on (`digitalocean`, `aws` or `vultr` — the installer checks it against the metadata service):
 
 ```bash
 cd /opt/trinity
@@ -166,7 +166,7 @@ The rule matches the **source address of the connection**, not a header, so a re
 
 Do [Step 2a](#step-2a-cloudflare-tunnel) and [Step 2b](#step-2b-private-network-tailscale), then change one thing about what the tunnel publishes.
 
-**In Cloudflare, publish paths rather than the whole hostname.** Step 2a's quickest setup routes everything to the frontend, web interface included. Use the *"Narrower: path-split rules"* table in [Public Access](public-access.md#2-configure-public-hostnames) instead, and **do not add the `/` catch-all row**. The tunnel then carries webhooks, public chat links, agent websites and MCP, and has no route to the web interface at all.
+**In Cloudflare, publish paths rather than the whole hostname.** Step 2a's quickest setup routes everything to the frontend, web interface included. Use the *"Narrower: path-split rules"* table in [Public Access](public-access.md#2-configure-public-hostnames) instead, and **do not add the `/` catch-all row**. The tunnel then carries webhooks, public chat links and MCP, and has no route to the web interface at all.
 
 **Reach the interface over the tailnet**, with `PRIVATE_NETWORK_CIDRS` set as in Step 2b.
 
