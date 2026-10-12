@@ -18,10 +18,10 @@ As the owner of a finance agent, I want "pay an invoice" to run only after the p
 
 - **`/chat`**: `routers/chat.py::chat_with_agent` → `dispatch_admission_service.admit_chat_request` (`src/backend/services/dispatch_admission_service.py:319`). Reached from the UI chat, MCP `chat_with_agent`, and connector `run_playbook` / `ask`.
 - **`/task`**: `routers/chat.py::execute_parallel_task` → `chat_execution_service.dispatch_parallel_task` (`src/backend/services/chat_execution_service.py:2125`). Covers parallel tasks, self-tasks and pull-routed tasks.
-- **The Workspace (the agent page's main chat)**: `client_portal/router.py::portal_chat` and `portal_chat_stream` → `client_portal/service.py::portal_chat`. The route passes `PortalPrincipal.is_person` through as `gate_is_person`.
+- **The Workspace (the agent page's main chat)**: `client_portal/router.py::portal_chat` and `portal_chat_stream` → `client_portal/service.py::portal_chat`. The route passes `PortalPrincipal.self_approves` through as `gate_is_person` (and `PortalPrincipal.credential` as `gate_credential`, #3404).
 - **Every other producer**: the backstop at step 1b of `TaskExecutionService.execute_task` (`src/backend/services/task_execution_service.py:1887`). This covers the scheduler, loops, fan-out, channels, rooms, sessions, A2A, public links, paid calls, operator resumes, validation and voice post-processing.
 - **Voice tool**: `gemini_voice._execute_tool` (`src/backend/services/gemini_voice.py:1483`) reaches the agent without `execute_task`, so it refuses a gated skill instead of raising an approval.
-- **Setting the map (trinity-enterprise#753)**: `GET/PUT/DELETE /api/agents/{agent_name}/skill-gates[/{skill_name}]` (`src/backend/routers/skill_gate.py` `agent_router`) → `services/skill_gate_map_service.py`; MCP `list_skill_gates` / `set_skill_gate` / `clear_skill_gate` (`src/mcp-server/src/tools/skills.ts`). The Skills tab UI is trinity-enterprise#754.
+- **Setting the map (trinity-enterprise#753)**: `GET/PUT/DELETE /api/agents/{agent_name}/skill-gates[/{skill_name}]` (`src/backend/routers/skill_gate.py` `agent_router`) → `services/skill_gate_map_service.py`; MCP `list_skill_gates` / `set_skill_gate` / `clear_skill_gate` (`src/mcp-server/src/tools/skills.ts`). The UI lane is the agent's Skills tab (trinity-enterprise#754): the Requires approval toggle and approver-kind picker on each card, for the owner or an admin — [skills-tab.md](skills-tab.md).
 - **Inside the agent (trinity-enterprise#752)**: Claude Code's PreToolUse hook `docker/base-image/hooks/skill-gate.py` → `POST /api/skill-gate/check` (`src/backend/routers/skill_gate.py`) → `skill_gate_service.check_invocation`, on every `Skill` call and every `Agent`/`Task` call whose subagent preloads skills.
 
 ## Frontend Layer
@@ -35,7 +35,7 @@ As the owner of a finance agent, I want "pay an invoice" to run only after the p
   - **Chat tab** (`ChatPanel.vue`) and **`/m` chat** (`MobileAdmin.vue`): the notice is a platform line (`chat/ChatSystemLine.vue`, the Workspace's centred muted line; `/m` reuses its `.empty-state` tone). The held message and its notice stay on screen but are flagged `held` and left out of the history the next turn sends, which would otherwise ask for the approval again on every later turn;
   - **Public link** (`PublicChat.vue`): its async turn is held in the background, so it never sees a 202. The poll now stops at a `skipped` row. The status route returns that row's text and `gate` (`routers/public.py::_gate_state`, only for a row the link's own chat started): `held` (a gate record names the row) shows as the grey line, and `refused` shows in the red error box;
   - **Tasks tab** (`TasksPanel.vue`): the local row stays, as `pending_approval` with the notice expanded; a refused request stays as `failed` with its reason. Neither creates a server row;
-  - **Playbooks** Run and **Dashboard** Update: an `info` toast on the agent page (`AgentDetail.vue` passes `notify`; the toast gained a `status-info` arm, so an info toast no longer renders red, and it carries `role="status"`, or `"alert"` for an error). A gate refusal there is an error toast, which stays until dismissed. Playbooks no longer navigates to a run that does not exist;
+  - **Skills tab** Run (trinity-enterprise#754 merged the Playbooks tab into it; Run sends `async_mode: true`) and **Dashboard** Update: an `info` toast on the agent page (`AgentDetail.vue` passes `notify`; the toast gained a `status-info` arm, so an info toast no longer renders red, and it carries `role="status"`, or `"alert"` for an error). A gate refusal there is an error toast, which stays until dismissed. Run no longer navigates to a run that does not exist;
   - a refusal everywhere reads its named message (`apiErrorMessage`), never the `detail` object.
 
 ### State Management
@@ -67,7 +67,7 @@ request → entry point
   │      existing record → still waiting: replay (202) · decided: 409 request_<state>
   ├─ caps (:313): rate 10/min/requester, 10 pending/requester/agent, 50/agent → 429
   ├─ fingerprints (:521; docker exec as root, python3 -I -S) → 409 unreadable/missing/ambiguous
-  ├─ create skill_gate_requests row (pending)  ← BEFORE the ask   (db/skill_gate_requests.py:84)
+  ├─ create skill_gate_requests row (pending)  ← BEFORE the ask   (db/skill_gate_requests.py:85)
   ├─ ask_service.raise_ask(raised_by="gate", approval, Approve/Reject, to=role)   (_ask_body :362)
   │      the card carries the WHOLE request (what Approve runs) + a 500-char preview
   │      raise failed → record refused, 503 approval_unavailable (no pending record left)
@@ -103,7 +103,7 @@ On `/task`, `message` is caller-supplied and may carry history, so an invocation
 
 **Self-approval needs a proven person**, from one of two places:
 - `is_person_principal` at the `/chat` and `/task` seams: a signed-in session or a user-scoped key, never an agent key, a system key, a connector, a portal delegate or the event loopback;
-- the Workspace caller its route verified: `PortalPrincipal.is_person` → `portal_chat(gate_is_person=…)` → `execute_task(gate_requester=…)`.
+- the Workspace caller its route verified: `PortalPrincipal.self_approves` → `portal_chat(gate_is_person=…)` → `execute_task(gate_requester=…)`. For a portal session that is narrower than `is_person` (#3404): the token's `minted_by` claim must be `otp` (the person's own emailed code). A session a `portal_delegate` key minted (`minted_by=delegate`), or a token with no claim (minted before the claim existed), is still a person for the ask routes but is unproven here — its own gated request is held for approval. The claim is carried through session rotation. The backstop's audit row has no principal to read, so it records the credential kind in `details.credential` (`portal_session:otp`, `platform_session`, `mcp_key:user`).
 
 The backstop never self-approves otherwise. Voice relays a model's paraphrase and stays unproven. Nothing is dispatched on a read that failed.
 
@@ -127,7 +127,7 @@ ask ended
   ├─ approved by someone not addressed → denied (approver_not_addressed)
   └─ approved
        ├─ claim: UPDATE … state pending→dispatching, dispatched_execution_id = new id
-       │     (CAS, db/skill_gate_requests.py:154)
+       │     (CAS, db/skill_gate_requests.py:155)
        ├─ agent gone / requesting agent gone / unreachable → not_run → notify
        ├─ fingerprint changed → stale → notify
        ├─ create row under the claimed id; capacity.acquire(queue_persistent)
@@ -205,11 +205,14 @@ Then the audit (best-effort, after the lock). A failed re-sync on a running agen
 
 **Who may** (`routers/skill_gate.py`):
 - Read — `set_by` (a username: an email for email-login users) is withheld (null) from any non-person principal, on the read and the PUT response (#715 people stay with people). `get_skill_gate_readable_agent_by_name`: a person or the system key, anything they can access (uniform 404); an agent key, its OWN gates, or (holding `skills.manage`) an agent its owner owns; connector / other / no scope → 403 `skill_gates_not_readable` on the principal alone.
+- Read, the Skills tab's fields (trinity-enterprise#754, `skill_gate_map_service.approver_status` / `hook_status`):
+  - `approvers: [{kind, reachable, viewer_fills}]` for every kind in `approver_kinds()`, booleans only. `viewer_fills` is decided by the enforce path's own functions (`requester_from_principal`, then `approver_people`, which is `_approvers` without the refusal), so it is false for an agent, connector or system principal (a person's user-scoped MCP key is that person, as in `enforce`);
+  - `?probe=true` adds `hook`: the agent's `/health → skill_gate_hook` (`ok` / `missing` / `not_root_owned` / `writable` / `unsupported_runtime`), `predates` for a 200 without the field, or `unknown` for no answer. It is one direct `/health` read (3 s, no circuit-breaker bookkeeping), honoured only for a person who may manage the agent's skills (`can_manage_agent_skills`); everyone else gets `hook: null`. See [skills-tab.md](skills-tab.md).
 - Write — `require_person_or_capability("skills.manage", self_person_only=True)` (the shared helper from #3236; its holder reach bound is `_refuse_unless_owners_agent`) then `get_owned_agent_by_name`: a person (session or own user key) who owns the agent or is an admin; an agent key holding `skills.manage`, only on an agent its owner OWNS (owner equality, never the admin short-circuit; 404 otherwise) and never on itself (403 `person_required`). The system key is refused.
 
 **Audit** (`CONFIGURATION`, only when a row changed): `skill_gate_set`, `skill_gate_cleared`, `skill_gate_default_applied`, `skill_gate_default_removed`, `skill_gate_removed_with_skill`; `details.via` from the principal (`ui` / `api` / `orchestrator` / `system`) and `details.trigger` (`direct` / `assignment` / `start` / `library_sync`). An agent actor is the actor, its owner as `actor_email`.
 
-**Library metadata** — `skill_packaging.extract_contract` reads `approval:` (top level or the `trinity:` block) from the closed set `{"recommended"}`; anything else is `frontmatter_invalid:approval`. It rides `list_skills()` entries and `SkillInfo.approval`. The agent server does not parse it (own skills).
+**Library metadata** — `skill_packaging.extract_contract` reads `approval:` (top level or the `trinity:` block) from the closed set `{"recommended"}`; anything else is `frontmatter_invalid:approval`. It rides `list_skills()` entries and `SkillInfo.approval`. Since trinity-enterprise#754 the agent server also reports it for the agent's own skills (`SkillInfo.approval` on its `GET /api/skills`, same precedence and closed set), for display only: it never creates or decides a gate.
 
 ### Database Operations
 
@@ -226,7 +229,7 @@ Then the audit (best-effort, after the lock). A failed re-sync on a running agen
 
 `agent_skill_gates` (trinity-enterprise#753): SQLite `agent_skill_gates`, Alembic `0094_agent_skill_gates` on top of `0093_platform_alert_responded_heal`. See §6. `agent_name` is in `AGENT_REFS` (CASCADE); `set_by_agent` is not.
 
-`state` moves `pending → dispatching → dispatched | stale | not_run | unknown`, or `pending → denied | expired | cancelled | refused`. A `self_approved` row (trinity-enterprise#752, no migration — a new value in the same column) is inserted in that state by `record_self_approved_run` and never moves; it is never pending work, so no cap, sweep or ask reads it. Both agent columns are in `AGENT_REFS` (CASCADE).
+`state` moves `pending → dispatching → dispatched | stale | not_run | unknown`, or `pending → denied | expired | cancelled | refused`. A `self_approved` row (trinity-enterprise#752, no migration — a new value in the same column) is inserted in that state by `record_self_approved_run` and never moves; it is never pending work, so no cap, sweep or ask reads it. The "ran without approval" marker reads it (trinity-enterprise#754, no new column): `db.get_self_approved_runs(agent, execution_ids)` (`db/skill_gate_requests.py:169`) is one batch read by `dispatched_execution_id`, for the Tasks row, the execution page and the Workspace turn ([skills-tab.md](skills-tab.md)). Both agent columns are in `AGENT_REFS` (CASCADE).
 
 ## Side Effects
 
@@ -322,7 +325,7 @@ Set a gate with `PUT /api/agents/{agent}/skill-gates/{skill}` (or MCP `set_skill
    - the notice comes back as a normal reply;
    - an admin's Approve is refused on the card (`not_addressee`);
    - when the approver approves, the result lands back in the asker's thread, and the asker's Inbox notice says "approved by the agent's approver" (never an email; #3274).
-8. **The UI senders (#3274)**, as a person who is NOT the approver: the Chat tab, the Tasks tab, a playbook's Run, Dashboard → Update Dashboard, `/m` chat, and a public link. Each shows the server's message (a platform line, a kept task row or an info toast) and no "No execution_id" error, failed row or timeout. A second chat message after a held one does not raise a second approval.
+8. **The UI senders (#3274)**, as a person who is NOT the approver: the Chat tab, the Tasks tab, a skill's Run on the Skills tab, Dashboard → Update Dashboard, `/m` chat, and a public link. Each shows the server's message (a platform line, a kept task row or an info toast) and no "No execution_id" error, failed row or timeout. A second chat message after a held one does not raise a second approval.
 7. **The in-container hook** (#752). It needs a base image built from the branch and a recreated agent; the agent's `/health` shows `skill_gate_hook: ok`. Save the running image under a second tag first, and restore by re-tagging it: rebuilding from a local `dev` that is older than the running image downgrades the agents. Claude Code expands a message that *starts* with `/pay-invoice` without any `Skill` call, so the hook is never asked about it; the dispatch-time check above decides those. The hook's allow path is a `Skill` call inside a cleared run, so the approved and self-approved steps put the slash mid-sentence:
    - **prose:** another agent sends "Please pay invoice INV-7 for 100 EUR." with no slash → the model's `Skill` call is refused with the hand-back, and a `skill_gate_refused` audit row is written (`not_cleared`);
    - **approved:** an agent asks "Please run /pay-invoice for INV-8 100 EUR." → card → Approve → inside the approved run the hook logs `skill_gate_allow`, and the skill runs;
@@ -388,6 +391,7 @@ These are covered by unit tests:
 | `tests/unit/test_ent753_gate_routes.py` | the REST routes over the real DB: the write and read principal matrices, uniform 404s, ghost 409 after the access check, named codes on the wire, PUT→GET round trip, census entries |
 | `tests/unit/test_ent753_assignment_hooks.py` | the AST guard (every `agent_skills` writer reaches the reconcile; mutation-checked) and the behaviour through `routers/skills.py`, the start path and the sweep |
 | `tests/unit/test_ent753_approval_metadata.py` | `approval:` parsing (YAML bool/date/mapping never raise) and its listing |
+| `tests/unit/test_ent754_gate_map_viewer_and_hook.py`, `test_ent754_execution_self_approved.py`, `test_ent754_workspace_self_approved.py` | The read's `approvers` / `hook`, and the "ran without approval" marker (trinity-enterprise#754; [skills-tab.md](skills-tab.md)) |
 | `src/mcp-server/src/tools/skill-gates.test.ts` | the three MCP tools: routes, only-sent fields, the zod schema, policy rows, description cap |
 
 ### Status
@@ -396,7 +400,7 @@ These are covered by unit tests:
 
 ## Related Flows
 
-- **Upstream:** the agent Skills tab "Requires approval" row (trinity-enterprise#754); an orchestrator agent applying a fleet approval policy through the MCP tools.
+- **Upstream:** the agent Skills tab "Requires approval" row (trinity-enterprise#754, [skills-tab.md](skills-tab.md)); an orchestrator agent applying a fleet approval policy through the MCP tools.
 - **Part of this flow:** the gate map (trinity-enterprise#753, §6).
 - **Downstream / shared:**
   - the ask sink and its endings (`operating-room.md`, trinity-enterprise#611);

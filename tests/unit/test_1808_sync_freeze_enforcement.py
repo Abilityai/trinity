@@ -137,14 +137,14 @@ def _db(db_path: Path):
 def test_freeze_predicate(tmp_path, freeze, status, failures, expected):
     db_path = tmp_path / "t.db"
     _seed(db_path, freeze=freeze, status=status, failures=failures)
-    assert _db(db_path).should_freeze_schedules("a1") is expected
+    assert (_db(db_path).sync_freeze_reason("a1") is not None) is expected
 
 
 def test_unknown_agent_does_not_freeze(tmp_path):
     """An agent with no git config must never be frozen."""
     db_path = tmp_path / "t.db"
     _seed(db_path, freeze=1, status="failed", failures=5)
-    assert _db(db_path).should_freeze_schedules("someone-else") is False
+    assert _db(db_path).sync_freeze_reason("someone-else") is None
 
 
 def test_fails_open_when_the_query_breaks(tmp_path):
@@ -155,21 +155,27 @@ def test_fails_open_when_the_query_breaks(tmp_path):
     """
     db_path = tmp_path / "t.db"
     sqlite3.connect(db_path).close()  # valid DB, no tables at all
-    assert _db(db_path).should_freeze_schedules("a1") is False
+    assert _db(db_path).sync_freeze_reason("a1") is None
 
 
 def test_threshold_matches_the_backend(tmp_path):
-    """The scheduler's threshold must stay in step with the backend endpoint.
+    """The scheduler's threshold must stay in step with the backend's.
 
-    trinity-enterprise#706: both now read it from ONE policy module (vendored
-    byte-identically; parity in test_ent706_sync_policy_parity.py), and the
-    backend endpoint delegates to that module instead of restating the rule.
+    trinity-enterprise#706: both read it from ONE policy module (vendored
+    byte-identically; parity in test_ent706_sync_policy_parity.py). The
+    backend's internal sync-health endpoint that once restated it was removed
+    in #3434 (no caller); the backend verdict is `sync_health_view`, which
+    delegates to the canonical policy module checked here.
     """
+    import re
+
     threshold = _scheduler_database_module().SYNC_FAILURE_FREEZE_THRESHOLD
     assert threshold == 3
-    backend = (_REPO / "src" / "backend" / "routers" / "internal.py").read_text()
-    assert "sync_health_view" in backend or "sync_freeze_policy" in backend
-    assert ">= 3" not in backend  # no second copy of the rule
+    policy = (_REPO / "src" / "backend" / "services" / "sync_freeze_policy.py").read_text()
+    m = re.search(r"^SYNC_FAILURE_FREEZE_THRESHOLD = (\d+)", policy, re.M)
+    assert m and int(m.group(1)) == threshold
+    view = (_REPO / "src" / "backend" / "services" / "sync_health_view.py").read_text()
+    assert "sync_freeze_policy" in view
 
 
 def test_mapping_only_rows_still_freeze(tmp_path, monkeypatch):
@@ -209,7 +215,7 @@ def test_mapping_only_rows_still_freeze(tmp_path, monkeypatch):
             conn.close()
 
     monkeypatch.setattr(db, "get_connection", dict_row_connection)
-    assert db.should_freeze_schedules("a1") is True
+    assert db.sync_freeze_reason("a1") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +240,6 @@ def test_divergence_past_24h_freezes_a_work_agent(tmp_path):
     db = _db(db_path)
     reason = db.sync_freeze_reason("a1")
     assert reason is not None and reason.startswith("diverged 0 behind / 7 ahead for 24h")
-    assert db.should_freeze_schedules("a1") is True
 
 
 def test_divergence_under_24h_fires(tmp_path):
@@ -260,7 +265,7 @@ def test_a_deployment_never_divergence_freezes(tmp_path):
 def test_fork_to_own_divergence_freezes(tmp_path):
     db_path = tmp_path / "t.db"
     _diverged_seed(db_path, age=timedelta(hours=30), source_mode=1, auto_sync=1)
-    assert _db(db_path).should_freeze_schedules("a1") is True
+    assert _db(db_path).sync_freeze_reason("a1") is not None
 
 
 def test_a_stale_observation_does_not_divergence_freeze(tmp_path):
@@ -318,7 +323,7 @@ def test_mapping_only_rows_divergence_freeze(tmp_path, monkeypatch):
             conn.close()
 
     monkeypatch.setattr(db, "get_connection", dict_row_connection)
-    assert db.should_freeze_schedules("a1") is True
+    assert db.sync_freeze_reason("a1") is not None
 
 
 # ---------------------------------------------------------------------------

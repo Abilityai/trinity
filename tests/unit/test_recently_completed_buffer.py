@@ -91,9 +91,11 @@ class TestRecentlyCompletedBuffer:
     def test_unregister_records_id_in_buffer(self):
         ProcessRegistry, _ = _import_process_registry()
         reg = ProcessRegistry()
-        reg.register("exec-1", _fake_process())
+        process = _fake_process()
+        reg.register("exec-1", process)
         assert reg.list_recently_completed_ids() == []  # not finished yet
 
+        process.poll.return_value = 0
         reg.unregister("exec-1")
         assert "exec-1" in reg.list_recently_completed_ids()
 
@@ -111,7 +113,9 @@ class TestRecentlyCompletedBuffer:
         monkeypatch.setattr(pr_mod, "RECENTLY_COMPLETED_TTL_SECONDS", 0.05)
 
         reg = ProcessRegistry()
-        reg.register("exec-1", _fake_process())
+        process = _fake_process()
+        reg.register("exec-1", process)
+        process.poll.return_value = 0
         reg.unregister("exec-1")
         assert "exec-1" in reg.list_recently_completed_ids()
 
@@ -124,7 +128,9 @@ class TestRecentlyCompletedBuffer:
         ProcessRegistry, _ = _import_process_registry()
         reg = ProcessRegistry()
         for eid in ("a", "b", "c"):
-            reg.register(eid, _fake_process())
+            process = _fake_process()
+            reg.register(eid, process)
+            process.poll.return_value = 0
             reg.unregister(eid)
         assert set(reg.list_recently_completed_ids()) == {"a", "b", "c"}
 

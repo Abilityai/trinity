@@ -124,6 +124,7 @@ _MACHINE_ROW_FIELDS = (
     "divergence_acknowledged_at",
     "disposition", "disposed_at", "disposed_by", "disposition_reason", "batch_id",
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
+    "replaces", "replaced_by",  # #3247 — uuids; the readback maps them to request_ids
     "aging", "aged_since",
     "subject", "last_seen_at",  # #3246: a platform alert's condition key + latest reading
 )
@@ -155,6 +156,7 @@ _READBACK_FIELDS = (
     "response", "response_text", "responded_at",
     "disposition", "disposed_at", "disposed_by", "disposition_reason",
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
+    "replaces", "replaced_by",  # #3247 — mapped to request_ids below
 )
 
 
@@ -319,7 +321,9 @@ async def get_queue_item(
 ):
     """Get a single queue item by ID."""
     item = db.get_operator_queue_item(item_id)
-    if not item:
+    # trinity-enterprise#631: a person's tag is read through its addressee's own
+    # door only — to the operator's door it is a row that is not there.
+    if not item or operator_queue_service.is_person_tag(item):
         raise HTTPException(status_code=404, detail="Queue item not found")
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(item["agent_name"], accessible)
@@ -345,7 +349,8 @@ async def respond_to_queue_item(
     """
     reject_non_person_principal(current_user)
     existing = db.get_operator_queue_item(item_id)
-    if not existing:
+    # trinity-enterprise#631: the same "not there" GET gives a person's tag.
+    if not existing or operator_queue_service.is_person_tag(existing):
         raise HTTPException(status_code=404, detail="Queue item not found")
 
     accessible = _accessible_set(current_user)
@@ -456,7 +461,8 @@ async def cancel_queue_item(
     """
     reject_non_person_principal(current_user)
     existing = db.get_operator_queue_item(item_id)
-    if not existing:
+    # trinity-enterprise#631: the same "not there" GET gives a person's tag.
+    if not existing or operator_queue_service.is_person_tag(existing):
         raise HTTPException(status_code=404, detail="Queue item not found")
 
     accessible = _accessible_set(current_user)
@@ -576,4 +582,7 @@ async def get_my_ask(
     # The row stores the predecessor's uuid; the agent knows its asks by the
     # request_id it chose, and the receipt names the predecessor that way too.
     readback["supersedes_expired"] = ask_service.request_id_of(item.get("supersedes_expired"))
+    # #3247: the replace link, both ways, the same way.
+    readback["replaces"] = ask_service.request_id_of(item.get("replaces"))
+    readback["replaced_by"] = ask_service.request_id_of(item.get("replaced_by"))
     return readback

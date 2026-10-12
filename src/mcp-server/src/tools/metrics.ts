@@ -407,9 +407,8 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         "in `gap.reason`. " +
         "`direction` is the declared-metric vocabulary only: `up_good`, `down_good`, " +
         "`neutral`, or null when undeclared. A HELD objective arrives as `neutral` with " +
-        "`direction_source: \"objective\"` (your word kept as `objective_direction`); " +
-        "`neutral` with `direction_source: \"none\"` means nobody said, so nothing can be " +
-        "behind or ahead. " +
+        "`direction_source: \"objective\"` (your word kept as `objective_direction`). " +
+        "A `role: \"guard\"` row must not move: always held, counted in `summary.guards`. " +
         "A metric the objective names but you do not declare is a row with `declared: false` " +
         "and a `finding` naming the fix (add it to template.yaml `metrics:` and call " +
         "refresh_metric_definitions) — never a blank. If it belongs to the role that OWNS " +

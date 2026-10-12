@@ -1649,16 +1649,6 @@ class GithubPatPropagationResult(BaseModel):
 # Outbound File Sharing (FILES-001)
 # =============================================================================
 
-class ShareFileRequest(BaseModel):
-    """Body for POST /api/internal/agent-files/share (internal, agent-server path)."""
-    agent_name: str = Field(..., max_length=128)
-    filename: str = Field(..., min_length=1, max_length=255)
-    display_name: Optional[str] = Field(default=None, max_length=255)
-    expires_in: Optional[int] = None
-    # NOTE: `one_time` is deferred — the schema retains the columns
-    # so we can re-enable it later without a migration.
-
-
 class ShareFileMcpRequest(BaseModel):
     """Body for POST /api/agents/{agent_name}/shared-files (MCP path).
 
@@ -3282,23 +3272,6 @@ class ImageGenerateRequest(BaseModel):
 # =============================================================================
 
 
-class ActivityTrackRequest(BaseModel):
-    """Request model for tracking activity start."""
-    agent_name: str
-    activity_type: str  # e.g., "schedule_start"
-    user_id: Optional[int] = None
-    triggered_by: str = "schedule"  # schedule, manual, user, agent, system
-    related_execution_id: Optional[str] = None
-    details: Optional[Dict] = None
-
-
-class ActivityCompleteRequest(BaseModel):
-    """Request model for completing an activity."""
-    status: str = ActivityState.COMPLETED  # ActivityState: completed, failed, cancelled
-    details: Optional[Dict] = None
-    error: Optional[str] = None
-
-
 class InternalTaskExecutionRequest(BaseModel):
     """Request model for internal task execution via TaskExecutionService."""
     agent_name: str
@@ -3814,6 +3787,7 @@ class OperatorAskCreate(BaseModel):
     expires_at: Optional[str] = None
     to: Optional[str] = None
     supersedes_expired: Optional[str] = None
+    replaces: Optional[str] = None  # #3247 — one of the agent's own PENDING asks this one replaces
 
 
 class SkillGateCheckRequest(BaseModel):
@@ -3874,15 +3848,32 @@ class SkillGateEntry(BaseModel):
     approver_reachable: Optional[bool] = None
 
 
+class SkillGateApproverStatus(BaseModel):
+    """One approver kind as the caller sees it (trinity-enterprise#754): does it
+    reach anyone now, and is the caller one of its people. Booleans only — the
+    map is readable by every viewer and by agent keys, so it names no person."""
+    kind: str
+    reachable: bool
+    viewer_fills: bool
+
+
 class SkillGateMapResponse(BaseModel):
     """`GET /api/agents/{agent_name}/skill-gates`. `approver_kinds` is what this
     install can resolve — `primary` only on OSS. `cleared_defaults` are library
-    defaults the owner cleared; they gate nothing while the skill stays assigned."""
+    defaults the owner cleared; they gate nothing while the skill stays assigned.
+
+    trinity-enterprise#754: `approvers` is `approver_kinds` with each kind's
+    reach and whether the caller fills it. `hook` is the in-agent gate check's
+    state (`ok`, `missing`, `not_root_owned`, `writable`, `unsupported_runtime`,
+    `predates` or `unknown`), read only on `?probe=true` by a person who may
+    manage the agent's skills; null otherwise."""
     agent_name: str
     gates: List[SkillGateEntry]
     cleared_defaults: List[str] = Field(default_factory=list)
     approver_kinds: List[str]
     default_deadline_hours: int
+    approvers: List[SkillGateApproverStatus] = Field(default_factory=list)
+    hook: Optional[str] = None
 
 
 class SkillGateWriteResponse(BaseModel):
@@ -4098,6 +4089,11 @@ class ExecutionSummary(BaseModel):
     compact_metadata: Optional[str] = None
     # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
+    # trinity-enterprise#754: the run went through without approval because its
+    # requester is the approver (ent#752's `self_approved` record); and the caller
+    # is that person. Booleans only — the email stays on the server.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
     # EXCLUDED (large fields - fetch via /executions/{id}):
     # - response: Optional[str]      # Full response text
@@ -4152,6 +4148,9 @@ class ExecutionResponse(BaseModel):
     compact_metadata: Optional[str] = None
     # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
+    # trinity-enterprise#754 — as on ExecutionSummary.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
     class Config:
         from_attributes = True
@@ -4636,6 +4635,17 @@ class WhatsAppTestRequest(BaseModel):
 # Skill Sources (ent#237 — multi-source skills library)
 # ============================================================================
 
+def _clean_skill_source_text(v: str) -> str:
+    """Shared `name`/`ref` rule for the source bodies: stripped, non-blank, no
+    control characters."""
+    v = v.strip()
+    if not v:
+        raise ValueError("must not be blank")
+    if any(ord(c) < 32 or ord(c) == 127 for c in v):
+        raise ValueError("must not contain control characters")
+    return v
+
+
 class SkillSourceCreate(BaseModel):
     """Register a skills repo as a source.
 
@@ -4652,16 +4662,36 @@ class SkillSourceCreate(BaseModel):
     # should pin (ent#237 AC#5).
     ref_type: Literal["branch", "tag"] = "branch"
     enabled: bool = True
+    # trinity-enterprise#692: optional, so an omitted priority keeps the
+    # db layer's custom-source default and the Settings panel is unchanged.
+    priority: Optional[int] = Field(None, ge=1, le=10000)
 
     @field_validator("name", "ref")
     @classmethod
     def _no_control_chars(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("must not be blank")
-        if any(ord(c) < 32 or ord(c) == 127 for c in v):
-            raise ValueError("must not contain control characters")
-        return v
+        return _clean_skill_source_text(v)
+
+
+class SkillSourceApply(BaseModel):
+    """Register-or-update a source keyed on its repository URL (trinity-enterprise#692).
+
+    Body of `POST /api/skills/sources/apply` — the idempotent form a declared
+    source (and the MCP `register_skill_source` tool) re-applies. Only `url` is
+    required; every other field is applied only when it is NAMED, so a re-apply
+    that omits `ref_type` does not reset it. `is_default` is absent for the
+    same reason as on `SkillSourceCreate`.
+    """
+    url: str = Field(..., min_length=1, max_length=500)
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    ref: Optional[str] = Field(None, min_length=1, max_length=200)
+    ref_type: Optional[Literal["branch", "tag"]] = None
+    enabled: Optional[bool] = None
+    priority: Optional[int] = Field(None, ge=1, le=10000)
+
+    @field_validator("name", "ref")
+    @classmethod
+    def _no_control_chars(cls, v: Optional[str]) -> Optional[str]:
+        return v if v is None else _clean_skill_source_text(v)
 
 
 class SkillSourceUpdate(BaseModel):
@@ -4723,6 +4753,25 @@ class SkillsLibrarySourceStatus(BaseModel):
     # this projection to "help" a non-admin surface debug a sync.
 
 
+class FleetReinjectSummary(BaseModel):
+    """The last fleet re-inject, COUNTS ONLY (trinity-enterprise#692).
+
+    An allow-list, like the model below: the stored report also carries a
+    per-agent `failures` map (agent names + error text, which can embed library
+    paths), and that stays on the admin routes. What every reader may see is
+    whether a re-inject ran, against which commit, and how it went in numbers —
+    enough for whoever ran a sync to read the consequence of it.
+    """
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    trigger: Optional[str] = None
+    commit_sha: Optional[str] = None
+    agents_total: int = 0
+    agents_injected: int = 0
+    agents_skipped: int = 0
+    agents_failed: int = 0
+
+
 class SkillsLibraryStatus(BaseModel):
     """PUBLIC projection of `skill_service.get_library_status()` (ent#334).
 
@@ -4766,6 +4815,8 @@ class SkillsLibraryStatus(BaseModel):
     # Legacy flat fields (first source in resolution order). Not URLs.
     branch: Optional[str] = None
     commit_sha: Optional[str] = None
+    # trinity-enterprise#692: counts only — see `FleetReinjectSummary`.
+    last_fleet_reinject: Optional[FleetReinjectSummary] = None
 
 
 class SkillAssignmentAgent(BaseModel):
@@ -4921,6 +4972,18 @@ class A2ACallResponse(BaseModel):
     protocol_version: str = "0.3"
     endpoint: str
     replayed: bool = False
+
+
+class A2ATrustedNetworksUpdate(BaseModel):
+    """trinity-enterprise#838 — the admin's declaration of our own private networks.
+
+    `entries` replaces the whole list (CIDRs, exact host names, or `*.domain`);
+    `[]` turns the feature off. `internal_base_url` is the origin an
+    internal-scope agent's card advertises; omit it to leave it unchanged, send
+    `""` to clear it. Validation lives in `services/a2a_trusted_networks.py`.
+    """
+    entries: List[str] = Field(default_factory=list, max_length=32)
+    internal_base_url: Optional[str] = Field(default=None, max_length=512)
 
 
 class A2AOutboundEndpointUpsert(BaseModel):
@@ -5173,6 +5236,10 @@ class ObjectiveMetricRead(BaseModel):
     the registry and the point store."""
 
     name: str
+    #: `primary` for an entry of the objective's `metrics:`, `guard` for one of
+    #: its `guard_metrics:` (ent#731) — a number that must not move, always
+    #: judged as a hold and counted in `summary.guards`, never in the buckets.
+    role: str = "primary"  # primary | guard
     target: Optional[float] = None
     #: A non-numeric target (a status label, a phrase) kept verbatim and
     #: bounded, so the card can show what the author wrote even though no gap
@@ -5226,15 +5293,49 @@ class ObjectiveRead(BaseModel):
     owned: bool
     supporting: bool
     metrics: List[ObjectiveMetricRead] = []
+    #: True when `metrics:` or `guard_metrics:` held more entries than the
+    #: per-list cap (each list has its own, ent#731).
     metrics_truncated: bool = False
 
 
+class CanonRoleRead(BaseModel):
+    """One seat the agent's canon defines — `<canon>/roles/<id>.yaml`
+    (trinity-enterprise#817). `error` names why the file could not be read."""
+
+    id: str
+    title: Optional[str] = None
+    updated: Optional[str] = None
+    path: Optional[str] = None
+    error: Optional[str] = None
+
+
+class CanonRolesRead(BaseModel):
+    """The seats an agent's canon defines (trinity-enterprise#817). An empty
+    list always carries `unavailable` or `reason` and a `message`, never a blank."""
+
+    agent_name: str
+    canon_root: Optional[str] = None
+    roles: List[CanonRoleRead] = []
+    unavailable: Optional[str] = None
+    reason: Optional[str] = None
+    message: Optional[str] = None
+    truncated: bool = False
+
+
 class ObjectiveRoleRead(BaseModel):
-    """The role from `x-role`. `null` when the agent has none — it can still
-    support an objective by name."""
+    """The seat the agent owns objectives through (trinity-enterprise#812) —
+    from Trinity's record, not from `x-role`. `null` when it has none; it can
+    still support an objective by name.
+
+    `case`: `holds` (the agent holds the seat itself), `serves` (a companion —
+    its assigned people's seats, primary first) or `none`. `seats` is every
+    seat it owns through; `id`/`path` name the first.
+    """
 
     id: Optional[str] = None
     path: Optional[str] = None
+    case: Optional[str] = None
+    seats: List[str] = []
 
 
 class ObjectiveJoinSource(BaseModel):
@@ -5260,8 +5361,20 @@ class ObjectiveJoinSource(BaseModel):
     objectives_truncated: bool = False
 
 
+class ObjectiveJoinGuardSummary(BaseModel):
+    """Guard rows (ent#731), counted apart. A guard is a hold, so it is never
+    behind or ahead."""
+
+    total: int = 0
+    on_target: int = 0
+    off_target: int = 0
+    not_computable: int = 0
+    stale: int = 0
+
+
 class ObjectiveJoinSummary(BaseModel):
-    """Counts a consumer can act on without walking the rows."""
+    """Counts a consumer can act on without walking the rows. Every count but
+    `objectives` and `guards` is over PRIMARY rows only."""
 
     objectives: int = 0
     metrics: int = 0
@@ -5275,6 +5388,7 @@ class ObjectiveJoinSummary(BaseModel):
     declared_elsewhere: int = 0
     #: Rows whose number came from a granted agent (`served_by`, ent#727).
     served_elsewhere: int = 0
+    guards: ObjectiveJoinGuardSummary = ObjectiveJoinGuardSummary()
 
 
 class ObjectiveJoinRead(BaseModel):
@@ -5346,3 +5460,64 @@ class AgentSkillSetStatus(BaseModel):
     assigned_by: Optional[str] = None
     assigned_by_agent: Optional[str] = None
     assigned_at: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#631 — tagging a person in a conversation
+# ---------------------------------------------------------------------------
+# What the TAGGED person reads (their Inbox) and what the TAGGER sees of it.
+# Deliberately narrow: no cost, no execution id, no addressee and no ledger
+# internals (#78 — internal-only facts never cross to a workspace reader). The
+# conversation's id and its content are present ONLY when the reader may see
+# the conversation already; a tag grants no access.
+
+class PersonMentionConversation(BaseModel):
+    kind: str                      # 'room' | 'chat'
+    # Only when the reader can see the conversation — a non-member is told
+    # which conversation by name, never handed an id to probe with.
+    id: Optional[str] = None
+    label: str
+
+
+class PersonMention(BaseModel):
+    """One Inbox item: a person tagged you. Kind *Unread* — never *Action*."""
+    id: str
+    agent_name: str
+    state: str                     # 'unread' | 'read'
+    created_at: str
+    read_at: Optional[str] = None
+    tagged_by: str                 # the tagger's display name
+    conversation: PersonMentionConversation
+
+
+class PersonMentionMessage(BaseModel):
+    id: str
+    seq: Optional[int] = None
+    sender_kind: str               # 'agent' | 'person' | 'system'
+    sender_label: str
+    content: str
+    created_at: Optional[str] = None
+    tagged: bool = False           # the message the tag points at
+
+
+class PersonMentionDetail(PersonMention):
+    """The item opened: the tagged message with a little around it — only when
+    the reader may already see the conversation; otherwise `can_see` is False,
+    there is no content at all, and `can_let_you_in` names who can."""
+    can_see: bool
+    message: Optional[PersonMentionMessage] = None
+    context: List[PersonMentionMessage] = []
+    can_let_you_in: List[str] = []
+
+
+class TaggablePerson(BaseModel):
+    """A picker row: enough to tell two colleagues apart, nothing more."""
+    email: str
+    label: str
+
+
+class PersonTagState(BaseModel):
+    """What the tagger sees on their own message: it landed, and whether it was read."""
+    label: str
+    state: str                     # 'delivered' | 'read'
+    read_at: Optional[str] = None

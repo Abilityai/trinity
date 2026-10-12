@@ -80,8 +80,3 @@ def validate_password_strength(password: str) -> list[str]:
         errors.append("Password is too common — choose something less predictable")
 
     return errors
-
-
-def is_password_weak(password: str) -> bool:
-    """Quick check returning True if password fails any complexity rule."""
-    return len(validate_password_strength(password)) > 0

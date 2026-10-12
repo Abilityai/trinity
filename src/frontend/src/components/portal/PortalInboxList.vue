@@ -46,6 +46,16 @@
             ><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" :d="askKindIcon(it.ask && it.ask.kind).path" /></svg>
             <span class="sr-only">{{ kindLabel(it) }}</span>
           </template>
+          <!-- trinity-enterprise#631: a person tagged you — the at-sign, by
+               shape (principle 24), and spoken. -->
+          <template v-else-if="it.type === 'mention'">
+            <svg
+              class="w-4 h-4 mt-0.5 shrink-0"
+              :class="meta(it)"
+              fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"
+            ><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 12a4 4 0 10-8 0 4 4 0 008 0zm0 0v1.5a2.5 2.5 0 005 0V12a9 9 0 10-9 9m4.5-1.206a8.959 8.959 0 01-4.5 1.207" /></svg>
+            <span class="sr-only">Mention</span>
+          </template>
           <svg
             v-else
             class="w-4 h-4 mt-0.5 shrink-0"
@@ -58,7 +68,7 @@
               <!-- Round 3: the agent keeps its width (to 60%) and the chat title
                    is what truncates — both shrank, and a long title left the
                    agent at 1–7 characters. -->
-              <span class="shrink-0 max-w-[60%] text-sm font-medium truncate text-gray-900 dark:text-gray-100" :data-testid="`inbox-row-agent-${it.key}`">{{ labelFor(it.agent_name) }}</span>
+              <span class="shrink-0 max-w-[60%] text-sm font-medium truncate text-gray-900 dark:text-gray-100" :data-testid="`inbox-row-agent-${it.key}`">{{ it.type === 'mention' ? (it.mention && it.mention.tagged_by) || 'Someone' : labelFor(it.agent_name) }}</span>
               <span v-if="it.type === 'thread'" class="min-w-0 text-[12.5px] truncate" :class="meta(it)">· {{ threadTitle(it) }}</span>
               <span
                 class="ml-auto shrink-0 text-[12.5px] tabular-nums"
@@ -68,10 +78,20 @@
             </span>
 
             <span v-if="it.type === 'ask'" class="mt-0.5 block text-sm truncate" :class="secondary(it)">{{ it.title }}</span>
+            <span v-else-if="it.type === 'mention'" class="mt-0.5 block text-sm truncate" :class="secondary(it)">Mentioned you {{ mentionWhere(it.mention) }}</span>
             <span v-else-if="it.latest && it.latest.excerpt" class="mt-0.5 block text-sm truncate" :class="secondary(it)">{{ it.latest.excerpt }}</span>
 
             <span class="mt-1 flex items-center gap-1.5 flex-wrap">
               <BaseBadge v-if="it.type === 'thread' && it.n > 0" variant="primary" class="tabular-nums" :data-testid="`inbox-row-new-${it.key}`">{{ newLabel(it.n) }}</BaseBadge>
+              <!-- trinity-enterprise#631: a tag is New until opened, then Read
+                   (kept in place, drawn read, until the selection moves). -->
+              <BaseBadge v-if="it.type === 'mention' && it.status === 'unread'" variant="primary" :data-testid="`inbox-row-new-${it.key}`">New</BaseBadge>
+              <BaseBadge
+                v-else-if="it.type === 'mention'"
+                variant="neutral"
+                :class="it.key === selectedKey ? 'ring-1 ring-inset ring-gray-300 dark:ring-gray-600' : ''"
+                :data-testid="`inbox-row-read-${it.key}`"
+              >Read</BaseBadge>
               <!-- On a selected row the neutral fill is the row's own (gray-750
                    in dark), so it gets an edge (round 3). -->
               <BaseBadge
@@ -91,7 +111,9 @@
               </BaseBadge>
               <BaseBadge v-if="it.latest && it.latest.kind === 'deliverable'" variant="purple">Deliverable</BaseBadge>
               <!-- §3g A10: what DIFFERS between pending asks — a high or critical
-                   priority, and an expiry within the day — at most two badges.
+                   priority, and an expiry within the day — at most two badges;
+                   a replacement adds the third that names what it replaces
+                   (#3247), because that is what differs about it.
                    "Waiting on you" was true of every row, so it said nothing. -->
               <template v-if="it.type === 'ask' && it.status === 'pending'">
                 <BaseBadge
@@ -106,6 +128,12 @@
                   :title="absolute(it.ask.expires_at)"
                   data-testid="inbox-row-badge-expiry"
                 >{{ expiry(it).label }}</BaseBadge>
+                <!-- #3247: the replacement names the ask it replaced. -->
+                <BaseBadge
+                  v-if="workspaceReplacesText(it.ask)"
+                  variant="neutral"
+                  :data-testid="`inbox-row-replaces-${it.key}`"
+                >{{ workspaceReplacesText(it.ask) }}</BaseBadge>
               </template>
               <BaseBadge
                 v-else-if="it.type === 'ask'"
@@ -137,8 +165,9 @@ import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import { relativeTime } from './portalUtils'
 import { newLabel } from './portalInbox'
+import { mentionWhere } from './portalMentions'
 import { priorityBadge, expiresSoonLabel, needsExpiryTick, nextExpiryEntry, askKindIcon } from './portalAskUrgency'
-import { queueTypeLabel } from '@/utils/operatorQueue'
+import { queueTypeLabel, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
 import { formatLocalDateTime } from '@/utils/timestamps'
 
 const props = defineProps({
@@ -209,8 +238,15 @@ const kindLabel = (it) => queueTypeLabel(it.ask && it.ask.kind) || 'Ask'
 
 function askStatusLabel(it) {
   const s = it.status
-  if (s === 'answered') return it.ask?.ended_by === 'you' ? 'Answered · you' : 'Answered'
+  if (s === 'answered') {
+    if (it.ask?.ended_by === 'you') return 'Answered · you'
+    // trinity-enterprise#816: a shared ask another person answered first.
+    if (it.ask?.ended_by === 'someone_else') return `Answered · ${it.ask.answered_by || 'someone else'}`
+    return 'Answered'
+  }
   if (s === 'expired') return 'Expired'
+  // #3247: the agent replaced it — never read as the operator's cancel.
+  if (s === 'cancelled' && it.ask?.ended_by === 'agent') return workspaceEndingText(it.ask)
   if (s === 'cancelled') return 'Cancelled'
   // trinity-enterprise#748: the addressee's own "no answer".
   if (s === 'dismissed') return it.ask?.ended_by === 'you' ? 'Dismissed · you' : 'Dismissed'

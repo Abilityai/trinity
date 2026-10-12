@@ -18,6 +18,29 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# trinity-enterprise#837: the only event kinds a Workspace-only account's socket
+# receives — what the Workspace reads off `/ws` (`utils/websocket.js` → the portal
+# stores). Activity and loop runs re-read the rail and the Work feed, a skills
+# change re-hydrates the briefing, and `resync_required` resets the replay cursor.
+# Everything else on the stream is operator UI: the queue, notifications,
+# reports, room triggers, the agent lifecycle, and the sharing events that carry
+# another person's email. A Workspace feature that starts reading a new kind
+# adds it here, or a `user` never sees it.
+WORKSPACE_WS_EVENT_TYPES = frozenset({
+    "agent_activity",
+    "loop_run_completed",
+    "loop_completed",
+    "agent_skills_changed",
+    "resync_required",
+})
+
+# The fields those consumers read: the kind (`type`, or `event` for a lifecycle
+# kind), the agent the event is about, and `activity_state` (the rail re-reads on
+# a terminal activity). Everything else — an activity's prompt and reply
+# previews, cost, session and execution ids — is cut from a Workspace-only
+# account's copy. The dispatcher keeps `_eid`, the replay cursor, on its own.
+WORKSPACE_WS_EVENT_FIELDS = frozenset({"type", "event", "agent_name", "activity_state"})
+
 
 def accessible_agents_for(email: str) -> List[str]:
     """Agent names a non-admin ``email`` may observe. Empty for a falsy email.
@@ -54,8 +77,15 @@ def resolve_ws_identity(username: str) -> Optional[Dict[str, Any]]:
     start filtering on it — at which point every agent created after the page
     loaded goes silent for the operator most likely to be watching one being
     created.
+
+    ``allowed_types`` is the kind allowlist the socket is filtered by and
+    ``allowed_fields`` the fields each delivered event is cut to: ``None``
+    (everything) on the operator rungs, ``WORKSPACE_WS_EVENT_TYPES`` /
+    ``WORKSPACE_WS_EVENT_FIELDS`` for a Workspace-only role (#837) — always
+    present, so the endpoint states them rather than inheriting a default.
     """
     from database import db
+    from dependencies import is_workspace_only_role
 
     if not username:
         return None
@@ -70,13 +100,19 @@ def resolve_ws_identity(username: str) -> Optional[Dict[str, Any]]:
         return None
     is_admin = user.get("role") == "admin"
     email = user.get("email") or ""
+    workspace_only = is_workspace_only_role(user.get("role"))
+    allowed_types = WORKSPACE_WS_EVENT_TYPES if workspace_only else None
+    allowed_fields = WORKSPACE_WS_EVENT_FIELDS if workspace_only else None
     if is_admin:
-        return {"email": email, "is_admin": True, "accessible_agents": []}
+        return {"email": email, "is_admin": True, "accessible_agents": [],
+                "allowed_types": None, "allowed_fields": None}
     if not email:
-        return {"email": "", "is_admin": False, "accessible_agents": []}
+        return {"email": "", "is_admin": False, "accessible_agents": [],
+                "allowed_types": allowed_types, "allowed_fields": allowed_fields}
     try:
         agents = accessible_agents_for(email)
     except Exception:  # noqa: BLE001
         logger.warning("[/ws] accessible-agent lookup failed", exc_info=True)
         return None
-    return {"email": email, "is_admin": False, "accessible_agents": list(agents or [])}
+    return {"email": email, "is_admin": False, "accessible_agents": list(agents or []),
+            "allowed_types": allowed_types, "allowed_fields": allowed_fields}

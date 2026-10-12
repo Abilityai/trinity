@@ -166,9 +166,9 @@ class TestProviderRegistration:
         gate = _load_gate()
         p = _Provider(None)
         gate.register_skills_provider(p)
-        assert gate.get_skills_provider() is p
+        assert gate._skills_provider is p
         gate.clear_skills_provider()
-        assert gate.get_skills_provider() is None
+        assert gate._skills_provider is None
 
     def test_skills_and_allowlist_providers_are_independent(self):
         """Two seams, one module — registering one must not disturb the other."""

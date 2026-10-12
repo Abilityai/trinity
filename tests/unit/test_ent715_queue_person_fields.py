@@ -60,6 +60,7 @@ MACHINE_ROW_KEYS = frozenset({
     "divergence_acknowledged_at",
     "disposition", "disposed_at", "disposed_by", "disposition_reason", "batch_id",
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
+    "replaces", "replaced_by",  # #3247
     "aging", "aged_since",
     "subject", "last_seen_at",
 })
@@ -229,7 +230,7 @@ class TestARealAgentKey:
 
         monkeypatch.setattr(r, "_websocket_manager", None)
         if not real_db.get_user_by_username(self.OWNER):
-            real_db.create_user(UserCreate(username=self.OWNER, role="user", email="owner-715@example.com"))
+            real_db.create_user(UserCreate(username=self.OWNER, role="operator", email="owner-715@example.com"))
         if not real_db.get_agent_owner(self.AGENT):
             real_db.register_agent_owner(self.AGENT, self.OWNER)
         uid = _seed(real_db, channel="file", agent=self.AGENT)

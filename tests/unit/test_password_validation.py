@@ -20,7 +20,6 @@ _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 
 validate_password_strength = _mod.validate_password_strength
-is_password_weak = _mod.is_password_weak
 COMMON_PASSWORDS = _mod.COMMON_PASSWORDS
 PASSWORD_REQUIREMENTS_MESSAGE = _mod.PASSWORD_REQUIREMENTS_MESSAGE
 MIN_LENGTH = _mod.MIN_LENGTH
@@ -108,19 +107,6 @@ class TestValidatePasswordStrength:
         """A unique password should not be flagged as common."""
         errors = validate_password_strength("Xq9!mZp2rT#wY4")
         assert not any("common" in e for e in errors)
-
-
-class TestIsPasswordWeak:
-    """Tests for is_password_weak() convenience wrapper."""
-
-    def test_strong_password_not_weak(self):
-        assert is_password_weak("MyStr0ng!Pass99") is False
-
-    def test_weak_password_is_weak(self):
-        assert is_password_weak("weak") is True
-
-    def test_common_password_is_weak(self):
-        assert is_password_weak("password") is True
 
 
 class TestCommonPasswordsList:

@@ -37,6 +37,24 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
   const resolveAgent = (authContext: McpAuthContext | undefined, agent_name?: string): string | null =>
     agent_name || (authContext?.scope === "agent" ? authContext.agentName ?? null : null);
 
+  // trinity-enterprise#839: an agent-scoped key records and reads only its OWN
+  // agent's seat decisions — the backend refuses anything else with a 403. The
+  // override exists for a user-scoped key; an agent key naming another agent is
+  // refused here, before any call, so the tool stops advertising the pivot.
+  const foreignTarget = (authContext: McpAuthContext | undefined, agent_name?: string): string | null =>
+    authContext?.scope === "agent" && agent_name && agent_name !== authContext.agentName
+      ? JSON.stringify(
+          {
+            success: false,
+            error:
+              "An agent-scoped key may only record and read its own agent's seat decisions. " +
+              "Omit agent_name.",
+          },
+          null,
+          2
+        )
+      : null;
+
   const noAgent = () =>
     JSON.stringify(
       {
@@ -90,7 +108,7 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
         agent_name: z
           .string()
           .optional()
-          .describe("Agent name override. Defaults to the agent whose MCP key is making this call. Omit in normal use."),
+          .describe("For a user-scoped key only. An agent-scoped key always records for its own agent; naming another is refused."),
       }),
       execute: async (
         args: {
@@ -112,6 +130,8 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
         context: any
       ) => {
         const authContext = requireApiKey ? context?.session : undefined;
+        const refused = foreignTarget(authContext, args.agent_name);
+        if (refused) return refused;
         const apiClient = getClient(authContext);
         const resolvedAgent = resolveAgent(authContext, args.agent_name);
         if (!resolvedAgent) return noAgent();
@@ -142,13 +162,18 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
       parameters: z.object({
         execution_id: z.string().min(1).describe("Your current execution_id (Execution Context block)."),
         include_history: z.boolean().optional().describe("Also return non-active records (default false)."),
-        agent_name: z.string().optional().describe("Agent name override. Omit in normal use."),
+        agent_name: z
+          .string()
+          .optional()
+          .describe("For a user-scoped key only. An agent-scoped key always reads its own agent; naming another is refused."),
       }),
       execute: async (
         args: { execution_id: string; include_history?: boolean; agent_name?: string },
         context: any
       ) => {
         const authContext = requireApiKey ? context?.session : undefined;
+        const refused = foreignTarget(authContext, args.agent_name);
+        if (refused) return refused;
         const apiClient = getClient(authContext);
         const resolvedAgent = resolveAgent(authContext, args.agent_name);
         if (!resolvedAgent) return noAgent();

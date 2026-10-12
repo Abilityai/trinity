@@ -232,10 +232,6 @@ def payment_caller_allowed(agent_name: str, payer: Optional[str]) -> bool:
         return False
 
 
-class AllowlistRefused(Exception):
-    """The allow-list refused this payer after a successful verify (T7)."""
-
-
 async def run_a2a_paid_turn(
     *,
     agent_name: str,

@@ -6,6 +6,7 @@ from pathlib import Path
 import click
 
 from ..client import TrinityClient, TrinityAPIError
+from ..refusals import is_workspace_only_refusal
 from ..config import (
     clear_auth, get_instance_url, get_user, load_config,
     profile_name_from_url, set_auth, set_profile_key, _resolve_profile_name,
@@ -42,6 +43,14 @@ def _mfa_required_exit() -> None:
     raise SystemExit(1)
 
 
+def _email_code_error(detail: str) -> str:
+    """ent#849: name the next step when the instance turned email codes off."""
+    if detail == "email_code_disabled":
+        return ("email-code sign-in is turned off on this instance. Sign in with "
+                "SSO in the web UI and create an MCP API key, or use --admin.")
+    return detail
+
+
 def _exit_on_login_error(e: TrinityAPIError, prefix: str) -> None:
     """Map a failed login response to an exit message (#2322).
 
@@ -55,6 +64,18 @@ def _exit_on_login_error(e: TrinityAPIError, prefix: str) -> None:
     raise SystemExit(1)
 
 
+def _workspace_only_exit() -> None:
+    """The account works in the Workspace only (trinity-enterprise#837), and every
+    CLI command is an operator action — say so instead of reporting success."""
+    click.echo(
+        "This account works in the Workspace only (role `user`), and the CLI's "
+        "commands are operator actions. Open the Workspace in a browser "
+        "(<instance>/workspace), or ask an admin to raise the account to `operator`.",
+        err=True,
+    )
+    raise SystemExit(1)
+
+
 def _provision_mcp_key(client: TrinityClient, profile_name: str):
     """Ensure the user has an MCP API key and store it in the profile."""
     try:
@@ -63,7 +84,9 @@ def _provision_mcp_key(client: TrinityClient, profile_name: str):
             set_profile_key("mcp_api_key", result["api_key"], profile_name)
             click.echo(f"MCP API key provisioned and saved to profile")
             return result["api_key"]
-    except TrinityAPIError:
+    except TrinityAPIError as e:
+        if is_workspace_only_refusal(e.status_code, e.body):
+            _workspace_only_exit()
         # Non-fatal — user can still use JWT auth
         pass
     return None
@@ -193,7 +216,7 @@ def login(ctx, instance, profile_opt, admin):
     try:
         client.post_unauthenticated("/api/auth/email/request", {"email": email})
     except TrinityAPIError as e:
-        click.echo(f"Error requesting code: {e.detail}", err=True)
+        click.echo(f"Error requesting code: {_email_code_error(e.detail)}", err=True)
         raise SystemExit(1)
 
     click.echo(f"Verification code sent to {email}")
@@ -351,7 +374,7 @@ def init(ctx, profile_opt, admin):
         try:
             client.post_unauthenticated("/api/auth/email/request", {"email": email})
         except TrinityAPIError as e:
-            click.echo(f"Error requesting code: {e.detail}", err=True)
+            click.echo(f"Error requesting code: {_email_code_error(e.detail)}", err=True)
             raise SystemExit(1)
 
         click.echo(f"Verification code sent to {email}")

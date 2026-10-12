@@ -44,7 +44,7 @@
          without a `rename` function (search results, a read-only caller) it
          is a plain span. -->
     <PortalEditableTitle
-      v-if="rename"
+      v-if="rename && !thread.is_main"
       dense
       :value="rawTitle"
       placeholder="New chat"
@@ -86,7 +86,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import DraftMark from '@/components/base/DraftMark.vue'
-import { rowAgents, threadTitle } from './portalUtils'
+import { rowAgents, chatRowTitle } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
 
 const props = defineProps({
@@ -101,7 +101,7 @@ defineEmits(['open', 'toggle-star'])
 const avatars = computed(() => rowAgents(props.thread))
 const allAgentNames = computed(() => (props.thread.agent_names || []).join(', '))
 const unread = computed(() => Number(props.thread.unread) || 0)
-const title = computed(() => threadTitle(props.thread))
+const title = computed(() => chatRowTitle(props.thread))
 // The stored title itself — the editor pre-fills from it and shows the
 // placeholder when it is empty, never the fallback word as a draft.
 const rawTitle = computed(() => (props.thread.title || '').trim())

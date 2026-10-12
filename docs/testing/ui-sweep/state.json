@@ -14,39 +14,47 @@
    "area": "portal",
    "lane": "explore",
    "severity": "critical",
+   "category": "functional",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "reproduced \u00d72 in-run + API + DB + source",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-portal-public"
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/d4a6e8df-1.png"
+   ],
+   "issue": 3443,
+   "streak": 2
   },
   "4f4330c2": {
-   "title": "Header connection indicator read Disconnected after a client-side login once (flaky; source shows connect() only runs at app mount with a token)",
+   "title": "Header connection indicator stays Disconnected after a client-side login until the page is reloaded",
    "area": "auth",
    "lane": "explore",
-   "severity": "low",
+   "severity": "medium",
+   "category": "functional",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "not reproduced in the fresh-context pass",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-auth"
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/4f4330c2-1.png"
+   ],
+   "issue": 3445,
+   "streak": 2
   },
   "763ada69": {
    "title": "Login has no return path: expired session and deep links always land on the dashboard",
    "area": "auth",
    "lane": "explore",
    "severity": "medium",
+   "category": "functional",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "reproduced \u00d73 (auth, agent-detail edges, settings edges, repro)",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-auth"
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/763ada69-1.png",
+    "evidence/2026-10-09-all/763ada69-2.png",
+    "evidence/2026-10-09-all/763ada69-3.png"
+   ],
+   "issue": 3444,
+   "streak": 2
   },
   "b00c8834": {
    "title": "Create Agent modal ignores Esc and backdrop click and never moves focus into the modal",
@@ -57,9 +65,12 @@
    "last_seen": "2026-09-13",
    "issue": null,
    "streak": 1,
-   "reproduction": "reproduced \u00d73 (dashboard, library edges, repro) \u2014 focus never enters the modal",
+   "reproduction": "reproduced ×3 (dashboard, library edges, repro) — focus never enters the modal",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-dashboard"
+   "evidence_prefix": "sheet-explore-dashboard",
+   "status": "superseded",
+   "resolved": "2026-10-09",
+   "resolution": "merged into the modal-class finding"
   },
   "3a51bfac": {
    "title": "ConfirmDialog primitive has no Esc, focus trap or initial focus; delete-agent confirm does not restate the consequence",
@@ -70,9 +81,12 @@
    "last_seen": "2026-09-13",
    "issue": null,
    "streak": 1,
-   "reproduction": "reproduced \u00d73",
+   "reproduction": "reproduced ×3",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-agent-detail"
+   "evidence_prefix": "sheet-explore-agent-detail",
+   "status": "fixed",
+   "resolved": "2026-10-09",
+   "resolution": "ConfirmDialog now has Esc, focus trap and initial focus on the safe action (BaseModal); only the generic delete-agent copy remains (logged as a new Low)"
   },
   "381355a4": {
    "title": "Execution-log modal and Create MCP Key dialog do not close on Esc",
@@ -83,9 +97,12 @@
    "last_seen": "2026-09-13",
    "issue": null,
    "streak": 1,
-   "reproduction": "reproduced \u00d72",
+   "reproduction": "reproduced ×2",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-agent-detail"
+   "evidence_prefix": "sheet-explore-agent-detail",
+   "status": "superseded",
+   "resolved": "2026-10-09",
+   "resolution": "merged into the modal-class finding"
   },
   "f457dc14": {
    "title": "Agent Detail header row causes horizontal page scroll at 768 and 390",
@@ -96,35 +113,43 @@
    "last_seen": "2026-09-13",
    "issue": null,
    "streak": 1,
-   "reproduction": "reproduced \u00d73 (also trinity-system)",
+   "reproduction": "reproduced ×3 (also trinity-system)",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-agent-detail"
+   "evidence_prefix": "sheet-explore-agent-detail",
+   "status": "fixed",
+   "resolved": "2026-10-09",
+   "resolution": "no horizontal page scroll at 768 on agent detail in two sheets"
   },
   "e1007ae8": {
    "title": "Agent Detail tab clicks never update ?tab= so refresh and back lose the tab",
    "area": "agent-detail",
    "lane": "explore",
    "severity": "medium",
+   "category": "functional",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "reproduced \u00d72",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-agent-detail"
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/e1007ae8-1.png"
+   ],
+   "issue": 2900,
+   "streak": 2
   },
   "89d516c8": {
-   "title": "Schedule form opens blank and accepts an empty submit without any named error",
+   "title": "Schedule form: invalid cron disables Create with no message, whitespace passes, name has no cap and is stored untrimmed",
    "area": "agent-detail",
-   "lane": "explore",
+   "lane": "edges",
    "severity": "medium",
+   "category": "functional",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "reproduced \u00d72 (explore + edges)",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-agent-detail"
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/89d516c8-1.png",
+    "evidence/2026-10-09-all/89d516c8-2.png"
+   ],
+   "issue": 3462,
+   "streak": 2
   },
   "11226c3d": {
    "title": "Password fields without autocomplete opt-out get the admin login autofilled into third-party credential fields",
@@ -135,22 +160,27 @@
    "last_seen": "2026-09-13",
    "issue": null,
    "streak": 1,
-   "reproduction": "observed \u00d73 surfaces; source-confirmed",
+   "reproduction": "observed ×3 surfaces; source-confirmed",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-agent-detail"
+   "evidence_prefix": "sheet-explore-agent-detail",
+   "not_tested": {
+    "2026-10-09": "needs a persistent browser profile with a password manager; the run uses an isolated profile"
+   }
   },
   "930abed1": {
    "title": "Sharing tab renders ChannelConfigDialog that is never imported (6 Vue warnings, dead dialog path)",
    "area": "agent-detail",
    "lane": "explore",
    "severity": "medium",
+   "category": "functional",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "source-confirmed; observed once",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-agent-detail"
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/930abed1-1.png"
+   ],
+   "issue": 3447,
+   "streak": 2
   },
   "4d727d26": {
    "title": "Workspace deep link to an unknown session shows the previous agent instead of a not-found state",
@@ -161,22 +191,28 @@
    "last_seen": "2026-09-13",
    "issue": null,
    "streak": 1,
-   "reproduction": "reproduced \u00d72 (+3 in-run)",
+   "reproduction": "reproduced ×2 (+3 in-run)",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-workspace"
+   "evidence_prefix": "sheet-explore-workspace",
+   "status": "fixed",
+   "resolved": "2026-10-09",
+   "resolution": "an unknown Workspace thread shows a not-found state with a way back"
   },
   "0abec0bc": {
    "title": "Operations lists grow the page instead of scrolling in a bounded viewport",
    "area": "operations",
    "lane": "explore",
    "severity": "medium",
+   "category": "contract",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "reproduced \u00d72",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-operations"
+   "last_seen": "2026-10-09",
+   "validated": "observed twice (2026-09-13 and 2026-10-09)",
+   "evidence": [
+    "evidence/2026-10-09-all/0abec0bc-1.png",
+    "evidence/2026-10-09-all/0abec0bc-2.png"
+   ],
+   "issue": 3451,
+   "streak": 2
   },
   "1c9b4cca": {
    "title": "Operations shows the page size as the total (Notifications Total 50 vs Pending 427; Active Alerts 50)",
@@ -187,22 +223,27 @@
    "last_seen": "2026-09-13",
    "issue": null,
    "streak": 1,
-   "reproduction": "reproduced \u00d72 + API",
+   "reproduction": "reproduced ×2 + API",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-operations"
+   "evidence_prefix": "sheet-explore-operations",
+   "status": "superseded",
+   "resolved": "2026-10-09",
+   "resolution": "merged into the Notifications count finding"
   },
   "05a55425": {
    "title": "Health tab shows no circuit-breaker state for agents whose breaker is DORMANT",
    "area": "operations",
    "lane": "explore",
    "severity": "medium",
+   "category": "functional",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "reproduced \u00d72",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-operations"
+   "last_seen": "2026-10-09",
+   "validated": "API",
+   "evidence": [
+    "evidence/2026-10-09-all/05a55425-1.png"
+   ],
+   "issue": 3452,
+   "streak": 2
   },
   "6b84de2f": {
    "title": "Operations Needs-Response cards and Health rows overflow horizontally at 390",
@@ -213,22 +254,27 @@
    "last_seen": "2026-09-13",
    "issue": null,
    "streak": 1,
-   "reproduction": "reproduced \u00d72",
+   "reproduction": "reproduced ×2",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-operations"
+   "evidence_prefix": "sheet-explore-operations",
+   "not_tested": {
+    "2026-10-09": "phone widths excluded by the operator"
+   }
   },
   "a092f108": {
    "title": "Skills assign dropdown offers agents that no longer exist",
    "area": "library",
    "lane": "explore",
    "severity": "medium",
+   "category": "functional",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "reproduced \u00d72 + API",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-library"
+   "last_seen": "2026-10-09",
+   "validated": "API",
+   "evidence": [
+    "evidence/2026-10-09-all/a092f108-1.png"
+   ],
+   "issue": 3464,
+   "streak": 2
   },
   "94c5401b": {
    "title": "Header navigation disappears below 640px with no menu",
@@ -239,9 +285,12 @@
    "last_seen": "2026-09-13",
    "issue": null,
    "streak": 1,
-   "reproduction": "reproduced \u00d73 (dashboard, library, repro)",
+   "reproduction": "reproduced ×3 (dashboard, library, repro)",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-library"
+   "evidence_prefix": "sheet-explore-library",
+   "not_tested": {
+    "2026-10-09": "phone widths excluded by the operator"
+   }
   },
   "be77459c": {
    "title": "Settings tab strip is hand-rolled and overflows the viewport at 768 and 390",
@@ -252,48 +301,59 @@
    "last_seen": "2026-09-13",
    "issue": null,
    "streak": 1,
-   "reproduction": "reproduced \u00d73",
+   "reproduction": "reproduced ×3",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-settings"
+   "evidence_prefix": "sheet-explore-settings",
+   "status": "fixed",
+   "resolved": "2026-10-09",
+   "resolution": "Settings tab strip collapses into a More menu at 768"
   },
   "ad284d77": {
-   "title": "Edition-gated Settings tabs fall back to General on a cold load or refresh",
+   "title": "Entitlement-gated Settings tabs fall back to General on a cold load or refresh",
    "area": "settings",
    "lane": "explore",
    "severity": "medium",
+   "category": "functional",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "reproduced \u00d72 (4/4 tabs first run)",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-settings"
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/ad284d77-1.png",
+    "evidence/2026-10-09-all/ad284d77-2.png"
+   ],
+   "issue": 3453,
+   "streak": 2
   },
   "8c213903": {
    "title": "Retention tab never renders the backup status the API already returns",
    "area": "settings",
    "lane": "explore",
    "severity": "medium",
+   "category": "functional",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "reproduced \u00d72",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-settings"
+   "last_seen": "2026-10-09",
+   "validated": "API",
+   "evidence": [
+    "evidence/2026-10-09-all/8c213903-1.png"
+   ],
+   "issue": 3454,
+   "streak": 2
   },
   "9d9030cd": {
-   "title": "Email whitelist accepts any string: no client-side or server-side validation (invalid entries already persisted)",
+   "title": "Email whitelist accepts any string: no client-side or server-side validation",
    "area": "settings",
    "lane": "explore",
    "severity": "medium",
+   "category": "functional",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "reproduced \u00d73 (explore, edges w/ server 200s, repro)",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-settings"
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/9d9030cd-1.png",
+    "evidence/2026-10-09-all/9d9030cd-2.png"
+   ],
+   "issue": 3455,
+   "streak": 2
   },
   "a284ab64": {
    "title": "MCP Keys list renders 456 cards unbounded (52k px page)",
@@ -304,9 +364,12 @@
    "last_seen": "2026-09-13",
    "issue": null,
    "streak": 1,
-   "reproduction": "reproduced \u00d72",
+   "reproduction": "reproduced ×2",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-settings"
+   "evidence_prefix": "sheet-explore-settings",
+   "status": "fixed",
+   "resolved": "2026-10-09",
+   "resolution": "MCP keys list shows active keys only; revoked ones sit behind a switch capped at 25"
   },
   "318f03eb": {
    "title": "Help chat FAB overlaps the System tab on /m at 390",
@@ -317,22 +380,29 @@
    "last_seen": "2026-09-13",
    "issue": null,
    "streak": 1,
-   "reproduction": "reproduced \u00d72 (+ landing card at 390)",
+   "reproduction": "reproduced ×2 (+ landing card at 390)",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-mobile"
+   "evidence_prefix": "sheet-explore-mobile",
+   "not_tested": {
+    "2026-10-09": "phone surface excluded by the operator"
+   }
   },
   "1bfe4103": {
    "title": "Audit table on the edition-gated audit surface has no bounded viewport, no sticky header and clips columns at 390",
    "area": "enterprise",
    "lane": "explore",
    "severity": "medium",
+   "category": "contract",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
+   "validated": "observed twice (2026-09-13 and 2026-10-09)",
+   "evidence": [
+    "evidence/2026-10-09-all/1bfe4103-1.png",
+    "evidence/2026-10-09-all/1bfe4103-2.png"
+   ],
    "issue": null,
-   "streak": 1,
-   "reproduction": "observed once (computed styles)",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-enterprise"
+   "streak": 2,
+   "gated": true
   },
   "a2d79bab": {
    "title": "Public chat thread grows the page instead of scrolling inside its container",
@@ -340,9 +410,9 @@
    "lane": "explore",
    "severity": "medium",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "observed once + source",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-portal-public"
@@ -353,9 +423,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-auth"
@@ -366,9 +436,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-auth"
@@ -384,7 +454,10 @@
    "streak": 1,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-dashboard"
+   "evidence_prefix": "sheet-explore-dashboard",
+   "status": "fixed",
+   "resolved": "2026-10-09",
+   "resolution": "no gray-500 meta text in dark on the dashboard list"
   },
   "0f0bc129": {
    "title": "View-switcher active state uses raw bg-blue-600 (in baseline)",
@@ -392,9 +465,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-dashboard"
@@ -418,9 +491,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-agent-detail"
@@ -431,9 +504,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-agent-detail"
@@ -444,9 +517,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-agent-detail"
@@ -470,9 +543,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-agent-detail"
@@ -483,9 +556,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-operations"
@@ -496,9 +569,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-operations"
@@ -509,9 +582,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-library"
@@ -522,9 +595,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-library"
@@ -535,9 +608,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-library"
@@ -548,9 +621,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-library"
@@ -566,7 +639,10 @@
    "streak": 1,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-explore-settings"
+   "evidence_prefix": "sheet-explore-settings",
+   "status": "fixed",
+   "resolved": "2026-10-09",
+   "resolution": "public-chat-url returns 200"
   },
   "64a60089": {
    "title": "Save buttons enabled with no change on several Settings forms",
@@ -574,9 +650,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-settings"
@@ -587,9 +663,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-settings"
@@ -613,9 +689,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-settings"
@@ -678,9 +754,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-enterprise"
@@ -691,9 +767,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-enterprise"
@@ -704,9 +780,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-portal-public"
@@ -717,9 +793,9 @@
    "lane": "edges",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-edges-agent-detail"
@@ -743,9 +819,9 @@
    "lane": "explore",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-explore-operations"
@@ -755,13 +831,15 @@
    "area": "workspace",
    "lane": "edges",
    "severity": "medium",
+   "category": "functional",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "observed once + source",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-edges-workspace"
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/b0b78d8e-1.png"
+   ],
+   "issue": 3460,
+   "streak": 2
   },
   "0f801498": {
    "title": "Closed room Send button re-enables as soon as text is typed",
@@ -774,7 +852,10 @@
    "streak": 1,
    "reproduction": "observed once + source",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-edges-workspace"
+   "evidence_prefix": "sheet-edges-workspace",
+   "not_tested": {
+    "2026-10-09": "no closed room exists on this instance"
+   }
   },
   "59ba7dd2": {
    "title": "One rail click pushes two history entries so Back needs several presses",
@@ -787,7 +868,10 @@
    "streak": 1,
    "reproduction": "observed once; source plausible",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-edges-workspace"
+   "evidence_prefix": "sheet-edges-workspace",
+   "status": "superseded",
+   "resolved": "2026-10-09",
+   "resolution": "superseded by the Workspace Back trap"
   },
   "15a9833a": {
    "title": "Composer draft is silently lost on a thread switch (confirmed twice)",
@@ -798,9 +882,12 @@
    "last_seen": "2026-09-13",
    "issue": null,
    "streak": 1,
-   "reproduction": "reproduced \u00d73 (explore, edges, repro)",
+   "reproduction": "reproduced ×3 (explore, edges, repro)",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-edges-workspace"
+   "evidence_prefix": "sheet-edges-workspace",
+   "status": "fixed",
+   "resolved": "2026-10-09",
+   "resolution": "composer drafts persist per chat across switches, reloads and Back"
   },
   "4fbebc97": {
    "title": "Fenced code blocks wrap instead of scrolling; chat messages carry no timestamp at all; ghost model select stays open on Esc",
@@ -808,25 +895,27 @@
    "lane": "edges",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-edges-workspace"
   },
   "1cbc0f01": {
-   "title": "Agent name has no length ceiling or format allowlist; hostile input is sanitized into a real agent with no preview",
+   "title": "Agent name has no length ceiling, no format hint and no preview of the sanitized slug",
    "area": "library",
    "lane": "edges",
    "severity": "medium",
+   "category": "functional",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
-   "issue": null,
-   "streak": 1,
-   "reproduction": "observed once (5 creations) + source",
-   "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-edges-library"
+   "last_seen": "2026-10-09",
+   "validated": "observed twice (2026-09-13 and 2026-10-09)",
+   "evidence": [
+    "evidence/2026-10-09-all/1cbc0f01-1.png"
+   ],
+   "issue": 3463,
+   "streak": 2
   },
   "28e69f66": {
    "title": "Empty agent name submit is a silent no-op; rejection copy lacks an example",
@@ -839,7 +928,10 @@
    "streak": 1,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
-   "evidence_prefix": "sheet-edges-library"
+   "evidence_prefix": "sheet-edges-library",
+   "not_tested": {
+    "2026-10-09": "empty-name submit not exercised"
+   }
   },
   "74dce3aa": {
    "title": "Retention Save stays enabled on out-of-range values; MCP key name has no validation or length cap; Default Model row does not stack at 320px",
@@ -847,12 +939,1132 @@
    "lane": "edges",
    "severity": "low",
    "first_seen": "2026-09-13",
-   "last_seen": "2026-09-13",
+   "last_seen": "2026-10-09",
    "issue": null,
-   "streak": 1,
+   "streak": 2,
    "reproduction": "",
    "evidence_dir": "evidence/2026-09-13-explore-all-areas/",
    "evidence_prefix": "sheet-edges-settings"
+  },
+  "c3695057": {
+   "title": "Hand-rolled modal overlays bypass BaseModal: no Esc, no focus move, no focus trap",
+   "area": "agent-detail",
+   "lane": "explore",
+   "severity": "medium",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/c3695057-1.png",
+    "evidence/2026-10-09-all/c3695057-2.png",
+    "evidence/2026-10-09-all/c3695057-3.png",
+    "evidence/2026-10-09-all/c3695057-4.png",
+    "evidence/2026-10-09-all/c3695057-5.png",
+    "evidence/2026-10-09-all/c3695057-6.png",
+    "evidence/2026-10-09-all/c3695057-7.png"
+   ],
+   "issue": 1923,
+   "streak": 1
+  },
+  "2770a4d6": {
+   "title": "Help chat button overlaps the Send button on the agent Chat tab",
+   "area": "agent-detail",
+   "lane": "explore",
+   "severity": "medium",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/2770a4d6-1.png",
+    "evidence/2026-10-09-all/2770a4d6-2.png"
+   ],
+   "issue": 3446,
+   "streak": 1
+  },
+  "7c406f1c": {
+   "title": "Skill lists render the whole library unbounded with no search or filter",
+   "area": "library",
+   "lane": "explore",
+   "severity": "medium",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/7c406f1c-1.png",
+    "evidence/2026-10-09-all/7c406f1c-2.png",
+    "evidence/2026-10-09-all/7c406f1c-3.png"
+   ],
+   "issue": 3448,
+   "streak": 1
+  },
+  "6d97027e": {
+   "title": "A filter on the Notifications tab rewrites the global Operations counts",
+   "area": "operations",
+   "lane": "explore",
+   "severity": "medium",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/6d97027e-1.png",
+    "evidence/2026-10-09-all/6d97027e-2.png"
+   ],
+   "issue": 3449,
+   "streak": 1
+  },
+  "65c9986d": {
+   "title": "Health tab says Active Alerts (50) but renders five with no way to see the rest",
+   "area": "operations",
+   "lane": "explore",
+   "severity": "medium",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/65c9986d-1.png",
+    "evidence/2026-10-09-all/65c9986d-2.png"
+   ],
+   "issue": 3450,
+   "streak": 1
+  },
+  "3c97afea": {
+   "title": "A whitelist entry containing a slash cannot be removed",
+   "area": "settings",
+   "lane": "edges",
+   "severity": "medium",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/3c97afea-1.png"
+   ],
+   "issue": 3456,
+   "streak": 1
+  },
+  "33952f7e": {
+   "title": "Workspace Back button is trapped after opening an agent from the sidebar",
+   "area": "workspace",
+   "lane": "edges",
+   "severity": "medium",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/33952f7e-1.png",
+    "evidence/2026-10-09-all/33952f7e-2.png"
+   ],
+   "issue": 3457,
+   "streak": 1
+  },
+  "fd613209": {
+   "title": "A long unbroken token in a Workspace message renders a bubble thousands of pixels wide",
+   "area": "workspace",
+   "lane": "edges",
+   "severity": "medium",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/fd613209-1.png",
+    "evidence/2026-10-09-all/fd613209-2.png"
+   ],
+   "issue": 3458,
+   "streak": 1
+  },
+  "c668b9a8": {
+   "title": "Esc while renaming a Workspace chat saves the edit instead of cancelling",
+   "area": "workspace",
+   "lane": "edges",
+   "severity": "medium",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/c668b9a8-1.png"
+   ],
+   "issue": 3459,
+   "streak": 1
+  },
+  "bb3125b8": {
+   "title": "Public chat shows visitors the raw execution error, including the exit code and operator-only remediation",
+   "area": "portal",
+   "lane": "explore",
+   "severity": "medium",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "source",
+   "evidence": [
+    "evidence/2026-10-09-all/bb3125b8-1.png"
+   ],
+   "issue": 3461,
+   "streak": 1
+  },
+  "63bf6313": {
+   "title": "Dashboard list rows overlap and clip at 768 px with the Systems sidebar expanded",
+   "area": "dashboard",
+   "lane": "explore",
+   "severity": "medium",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "reproduced twice in a fresh context",
+   "evidence": [
+    "evidence/2026-10-09-all/63bf6313-1.png",
+    "evidence/2026-10-09-all/63bf6313-2.png",
+    "evidence/2026-10-09-all/63bf6313-3.png",
+    "evidence/2026-10-09-all/63bf6313-4.png"
+   ],
+   "issue": 3465,
+   "streak": 1
+  },
+  "403d02c4": {
+   "title": "Workspace composer clears the draft before the send request is issued and a not-delivered message does not survive a reload",
+   "area": "workspace",
+   "lane": "edges",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "reproduced once (not at human timing)",
+   "evidence": [
+    "evidence/2026-10-09-all/403d02c4-1.png",
+    "evidence/2026-10-09-all/403d02c4-2.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "cc40bb10": {
+   "title": "An operator whose session ends in the Workspace gets the client email-code sign-in with no route back to the operator login",
+   "area": "workspace",
+   "lane": "edges",
+   "severity": "medium",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "reproduced twice in fresh contexts",
+   "evidence": [
+    "evidence/2026-10-09-all/cc40bb10-1.png",
+    "evidence/2026-10-09-all/cc40bb10-2.png"
+   ],
+   "issue": 3466,
+   "streak": 1
+  },
+  "38c0a622": {
+   "title": "Filter form on the edition-gated audit surface keeps stale values after Reset",
+   "area": "enterprise",
+   "lane": "explore",
+   "severity": "medium",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed only",
+   "evidence": [
+    "evidence/2026-10-09-all/38c0a622-1.png"
+   ],
+   "issue": null,
+   "streak": 1,
+   "gated": true
+  },
+  "450c2fef": {
+   "title": "Failed admin login replaces the form with an Access Denied card and drops focus to the page body",
+   "area": "auth",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/450c2fef-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "bd485219": {
+   "title": "Expected 401s are logged as console errors on a failed login and on an expired session",
+   "area": "auth",
+   "lane": "explore",
+   "severity": "low",
+   "category": "hygiene",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [],
+   "issue": null,
+   "streak": 1
+  },
+  "936b4888": {
+   "title": "Login controls are hand-rolled at 8px radius with inconsistent focus rings",
+   "area": "auth",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/936b4888-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "da7b887e": {
+   "title": "First-run setup overlay reappears for every fresh browser profile on a populated instance and Esc opens a confirm instead of dismissing",
+   "area": "auth",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/da7b887e-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "12d1aa91": {
+   "title": "Timeline toolbar wraps and collides at 768",
+   "area": "dashboard",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/12d1aa91-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "ea02bb38": {
+   "title": "Grid overlay toolbar and Tiles button cover fleet cards",
+   "area": "dashboard",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/ea02bb38-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "6a18648f": {
+   "title": "Grid shows No departments yet while a filter is active",
+   "area": "dashboard",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/6a18648f-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "e4df2de5": {
+   "title": "Dashboard load duplicates agents, system-views, permissions-edges and stats requests and fetches analytics once per agent in grid mode",
+   "area": "dashboard",
+   "lane": "explore",
+   "severity": "low",
+   "category": "hygiene",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [],
+   "issue": null,
+   "streak": 1
+  },
+  "f1e661ef": {
+   "title": "Dashboard toolbar controls use 4px radius and list meta text is 9px",
+   "area": "dashboard",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/f1e661ef-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "10cb887f": {
+   "title": "Grid opens at 47 percent zoom with unreadable card text (taste)",
+   "area": "dashboard",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/10cb887f-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "e281e5c6": {
+   "title": "Execution duration is shown as two different unlabeled numbers",
+   "area": "agent-detail",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/e281e5c6-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "71d7098c": {
+   "title": "Cost versus average badge looks clamped at 600 percent",
+   "area": "agent-detail",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/71d7098c-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "0b78fe72": {
+   "title": "Tasks row icon buttons use raw palette classes and 4px radius",
+   "area": "agent-detail",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/0b78fe72-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "e40930af": {
+   "title": "Execution detail page has no app header or theme control",
+   "area": "agent-detail",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/e40930af-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "27fd659a": {
+   "title": "Must-fix compatibility banner uses a success check icon on a red bar",
+   "area": "agent-detail",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/27fd659a-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "f1a12867": {
+   "title": "Loops form: model dropdown ignores Esc, Cancel is styled primary, Start Loop is disabled without a reason, tool picker label contradicts its state",
+   "area": "agent-detail",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/f1a12867-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "e7db2ae0": {
+   "title": "Agent Settings tab fires three 404s for an agent without git sync",
+   "area": "agent-detail",
+   "lane": "explore",
+   "severity": "low",
+   "category": "hygiene",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/e7db2ae0-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "a29105a8": {
+   "title": "Agent Settings shows several primary buttons including the destructive Regenerate key",
+   "area": "agent-detail",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/a29105a8-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "44497868": {
+   "title": "Credentials tab uses raw blue and green palette on actions and its View action opens an editor that shows file contents unmasked",
+   "area": "agent-detail",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/44497868-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "5426fa0f": {
+   "title": "Unlabeled selects, default focus outline on the tab strip, More menu without a count, clipped chart axis label",
+   "area": "agent-detail",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/5426fa0f-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "9a737e87": {
+   "title": "Delete-agent confirm does not name the agent or the consequence",
+   "area": "agent-detail",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [],
+   "issue": null,
+   "streak": 1
+  },
+  "26700019": {
+   "title": "Create Schedule has no re-entrancy guard: two same-tick clicks create two schedules",
+   "area": "agent-detail",
+   "lane": "edges",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/26700019-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "8e641583": {
+   "title": "A long unbroken token in a Tasks row runs under the action icons and is clipped at 768",
+   "area": "agent-detail",
+   "lane": "edges",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/8e641583-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "69a19ad1": {
+   "title": "A failed chat send disappears from the agent Chat transcript after reload while its execution remains (seen under the out-of-credit condition)",
+   "area": "agent-detail",
+   "lane": "edges",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/69a19ad1-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "d03a5ae4": {
+   "title": "A task started in one tab is not reflected in a second tab for 60 seconds (seen under the out-of-credit condition)",
+   "area": "agent-detail",
+   "lane": "edges",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [],
+   "issue": null,
+   "streak": 1
+  },
+  "83c9c100": {
+   "title": "Every agent tab revisit refetches the tab's data and activity is polled twice per cycle",
+   "area": "agent-detail",
+   "lane": "edges",
+   "severity": "low",
+   "category": "hygiene",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [],
+   "issue": null,
+   "streak": 1
+  },
+  "18639f71": {
+   "title": "Files tab: search does not trim, preview shows no file name, invalid-folder toast lingers without a reason",
+   "area": "agent-detail",
+   "lane": "edges",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/18639f71-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "ccf9321e": {
+   "title": "Failed runs are titled with the context preamble on the Tasks tab and in the Workspace work card",
+   "area": "agent-detail",
+   "lane": "edges",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/ccf9321e-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "28e2788a": {
+   "title": "Failed-turn bubble says usage limit while the work card shows a different raw error for the same send",
+   "area": "workspace",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/28e2788a-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "eaff8f3e": {
+   "title": "New-chat stage for a stopped agent says suggestions could not load above a populated suggestions list and tells an admin to ask an admin",
+   "area": "workspace",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/eaff8f3e-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "84f16840": {
+   "title": "Inbox list at 1440 clips chat titles to an ellipsis and mixes relative and ISO dates",
+   "area": "workspace",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/84f16840-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "0debd856": {
+   "title": "Chat header clips the chat name and model label at 768",
+   "area": "workspace",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/0debd856-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "eefc5f20": {
+   "title": "Thread load posts the read marker twice and a cold load fetches another agent's suggestions first",
+   "area": "workspace",
+   "lane": "explore",
+   "severity": "low",
+   "category": "hygiene",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [],
+   "issue": null,
+   "streak": 1
+  },
+  "f1c8d115": {
+   "title": "Legacy portal redirect drops query and hash although the router comment promises both survive",
+   "area": "workspace",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [],
+   "issue": null,
+   "streak": 1
+  },
+  "a9dab988": {
+   "title": "Workspace rail forms and sidebar rows are hand-rolled with default focus outlines",
+   "area": "workspace",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/a9dab988-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "9fcbdee9": {
+   "title": "Ask about it silently overwrites an existing composer draft",
+   "area": "workspace",
+   "lane": "edges",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/9fcbdee9-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "0ffc4a60": {
+   "title": "Unknown room id renders a live room shell instead of a not-found state",
+   "area": "workspace",
+   "lane": "edges",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/0ffc4a60-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "77013a86": {
+   "title": "A second tab on the same thread does not show a message sent in the first (seen under the out-of-credit condition)",
+   "area": "workspace",
+   "lane": "edges",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/77013a86-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "005a212d": {
+   "title": "Add-agent tray ignores Esc and the open Work panel squeezes the centre column at 768",
+   "area": "workspace",
+   "lane": "edges",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/005a212d-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "7c4a1cd8": {
+   "title": "Health Last updated shows the oldest agent check under Monitoring Active and Refresh does not change it",
+   "area": "operations",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/7c4a1cd8-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "33e66604": {
+   "title": "Stopped agents are shown as Critical with network unreachable instead of a stopped state",
+   "area": "operations",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/33e66604-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "fde2f460": {
+   "title": "Reports and Health filter empty states have no next action and the Reports default window hides existing reports",
+   "area": "operations",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/fde2f460-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "c3fdf15c": {
+   "title": "Operations tabs have no 6px controls, raw palette on the Health toolbar, gray-500 stat labels in dark and a tab strip that jumps between tabs",
+   "area": "operations",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/c3fdf15c-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "ce9a29f8": {
+   "title": "Executions and Reports tabs request the agent list twice on load",
+   "area": "operations",
+   "lane": "explore",
+   "severity": "low",
+   "category": "hygiene",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [],
+   "issue": null,
+   "streak": 1
+  },
+  "86561fab": {
+   "title": "Esc does not collapse an expanded Needs Response card and an unknown tab id is not normalised in the URL",
+   "area": "operations",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/86561fab-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "a418e775": {
+   "title": "Create Agent template list scrolls horizontally by one pixel and two cards look selected",
+   "area": "library",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/a418e775-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "aaf6f96c": {
+   "title": "Clamped template descriptions cannot be read in full and plurals are wrong",
+   "area": "library",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/aaf6f96c-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "eba2f3f2": {
+   "title": "Disabled Preview, Deploy and Assign controls give no reason and the help button overlaps a card at 768",
+   "area": "library",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/eba2f3f2-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "c9a75345": {
+   "title": "Non-ASCII agent name is rejected as having no alphanumeric character and a reserved name says already exists",
+   "area": "library",
+   "lane": "edges",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/c9a75345-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "17282d6d": {
+   "title": "Systems manifest preview error shows parser internals and an internal error code",
+   "area": "library",
+   "lane": "edges",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/17282d6d-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "47fc80db": {
+   "title": "A typed Create Agent draft is lost on Back without a warning",
+   "area": "library",
+   "lane": "edges",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [],
+   "issue": null,
+   "streak": 1
+  },
+  "feaaa2c7": {
+   "title": "Skills library source Disable acts on one click without a confirm",
+   "area": "settings",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [],
+   "issue": null,
+   "streak": 1
+  },
+  "18bc351c": {
+   "title": "Destructive actions use the native browser confirm in more than twenty places instead of ConfirmDialog",
+   "area": "settings",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [],
+   "issue": null,
+   "streak": 1
+  },
+  "e00f0811": {
+   "title": "Two entitlement-gated Settings forms have placeholder-only unlabeled inputs and raw blue primary buttons",
+   "area": "settings",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/e00f0811-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "a4005f07": {
+   "title": "Settings content shifts four pixels between tabs in dark and the Access activity panel ignores Esc",
+   "area": "settings",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/a4005f07-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "1b65dd5d": {
+   "title": "Audit-log retention field silently snaps zero to the floor and key revoke and delete confirms do not name the key",
+   "area": "settings",
+   "lane": "edges",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/1b65dd5d-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "f4c72e3c": {
+   "title": "Invalid public link page header says Loading forever and offers no next action",
+   "area": "portal",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/f4c72e3c-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "6979dde1": {
+   "title": "After New in public chat the previous failure banner stays above the fresh thread until reload",
+   "area": "portal",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/6979dde1-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "0d2ccdd8": {
+   "title": "Public chat fetches playbooks twice per load and every anonymous page load runs a model turn for the intro (taste)",
+   "area": "portal",
+   "lane": "explore",
+   "severity": "low",
+   "category": "hygiene",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [],
+   "issue": null,
+   "streak": 1
+  },
+  "35eaeb15": {
+   "title": "Edition-gated audit surface: time preset highlight is lost after a click and the activity chart ignores one of the applied filters",
+   "area": "enterprise",
+   "lane": "explore",
+   "severity": "low",
+   "category": "functional",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/35eaeb15-1.png"
+   ],
+   "issue": null,
+   "streak": 1
+  },
+  "9e4eadc6": {
+   "title": "Edition-gated landing and audit surface: dimmed cards and light meta text below AA contrast, hand-rolled 4px controls, internal wording shown to operators",
+   "area": "enterprise",
+   "lane": "explore",
+   "severity": "low",
+   "category": "contract",
+   "first_seen": "2026-10-09",
+   "last_seen": "2026-10-09",
+   "validated": "observed",
+   "evidence": [
+    "evidence/2026-10-09-all/9e4eadc6-1.png"
+   ],
+   "issue": null,
+   "streak": 1
   }
  },
  "runs": [
@@ -871,17 +2083,37 @@
    "issues_filed": 0,
    "note": "first full run; issues held for user confirmation; report not committed",
    "evidence": "evidence/2026-09-13-explore-all-areas/"
+  },
+  {
+   "date": "2026-10-09",
+   "sha": "c90c711ee",
+   "lane": "explore+edges",
+   "slice": "all",
+   "status": "COMPLETE",
+   "minutes": 138,
+   "findings": {
+    "critical": 1,
+    "medium": 27,
+    "low": 62
+   },
+   "categories": {
+    "functional": 48,
+    "contract": 35,
+    "hygiene": 7
+   },
+   "issues_filed": 24,
+   "issues_commented": 2,
+   "note": "phone layouts excluded by the operator; model credit ran out mid-run; frontend served with uncommitted workspace edits",
+   "evidence": "evidence/2026-10-09-all/"
   }
  ],
  "needs_repro": [
-  "930abed1",
-  "1bfe4103",
   "a2d79bab",
-  "b0b78d8e",
   "0f801498",
-  "59ba7dd2",
-  "1cbc0f01",
-  "4f4330c2"
+  "11226c3d",
+  "69a19ad1",
+  "d03a5ae4",
+  "77013a86"
  ],
  "partial_area": null,
  "area_table_stale": [
@@ -892,5 +2124,11 @@
   "portal probe needs require_email:false on the fixture",
   "no loops panel on /operations",
   "no search on library templates/skills"
+ ],
+ "unassigned_routes": [
+  "/workspace/inbox",
+  "/workspace/projects",
+  "/workspace/projects/:projectId",
+  "/canvas/s/:token"
  ]
 }

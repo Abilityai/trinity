@@ -1115,6 +1115,7 @@ class TestSelfReadback:
         "response", "response_text", "responded_at",
         "disposition", "disposed_at", "disposed_by", "disposition_reason",
         "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
+        "replaces", "replaced_by",  # #3247
     }
 
     def test_an_agent_reads_its_own_ask_through_a_redacted_projection(self, routes, agent_exists):
@@ -1397,7 +1398,7 @@ class TestWorkspaceAnswerIsPersonOnly:
             return SimpleNamespace(username="owner", agent_name=None, connector_agent=None,
                                    portal_delegate=False, mcp_scope=scope)
 
-        monkeypatch.setattr(pa, "get_current_user", fake_get_current_user)
+        monkeypatch.setattr(pa, "resolve_platform_user_unfloored", fake_get_current_user)
         return pa
 
     @pytest.mark.asyncio

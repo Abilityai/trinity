@@ -1493,6 +1493,10 @@ metrics:
     direction: up          # up | down | hold
     target: 35
     by: 2026-12-31
+guard_metrics:             # optional: numbers that must not move meanwhile
+  - name: cost_per_lead
+    target: 40             # the level to hold, once you have a baseline
+    tolerance: 5
 ```
 
 `name` is the whole link: an objective does not carry its own copy of the
@@ -1515,6 +1519,12 @@ from `get_metrics` plus the file: `gap.status` is *position* relative to the
 target (`behind` / `on_target` / `ahead`, or `on_target` / `off_target` for
 `hold`), and `stale: true` means do not act on that number — record a fresh
 point first.
+
+A **guard** row carries `role: "guard"`. It is always judged as a hold —
+`on_target` within its `tolerance` or `off_target`, never behind or ahead,
+whatever the metric's own direction — and it is counted in `summary.guards`,
+apart from the objective's own metrics. A guard with no `target` yet shows the
+finding `guard_target_unset`.
 
 ### File Locations
 
@@ -2092,7 +2102,7 @@ All human/operator communication on Trinity is **asynchronous**, mediated by the
 
 1. **Park** the request (approval / question / alert) with `ask_operator`, or, as the fallback, by appending an entry to the queue file.
 2. **End the turn.** A turn must never wait, poll, or sleep for a human response — a human may answer in minutes or days, and a blocked turn burns its entire timeout budget while pinning platform capacity. Never assume a synchronous human answer is available mid-turn.
-3. **Process the outcome in a later turn.** `get_my_ask` returns how an ask ended (answered, cancelled or expired, with the answer when there is one), and the Execution Context block of the system prompt lists the agent's asks that ended in the last 24 hours. For a queue-file entry, check the file for `status: "responded"` items, act on them, then mark them `"acknowledged"`. On an approval the answer is one of the agent's own options or the platform-reserved value `(something else)` (#3242): none of the options is approved — carry out none of them — and the person's instruction is in `response_text`. Never list `(something else)` as an option yourself; `ask_operator` refuses it. Write atomic asks (#3243): one decision per ask, a one-glance title (at most 120 characters), and at most 5 short options that name the choice only — the full rules are in the `ask_operator` tool description, and a queue-file entry over the caps is held as `invalid_options` / `invalid_title`.
+3. **Process the outcome in a later turn.** `get_my_ask` returns how an ask ended (answered, cancelled or expired, with the answer when there is one), and the Execution Context block of the system prompt lists the agent's asks that ended in the last 24 hours and the ones still pending. Do not re-ask what is still pending (#3247): if the facts changed, raise the new ask with `replaces` set to the pending ask's `request_id` — the earlier ask ends as replaced, never edited in place; if a person answered first the replace is refused `replaces_ended` and the answer stands, and repeating a pending ask's `proposal` without `replaces` is refused `already_pending`. For a queue-file entry, check the file for `status: "responded"` items, act on them, then mark them `"acknowledged"`. On an approval the answer is one of the agent's own options or the platform-reserved value `(something else)` (#3242): none of the options is approved — carry out none of them — and the person's instruction is in `response_text`. Never list `(something else)` as an option yourself; `ask_operator` refuses it. Write atomic asks (#3243): one decision per ask, a one-glance title (at most 120 characters), and at most 5 short options that name the choice only — the full rules are in the `ask_operator` tool description, and a queue-file entry over the caps is held as `invalid_options` / `invalid_title`.
 
 **Ask before irreversible actions.** Before an action the platform cannot undo or verify — payments, emails/messages through the agent's own credentials, public posts, destructive deletions — park an `approval` and end the turn when uncertain. Put the exact action in the ask's `proposal`. This matters most under re-delivery: pull-mode coordination (#1081) re-runs a turn whose worker died, so a task you receive may have partially run before. Check your own records and your earlier asks before repeating an irreversible effect; do the reversible parts first and gate only the irreversible step.
 

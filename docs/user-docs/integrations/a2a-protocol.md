@@ -377,6 +377,29 @@ A few behaviors that surprise people, all deliberate: the **calling agent's cont
 
 Register the remote instance's agent endpoint (`https://their-trinity.example.com/a2a/their-agent`) with a **Trinity MCP API key from that instance** as the credential. Both sides speak A2A v0.3, so it works with no extra configuration.
 
+### Between your own instances on a private network
+
+When your Trinity instances share a private network (a tailnet or a VPN), they can call each other's agents over it, without the public internet and without exchanging keys. It takes one step on each side, after an admin declares the network once.
+
+**1. Declare the network (admin, on both instances).** List the network's address range, the names your instances use on it, or both. Optionally set the address this instance has on that network, so internal agents advertise it on their card:
+
+```bash
+curl -X PUT http://localhost:8000/api/settings/a2a-trusted-networks \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"entries": ["100.64.0.0/10", "*.your-tailnet.ts.net"],
+       "internal_base_url": "http://this-instance.your-tailnet.ts.net"}'
+```
+
+The platform refuses entries that would trust its own Docker networks, loopback, link-local or reserved ranges, or anything broader than a /8.
+
+**2. Provider side:** in the agent's **A2A** settings, turn on **Expose over A2A** and choose **Our own networks only**. The agent now answers only callers whose address is in a declared range. Everyone else, including the public address, sees an unexposed agent. **No key needed on our networks** is on by default; turn it off to require a Trinity key even from the private network.
+
+**3. Caller side:** register `http://<provider-instance>.<your-network>/a2a/<agent>` as an outbound endpoint, with no credential. Plain `http://` and private addresses are accepted only because the host matches a declared entry. The check runs again on every call, so a name that later resolves outside the declared ranges is refused.
+
+Keyless calls are rate-limited and recorded with the caller's address. A keyless caller can read and cancel only the tasks it started.
+
+> **Pair it with a network rule.** "No key on our network" trusts every machine on that network. If the network also carries laptops or other people's devices, add a network ACL that admits A2A traffic only between your Trinity instances.
+
 ### Troubleshooting
 
 | Symptom | Cause |

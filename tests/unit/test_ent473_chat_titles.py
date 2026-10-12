@@ -461,8 +461,9 @@ def test_the_spawn_sits_between_the_persist_and_the_turn():
     fallback has to be in place first, because the generated write is guarded
     against a person's rename — not against an empty row."""
     src = _service_source()
-    # The call's stable prefix: #3265 appended `attachments=` to its arguments.
-    persist = src.index("_persist_user_turn(agent_name, email, session_id, client_message,")
+    # The call's stable prefix: #3265 appended `attachments=` to its arguments,
+    # #3166 bound its result.
+    persist = src.index("user_row_id = _persist_user_turn(agent_name, email, session_id, client_message,")
     spawn = src.index('_spawn_title_generation(agent_name, session_id, client_message, "",')
     # The first thing the turn path does after the spawn.
     #

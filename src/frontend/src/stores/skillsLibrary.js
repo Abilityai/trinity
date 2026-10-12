@@ -3,7 +3,7 @@
  * Skills section (browse-only; assignment stays on each agent's Skills tab).
  *
  * Deliberately SEPARATE from `stores/skills.js` (the per-agent Skills tab
- * store): App.vue wraps AgentDetail in KeepAlive, so SkillsPanel's
+ * store): App.vue wraps AgentDetail in KeepAlive, so the Skills tab's
  * `onUnmounted → clear()` never fires on nav-away (deactivated ≠ unmounted).
  * Sharing `library`/`libraryStatus`/`loading`/`error` refs would let this
  * page's writes — including a failed fetch's error — render inside the CACHED

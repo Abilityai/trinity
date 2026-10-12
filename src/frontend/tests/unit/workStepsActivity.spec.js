@@ -75,3 +75,43 @@ describe('PortalWorkCard (#3001)', () => {
     expect(w.text()).not.toContain(SENTENCE)
   })
 })
+
+describe('PortalWorkCard (#3357): a live activity line and "could not be read" never share a card', () => {
+  const UNREADABLE = 'Steps could not be read right now.'
+
+  it('stepsLine stays silent on unknown while there is a live signal; stages still render', () => {
+    expect(stepsLine({ state: 'unknown' }, { liveSignal: true })).toEqual({ kind: 'none', text: '' })
+    expect(stepsLine(null, { liveSignal: true })).toEqual({ kind: 'none', text: '' })
+    const reported = { state: 'reported', stages: [{ id: 's', name: 'Draft', state: 'current' }] }
+    expect(stepsLine(reported, { liveSignal: true }).kind).toBe('stages')
+  })
+
+  it.each([false, true])('with the activity line on screen (reserveLiveRows=%s)', async (reserveLiveRows) => {
+    const w = mount(PortalWorkCard, {
+      props: { item: item({ steps: { state: 'unknown' } }), liveStep: 'Running cd /home/developer', reserveLiveRows },
+    })
+    await w.vm.$nextTick()
+    expect(w.get('[data-testid="portal-work-step"]').text()).toContain('Running cd')
+    expect(w.text()).not.toContain(UNREADABLE)
+    if (reserveLiveRows) {
+      // The chat card keeps its reserved row, blank: nothing shifts.
+      expect(w.get('[data-testid="portal-work-reserved-steps"]').text()).toBe('')
+    }
+  })
+
+  it('the sentence comes back only once the card has no activity line', async () => {
+    const w = mount(PortalWorkCard, {
+      props: { item: item({ steps: { state: 'unknown' } }), liveStep: 'Thinking' },
+    })
+    await w.vm.$nextTick()
+    expect(w.text()).not.toContain(UNREADABLE)
+    await w.setProps({ liveStep: null })
+    vi.advanceTimersByTime(5000)
+    await w.vm.$nextTick()
+    if (w.find('[data-testid="portal-work-step"]').exists()) {
+      expect(w.text()).not.toContain(UNREADABLE)
+    } else {
+      expect(w.text()).toContain(UNREADABLE)
+    }
+  })
+})

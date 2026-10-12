@@ -166,9 +166,10 @@ def test_a_full_round_trip_returns_the_peers_answer():
     assert result.context_id == "c-1"
     assert result.protocol_version == "0.3"
 
-    # Two hops: the card, then the RPC.
+    # Two hops: the card, then the RPC. The card is the registered endpoint's
+    # own (ent#838) — where a per-agent server like Trinity publishes it.
     assert [r.method for r in seen] == ["GET", "POST"]
-    assert seen[0].url.path == "/.well-known/agent-card.json"
+    assert seen[0].url.path == "/a2a/bot/.well-known/agent-card.json"
 
     # v0.3 slash method name — a remote Trinity speaks this, and #738
     # federation is the reason "target v1.0 only" was rejected.
@@ -418,12 +419,56 @@ def test_a_registered_path_that_the_card_contradicts_is_refused():
     assert exc.value.reason == "card_url_ambiguous"
 
 
-def test_the_card_is_always_fetched_from_the_origin_not_the_registered_path():
-    """Appending `/.well-known/...` to a registered path would fetch a
-    different agent's card without saying so."""
+def _card_at(paths, *, status_elsewhere=404, record=None):
+    """A peer that publishes its card only at `paths`; any other GET answers
+    `status_elsewhere`."""
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            if request.url.path in paths:
+                return _json(CARD)
+            return httpx.Response(status_elsewhere)
+        return _json(_rpc_ok())
+    return _factory(_handler, record=record)
+
+
+def test_a_per_agent_card_is_found_under_the_registered_endpoint():
+    """ent#838: a Trinity instance publishes `/a2a/<agent>/.well-known/agent-card.json`
+    and nothing at its origin — origin-only discovery could never reach it."""
     seen = []
-    _call(client_factory=_two_hop(record=seen))
-    assert seen[0].url.path == "/.well-known/agent-card.json"
+    result = _call(client_factory=_card_at({"/a2a/bot/.well-known/agent-card.json"}, record=seen))
+    assert result.state == "completed"
+    assert [r.url.path for r in seen if r.method == "GET"] == ["/a2a/bot/.well-known/agent-card.json"]
+
+
+def test_an_origin_card_is_still_found_when_the_endpoint_has_none():
+    seen = []
+    result = _call(client_factory=_card_at({"/.well-known/agent-card.json"}, record=seen))
+    assert result.state == "completed"
+    assert [r.url.path for r in seen if r.method == "GET"] == [
+        "/a2a/bot/.well-known/agent-card.json", "/.well-known/agent-card.json"]
+
+
+def test_only_a_404_moves_on_to_the_origin_card():
+    """A 5xx (or any other failure) on the endpoint's own card is the answer —
+    the origin is not a second chance at a peer that is failing."""
+    seen = []
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_card_at({"/.well-known/agent-card.json"}, status_elsewhere=503, record=seen))
+    assert exc.value.reason == "card_http_error" and exc.value.remote_status == 503
+    assert [r.url.path for r in seen] == ["/a2a/bot/.well-known/agent-card.json"]
+
+
+def test_a_registered_card_url_is_fetched_as_given_and_its_url_is_the_target():
+    card_url = ValidatedPublicUrl(
+        url="https://peer.example.com/a2a/bot/.well-known/agent-card.json",
+        hostname="peer.example.com", port=443, addresses=("93.184.216.34",),
+    )
+    seen = []
+    result = _call(endpoint_url=card_url.url, validated=card_url,
+                   client_factory=_card_at({"/a2a/bot/.well-known/agent-card.json"}, record=seen))
+    assert result.state == "completed"
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("GET", "/a2a/bot/.well-known/agent-card.json"), ("POST", "/a2a/bot")]
 
 
 # --------------------------------------------------------------------------- #

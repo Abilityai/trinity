@@ -286,7 +286,7 @@ describe('the strip is the primitive, and the editor has one home', () => {
 
   // #2579 — fixed width. These are SOURCE pins, not behaviour: vitest runs
   // `environment: 'node'` with no mount harness, so nothing here can prove a
-  // tab is 160px. That is `e2e/workspace-chat-tabs.spec.js`'s job.
+  // tab is 192px. That is `e2e/workspace-chat-tabs.spec.js`'s job.
   //
   // The mirror-slice idiom (precedent: portalRail.spec.js) rather than a count:
   // "the class appears twice" is satisfied by putting it on the MIRROR's More
@@ -303,7 +303,7 @@ describe('the strip is the primitive, and the editor has one home', () => {
 
     it('declares the prop, default off, with one named width constant', () => {
       expect(s()).toMatch(/fixedWidth: \{ type: Boolean, default: false \}/)
-      expect(s()).toMatch(/export const FIXED_TAB_WIDTH = 'w-40'/)
+      expect(s()).toMatch(/export const FIXED_TAB_WIDTH = 'w-48'/)
     })
 
     it('puts the width on the tab button in BOTH rows — a mirror that measures narrower overflows too late', () => {

@@ -65,6 +65,30 @@ def is_model_rejection(error_message: str) -> bool:
     return any(marker in error_lower for marker in MODEL_REJECTION_MARKERS)
 
 
+# #3470: agent-server 503s that are about the CONTAINER, not the credential.
+# `classify_switch_failure` reads a bare 503 as "auth" (#285 — the agent's own
+# zero-token heuristic answers 503 for a refused credential), so without this
+# list a broken container would walk one interactive turn across every
+# subscription AND the platform key, recording an auth refusal against each —
+# the whole pool skip-listed for 2h by one agent that could not spawn Claude
+# at all. Literals pinned against the agent-server source by
+# tests/unit/test_3470_subscription_walk.py (same shape as the #3012 parity).
+CONTAINER_FAULT_MARKERS = [
+    "claude code is not available in this container",
+    "permission bypass failed",
+]
+
+
+def is_container_fault(error_message: str) -> bool:
+    """Return True if `error_message` is the agent server saying the container
+    cannot run Claude at all — no credential can fix it, so SUB-003 must not
+    switch on it (#3470)."""
+    if not error_message:
+        return False
+    error_lower = error_message.lower()
+    return any(marker in error_lower for marker in CONTAINER_FAULT_MARKERS)
+
+
 def is_auth_failure(error_message: str) -> bool:
     """Return True if `error_message` contains any AUTH_INDICATORS substring
     AND does not also contain an unambiguous signal-kill / OOM / timeout

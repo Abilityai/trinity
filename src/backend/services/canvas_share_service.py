@@ -22,7 +22,7 @@ row; everything else collapses into the same not-found.
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, NamedTuple, Optional
 
 from database import db
 from dependencies import agent_may_reach
@@ -31,6 +31,14 @@ from services import canvas_service
 from utils.helpers import parse_iso_timestamp, utc_now_iso
 
 logger = logging.getLogger(__name__)
+
+
+class WorkspaceViewer(NamedTuple):
+    """A Workspace session on a share link: a verified email and no platform
+    account (trinity-enterprise#837 — someone an agent is shared with signs in to
+    the Workspace, not at `/login`)."""
+
+    email: str
 
 
 class ShareResolution:
@@ -71,6 +79,8 @@ def viewer_may_see(agent_name: str, canvas_id: str, user) -> bool:
     """
     if user is None:
         return False
+    if isinstance(user, WorkspaceViewer):
+        return _workspace_viewer_may_see(agent_name, canvas_id, user.email)
     try:
         if (db.can_user_access_agent(user.username, agent_name) and agent_may_reach(user, agent_name)):
             return True
@@ -78,6 +88,22 @@ def viewer_may_see(agent_name: str, canvas_id: str, user) -> bool:
         logger.warning("canvas share: access check failed for %s: %s", agent_name, e)
         return False
     return False
+
+
+def _workspace_viewer_may_see(agent_name: str, canvas_id: str, email: str) -> bool:
+    """A Workspace session sees what the Workspace shows it: an agent on its
+    roster and a canvas addressed to the roster (never an `operator` one).
+    Fails closed, like the platform branch."""
+    from db.canvas import AUDIENCE_ROSTER
+    from client_portal.service import roster_agent_names
+
+    try:
+        if agent_name not in roster_agent_names(email, include_owned=False):
+            return False
+        return db.get_agent_canvas(agent_name, canvas_id, AUDIENCE_ROSTER) is not None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("canvas share: workspace access check failed for %s: %s", agent_name, e)
+        return False
 
 
 def resolve(token: str, user=None) -> Dict:

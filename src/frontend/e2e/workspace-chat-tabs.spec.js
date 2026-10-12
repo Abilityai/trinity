@@ -7,8 +7,8 @@ import { agentExists, missingAgentReason } from './helpers/agent-probe.js'
  * The AC names fixed-width tabs, and NO node-env pin can execute that. vitest
  * runs `environment: 'node'` with no layout engine and this project has no
  * component-mount harness, so `portalChatTabsAndTitles.spec.js` can prove the
- * class string is on the element and nothing more — that a `w-40` tab actually
- * renders 160px wide, that a long title actually ellipsises, and that the strip
+ * class string is on the element and nothing more — that a `w-48` tab actually
+ * renders 192px wide, that a long title actually ellipsises, and that the strip
  * actually repacks, are measurements.
  *
  * Learning #1500 is why this is not optional: the last structural change to a
@@ -42,8 +42,8 @@ import { agentExists, missingAgentReason } from './helpers/agent-probe.js'
 
 const TEST_AGENT = process.env.PORTAL_TEST_AGENT || 'testfix'
 
-// Must equal `FIXED_TAB_WIDTH` in components/OverflowTabs.vue ('w-40').
-const TAB_WIDTH = 160
+// Must equal `FIXED_TAB_WIDTH` in components/OverflowTabs.vue ('w-48').
+const TAB_WIDTH = 192
 
 // The strip's own box, plus every visible tab button inside it. Located
 // through the strip's `data-testid` and the button role rather than through
@@ -124,7 +124,7 @@ test.describe('Workspace chat tabs', () => {
     for (const tab of m.tabs) {
       expect(tab.w, `tab "${tab.label}" is one fixed width`).toBe(TAB_WIDTH)
     }
-    // Uniform means Main too — a four-character label costs the same 160px as
+    // Uniform means Main too — a four-character label costs the same 192px as
     // a sentence. That is the trade the operator's ruling buys, and asserting
     // it here is what stops someone "optimising" Main back to intrinsic width.
     const main = m.tabs.find((t) => t.label === 'Main')

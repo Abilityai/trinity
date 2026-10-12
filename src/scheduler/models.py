@@ -26,14 +26,6 @@ class ExecutionStatus(str, Enum):
     PENDING_RETRY = "pending_retry"  # Added for RETRY-001 - retry scheduled but not yet fired
 
 
-class TriggerSource(str, Enum):
-    """What triggered the execution."""
-    SCHEDULE = "schedule"
-    MANUAL = "manual"
-    API = "api"
-    RETRY = "retry"  # Added for RETRY-001 - automatic retry of failed execution
-
-
 @dataclass
 class Schedule:
     """A scheduled task definition."""
@@ -241,26 +233,6 @@ class Reminder:
 
 
 @dataclass
-class AgentTaskMetrics:
-    """Metrics extracted from agent task response."""
-    context_used: int = 0
-    context_max: int = 200000
-    context_percent: float = 0.0
-    cost_usd: Optional[float] = None
-    tool_calls_json: Optional[str] = None
-    execution_log_json: Optional[str] = None
-    session_id: Optional[str] = None  # Claude Code session ID for --resume (EXEC-023)
-
-
-@dataclass
-class AgentTaskResponse:
-    """Parsed response from agent task endpoint."""
-    response_text: str
-    metrics: AgentTaskMetrics
-    raw_response: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
 class SchedulerStatus:
     """Current status of the scheduler service."""
     running: bool
@@ -268,46 +240,3 @@ class SchedulerStatus:
     last_check: datetime
     uptime_seconds: float
     jobs: List[Dict[str, Any]] = field(default_factory=list)
-
-
-# =============================================================================
-# Process Scheduling Models
-# =============================================================================
-
-
-@dataclass
-class ProcessSchedule:
-    """
-    A scheduled process trigger definition.
-
-    Represents a schedule trigger defined in a process definition.
-    When the cron fires, the scheduler executes the process.
-    """
-    id: str  # Unique schedule ID
-    process_id: str  # Process definition ID
-    process_name: str  # Process name (denormalized for display)
-    trigger_id: str  # Trigger ID from process definition
-    cron_expression: str
-    enabled: bool
-    timezone: str
-    description: Optional[str]
-    created_at: datetime
-    updated_at: datetime
-    last_run_at: Optional[datetime] = None
-    next_run_at: Optional[datetime] = None
-
-
-@dataclass
-class ProcessScheduleExecution:
-    """A record of a process schedule execution."""
-    id: str
-    schedule_id: str
-    process_id: str
-    process_name: str
-    execution_id: Optional[str]  # Process execution ID returned by backend
-    status: str
-    started_at: datetime
-    triggered_by: str
-    completed_at: Optional[datetime] = None
-    duration_ms: Optional[int] = None
-    error: Optional[str] = None

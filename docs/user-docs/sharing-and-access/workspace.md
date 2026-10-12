@@ -12,7 +12,7 @@ Workspace lives at `/workspace` and ships in **every** build. The older `/portal
 - **Chat** — One ongoing conversation. A **1:1** chat is with a single agent; a **room** is a chat with two or more.
 - **Main** — The pinned chat every (you, agent) pair has. It is the first tab for every agent and the place the agent reaches you when nothing else names a chat: an agent-initiated message, a question it raises outside a conversation, or a scheduled brief.
 - **Rail** — The right-hand column beside the conversation. Its tabs are **Work**, **Loops**, **Canvas**, **Files** and **Info**.
-- **Briefing** — The panel on an empty chat headed **Things you can ask**, drawn from the agent's exposed playbooks or its template.
+- **Briefing** — The panel on an empty chat headed **Things you can ask**, drawn from the agent's exposed skills or its template.
 - **Suggestions** — A short list headed **Suggested for you**, computed for you and the agent in front of you: what is waiting on you, and what you could do next. Platform users only.
 - **Seat** — You and one agent together. The agent's memory of you, and the decisions you and it record, belong to the seat.
 
@@ -51,11 +51,11 @@ Top to bottom:
 - **Trinity Workspace** — the wordmark. It links to the Inbox.
 - **Inbox** — a pinned row with two badges: the number of asks agents are waiting on you to answer, and the number of chats with something you haven't read. See [The Inbox](#the-inbox).
 - **New chat** — opens the agent picker.
-- **Search agents and chats…** — two characters or more. Agents filter in place; chat results replace the chat list below, and each half says separately when it matched nothing.
+- **Search agents and chats…** — two characters or more. **⌘/** / **Ctrl+/** puts the cursor there from anywhere; pressed again from the field, it returns you to the message field. Agents filter in place; chat results replace the chat list below, and each half says separately when it matched nothing.
 - **Agents** — your roster, ordered by the agents you worked with most recently, then by name. Five rows show, with **Show all** to expand. A row carries the agent's display name, the title of your newest chat with it (or its slug when the name is a label), when you last heard from it, an availability chip when the agent is stopped or unreachable, and its own ask and unread badges. **Clicking an agent opens a new, empty chat with it**, with the cursor in the message field — or returns you to a chat with that agent where you left unsent text. Your earlier chats are its tabs, one click away.
 - **Starred** — chats you've starred, lifted out of the date groups so each chat appears exactly once.
 - **Today / Yesterday / Previous 7 days / Older** — everything else. A Main you have never used is not listed here; the agent's row is the way into it.
-- **Keyboard shortcuts** — at the bottom, beside sign-out. It opens the list of keys (also **⌘/** / **Ctrl+/**).
+- **Keyboard shortcuts** — at the bottom, beside sign-out. It opens the list of keys (also **⌥/** / **Alt+/**).
 
 ### The Inbox
 
@@ -94,7 +94,7 @@ Every other chat can be renamed in place — from the pencil beside its title in
 
 One box: the message field on top, the controls in a row inside it. Enter sends; Shift+Enter adds a line.
 
-- **`/` and `@`** — type `/` at the start of a word for the agent's playbooks, or `@` for another agent. ↓ then Enter (or Tab for the top row) inserts the pick; Esc dismisses the list. Enter alone always sends. A `/` pick splices the playbook's starter prompt into the field without sending.
+- **`/` and `@`** — type `/` at the start of a word for the agent's skills, or `@` for another agent. ↓ then Enter (or Tab for the top row) inserts the pick; Esc dismisses the list. Enter alone always sends. A `/` pick splices the skill's starter prompt into the field without sending.
 - **Model** — platform users on a Claude-runtime agent get a dropdown beside Send. The default option reads **Agent's default (…)** and names what the agent would use; the other three are plain-language tiers — **Most capable**, **Balanced — fast and smart**, **Fastest**. The choice is remembered per agent on your account. Resolution is your explicit choice → the model the owner set for the agent's public channels → the platform default. If the agent can't complete a turn on a model you chose, the reply says so and the choice reverts to the agent's default.
 - **Attach** — the paperclip picks files, dropping files anywhere on the conversation sends them (*Drop files to send to …*), and pasting a copied image or file into the message field attaches it the same way. A paste that also carries text still types the text. Up to 20 files per drop, 25 MB each, uploaded one after another; each shows as a chip with its own progress, and a refused file names itself and the limit. Sent files land in the agent's inbox and appear under **Files you sent** in the rail.
 - **Speak your message** — the microphone dictates into the field. It is separate from the voice call, and it appears only where dictation can work; see [Dictation](#dictation).
@@ -178,9 +178,9 @@ A platform user who opens an agent gets a short list headed **Suggested for you*
 | **Re-enable or delete "*schedule*"** | *Disabled since … · it used to run* |
 | **Turn on autonomy, or pause these schedules** | *N schedules won't run — autonomy is off* |
 | **Pick up where you left off** | *Your last conversation was …* |
-| A playbook's title | *You haven't run /name yet* |
+| A skill's title | *You haven't run /name yet* |
 
-Schedule suggestions appear only for the agent's owner or an admin. A playbook is suggested only if the agent exposes it, you have not run it with `/name`, and no enabled schedule already runs it. When you have never talked to the agent, the list says so — *You haven't talked to this agent yet — these are things it can do.* An agent with nothing to suggest says *Nothing to suggest right now.*
+Schedule suggestions appear only for the agent's owner or an admin. A skill is suggested only if the agent exposes it, you have not run it with `/name`, and no enabled schedule already runs it. When you have never talked to the agent, the list says so — *You haven't talked to this agent yet — these are things it can do.* An agent with nothing to suggest says *Nothing to suggest right now.*
 
 Each item has two buttons. The accept button never sends anything: it pre-fills the composer, opens the section it names, focuses the chat, or opens the agent's schedules page in the main app in a new tab. **Dismiss** hides the item until its state changes — a schedule that keeps failing does not come back with every new failure, but one that recovers and fails again does. The Info tab's rail dot lights when there are suggestions, even with the rail collapsed.
 
@@ -236,6 +236,8 @@ Inside a room, **+ Add agent** recruits another, and only a person can do that. 
 
 ### Keyboard shortcuts
 
+The open rail carries a small **shortcut tips** panel at its foot with the most-used keys; close it with its **×** and this browser remembers. The collapsed rail shows a single keyboard icon instead, which opens the full list.
+
 | Keys | Where | Does |
 |------|-------|------|
 | **⌘J** / **Ctrl+J** | Anywhere in the Workspace | New chat with the agent in front of you (the picker when there is none) |
@@ -243,7 +245,8 @@ Inside a room, **+ Add agent** recruits another, and only a person can do that. 
 | **⌥⇧↓** / **⌥⇧↑** (**Alt+Shift+↓** / **↑**) | Anywhere | Next / previous chat with this agent |
 | **⌘.** / **Ctrl+.** | Anywhere | Show or hide the rail |
 | **⌥.** (**Alt+.**) | Anywhere | Next rail tab |
-| **⌘/** / **Ctrl+/** | Anywhere | The keyboard-shortcuts list |
+| **⌘/** / **Ctrl+/** | Anywhere | Cursor to the sidebar search; again, back to the message field. On a narrow screen it opens the sidebar first |
+| **⌥/** (**Alt+/**) | Anywhere | The keyboard-shortcuts list |
 | **Enter** / **Shift+Enter** | Composer | Send / new line |
 | **↓ ↑**, **Enter**, **Tab**, **Esc** | Composer, with the `/` or `@` list open | Move, insert the selected row, insert the top row, dismiss |
 | **Esc** | Composer, with a *Replying to* chip | Drop the reply |
@@ -261,7 +264,7 @@ Inside a room, **+ Add agent** recruits another, and only a person can do that. 
 
 Workspace surfaces the agents already shared with a person's email — there is no separate access list. To give a client agents, share each one with their email using the normal [agent sharing](agent-sharing.md) and [access control](access-control.md) model; remove the share to revoke access.
 
-Capability cards come from the agent's exposed playbooks where an operator has configured them, and otherwise from the `use_cases` in its template — so what a client sees you can shape without touching Workspace itself. The model an external client's turns run on is the one set for the agent's public channels on its **Sharing** tab, falling back to the platform default.
+Capability cards come from the agent's exposed skills where an operator has configured them, and otherwise from the `use_cases` in its template — so what a client sees you can shape without touching Workspace itself. The model an external client's turns run on is the one set for the agent's public channels on its **Sharing** tab, falling back to the platform default.
 
 ## For Agents
 
@@ -319,7 +322,7 @@ Asks (`/asks`, with `/asks/{id}/answer`, `/discuss`, `/dismiss` and `/context`) 
 - **Multi-agent chat is available in every build.** Against an older backend that does not serve rooms, `@mention` escalation is unavailable and Workspace says so rather than failing obscurely.
 - **Rooms show no unread count.** Stars work for rooms; unread badges count 1:1 chats only. A chat that existed before you first read anything, and was never opened, reports nothing.
 - **Room settings are not editable here** beyond the name. Topic, budget and scribe are set through the API.
-- **`/` playbooks are not offered in a room.** `@` is.
+- **`/` skills are not offered in a room.** `@` is.
 - **Codex agents replay history** instead of resuming, so their continuity is text-only.
 - **A very long chat is windowed.** The thread shows the newest turns and says *Earlier messages in this chat aren't shown* when older ones were cut.
 - **No cost or model information** is shown on the agent's band or Info tab, and the chat history and chat reply routes return no turn cost to any caller.

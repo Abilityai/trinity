@@ -27,6 +27,7 @@
              screen has no hover, so below `sm` it is simply visible. -->
         <button
           v-if="rename"
+          ref="pencil"
           type="button"
           class="shrink-0 rounded p-0.5 transition text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 focus:opacity-100"
           :class="dense ? 'opacity-100 sm:opacity-0 sm:group-hover:opacity-100' : ''"
@@ -61,7 +62,7 @@
         class="w-full min-w-0 rounded-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none disabled:opacity-50"
         :class="dense ? 'text-sm' : 'text-sm font-semibold'"
         @keydown.enter.prevent="commit"
-        @keydown.esc.prevent="cancel"
+        @keydown.esc.prevent="abandon"
         @blur="onBlur"
       />
       <!-- The failed verb persists next to the control until it is fixed or
@@ -98,6 +99,7 @@ const draft = ref('')
 const saving = ref(false)
 const error = ref('')
 const field = ref(null)
+const pencil = ref(null)
 // A blur fired by the component's own teardown (Enter → commit → exit) must
 // not commit a second time; this flag says a commit is already in hand.
 let settling = false
@@ -118,8 +120,19 @@ function cancel() {
   emit('editing', false)
 }
 
+// Esc (#3459): drop the draft and hand focus back to the pencil that opened
+// the editor, so the keyboard is not left on <body>.
+function abandon() {
+  if (saving.value) return
+  cancel()
+  nextTick(() => pencil.value?.focus())
+}
+
 function onBlur() {
-  if (settling || saving.value) return
+  // Leaving edit mode removes the field, and the browser blurs a focused
+  // field as it goes. That blur is the editor's own teardown, not the person
+  // leaving the field: after Esc it would save the draft just abandoned.
+  if (!editing.value || settling || saving.value) return
   // Leaving the field with an unchanged draft is an abandon, not a save.
   if ((draft.value || '').trim() === (props.value || '').trim()) { cancel(); return }
   commit()

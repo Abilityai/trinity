@@ -175,10 +175,6 @@ class TestDocumentShape:
         first key (`'\\ufeffname'` would make `data["name"]` a KeyError)."""
         assert _load_yaml("\ufeffname: x\n") == {"name": "x"}
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "BUG: NUL / C0 control chars raise yaml.ReaderError from the loader's "
-        "constructor, OUTSIDE the try that maps YAMLError to `_yaml_invalid` — "
-        "#3324"))
     @pytest.mark.parametrize("ch", ["\x00", "\x07", "\x1b", "\x7f", "\ufffe"],
                              ids=["Y8-nul", "Y9-bel", "Y9-esc", "Y9-del", "Y9-fffe"])
     def test_control_characters_are_a_named_parse_error(self, ch):
@@ -211,9 +207,6 @@ class TestDocumentShape:
                else _load_yaml('a: 1\nb: "x\ty"\n'))
         assert isinstance(out, dict) and out["a"] == 1
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "BUG: deep flow nesting raises RecursionError (not HardenedYamlError) "
-        "well under the byte cap — #3324"))
     def test_deep_nesting_is_a_named_refusal(self):
         """Y10. 6 KB of `[` — 2.3% of the 256 KiB cap — exhausts the Python
         stack inside PyYAML's recursive composer. The loader bounds bytes and
@@ -226,8 +219,9 @@ class TestDocumentShape:
         1483, ent#128) — i.e. callers are compensating for the loader."""
         doc = "[" * 3000 + "]" * 3000
         assert len(doc.encode()) < SY.DEFAULT_MAX_BYTES
-        with pytest.raises(HYE):
+        with pytest.raises(HYE) as exc:
             _load_yaml(doc)
+        assert exc.value.code == "k_too_deep"
 
     def test_moderate_nesting_parses(self):
         """Y11 — the depth gap must not be 'fixed' by a cap that breaks real
@@ -641,10 +635,6 @@ class TestSanitizerBoundaries:
         out = CS.sanitize_text("FOO=bar GH_TOKEN=s1 PASSWORD=s2\nAPI_SECRET='s3'")
         assert out == f"FOO=bar GH_TOKEN={RED} PASSWORD={RED}\nAPI_SECRET={RED}"
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "BUG: a non-sensitive `k=v` glued to a sensitive pair (`a=1&token=X`, "
-        "`--env=GH_TOKEN=X`) swallows it — regression from #1670, the pre-#1661 "
-        "regex redacted these — #3311"))
     @pytest.mark.parametrize("text,secret", [
         ("https://api.example.com/v1?client=me&access_token=s3cr3tv4lue", "s3cr3tv4lue"),
         ("curl -d user=alice&password=hunter2xyz https://x", "hunter2xyz"),
@@ -705,16 +695,12 @@ class TestSanitizeDictDepth:
         out = CS.sanitize_dict(data)
         assert GHP not in json.dumps(out)
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "BUG: sanitize_dict/sanitize_list return the subtree UNSANITIZED past "
-        "max_depth (fail-open) — #3312"))
     @pytest.mark.parametrize("shape", ["log", "lists"], ids=["S12-dict-log", "S12-list-nest"])
     def test_secret_below_max_depth_is_still_redacted(self, shape):
-        """S12. `if depth > max_depth: return data` hands back the raw subtree,
-        so any secret nested 12+ containers deep is persisted verbatim. The cap
-        exists to bound recursion (existing test only asserts 'does not crash'),
-        but the safe failure for a REDACTOR is to redact what it cannot walk
-        (e.g. `sanitize_text(json.dumps(subtree))`), not to pass it through.
+        """S12 (#3312). The cap bounds recursion; past it the subtree is
+        replaced with the placeholder (fail closed), never handed back raw —
+        `if depth > max_depth: return data` persisted any secret nested 12+
+        containers deep verbatim.
 
         Reachability: `chat_execution_service.py:434` →
         `sanitize_execution_log` → `sanitize_json_string` → `sanitize_list`.
@@ -728,6 +714,29 @@ class TestSanitizeDictDepth:
         else:
             log = [[[[[[[[[[[[["key " + GHP]]]]]]]]]]]]]
         out = CS.sanitize_execution_log(json.dumps(log))
+        assert GHP not in out
+
+    @pytest.mark.parametrize("walker", ["dict", "list"])
+    def test_very_deep_object_is_redacted_without_recursing(self, walker):
+        """#3312 — 2000 levels (built iteratively, past the interpreter's
+        recursion limit): no RecursionError, and the secret does not survive.
+        The capped result is shallow, so `json.dumps` over it is safe."""
+        leaf = "key " + GHP
+        for i in range(2000):
+            leaf = {"n": leaf} if (walker == "dict") == (i % 2 == 0) else [leaf]
+        root = {"r": leaf} if walker == "dict" else [leaf]
+        fn = CS.sanitize_dict if walker == "dict" else CS.sanitize_list
+        out = fn(root)
+        assert GHP not in json.dumps(out)
+        assert RED in json.dumps(out)
+
+    def test_pathologically_deep_json_does_not_raise(self):
+        """#3312 AC2 — `json.loads` itself raises RecursionError on a ~200k-deep
+        array; `sanitize_execution_log` must fall back to the linear text pass
+        instead of letting it escape the log-persist path."""
+        raw = "[" * 200_000 + json.dumps("key " + GHP) + "]" * 200_000
+        out = CS.sanitize_execution_log(raw)
+        assert isinstance(out, str)
         assert GHP not in out
 
     def test_list_and_dict_depth_count_together(self):

@@ -410,15 +410,14 @@ const dismissResumeMode = () => {
 
 // Build context from conversation history
 const buildContextPrompt = (userMessage) => {
-  if (messages.value.length === 0) {
-    return userMessage
-  }
-
   // Build conversation context (last 10 exchanges). A held request and its
   // notice stay on screen but out of the context (trinity#3274): resent, the
   // gated command would hold every later turn — and ride along if one of
   // those were approved.
   const recentMessages = messages.value.filter(m => !m.held).slice(-20) // Last 20 messages (10 exchanges)
+  if (recentMessages.length === 0) {
+    return userMessage
+  }
   let context = '### Previous conversation:\n\n'
 
   for (const msg of recentMessages) {
@@ -585,6 +584,11 @@ const sendMessage = async (userMessage, files = []) => {
 
   error.value = null
 
+  // trinity#3163: the context is built from the conversation as it stands, so
+  // the message being sent reaches the agent once (under "Current message"),
+  // and a first message carries no history block.
+  const contextPrompt = buildContextPrompt(userMessage)
+
   // Add user message to chat immediately
   messages.value.push({
     role: 'user',
@@ -600,9 +604,6 @@ const sendMessage = async (userMessage, files = []) => {
   loadingText.value = 'Thinking...'
 
   try {
-    // Build context with conversation history
-    const contextPrompt = buildContextPrompt(userMessage)
-
     // Build request payload - use async_mode for SSE streaming (THINK-001)
     const payload = {
       message: contextPrompt,

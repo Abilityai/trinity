@@ -15,8 +15,7 @@ Covered:
 - open denies; retry_after_seconds ~= base cooldown
 - half-open probe closes on success; reopens with grown backoff
 - record_failure("missed_heartbeat") seam (#307)
-- get_all_dispatch_states (scan, skips probe-locks) + get_dispatch_states_for
-  (pipelined) + reset_dispatch
+- get_dispatch_states_for (pipelined) + reset_dispatch
 """
 
 from __future__ import annotations
@@ -43,7 +42,6 @@ from services.dispatch_breaker import (  # noqa: E402
     DISPATCH_BASE_COOLDOWN_SECONDS,
     DISPATCH_FAILURE_THRESHOLD,
     DispatchBreaker,
-    get_all_dispatch_states,
     get_dispatch_states_for,
     reset_dispatch,
 )
@@ -163,16 +161,6 @@ class TestStateMachine:
 
 
 class TestOperatorHooks:
-    def test_get_all_dispatch_states_includes_open_skips_locks(self, agent_name, redis_client):
-        b = _breaker(agent_name, redis_client)
-        for _ in range(DISPATCH_FAILURE_THRESHOLD):
-            b.record_outcome("auth")
-        # opening sets a probe-lock transiently; ensure scan never returns the lock key
-        states = get_all_dispatch_states()
-        assert agent_name in states
-        assert states[agent_name]["state"] == "open"
-        assert not any(k.endswith(":probe-lock") for k in states)
-
     def test_get_dispatch_states_for_pipelined(self, agent_name, redis_client):
         b = _breaker(agent_name, redis_client)
         for _ in range(DISPATCH_FAILURE_THRESHOLD):

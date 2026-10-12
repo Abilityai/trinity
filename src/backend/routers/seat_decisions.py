@@ -29,13 +29,29 @@ from database import db
 from dependencies import get_current_user, assert_agent_access
 from db_models import User
 from services import idempotency_service, rate_limiter, schedule_seat_memory, seat_decision_service
-from services.assignment_provider import resolve_assignment
+from services.assignment_provider import resolve_assignment, resolve_served_seat
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/agents", tags=["seat-decisions"])
 
 _USER_FACING_TRIGGERS = {"public", "slack", "telegram", "whatsapp"}
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _self_gate(current_user: User, agent_name: str) -> None:
+    """An agent-scoped key records and reads only its OWN agent's seat decisions
+    (trinity-enterprise#839, CWE-863). The key resolves to its owner carrying
+    the owner's role, so `assert_agent_access` alone lets a sibling agent — and,
+    under an admin owner, any agent on the instance — name this agent and one of
+    its seat runs: a forged `active` row becomes standing instruction text in
+    this agent's system prompt, and the GET returns a person's criteria and
+    notes. Runs before any lookup, so the refusal says nothing about the target
+    (mirrors `reminders._self_gate`, `public_memory`)."""
+    if current_user.agent_name and current_user.agent_name != agent_name:
+        raise HTTPException(
+            status_code=403,
+            detail="Agent-scoped key may only record and read its own agent's seat decisions",
+        )
 
 
 def _seat_for(agent_name: str, execution_id: str) -> tuple[str, object]:
@@ -74,6 +90,7 @@ async def record_seat_decision(
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     """Record a decision for the seat this execution serves."""
+    _self_gate(current_user, agent_name)
     assert_agent_access(current_user, agent_name, detail="Not authorized")
     rate_limiter.enforce(f"seat_decision_record:{agent_name}", 60, 60)
     seat_email, execution = _seat_for(agent_name, body.execution_id)
@@ -85,7 +102,12 @@ async def record_seat_decision(
             raise HTTPException(status_code=409, detail="A record with this Idempotency-Key is in flight")
         return {**(idem.snapshot or {}), "replayed": True}
 
-    role = body.decided_by_role
+    # ent#814: the decision is stamped with the seat THIS run serves — the
+    # served person's own seat, the agent's own if it holds one, the primary's
+    # as the default. Resolved here, not taken from the agent, whose prompt
+    # used to name the primary's seat on every run; the agent's value is only
+    # the fallback when nobody's seat is on record.
+    role = resolve_served_seat(agent_name, seat_email)["role_id"] or body.decided_by_role
     if not role:
         assignment = resolve_assignment(agent_name, getattr(execution, "triggered_by", None))
         role = (assignment or {}).get("role_id") or None
@@ -122,6 +144,7 @@ async def list_seat_decisions(
 ):
     """The seat's standing decisions (criterion first), for reuse and citing.
     `include_history` adds superseded / closed / reversed / expired rows."""
+    _self_gate(current_user, agent_name)
     assert_agent_access(current_user, agent_name, detail="Not authorized")
     seat_email, _ = _seat_for(agent_name, execution_id)
     rows = db.list_seat_decisions(agent_name, seat_email, limit=seat_decision_service.MAX_ROWS_PER_SEAT)

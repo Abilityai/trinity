@@ -239,13 +239,13 @@ class TestMessageRouterFileValidation:
 
     def test_format_file_size(self):
         """Test human-readable file size formatting."""
-        from adapters.message_router import _format_file_size
+        from services.upload_service import format_file_size
 
-        assert _format_file_size(500) == "500 B"
-        assert _format_file_size(1024) == "1 KB"
-        assert _format_file_size(1536) == "2 KB"  # Rounded
-        assert _format_file_size(1048576) == "1.0 MB"
-        assert _format_file_size(5242880) == "5.0 MB"
+        assert format_file_size(500) == "500 B"
+        assert format_file_size(1024) == "1 KB"
+        assert format_file_size(1536) == "2 KB"  # Rounded
+        assert format_file_size(1048576) == "1.0 MB"
+        assert format_file_size(5242880) == "5.0 MB"
 
     def test_magic_available_flag(self):
         """Check that magic library availability is tracked."""
@@ -328,105 +328,105 @@ class TestParseMessageWithFiles:
 
 
 class TestFilenameSanitization:
-    """Test the _sanitize_filename helper used during workspace delivery."""
+    """Test upload_service.sanitize_filename, used during workspace delivery."""
 
     def test_strips_path_traversal_unix(self):
-        from adapters.message_router import _sanitize_filename
+        from services.upload_service import sanitize_filename
         used: set = set()
-        result = _sanitize_filename("../../etc/passwd", "fid1", used)
+        result = sanitize_filename("../../etc/passwd", "fid1", used)
         assert "/" not in result
         assert ".." not in result
         assert result == "passwd"
 
     def test_strips_absolute_path(self):
-        from adapters.message_router import _sanitize_filename
+        from services.upload_service import sanitize_filename
         used: set = set()
-        result = _sanitize_filename("/etc/passwd", "fid1", used)
+        result = sanitize_filename("/etc/passwd", "fid1", used)
         assert "/" not in result
         assert result == "passwd"
 
     def test_unicode_normalize_fullwidth(self):
         """Fullwidth unicode chars are normalized via NFKC."""
-        from adapters.message_router import _sanitize_filename
+        from services.upload_service import sanitize_filename
         used: set = set()
         # Fullwidth dot/slash/period sequences NFKC-normalize to ASCII.
         # Ensure traversal attempts encoded with unicode variants don't survive.
         traversal = "．．／etc／passwd"  # ＦＵＬＬＷＩＤＴＨ ../etc/passwd
-        result = _sanitize_filename(traversal, "fid1", used)
+        result = sanitize_filename(traversal, "fid1", used)
         assert "/" not in result
         assert ".." not in result
 
     def test_unicode_normalize_preserves_content(self):
         """Standard unicode names normalize cleanly."""
-        from adapters.message_router import _sanitize_filename
+        from services.upload_service import sanitize_filename
         used: set = set()
-        result = _sanitize_filename("café.txt", "fid1", used)
+        result = sanitize_filename("café.txt", "fid1", used)
         # NFKC keeps café intact (é is already NFKC-normal)
         assert result.endswith(".txt")
         assert "caf" in result
 
     def test_truncates_long_filename_preserving_extension(self):
-        from adapters.message_router import _sanitize_filename
+        from services.upload_service import sanitize_filename
         used: set = set()
         long_name = ("a" * 300) + ".txt"
-        result = _sanitize_filename(long_name, "fid1", used)
+        result = sanitize_filename(long_name, "fid1", used)
         assert len(result) <= 200
         assert result.endswith(".txt")
 
     def test_truncates_long_no_extension(self):
-        from adapters.message_router import _sanitize_filename
+        from services.upload_service import sanitize_filename
         used: set = set()
         long_name = "x" * 300
-        result = _sanitize_filename(long_name, "fid1", used)
+        result = sanitize_filename(long_name, "fid1", used)
         assert len(result) <= 200
 
     def test_collision_dedup(self):
         """Same sanitized name twice gets -1, -2 suffix before extension."""
-        from adapters.message_router import _sanitize_filename
+        from services.upload_service import sanitize_filename
         used: set = set()
-        first = _sanitize_filename("data.csv", "fid1", used)
+        first = sanitize_filename("data.csv", "fid1", used)
         used.add(first)
-        second = _sanitize_filename("data.csv", "fid2", used)
+        second = sanitize_filename("data.csv", "fid2", used)
         used.add(second)
-        third = _sanitize_filename("data.csv", "fid3", used)
+        third = sanitize_filename("data.csv", "fid3", used)
 
         assert first == "data.csv"
         assert second == "data-1.csv"
         assert third == "data-2.csv"
 
     def test_collision_dedup_no_extension(self):
-        from adapters.message_router import _sanitize_filename
+        from services.upload_service import sanitize_filename
         used: set = set()
-        first = _sanitize_filename("README", "fid1", used)
+        first = sanitize_filename("README", "fid1", used)
         used.add(first)
-        second = _sanitize_filename("README", "fid2", used)
+        second = sanitize_filename("README", "fid2", used)
         assert first == "README"
         assert second == "README-1"
 
     def test_empty_name_fallback(self):
-        from adapters.message_router import _sanitize_filename
+        from services.upload_service import sanitize_filename
         used: set = set()
-        assert _sanitize_filename("", "abc123", used) == "file_abc123"
+        assert sanitize_filename("", "abc123", used) == "file_abc123"
 
     def test_dot_only_fallback(self):
-        from adapters.message_router import _sanitize_filename
+        from services.upload_service import sanitize_filename
         used: set = set()
-        assert _sanitize_filename("...", "abc123", used) == "file_abc123"
+        assert sanitize_filename("...", "abc123", used) == "file_abc123"
 
     def test_hidden_dotfile_rejected(self):
         """Dotfiles like .env / .gitignore fall back to file_{id} (#222 parity)."""
-        from adapters.message_router import _sanitize_filename
+        from services.upload_service import sanitize_filename
         used: set = set()
-        assert _sanitize_filename(".env", "F001", used) == "file_F001"
+        assert sanitize_filename(".env", "F001", used) == "file_F001"
         used = set()
-        assert _sanitize_filename(".gitignore", "F002", used) == "file_F002"
+        assert sanitize_filename(".gitignore", "F002", used) == "file_F002"
         used = set()
-        assert _sanitize_filename(".mcp.json", "F003", used) == "file_F003"
+        assert sanitize_filename(".mcp.json", "F003", used) == "file_F003"
 
     def test_strips_unsafe_chars(self):
-        from adapters.message_router import _sanitize_filename
+        from services.upload_service import sanitize_filename
         used: set = set()
-        result = _sanitize_filename("my file<>?.txt", "fid1", used)
+        result = sanitize_filename("my file<>?.txt", "fid1", used)
         # Spaces and angle brackets get sanitized
         assert "<" not in result
         assert ">" not in result

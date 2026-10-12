@@ -84,6 +84,8 @@ def client(monkeypatch):
 
     fake_db = types.SimpleNamespace(
         get_a2a_exposed=lambda name: name in state["exposed"],
+        # ent#838: every agent here is public-scope — today's A2A behaviour.
+        get_a2a_scope=lambda name: {"scope": "public", "keyless": True},
         can_user_access_agent=lambda user, name: name in state["access"],
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=_cancel_queued,

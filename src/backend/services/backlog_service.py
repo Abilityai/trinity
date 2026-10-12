@@ -447,14 +447,3 @@ class BacklogService:
                 f"[Backlog] Cancelled {n} queued rows for agent '{agent_name}' ({reason})"
             )
         return n
-
-
-# Global singleton
-_backlog_service: Optional[BacklogService] = None
-
-
-def get_backlog_service() -> BacklogService:
-    global _backlog_service
-    if _backlog_service is None:
-        _backlog_service = BacklogService()
-    return _backlog_service
