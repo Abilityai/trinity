@@ -2035,8 +2035,8 @@ def _build_env_vars(
     # #946 / #1081 Phase 2: opt an allowlisted pilot agent into the pull worker
     # pool. Returns {} (a no-op) for every non-pilot agent, so the default push
     # behavior is unchanged. See services/agent_service/pull_mode.py.
-    from services.agent_service.pull_mode import pull_mode_env_vars
-    env_vars.update(pull_mode_env_vars(config.name))
+    from services.agent_service.pull_mode import apply_pull_mode_env
+    apply_pull_mode_env(config.name, env_vars)
     return env_vars, auto_assigned_subscription_id
 
 

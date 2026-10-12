@@ -5741,6 +5741,17 @@
         "api"
       ],
       "description": "Nine routes nothing calls stay removed: five secret-gated /api/internal routes (health, activities/track, activities/{id}/complete, agent-files/share, agents/{name}/sync-health-status), GET /api/agents/{name}/activities, GET /api/agents/activities/timeline and the observability router (GET /api/observability/{metrics,status}); checked in the AST census and in the live route table of the real app. Pins the OTel parse helpers at their new home services/ops_costs_service.py (GET /api/ops/costs)."
+    },
+    {
+      "file": "unit/test_3590_rebuild_pull_env.py",
+      "feature": "#3590",
+      "added": "2026-10-12",
+      "categories": [
+        "backend",
+        "unit",
+        "agent-lifecycle"
+      ],
+      "description": "The #1559 rebuild-from-nothing path bakes the pull-worker env for an allowlisted pilot (driven through the real recreate_missing_container, red before the fix on KeyError TRINITY_PULL_MODE); apply_pull_mode_env is the one owner of the set-or-clear idiom (pilot on empty dict, de-pilot clears, idempotent, module-global lookup honours stubs, MCP-key-absent and settings-fallback warnings); check_pull_mode_env_matches joins the start-path drift chain (flag only, fail-safe on unobserved attrs) and start_agent_internal recreates a pilot whose container lacks the flag; AST writer-set guard pins the three env assemblers on apply_pull_mode_env."
     }
   ]
 }
