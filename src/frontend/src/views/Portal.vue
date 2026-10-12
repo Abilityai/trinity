@@ -131,6 +131,7 @@
           :current-session-id="activeSessionId"
           :current-room-id="activeRoomIdFromRoute"
           :is-platform-session="store.isPlatformSession"
+          :workspace-only="workspaceOnly"
           :projects-available="store.projectsAvailable"
           :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
@@ -180,6 +181,7 @@
             :current-session-id="activeSessionId"
             :current-room-id="activeRoomIdFromRoute"
             :is-platform-session="store.isPlatformSession"
+            :workspace-only="workspaceOnly"
             :projects-available="store.projectsAvailable"
             :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
@@ -363,7 +365,7 @@
           :threads-loaded="threadsLoaded"
           :threads-failed="store.sessionsFailed || previewsFailed"
           :labels="inboxAgentLabels"
-          :is-platform="store.isPlatformSession"
+          :is-platform="store.isPlatformSession && !workspaceOnly"
           :mark-read="markRead"
           :rail-allowance="inboxRailAllowance"
           :canvas-count="inboxCanvases"
@@ -574,7 +576,7 @@
                The two audiences need different ones: a signed-in user can go
                make an agent, an external client can only ask the person who
                invited them. -->
-          <template v-else-if="store.isPlatformSession">
+          <template v-else-if="store.isPlatformSession && !workspaceOnly">
             <p :class="STAGE_TITLE">No agents here yet</p>
             <p :class="STAGE_BODY">
               Agents you own, and agents shared with you, appear here.
@@ -585,7 +587,7 @@
             <p :class="STAGE_TITLE">No agents shared with you yet</p>
             <p :class="STAGE_BODY">
               Ask whoever invited you to share an agent with
-              <span class="font-medium">{{ store.clientEmail || 'your email' }}</span>.
+              <span class="font-medium">{{ store.clientEmail || authStore.user?.email || 'your email' }}</span>.
             </p>
           </template>
           <button class="sm:hidden mt-4 text-sm text-action-primary-600" @click="mobileNav = true">Open menu</button>
@@ -894,6 +896,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick
 import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
+import { canvasReturnPath, isWorkspaceOnlyRole } from '@/utils/workspaceOnly'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
 import { safeStorage } from '@/utils/safeStorage'
@@ -997,6 +1000,9 @@ import {
 
 const store = useClientPortalStore()
 const authStore = useAuthStore()
+// trinity-enterprise#837 — a `user` works in the Workspace only: the next step
+// on an empty roster is the one an external client gets, not "Go to your agents".
+const workspaceOnly = computed(() => isWorkspaceOnlyRole(authStore.user?.role))
 // trinity-enterprise#657. Declared with its siblings rather than beside its
 // first reader (`decorate`, ~900 lines down): `onMainReset` reads it too, and a
 // `const` used above its declaration is a TDZ crash the moment any caller
@@ -1062,7 +1068,8 @@ async function onVerify() {
     // where the client was when their session lapsed, and until now nothing ever
     // read it back: the expired notice promises "pick up where you left off", so
     // it has to actually land there rather than on the roster root.
-    const resumeTo = store.resumePath
+    // trinity-enterprise#837: or the shared canvas whose "Sign in" sent them here.
+    const resumeTo = store.resumePath || canvasReturnPath(route.query.redirect)
     await store.verifyCode(email.value.trim().toLowerCase(), code.value.trim())
     await bootstrap()
     if (resumeTo && resumeTo !== route.fullPath) {
@@ -1143,7 +1150,7 @@ const unlandedAgentPage = computed(() => (
 const railFreePage = computed(() => unlandedAgentPage.value || (projectsRoute.value ? 'projects' : null))
 const activeAgent = computed(() => {
   if (isInboxRoute.value) {
-    return inboxSelectedAgent({ item: inboxSelection.value, threads: threads.value, asks: store.asks, agents: store.agents })
+    return inboxSelectedAgent({ item: inboxSelection.value, threads: threads.value, asks: store.asks, agents: store.agents, mentions: store.mentions })
   }
   // Never substitute a different agent for one the caller asked for by name.
   if (unreachableAgent.value) return null
@@ -1679,7 +1686,7 @@ const activeRoomCarryNotice = computed(() => (
     : null
 ))
 
-async function onEscalateToRoom({ agents, message, attachments = [] } = {}) {
+async function onEscalateToRoom({ agents, message, attachments = [], tags = [] } = {}) {
   if (escalating.value || !agents?.length) return
   escalating.value = true
   roomCarryNotice.value = null
@@ -1742,7 +1749,9 @@ async function onEscalateToRoom({ agents, message, attachments = [] } = {}) {
 
     if (message) {
       try {
-        await store.postRoomMessage(roomId, message)
+        // trinity-enterprise#631: the people the message tagged go with it.
+        if (tags && tags.length) await store.postRoomMessage(roomId, message, { tags })
+        else await store.postRoomMessage(roomId, message)
       } catch {
         // trinity-enterprise#657: the room is open in front of them, but the
         // 1:1's `send()` already emptied the composer, so without this the
@@ -3027,12 +3036,16 @@ function startAsksPoll() {
   stopAsksPoll()
   if (!store.isClientSignedIn) return
   store.fetchAsks()
+  // trinity-enterprise#631: the tags addressed to this person ride the same
+  // tick — a tag is a row, not an event, so a backgrounded tab loses nothing.
+  store.fetchMentions()
   asksTimer = setInterval(() => {
     // Visibility-aware: a backgrounded tab polls nothing. The next foreground
     // tick catches up, and an ask that arrived meanwhile is not lost — it is a
     // row, not an event.
     if (document.visibilityState !== 'visible') return
     store.fetchAsks()
+    store.fetchMentions()
     // ent#557: the SAME tick refreshes threads and their read state, which is
     // what makes an unread reply appear while the user is elsewhere in the
     // Workspace. `refreshThreads` was event-driven only — a send, a navigation,

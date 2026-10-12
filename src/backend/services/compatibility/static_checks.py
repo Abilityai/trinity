@@ -775,10 +775,6 @@ def c_g001(snap):
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
-def _is_skill_md(rel: str) -> bool:
-    return rel.endswith("SKILL.md") or rel.endswith(".md")
-
-
 def c_p001(snap):
     bad = []
     for rel, info in _skill_files(snap).items():

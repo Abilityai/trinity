@@ -47,7 +47,7 @@ Human-in-the-loop approval gates surfaced through the Operations queue. An agent
 
 Answering an item marked **Changed by the agent** or **Closed by the agent** is refused once (`409 item_diverged`): the card refreshes and asks you to review it, and the next **Send** answers anyway. The Operations header counts items whose answer did not reach the agent and items the agent closed, and offers one-click cancel of the closed ones. The platform never writes over an agent's queue file it cannot parse, and delivers an answer only into an entry that still matches what you answered.
 
-**Platform heads-ups.** Trinity itself files items of other types into the same queue — for example a Workspace client rating a response as not useful, or an agent calling a playbook that does not exist. These carry no decision; they show **Got it** only, and acknowledging them sends nothing back to the agent.
+**Platform heads-ups.** Trinity itself files items of other types into the same queue — for example a Workspace client rating a response as not useful, or an agent calling a skill that does not exist. These carry no decision; they show **Got it** only, and acknowledging them sends nothing back to the agent.
 
 Some heads-ups describe a *condition* rather than an event — for example a subscription running low on headroom, a skills-library URL Trinity refused to adopt, a stale system-agent base image, or an agent's dispatch breaker gone dormant. For those, Trinity keeps **one pending row per condition**:
 

@@ -2,6 +2,7 @@
   <div>
     <div
       class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-3 text-sm leading-relaxed"
+      :class="BUBBLE_WRAP_CLASS"
     >
       <PortalMarkdown :content="content" />
     </div>
@@ -77,6 +78,7 @@
  */
 import { ref, onBeforeUnmount } from 'vue'
 import PortalMarkdown from './PortalMarkdown.vue'
+import { BUBBLE_WRAP_CLASS } from './portalBubble'
 import { copyText, copyFeedback, COPY_FEEDBACK_TTL_MS, COPY_MESSAGE_ARIA } from '@/utils/clipboard'
 
 const props = defineProps({

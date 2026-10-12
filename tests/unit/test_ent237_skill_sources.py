@@ -1214,6 +1214,8 @@ class TestSourceEndpointGating:
     # axis was misread on this branch; `list_skill_sources` was the first.
     MUTATING = [
         "create_skill_source",
+        # trinity-enterprise#692: the idempotent register behind the MCP tool.
+        "apply_source",
         "update_skill_source",
         "delete_skill_source",
         "sync_skill_source",

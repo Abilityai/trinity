@@ -8,17 +8,15 @@ value then flowed unguarded into ``get_agent_analytics`` and out to the Agent
 Detail Overview chart. Canary G-03 *detects* the skew at severity ``minor`` but
 prevents nothing.
 
-The fix clamps at the **write**, in all three writers, so no reader has to know:
+The fix clamps at the **write**, in both writers, so no reader has to know:
 
 * ``src/backend/db/schedules/executions.py`` — ``update_execution_status``
 * ``src/scheduler/database.py`` — the ``schedule_executions`` finalizer
-* ``src/scheduler/database.py`` — the ``process_schedule_executions`` finalizer
 
-The issue named the first two; the third is the same unguarded subtraction on
-the process-execution table and is fixed here too, which is why this file guards
-the invariant at **source level** as well as behaviourally — the two scheduler
-writers live in a separate image that these unit tests cannot import, and a
-fourth call-site added later would otherwise reintroduce the bug silently.
+This file guards the invariant at **source level** as well as behaviourally —
+the scheduler writer lives in a separate image that these unit tests cannot
+import, and a third call-site added later would otherwise reintroduce the bug
+silently.
 
 Trade-off recorded deliberately: a skewed row clamps to exactly ``0``, which
 makes it indistinguishable from a genuine sub-millisecond execution. Preserving
@@ -344,7 +342,7 @@ def _is_guarded(value: ast.AST, *, allow_none: bool = True) -> bool:
 def test_1832_every_duration_writer_is_clamped(path):
     """No writer may bind duration_ms to an unguarded ``completed_at - started_at``.
 
-    The two ``src/scheduler`` writers ship in a separate image that these unit
+    The ``src/scheduler`` writer ships in a separate image that these unit
     tests cannot import, so the invariant is enforced against the source. This
     also catches a call-site added later, which is how the reported bug survived
     being fixed in one place — twice (#1832 low end, #2434 high end).
@@ -456,7 +454,7 @@ def test_2434_none_is_only_accepted_at_a_fabrication_site():
 
     Blanket-accepting `None` was the loophole Codex named: it would let a future
     edit replace `duration_ms_between(...)` with `None` inside
-    `update_execution_status` or either scheduler finalizer — throwing away a
+    `update_execution_status` or the scheduler finalizer — throwing away a
     real number — and this guard would still pass.
     """
     value = ast.parse("duration_ms = None").body[0].value

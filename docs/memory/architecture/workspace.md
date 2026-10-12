@@ -21,6 +21,32 @@ through `client_portal/portal_auth.py::get_portal_principal`, which returns
 `(email, is_platform, is_person)`; the roster is every agent shared with that email, plus — for a
 platform session only — the agents they own. `is_person` (trinity-enterprise#611) is False only
 for a platform principal that is not a person: a system-scoped key reads here but cannot answer an ask.
+The field defaults to False, and the principal also carries `self_approves` + `credential` (#3404): a
+portal session token says how it was minted (`minted_by`: `otp` | `delegate`), and only a platform
+person or an `otp`-minted session may self-approve a gated skill — see `feature-flows/skill-gate.md`.
+
+**The `user` rung is Workspace-only (trinity-enterprise#837).** A platform account whose role is
+`user` is a member who works with agents here and nowhere else: `get_current_user` refuses it on
+every operator route (403 `workspace_only`, `architecture/security.md` §1). The Workspace doors —
+`get_portal_principal`, `shared_sessions/router.py::get_room_principal`, the Workspace voice start —
+resolve the credential through `resolve_platform_user_unfloored`, so such a member reaches this
+surface exactly as before, roster included (shared agents plus any they own). The handful of
+operator-side routes the Workspace calls (session identity, sign-out, the `/ws` ticket, preferences,
+loops, the voice canvas, an `authorized` canvas link, the public chat page's history) carry
+`@workspace_route` and admit a browser
+session only; the census in
+`tests/unit/test_837_workspace_route_census.py` fails when a Workspace file calls an operator route
+that is neither a door nor marked. In the SPA, `/login` lands a `user` in `/workspace` and the router
+guard sends one on an operator URL there (`/agents/:name/*` → `/workspace?agent=:name`,
+`utils/workspaceOnly.js`). Sharing an agent writes no login whitelist row: the person signs in here
+with the code. Inside the Workspace such a member keeps the **team view**: signed in with the platform login,
+`get_portal_principal` resolves them as a platform account (`is_platform=True`), so they read every canvas audience
+(`agent_page.canvas_audience_for`), the agent's whole activity, loop runs included
+(`agent_page._client_scope`), voice and model choice — the narrower client view is for people
+without an account (decided at #837; nothing new is exposed, a `user` saw all of it on Agent Detail
+before). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
+reads (`WORKSPACE_WS_EVENT_TYPES` / `_FIELDS`, `architecture/integrations.md`). An agent whose owner
+is Workspace-only is refused at the rooms door.
 
 **Sign-out ends whichever credential is live — never a derivation of it (#2258).** The
 implicit entry above runs the other way too: `isPlatformSession = !portalToken &&
@@ -29,7 +55,7 @@ fallback, and the Workspace's "Sign out" used to re-enter as the operator on ref
 re-authenticate a client as the co-resident operator). `stores/clientPortal.js::
 signOutEverywhere()` ends the platform session (`authStore.logout()`) **first**, then
 clears portal state, and routes by principal — operator → `/login`, client → the OTP
-form. A persisted suppression flag was rejected on evidence: the JWT is an axios
+form (a `user` signing back in at `/login` lands in `/workspace`, ent#837). A persisted suppression flag was rejected on evidence: the JWT is an axios
 **default** header and per-request headers merge over defaults, so a flag hides the
 disclosure while every portal request still carries the operator's credential.
 `auth.logout()` clears local state **before** the network revoke, because the global 401
@@ -506,7 +532,7 @@ feed's live rows plus the conversation's in-flight emit joined **by execution id
 (`workSignalFromItems`), never two signals summed. `PortalWorkCard` is the one card for the chat
 (under the message; the stream's last line is the current step while live; the terminal card
 renders FROM the durable #2320 verdict, so it survives a reload; **Ask about it** is a prefill,
-never a send — the ruled lesser control) and for `PortalWork`, the tab body (Now · Earlier; since the ent#610 2026-09-30 ruling Work draws no ask — one `PortalAsksWaitingLine` ("N ask(s) waiting on you · Open in Inbox", counted from `openAsks`, to `asksHomeRoute(agent)`), which Info also mounts for every principal; the ask row itself renders in the Inbox, in its raising chat's thread as a tile when `raised_in_turn` (placed by server time; the chat also reads its own chat-turn asks, `GET …/asks?chat_id=`, with no ended window, merged under the store's fresher rows), and in a project's Needs you — since #2915 the projection (`WorkspaceAsk`) carries a coarse `sync ∈ {confirmed, changed, closed, unconfirmed}` + `aging` (never the reason or a poller timestamp), rendered by the shared `queueSyncBadge` rule (in the Workspace through `workspaceAskBadge`, which drops the operator-only "Unconfirmed" since ent#610 PR A2), and an answer to a changed/closed ask is refused with `AskError(409, "item_diverged")` until `acknowledge_divergence` rides the resend; since trinity-enterprise#611 the list also carries asks that ENDED in the last 7 days (`include_ended`, read past the operator's Clear All) with a coarse `ended_by ∈ {you, operator, timeout}` + `ended_at` and never an email or the cancel reason — `pending-only` keeps a project's Needs you to what is still open; a chat's ended chat-turn asks are its own read, not this window — and the answer is person-only; since PR B the projection also names `proposal`, the exact action an approval asks the person to approve (rendered read-only by `QueueProposal`), while `context` stays off; since trinity-enterprise#610 PR A2 (§3g L7) a selected ask's context is its own lazy read, `GET …/asks/{id}/context` → `asks/service.get_ask_context` (the run only after the agent / live-window / audience checks on the agent-written `execution_id`; an origin excerpt only from a chat TURN's thread (`triggered_by = public`) verified as the viewer's, else the ask's own chat only for an in-turn ask — a background ask has no chat origin; no `cost` or `execution_id` — stricter than Work's projection by decision), rendered by `PortalAskContext` below the pane's card;
+never a send — the ruled lesser control) and for `PortalWork`, the tab body (Now · Earlier; since the ent#610 2026-09-30 ruling Work draws no ask — one `PortalAsksWaitingLine` ("N ask(s) waiting on you · Open in Inbox", counted from `openAsks`, to `asksHomeRoute(agent)`), which Info also mounts for every principal; the ask row itself renders in the Inbox, in its raising chat's thread as a tile when `raised_in_turn` (placed by server time; the chat also reads its own chat-turn asks, `GET …/asks?chat_id=`, with no ended window, merged under the store's fresher rows), and in a project's Needs you — since #2915 the projection (`WorkspaceAsk`) carries a coarse `sync ∈ {confirmed, changed, closed, unconfirmed}` + `aging` (never the reason or a poller timestamp), rendered by the shared `queueSyncBadge` rule (in the Workspace through `workspaceAskBadge`, which drops the operator-only "Unconfirmed" since ent#610 PR A2), and an answer to a changed/closed ask is refused with `AskError(409, "item_diverged")` until `acknowledge_divergence` rides the resend; since trinity-enterprise#611 the list also carries asks that ENDED in the last 7 days (`include_ended`, read past the operator's Clear All) with a coarse `ended_by ∈ {you, operator, timeout}` + `ended_at` and never an email or the cancel reason — since trinity-enterprise#816 (the 2026-10-07 ruling) an ask to a role several people fill is ONE row delivered to each of them: "addressed to the viewer" is `addressed_to_email = viewer` OR `viewer ∈ resolved_to`, in SQL for the list and its count (`db/operator_queue._resolved_to_contains`) and in `_is_addressed_to` for every per-ask door (answer, dismiss, discuss, context — a non-addressee keeps the uniform 404); the projection carries `shared`, the first answer wins (a later one is `already_resolved`), the others read `ended_by = someone_else` + `answered_by` (that co-addressee's name, else address; never an operator's), and Dismiss/Discuss are refused 422 `shared_ask` and hidden in `PortalAsks` until they are per person; a shared ask has no single addressee, so it attaches to no chat and lives in the Inbox only — `pending-only` keeps a project's Needs you to what is still open; a chat's ended chat-turn asks are its own read, not this window — and the answer is person-only; since PR B the projection also names `proposal`, the exact action an approval asks the person to approve (rendered read-only by `QueueProposal`), while `context` stays off; since trinity-enterprise#610 PR A2 (§3g L7) a selected ask's context is its own lazy read, `GET …/asks/{id}/context` → `asks/service.get_ask_context` (the run only after the agent / live-window / audience checks on the agent-written `execution_id`; an origin excerpt only from a chat TURN's thread (`triggered_by = public`) verified as the viewer's, else the ask's own chat only for an in-turn ask — a background ask has no chat origin; no `cost` or `execution_id` — stricter than Work's projection by decision), rendered by `PortalAskContext` below the pane's card;
 rooms grouped by participant, absence visible). **OSS-core by decision (ent#525): deliberately
 ungated.** See [workspace-work.md](../feature-flows/workspace-work.md).
 
@@ -935,6 +961,96 @@ reply (unchanged). The relation is not persisted on the stored user row, so a re
 quote on a sent reply (ent#746). Pinned by `portalInChatReply.mount.spec.js` and
 `portalInboxShell.mount.spec.js`.
 
+## Person tags — a pointer, not a seat (trinity-enterprise#631)
+
+**OSS core, ungated — the same edition as rooms (ent#443) and the Inbox (ent#610).** A
+person in a 1:1 chat or a room `@`s a colleague and the colleague is told. Requirement
+§5.42 of `core-agent.md`; flow in `feature-flows/workspace-person-tag.md`.
+
+**One row on the existing ledger, outside the ask lifecycle.** A tag is ONE
+`operator_queue` row (`db/queue_mentions.py`) — type `mention`, `addressed_to_email` = the
+tagged person, platform-written `context.mention` = `{conversation {kind, id, label},
+message_id, seq, tagged_by {username, label}, person {label}}`, `raised_by = 'person'`,
+`channel = 'mention'`. Its status is `delivered` → `read` (`acknowledged_at` is the read
+time — unused on a platform-minted row, since no agent acknowledges one) and **never
+`pending`**: every depth cap, expiry sweep, delivery flag, ending observer and operator badge
+reads `pending`, so starting outside it keeps all of that blind to the row by construction.
+The id is `mention-<h(kind:conversation)>-<h(message)>-<h(email)>`: deterministic, so the
+`(agent_name, request_id)` conflict makes a repeat a no-op (same person twice, a retried
+turn, a re-delivery), and one conversation's tags share a prefix the tagger's marks read in
+one query (served by `idx_operator_queue_type`). `agent_name` is the conversation's agent —
+a room's first live agent participant, by join order — which is what scopes the row's
+lifecycle (an agent rename cascades it; an agent delete removes it). `mention-` is in
+`_RESERVED_ID_PREFIXES` (an agent's queue file cannot forge or pre-suppress one, and
+`is_platform_minted` keeps it out of the agent's file and answer wake) and in the
+about-a-person subset (a machine key never reads one). **A row is a tag only when it
+carries BOTH the reserved `mention-` id and `type='mention'`** (`queue_mentions.is_tag_clause`
+/ `is_person_tag`): `type` is agent-authored (the queue file's ingest only bounds its length),
+so keying on the type alone let an agent forge "Alice mentioned you" into a roster member's
+Inbox and hide its own ask from the operator by naming it `mention`. The operator door
+(`_list_conditions`, `get_stats`, and `GET`/`respond`/`cancel` on `/api/operator-queue/{id}`,
+each a 404) leaves tags out **unconditionally** — `type` is a query parameter of the list
+route, so an exception for "a caller who names the type" was a door any sharee could open
+with `?type=mention`. Listed there, a tag would tell anyone with access to the agent who
+tagged whom.
+
+**The wake is untouched.** `shared_sessions.service.resolve_mentions` still returns the
+agents to wake from the TEXT, and the message's stored `mentions` stay agent-only. Tags are
+not parsed from text: the composer sends `tags: [email]` beside it (picked from the `@`
+typeahead; a name the writer deleted is not tagged — `portalMentions.tagsInText`). A name
+equal to an agent participant still wakes that agent, exactly as before.
+
+**Who, decided once in `services/person_mention_service.py`.** `tagger_for` resolves the
+tagger from the auth context and refuses an agent key (`agents_cannot_tag` — checked before
+`is_person_principal`, since an agent key resolves to its owner), a non-person platform key,
+and an external Workspace client (`tagging_unavailable`: the colleagues it would list are
+the organisation's, #78). `taggable_people` / `resolve_tags` share ONE predicate
+(`db.users._taggable_conds`): an account with an email, not suspended, that is an admin, an
+owner, or a sharee of one of the conversation's agents. The picker requires a query, caps
+at 8 and is rate-limited (`room_people:*`, `portal_people:*`, 120/min) — the ent#450 shape,
+never a directory. The send-time check refuses before ANY write (in a room, before the
+newcomer join): one `unknown_person` for "no account" and "no access", so it is no oracle;
+`cannot_tag_yourself`; `too_many_tags` past 10 distinct.
+
+**Delivery.** Rooms: `post_message(tags=)` validates, appends, then `_deliver_tags` writes
+the rows — inside the #3210 "the message has landed" discipline: a failed write is
+reported as `failed` on the tagger's marks, never as a failed post. 1:1 chat: the router
+resolves `PortalChatRequest.tags` before the turn (`service.resolve_chat_tags`, refusals as
+`ChatTagError` → 403/422 with `{code, message, name}`), threads `person_tags` through
+`start_portal_turn` → `portal_chat`, and delivers once `_persist_user_turn` returns the row
+that stands for the message (the retry-reuse row on a retry — still one item).
+
+**The tagged person's door** (`client_portal/mentions/router.py`, portal principal):
+`GET /mentions` (theirs, newest first), `GET /mentions/{id}`, `POST /mentions/{id}/read`
+(person only). Addressee match in the service; not-yours and not-there are one 404. Opening
+one is `open_for_reader`: for a room, `_room_access` — the room's own membership rule, **per
+door**: a live `workspace_user` participant (email) on either door; a live `user` participant
+(username) or an admin on the **platform door only** (`Reader.is_platform`; a Workspace
+session for a platform member's or an admin's address — a portal_delegate-minted one
+included — is a 404 on that room through `_require_membership`, so it is not shown it here
+either, #78) — decides `can_see`. Only
+then does any content cross: the tagged message and its neighbours (seq −3…+2, each
+≤4,000 chars), sender labels, never `execution_id` or cost. Otherwise `can_see = false`,
+`conversation.id = null`, no content (not even the tagger's own words), and
+`can_let_you_in` = the room's human moderators. A 1:1 chat is always its owner's alone:
+`can_let_you_in = [tagger]`.
+
+**The tagger's view.** Rooms: `get_room` stamps `tags` on the caller's own messages and
+returns `own_tags` (message id → `[{label, state, read_at}]`) for the whole room, filtered to
+`tagged_by.username` = the caller, so the 3 s incremental poll (which re-reads only new
+messages) still sees an older tag turn `read`. 1:1: history rows carry `tags` on the
+reader's own messages (a thread is only ever its owner's). `PortalTagMarks.vue` draws them
+— envelope "in their Inbox", double check "read", cross "not delivered" — icon and word.
+
+**The Inbox.** `portalInbox.js` gains a third item type, `mention:<id>`: in Unread while
+`state = unread` and in All always, counted in `inboxCounts().came` (one per unread tag), never
+in Action. The store reads `GET /mentions` on the asks tick (`fetchMentions`; absence is
+404/403, a failure keeps the last good list). The pane renders `PortalMentionCard.vue`,
+which reads the item, says `rendered`, and the container's read waits for that (the chat
+rule — a previewed card is reloaded on an explicit open). The read is
+`store.markMentionRead`; the row stays in place drawn read (`ghostOf`). Tags merge into
+Unread/All as their read lands; the tabs' honest state stays the chats'.
+
 ## Agents at the centre — Main, Reset, and the one page (ent#523, ent#524)
 
 Clicking an agent opens the **conversation** you were last in. `/workspace/a/:agentName`
@@ -1319,6 +1435,19 @@ threw it away — so it returns `message_id`, **declared on `PortalChatResponse`
 response model strips undeclared keys in silence. The `v-if="item.message.id"` gate stays:
 carry the identifier with the flag and let the consumer still refuse an empty one.
 
+**A self-approved reply says so (trinity-enterprise#754).** `get_history` (both the window and the
+reply poll's `limit` read) calls `skill_gate_map_service.annotate_self_approved_turns`, which marks
+each agent reply whose `execution_id` has an ent#752 `self_approved` record with
+`gate_self_approved` / `gate_self_approved_by_viewer` (the portal session's email, casefolded,
+against the record's requester key). Both are declared on `PortalHistoryMessage` (an undeclared
+key is stripped by `response_model`); no email is added. `assistantRow` / `replyFromHistory`
+carry them, so a just-landed reply shows `ExecutionGateMarker` under the bubble without a reload.
+Rows from before #3166 (NULL `execution_id`) read false. The synchronous fallback (`POST .../chat`)
+answers the same pair from `_persist_reply`, declared on `PortalChatResponse`; the client reads either
+spelling through `portalUtils.turnGateFlags`. The marker is for people only: the history route passes
+`principal.is_person` and the chat path `gate_is_person`, so a system key on the platform session
+reads neither flag (the executions rule).
+
 **A reply names its turn (#3166).** `enterprise_portal_messages.execution_id` holds the
 execution that wrote the row: the dispatched id the client watches (never a cold retry's
 second row), on the reply, on the skill-approval notice and on the user row (stamped after
@@ -1368,6 +1497,24 @@ is the edition-agnostic surface it plugs into:
   narrow view (the server omits the log, tasks, decisions and members); the
   controls it cannot use are absent, not disabled. `ProjectImportModal.vue`
   imports a folder project once.
+- **Project hub (v3, `ProjectHub.vue`)** — four cards in ONE grid with
+  `lg:items-start` (#3574: a grid row stretches every cell to its tallest
+  sibling, so a tall "Needs you" once made the empty Metrics card beside it
+  screen-tall). **Needs you** is `ProjectNeedsYou.vue`: the Overview is a
+  list, not a second Inbox pane — a pending ask is the Inbox's own list row
+  (agent, when, one-line inline-markdown title; rows from the pure
+  `projectsUtils.projectNeedsYouRows`, pending in `askUrgencyCompare` order),
+  with **Answer** mounting `PortalAsks` narrowed by `askIds` in place (the one
+  answer surface, unchanged) and **Open in Inbox** going to
+  `askInboxRoute` (`?tab=action&from=<agent>&item=ask:<id>`). An opened row
+  stays after its ask ends until collapsed (PortalAsks draws the ending and
+  the ent#468 confirmation); a row inside its ent#748 Undo window is forced
+  open, since Undo lives on the card. Gates: read failed → loading (ids but
+  no list yet — never "nothing waiting" before the read) → nothing waiting
+  (on the ROWS, not the ids) → rows. Focus follows the toggle (the opened
+  card's `tabindex=-1`, then the Answer button back). The "Open in Inbox"
+  link class is `portalUtils.INBOX_LINK_CLASS`, shared with
+  `PortalAsksWaitingLine`.
 - **Chat and room header** — `ProjectChatControls.vue` (`kind` thread|room):
   the project badge + Detach, or one "Project" button (add to a project, or —
   for a 1:1 chat — make one from it). **Wrap up** in a linked chat sends the

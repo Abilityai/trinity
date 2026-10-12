@@ -7,7 +7,8 @@
   -->
   <span
     :class="[
-      'inline-flex items-center gap-1.5 rounded-full px-[9px] py-[2.5px] text-[11.5px] font-[550] leading-[1.4] tracking-[.01em] whitespace-nowrap',
+      'inline-flex items-center rounded-full font-[550] leading-[1.4] tracking-[.01em] whitespace-nowrap',
+      SIZE_CLASSES[size],
       VARIANT_CLASSES[variant],
     ]"
   >
@@ -18,6 +19,13 @@
 
 <script setup>
 // Full literal class strings so Tailwind's content scan sees every one.
+// `sm` (trinity-enterprise#754) is the Skills card's author-mode chip: the
+// 11px step of the type scale, one fact per badge like `md`.
+const SIZE_CLASSES = {
+  md: 'gap-1.5 px-[9px] py-[2.5px] text-[11.5px]',
+  sm: 'gap-1 px-[7px] py-[1.5px] text-[11px]',
+}
+
 const VARIANT_CLASSES = {
   success: 'bg-status-success-100 text-status-success-700 dark:bg-status-success-500/16 dark:text-status-success-300',
   warning: 'bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-500/16 dark:text-status-warning-300',
@@ -48,6 +56,11 @@ defineProps({
   dot: {
     type: Boolean,
     default: false,
+  },
+  size: {
+    type: String,
+    default: 'md',
+    validator: (v) => ['md', 'sm'].includes(v),
   },
 })
 </script>

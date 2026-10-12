@@ -257,3 +257,44 @@ describe("ent#661 v3 — the steward's tools", () => {
     assert.ok(kind.includes("ask"));
   });
 });
+
+describe("ent#588 — an agent starts or imports a project (projects.manage)", () => {
+  it("create_project sends name and goal, and the tracker only when given", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      createProjectAsAgent: async (body: Record<string, unknown>) => {
+        calls.push(["create", body]);
+        return { ...PROJECT, steward: { kind: "agent", ref: "a1" } };
+      },
+    } as Partial<TrinityClient>);
+    const out = JSON.parse(await tools.create_project.execute({ name: "Q4 launch", goal: "Ship it." }));
+    assert.equal(out.success, true);
+    assert.equal(out.project.id, PROJECT.id);
+    assert.deepEqual(calls, [["create", { name: "Q4 launch", goal: "Ship it." }]]);
+  });
+
+  it("without the grant the named refusal comes back, never a throw", async () => {
+    const tools = makeTools({
+      createProjectAsAgent: async () => {
+        throw apiError(403, { code: "project_management_not_permitted", message: "No project-management permission." });
+      },
+    } as Partial<TrinityClient>);
+    const out = JSON.parse(await tools.create_project.execute({ name: "x", goal: "y" }));
+    assert.equal(out.success, false);
+    assert.equal(out.code, "project_management_not_permitted");
+  });
+
+  it("import_project forwards only the path; a second import's 409 is surfaced", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      importProjectAsAgent: async (path: string) => {
+        calls.push(["import", path]);
+        throw apiError(409, { code: "already_imported", message: "This folder was already imported." });
+      },
+    } as Partial<TrinityClient>);
+    const out = JSON.parse(await tools.import_project.execute({ path: "project_files/q4" }));
+    assert.deepEqual(calls, [["import", "project_files/q4"]]);
+    assert.equal(out.success, false);
+    assert.equal(out.code, "already_imported");
+  });
+});

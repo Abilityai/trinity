@@ -497,8 +497,13 @@ async def test_acquire_gate_fails_open_on_db_error(gated_capacity, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _req(method: str, path: str):
-    return SimpleNamespace(method=method, scope={"path": path})
+def _req(method: str, path: str, path_params=None):
+    """A request as the router hands it over: an agent route's `{name}` segment is
+    a path parameter (trinity-enterprise#837 — the fence binds the name to it)."""
+    if path_params is None:
+        parts = path.split("/")
+        path_params = {"name": parts[3]} if path.startswith("/api/agents/") and len(parts) > 3 else {}
+    return SimpleNamespace(method=method, scope={"path": path}, path_params=path_params)
 
 
 @pytest.fixture
@@ -547,6 +552,21 @@ def test_fence_denies_everything_else(ghost_fence, method, path):
 
     with pytest.raises(HTTPException) as exc:
         ghost_fence(_req(method, path), "ghost-a")
+    assert exc.value.status_code == 403
+
+
+def test_a_static_route_that_spells_the_ghosts_name_is_not_its_own(ghost_fence, monkeypatch):
+    """`GET /api/agents/slots` is a static fleet route registered ahead of
+    `/api/agents/{agent_name}`: its raw path matches the self-info shape with the
+    name `slots`, but the route carries no parameter (trinity-enterprise#837)."""
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(
+        _REAL_MODULES["database"].db, "get_agent_ephemeral_info",
+        lambda name: {"is_ephemeral": True},
+    )
+    with pytest.raises(HTTPException) as exc:
+        ghost_fence(_req("GET", "/api/agents/slots", path_params={}), "slots")
     assert exc.value.status_code == 403
 
 

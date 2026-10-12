@@ -1,0 +1,46 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-09",
+  "mode": "daily",
+  "scope": "diff",
+  "base": "origin/dev",
+  "issue": "abilityai/trinity-enterprise#849",
+  "phases_run": [0, 1, 2, 4, 6, 7, 9, 10, 12, 13, 14],
+  "phases_skipped": {"3": "no dependency change", "5": "no Docker or compose change", "8": "no agent-shipped file changed", "11": "no new data class"},
+  "stack_cve_quicklist": [],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_auth": ["POST /api/auth/email/request", "POST /api/auth/email/verify", "GET /api/auth/mode", "MCP inline sign-in", "Workspace guest sign-in", "Telegram /login", "WhatsApp /login", "Slack require_email", "POST /api/public/verify/request", "POST /api/public/verify/confirm"],
+    "unchanged_break_glass": "POST /api/token"
+  },
+  "findings": [
+    {"id": 1, "severity": "medium", "confidence": 9, "status": "VERIFIED", "evidence": "SUPPORTED", "category": "auth-policy-bypass",
+     "owasp_2025": "A07", "file": "src/backend/adapters/slack_adapter.py", "title": "Slack require_email emailed code did not consult the login policy",
+     "exploit": "Policy off; attacker controlling a member inbox completes the Slack require_email step with the emailed code.",
+     "impact": "Passes the Slack verification step only; access policy reads the Slack profile email, so no sharing or owner privilege is granted by the code.",
+     "resolution": "fixed in branch: member rule + detached send, code from secrets, caller guard extended to send_verification_code"},
+    {"id": 2, "severity": "medium", "confidence": 9, "status": "VERIFIED", "evidence": "SUPPORTED", "category": "enumeration-oracle",
+     "owasp_2025": "A01", "file": "src/backend/routers/public.py", "title": "Public-link per-address 429 counted only addresses that were sent a code",
+     "exploit": "Policy off; four /verify/request calls for one address: outsider gets 429 on the 4th, member gets 200.",
+     "impact": "Reveals platform membership of an address.",
+     "resolution": "fixed in branch: every request is counted per address while codes are refused"}
+  ],
+  "hypotheses": [],
+  "coverage_gaps": [],
+  "accepted": [
+    "Provider or member-lookup error fails open (owner decision: availability over lockout).",
+    "Sessions, MCP keys and channel bindings issued before the toggle stay valid (tracked separately)."
+  ],
+  "out_of_scope_preexisting": ["POST /api/access/request reports already_registered, revealing whitelist membership when self-signup is enabled; unrelated to this policy."],
+  "checks": {
+    "secrets_in_diff": "none (prefix grep over added lines; fixtures use example.com / x.com)",
+    "docs_disclosure_guard": "new seam file added to SEAM_FILES; no pattern hit",
+    "independent_verifier": "fresh-context adversarial agent; findings 1-2 came from it and were reproduced",
+    "mutation": "each fix reverted from a scratch copy: its test went red; restored byte-identical"
+  },
+  "supply_chain_summary": {"scanner": "n/a: no dependency change in diff"},
+  "filter_stats": {"candidates": 5, "reported": 2},
+  "totals": {"critical": 0, "high": 0, "medium": 2, "low": 0, "open": 0},
+  "trend": "first diff run for this issue",
+  "counts_as_full_run": false
+}

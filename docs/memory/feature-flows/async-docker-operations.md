@@ -253,7 +253,7 @@ from services.docker_utils import container_exec_run
 - `clear_container_password()` (line 213) - Locks account password via `passwd -l`
 - `remove_ssh_key()` (line 243) - Removes key from `authorized_keys` via `sed`
 - `cleanup_expired_credentials()` (line 368) - Periodic cleanup of expired credentials
-- `cleanup_agent_credentials()` (line 441) - Cleanup all credentials on agent stop/delete
+- `cleanup_agent_credentials()` (line 445) - Cleanup all credentials for one agent (no production caller: agent stop/delete does not invoke it today)
 - `revoke_key()` (line 420) - Immediate key revocation
 
 All methods use `await container_exec_run()` for container operations.

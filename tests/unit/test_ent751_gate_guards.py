@@ -90,8 +90,9 @@ def _dispatch_sites():
 _DISPATCH_SITES = {
     ("services/task_execution_service.py", "_call_agent_with_retries"):
         "only reached from execute_task, after the 1b skill-gate backstop",
-    ("services/chat_execution_service.py", "run_chat_turn"):
-        "only reached from routers/chat.py::chat_with_agent, after admit_chat_request",
+    ("services/chat_execution_service.py", "_walk_chat_dispatch"):
+        "the /chat dispatch loop (#3470) — only reached from run_chat_turn, which "
+        "routers/chat.py::chat_with_agent calls after admit_chat_request",
     ("services/gemini_voice.py", "_execute_tool"):
         "calls skill_gate_service.enforce(refuse_only=True) before client.task",
     ("routers/public.py", "get_agent_intro"):

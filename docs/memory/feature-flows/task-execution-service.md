@@ -380,7 +380,7 @@ result = await task_execution_service.execute_task(
 
 ### Caller 2: Public Link Chat
 
-**`src/backend/routers/public.py:262-460`** -- `public_chat()`
+**`src/backend/routers/public.py:262-458`** -- `public_chat()`
 
 The endpoint handles:
 1. Link token validation (lines 277-279)

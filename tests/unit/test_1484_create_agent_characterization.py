@@ -706,6 +706,32 @@ async def test_case6_ephemeral_success_name_mutation_and_ordering(
     assert order == [("clear", "ghost-deadbeef"), "run"]
 
 
+@pytest.mark.asyncio
+async def test_ent754_create_drops_a_recycled_names_skills_listing(crud_env, monkeypatch):
+    """trinity-enterprise#754: the create path drops the name's last-known
+    skills listing beside the breakers, BEFORE the container exists. Teardown
+    already cleared it, but a live read in flight during the predecessor's
+    delete could have written it back; without this the new agent's Skills tab
+    would show its predecessor's skills as "last known" (#1560 class)."""
+    crud, ctx = crud_env
+    order = []
+    monkeypatch.setattr(
+        crud, "clear_agent_breakers", lambda n: order.append(("clear", n)))
+    listing = MagicMock()
+    listing.forget.side_effect = lambda n: order.append(("forget", n))
+    monkeypatch.setitem(sys.modules, "services.agent_skills_listing", listing)
+
+    async def _run(*a, **k):
+        order.append("run")
+        return MagicMock()
+    ctx["docker_utils"].containers_run.side_effect = _run
+
+    await crud.create_agent_internal(_local_config("recycled"), _user(), None)
+
+    assert order[:2] == [("clear", "recycled"), ("forget", "recycled")]
+    assert "run" in order and order.index("run") == 2
+
+
 # ===========================================================================
 # Case 7 — ephemeral gate ORDER (earliest wins under overlap)
 # ===========================================================================

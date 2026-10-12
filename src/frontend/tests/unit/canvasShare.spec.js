@@ -6,7 +6,7 @@
  * choosing, and why a link they were sent will not open.
  */
 import { describe, it, expect } from 'vitest'
-import { SHARE_SCOPES, scopeCopy, shareProblem, shareSummary, shareUrl } from '../../src/components/canvas/canvasShare'
+import { SHARE_SCOPES, scopeCopy, shareFetchClient, shareProblem, shareSummary, shareUrl } from '../../src/components/canvas/canvasShare'
 
 describe('scopeCopy', () => {
   it('names the wider reach as wider, at the point of choosing', () => {
@@ -120,5 +120,23 @@ describe('shareSummary', () => {
 
   it('survives junk', () => {
     expect(shareSummary(null)).toBeNull()
+  })
+})
+
+// trinity-enterprise#837: someone an agent is shared with signs in to the
+// Workspace, not at /login, so without a platform session the Workspace session
+// is the credential an `authorized` link is opened with.
+describe('shareFetchClient', () => {
+  it('a platform session is used when there is one', () => {
+    expect(shareFetchClient({ hasPlatformSession: true, hasWorkspaceSession: true })).toBe('platform')
+    expect(shareFetchClient({ hasPlatformSession: true, hasWorkspaceSession: false })).toBe('platform')
+  })
+
+  it('a Workspace session is used when it is the only one', () => {
+    expect(shareFetchClient({ hasPlatformSession: false, hasWorkspaceSession: true })).toBe('workspace')
+  })
+
+  it('a visitor with neither goes as a stranger, through the platform client', () => {
+    expect(shareFetchClient({ hasPlatformSession: false, hasWorkspaceSession: false })).toBe('platform')
   })
 })

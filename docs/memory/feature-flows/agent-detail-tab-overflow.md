@@ -34,8 +34,12 @@ horizontal scrollbar, so every tab stays reachable without scrolling.
 ```
 
 `visibleTabs` is the existing computed array of `{ id, label, badge? }`;
-`activeTab` is a local string ref. The component is intentionally generic so
-the `Operations.vue` (`?tab=`-driven) tab strip can adopt it next.
+`activeTab` is a local string ref, kept in step with the `?tab=` query key by
+`composables/useTabRoute.js` (#2900): a tab change pushes `?tab=` (Back steps
+through tabs, a reload keeps the tab), a Back/Forward step on the page writes
+the ref, and the normalising writes (`selectTab(…, { replace: true })`,
+`syncTabUrl()`) replace. The component is intentionally generic so the
+`Operations.vue` (`?tab=`-driven) tab strip can adopt it next.
 
 ---
 

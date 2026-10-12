@@ -13,8 +13,6 @@ Run with: pytest tests/test_slack_integration.py -v
 """
 import os
 import time
-import hmac
-import hashlib
 import base64
 import json
 import pytest
@@ -381,39 +379,6 @@ class TestSlackSettingsAPI:
                 f"{BASE_URL}/api/settings/slack",
                 headers=auth_headers
             )
-
-
-class TestSlackSignatureVerification:
-    """Test Slack signature verification logic (unit-style tests)."""
-
-    def test_signature_verification_valid(self):
-        """Test that valid signatures pass verification."""
-        # This test requires the Slack service to be importable
-        # In a real test environment with the backend code available
-        try:
-            import sys
-            sys.path.insert(0, 'src/backend')
-            from services.slack_service import slack_service
-
-            # Create test data
-            timestamp = str(int(time.time()))
-            body = b'{"test": "payload"}'
-            signing_secret = "test_signing_secret"
-
-            # Generate valid signature
-            sig_basestring = f"v0:{timestamp}:{body.decode('utf-8')}"
-            expected_signature = 'v0=' + hmac.new(
-                signing_secret.encode('utf-8'),
-                sig_basestring.encode('utf-8'),
-                hashlib.sha256
-            ).hexdigest()
-
-            # Note: This would need the signing secret to be configured
-            # For now, just test that the function exists
-            assert hasattr(slack_service, 'verify_slack_signature')
-
-        except ImportError:
-            pytest.skip("Could not import slack_service from backend")
 
 
 class TestSlackOAuthState:

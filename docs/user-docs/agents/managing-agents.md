@@ -19,7 +19,7 @@ Click any agent to open its detail page. The page lands on the **Overview** tab 
 | **Canvas** | `canvas` | The surface the agent keeps current -- see [Agent Canvas](agent-canvas.md) |
 | **Schedules** | `schedules` | Cron-based automation -- see [Scheduling](../automation/scheduling.md) |
 | **Loops** | `loops` | Sequential bounded task runs -- see [Agent Loops](../automation/agent-loops.md) |
-| **Playbooks** | `playbooks` | Reusable command templates |
+| **Skills** | `skills` | The agent's own skills and those shared from the library, each with **Run**; owners also set approval and assign skills -- see [Skills](../automation/skills-and-playbooks.md) |
 | **Credentials** | `credentials` | Credential injection and export |
 | **Payments** | `nevermined` | Paid access configuration |
 | **Access** | `access` | Operator access roster (owners only) |
@@ -29,13 +29,12 @@ Click any agent to open its detail page. The page lands on the **Overview** tab 
 | **Git** | `git` | Git sync controls — only for GitHub-synced agents |
 | **Files** | `files` | Workspace file browser |
 | **Folders** | `folders` | Shared folder configuration (owners only) |
-| **Skills** | `skills` | Assign skills from the library (owners only) -- see [Skills](../automation/skills-and-playbooks.md) |
 | **Settings** | `settings` | Per-agent configuration (owners only) -- see [Agent Configuration](agent-configuration.md) |
 | **Info** | `info` | Template metadata and capabilities |
 
 Tabs marked *owners only* are hidden from users an agent is merely shared with, and are never shown on the system agent. **Dashboard**, **Brain**, **Git**, and **A2A** appear only when that agent or instance supports them.
 
-Every visible tab is deep-linkable with `?tab=` — including the conditional ones. A `?tab=` value naming a tab you cannot see falls back to Overview. Two legacy links still resolve: `?tab=guardrails` opens **Settings**, and `?tab=session` redirects to that agent's [Workspace](../sharing-and-access/workspace.md) conversation.
+Every visible tab is deep-linkable with `?tab=` — including the conditional ones. A `?tab=` value naming a tab you cannot see falls back to Overview. Three legacy links still resolve: `?tab=guardrails` opens **Settings**, `?tab=playbooks` opens **Skills**, and `?tab=session` redirects to that agent's [Workspace](../sharing-and-access/workspace.md) conversation.
 
 When the window is too narrow to fit every tab, the trailing tabs collapse into a **More ▾** menu at the end of the tab strip. If the active tab is inside the menu, the More button carries the active highlight. Deep links via `?tab=` work either way.
 

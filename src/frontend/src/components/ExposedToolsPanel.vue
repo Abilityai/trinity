@@ -11,15 +11,15 @@
   -->
   <div>
     <div class="flex items-center justify-between mb-2">
-      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100">Exposed playbooks</h4>
+      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100">Exposed skills</h4>
       <label class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300 cursor-pointer">
         <input type="checkbox" v-model="exposeAll" @change="saveAllowList" :disabled="busy" />
         Expose all
       </label>
     </div>
     <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">
-      Choose which playbooks shared consumers can call as tools. Approval-gated playbooks still
-      require operator sign-off; non-invocable playbooks can never be exposed.
+      Choose which skills shared consumers can call as tools. Approval-gated skills still
+      require operator sign-off; non-invocable skills can never be exposed.
     </p>
 
     <!-- Playbooks need a running agent -->
@@ -27,7 +27,7 @@
 
     <!-- Empty state: guidance, not a blank panel -->
     <div v-else-if="playbooks.length === 0" class="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 px-3 py-4 text-center">
-      <p class="text-xs font-medium text-gray-700 dark:text-gray-300">No playbooks to expose</p>
+      <p class="text-xs font-medium text-gray-700 dark:text-gray-300">No skills to expose</p>
       <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
         This agent has no skills under
         <code class="font-mono text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">.claude/skills/</code>.
@@ -118,8 +118,8 @@ const loadPlaybooks = async () => {
   } catch (e) {
     playbooks.value = []
     playbooksError.value = e.response?.status === 503
-      ? 'Start the agent to choose which playbooks to expose.'
-      : 'Could not load this agent’s playbooks.'
+      ? 'Start the agent to choose which skills to expose.'
+      : 'Could not load this agent’s skills.'
   }
 }
 
@@ -136,9 +136,9 @@ const saveAllowList = async () => {
       : { exposed_playbooks: selected.value }
     const { data } = await api.put(`/api/agents/${props.agentName}/connector`, body)
     syncFromConnector(data.exposed_playbooks)
-    notify('Exposed playbooks updated.')
+    notify('Exposed skills updated.')
   } catch (e) {
-    notify(e.response?.data?.detail || 'Failed to update playbooks', true)
+    notify(e.response?.data?.detail || 'Failed to update exposed skills', true)
   } finally {
     busy.value = false
   }

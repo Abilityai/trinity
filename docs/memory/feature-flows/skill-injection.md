@@ -97,8 +97,10 @@ skill names on the wire would hand every authenticated client which library skil
 tenant's agents run. Listeners refetch through access-controlled routes:
 
 - `utils/websocket.js` → `stores/skills.js::noteSkillsChanged(agent)` (per-agent tick,
-  300 ms debounce) → `ChatPanel.vue` / `PlaybooksPanel.vue` watch their agent's tick and
-  call their own `loadPlaybooks()` (`/api/agents/{name}/playbooks`, `AuthorizedAgentByName`).
+  300 ms debounce) → `ChatPanel.vue` (its own `loadPlaybooks()`) and the Skills tab
+  (`SkillsTab.vue` → `stores/skills.js::loadAgentList`, `?last_known=true`; trinity-enterprise#754,
+  [skills-tab.md](skills-tab.md)) watch their agent's tick and re-read
+  `/api/agents/{name}/playbooks` (`AuthorizedAgentByName`).
   `ChatInput` takes its list from `ChatPanel` (#2198), so the `/` popup follows.
 - `utils/websocket.js` → `stores/clientPortal.js::revalidateBriefing(agent)` →
   `hydrateBriefings([agent])` (`GET /briefings?agents=`, roster-gated) —
@@ -124,9 +126,10 @@ name the vocabulary. A `conflict` (#2914) reads "Saved but not delivered: the ag
 already has its own skill with that name (…) — its copy is kept and runs. Unassign the
 library skill, or rename the agent's." and never arms the Sync nudge (Sync refuses
 again by design); the Skills tab additionally reads `delivery_status` off the assignment
-rows (`stores/skills.js::conflictNames`) so the badge, the explanation and the inline
-"Unassign library skill" action show on a fresh load, and `inject()` re-reads the rows so
-a resolved conflict clears without a reload.
+rows (`stores/skills.js::conflictNames`) so the Shared card's badge and note, and — in its
+details dialog (`SkillDetailsModal.vue`, ent#754) — the explanation and the "Unassign
+library skill" action show on a fresh load, and `inject()` re-reads the rows so a resolved
+conflict clears without a reload.
 
 **A deprecated skill (ent#672)** is a second, separate statement. `deliver_assigned` stamps
 `skills[name].warnings = ["deprecated" | "deprecated:<successor>"]` on the report for a
@@ -135,8 +138,9 @@ deprecated name — on every outcome, because it reads the library entry
 injection. The key is absent for a live skill and carries lifecycle codes only.
 `utils/skillDelivery.js::deprecationText(report)` turns it into "`<skill>` is deprecated —
 superseded by `<successor>`." and both assign surfaces render it as its own warning-toned
-line (`AssignedAgents.vue` under the delivery note; `SkillsPanel.vue` under the save row,
-shown only beside the save note it belongs to). `deliveryText` is untouched: a clean
+line (`AssignedAgents.vue` under the delivery note; on the agent's Skills tab, under the
+save note in `SkillAssignModal.vue` and on the Shared line, shown only beside the save note
+it belongs to). `deliveryText` is untouched: a clean
 delivery stays green.
 
 ## Removal (ent#236)
@@ -376,7 +380,7 @@ projection, and the un-annotated CLAUDE.md line.
 | **Upstream**: [skill-assignment.md](skill-assignment.md) | Assignment selects what to inject |
 | **Downstream**: [agent-lifecycle.md](agent-lifecycle.md) | Start-path injection (`force=False`) |
 | **Related**: [github-sync.md](github-sync.md) | Injected dirs are gitignored/untracked against the auto-sync loop |
-| **Related**: [playbooks-tab.md](playbooks-tab.md) | Agent-local skills — same directory, agent-authored, never pruned |
+| **Related**: [skills-tab.md](skills-tab.md) | Agent-local skills (the Skills tab's Own section) — same directory, agent-authored, never pruned |
 
 ---
 

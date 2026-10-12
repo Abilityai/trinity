@@ -131,6 +131,9 @@ class Requester:
     mcp_key_id: Optional[str] = None
     is_person: bool = False
     label: Optional[str] = None
+    # #3404: the credential kind a producer saw, where no principal reaches the
+    # audit (the Workspace, through the `execute_task` backstop). Audit only.
+    credential: Optional[str] = None
 
     def display(self) -> str:
         if self.label:
@@ -306,6 +309,17 @@ def _approvers(agent_name: str, role: str) -> List[str]:
             f"Nobody fills the {role} role for {agent_name}, so this gated request "
             "can't be approved. Ask the agent's owner to assign one.", role=role)
     return people
+
+
+def approver_people(agent_name: str, role: str) -> List[str]:
+    """`_approvers` without the refusal: the casefolded emails `role` reaches
+    on `agent_name`, or `[]` when it reaches nobody. trinity-enterprise#754:
+    the Skills tab's "you approve this" reads the very list `enforce` decides
+    self-approval with, so the card and the run cannot disagree."""
+    try:
+        return _approvers(agent_name, role)
+    except SkillGateRefused:
+        return []
 
 
 def read_gates(agent_name: str) -> Dict[str, SkillGate]:
@@ -743,14 +757,20 @@ def requester_for_dispatch(*, triggered_by: str, source_user_email: Optional[str
 
 
 async def audit_self_approved(agent_name: str, decision: GateDecision, *, current_user,
-                              endpoint: str, execution_id: Optional[str]) -> None:
+                              endpoint: str, execution_id: Optional[str],
+                              credential: Optional[str] = None) -> None:
     """The gate let an approver's own request through — one row per execution
     it let through. At the `/chat` and `/task` seams it is written once the row
     exists; at the `execute_task` backstop (the Workspace) before admission, so
     a capacity refusal after it, or the Workspace's cold retry, leaves a row
-    whose execution says what actually happened. Best effort."""
+    whose execution says what actually happened. `credential` (#3404) names the
+    credential kind where there is no `current_user` to read it from. Best
+    effort."""
     if decision.ungated or not decision.self_approved_by:
         return
+    details = {"skills": list(decision.skills), "execution_id": execution_id}
+    if credential:
+        details["credential"] = credential
     from services.platform_audit_service import AuditEventType, platform_audit_service
     try:
         await platform_audit_service.log(
@@ -766,7 +786,7 @@ async def audit_self_approved(agent_name: str, decision: GateDecision, *, curren
             target_id=agent_name,
             endpoint=endpoint,
             request_id=None,
-            details={"skills": list(decision.skills), "execution_id": execution_id},
+            details=details,
         )
     except Exception:  # noqa: BLE001 — never fail a dispatch that already began
         logger.warning("[SkillGate] self-approval audit failed for %s", agent_name, exc_info=True)
@@ -808,7 +828,8 @@ MARKER_HEAL_WINDOW_SECONDS = 300
 async def record_self_approval(agent_name: str, decision: GateDecision, *,
                                execution_id: Optional[str], current_user, endpoint: str,
                                request_text: Optional[str] = None,
-                               triggered_by: Optional[str] = None) -> None:
+                               triggered_by: Optional[str] = None,
+                               credential: Optional[str] = None) -> None:
     """The one way a self-approval is written down: a `self_approved` record
     clearing the run the agent RECEIVES (`execution_id`) for the gated skills,
     then #751's audit row. The record is what the in-container hook honours;
@@ -833,7 +854,8 @@ async def record_self_approval(agent_name: str, decision: GateDecision, *,
                            "the in-container hook will refuse the skill in it",
                            execution_id, agent_name, exc_info=True)
     await audit_self_approved(agent_name, decision, current_user=current_user,
-                              endpoint=endpoint, execution_id=execution_id)
+                              endpoint=endpoint, execution_id=execution_id,
+                              credential=credential)
 
 
 def _self_approval_id(agent_name: str, execution_id: str) -> str:

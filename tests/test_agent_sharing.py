@@ -162,19 +162,20 @@ class TestUnshareAgent:
         assert_status_in(response, [200, 204, 400, 404])
 
 
-class TestShareWhitelistDefaultRole:
-    """#314: sharing an agent auto-whitelists the recipient with default_role='user'.
+class TestShareWritesNoLogin:
+    """trinity-enterprise#837: sharing grants the agent, never a platform login.
 
-    Prevents the privilege escalation where /share silently promoted the
-    recipient to `creator` on their first Trinity web login.
+    Until #837, /share also whitelisted the recipient for /login (at `user`,
+    #314). A shared person now signs in to the Workspace with the emailed code;
+    a platform account is an admin's decision.
     """
 
-    def test_share_adds_whitelist_entry_with_user_role(
+    def test_share_writes_no_whitelist_entry(
         self,
         api_client: TrinityApiClient,
         created_agent,
     ):
-        """POST /api/agents/{name}/share creates a whitelist entry with default_role='user'."""
+        """POST /api/agents/{name}/share leaves the login whitelist untouched."""
         # Requires admin to inspect whitelist
         list_response = api_client.get("/api/settings/email-whitelist")
         if list_response.status_code == 403:
@@ -183,7 +184,7 @@ class TestShareWhitelistDefaultRole:
         # Requires email auth enabled (whitelist insert is gated on that flag)
         auth_mode = api_client.get("/api/auth/mode").json()
         if not auth_mode.get("email_auth_enabled"):
-            pytest.skip("Email auth not enabled — /share does not whitelist")
+            pytest.skip("Email auth not enabled — the case #837 changed needs it on")
 
         share_email = "test-share-default-role@example.com"
         # Clean slate
@@ -200,12 +201,8 @@ class TestShareWhitelistDefaultRole:
 
             whitelist = api_client.get("/api/settings/email-whitelist").json()["whitelist"]
             entry = next((e for e in whitelist if e["email"] == share_email), None)
-            assert entry is not None, (
-                f"Expected {share_email} in whitelist after /share"
-            )
-            assert entry["default_role"] == "user", (
-                f"Expected default_role='user' for share recipient, "
-                f"got {entry['default_role']} — this recreates the #314 bug"
+            assert entry is None, (
+                f"/share wrote a login whitelist row for {share_email}: {entry}"
             )
         finally:
             api_client.delete(f"/api/agents/{created_agent['name']}/share/{share_email}")

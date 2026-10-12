@@ -254,7 +254,7 @@
              depends on who is looking — a platform user can go make an agent,
              an external client can only ask whoever invited them. -->
         <div v-if="!roster.length && !loadingRoster" class="px-2 py-3 text-xs text-gray-500 dark:text-gray-400">
-          <template v-if="isPlatformSession">
+          <template v-if="isPlatformSession && !workspaceOnly">
             No agents yet.
             <a href="/" class="text-action-primary-600 hover:underline">Create one →</a>
           </template>
@@ -458,6 +458,9 @@ const props = defineProps({
   // active row class, the auto-expand below, and `visibleAgentRows`' `keep`.
   activeAgentName: { type: String, default: null },
   isPlatformSession: { type: Boolean, default: false },
+  // trinity-enterprise#837: a `user` cannot make an agent, so the empty roster
+  // asks for a share instead of pointing at the operator UI.
+  workspaceOnly: { type: Boolean, default: false },
   // ent#661 — the roster's capability, and whether a Projects page is on screen.
   projectsAvailable: { type: Boolean, default: false },
   projectsActive: { type: Boolean, default: false },
@@ -531,7 +534,8 @@ const waitingFor = (name) => waiting.value[name] || 0
 const asksStore = useClientPortalStore()
 // trinity-enterprise#610 (D13): the pinned Inbox row's two counts — `needs` is
 // `askCount` (pending asks), `came` is `totalUnread` over these threads.
-const inbox = computed(() => inboxCounts(props.threads, asksStore.openAsks))
+// trinity-enterprise#631: plus the tags not yet opened.
+const inbox = computed(() => inboxCounts(props.threads, asksStore.openAsks, asksStore.mentions))
 // #2424: the ask twin of `waiting`. Kept a separate map on purpose — see the
 // Inbox-row comment in the template.
 const asksPerAgent = computed(() => asksByAgent(asksStore.openAsks))
