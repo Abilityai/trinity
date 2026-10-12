@@ -329,7 +329,7 @@ async verifyEmailCode(email, code) {
 | 304-324 | Add email form | Input field + Add button |
 | 327-383 | Whitelist table | Shows email, source, date, actions |
 | 356-380 | Table rows | Iterates over `emailWhitelist` array |
-| 361-366 | Source badges | Auto (Agent Sharing) or Manual |
+| 361-366 | Source badges | Auto (Agent Sharing), or `whitelistSourceLabel(source)`: Manual, Access tab, else the stored source |
 | 372-378 | Remove button | DELETE action per email |
 | 385-387 | Help text | "When you share an agent..." tip |
 | 505-510 | Whitelist state | `emailWhitelist`, `newEmail`, loading flags |
@@ -1622,9 +1622,12 @@ This allows distinguishing between:
 
 ### Source Tracking
 
-The whitelist tracks how emails were added (visible in Settings UI):
+The whitelist tracks how emails were added (visible in Settings UI; the label comes from
+`utils/emailWhitelist.js::whitelistSourceLabel`):
 - `source="manual"` - ✋ Manual badge - Added by admin via Settings page
-- `source="agent_sharing"` - 🤝 Auto badge - Auto-added when agent was shared
+- `source="agent_sharing"` - 🤝 Auto badge - Auto-added when agent was shared (before trinity-enterprise#837)
+- `source="access_tab"` - "Access tab" - an account given from an agent's Access tab (trinity-enterprise#837)
+- any other source (`sso`, `cli`, `access_request`, …) - shown as stored, never as "Manual"; no source reads "—"
 
 This provides an audit trail and helps admins understand whitelist growth.
 

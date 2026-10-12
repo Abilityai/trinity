@@ -33,22 +33,23 @@
       :reload-people="load"
     />
 
-    <!-- Add operator. `min-w-0` lets the input give way at phone width; without
-         it the input's intrinsic width plus the button pushed the page 47px
-         wider than a 390px screen. -->
-    <form @submit.prevent="addOperator" class="flex items-center space-x-3">
+    <!-- Add operator. At phone width the input takes the whole line and the
+         button sits below it (ent#837 eyeball: side by side, the field shrank to
+         "name@compan"); `min-w-0` lets it give way in the row layout, where its
+         intrinsic width plus the button once pushed the page past 390px. -->
+    <form @submit.prevent="addOperator" class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
       <input
         v-model="newEmail"
         type="email"
         required
         placeholder="name@company.com"
         :disabled="adding"
-        class="flex-1 min-w-0 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+        class="w-full sm:w-auto sm:flex-1 min-w-0 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
       />
       <button
         type="submit"
         :disabled="adding || !newEmail.trim()"
-        class="inline-flex shrink-0 whitespace-nowrap items-center px-4 py-2 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
+        class="inline-flex self-start sm:self-auto shrink-0 whitespace-nowrap items-center px-4 py-2 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
       >
         <svg v-if="adding" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -125,31 +126,36 @@
           />
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-2 max-w-full">
-          <!-- trinity-enterprise#837 (AC5): the platform role, for an admin.
-               Bound to the value being confirmed or saved, so a cancel or a
-               refusal puts the select back on the stored role. -->
-          <BaseSelect
-            v-if="roleEditable(op)"
-            size="sm"
-            class="min-w-[11rem]"
-            :model-value="shownRole(op)"
-            :aria-label="`Platform role for ${nameOf(op)} (every agent)`"
-            help="Platform role · every agent"
-            :disabled="!!savingRole"
-            data-testid="access-role"
-            @update:model-value="(role) => askRole(op, role)"
-          >
-            <option v-for="r in PLATFORM_ROLES" :key="r" :value="r">{{ platformRoleLabel(r) }}</option>
-          </BaseSelect>
-          <BaseButton
-            v-else-if="canManageMembers && op.status === 'pending'"
-            variant="secondary"
-            size="sm"
-            :loading="provisioning === op.email"
-            loading-label="Creating…"
-            data-testid="access-give-account"
-            @click="askProvision(op)"
-          >Give a platform account</BaseButton>
+          <!-- trinity-enterprise#837 (AC5): the platform role, for an admin, in
+               one fixed-width slot on every row (empty on your own), so the
+               controls after it line up. The select is bound to the value being
+               confirmed or saved, so a cancel or a refusal puts it back on the
+               stored role; "every agent" is in its accessible name and the
+               header, not a caption. -->
+          <div v-if="canManageMembers" class="w-48 shrink-0" data-testid="access-member-slot">
+            <BaseSelect
+              v-if="roleEditable(op)"
+              size="sm"
+              class="w-full"
+              :model-value="shownRole(op)"
+              :aria-label="`Platform role for ${nameOf(op)} (every agent)`"
+              :disabled="!!savingRole"
+              data-testid="access-role"
+              @update:model-value="(role) => askRole(op, role)"
+            >
+              <option v-for="r in PLATFORM_ROLES" :key="r" :value="r">{{ platformRoleLabel(r) }}</option>
+            </BaseSelect>
+            <BaseButton
+              v-else-if="op.status === 'pending'"
+              variant="secondary"
+              size="sm"
+              class="w-full"
+              :loading="provisioning === op.email"
+              loading-label="Creating…"
+              data-testid="access-give-account"
+              @click="askProvision(op)"
+            >Give a platform account</BaseButton>
+          </div>
           <!-- #1577: per-recipient proactive-messaging toggle (allow_proactive
                on agent_sharing). The flag rides on the sharing row, which exists
                pre-resolution, so a pending invite can be pre-authorized too. -->

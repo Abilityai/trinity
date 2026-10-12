@@ -139,7 +139,7 @@
                     Not shared with {{ row.display_name }}: they can't see this agent or its asks in the Workspace.<template
                       v-if="shareFail[row.user_id]"> {{ shareFail[row.user_id] }}</template>
                   </span>
-                  <BaseButton variant="secondary" size="sm" :loading="sharingId === row.user_id" loading-label="Sharing…"
+                  <BaseButton variant="ghost" size="sm" :loading="sharingId === row.user_id" loading-label="Sharing…"
                               data-testid="assignment-share" @click="shareRow(row)">Share with them</BaseButton>
                 </div>
               </div>
@@ -147,6 +147,7 @@
               <div v-if="isAdmin && row.kind !== 'primary'" class="flex items-center gap-2 shrink-0 self-start">
                 <BaseSelect
                   :model-value="row.kind"
+                  size="sm"
                   class="min-w-[9.5rem]"
                   :aria-label="`Kind for ${row.display_name}`"
                   :disabled="busyId === row.id"
@@ -239,7 +240,8 @@
             <option v-for="k in addKinds" :key="k" :value="k">{{ kindLabel(k) }}</option>
           </BaseSelect>
           <BaseInput v-model="addForm.roleId" label="Seat (role id, optional)" :list="roleListId" data-testid="add-role" />
-          <BaseButton type="submit" :disabled="!addForm.userId"
+          <!-- The fields' height (13.5px × 1.5 + py-2 + border), so the row reads as one line. -->
+          <BaseButton type="submit" class="h-[38px]" :disabled="!addForm.userId"
                       :loading="savingAdd" loading-label="Adding…" data-testid="add-submit">Add</BaseButton>
         </form>
         <InlineError v-if="isAdmin && (addError || assignments.usersError)" :message="addError || assignments.usersError" @dismiss="addError = ''" />
