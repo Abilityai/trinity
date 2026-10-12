@@ -2123,6 +2123,9 @@ class DatabaseManager:
     def get_chat_session(self, session_id: str):
         return self._chat_ops.get_chat_session(session_id)
 
+    def find_chat_session_by_message_source(self, agent_name: str, user_id: int, source: str):
+        return self._chat_ops.find_chat_session_by_message_source(agent_name, user_id, source)
+
     def get_chat_messages(self, session_id: str, limit: int = 100):
         return self._chat_ops.get_chat_messages(session_id, limit)
 
@@ -2360,6 +2363,9 @@ class DatabaseManager:
 
     def list_gate_requests_with_ended_asks(self, limit: int = 200):
         return self._skill_gate_request_ops.list_gate_requests_with_ended_asks(limit)
+
+    def list_gate_requests_ended_unreported(self, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_ended_unreported(limit)
 
     def list_gate_requests_lost_in_dispatch(self, claimed_before: str, limit: int = 200):
         return self._skill_gate_request_ops.list_gate_requests_lost_in_dispatch(claimed_before, limit)
@@ -3893,6 +3899,12 @@ class DatabaseManager:
 
     def get_operator_queue_item(self, item_id):
         return self._operator_queue_ops.get_item(item_id)
+
+    def update_pending_problem_report(self, agent_name, request_id, *, question, context, now=None):
+        # trinity#3521: a comment sent after the thumbs-down reaches the alert.
+        return self._operator_queue_ops.update_pending_problem_report(
+            agent_name, request_id, question=question, context=context, now=now,
+        )
 
     def get_operator_queue_item_for_agent_by_request_id(self, agent_name, request_id):
         # trinity-enterprise#611: the agent's own readback — ignores Clear All.

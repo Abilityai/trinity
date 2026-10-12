@@ -28,6 +28,7 @@ from dependencies import get_current_user, get_authorized_agent, get_owned_agent
 from database import db
 from config import VOICE_ENABLED, DEFAULT_VOICE_NAME, GEMINI_VOICE_NAMES
 from services import canvas_service
+from services.chat_persistence_service import is_gate_message
 from services.gemini_voice import voice_service, WORKSPACE_PANEL_INSTRUCTIONS
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
@@ -567,6 +568,9 @@ def _build_context_summary(chat_session_id: str) -> str:
     max_chars = 3000  # ~750 tokens
 
     for msg in messages:
+        # trinity#3526: a held gated request and its notice are not conversation.
+        if is_gate_message(msg):
+            continue
         role_label = "User" if msg.role == "user" else "Assistant"
         # Truncate individual messages
         content = msg.content[:500] + "..." if len(msg.content) > 500 else msg.content

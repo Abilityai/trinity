@@ -84,6 +84,7 @@ from services.platform_prompt_service import (
     is_execution_context_enabled,
 )
 from db.write_params import ExecutionResult, TaskExecutionFields
+from db.skill_gate_requests import APPROVED_RUN_STATES
 
 
 def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str]) -> Optional[str]:
@@ -1951,7 +1952,7 @@ class TaskExecutionService:
             if execution_id:
                 approved = db.get_gate_request_by_dispatched_execution(execution_id)
                 if (approved and approved.get("agent_name") == agent_name
-                        and approved.get("state") in ("dispatching", "dispatched")):
+                        and approved.get("state") in APPROVED_RUN_STATES):
                     return
             fields = _with_row_attribution(fields, execution_id)
             requester = gate_requester or skill_gate_service.requester_for_dispatch(

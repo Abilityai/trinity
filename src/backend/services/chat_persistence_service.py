@@ -25,6 +25,7 @@ from models import ParallelTaskRequest, TaskExecutionStatus
 from database import db
 from utils.helpers import utc_now_iso
 from db.write_params import ChatMessageFields
+from services.runtime_secret_scrub import get_staged_values, scrub_text
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,98 @@ def set_websocket_manager(manager):
     """Set the WebSocket manager for the chat_response_ready broadcast."""
     global _websocket_manager
     _websocket_manager = manager
+
+
+def _resolve_session(agent_name: str, request: ParallelTaskRequest, user_id: int,
+                     user_email: str, subscription_id: Optional[str] = None):
+    """The chat session a `/task` request writes to: a new one, the caller's
+    named one, or their active one."""
+    if request.create_new_session:
+        return db.create_new_chat_session(
+            agent_name=agent_name,
+            user_id=user_id,
+            user_email=user_email,
+            subscription_id=subscription_id,
+        )
+    if request.chat_session_id:
+        session = db.get_chat_session(request.chat_session_id)
+        # Security F2 (#1444): a caller-supplied chat_session_id must belong
+        # to this user. Without this gate a forged/leaked id would append
+        # into another user's session (IDOR). On absence OR ownership
+        # mismatch, fall through to the caller's own active session.
+        if session and session.user_id == user_id:
+            return session
+    return db.get_or_create_chat_session(
+        agent_name=agent_name,
+        user_id=user_id,
+        user_email=user_email,
+    )
+
+
+# `chat_messages.source` of a held gated request and its notice (trinity#3526):
+# the prefix plus the gate request id. Every reader that builds a prompt from a
+# session leaves these rows out — resent, the gated command would hold every
+# later turn.
+GATE_SOURCE_PREFIX = "gate:"
+
+
+def is_gate_message(message) -> bool:
+    return (getattr(message, "source", None) or "").startswith(GATE_SOURCE_PREFIX)
+
+
+def persist_held_request(agent_name: str, request: ParallelTaskRequest, held,
+                         user_id: int, user_email: str) -> Optional[str]:
+    """Keep a held gated request in the sender's conversation (trinity#3526):
+    their own words and the notice, both marked with the gate request id. Once
+    per request — a replayed hold returns the session already holding it.
+    Returns the session id, or None when it could not be saved: the approval is
+    already raised, so a failure here never changes the answer."""
+    source = f"{GATE_SOURCE_PREFIX}{held.request_id}"
+    try:
+        existing = db.find_chat_session_by_message_source(agent_name, user_id, source)
+        if existing:
+            return existing
+        session = _resolve_session(agent_name, request, user_id, user_email)
+        # ent#279: the notice names skills and the request may quote earlier
+        # turns — neither is stored with a staged secret in it.
+        staged = get_staged_values()
+        for role, content in (("user", request.user_message or request.message),
+                              ("system", held.message)):
+            db.add_chat_message(
+                session_id=session.id,
+                agent_name=agent_name,
+                user_id=user_id,
+                user_email=user_email,
+                role=role,
+                content=scrub_text(staged, content),
+                fields=ChatMessageFields(source=source),
+            )
+        return session.id
+    except Exception as e:
+        # Identifiers only, as in `persist_chat_session` (Security F3).
+        logger.error(
+            "[Task] Failed to save held request %s to a chat session for agent '%s' (exc=%s)",
+            held.request_id, agent_name, type(e).__name__, exc_info=True,
+        )
+        return None
+
+
+def session_messages_view(agent_name: str, messages) -> list:
+    """A session's messages as the API returns them. A held gated request and
+    its notice carry `gate`: where that request stands now (trinity#3526)."""
+    from services import skill_gate_service
+
+    status = {}
+    rows = []
+    for message in messages:
+        row = message.model_dump()
+        if is_gate_message(message):
+            request_id = message.source[len(GATE_SOURCE_PREFIX):]
+            if request_id not in status:
+                status[request_id] = skill_gate_service.request_status(request_id, agent_name)
+            row["gate"] = status[request_id]
+        rows.append(row)
+    return rows
 
 
 async def persist_chat_session(
@@ -60,31 +153,7 @@ async def persist_chat_session(
         return None
 
     try:
-        if request.create_new_session:
-            session = db.create_new_chat_session(
-                agent_name=agent_name,
-                user_id=user_id,
-                user_email=user_email,
-                subscription_id=subscription_id,
-            )
-        elif request.chat_session_id:
-            session = db.get_chat_session(request.chat_session_id)
-            # Security F2 (#1444): a caller-supplied chat_session_id must belong
-            # to this user. Without this gate a forged/leaked id would append
-            # into another user's session (IDOR). On absence OR ownership
-            # mismatch, fall through to the caller's own active session.
-            if not session or session.user_id != user_id:
-                session = db.get_or_create_chat_session(
-                    agent_name=agent_name,
-                    user_id=user_id,
-                    user_email=user_email,
-                )
-        else:
-            session = db.get_or_create_chat_session(
-                agent_name=agent_name,
-                user_id=user_id,
-                user_email=user_email,
-            )
+        session = _resolve_session(agent_name, request, user_id, user_email, subscription_id)
 
         original_user_message = request.user_message or request.message
         db.add_chat_message(

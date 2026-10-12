@@ -2610,6 +2610,14 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   (`comment_withheld`) is untouched. The operator sees the comment; the agent
   still does not — including through its own key: the operator queue's reads
   never return this item to a machine principal (trinity-enterprise#715).
+- **The agent's owner and admins only** (trinity-enterprise#866). A person the
+  agent is merely *shared* with is often a client too, so the alert — which names
+  the rater and quotes their words — is owner-only: the queue lists it to a
+  non-admin only for agents they own (a SQL condition, so `total` stays exact),
+  answers it by id as "not found", and refuses to acknowledge, cancel or
+  bulk-cancel it. The same facts `GET /evaluations` already withholds from a
+  shared non-owner. Only this kind is owner-only (`OWNER_ONLY_ID_PREFIXES`): a
+  shared operator still sees and answers a skill gate's approval.
 - **Routed through the budget, never allowlisted** (#1677). The volume here is
   driven by a *client* clicking, so this is an agent-influenceable emitter by
   the classification rule and goes through
@@ -2618,12 +2626,20 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   direct `create_operator_queue_item` would fail the CI emitter guard, and
   reusing the generic `alert` type would have made five unrelated alerts on that
   agent silence every problem report.
-- **One item per person per target, by construction.** The id is derived from
-  the evaluator and the target, so a re-rate hits `create_item`'s
-  `ON CONFLICT DO NOTHING`. **Stated residual**: `create_item` has no UPDATE
-  path, so an edited comment does not reach an item already raised — the same
-  residual ent#434's alert carries, and it is a shared fix, not a per-emitter
-  one.
+- **One item per person per target per UTC day, by construction.** The id is
+  derived from the evaluator, the target and the day, so a re-rate hits
+  `create_item`'s `ON CONFLICT DO NOTHING`.
+- **A comment sent after the rating reaches the item** (trinity#3521). The
+  Workspace records the thumbs-down on the click and sends the comment as a
+  second request, so the click has usually raised the item already. A request
+  that carries words rewrites the item's `question` and `context.has_comment`
+  through `db.update_pending_problem_report` — pending items of this type only,
+  so an item a person already ended is never rewritten or reopened. Only words
+  ever write text: a bare re-rate cannot erase a comment. The update adds no row,
+  so it spends no budget. Both requests run in the background, so the service
+  attaches once more after its own create (the click's create can land in
+  between). **Stated residual**: a comment sent after the operator ended that
+  day's item does not reach it; the next day's item carries the next report.
 - **Emitted off the response path.** `create_bounded_alert` is async and the
   rating route is a sync `def`, so the emit rides `BackgroundTasks` beside the
   existing `capture-feedback` dispatch. A rating is recorded whether or not the
