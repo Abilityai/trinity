@@ -87,14 +87,14 @@
     <!-- Expanded Content -->
     <div v-if="isExpanded" class="border-t border-gray-100 dark:border-gray-700">
       <!-- Question body -->
-      <div class="px-4 pt-3 pb-4">
+      <div v-if="!isGateCard(item)" class="px-4 pt-3 pb-4">
         <AskMarkdown :text="item.question" class="text-gray-700 dark:text-gray-300" data-testid="queue-card-question" />
       </div>
 
       <!-- trinity-enterprise#611: the exact action this approval would run, always
            shown — it is what the operator is deciding, unlike `context` below. -->
       <!-- trinity-enterprise#755: a gated-skill approval has its own card. -->
-      <GatedSkillRequest v-if="isGateCard(item)" :item="item" class="px-4 pb-4" />
+      <GatedSkillRequest v-if="isGateCard(item)" :item="item" class="px-4 pt-3 pb-4" />
       <QueueProposal v-else-if="item.proposal" :proposal="item.proposal" class="px-4 pb-4" />
 
       <!-- Context (collapsible) -->

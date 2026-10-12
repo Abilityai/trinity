@@ -5,8 +5,10 @@
   ONE component for the Workspace Inbox, the chat card and Operations
   (`PortalAsks`, `QueueCard`, `ResolvedCard`), rendered in place of the generic
   `QueueProposal` when the ask carries the platform's `gate` view. The input is
-  the ask's frozen `proposal.input` — exactly what Approve runs. Every value is
-  requester- or agent-authored: text interpolation only, never v-html.
+  the ask's frozen `proposal.input` — exactly what Approve runs. The card says
+  everything the gate's question says, so its hosts leave the question out.
+  Every value is requester- or agent-authored: text interpolation only, never
+  v-html.
 -->
 <template>
   <div data-testid="gate-card">
@@ -44,6 +46,10 @@
           >{{ folded ? 'Show the whole input' : 'Show less' }}</BaseButton>
         </dd>
       </div>
+      <div v-if="gate.also_sent" :class="ROW">
+        <dt :class="TERM">Also sent</dt>
+        <dd :class="[VALUE, 'whitespace-pre-wrap']" data-testid="gate-card-also-sent">{{ gate.also_sent }}</dd>
+      </div>
       <div :class="ROW">
         <dt :class="TERM">Requested by</dt>
         <dd :class="VALUE" data-testid="gate-card-requester">
@@ -77,6 +83,11 @@
       </div>
     </dl>
 
+    <p
+      v-if="deciding"
+      class="mt-2 text-[12.5px] text-gray-600 dark:text-gray-300"
+      data-testid="gate-card-hint"
+    >Approve runs it once, exactly as written. Reject runs nothing.</p>
     <p
       v-if="outcome"
       class="mt-2 flex flex-wrap items-center gap-2 text-[12.5px] text-gray-600 dark:text-gray-300"
@@ -128,6 +139,10 @@ const waiting = computed(() => (
   !outcome.value && props.item.status === 'pending' && gate.value.can_decide !== true
     ? (gate.value.waiting_on || []).join(', ')
     : ''
+))
+
+const deciding = computed(() => (
+  !outcome.value && props.item.status === 'pending' && gate.value.can_decide === true
 ))
 
 const runPath = (agent, executionId) =>

@@ -261,7 +261,7 @@
                 <!-- #3246: one row per condition — how often the platform saw it. -->
                 <p v-if="queueSeenLine(item)" class="ops-card-type" data-testid="queue-seen-line">{{ queueSeenLine(item) }}</p>
                 <!-- #3115: agent-written markdown, rendered — never shown raw. -->
-                <AskMarkdown class="ops-card-message" :text="item.message || item.question || item.description" :prose="false" data-testid="queue-message" />
+                <AskMarkdown v-if="!item.gate" class="ops-card-message" :text="item.message || item.question || item.description" :prose="false" data-testid="queue-message" />
                 <!-- trinity-enterprise#611: the exact action this approval would run,
                      on the same card that offers the decision (desktop parity). -->
                 <!-- trinity-enterprise#755: a gated-skill approval has its own card. -->

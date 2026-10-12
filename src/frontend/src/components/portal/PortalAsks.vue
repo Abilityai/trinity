@@ -85,7 +85,7 @@
            sanitiser, #3115 — the same on every surface), never printed as its
            syntax (ent#610 sign-off). -->
       <AskMarkdown
-        v-if="ask.question && ask.question !== ask.title"
+        v-if="ask.question && ask.question !== ask.title && !isGateCard(ask)"
         :text="ask.question"
         class="mt-0.5 min-w-0 text-gray-600 dark:text-gray-300"
         :data-testid="`${tid.prefix}-question-${ask.id}`"

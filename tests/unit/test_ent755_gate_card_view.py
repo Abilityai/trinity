@@ -182,3 +182,20 @@ def test_a_rejection_without_a_reason_says_nothing_about_one(card):
     _answer(rid, _GATE.REJECT)
     assert _resolve(rid) == "denied"
     assert "Reason given" not in card.woken[0][1]
+
+
+class _Asker:
+    def display(self):
+        return f"Agent {REQ}"
+
+
+def test_the_card_carries_the_context_lines_the_question_held(card):
+    """The card replaces the question, so what only the question said moves onto it."""
+    def question(text, context=""):
+        return _GATE._ask_body(FIN, "gate-x", ["pay-invoice"], text, _Asker(), {}, "approver", None,
+                               card_context=context)["question"]
+
+    context = "Schedule: /pay-invoice INV-8\nKey: nightly"
+    assert _GATE._also_sent(question("do the usual", context), FIN) == context
+    assert _GATE._also_sent(question("/pay-invoice INV-8"), FIN) == ""
+    assert _view(_raise_request())["also_sent"] == ""

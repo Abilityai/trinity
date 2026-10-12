@@ -57,6 +57,7 @@ describe('/m — the gated-skill approval card', () => {
   it('someone it is not addressed to reads who it waits on and gets no options', async () => {
     const card = await mountView(false)
     expect(card.find('[data-testid="gate-card-waiting-on"]').text()).toBe('Dana Reyes')
+    expect(card.find('[data-testid="queue-message"]').exists()).toBe(false)   // the card says it once
     expect(card.find('[data-testid="queue-proposal"]').exists()).toBe(false)
     expect(card.findAll('[data-testid="queue-option"]')).toHaveLength(0)
   })

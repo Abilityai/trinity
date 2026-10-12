@@ -73,6 +73,14 @@ describe('the card itself', () => {
     expect(w.text()).not.toContain('fingerprints')
   })
 
+  it('shows the context the agent was also sent, and the one-line rule only to the decider', () => {
+    expect(tid(card(), 'gate-card-also-sent').exists()).toBe(false)
+    expect(tid(card(), 'gate-card-hint').text()).toContain('Reject runs nothing')
+    const w = card({ gate: gate({ also_sent: 'Schedule: /pay-invoice INV-8', can_decide: false }) })
+    expect(tid(w, 'gate-card-also-sent').text()).toBe('Schedule: /pay-invoice INV-8')
+    expect(tid(w, 'gate-card-hint').exists()).toBe(false)
+  })
+
   it('links the requesting agent run when the platform gives its id', () => {
     const w = card({ gate: gate({ requester: { kind: 'agent', label: 'Agent marketing', agent: 'marketing', execution_id: 'run-1' } }) })
     expect(tid(w, 'gate-card-requester-run').findComponent(RouterLinkStub).props('to'))
@@ -142,6 +150,7 @@ describe('Operations (QueueCard)', () => {
     const w = await mountCard()
     expect(tid(w, 'gate-card').exists()).toBe(true)
     expect(tid(w, 'queue-proposal').exists()).toBe(false)
+    expect(tid(w, 'queue-card-question').exists()).toBe(false)   // the card says it once
   })
 
   it('someone the approval is not addressed to gets no controls, and reads who it waits on', async () => {
@@ -167,6 +176,7 @@ describe('Operations (QueueCard)', () => {
   it('an ordinary approval keeps its proposal block and its controls', async () => {
     const w = await mountCard({ gate: null, proposal: { amount: 5 }, decided_by_options: false })
     expect(tid(w, 'gate-card').exists()).toBe(false)
+    expect(tid(w, 'queue-card-question').exists()).toBe(true)
     expect(tid(w, 'queue-proposal').exists()).toBe(true)
     expect(tid(w, 'approval-send').exists()).toBe(true)
   })
@@ -189,6 +199,7 @@ describe('the Workspace (PortalAsks — the Inbox pane and the chat card)', () =
     const w = mountAsks([ask()])
     expect(tid(w, 'gate-card').exists()).toBe(true)
     expect(tid(w, 'queue-proposal').exists()).toBe(false)
+    expect(tid(w, 'portal-ask-question-g1').exists()).toBe(false)   // the card says it once
     expect(w.findAll('[data-testid="portal-ask-option-g1"]').map((b) => b.text())).toEqual(['Approve', 'Reject'])
     expect(tid(w, 'portal-ask-something-else-g1').exists()).toBe(false)
   })

@@ -224,6 +224,7 @@ operator_queue row (raised_by = gate, type = approval)
        record = skill_gate_requests[item.request_id]      same agent, else no card
        skills[]      record.skills + description from agent_skills_listing.recall (Redis, fail-open)
        requester     kind, label (the proposal's frozen display), agent, execution_id*
+       also_sent     the context lines the gate wrote into the question ("Also sent to …"), else ''
        state         the record's state
        execution_id* the approved run
        waiting_on[]  resolved_to, each as the account name, else the address (only name_approvers)
@@ -234,8 +235,10 @@ operator_queue row (raised_by = gate, type = approval)
 
 components/operator/GatedSkillRequest.vue   (utils/skillGateCard.js)
   Agent · Skill(s) + description · Input (proposal.input, folded past 600 chars / 8 lines)
-  Requested by (+ "from this run") · Raised · Deadline · Waiting on (viewer cannot decide)
+  Also sent (when set) · Requested by (+ "from this run") · Raised · Deadline
+  Waiting on (viewer cannot decide) · "Approve runs it once…" (viewer can decide)
   outcome line: badge + sentence + "Open the run"
+  the hosts do not draw the ask's question on a gate card: the card says it once
   drawn by PortalAsks (Inbox pane, chat card), QueueCard, ResolvedCard, MobileAdmin
 ```
 

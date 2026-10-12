@@ -460,6 +460,22 @@ async def _fingerprints_or_refuse(agent_name: str, names: List[str]) -> Dict[str
     return out
 
 
+ASK_FOOTER = f"{APPROVE} runs it once, exactly as written. {REJECT} runs nothing."
+
+
+def _also_sent_head(agent_name: str) -> str:
+    return f"Also sent to {agent_name} with this request:\n"
+
+
+def _also_sent(question: Optional[str], agent_name: str) -> str:
+    """The context lines `_ask_body` wrote into the question, for the card,
+    which shows them in a row of their own and drops the question."""
+    body = (question or "").removesuffix(ASK_FOOTER)
+    head = _also_sent_head(agent_name)
+    at = body.rfind(head)
+    return body[at + len(head):].strip() if at >= 0 else ""
+
+
 def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints, role, expires_at,
               card_context: str = ""):
     """The card: the WHOLE request in `proposal.input` (what Approve runs), a
@@ -469,14 +485,14 @@ def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints
     who = requester.display()
     preview = clean_text if len(clean_text) <= QUESTION_PREVIEW_CHARS \
         else clean_text[:QUESTION_PREVIEW_CHARS] + "… (the full request is shown below)"
-    beside = f"Also sent to {agent_name} with this request:\n{card_context}\n\n" if card_context else ""
+    beside = f"{_also_sent_head(agent_name)}{card_context}\n\n" if card_context else ""
     return {
         "request_id": request_id,
         "type": "approval",
         "priority": "high",
         "title": f"Approve {skills} on {agent_name}"[:300],
         "question": (f"{who} asked {agent_name} to run {skills}.\n\nRequest:\n{preview}\n\n{beside}"
-                     f"{APPROVE} runs it once, exactly as written. {REJECT} runs nothing."),
+                     f"{ASK_FOOTER}"),
         "options": list(OPTIONS),
         "to": role,
         "expires_at": expires_at,
@@ -1723,8 +1739,9 @@ def _person_label(email: str) -> str:
 def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
               with_run_ids: bool = False, name_approvers: bool = False) -> Optional[Dict[str, Any]]:
     """What the approval card shows beside the ask's frozen `proposal`: the
-    skills with their descriptions, who asked, who it is waiting on, whether
-    this viewer may decide, and how the request ended.
+    skills with their descriptions, who asked, the context lines the agent was
+    also sent, who it is waiting on, whether this viewer may decide, and how
+    the request ended.
 
     Read from the gate's own record, for an ask the GATE raised — never from
     `proposal`, which any agent can write — so only a real gated request gets
@@ -1761,6 +1778,7 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
             "agent": record.get("source_agent"),
             "execution_id": record.get("requester_execution_id") if with_run_ids else None,
         },
+        "also_sent": _also_sent(item.get("question"), record["agent_name"]),
         "state": record.get("state"),
         "execution_id": record.get("dispatched_execution_id") if with_run_ids else None,
         "waiting_on": [_person_label(p) for p in people] if name_approvers else [],
