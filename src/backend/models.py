@@ -6,7 +6,7 @@ import os
 import re
 import unicodedata
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, StrictInt, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, PrivateAttr, SecretStr, StrictInt, field_validator, model_validator
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from datetime import datetime
 from enum import Enum
@@ -488,6 +488,13 @@ class User(BaseModel):
     # agent created could reach `/task` looking like the admin in a browser.
     # `dependencies.is_person_principal` refuses it.
     is_event_loopback: bool = False
+    # trinity-enterprise#629 + #164: the agents a capability fence admitted an
+    # agent key to on THIS request (`dependencies._admit_capability_reach`).
+    # Private, so it is never serialized and never set from a token: the only
+    # writers are the two fences, after the grant check and the owner bound.
+    # One principal object per request (FastAPI caches `get_current_user`), so
+    # it cannot outlive the request that earned it.
+    _capability_reach: set = PrivateAttr(default_factory=set)
 
 
 class Token(BaseModel):

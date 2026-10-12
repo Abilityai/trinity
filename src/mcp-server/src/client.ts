@@ -1007,9 +1007,23 @@ export class TrinityClient {
   /**
    * Check if source agent is permitted to call target agent (Phase 9.10)
    */
+  /**
+   * May `sourceAgent` call `targetAgent`? Decided by the backend from the
+   * database — the permission edge or the spawn record — never from the
+   * Docker-filtered permissions list, so a target with no container, a spawned
+   * child, or a Docker read fault no longer reads as "not permitted"
+   * (trinity-enterprise#629). Fails closed: any error is `false`.
+   */
   async isAgentPermitted(sourceAgent: string, targetAgent: string): Promise<boolean> {
-    const permitted = await this.getPermittedAgents(sourceAgent);
-    return permitted.includes(targetAgent);
+    try {
+      const response = await this.request<{ reachable: boolean }>(
+        "GET",
+        `/api/agents/${encodeURIComponent(sourceAgent)}/reach/${encodeURIComponent(targetAgent)}`
+      );
+      return response.reachable === true;
+    } catch {
+      return false;
+    }
   }
 
   /**
