@@ -2610,6 +2610,14 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   (`comment_withheld`) is untouched. The operator sees the comment; the agent
   still does not — including through its own key: the operator queue's reads
   never return this item to a machine principal (trinity-enterprise#715).
+- **The agent's owner and admins only** (trinity-enterprise#866). A person the
+  agent is merely *shared* with is often a client too, so the alert — which names
+  the rater and quotes their words — is owner-only: the queue lists it to a
+  non-admin only for agents they own (a SQL condition, so `total` stays exact),
+  answers it by id as "not found", and refuses to acknowledge, cancel or
+  bulk-cancel it. The same facts `GET /evaluations` already withholds from a
+  shared non-owner. Only this kind is owner-only (`OWNER_ONLY_ID_PREFIXES`): a
+  shared operator still sees and answers a skill gate's approval.
 - **Routed through the budget, never allowlisted** (#1677). The volume here is
   driven by a *client* clicking, so this is an agent-influenceable emitter by
   the classification rule and goes through

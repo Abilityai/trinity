@@ -1109,6 +1109,8 @@ class OperatorQueueOperations:
         types: Optional[Tuple[str, ...]] = None,
         context_contains: Optional[Tuple[str, ...]] = None,
         exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        owner_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        owner_agent_names: Optional[Set[str]] = None,
     ) -> Optional[list]:
         """The WHERE conditions `list_items`, `count_items` and
         `list_item_agent_names` share (#3059) — ONE definition, so a page, its
@@ -1180,6 +1182,14 @@ class OperatorQueueOperations:
             escaped = fragment.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             conds.append(operator_queue.c.context.like(f"%{escaped}%", escape="\\"))
         conds.extend(self._request_id_not_prefixed_ci(exclude_request_id_prefixes))
+        # trinity-enterprise#866: an owner-only row (a client's complaint) is
+        # listed only for the agents in `owner_agent_names` — the caller's own.
+        # Same case-insensitive prefix comparison as the exclusion above.
+        if owner_only_request_id_prefixes:
+            owners = sorted(owner_agent_names or ())
+            for not_prefixed in self._request_id_not_prefixed_ci(owner_only_request_id_prefixes):
+                conds.append(or_(not_prefixed, operator_queue.c.agent_name.in_(owners))
+                             if owners else not_prefixed)
         return conds
 
     def count_items(self, **filters) -> int:
@@ -1222,6 +1232,8 @@ class OperatorQueueOperations:
         types: Optional[Tuple[str, ...]] = None,
         context_contains: Optional[Tuple[str, ...]] = None,
         exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        owner_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        owner_agent_names: Optional[Set[str]] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
 
@@ -1276,6 +1288,8 @@ class OperatorQueueOperations:
             hide_ended_before=hide_ended_before, types=types,
             context_contains=context_contains,
             exclude_request_id_prefixes=exclude_request_id_prefixes,
+            owner_only_request_id_prefixes=owner_only_request_id_prefixes,
+            owner_agent_names=owner_agent_names,
         )
         if conds is None:
             return []
