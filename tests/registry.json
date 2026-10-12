@@ -5719,6 +5719,50 @@
       "description": "trinity-enterprise#837 review: the CLI names the workspace_only refusal (executed predicate, no CLI deps) and trinity init's key provisioning exits on it (AST pin). No Docker."
     },
     {
+      "file": "unit/test_837_role_change_audit.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-12",
+      "categories": [
+        "backend",
+        "auth",
+        "audit",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837 PR 2: PUT /api/users/{username}/role through the real router (real sqlite): a change writes one role_change audit row with from/to; a no-op, a self-change, an invalid role, an unknown account and a non-admin write none; trinity-system's key, an admin's user-scoped key and an agent key cannot change a role (interactive only), an interactive admin can; the person's whitelist row is capped at the new role before the write — lowered, never raised — so a demotion cannot be undone by re-binding the account away and signing in with the old address, and a promotion does not arm the old address (no row is created; a refusal leaves it; a no-op heals a stale one; a failed whitelist write leaves the role unchanged); the module's role order equals ROLE_HIERARCHY. Mutation-proven. No Docker."
+    },
+    {
+      "file": "unit/test_837_assigned_user_inbox.py",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-12",
+      "categories": [
+        "backend",
+        "client-portal",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "trinity-enterprise#837 AC7: a real user-role account, its real platform JWT resolved by the Workspace door, the real roster and an ask to: primary resolved through the assignment seam — shared and assigned, the user sees the ask and answers it; assigned but not shared, the ask is in nobody's Inbox and the answer is the uniform 404 (why the Access tab shares on assign). Mutation-proven (a floored door, an always-true roster). No Docker."
+    },
+    {
+      "file": "../src/frontend/tests/unit/accessPanelMembers.mount.spec.js",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-12",
+      "categories": [
+        "frontend",
+        "auth"
+      ],
+      "description": "trinity-enterprise#837 AC5 (mounted): the Access tab's role select and Give a platform account show only for an entitled, server-verified admin and never on their own row; every role change asks first and a cancel or a refusal puts the select back; Give a platform account asks first, calls the store and reloads; the serves section gets the people list only once it has loaded. Mutation-proven."
+    },
+    {
+      "file": "../src/frontend/tests/unit/agentAssignmentsShare.mount.spec.js",
+      "feature": "trinity-enterprise#837",
+      "added": "2026-10-12",
+      "categories": [
+        "frontend",
+        "assignments"
+      ],
+      "description": "trinity-enterprise#837 D4 (mounted): People this agent serves shows each platform role on rows and pickers, writes the assignment and then shares the agent (never with the owner, yourself or an account with no email; a 409 is silent; a failed assignment shares nothing; a failed share lands in the row's Not shared warning), pins the agent across an in-flight switch, and warns on an old unshared row with Share with them. Mutation-proven."
+    },
+    {
       "file": "unit/test_3435_credential_tool_gates.py",
       "feature": "#3435",
       "added": "2026-10-09",

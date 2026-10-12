@@ -222,7 +222,7 @@ Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_
 | PUT | `/api/users/me/preferences/{key}` | Conditionally store one preference. Body `{value: object, base_updated_at: null \| string}` — `null` = insert-only, string = compare-and-set; 404 unknown key (allowlist: `grid_layout`, `grid_widgets`, `grid_org`), 422 non-object, 413 over 256 KiB, 409 stale base with `detail.current` = the live record (or `null`). Interactive JWT only |
 | DELETE | `/api/users/me/preferences/{key}` | Remove one of the caller's preferences (the Grid's "Reset") → `{deleted}`. Interactive JWT only |
 | GET | `/api/users` | List users with roles (admin-only; exposes `suspended_at` read-only) (ROLE-001) |
-| PUT | `/api/users/{username}/role` | Update user role (admin-only) |
+| PUT | `/api/users/{username}/role` | Update user role (admin, interactive session only; audited `role_change`, ent#837) |
 | GET | `/api/mcp/info` | MCP server info |
 | POST/GET/DELETE | `/api/mcp/keys` (`/{id}`) | Create / list / delete API keys |
 | GET | `/oauth/{provider}/authorize` / `/callback` | OAuth start / callback |

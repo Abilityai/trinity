@@ -114,6 +114,10 @@
                   <BaseBadge v-if="row.kind === 'primary' || !isAdmin" :variant="row.kind === 'primary' ? 'primary' : 'neutral'">
                     {{ kindLabel(row.kind) }}
                   </BaseBadge>
+                  <!-- ent#837: the person's platform role — it applies on every agent;
+                       it is changed on their row in the list below. -->
+                  <BaseBadge v-if="roleOf(row)" :variant="roleOf(row) === 'user' ? 'info' : 'neutral'"
+                             data-testid="assignment-platform-role">{{ platformRoleLabel(roleOf(row)) }}</BaseBadge>
                   <span v-if="row.role_id" class="text-xs text-gray-600 dark:text-gray-300" :title="row.role_id"
                         data-testid="assignment-seat">{{ seatName(row.role_id) }}</span>
                   <BaseButton
@@ -128,11 +132,22 @@
                   <span class="text-gray-600 dark:text-gray-300" data-testid="assignment-consent">{{ consentLabel(row) }}</span>
                   <span v-if="driftNote(row)" :class="driftClass(row)" data-testid="assignment-drift">{{ driftNote(row).text }}</span>
                 </div>
+                <!-- ent#837 D4: an assignment is not access (ent#500) — the Inbox
+                     shows this agent's asks only to people it is shared with. -->
+                <div v-if="notShared(row)" class="flex flex-wrap items-center gap-2 text-xs" data-testid="assignment-not-shared">
+                  <span class="font-medium text-status-warning-700 dark:text-status-warning-300">
+                    Not shared with {{ row.display_name }}: they can't see this agent or its asks in the Workspace.<template
+                      v-if="shareFail[row.user_id]"> {{ shareFail[row.user_id] }}</template>
+                  </span>
+                  <BaseButton variant="ghost" size="sm" :loading="sharingId === row.user_id" loading-label="Sharing…"
+                              data-testid="assignment-share" @click="shareRow(row)">Share with them</BaseButton>
+                </div>
               </div>
 
               <div v-if="isAdmin && row.kind !== 'primary'" class="flex items-center gap-2 shrink-0 self-start">
                 <BaseSelect
                   :model-value="row.kind"
+                  size="sm"
                   class="min-w-[9.5rem]"
                   :aria-label="`Kind for ${row.display_name}`"
                   :disabled="busyId === row.id"
@@ -225,10 +240,19 @@
             <option v-for="k in addKinds" :key="k" :value="k">{{ kindLabel(k) }}</option>
           </BaseSelect>
           <BaseInput v-model="addForm.roleId" label="Seat (role id, optional)" :list="roleListId" data-testid="add-role" />
-          <BaseButton type="submit" :disabled="!addForm.userId"
+          <!-- The fields' height (13.5px × 1.5 + py-2 + border), so the row reads as one line. -->
+          <BaseButton type="submit" class="h-[38px]" :disabled="!addForm.userId"
                       :loading="savingAdd" loading-label="Adding…" data-testid="add-submit">Add</BaseButton>
         </form>
         <InlineError v-if="isAdmin && (addError || assignments.usersError)" :message="addError || assignments.usersError" @dismiss="addError = ''" />
+        <p v-if="isAdmin && shareNote" class="text-xs text-gray-600 dark:text-gray-300" role="status" data-testid="assignments-share-note">{{ shareNote }}</p>
+        <p v-if="isAdmin" class="text-xs text-gray-600 dark:text-gray-300" data-testid="assignments-share-hint">
+          Adding someone this agent isn't shared with also shares it with them, so they can use it in the
+          Workspace (operators and above, in the operator UI too).
+        </p>
+        <p v-if="isAdmin && notOffered" class="text-xs text-gray-600 dark:text-gray-300" data-testid="assignments-not-offered">
+          Not offered: {{ notOffered }} (no platform account yet).
+        </p>
         <p v-if="isAdmin && canonNote" class="text-xs text-gray-600 dark:text-gray-300" data-testid="assignments-canon-note">
           No seats to suggest: {{ canonNote }}. A typed role id still works.
         </p>
@@ -253,6 +277,8 @@ import { useAssignmentsStore } from '../stores/assignments'
 import { useAuthStore } from '../stores/auth'
 import { useEnterpriseStore } from '../stores/enterprise'
 import { viewState } from '../utils/loadingState'
+import { platformRoleLabel, platformRoleShort } from '../utils/workspaceOnly'
+import { useAgentsStore } from '../stores/agents'
 import {
   KIND_LABELS, STAKEHOLDER_KINDS, primaryOf, stakeholdersOf, seatLine,
   consentLabel, driftNote, writeError, withRole, seatTitle, seatUpdated,
@@ -262,11 +288,18 @@ const FEATURE_ID = 'assignments'
 
 const props = defineProps({
   agentName: { type: String, required: true },
+  // ent#837: the owner's username — the agent is never shared with its owner.
+  agentOwner: { type: String, default: null },
+  // AccessPanel's people list (`GET /access` rows); null until it has loaded.
+  people: { type: Array, default: null },
+  // Re-reads that list after a share; awaited, so the warnings move with it.
+  reloadPeople: { type: Function, default: null },
 })
 
 const assignments = useAssignmentsStore()
 const auth = useAuthStore()
 const enterprise = useEnterpriseStore()
+const agentsStore = useAgentsStore()
 
 const entitled = computed(() => enterprise.isEntitled(FEATURE_ID))
 // #2198: a role gate reads the SERVER-verified profile, never the stored one.
@@ -301,8 +334,10 @@ const addKinds = computed(() => (primary.value ? STAKEHOLDER_KINDS : ['primary',
 function kindLabel(k) { return KIND_LABELS[k] || k }
 function article(k) { return /^[aeiou]/i.test(k || '') ? 'an' : 'a' }
 function userLabel(u) {
-  // A name, never a bare address where a name exists.
-  return u.name || u.username || u.email || `User ${u.id}`
+  // A name, never a bare address where a name exists — and its platform role
+  // (ent#837): `Ann · Workspace only`.
+  const name = u.name || u.username || u.email || `User ${u.id}`
+  return u.role ? `${name} · ${platformRoleShort(u.role)}` : name
 }
 function driftClass(row) {
   const tone = driftNote(row).tone
@@ -325,16 +360,22 @@ watch(addKinds, (kinds) => {
 // serves it — starting from the primary's would stamp everyone with that role.
 
 async function addPerson() {
+  // Pinned before the first await: Agent Detail is kept alive, so the page can
+  // move to another agent while this write is in flight (ent#837).
+  const agent = props.agentName
+  const person = usersById.value.get(Number(addForm.value.userId))
   addError.value = ''
+  shareNote.value = ''
   savingAdd.value = true
   try {
-    await assignments.add(props.agentName, withRole({
+    await assignments.add(agent, withRole({
       user_id: Number(addForm.value.userId),
       kind: addForm.value.kind,
     }, addForm.value.roleId))
     // The seat goes with the person: a seat left in the field would be given
     // to whoever is added next (ent#814 — each person holds their own).
     addForm.value = { ...addForm.value, userId: '', roleId: '' }
+    await shareAfterAssign(agent, person)
   } catch (err) {
     addError.value = writeError(err, "Couldn't add that person.")
   } finally {
@@ -454,15 +495,19 @@ function startReplace() {
 }
 
 async function confirmReplace() {
+  const agent = props.agentName
+  const person = usersById.value.get(Number(replaceForm.value.userId))
   replaceError.value = ''
+  shareNote.value = ''
   savingReplace.value = true
   try {
-    await assignments.replacePrimary(props.agentName, {
+    await assignments.replacePrimary(agent, {
       newUserId: Number(replaceForm.value.userId),
       oldBecomes: replaceForm.value.oldBecomes,
       roleId: replaceForm.value.roleId.trim(),
     })
     replacing.value = false
+    await shareAfterAssign(agent, person)
   } catch (err) {
     // The store has rolled back and re-read the roster: say where that left
     // the agent, from the fresh read, not from what we hoped happened.
@@ -476,10 +521,102 @@ async function confirmReplace() {
   }
 }
 
+// ---- who can see the agent (trinity-enterprise#837, D4) ----------------------
+// An assignment is a relationship, not access (ent#500): the Inbox shows an
+// agent's asks only to people it is shared with, or who own it. So assigning
+// someone shares the agent with them — AFTER the assignment is written, so a
+// failed assignment grants nothing and a failed share lands in the row's
+// warning below. The route's 409 means "already shared" and is not news.
+const usersById = computed(() => new Map(assignments.users.map((u) => [u.id, u])))
+const lower = (v) => String(v || '').trim().toLowerCase()
+const peopleByEmail = computed(() => new Map((props.people || []).map((p) => [lower(p.email), p])))
+
+/** A person's platform role: the users list (admins), else the people list. */
+function roleOf(row) {
+  return usersById.value.get(row.user_id)?.role || peopleByEmail.value.get(lower(row.user_email))?.role || null
+}
+
+// The people the picker cannot offer: shared, but with no account yet.
+const notOffered = computed(() => {
+  const pending = (props.people || []).filter((p) => p.status === 'pending').map((p) => p.email)
+  if (pending.length <= 3) return pending.join(', ')
+  return `${pending.slice(0, 3).join(', ')} and ${pending.length - 3} more`
+})
+
+const shareNote = ref('')
+const shareFail = ref({})   // user_id -> why the share after an assignment failed
+const sharingId = ref(null)
+
+/** No share for the owner, for yourself (the route refuses a self-share), or for an account with no address. */
+function reachesWithoutShare(u) {
+  return !lower(u?.email)
+    || (!!props.agentOwner && u.username === props.agentOwner)
+    || (!!auth.principalId && u.username === auth.principalId)
+}
+
+/** 'shared' | 'already' | 'skipped'; throws the route's refusal otherwise. */
+async function shareWith(agent, u) {
+  if (!u || reachesWithoutShare(u)) return 'skipped'
+  try {
+    await agentsStore.shareAgent(agent, lower(u.email))
+    return 'shared'
+  } catch (err) {
+    if (err?.response?.status === 409) return 'already'
+    throw err
+  }
+}
+
+/** After an assignment: share, never throwing — a failure is the row's warning. */
+async function shareAfterAssign(agent, person) {
+  try {
+    const outcome = await shareWith(agent, person)
+    if (outcome !== 'shared' || agent !== props.agentName) return
+    shareNote.value = `Shared with ${person.name || person.username || person.email} so they can use it in the Workspace.`
+    if (props.reloadPeople) await props.reloadPeople()
+  } catch (err) {
+    if (agent !== props.agentName) return
+    const reason = writeError(err, "Couldn't share this agent with them.")
+    shareFail.value = { ...shareFail.value, [person.id]: reason }
+    // Without the people list there is no row warning to carry it.
+    if (!props.people) addError.value = `Added, but not shared with them, so they can't see this agent in the Workspace: ${reason}`
+  }
+}
+
+/** A row's person can't see the agent: shown to admins once the people list has loaded. */
+function notShared(row) {
+  if (!isAdmin.value || !props.people) return false
+  const u = usersById.value.get(row.user_id)
+  if (!u || reachesWithoutShare(u)) return false   // unknown yet, the owner, or yourself
+  const email = lower(row.user_email || u.email)
+  return !!email && !peopleByEmail.value.has(email)
+}
+
+async function shareRow(row) {
+  const agent = props.agentName
+  const person = usersById.value.get(row.user_id)
+  if (!person) return
+  sharingId.value = row.user_id
+  try {
+    const outcome = await shareWith(agent, person)
+    const { [row.user_id]: _done, ...rest } = shareFail.value
+    shareFail.value = rest
+    if (outcome === 'shared' && agent === props.agentName) {
+      shareNote.value = `Shared with ${row.display_name} so they can use it in the Workspace.`
+    }
+    if (props.reloadPeople) await props.reloadPeople()
+  } catch (err) {
+    shareFail.value = { ...shareFail.value, [row.user_id]: writeError(err, "Couldn't share this agent with them.") }
+  } finally {
+    sharingId.value = null
+  }
+}
+
 // ---- loading ---------------------------------------------------------------
 function reload() { return assignments.load(props.agentName) }
 
 async function start() {
+  shareNote.value = ''
+  shareFail.value = {}
   await enterprise.loadFeatureFlags()
   if (!entitled.value) return
   // The canon read is a container read; it never blocks the roster.

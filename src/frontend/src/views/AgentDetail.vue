@@ -224,7 +224,7 @@
             <!-- Sharing Tab Content -->
             <!-- Access Tab Content (#17 — Trinity operators) -->
             <div v-if="activeTab === 'access' && agent.can_share">
-              <AccessPanel :agent-name="agent.name" />
+              <AccessPanel :agent-name="agent.name" :agent-owner="agent.owner" />
             </div>
 
             <div v-if="activeTab === 'sharing' && agent.can_share">
