@@ -5728,7 +5728,7 @@
         "audit",
         "unit"
       ],
-      "description": "trinity-enterprise#837 PR 2: PUT /api/users/{username}/role through the real router (real sqlite): a change writes one role_change audit row with from/to; a no-op, a self-change, an invalid role, an unknown account and a non-admin write none; trinity-system's key, an admin's user-scoped key and an agent key cannot change a role (interactive only), an interactive admin can; the person's whitelist row follows the new role, so a demotion cannot be undone by re-binding the account away and signing in with the old address (no row is created; a refusal leaves it; a no-op heals a stale one). Mutation-proven. No Docker."
+      "description": "trinity-enterprise#837 PR 2: PUT /api/users/{username}/role through the real router (real sqlite): a change writes one role_change audit row with from/to; a no-op, a self-change, an invalid role, an unknown account and a non-admin write none; trinity-system's key, an admin's user-scoped key and an agent key cannot change a role (interactive only), an interactive admin can; the person's whitelist row is capped at the new role before the write — lowered, never raised — so a demotion cannot be undone by re-binding the account away and signing in with the old address, and a promotion does not arm the old address (no row is created; a refusal leaves it; a no-op heals a stale one; a failed whitelist write leaves the role unchanged); the module's role order equals ROLE_HIERARCHY. Mutation-proven. No Docker."
     },
     {
       "file": "unit/test_837_assigned_user_inbox.py",

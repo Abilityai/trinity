@@ -80,7 +80,7 @@
       "title": "A demotion could be undone through the whitelist row's stale role",
       "description": "A role change updated only users.role; the whitelist row kept the old role, which an account created for the address gets again after a re-bind.",
       "exploit": "A demoted person re-binds the account to another mailbox and signs in with the old address as a new account at the old role.",
-      "fix": "db.set_whitelist_default_role on every successful role change; TestTheWhitelistRowFollowsTheRole, mutation-proved."
+      "fix": "db.cap_whitelist_default_role before every role write: the row is lowered, never raised; TestTheWhitelistRowFollowsTheRole (both directions, write-failure order), mutation-proved."
     }
   ],
   "hypotheses": [],

@@ -2761,8 +2761,8 @@ class DatabaseManager:
     def get_whitelist_default_role(self, email: str):
         return self._email_auth_ops.get_whitelist_default_role(email)
 
-    def set_whitelist_default_role(self, email: str, default_role: str):
-        return self._email_auth_ops.set_whitelist_default_role(email, default_role)
+    def cap_whitelist_default_role(self, email: str, role: str):
+        return self._email_auth_ops.cap_whitelist_default_role(email, role)
 
     def remove_from_whitelist(self, email: str):
         return self._email_auth_ops.remove_from_whitelist(email)

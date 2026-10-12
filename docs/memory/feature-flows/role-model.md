@@ -213,14 +213,14 @@ async def update_user_role(username: str, body: UserRoleUpdate, request: Request
         raise HTTPException(status_code=400, detail="Cannot change your own role")
     if body.role not in VALID_ROLES:
         raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: ...")
-    previous = db.get_user_by_username(username)
+    previous = db.get_user_by_username(username)          # 404 if missing
+    if previous.get("email"):   # the whitelist row may never rank above the account
+        db.cap_whitelist_default_role(previous["email"], body.role)   # lowered, never raised
     updated = db.update_user_role(username, body.role)
     if not updated:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
     if previous_role != updated["role"]:
         await platform_audit_service.log(event_action="role_change", details={"from": ..., "to": ...}, ...)
-    if updated.get("email"):   # the whitelist row follows, or a re-bind could restore the old role
-        db.set_whitelist_default_role(updated["email"], updated["role"])
     return {"username": updated["username"], "role": updated["role"]}
 ```
 
@@ -379,7 +379,7 @@ Admin-only. Returns all platform users without password hashes.
 
 ### PUT /api/users/{username}/role
 
-Admin, from an interactive session (any API key gets 403). Changes the role of the specified user, points their whitelist row (if any) at the new role, and records a `role_change` audit row (from → to); a no-op writes none.
+Admin, from an interactive session (any API key gets 403). Changes the role of the specified user — first capping their whitelist row (if any) at the new role, lowered never raised — and records a `role_change` audit row (from → to); a no-op writes none.
 
 **Request Body:**
 ```json

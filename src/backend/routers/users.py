@@ -391,6 +391,17 @@ async def update_user_role(
         )
 
     previous = db.get_user_by_username(username)
+    if not previous:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    # The whitelist row is the role an account created for this address gets —
+    # again after a re-bind — so it may never rank above the account: lowered
+    # with a demotion (no-ops included, which heals a row an earlier change left
+    # behind), never raised with a promotion. Written FIRST, so a failure leaves
+    # the role unchanged; the only partial state is a row already lowered.
+    if previous.get("email"):
+        db.cap_whitelist_default_role(previous["email"], body.role)
+
     try:
         updated = db.update_user_role(username, body.role)
     except ValueError as e:
@@ -399,7 +410,7 @@ async def update_user_role(
     if not updated:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
-    previous_role = previous.get("role") if previous else None
+    previous_role = previous.get("role")
     if previous_role != updated["role"]:
         await platform_audit_service.log(
             event_type=AuditEventType.AUTHORIZATION,
@@ -413,11 +424,6 @@ async def update_user_role(
             request_id=getattr(request.state, "request_id", None),
             details={"from": previous_role, "to": updated["role"]},
         )
-    # The whitelist row is the role an account created for this address gets —
-    # again after a re-bind — so it follows the change (no-ops included, which
-    # heals a row an earlier change left behind).
-    if updated.get("email"):
-        db.set_whitelist_default_role(updated["email"], updated["role"])
 
     return {
         "username": updated["username"],

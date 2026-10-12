@@ -180,10 +180,12 @@ self-signup and SSO first sign-in keep writing.
   `require_admin` alone admits `trinity-system`'s key and an admin's user-scoped key, and a
   role applies on every agent. A change writes one `role_change` audit row
   (`AUTHORIZATION`, target `user`, details `{from, to}`); a no-op and every refusal write none.
-  A successful change also sets the person's whitelist row (if any) to the new role
-  (`db.set_whitelist_default_role`): that row is what an account created for the address gets —
-  again after a re-bind — so a stale row let a demoted person re-bind away and sign in with the
-  old address as a new account at the old role.
+  Before the role is written, the person's whitelist row (if any) is capped at the new role
+  (`db.cap_whitelist_default_role`, one conditional UPDATE): lowered, never raised. That row is
+  what an account created for the address gets — again after a re-bind — so a row above the
+  account let a demoted person re-bind away and sign in with the old address at the old role,
+  and a row raised on a promotion would hand the old address a second account a later demotion
+  would not reach. A failure in that write leaves the role unchanged.
 - **A platform account now**: an admin can create the account for a person an agent is shared
   with before they first sign in, so they can be assigned at once. The account is the one their
   first sign-in would create, at the role their allow-list entry records: `user` for a new

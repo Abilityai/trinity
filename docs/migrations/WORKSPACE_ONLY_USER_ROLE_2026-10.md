@@ -68,8 +68,8 @@ Every account whose role is `user`. They usually got it from one of these:
    `PUT /api/users/{username}/role` with `{"role": "operator"}` from an admin's signed-in
    session. The route no longer accepts API keys (an admin's own keys and `trinity-system`'s
    included), so a script that changed roles with a key now gets 403; every change is
-   recorded in the audit log as `role_change`, and also updates the person's row on the
-   Email Whitelist ("Role at first sign-in") to the new role.
+   recorded in the audit log as `role_change`. Lowering a role also lowers the person's row on
+   the Email Whitelist ("Role at first sign-in") to match; raising one leaves that row as it is.
 
 3. **If accounts are created on first single sign-on**, set the provider's default role to
    `operator` for a team of operators, or raise each account after it first signs in.

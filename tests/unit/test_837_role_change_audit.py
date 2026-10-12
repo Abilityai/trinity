@@ -168,7 +168,10 @@ class TestTheWhitelistRowFollowsTheRole:
     created for the address gets — at a first sign-in, and AGAIN if the account
     later re-binds to another address. A role change that left the row at the old
     role let a demoted person re-bind away and sign in with the old address as a
-    NEW account at the old role. The row now follows every role the route sets."""
+    NEW account at the old role. The row is now capped at every role the route
+    sets — lowered, never raised (review on #3634: raised, a promotion would hand
+    the old address a second account at the new role after a re-bind, one a later
+    demotion of the first account would not reach)."""
 
     def _row(self, db, email, role, by):
         assert db.add_to_whitelist(email, by["username"], "manual", default_role=role)
@@ -211,3 +214,50 @@ class TestTheWhitelistRowFollowsTheRole:
         assert _put(api["as"](admin), member["username"], "operator").status_code == 200
         assert db.get_whitelist_default_role(member["email"]) == "operator"
         assert _role_changes(api["audit"]) == []                # a no-op is still not a change
+
+    def test_a_promotion_never_raises_the_row(self, api):
+        db = api["db"]
+        admin = _make_user(db, "admin")
+        member = _make_user(db, "user")
+        self._row(db, member["email"], "user", admin)
+        assert _put(api["as"](admin), member["username"], "admin").status_code == 200
+        assert db.get_whitelist_default_role(member["email"]) == "user"
+
+        old = member["email"]
+        db.update_user(member["username"], {"email": f"moved-{uuid.uuid4().hex[:8]}@example.com"})
+        fresh = db.get_or_create_email_user(old)
+        assert fresh["id"] != member["id"]
+        assert fresh["role"] == "user"          # not a second admin account
+
+    def test_a_row_already_below_the_new_role_stays(self, api):
+        db = api["db"]
+        admin = _make_user(db, "admin")
+        member = _make_user(db, "operator")
+        self._row(db, member["email"], "user", admin)
+        assert _put(api["as"](admin), member["username"], "creator").status_code == 200
+        assert db.get_whitelist_default_role(member["email"]) == "user"
+
+    def test_a_failed_whitelist_write_leaves_the_role_unchanged(self, api, monkeypatch):
+        """The row is capped BEFORE the role is written, so the only partial state
+        a failure can leave is a row already lowered — the safe direction — never
+        a 500 after the role has changed (review on #3634)."""
+        db = api["db"]
+        admin = _make_user(db, "admin")
+        member = _make_user(db, "admin")
+        self._row(db, member["email"], "admin", admin)
+
+        def boom(*_a, **_k):
+            raise RuntimeError("whitelist write failed")
+
+        monkeypatch.setattr(db, "cap_whitelist_default_role", boom)
+        with pytest.raises(RuntimeError):
+            _put(api["as"](admin), member["username"], "operator")
+        assert db.get_user_by_username(member["username"])["role"] == "admin"
+        assert _role_changes(api["audit"]) == []
+
+    def test_the_whitelist_role_order_is_the_role_hierarchy(self):
+        """The whitelist module keeps its own copy of the ladder (it cannot import
+        `dependencies`); this pins the copy to the original."""
+        import db.email_auth as email_auth
+        from dependencies import ROLE_HIERARCHY
+        assert email_auth._ROLE_ORDER == tuple(ROLE_HIERARCHY)
