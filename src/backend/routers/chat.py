@@ -33,6 +33,7 @@ from services.capacity_manager import (
 )
 from services import dispatch_admission_service
 from services import chat_execution_service
+from services import chat_persistence_service
 from services.chat_signals import (
     ChatAdmissionReplay,
     ChatDispatchError,
@@ -510,6 +511,8 @@ async def get_agent_chat_history(
         return [
             {"role": m.role, "content": m.content, "timestamp": m.timestamp.isoformat()}
             for m in db.get_chat_messages(sessions[0].id)
+            # trinity#3526: a held gated request and its notice are not turns.
+            if not chat_persistence_service.is_gate_message(m)
         ]
 
     if container.status != "running":
@@ -912,7 +915,7 @@ async def get_chat_session_detail(
     return {
         "session": session.model_dump(),
         "message_count": len(messages),
-        "messages": [msg.model_dump() for msg in messages]
+        "messages": chat_persistence_service.session_messages_view(name, messages),
     }
 
 

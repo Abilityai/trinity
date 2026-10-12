@@ -68,6 +68,34 @@ def _accessible_set(current_user: User) -> Optional[Set[str]]:
     return set(names)
 
 
+def _owned_set(current_user: User) -> Optional[Set[str]]:
+    """The agents this caller OWNS, for the owner-only rows
+    (trinity-enterprise#866), or None when that rule does not apply: an admin
+    sees every row. A machine key never reaches an owner-only row at all — it is
+    about a person (#715) — so its set is irrelevant and it gets None too."""
+    if current_user.role == "admin" or not is_person_principal(current_user):
+        return None
+    return set(db.get_agents_by_owner(current_user.username))
+
+
+def _hidden_from(item: Dict[str, Any], owned: Optional[Set[str]]) -> bool:
+    """An owner-only row (a client's complaint) on an agent this caller does not
+    own (trinity-enterprise#866). To them it reads like a row that is not there."""
+    return (owned is not None and operator_queue_service.is_owner_only(item)
+            and item.get("agent_name") not in owned)
+
+
+def _drop_hidden(items: List[Dict[str, Any]], owned: Optional[Set[str]]) -> List[Dict[str, Any]]:
+    return [item for item in items if not _hidden_from(item, owned)]
+
+
+def _hidden_for(item: Dict[str, Any], current_user: User) -> bool:
+    """`_hidden_from` for one row, resolving the caller's agents only when the
+    row is owner-only — every other row costs no lookup."""
+    return (operator_queue_service.is_owner_only(item)
+            and _hidden_from(item, _owned_set(current_user)))
+
+
 def _assert_agent_accessible(agent_name: str, accessible: Optional[Set[str]]) -> None:
     """Raise 403 if the user cannot access the given agent."""
     if accessible is not None and agent_name not in accessible:
@@ -177,18 +205,21 @@ async def list_queue_items(
     agent-scoped key is narrowed to `{self} ∪ permitted` before the cut;
     `agent_names` narrows any caller further.
     """
+    owned = _owned_set(current_user)
     try:
         return operator_queue_service.list_for_principal(
             current_user,
             accessible=_accessible_set(current_user),
             exclude_about_a_person=not is_person_principal(current_user),
+            # trinity-enterprise#866: a client's complaint is the agent owner's.
+            owned_agents=owned,
             # #2915: aging is computed once, here, from the operator's bound —
             # the frontend renders `aging`/`aged_since`, it never recomputes
             # them. The two flag counts are the visible escalation (undelivered
             # answers, items the agent closed on its side) the Operations header
             # shows instead of minting queue items about queue items.
             project=lambda rows: _for_principal(
-                operator_queue_service.annotate_aging(rows), current_user),
+                operator_queue_service.annotate_aging(_drop_hidden(rows, owned)), current_user),
             filters=dict(status=status, type=type, priority=priority,
                          agent_name=agent_name, since=since),
             limit=limit,
@@ -227,8 +258,12 @@ async def bulk_cancel_queue_items(
     reject_non_person_principal(current_user)
     accessible = _accessible_set(current_user)
     ids = list(dict.fromkeys(body.ids))  # dedupe, keep order — honest skipped count
+    # trinity-enterprise#866: an owner-only row a caller cannot read is not
+    # theirs to end either; it counts as skipped, like an inaccessible id.
+    cancellable = [i for i in ids
+                   if not _hidden_for(db.get_operator_queue_item(i) or {}, current_user)]
     ending = ask_service.bulk_cancel(
-        ids, accessible, actor=_actor(current_user, request), reason=body.reason,
+        cancellable, accessible, actor=_actor(current_user, request), reason=body.reason,
     )
     cancelled = len(ending.rows)
     return {"cancelled": cancelled, "skipped": len(ids) - cancelled, "batch_id": ending.batch_id}
@@ -297,6 +332,8 @@ async def get_queue_item(
         raise HTTPException(status_code=404, detail="Queue item not found")
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(item["agent_name"], accessible)
+    if _hidden_for(item, current_user):
+        raise HTTPException(status_code=404, detail="Queue item not found")  # ent#866
     visible = _for_principal(operator_queue_service.annotate_aging([item]), current_user)
     if not visible:
         # #715: a row about a person reads, to a machine, like one that is not there.
@@ -325,6 +362,8 @@ async def respond_to_queue_item(
 
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(existing["agent_name"], accessible)
+    if _hidden_for(existing, current_user):
+        raise HTTPException(status_code=404, detail="Queue item not found")  # ent#866
 
     if existing["status"] != "pending":
         raise HTTPException(
@@ -437,6 +476,8 @@ async def cancel_queue_item(
 
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(existing["agent_name"], accessible)
+    if _hidden_for(existing, current_user):
+        raise HTTPException(status_code=404, detail="Queue item not found")  # ent#866
 
     if existing["status"] != "pending":
         raise HTTPException(
@@ -475,6 +516,10 @@ async def get_agent_queue_items(
     """Get queue items for a specific agent."""
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(agent_name, accessible)
+    owned = _owned_set(current_user)
+    owner_only = ({} if owned is None else
+                  dict(owner_only_request_id_prefixes=operator_queue_service.OWNER_ONLY_ID_PREFIXES,
+                       owner_agent_names=owned))
     items = db.list_operator_queue_items(
         agent_name=agent_name,
         status=status,
@@ -484,8 +529,10 @@ async def get_agent_queue_items(
         exclude_request_id_prefixes=(
             None if is_person_principal(current_user)
             else operator_queue_service.ABOUT_A_PERSON_ID_PREFIXES),
+        **owner_only,  # trinity-enterprise#866: before the limit, like the line above
     )
-    items = _for_principal(operator_queue_service.annotate_aging(items), current_user)
+    items = _for_principal(
+        operator_queue_service.annotate_aging(_drop_hidden(items, owned)), current_user)
     return {"agent_name": agent_name, "items": items, "count": len(items)}
 
 

@@ -5791,6 +5791,13 @@
         "api"
       ],
       "description": "Nine routes nothing calls stay removed: five secret-gated /api/internal routes (health, activities/track, activities/{id}/complete, agent-files/share, agents/{name}/sync-health-status), GET /api/agents/{name}/activities, GET /api/agents/activities/timeline and the observability router (GET /api/observability/{metrics,status}); checked in the AST census and in the live route table of the real app. Pins the OTel parse helpers at their new home services/ops_costs_service.py (GET /api/ops/costs)."
+    },
+    {
+      "file": "unit/test_3526_held_chat_trace.py",
+      "feature": "#3526",
+      "added": "2026-10-12",
+      "categories": ["backend", "unit", "chat"],
+      "description": "A gated request held from the Chat tab is saved once to the chat session with its notice (source gate:<request_id>), the 202 names the session, a foreign session id falls back to the sender's own, and a failed save still answers pending. A person re-sending the same request while one is pending gets it back ahead of the caps; an agent, another person, another text or a decided request each raise their own. The session read carries the request's state and decision text; the voice context leaves held rows out."
     }
   ]
 }

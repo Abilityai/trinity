@@ -85,6 +85,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from database import db
+from db.skill_gate_requests import RAN_STATES
 from models import TaskExecutionStatus
 from services.sync_waiter import (
     signal_fan_out_batch,
@@ -213,8 +214,10 @@ def build_aggregate(
             task_status = "running"
         elif row.get("id") in held and held[row["id"]].get("state") in ("pending", "dispatching"):
             task_status = "pending_approval"
-        elif row.get("id") in held and held[row["id"]].get("state") == "dispatched":
-            task_status = "approved"   # it ran later, as its own execution
+        elif row.get("id") in held and held[row["id"]].get("state") in RAN_STATES:
+            # It ran later, as its own execution — and stays "approved" once
+            # that run ends (`succeeded` / `failed`, trinity#3520).
+            task_status = "approved"
         else:
             task_status = "failed"
         task_id = row.get("fan_out_task_id") or row.get("id")
