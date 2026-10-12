@@ -63,6 +63,10 @@ class SkillApprovalRequired(SkillGateError):
         if self.outcome_delivery == OUTCOME_DELIVERY_NONE:
             text += (" Nothing will be sent back when it is decided: if it is approved, "
                      f"it runs as a new execution on {self.agent_name}; if not, nothing runs.")
+        else:
+            # trinity#3520: what `_notify` and `_notify_completion` really send.
+            text += (" You will be told when it is decided, and again when an approved "
+                     "run ends, with how it ended.")
         return text
 
     def detail(self) -> Dict[str, Any]:

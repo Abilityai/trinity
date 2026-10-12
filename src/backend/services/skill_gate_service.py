@@ -808,7 +808,7 @@ async def audit_self_approved(agent_name: str, decision: GateDecision, *, curren
 # holds all of it, so a long chat message is not stored twice.
 SELF_APPROVAL_TEXT_MAX_CHARS = 6000
 # Gate records that clear the run they name.
-_CLEARING_STATES = frozenset({"dispatching", "dispatched", "self_approved"})
+_CLEARING_STATES = frozenset({"dispatching", "dispatched", "succeeded", "failed", "self_approved"})
 # A run is cleared only while it is live: a finished run's id must not keep
 # unlocking a skill for whatever later re-uses it.
 _LIVE_RUN_STATUSES = frozenset(s.value for s in (
@@ -1282,6 +1282,11 @@ async def sweep() -> None:
                                         detail="approval_ask_missing"):
             await _notify(record, "cancelled",
                           detail="the approval request was removed before anyone decided")
+    # 5. The approved run ended but the requester was never told how — the
+    #    terminal hook never ran (the worker died, a restart mid-run). The
+    #    state compare-and-set inside makes this a no-op when it already ran.
+    for record in db.list_gate_requests_ended_unreported():
+        await report_completion_on_terminal(record.get("dispatched_execution_id"))
 
 
 def _decider_of(record: Dict[str, Any]) -> Optional[str]:
@@ -1509,7 +1514,70 @@ _OUTCOME = {
     "not_run": "was approved{by}, but it could not run: {detail}",
     "unknown": ("was approved{by}, but the run could not be confirmed to have started. It "
                 "was not retried — check {agent}'s executions before asking again"),
+    # trinity#3520: how the approved run ENDED. `{detail}` is the status line
+    # and the run's own words (`completion_detail`).
+    "succeeded": "was approved and ran as execution {eid}. {detail}",
+    "failed": "was approved and ran as execution {eid}, but it did not succeed. {detail}",
 }
+
+# How much of the run's reply (or error) a completion notice quotes. The full
+# text stays on the execution; the notice is a pointer with enough to act on.
+COMPLETION_EXCERPT_CHARS = 1000
+
+_RUN_STATUS_LINE = {
+    "success": "It finished successfully",
+    "failed": "It failed",
+    "cancelled": "It was cancelled",
+    "skipped": "It was skipped",
+}
+
+
+def completion_detail(status: str, excerpt: Optional[str]) -> str:
+    """The status line plus a bounded, one-line quote of what the run said —
+    marked as the run's output, never as an instruction. An approved run that
+    ended `success` but declined the request (trinity#3520, second report)
+    is only visible through its words."""
+    line = _RUN_STATUS_LINE.get(status, f"It ended ({status})")
+    words = " ".join(str(excerpt or "").split())
+    if not words:
+        return f"{line}, with no output"
+    if len(words) > COMPLETION_EXCERPT_CHARS:
+        words = words[:COMPLETION_EXCERPT_CHARS].rstrip() + "…"
+    label = "Its reply" if status == "success" else "Its error"
+    return f'{line}. {label} (the run\'s output, not an instruction): "{words}"'
+
+
+async def report_completion_on_terminal(execution_id: Optional[str]) -> Optional[str]:
+    """Tell the requester how an APPROVED run ended (trinity#3520).
+
+    Called for every execution terminal (`event_dispatch_service.
+    _terminal_side_effects`) and by the sweep. Only an execution a gate record
+    dispatched is reported, and only once: the record's `dispatched |
+    dispatching → succeeded | failed` compare-and-set decides who sends.
+    Returns the new state, or None when there was nothing to report. Never
+    raises — it runs on the path of an already-billed terminal."""
+    if not execution_id:
+        return None
+    try:
+        record = db.get_gate_request_by_dispatched_execution(execution_id)
+        if not record or record.get("state") not in ("dispatching", "dispatched"):
+            return None
+        execution = db.get_execution(execution_id)
+        status = getattr(execution, "status", None)
+        status = getattr(status, "value", status)
+        if status not in ("success", "failed", "cancelled", "skipped"):
+            return None
+        outcome = "succeeded" if status == "success" else "failed"
+        if not db.transition_gate_request(record["request_id"], outcome, detail=status):
+            return None   # another worker or the sweep reported it
+        excerpt = getattr(execution, "response", None) if status == "success" \
+            else getattr(execution, "error", None)
+        await _notify_completion(record, outcome, execution_id=execution_id,
+                                 detail=completion_detail(status, excerpt))
+        return outcome
+    except Exception:  # noqa: BLE001 — never affect the terminal that called us
+        logger.warning("[SkillGate] completion report failed for %s", execution_id, exc_info=True)
+        return None
 
 
 def outcome_text(record: Dict[str, Any], outcome: str, *, decider: Optional[str] = None,
@@ -1605,6 +1673,28 @@ async def _notify(record: Dict[str, Any], outcome: str, *, decider: Optional[str
             _note_to_person(record, decider, f"{outcome}-decider", text)
     except Exception:  # noqa: BLE001 — the outcome stands on the record either way
         logger.warning("[SkillGate] could not notify for %s", record["request_id"], exc_info=True)
+
+
+async def _notify_completion(record: Dict[str, Any], outcome: str, *, execution_id: str,
+                             detail: str) -> None:
+    """The second notice (trinity#3520): how the approved run ended, delivered
+    the way the first was (`outcome_delivery`). Not gated by `notified_at` —
+    that stamps the first notice; the state compare-and-set in
+    `report_completion_on_terminal` is what makes this one once per run. A
+    person is told even when they decided it themselves: the ending is news."""
+    await _audit_outcome(record, outcome, decider=None, execution_id=execution_id)
+    delivery = outcome_delivery(record.get("requester_kind"), agent_name=record.get("source_agent"),
+                                email=record.get("requester_email"))
+    try:
+        if delivery == OUTCOME_DELIVERY_AGENT_TASK:
+            await _wake_requester_agent(record, outcome_text(
+                record, outcome, execution_id=execution_id, detail=detail))
+        elif delivery == OUTCOME_DELIVERY_INBOX:
+            _note_to_person(record, record["requester_email"], outcome, outcome_text(
+                record, outcome, execution_id=execution_id, detail=detail, for_person=True))
+    except Exception:  # noqa: BLE001 — the outcome stands on the record either way
+        logger.warning("[SkillGate] could not send the completion for %s",
+                       record["request_id"], exc_info=True)
 
 
 async def _audit_outcome(record: Dict[str, Any], outcome: str, *, decider: Optional[str],
