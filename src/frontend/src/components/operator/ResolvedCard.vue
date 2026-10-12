@@ -38,7 +38,10 @@
         <!-- trinity-enterprise#611: the action this ask proposed, so the record
              says what was approved, denied or let expire (the Workspace keeps it
              on ended asks too). -->
-        <QueueProposal v-if="item.proposal" :proposal="item.proposal" class="mt-2" />
+        <!-- trinity-enterprise#755: a gated-skill approval keeps its own card,
+             which also says how the request ended. -->
+        <GatedSkillRequest v-if="isGateCard(item)" :item="item" class="mt-2" />
+        <QueueProposal v-else-if="item.proposal" :proposal="item.proposal" class="mt-2" />
 
         <!-- Response (responded/acknowledged) or terminal status (cancelled/expired, #1017).
              trinity-enterprise#611: who ended it and when, from the endings
@@ -90,6 +93,8 @@ import { formatLocalDateTime } from '../../utils/timestamps'
 import AgentAvatar from '../AgentAvatar.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import QueueProposal from './QueueProposal.vue'
+import GatedSkillRequest from './GatedSkillRequest.vue'
+import { isGateCard } from '../../utils/skillGateCard'
 import AskMarkdown from './AskMarkdown.vue'
 
 const props = defineProps({

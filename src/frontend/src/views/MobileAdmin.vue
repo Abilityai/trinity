@@ -264,7 +264,9 @@
                 <AskMarkdown class="ops-card-message" :text="item.message || item.question || item.description" :prose="false" data-testid="queue-message" />
                 <!-- trinity-enterprise#611: the exact action this approval would run,
                      on the same card that offers the decision (desktop parity). -->
-                <QueueProposal v-if="item.proposal" :proposal="item.proposal" class="mt-2" />
+                <!-- trinity-enterprise#755: a gated-skill approval has its own card. -->
+                <GatedSkillRequest v-if="item.gate" :item="item" class="mt-2" />
+                <QueueProposal v-else-if="item.proposal" :proposal="item.proposal" class="mt-2" />
                 <!-- Controls switch on the item TYPE (desktop parity), and an
                      approval is never answered on one tap: select → restated
                      consequence → optional note → explicit Send. The decision
@@ -275,7 +277,11 @@
                      This inline step is deliberately p19-shaped — named verb,
                      restated consequence, the safe action first and focused —
                      and is NOT a confirm overlay (see the note on #1924). -->
-                <template v-if="queueResponseKind(item) === 'approval'">
+                <!-- trinity-enterprise#755: a gated-skill approval offers its
+                     controls only to a person it is addressed to; anyone else
+                     reads who it is waiting on, in the card above. -->
+                <template v-if="gateReadOnly(item)" />
+                <template v-else-if="queueResponseKind(item) === 'approval'">
                   <div class="ops-options" role="group" aria-label="Options">
                     <button
                       v-for="(opt, idx) in offeredChips(item)"
@@ -310,7 +316,7 @@
                       type="text"
                       enterkeyhint="done"
                       maxlength="4000"
-                      :placeholder="selectedOptions[item.id] === SOMETHING_ELSE ? 'What should it do instead?' : 'Add a note (optional)...'"
+                      :placeholder="selectedOptions[item.id] === SOMETHING_ELSE ? 'What should it do instead?' : (gateRejecting(item, selectedOptions[item.id]) ? 'Reason (optional) — the requester is told' : 'Add a note (optional)...')"
                       class="ops-response-input"
                       data-testid="queue-note"
                       :disabled="respondingItems[item.id]"
@@ -682,6 +688,8 @@ import { formatLocalDateTime } from '../utils/timestamps'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
 import QueueProposal from '../components/operator/QueueProposal.vue'
+import GatedSkillRequest from '../components/operator/GatedSkillRequest.vue'
+import { gateReadOnly, gateRejecting } from '../utils/skillGateCard'
 
 const route = useRoute()
 const authStore = useAuthStore()

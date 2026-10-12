@@ -93,7 +93,10 @@
       <!-- trinity-enterprise#611: the exact action this approval would run, which is
            what the person is deciding. Kept on an ended ask, so it still says what
            was decided. -->
-      <QueueProposal v-if="ask.proposal" :proposal="ask.proposal" class="mt-2" />
+      <!-- trinity-enterprise#755: a gated-skill approval has its own card —
+           the same one Operations draws (one object, two windows). -->
+      <GatedSkillRequest v-if="isGateCard(ask)" :item="ask" class="mt-2" />
+      <QueueProposal v-else-if="ask.proposal" :proposal="ask.proposal" class="mt-2" />
       <!-- ent#610 §3g L6 (E2 seam): the agent's brief — Why now, then what it
            recommends — after the proposal and before the options. Kept on an
            ended ask, like the proposal: it says what the decision was about. -->
@@ -224,8 +227,8 @@
               type="text"
               maxlength="4000"
               :disabled="busyId === ask.id"
-              :placeholder="somethingElseArmed(ask) ? 'What should it do instead? None of the options will run.' : 'Add a note (optional)…'"
-              :aria-label="somethingElseArmed(ask) ? 'Instruction' : 'Note'"
+              :placeholder="somethingElseArmed(ask) ? 'What should it do instead? None of the options will run.' : noteCopy(ask).placeholder"
+              :aria-label="somethingElseArmed(ask) ? 'Instruction' : noteCopy(ask).label"
               :class="FIELD"
               :data-testid="`${tid.prefix}-note-${ask.id}`"
               @keydown.enter="!picks[ask.id] && $event.preventDefault()"
@@ -334,6 +337,7 @@ import BaseBadge from '../base/BaseBadge.vue'
 import BaseButton from '../base/BaseButton.vue'
 import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import QueueProposal from '../operator/QueueProposal.vue'
+import GatedSkillRequest from '../operator/GatedSkillRequest.vue'
 import QueueBrief from '../operator/QueueBrief.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
@@ -348,6 +352,8 @@ import { queueEnding, workspaceEndingText, workspaceReplacesText } from '@/utils
 import { workspaceAskBadge, questionQuickPicks } from '@/utils/operatorQueue'
 // trinity-enterprise#610 §3g L6 (E2 seam): the brief's per-option consequence.
 import { briefImpactFor } from '@/utils/operatorQueue'
+// trinity-enterprise#755: the gated-skill approval card.
+import { isGateCard, gateRejecting } from '@/utils/skillGateCard'
 // #3242: the reserved off-menu approval answer.
 import { SOMETHING_ELSE, SOMETHING_ELSE_LABEL, offeredChips, decidedByOptions } from '@/utils/operatorQueue'
 import { formatLocalDateTime, formatRelativeTime } from '@/utils/timestamps'
@@ -458,6 +464,11 @@ function pick(ask, opt) {
 // its options. With no pick, typing arms it (the note box is the instruction);
 // Enter never sends that auto-armed state — the person clicks Send.
 const offersSomethingElse = (ask) => !decidedByOptions(ask)
+// trinity-enterprise#755: beside a picked Reject on a gated-skill approval the
+// note is the reason, and the requester is told it.
+const NOTE = { placeholder: 'Add a note (optional)…', label: 'Note' }
+const REASON = { placeholder: 'Reason (optional) — the requester is told', label: 'Reason' }
+const noteCopy = (ask) => (gateRejecting(ask, picks[ask.id]) ? REASON : NOTE)
 const approvalOption = (ask) => picks[ask.id]
   ?? (offersSomethingElse(ask) && (notes[ask.id] || '').trim() ? SOMETHING_ELSE : null)
 const somethingElseArmed = (ask) => approvalOption(ask) === SOMETHING_ELSE

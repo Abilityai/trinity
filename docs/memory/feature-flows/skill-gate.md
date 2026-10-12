@@ -28,7 +28,7 @@ As the owner of a finance agent, I want "pay an invoice" to run only after the p
 
 ### Components
 
-- **Operations → Needs Response** (`components/operator/QueueCard.vue`) and the **Workspace Inbox** render the approval as an ordinary ask. The question names who asked and previews the request, and `QueueProposal` shows `kind: gated_skill`, the skills, the exact input, the requester and the fingerprints. A dedicated card is trinity-enterprise#755.
+- **Operations → Needs Response** (`components/operator/QueueCard.vue`) and the **Workspace Inbox** render the approval as an ordinary ask. The question names who asked and previews the request, and the request itself is drawn by the approval card (§7, trinity-enterprise#755).
 - **A refused decision:** a 403 `not_addressee` (the approval was addressed to someone else) is shown on that card as an `InlineError` beside the controls (`components/operator/QueueCard.vue:134`, `data-testid="queue-not-addressee-notice"`) and stays until dismissed. `/m` does the same (`views/MobileAdmin.vue:1294`).
 - **The Workspace thread:** a held turn is answered with the notice as a normal assistant reply, never a Failed turn. An approved run's result arrives later in the same thread ("**Finished**" plus the result).
 - **The other run senders (trinity#3274)** read the 202 through `utils/skillGate.js` (`pendingApprovalMessage`, `isGateRefusal`), show the server's own `message`, and poll nothing:
@@ -216,6 +216,33 @@ Then the audit (best-effort, after the lock). A failed re-sync on a running agen
 
 **Library metadata** — `skill_packaging.extract_contract` reads `approval:` (top level or the `trinity:` block) from the closed set `{"recommended"}`; anything else is `frontmatter_invalid:approval`. It rides `list_skills()` entries and `SkillInfo.approval`. Since trinity-enterprise#754 the agent server also reports it for the agent's own skills (`SkillInfo.approval` on its `GET /api/skills`, same precedence and closed set), for display only: it never creates or decides a gate.
 
+### 7. The approval card (trinity-enterprise#755)
+
+```
+operator_queue row (raised_by = gate, type = approval)
+  └─ skill_gate_service.card_view(item, viewer_email, with_run_ids)
+       record = skill_gate_requests[item.request_id]      same agent, else no card
+       skills[]      record.skills + description from agent_skills_listing.recall (Redis, fail-open)
+       requester     kind, label (the proposal's frozen display), agent, execution_id*
+       state         the record's state
+       execution_id* the approved run
+       waiting_on[]  resolved_to, each as the account name, else the address (only name_approvers)
+       can_decide    viewer ∈ resolved_to
+       (* only with_run_ids)
+  ├─ routers/operator_queue._for_principal   a person's row: gate (run ids and approvers on)
+  └─ client_portal/asks/service._project     WorkspaceAsk.gate (run ids for a platform viewer)
+
+components/operator/GatedSkillRequest.vue   (utils/skillGateCard.js)
+  Agent · Skill(s) + description · Input (proposal.input, folded past 600 chars / 8 lines)
+  Requested by (+ "from this run") · Raised · Deadline · Waiting on (viewer cannot decide)
+  outcome line: badge + sentence + "Open the run"
+  drawn by PortalAsks (Inbox pane, chat card), QueueCard, ResolvedCard, MobileAdmin
+```
+
+- `QueueCard` and `/m` render no response controls when `gate.can_decide` is false. The server's `may_end` stays the rule; the card only stops offering what it would refuse.
+- Beside a picked Reject, the note field is labelled Reason. `resolve` passes the ask's `response_text` to `_notify`, and `outcome_text` quotes it ("Reason given: …", one line, 500 characters, substituted last, with `"` and the `[Trinity]` marker neutralised). `request_status` reads the same reason for the conversation trace.
+- The record trails the ask by one poll cycle. An ask the clock ended reads Expired on the card before the record moves; an ask just approved shows its outcome once the record leaves `pending`.
+
 ### Database Operations
 
 `skill_gate_requests` exists on both tracks: SQLite `skill_gate_requests_table`, and Alembic `0088_skill_gate_requests` on top of `0087_pull_sync`. Columns:
@@ -375,6 +402,9 @@ These are covered by unit tests:
 | `tests/unit/test_ent751_gate_guards.py` | discovery guards and the frozen-dispatch parity |
 | `tests/unit/test_ent329_operator_resume.py`, `tests/unit/test_ent611_ask_endings.py` | what the gate reads on a resume and an ending |
 | `src/frontend/tests/unit/queueCardNotAddressee.spec.js`, `mobileAdminNotAddressee.spec.js` | the refusal shown on the card |
+| `tests/unit/test_ent755_gate_card_view.py` | the card view: skills and descriptions, requester, who decides, run ids, each ending, no card for an ask the gate did not raise; the rejection reason reaching the requester |
+| `src/frontend/tests/unit/mobileAdminGateCard.mount.spec.js` | `/m`: the card, no options for a non-addressee, Reject's reason |
+| `src/frontend/tests/unit/gatedSkillCard.mount.spec.js` | the card mounted alone, in `QueueCard` and in `PortalAsks`: fields, folded input, waiting-on, outcomes and run links, no controls for a non-addressee, Reject's reason |
 | `src/mcp-server/src/chat-gate.test.ts` | the MCP results and the forwarded turn; the delivery-honest suffix and the inline connector tier (#3274) |
 | `tests/unit/test_3274_gate_context.py` | the context scan at the backstop, `/task` and `/chat`; raw vs rendered; scanned apart; the `ExecutionContext` parity |
 | `tests/unit/test_3274_gate_replay.py` | `/task` and fan-out replay the message and the system prompt apart; legacy records |
@@ -410,7 +440,7 @@ These are covered by unit tests:
 - **Part of this flow:** the gate map (trinity-enterprise#753, §6).
 - **Downstream / shared:**
   - the ask sink and its endings (`operating-room.md`, trinity-enterprise#611);
-  - the approval card (trinity-enterprise#755);
+  - the approval card (§7, trinity-enterprise#755) in the Workspace Inbox ([workspace-inbox.md](workspace-inbox.md));
   - the completion report back to a channel or thread (ent#457);
   - the connector playbooks (`mcp-connector.md`);
   - the guardrail hooks this hook sits beside (GUARD-002, `requirements/security.md` §28.2) and the chat's own session (#2958).
