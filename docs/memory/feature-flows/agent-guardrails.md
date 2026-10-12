@@ -267,7 +267,7 @@ Runs as **root** via `sudo` from `startup.sh`. Reads baseline + `$AGENT_GUARDRAI
 Immutable, root-owned `0444`. Contents:
 
 - **`bash_deny`** (12 regex+reason rules): recursive root/home delete, `chmod 777`, pipe-to-shell, git force-push, `kill -9 1`, raw `dd of=/dev/sd…`, `mkfs.*`, fork bomb, read-only-config tamper, host shutdown/reboot/poweroff, `sudo` naming `/etc/claude-code`/`/opt/trinity`/`/etc/sudoers` or `visudo`, root shells (`sudo -i`/`-s`/`--login`/`--shell`, `sudo su`, `sudo <shell>` with no script, bare `su`) (#3105).
-- **`path_deny`** (12 globs): `.env`, `.env.*`, `.mcp.json`, `.credentials.enc`, `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.trinity/read-only-config.json`, `/opt/trinity/*`, `/etc/claude-code/*`.
+- **`path_deny`** (16 globs): `.env`, `.env.*`, `.mcp.json`, `.credentials.enc`, `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json`, `~/.tmp/codex/*` (the runtimes' login and MCP config, trinity-enterprise#823), `~/.trinity/read-only-config.json`, `/opt/trinity/*`, `/etc/claude-code/*`. The image-build smoke (`guard002-smoke.py`) includes a `~/.claude.json` row.
 - **`credential_patterns`** (9): Anthropic key/OAuth, OpenAI, GitHub PAT (classic + fine-grained), AWS access key, Slack bot/user token, Google API key.
 - **Budgets**: `max_turns_chat: 50`, `max_turns_task: 50`, `execution_timeout_sec: 1800`.
 - **Override slots** (empty by default): `extra_bash_deny: []`, `extra_path_deny: []`, `disallowed_tools: []`.
