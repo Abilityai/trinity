@@ -356,6 +356,10 @@ def test_what_counts_as_touching_the_skills_dir(path, ancestors, expected):
 def files_mod(monkeypatch, grants, audit):
     from services.agent_service import files
     monkeypatch.setattr(files.db, "can_user_access_agent", lambda u, a: True)
+    # ent#629: a holder's path exception is bounded to agents its owner OWNS.
+    import dependencies
+    monkeypatch.setattr(dependencies.db, "get_agent_owner",
+                        lambda name: {"owner_username": "owner"})
     # Past the gate, the next thing each logic function does is look up the
     # container; "not found" is the observable proof the gate let it through.
     monkeypatch.setattr(files, "get_agent_container", lambda name: None)

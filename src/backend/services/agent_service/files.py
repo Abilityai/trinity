@@ -155,17 +155,27 @@ def _touches_skills_dir(path: str, *, include_ancestors: bool = False) -> bool:
 
 
 def _may_reach_for_path(current_user, agent_name, path, *, include_ancestors=False) -> bool:
-    """trinity-enterprise#629 reach, plus the ent#596 exception: `skills.manage`
-    IS the grant to change the skills of the owner's other agents, so a holder
-    writing a skills path reaches the target without a permission edge (the
-    capability gate below still decides the write)."""
+    """trinity-enterprise#629 reach, plus the capability exception: `skills.manage`
+    (ent#596) and `instructions.manage` (ent#164) ARE the grants to change those
+    files on the owner's other agents, so a holder writing such a path reaches
+    the target without a permission edge. Every file class the path touches
+    needs its capability, and the target must be one the key's owner OWNS — the
+    bound the route-level capability fences apply (`owner_owns_agent`). The
+    capability gate below still decides the write and audits a refusal."""
     if agent_may_reach(current_user, agent_name):
         return True
-    if not _touches_skills_dir(path, include_ancestors=include_ancestors):
+    from db.capability_grants import CAPABILITY_INSTRUCTIONS_MANAGE, CAPABILITY_SKILLS_MANAGE
+    needed = []
+    if _touches_skills_dir(path, include_ancestors=include_ancestors):
+        needed.append(CAPABILITY_SKILLS_MANAGE)
+    if _touches_instructions(path, include_ancestors=include_ancestors):
+        needed.append(CAPABILITY_INSTRUCTIONS_MANAGE)
+    if not needed:
         return False
-    from dependencies import capability_refusal
-    from db.capability_grants import CAPABILITY_SKILLS_MANAGE
-    return capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is None
+    from dependencies import capability_refusal, owner_owns_agent
+    if any(capability_refusal(current_user, cap) is not None for cap in needed):
+        return False
+    return owner_owns_agent(current_user, agent_name)
 
 
 # trinity-enterprise#164: the agent's INSTRUCTIONS — its top-level CLAUDE.md /

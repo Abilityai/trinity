@@ -45,7 +45,9 @@ import dependencies  # noqa: E402
 from models import User  # noqa: E402
 
 OWNER = "owner"
+OTHER = "other"
 A, B, C, SPAWN = "a-alpha", "a-beta", "a-gamma", "a-child"
+FOREIGN = "o-delta"   # another user's agent, reachable by an admin owner's role
 
 
 def _agent_key(agent: str = A, role: str = "admin") -> User:
@@ -66,7 +68,15 @@ def fleet(db_backend, monkeypatch):
     seed_user(1, OWNER, role="admin")
     for name in (A, B, C, SPAWN):
         seed_agent(name, owner_id=1)
+    seed_user(2, OTHER, role="user")
+    seed_agent(FOREIGN, owner_id=2)
     db.add_agent_permission(A, B, created_by=OWNER)
+    from sqlalchemy import text
+    from db.engine import get_engine
+    with get_engine().begin() as conn:  # real provenance, for the set-form read
+        conn.execute(text("UPDATE agent_ownership SET spawned_by_agent = :a, "
+                          "spawned_by_key_id = 'key-a' WHERE agent_name = :s"),
+                     {"a": A, "s": SPAWN})
 
     def ephemeral_info(target):
         return {"spawned_by_agent": A, "spawned_by_key_id": "key-a"} if target == SPAWN else None
@@ -194,6 +204,25 @@ def test_a_skills_holder_reaches_a_siblings_skills_dir_and_nothing_else(fleet, m
     assert files._may_reach_for_path(key, C, ".claude/skills/x/SKILL.md") is False
 
 
+def test_a_skills_or_instructions_holder_stops_at_the_owners_agents(fleet, monkeypatch):
+    """The file-path exception is bounded like the route fences: an agent its
+    owner OWNS, never the admin short-circuit (merge-train review, 2026-10-08)."""
+    from services.agent_service import files
+
+    held = {"skills.manage", "instructions.manage"}
+    monkeypatch.setattr(dependencies.db, "agent_has_capability",
+                        lambda agent, cap: agent == A and cap in held)
+    key = _agent_key()
+    assert files._may_reach_for_path(key, FOREIGN, ".claude/skills/x/SKILL.md") is False
+    assert files._may_reach_for_path(key, FOREIGN, "CLAUDE.md") is False
+    assert files._may_reach_for_path(key, C, "CLAUDE.md") is True
+    assert files._may_reach_for_path(key, C, ".claude/agents/x.md") is True
+    # Deleting `.claude` touches both classes, so it needs both grants.
+    held.discard("skills.manage")
+    assert files._may_reach_for_path(key, C, ".claude", include_ancestors=True) is False
+    assert files._may_reach_for_path(key, C, "CLAUDE.md") is True
+
+
 def test_a2a_inbound_is_narrowed_too(fleet, monkeypatch):
     import routers.a2a as a2a
 
@@ -212,6 +241,111 @@ def test_the_operator_queue_narrows_an_agent_key_on_an_admin_owned_install(fleet
     assert oq._accessible_set(_agent_key()) == {A, B, SPAWN}
     assert _status(oq._assert_agent_accessible, C, oq._accessible_set(_agent_key())) == 403
     assert oq._accessible_set(_human()) is None          # an admin person: unchanged
+
+
+def test_the_spawned_set_is_one_read_with_the_gates_key_rule(fleet, monkeypatch):
+    assert fleet.list_agents_spawned_by_key(A, "key-a") == [SPAWN]
+    assert fleet.list_agents_spawned_by_key(A, "key-rotated") == []
+    assert fleet.list_agents_spawned_by_key(A, "") == []
+
+    class _NewKey:
+        id = "key-rotated"
+
+    import routers.operator_queue as oq
+    monkeypatch.setattr(dependencies.db, "get_agent_mcp_api_key", lambda agent: _NewKey())
+    assert oq._accessible_set(_agent_key()) == {A, B}
+
+
+# ---------------------------------------------------------------------------
+# Part B2 — a capability earns reach per request (ent#164 × ent#629)
+# ---------------------------------------------------------------------------
+# A capability is the grant to act on the owner's other agents on the routes
+# that check it. The fence that admits a holder records the target on the
+# request's principal; the reach gate honours that record and nothing wider.
+
+def _req(target: str):
+    class _R:
+        method = "POST"
+        scope = {"path": "/x"}
+        client = None
+        state = type("S", (), {})()
+        path_params = {"name": target}
+    return _R()
+
+
+def _holding(monkeypatch, *caps):
+    monkeypatch.setattr(dependencies.db, "agent_has_capability",
+                        lambda agent, cap: agent == A and cap in caps)
+
+
+def _fence(capability, target, key, **kw):
+    asyncio.run(dependencies.capability_fence(capability, **kw)(request=_req(target), current_user=key))
+
+
+def test_a_fenced_holder_reaches_its_owners_sibling_on_that_request(fleet, monkeypatch):
+    """`schedules.manage` holder → create (`assert_agent_access`) and
+    enable/disable (`OwnedAgent`) on a sibling with no edge — refused before."""
+    _holding(monkeypatch, "schedules.manage")
+    key = _agent_key()
+    _fence("schedules.manage", C, key, own_agent_exempt=True)
+    assert _status(dependencies.assert_agent_access, key, C) == 200
+    assert _status(dependencies.get_owned_agent, name=C, current_user=key) == 200
+    assert _status(dependencies.get_authorized_agent, name=C, current_user=key) == 200
+
+
+def test_the_reach_is_for_that_target_and_that_request_only(fleet, monkeypatch):
+    _holding(monkeypatch, "schedules.manage", "agents.manage")
+    key = _agent_key()
+    _fence("schedules.manage", C, key, own_agent_exempt=True)
+    assert _status(dependencies.get_owned_agent, name=B, current_user=key) == 404
+    # A new request is a new principal object: holding the grant is not reach.
+    fresh = _agent_key()
+    assert _status(dependencies.get_owned_agent, name=C, current_user=fresh) == 404
+    assert _status(dependencies.assert_agent_access, fresh, C) == 403
+
+
+def test_holding_agents_manage_alone_no_longer_widens_the_owner_tier(fleet, monkeypatch):
+    """The old `_manages_owners_agent` widened every owner check for a holder,
+    on every route. The record replaces it."""
+    _holding(monkeypatch, "agents.manage")
+    assert _status(dependencies.get_owned_agent, name=C, current_user=_agent_key()) == 404
+
+
+def test_the_person_or_capability_dependency_records_the_reach_too(fleet, monkeypatch):
+    """`agents.manage` on the reconfigure routes (`agent_config.py`), which then
+    authorise through `assert_agent_owner`."""
+    _holding(monkeypatch, "agents.manage")
+    key = _agent_key()
+    asyncio.run(dependencies.require_person_or_capability("agents.manage")(
+        request=_req(C), current_user=key))
+    assert _status(dependencies.assert_agent_owner, key, C) == 200
+
+
+def test_a_fence_never_admits_another_users_agent(fleet, monkeypatch):
+    _holding(monkeypatch, "schedules.manage")
+    key = _agent_key()
+    assert _status(_fence, "schedules.manage", FOREIGN, key, own_agent_exempt=True) == 404
+    assert _status(dependencies.get_owned_agent, name=FOREIGN, current_user=key) == 404
+
+
+def test_a_refused_non_holder_records_nothing(fleet, monkeypatch):
+    _holding(monkeypatch)
+    monkeypatch.setattr("services.platform_audit_service.platform_audit_service.log",
+                        lambda **kw: asyncio.sleep(0))
+    key = _agent_key()
+    assert _status(_fence, "schedules.manage", C, key, own_agent_exempt=True) == 403
+    assert _status(dependencies.get_owned_agent, name=C, current_user=key) == 404
+
+
+def test_a_loop_by_id_is_narrowed_before_the_admin_shortcut(fleet):
+    """`_check_loop_access` returned on `role == "admin"` / initiator before any
+    reach check, and every sibling's loop is "started by" the shared owner."""
+    from routers.loops import _check_loop_access
+
+    loop = {"agent_name": C, "started_by_user_id": 1}
+    assert _status(_check_loop_access, loop, _agent_key()) == 403
+    assert _status(_check_loop_access, {**loop, "agent_name": B}, _agent_key()) == 200
+    assert _status(_check_loop_access, loop, _human()) == 200
 
 
 # ---------------------------------------------------------------------------

@@ -1511,9 +1511,14 @@ def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
 #     An edge means "may call", never "may manage".
 #
 # Every other principal is unchanged: humans, `user`/`system` keys, connector
-# keys (fenced separately) — `agent_name` is set only for scope `agent`. A
-# capability (ent#596 `skills.manage`) is the explicit grant to manage the
-# owner's other agents; its dependency keeps the plain owner fence.
+# keys (fenced separately) — `agent_name` is set only for scope `agent`.
+#
+# A capability (ent#596, ent#164) is the explicit grant to act on the owner's
+# OTHER agents, but only on the routes that check it. So the reach a grant
+# earns is per request: a capability fence that admits a holder records the
+# target (`_admit_capability_reach`), and only that request's reach checks see
+# it. Holding `schedules.manage` therefore reaches a sibling's schedule routes
+# and nothing else; the gate never has to know which capability a route checked.
 def agent_may_reach(current_user, target_agent: str, *, manage: bool = False) -> bool:
     """False only when an agent-scoped principal is outside its reach."""
     agent = getattr(current_user, "agent_name", None)
@@ -1527,27 +1532,25 @@ def agent_may_reach(current_user, target_agent: str, *, manage: bool = False) ->
         return True
     if _spawned_by_caller(agent, target_agent):
         return True
-    return manage and _manages_owners_agent(current_user, target_agent)
+    return _capability_admitted(current_user, target_agent)
 
 
-def _manages_owners_agent(current_user, target_agent: str) -> bool:
-    """An `agents.manage` holder reaches, for owner operations, the agents its
-    owner OWNS (trinity-enterprise#164): the grant IS the instance admin's
-    permission to reconfigure the owner's other agents, the same way
-    `skills.manage` is for their skills (ent#596). Bounded exactly like
-    `_refuse_unless_owners_agent` — `owner_username` equality, never the admin
-    short-circuit an agent key's owner role carries. Reads are not widened.
-    Fails closed."""
-    from db.capability_grants import CAPABILITY_AGENTS_MANAGE
-    try:
-        if capability_refusal(current_user, CAPABILITY_AGENTS_MANAGE) is not None:
-            return False
-        owner = db.get_agent_owner(target_agent) or {}
-    except Exception:
-        logger.warning("[ent#629] agents.manage reach lookup for %s failed; treating as unreachable",
-                       target_agent)
-        return False
-    return bool(owner) and owner.get("owner_username") == current_user.username
+def _capability_admitted(current_user, target_agent: str) -> bool:
+    """Whether a capability fence admitted this principal to `target_agent` on
+    the current request. Anything but the private set fails closed."""
+    reach = getattr(current_user, "_capability_reach", None)
+    return isinstance(reach, set) and target_agent in reach
+
+
+def _admit_capability_reach(current_user, target_agent: str) -> None:
+    """Record that a capability fence admitted an agent key to `target_agent`.
+
+    Call only after the grant check AND the owner bound
+    (`_refuse_unless_owners_agent`) have passed, so the reach it earns stays
+    inside the agents the key's owner owns."""
+    reach = getattr(current_user, "_capability_reach", None)
+    if isinstance(reach, set):
+        reach.add(target_agent)
 
 
 def _has_edge(agent_name: str, target_agent: str) -> bool:
@@ -2266,9 +2269,15 @@ def _refuse_unless_owners_agent(current_user: User, target: str) -> None:
     included. `owner_username` equality, never the admin short-circuit;
     not-owned and nonexistent answer the same 404, so a holder learns nothing
     about agents outside its owner's."""
-    owner = db.get_agent_owner(target) or {}
-    if owner.get("owner_username") != current_user.username:
+    if not owner_owns_agent(current_user, target):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+
+def owner_owns_agent(current_user, target: str) -> bool:
+    """`owner_username` equality: the bound every capability holder meets. Never
+    the admin short-circuit an agent key's owner role carries."""
+    owner = db.get_agent_owner(target) or {}
+    return bool(owner) and owner.get("owner_username") == current_user.username
 
 
 def capability_fence(capability: str, *, own_agent_exempt: bool = False,
@@ -2312,6 +2321,7 @@ def capability_fence(capability: str, *, own_agent_exempt: bool = False,
         await enforce_agent_capability(request, current_user, capability, target=target)
         if is_agent and target:
             _refuse_unless_owners_agent(current_user, target)
+            _admit_capability_reach(current_user, target)
     fence.__name__ = f"capability_fence_{capability.replace('.', '_')}"
     return fence
 
@@ -2348,6 +2358,7 @@ def require_person_or_capability(capability: str, *, self_person_only: bool = Fa
             await enforce_agent_capability(request, current_user, capability, target=target)
             if target:
                 _refuse_unless_owners_agent(current_user, target)
+                _admit_capability_reach(current_user, target)
             return current_user
         assert_person(current_user)
         return current_user

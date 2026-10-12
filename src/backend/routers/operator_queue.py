@@ -25,7 +25,6 @@ from models import (
 
 from database import db
 from dependencies import (
-    agent_may_reach,
     get_current_user,
     get_self_acting_agent,
     is_person_principal,
@@ -95,7 +94,13 @@ def _agent_reach_set(current_user: User, owner_names: Set[str], *, is_admin: boo
     reach = {me} | permitted
     if not is_admin:
         reach &= owner_names | {me}
-    return reach | {n for n in owner_names - reach if agent_may_reach(current_user, n)}
+    try:  # one query, not two lookups per held agent; same key-id rule as the gate
+        key = db.get_agent_mcp_api_key(me)
+        spawned = set(db.list_agents_spawned_by_key(me, key.id)) if key else set()
+    except Exception:
+        logger.warning("[ent#629] spawned list for %s failed; treating as none", me)
+        spawned = set()
+    return reach | (spawned & owner_names)
 
 
 def _assert_agent_accessible(agent_name: str, accessible: Optional[Set[str]]) -> None:
