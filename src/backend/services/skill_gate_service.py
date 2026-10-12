@@ -240,6 +240,22 @@ async def enforce(
     existing = db.get_gate_request(request_id)
     if existing:
         raise _answer_for_record(existing, role)
+    if occurrence_key is None and requester.is_person:
+        # trinity#3526: a person's sender (the Chat tab) names no occurrence, so
+        # the same request sent again while the first is waiting is that request.
+        # Ahead of the caps: it raises nothing, so it spends nothing. Compared on
+        # the card text and the frozen dispatch — everything Approve runs (the
+        # model, the tools, the surface it came from) — never on a field the
+        # caller chose.
+        # ponytail: read-then-insert, so two workers can each admit one (the
+        # caps' own tolerance); a unique index on the pending triple if it matters.
+        frozen = json.dumps(dict(dispatch or {}), sort_keys=True)
+        for pending in db.list_pending_gate_requests(agent_name):
+            if (pending.get("requester_key") == requester.key
+                    and pending.get("request_text") == clean_text
+                    and pending.get("skills") == names
+                    and json.dumps(pending.get("dispatch") or {}, sort_keys=True) == frozen):
+                raise _pending_from_record(pending, role)
 
     _check_caps(agent_name, requester)
     fingerprints = await _fingerprints_or_refuse(agent_name, names)
@@ -1529,6 +1545,24 @@ def outcome_text(record: Dict[str, Any], outcome: str, *, decider: Optional[str]
     marker = "" if for_person else "[Trinity] "
     return (f"{marker}Your request {record['request_id']} to run the skill {skills} on "
             f"{record['agent_name']} {body}.{tail}")
+
+
+def request_status(request_id: str, agent_name: str) -> Dict[str, Optional[str]]:
+    """Where a request stands, for the conversation it was made in
+    (trinity#3526): `pending` with no text while it waits, else the outcome and
+    the sentence `_notify` sends a person — without the decider, since this is
+    read by whoever may read the conversation. `not_found` for an id that is
+    not a request on `agent_name`."""
+    record = db.get_gate_request(request_id)
+    if not record or record.get("agent_name") != agent_name:
+        return {"request_id": request_id, "state": "not_found", "text": None}
+    state = record.get("state")
+    if state in ("pending", "dispatching"):
+        return {"request_id": request_id, "state": "pending", "text": None}
+    outcome = "approved" if state == "dispatched" else state
+    return {"request_id": request_id, "state": outcome, "text": outcome_text(
+        record, outcome, execution_id=record.get("dispatched_execution_id"),
+        detail=record.get("state_detail"), for_person=True)}
 
 
 # Outcomes that are exactly what the decider did. A person who decided their own

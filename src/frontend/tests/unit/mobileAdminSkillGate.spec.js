@@ -77,6 +77,27 @@ describe('/m chat — a gated skill', () => {
     expect(second.message).not.toContain(NOTICE)
   })
 
+  // trinity#3526 — a held request saved to the session is still held when the
+  // session is loaded: shown, with its decision, and out of the history.
+  it('keeps a saved held request held when its session is loaded', async () => {
+    const decided = 'Your request gate-abc to run the skill pay-invoice on fin was rejected; nothing was run.'
+    const gate = { request_id: 'gate-abc', state: 'denied', text: decided }
+    const w = await mountView(async () => ({ status: 202, data: { status: 'accepted', execution_id: 'e2' } }))
+    http.get.mockImplementation(async (url) => {
+      if (url.endsWith('/chat/sessions/s1')) {
+        return { data: { messages: [
+          { role: 'user', content: '/pay-invoice 100 EUR', source: 'gate:gate-abc', gate },
+          { role: 'system', content: NOTICE, source: 'gate:gate-abc', gate },
+        ] } }
+      }
+      return { data: [] }
+    })
+    await w.vm.selectSession({ id: 's1' })
+    await flushPromises()
+    expect(w.find('[data-testid="chat-system-line"]').text()).toContain(decided)
+    expect(w.vm.buildContextPrompt('what is on today?')).toBe('what is on today?')
+  })
+
   it('leaves a refused request out of the next message\'s history too', async () => {
     let calls = 0
     const w = await mountView(async () => {

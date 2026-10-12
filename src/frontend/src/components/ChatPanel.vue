@@ -171,7 +171,7 @@ import { ChatMessages, ChatInput, ChatEmptyState } from './chat'
 import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../utils/turnCancel'
 import ModelSelector from './ModelSelector.vue'
 import { apiErrorMessage } from '../utils/apiError'
-import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
+import { isGateRefusal, pendingApprovalMessage, storedChatMessage } from '../utils/skillGate'
 import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } from '../utils/execution-status'
 
 const props = defineProps({
@@ -370,11 +370,12 @@ const selectSession = async (session, closeDropdown = true) => {
     })
 
     // Load messages from session (already ordered ASC by backend)
-    messages.value = (response.data.messages || []).map(msg => ({
+    messages.value = (response.data.messages || []).map(storedChatMessage).map(msg => ({
       role: msg.role,
       content: msg.content,
       timestamp: msg.timestamp,
       source: msg.source || 'text',
+      held: msg.held,
     }))
   } catch (err) {
     console.error('Failed to load session:', err)
@@ -636,6 +637,11 @@ const sendMessage = async (userMessage, files = []) => {
     if (held) {
       userEntry.held = true
       messages.value.push({ role: 'system', content: held, held: true, timestamp: new Date().toISOString() })
+      // trinity#3526: the request was saved to a conversation — stay in it.
+      if (submitResponse.data.chat_session_id) {
+        currentSessionId.value = submitResponse.data.chat_session_id
+        await loadSessions(false)
+      }
       return
     }
 
