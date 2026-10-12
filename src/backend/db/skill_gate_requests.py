@@ -74,6 +74,14 @@ _ENTERED_FROM = {
     SUCCEEDED: (DISPATCHING, DISPATCHED),
     FAILED: (DISPATCHING, DISPATCHED),
 }
+# The states of a record whose request was APPROVED and handed to a run — the
+# ONE definition every reader outside the gate service uses (#3630 review):
+# `RAN_STATES` once the run started (whatever became of it), plus
+# `dispatching` (claimed, the run is being started). A reader that spelled
+# out `("dispatching", "dispatched")` stopped matching the moment a finished
+# run moved the record to `succeeded` / `failed`.
+RAN_STATES = (DISPATCHED, SUCCEEDED, FAILED)
+APPROVED_RUN_STATES = (DISPATCHING,) + RAN_STATES
 # The execution statuses that end an approved run (trinity#3520).
 RUN_TERMINAL_STATUSES = ("success", "failed", "cancelled", "skipped")
 TERMINAL_STATES = tuple(_ENTERED_FROM)

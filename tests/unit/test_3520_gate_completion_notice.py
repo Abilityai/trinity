@@ -331,3 +331,51 @@ def test_every_outcome_has_a_headline_and_a_persons_copy_has_no_marker(outcome, 
     record = {"request_id": "gate-x", "agent_name": FIN, "skills": ["pay-invoice"]}
     assert _GATE.outcome_text(record, outcome).startswith(f"[Trinity] {head} — your request gate-x")
     assert _GATE.outcome_text(record, outcome, for_person=True).startswith(f"{head} — your request")
+
+
+# --- readers outside the gate service still see an approved run (#3630 review) ---
+
+def test_the_channel_report_still_sees_an_approved_run_after_it_ended(run):
+    """Every terminal site spawns the terminal fan-out BEFORE the channel /
+    public-link completion report, so `report_completion_on_terminal` has
+    already moved the record to `succeeded` when the report asks."""
+    from services.channel_completion_report import _is_approved_gate_run
+    rid, eid = run.approve()
+    assert _is_approved_gate_run(eid) is True
+    run.end(eid, TaskExecutionStatus.SUCCESS, response="done")
+    _fanout(eid)
+    assert db.get_gate_request(rid)["state"] == "succeeded"
+    assert _is_approved_gate_run(eid) is True
+
+
+@pytest.mark.parametrize("state", ["dispatched", "succeeded", "failed"])
+def test_a_held_fan_out_subtask_reads_approved_whatever_its_run_became(monkeypatch, state):
+    import services.fan_out_service as fo
+    row = {"id": "row-1", "status": "skipped", "fan_out_task_id": "t1", "response": None,
+           "error": "held for approval"}
+    monkeypatch.setattr(fo.db, "get_fan_out_executions", lambda agent, fid: [row])
+    monkeypatch.setattr(fo.db, "get_gate_requests_by_origin_executions",
+                        lambda ids: {"row-1": {"request_id": "gate-1", "state": state}})
+    (task,) = fo.build_aggregate(FIN, "fo-1", ["t1"]).results
+    assert task.status == "approved" and task.request_id == "gate-1"
+
+
+@pytest.mark.parametrize("state", ["dispatched", "succeeded", "failed"])
+def test_the_backstop_never_re_holds_the_approved_run_itself(run, monkeypatch, state):
+    """`_skill_gate_backstop` skips the run the gate record names — also once
+    that run ended and the record moved past `dispatched`."""
+    import services.task_execution_service as tes
+    monkeypatch.setattr(tes.skill_gate_service, "read_gates",
+                        lambda agent: {"pay-invoice": _GATE.SkillGate()})
+    monkeypatch.setattr(tes.db, "get_gate_request_by_dispatched_execution",
+                        lambda eid: {"agent_name": FIN, "state": state})
+    enforced = []
+
+    async def _enforce(*a, **k):
+        enforced.append(1)
+        raise AssertionError("the approved run was gated again")
+    monkeypatch.setattr(tes.skill_gate_service, "enforce", _enforce)
+    asyncio.run(tes.TaskExecutionService()._skill_gate_backstop(
+        agent_name=FIN, message="/pay-invoice 100 EUR", request_text="/pay-invoice 100 EUR",
+        triggered_by="agent", execution_id="exec-approved", fields={}))
+    assert enforced == []
