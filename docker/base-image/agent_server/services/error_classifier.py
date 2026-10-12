@@ -27,6 +27,7 @@ from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from ..utils.credential_sanitizer import sanitize_dict, sanitize_text
+from .provider_pricing import turn_cost
 
 if TYPE_CHECKING:
     from ..models import ExecutionMetadata
@@ -368,7 +369,7 @@ def _recover_metadata_from_raw_messages(
         if not isinstance(msg, dict) or msg.get("type") != "result":
             continue
 
-        cost = msg.get("total_cost_usd")
+        cost = turn_cost(msg)
         dur = msg.get("duration_ms")
         if cost is None and dur is None:
             return False  # malformed result entry — nothing to recover

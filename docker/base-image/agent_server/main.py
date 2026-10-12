@@ -30,6 +30,7 @@ from .routers import (
 from .state import agent_state
 from .services.execution_env import arm_subscription_auth_guard
 from .services import chat_session_marker
+from .services.provider_pricing import prefetch_prices
 from .services.trinity_mcp import inject_trinity_mcp_if_configured
 from .auto_sync import schedule_auto_sync_if_enabled
 from .heartbeat import schedule_heartbeat
@@ -99,6 +100,12 @@ arm_subscription_auth_guard()
 @app.on_event("startup")
 def _clear_chat_session_marker() -> None:
     chat_session_marker.clear()
+
+# #3489: load the proxy's price list in the background so turn_cost, which
+# never fetches on the result path, can price the first turn after boot.
+@app.on_event("startup")
+def _prefetch_provider_prices() -> None:
+    prefetch_prices()
 
 # #389 S1a: auto-sync heartbeat loop — each cycle gated on the owner's
 # auto_sync_enabled flag, read live; GIT_SYNC_AUTO is the fallback (#3010).
