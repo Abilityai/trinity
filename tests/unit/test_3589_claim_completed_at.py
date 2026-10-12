@@ -112,9 +112,11 @@ class TestTerminalCompletedAtHelper:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def ops(db_backend):
+def ops(db_backend, monkeypatch):
+    # Re-resolve the db modules a sibling file may have stubbed (the
+    # test_cancelled_not_overwritten shape, via monkeypatch per lint_sys_modules).
     for mod in ("db.connection", "db.schedules", "db.activities", "database"):
-        sys.modules.pop(mod, None)
+        monkeypatch.delitem(sys.modules, mod, raising=False)
     from db.activities import ActivityOperations
     from db.schedules import ScheduleOperations
 
