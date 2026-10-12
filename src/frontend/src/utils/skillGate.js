@@ -21,6 +21,20 @@ export function pendingApprovalMessage(response) {
   return typeof data.message === 'string' && data.message.trim() ? data.message : FALLBACK_PENDING
 }
 
+// `chat_messages.source` of a held request and its notice (trinity#3526).
+const GATE_SOURCE = 'gate:'
+
+/**
+ * A message loaded from a chat session, as the chat shows it. A held request
+ * and its notice come back `held` (shown, and left out of the history sent
+ * with later turns); the notice reads the decision once there is one.
+ */
+export function storedChatMessage(msg) {
+  if (!String(msg?.source || '').startsWith(GATE_SOURCE)) return msg
+  const decision = msg.role === 'system' ? msg.gate?.text : null
+  return { ...msg, held: true, content: decision || msg.content }
+}
+
 /** True for a named skill-gate refusal (nothing ran, nothing was raised). */
 export function isGateRefusal(err) {
   const headers = err?.response?.headers || {}
