@@ -6110,11 +6110,13 @@ def _problem_report_id(evaluator: str, target_kind: str, target_id: str,
     day, whatever they click) while letting tomorrow's complaint through. It is
     the same bucketing ent#434's alert id uses, for the same reason.
 
-    **Stated residual**: `create_item` still has no UPDATE path, so an edited
-    comment does not reach an item already raised *that day*. That is the shared
-    ent#434 residual and belongs at the sink — working around it here with a
-    comment-dependent id would trade one bounded item per person for one per
-    keystroke-set, which is the flood the budget exists to stop.
+    **A comment sent after the rating** (the Workspace's normal path: the click
+    records the thumbs-down, the comment box sends a second request) reaches the
+    item through the sink's pending-only update, never through a comment-dependent
+    id (trinity#3521). A comment-dependent id would trade one bounded item per
+    person for one per keystroke-set, which is the flood the budget exists to stop.
+    **Stated residual**: an item a person already ended that day is not rewritten
+    or reopened by a later comment; tomorrow's bucket carries the next one.
     """
     bucket = day or utc_now_iso()[:10]
     digest = hashlib.sha256(
@@ -6147,6 +6149,7 @@ async def raise_problem_report(agent_name: str, email: str, *, target_kind: str,
     the operator's copy could not be written.
     """
     try:
+        from database import db as core_db
         from services.operator_queue_service import (
             _truncate_with_marker,
             create_bounded_alert,
@@ -6165,26 +6168,42 @@ async def raise_problem_report(agent_name: str, email: str, *, target_kind: str,
               "read that it was rated down but never these words. Nothing is "
               "waiting on a reply; acknowledge it once you have looked."
         )
+        # Identifiers only — no comment text, and no address. The operator
+        # reads who is unhappy from `question`; `context` is the
+        # machine-readable half and is the field most likely to be forwarded
+        # or logged, so it carries the least it can (the G-04 rule).
+        context = {
+            "target_kind": target_kind,
+            "target_id": target_id,
+            "has_comment": bool(text),
+        }
+        request_id = _problem_report_id(evaluator, target_kind, target_id)
+
+        def _attach_comment() -> bool:
+            # trinity#3521: the comment usually arrives as a SECOND request, after
+            # the click already raised the item. Only words ever write text, so a
+            # bare re-rate can never erase a comment. No new row, so no budget.
+            return bool(text) and core_db.update_pending_problem_report(
+                agent_name, request_id, question=question, context=context)
+
+        if _attach_comment():
+            return True
         item = {
-            "id": _problem_report_id(evaluator, target_kind, target_id),
+            "id": request_id,
             "agent_name": agent_name,
             "type": "workspace_problem_report",
             "status": "pending",
             "priority": "medium",
             "title": "A Workspace client rated a response as not useful",
             "question": question,
-            # Identifiers only — no comment text, and no address. The operator
-            # reads who is unhappy from `question`; `context` is the
-            # machine-readable half and is the field most likely to be forwarded
-            # or logged, so it carries the least it can (the G-04 rule).
-            "context": {
-                "target_kind": target_kind,
-                "target_id": target_id,
-                "has_comment": bool(text),
-            },
+            "context": context,
             "created_at": utc_now_iso(),
         }
-        return await create_bounded_alert(agent_name, item)
+        created = await create_bounded_alert(agent_name, item)
+        # Both requests run as background tasks. If the bare click's create
+        # landed between the miss above and this create, ours was the ON
+        # CONFLICT no-op, so attach once more. Idempotent.
+        return _attach_comment() or created
     except Exception as e:  # noqa: BLE001 — the rating is already recorded
         logger.warning("[ent#499] problem report failed for %s/%s: %s",
                        agent_name, target_kind, e)
