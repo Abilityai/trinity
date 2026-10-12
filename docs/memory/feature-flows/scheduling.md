@@ -557,7 +557,6 @@ CREATE UNIQUE INDEX idx_schedules_webhook_token
 |--------|---------|
 | `generate_webhook_token(schedule_id)` | `secrets.token_urlsafe(32)` → UPDATE + set `webhook_enabled=1` |
 | `get_schedule_by_webhook_token(token)` | O(1) SELECT via partial index |
-| `set_webhook_enabled(schedule_id, enabled)` | Enable/disable without revoking token |
 | `revoke_webhook_token(schedule_id)` | NULL token, set `webhook_enabled=0` |
 | `get_webhook_status(schedule_id)` | Returns `{webhook_token, webhook_enabled, has_token}` |
 
@@ -730,39 +729,37 @@ stored-invalid rows — the backend 400 is no longer the first feedback (design-
 - `croniter==5.0.1` - Cron expression parsing
 - `pytz==2024.2` - Timezone support. **Not the authoritative resolver** — pytz bundles its own complete tz database, while APScheduler's `astimezone()` re-resolves the zone through the stdlib `zoneinfo` (#1823)
 - `tzdata==2026.3` (+ the `tzdata-legacy` apt package) - The IANA database `zoneinfo` reads. `tzdata-legacy` carries the *backward-compatibility links* (`Europe/Kiev` → `Europe/Kyiv`), split out of `tzdata` in Debian trixie; without it every schedule stored under a legacy alias fails to register (#1823). Guarded by `tests/unit/test_1823_tz_capability_parity.py`
-- `httpx` - Async HTTP client (used by AgentClient)
+- `httpx` - Async HTTP client (used by `SchedulerService._call_backend_execute_task`)
 
 ---
 
 ## Agent HTTP Client Service
 
 **Added**: 2025-12-31 (Plan 03 refactoring)
-**Updated**: 2026-02-11 - Dedicated scheduler has its own `AgentClient` at `src/scheduler/agent_client.py`
 
-The dedicated scheduler uses `AgentClient` from `src/scheduler/agent_client.py` for all HTTP communication with agent containers. This centralizes URL construction, timeout handling, and response parsing.
+The dedicated scheduler does **not** talk to agent containers. Each fire goes through
+`SchedulerService._call_backend_execute_task` (`src/scheduler/service.py`), which POSTs to the
+backend's `/api/internal/execute-task` (`async_mode: true`, `Idempotency-Key: sched:{execution_id}`).
+The backend's `TaskExecutionService` then POSTs the agent's `/api/task` (`agent_post_with_retry`
+in `services/task_execution_service.py`). There is no `src/scheduler/agent_client.py`; it was removed in v0.7.0.
 
-### Usage in Dedicated Scheduler
+### Dispatch from the Dedicated Scheduler
 
-**Location**: `src/scheduler/agent_client.py`
+**Location**: `src/scheduler/service.py`
 
 ```python
-from scheduler.agent_client import get_agent_client, AgentNotReachableError
-
-# Send task to agent using AgentClient.task() for raw log format
-client = get_agent_client(schedule.agent_name)
-task_response = await client.task(schedule.message, execution_id=execution.id)
-
-# Update execution status with parsed response
-self.db.update_execution_status(
+result = await self._call_backend_execute_task(
+    agent_name=schedule.agent_name,
+    message=effective_message,
+    triggered_by=triggered_by,
+    model=schedule.model,
+    timeout_seconds=schedule.timeout_seconds,
+    allowed_tools=schedule.allowed_tools,
     execution_id=execution.id,
-    status="success",
-    response=task_response.response_text,
-    context_used=task_response.metrics.context_used,
-    context_max=task_response.metrics.context_max,
-    cost=task_response.metrics.cost_usd,
-    tool_calls=task_response.metrics.tool_calls_json,
-    execution_log=task_response.metrics.execution_log_json  # Raw Claude Code format
+    deliver_to_workspace_email=schedule.deliver_to_workspace_email,
 )
+# result is a dict: status 'dispatched' (async hand-off, completion polled from the DB),
+# 'success', or a failure.
 ```
 
 ### AgentClient API
@@ -814,19 +811,11 @@ class AgentChatMetrics:
 | `AgentRequestError` | Agent returned error status | 4xx/5xx from agent |
 | `AgentClientError` | Base exception | General failure |
 
-**Scheduler error handling** (dedicated scheduler `src/scheduler/service.py:295-313`):
-```python
-try:
-    client = get_agent_client(schedule.agent_name)
-    task_response = await client.task(schedule.message, execution_id=execution.id)
-    # ... success handling
-except AgentNotReachableError as e:
-    error_msg = f"Agent not reachable: {str(e)}"
-    # ... failure handling with specific message
-except Exception as e:
-    error_msg = str(e)
-    # ... generic failure handling
-```
+**Scheduler error handling**: the agent-client exceptions above are raised inside the backend,
+not the scheduler. `_call_backend_execute_task` raises a plain `Exception` when the backend
+returns a non-200 or the dispatch deadline passes (the message names the threshold, and the
+outcome is unknown). The caller records the fire as failed, unless the backend has already
+finalized that execution (the SCHED-ASYNC-001 anti-overwrite guard).
 
 ---
 
@@ -839,7 +828,6 @@ except Exception as e:
 | **Scheduler** | `src/scheduler/service.py` | APScheduler service (execution, sync) |
 | **Scheduler** | `src/scheduler/main.py` | Service entry point, health endpoints, manual trigger |
 | **Scheduler** | `src/scheduler/database.py` | Schedule/execution DB operations |
-| **Scheduler** | `src/scheduler/agent_client.py` | Agent HTTP client for scheduler |
 | **Scheduler** | `src/scheduler/locking.py` | Redis distributed locks |
 | Backend | `src/backend/routers/schedules.py` | REST API endpoints (CRUD, proxies trigger) |
 | Backend | `src/backend/routers/internal.py` | Internal API for activity tracking |
@@ -932,63 +920,17 @@ def _parse_cron(self, cron_expression: str) -> Dict:
 **Implemented**: 2025-12-02
 **Updated**: 2026-01-11 - `related_execution_id` now a top-level field for structured SQL queries
 **Updated**: 2026-02-11 - Activity tracking moved to internal API for dedicated scheduler
+**Updated**: 2026-10-09 - Activity rows are created and closed in-process by `TaskExecutionService` on `execute-task`; internal activity endpoints removed (#3434)
 
-Schedule executions now create persistent activity records in the unified activity stream for cross-platform observability. The dedicated scheduler tracks activities via internal API endpoints.
+Schedule executions now create persistent activity records in the unified activity stream for cross-platform observability. Activity rows are written in-process by `TaskExecutionService` for each run the scheduler dispatches via `POST /api/internal/execute-task`.
 
 ### Activity Tracking Flow
 
-**Internal API Endpoints** (used by dedicated scheduler):
-- `POST /api/internal/activities/track` - Start tracking an activity
-- `POST /api/internal/activities/{id}/complete` - Mark activity as completed/failed
+The dedicated scheduler makes no activity-tracking calls of its own (the former `POST /api/internal/activities/track` and `/complete` endpoints had no callers and were removed in #3434):
 
-**Schedule Start** (dedicated scheduler calls internal API):
-```python
-# Dedicated scheduler makes HTTP call to backend
-response = await httpx.post(
-    f"{BACKEND_URL}/api/internal/activities/track",
-    json={
-        "agent_name": schedule.agent_name,
-        "activity_type": "schedule_start",
-        "user_id": schedule.owner_id,
-        "triggered_by": "schedule",  # or "manual"
-        "related_execution_id": execution.id,
-        "details": {
-            "schedule_id": schedule.id,
-            "schedule_name": schedule.name,
-            "cron_expression": schedule.cron_expression
-        }
-    }
-)
-activity_id = response.json()["activity_id"]
-```
-
-**Schedule Completion** (dedicated scheduler calls internal API):
-```python
-# Dedicated scheduler makes HTTP call to backend
-await httpx.post(
-    f"{BACKEND_URL}/api/internal/activities/{activity_id}/complete",
-    json={
-        "status": "completed",
-        "details": {
-            "context_used": task_response.metrics.context_used,
-            "context_max": task_response.metrics.context_max,
-            "cost_usd": task_response.metrics.cost_usd,
-            "tool_count": len(execution_log) if execution_log else 0
-        }
-    }
-)
-```
-
-**Schedule Failure** (dedicated scheduler calls internal API):
-```python
-await httpx.post(
-    f"{BACKEND_URL}/api/internal/activities/{activity_id}/complete",
-    json={
-        "status": "failed",
-        "error": error_msg
-    }
-)
-```
+1. The scheduler dispatches each run with `POST /api/internal/execute-task` (`X-Internal-Secret` auth), carrying `triggered_by="schedule"` (cron) or `"manual"` plus the `execution_id`.
+2. `TaskExecutionService.execute_task()` creates the activity row in-process via `activity_service.track_activity()` (`activity_type=chat_start`, `related_execution_id=execution_id`).
+3. The same service completes it in-process via `activity_service.complete_activity()` when the run reaches a terminal state.
 
 ### Database Records
 
@@ -996,7 +938,7 @@ Each schedule execution creates:
 1. **schedule_executions** record (existing): Full execution details, response, error, cost, tool_calls
    - ID format: `token_urlsafe(16)` - permanent, used for API and UI navigation
 2. **agent_activities** record (NEW): Unified activity stream with:
-   - `activity_type`: "schedule_start"
+   - `activity_type`: "chat_start" with `triggered_by` = "schedule" / "manual" (written by `TaskExecutionService`; historical rows may carry "schedule_start")
    - `related_execution_id`: Links to `schedule_executions.id` - enables structured SQL queries
    - `duration_ms`: Calculated on completion
    - Parent-child relationships with tool calls (future)
@@ -1036,9 +978,9 @@ Activity events broadcast in addition to existing schedule events:
 
 ### Query Examples
 
-**Get all schedule activities for an agent**:
+**Get recent schedule activities** (the per-agent `GET /api/agents/{name}/activities` was removed in #3434):
 ```bash
-curl "http://localhost:8000/api/agents/my-agent/activities?activity_type=schedule_start&limit=20"
+sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_activities WHERE agent_name='my-agent' AND triggered_by IN ('schedule','manual') ORDER BY started_at DESC LIMIT 20"
 ```
 
 **Get schedule activity with execution details**:
@@ -1517,47 +1459,40 @@ if "allowed_tools" in row_keys and row["allowed_tools"]:
     allowed_tools = json.loads(row["allowed_tools"])
 ```
 
-### Agent Client
+### Scheduler Dispatch
 
-**task() method** (`src/scheduler/agent_client.py:101-153`):
+**`_call_backend_execute_task()`** (`src/scheduler/service.py`) forwards the schedule's config
+to the backend in the dispatch payload. The scheduler makes no agent call itself.
 ```python
-async def task(
-    self,
-    message: str,
-    timeout: float = None,
-    execution_id: Optional[str] = None,
-    allowed_tools: Optional[list] = None,
-    model: Optional[str] = None          # MODEL-001
-) -> AgentTaskResponse:
-    timeout = timeout or self.timeout
-
-    payload = {"message": message, "timeout_seconds": int(timeout)}
-    if execution_id:
-        payload["execution_id"] = execution_id
-    if allowed_tools is not None:
-        payload["allowed_tools"] = allowed_tools
-    if model:
-        payload["model"] = model           # MODEL-001
-
-    response = await self._request(
-        "POST", "/api/task",
-        json=payload,
-        timeout=timeout + 10  # Add buffer to agent timeout
-    )
+payload = {
+    "agent_name": agent_name,
+    "message": message,
+    "triggered_by": triggered_by,
+    "timeout_seconds": timeout_seconds,
+    "async_mode": True,
+}
+if model:
+    payload["model"] = model             # MODEL-001
+if allowed_tools:
+    payload["allowed_tools"] = allowed_tools
+if execution_id:
+    payload["execution_id"] = execution_id
+# POST {backend_url}/api/internal/execute-task
 ```
 
 ### Scheduler Service
 
-**Execution with config** (`src/scheduler/service.py:591-598`):
+**Execution with config** (`src/scheduler/service.py`):
 ```python
-# Send task to agent with schedule-specific timeout, allowed_tools, and model
-client = get_agent_client(schedule.agent_name)
-task_response = await client.task(
-    schedule.message,
-    timeout=schedule.timeout_seconds,
-    execution_id=execution.id,
+result = await self._call_backend_execute_task(
+    agent_name=schedule.agent_name,
+    message=effective_message,
+    triggered_by=triggered_by,
+    model=schedule.model,                   # MODEL-001
+    timeout_seconds=schedule.timeout_seconds,
     allowed_tools=schedule.allowed_tools,
-    model=schedule.model                    # MODEL-001
+    execution_id=execution.id,
+    deliver_to_workspace_email=schedule.deliver_to_workspace_email,
 )
 ```
 
@@ -1603,7 +1538,7 @@ task_response = await client.task(
 | `src/backend/db/schedules.py` | 66-91, 165-168, 283, 289-291 | JSON serialization, row mapping |
 | `src/scheduler/models.py` | 45-46 | `Schedule` dataclass fields |
 | `src/scheduler/database.py` | Row mapping | Parse `timeout_seconds`, `allowed_tools` |
-| `src/scheduler/agent_client.py` | 101-149 | Accept/forward `allowed_tools` param |
+| `src/scheduler/agent_client.py` | (removed in v0.7.0) | Originally accepted/forwarded `allowed_tools`; today `_call_backend_execute_task` in `src/scheduler/service.py` puts it in the backend dispatch payload |
 | `src/scheduler/service.py` | 473-480 | Pass config to `client.task()` |
 | `src/frontend/src/components/SchedulesPanel.vue` | 99-152, 244-255, 599-672, 875-880 | UI components, helpers |
 

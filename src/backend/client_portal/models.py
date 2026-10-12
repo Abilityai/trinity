@@ -1,9 +1,11 @@
 """Pydantic models for the enterprise client-portal exposure config (#79)."""
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+from models import PersonTagState  # trinity-enterprise#631 — one definition, shared with rooms
 
 
 class PortalExposureConfig(BaseModel):
@@ -389,6 +391,11 @@ class PortalChatRequest(BaseModel):
     # the first 20 rather than rejecting: a message that sent fine before #3265
     # must not start failing with a 422 because of what it carries.
     attachments: Optional[list[PortalTurnAttachment]] = None
+    # trinity-enterprise#631 — the PEOPLE this turn tags, by address, as picked
+    # in the composer. Optional; every existing caller is unaffected. Refused by
+    # name before anything is written; the service enforces the per-message cap.
+    tags: Optional[list[Annotated[str, Field(min_length=1, max_length=320)]]] = Field(
+        default=None, max_length=50)
 
     @field_validator("attachments", mode="before")
     @classmethod
@@ -429,6 +436,10 @@ class PortalChatResponse(BaseModel):
     # it. `None` then, and the client's `v-if="message.id"` correctly withholds
     # the thumbs rather than offering a control whose POST would 404.
     message_id: Optional[str] = None
+    # trinity-enterprise#754: the turn went through without approval because the
+    # asker is the approver (and the asker is this caller) — as on history rows.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
 
 class PortalTurnStarted(BaseModel):
@@ -645,6 +656,9 @@ class PortalRoleMetric(BaseModel):
     # declaring agent agrees on, or the code name turned into words. Never a
     # raw snake_case name.
     label: str = ""
+    # primary | guard (ent#731) — a fixed value, so a guard row can be labelled
+    # without any author text crossing.
+    role: str = "primary"
     # The registry's declared type and unit — what the card formats the two
     # numbers with. None for a metric this agent does not declare.
     type: Optional[str] = None
@@ -668,11 +682,10 @@ class PortalRoleObjective(BaseModel):
     horizon: Optional[str] = None
     status: Optional[str] = None
     owned: bool = False
-    # ent#843: for a SUPPORTED objective — its numbers are tracked by another
-    # agent (said once per objective, never per metric), and which one when the
-    # join knows it (an agent this one holds a read grant on).
+    # ent#843: for a SUPPORTED objective — another of the owner's agents
+    # declares its numbers. Said once per objective, never per metric, and
+    # never which agent: external clients read this card.
     tracked_elsewhere: bool = False
-    tracked_by: Optional[str] = None
     metrics: list[PortalRoleMetric] = Field(default_factory=list)
 
 
@@ -685,7 +698,7 @@ class PortalRoleInfo(BaseModel):
     stale: bool = False
     path: Optional[str] = None
     # role_file_not_found | role_file_unreadable | role_file_invalid |
-    # role_id_invalid | canon_path_invalid — the card SAYS the file failed.
+    # role_id_invalid | canon_path_invalid | no_seat — the card SAYS why.
     error: Optional[str] = None
 
 
@@ -701,7 +714,10 @@ class PortalRoleCard(BaseModel):
     `role` is None when the agent carries no `x-role` (no card is rendered)."""
     agent_name: str
     role: Optional[PortalRoleInfo] = None
-    seat: Optional[str] = None
+    # ent#814: where the seat on the card came from, for THIS viewer —
+    # holds (the agent's own) | person (the viewer's own) | primary | none.
+    # Never a person: the old `seat` carried x-role's email.
+    seat_source: Optional[Literal["holds", "person", "primary", "none"]] = None
     objectives: list[PortalRoleObjective] = Field(default_factory=list)
     # ent#676 — why `objectives` is empty when that is NOT simply true:
     # objectives_rate_limited | agent_unreachable | objectives_timeout |
@@ -715,7 +731,8 @@ class PortalRoleCard(BaseModel):
     finding_codes: list[str] = Field(default_factory=list)
     readiness: Optional[PortalRoleReadiness] = None
     walkthrough: Optional[PortalRoleWalkthrough] = None
-    # ent#500's assignment kind, when it lands; None renders as "no assignment recorded".
+    # The viewer's assignment kind on the agent (`kinds_for`): primary |
+    # approver | collaborator | viewer. None renders as "no assignment recorded".
     relationship: Optional[str] = None
     can_flip_readiness: bool = False
     # ent#689: a live seat-delivery schedule is being held because readiness is
@@ -1006,12 +1023,21 @@ class PortalHistoryMessage(BaseModel):
     # #3265: the files a user turn carried, so a reload shows them on the
     # message. None for every other row.
     attachments: Optional[list[PortalMessageAttachment]] = None
+    # trinity-enterprise#631: on the reader's OWN message, the people it tagged
+    # and whether each has read it. None on every other row.
+    tags: Optional[list[PersonTagState]] = None
     # #3166: the turn that wrote this row, so the client can take its own reply
     # off a thread another turn is also writing to, and place each reply under
     # its own question. The caller already holds these ids (the dispatch
     # response, `in_flight_execution_id`, `last_turn_outcome`); NULL on rows
     # written before the column existed and on rows no turn wrote (reports).
     execution_id: Optional[str] = None
+    # trinity-enterprise#754: on an agent reply, its turn went through without
+    # approval because the asker IS the approver (ent#752's self-approved
+    # record), and whether the viewer is that person. Booleans only — derived
+    # server-side; false on questions and rows no turn wrote.
+    gate_self_approved: bool = False
+    gate_self_approved_by_viewer: bool = False
 
 
 class PortalTurnOutcome(BaseModel):

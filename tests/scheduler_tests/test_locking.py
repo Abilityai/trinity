@@ -128,15 +128,6 @@ class TestLockManager:
 
         assert lock is None
 
-    def test_is_schedule_locked(self, mock_lock_manager: LockManager):
-        """Test checking if schedule is locked."""
-        mock_lock_manager.redis.exists.return_value = 1
-
-        is_locked = mock_lock_manager.is_schedule_locked("schedule-123")
-
-        assert is_locked is True
-        mock_lock_manager.redis.exists.assert_called_once()
-
     def test_set_heartbeat(self, mock_lock_manager: LockManager):
         """Test setting scheduler heartbeat."""
         result = mock_lock_manager.set_heartbeat("scheduler-1", ttl=60)

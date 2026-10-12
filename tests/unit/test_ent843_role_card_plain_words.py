@@ -4,13 +4,15 @@ Pins the backend half (the card's own rendering is pinned by
 `src/frontend/tests/unit/portalAgentRole.spec.js`):
 
 * a metric always crosses with a readable label: its declared label, else the
-  label every active declaration agrees on (so a metric another agent tracks
-  shows by THAT agent's label), else the code name turned into words — never a
-  raw snake_case name, and a failed lookup still falls back to words;
-* `agreed_labels` answers only when every active declaration agrees, ignores
-  retired rows, and never says which agent declared;
-* a supported objective whose numbers live elsewhere says so ONCE, naming the
-  agent only when one agent serves every number this agent reads for it;
+  label the owner's other agents' active declarations agree on (so a metric
+  another agent tracks shows by THAT agent's label), else the code name turned
+  into words — never a raw snake_case name, and a failed lookup still falls
+  back to words;
+* `declarations_elsewhere` reads only the same owner's other live agents,
+  ignores retired rows, and never says which agent declared — an agent of
+  another owner cannot put text on this owner's card;
+* a supported objective says "tracked elsewhere" ONCE, only when another agent
+  really declares one of its numbers, and never names that agent;
 * the canon's optional `client_heading` reaches the card through the join.
 """
 from __future__ import annotations
@@ -27,7 +29,7 @@ while _BACKEND_STR in sys.path:
     sys.path.remove(_BACKEND_STR)
 sys.path.insert(0, _BACKEND_STR)
 
-from db_harness import db_backend  # noqa: E402,F401
+from db_harness import db_backend, seed_agent, seed_user  # noqa: E402,F401
 
 pytest.importorskip("sqlalchemy", reason="backend venv required")
 
@@ -71,12 +73,14 @@ def test_missing_labels_take_the_agreed_label_else_words():
 
     def lookup(names):
         asked.append(names)
-        return {"runway_months": "Cash runway"}
+        return {"runway_months": "Cash runway", "finance_ar_overdue_usd": None,
+                "close_rate": "Someone else's label"}
 
-    rc.fill_metric_labels(objectives, lookup)
+    rc.apply_declarations_elsewhere(objectives, lookup)
     labels = [m["label"] for m in objectives[0]["metrics"]]
+    # agreed label; declared elsewhere but no agreed label → words; own label wins
     assert labels == ["Cash runway", "Finance AR overdue (USD)", "Close rate"]
-    assert asked == [["finance_ar_overdue_usd", "runway_months"]]   # only the unlabelled ones
+    assert asked == [["close_rate", "finance_ar_overdue_usd", "runway_months"]]
 
 
 def test_a_failed_label_lookup_still_never_shows_a_code_name():
@@ -85,61 +89,100 @@ def test_a_failed_label_lookup_still_never_shows_a_code_name():
     def boom(_names):
         raise RuntimeError("db down")
 
-    rc.fill_metric_labels(objectives, boom)
+    objectives[0]["tracked_elsewhere"] = True
+    rc.apply_declarations_elsewhere(objectives, boom)
     assert objectives[0]["metrics"][0]["label"] == "Runway (months)"
+    assert objectives[0]["tracked_elsewhere"] is False   # no claim without evidence
 
 
 # --------------------------------------------------------------------------- #
-# agreed_labels — real database
+# declarations_elsewhere — real database
 # --------------------------------------------------------------------------- #
+CARD = "card-agent"
+
+
 def _declare(agent, *entries):
     return metric_registry.reconcile_declared_metrics(
         agent, template_metrics.normalize_declared_metrics(list(entries)), source="create")
 
 
-def test_agreed_labels_only_when_every_active_declaration_agrees(db_backend):
+@pytest.fixture
+def owners(db_backend):
+    """CARD and its siblings belong to owner 1; `stranger` to owner 2."""
+    seed_user(1, "owner", role="admin")
+    seed_user(2, "someone", role="user")
+    for name in (CARD, "finance-agent", "ops-agent", "quiet-agent"):
+        seed_agent(name, owner_id=1)
+    seed_agent("stranger", owner_id=2)
+
+
+def test_declarations_elsewhere_agree_or_say_none(owners):
     _declare("finance-agent", {"name": "runway_months", "type": "gauge", "label": "Runway"},
              {"name": "burn_usd", "type": "gauge", "label": "Monthly burn"})
     _declare("ops-agent", {"name": "runway_months", "type": "gauge", "label": "Runway"},
              {"name": "burn_usd", "type": "gauge", "label": "Burn rate"})
     _declare("quiet-agent", {"name": "unlabelled_metric", "type": "gauge"})
 
-    got = db.agreed_metric_labels(["runway_months", "burn_usd", "unlabelled_metric", "nobody_declares"])
-    assert got == {"runway_months": "Runway"}        # agreed; burn disagrees; none blank; unknown absent
+    got = db.metric_declarations_elsewhere(
+        CARD, ["runway_months", "burn_usd", "unlabelled_metric", "nobody_declares"])
+    # agreed; declared but disagreeing; declared without a label; nobody → absent
+    assert got == {"runway_months": "Runway", "burn_usd": None, "unlabelled_metric": None}
 
 
-def test_a_retired_declaration_does_not_count(db_backend):
+def test_another_owners_agent_cannot_author_this_card(owners):
+    """Merge-train review (2026-10-08): the read was fleet-wide, so any agent
+    declaring the same name put up to 120 characters on another owner's
+    client-facing card."""
+    _declare("stranger", {"name": "runway_months", "type": "gauge", "label": "Buy now at example.com"})
+    assert db.metric_declarations_elsewhere(CARD, ["runway_months"]) == {}
+
+
+def test_the_card_agents_own_declaration_is_not_elsewhere(owners):
+    _declare(CARD, {"name": "runway_months", "type": "gauge", "label": "Runway"})
+    assert db.metric_declarations_elsewhere(CARD, ["runway_months"]) == {}
+
+
+def test_an_agent_with_no_ownership_row_matches_nothing(owners):
+    _declare("finance-agent", {"name": "runway_months", "type": "gauge", "label": "Runway"})
+    assert db.metric_declarations_elsewhere("unowned-agent", ["runway_months"]) == {}
+
+
+def test_a_retired_declaration_does_not_count(owners):
     _declare("finance-agent", {"name": "runway_months", "type": "gauge", "label": "Runway"})
     _declare("ops-agent", {"name": "runway_months", "type": "gauge", "label": "Old runway"})
     _declare("ops-agent")                             # emptied block retires ops-agent's row
-    assert db.agreed_metric_labels(["runway_months"]) == {"runway_months": "Runway"}
+    assert db.metric_declarations_elsewhere(CARD, ["runway_months"]) == {"runway_months": "Runway"}
 
 
 # --------------------------------------------------------------------------- #
-# Tracked elsewhere — once per objective
+# Tracked elsewhere — once per objective, never named, only when true
 # --------------------------------------------------------------------------- #
 def _objective(owned, metrics):
     return {"id": "o", "statement": "S", "owned": owned, "metrics": metrics}
 
 
+def _card_objective(owned, metrics, found):
+    obj = rc.portal_objective(_objective(owned, metrics))
+    rc.apply_declarations_elsewhere([obj], lambda names: found)
+    return obj
+
+
 def test_a_supported_objective_tracked_elsewhere_says_so_once_without_a_name():
-    obj = rc.portal_objective(_objective(False, [
-        _metric("a", declared_elsewhere=True), _metric("b", declared_elsewhere=True)]))
-    assert (obj["tracked_elsewhere"], obj["tracked_by"]) == (True, None)
+    obj = _card_objective(False, [_metric("a", declared_elsewhere=True),
+                                  _metric("b", declared_elsewhere=True)], {"a": "A"})
+    assert obj["tracked_elsewhere"] is True
+    assert "tracked_by" not in obj
 
 
-def test_it_names_the_agent_only_when_one_agent_serves_every_number():
-    one = rc.portal_objective(_objective(False, [
-        _metric("a", served_by="finance-agent"), _metric("b", served_by="finance-agent")]))
-    assert (one["tracked_elsewhere"], one["tracked_by"]) == (True, "finance-agent")
-    two = rc.portal_objective(_objective(False, [
-        _metric("a", served_by="finance-agent"), _metric("b", served_by="ops-agent")]))
-    assert (two["tracked_elsewhere"], two["tracked_by"]) == (True, None)
+def test_nobody_declaring_the_number_is_not_tracked_elsewhere():
+    """The join's `declared_elsewhere` is also true when NO agent declares it."""
+    obj = _card_objective(False, [_metric("a", declared_elsewhere=True)], {})
+    assert obj["tracked_elsewhere"] is False
 
 
 def test_an_owned_objective_is_never_tracked_elsewhere():
-    obj = rc.portal_objective(_objective(True, [_metric("a", served_by="finance-agent")]))
-    assert (obj["tracked_elsewhere"], obj["tracked_by"]) == (False, None)
+    obj = _card_objective(True, [_metric("a", declared_elsewhere=True)], {"a": "A"})
+    assert obj["tracked_elsewhere"] is False
 
 
 # --------------------------------------------------------------------------- #

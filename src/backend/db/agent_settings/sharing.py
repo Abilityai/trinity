@@ -20,6 +20,18 @@ class SharingMixin:
     """Mixin for agent sharing operations. Requires self._user_ops and ownership methods."""
 
     @staticmethod
+    def proactive_consent_state(value) -> str:
+        """`agent_sharing.allow_proactive` as a statement (trinity-enterprise#817).
+
+        NULL = never asked, 0 = declined, 1 = consented. Only `consented` lets
+        an agent send unprompted; the other two are equally "no", and they are
+        told apart only so a person can see whether anyone ever asked.
+        """
+        if value is None:
+            return "not_asked"
+        return "consented" if int(value) == 1 else "declined"
+
+    @staticmethod
     def _row_to_agent_share(row) -> AgentShare:
         """Convert an agent_sharing row to an AgentShare model."""
         return AgentShare(
@@ -29,7 +41,9 @@ class SharingMixin:
             shared_by_id=row["shared_by_id"],
             shared_by_email=row["shared_by_email"] or "unknown",
             created_at=datetime.fromisoformat(row["created_at"]),
-            allow_proactive=bool(row["allow_proactive"]) if "allow_proactive" in row.keys() else False
+            allow_proactive=bool(row["allow_proactive"]) if "allow_proactive" in row.keys() else False,
+            proactive_consent=SharingMixin.proactive_consent_state(
+                row["allow_proactive"] if "allow_proactive" in row.keys() else None),
         )
 
     def share_agent(self, agent_name: str, owner_username: str, share_with_email: str) -> Optional[AgentShare]:
@@ -69,6 +83,9 @@ class SharingMixin:
                         shared_with_email=normalized_email,
                         shared_by_id=owner["id"],
                         created_at=now,
+                        # ent#817: nobody has been asked yet — NULL, not the
+                        # column's legacy DEFAULT 0, which reads as "declined".
+                        allow_proactive=None,
                     )
                 )
                 # #446: once the email is on the allow-list, any pending access
@@ -178,6 +195,7 @@ class SharingMixin:
                 "last_active": r["last_login"],
                 "status": "active" if resolved else "pending",
                 "allow_proactive": bool(r["allow_proactive"]),
+                "proactive_consent": self.proactive_consent_state(r["allow_proactive"]),
             })
         return out
 

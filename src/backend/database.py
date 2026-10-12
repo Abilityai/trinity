@@ -151,6 +151,7 @@ from db.slack import SlackOperations
 from db.slack_channels import SlackChannelOperations
 from db.nevermined import NeverminedOperations
 from db.operator_queue import OperatorQueueOperations
+from db.queue_mentions import QueueMentionOperations
 from db.event_subscriptions import EventSubscriptionOperations
 from db.telegram_channels import TelegramChannelOperations
 from db.whatsapp_channels import WhatsAppChannelOperations
@@ -1033,6 +1034,7 @@ class DatabaseManager:
         self._slack_channel_ops = SlackChannelOperations()
         self._nevermined_ops = NeverminedOperations()
         self._operator_queue_ops = OperatorQueueOperations()
+        self._queue_mention_ops = QueueMentionOperations()  # trinity-enterprise#631
         self._event_subscription_ops = EventSubscriptionOperations()
         self._telegram_channel_ops = TelegramChannelOperations()
         self._whatsapp_channel_ops = WhatsAppChannelOperations()
@@ -1080,6 +1082,14 @@ class DatabaseManager:
 
     def list_users(self):
         return self._user_ops.list_users()
+
+    # trinity-enterprise#631 — who may be tagged in a conversation with these agents
+    def list_taggable_people(self, agent_names, query, *, exclude_email=None, limit=8):
+        return self._user_ops.list_taggable_people(agent_names, query,
+                                                   exclude_email=exclude_email, limit=limit)
+
+    def get_taggable_person(self, agent_names, email):
+        return self._user_ops.get_taggable_person(agent_names, email)
 
     def update_user_role(self, username: str, role: str):
         return self._user_ops.update_user_role(username, role)
@@ -1876,6 +1886,10 @@ class DatabaseManager:
         """ent#498 — attach a delivery destination to a pre-created row."""
         return self._schedule_ops.stamp_execution_channel_context(execution_id, **kwargs)
 
+    def set_execution_subscription(self, execution_id: str, subscription_id) -> bool:
+        """#3470 — re-point a row's SUB-004 attribution to the subscription that served."""
+        return self._schedule_ops.set_execution_subscription(execution_id, subscription_id)
+
     def resume_session_belongs_to_user(
         self, agent_name: str, claude_session_id: str, user_id: int
     ) -> bool:
@@ -2317,6 +2331,9 @@ class DatabaseManager:
 
     def get_gate_request_by_dispatched_execution(self, execution_id: str):
         return self._skill_gate_request_ops.get_gate_request_by_dispatched_execution(execution_id)
+
+    def get_self_approved_runs(self, agent_name: str, execution_ids):
+        return self._skill_gate_request_ops.get_self_approved_runs(agent_name, execution_ids)
 
     def get_gate_requests_by_origin_executions(self, execution_ids):
         return self._skill_gate_request_ops.get_gate_requests_by_origin_executions(execution_ids)
@@ -3207,8 +3224,8 @@ class DatabaseManager:
     def delete_subscription(self, subscription_id: str):
         return self._subscription_ops.delete_subscription(subscription_id)
 
-    def assign_subscription_to_agent(self, agent_name: str, subscription_id: str):
-        return self._subscription_ops.assign_subscription_to_agent(agent_name, subscription_id)
+    def assign_subscription_to_agent(self, agent_name: str, subscription_id: str, **kwargs):
+        return self._subscription_ops.assign_subscription_to_agent(agent_name, subscription_id, **kwargs)
 
     def clear_agent_subscription(self, agent_name: str):
         return self._subscription_ops.clear_agent_subscription(agent_name)
@@ -3813,6 +3830,25 @@ class DatabaseManager:
         return self._nevermined_ops.get_payment_log_entry(log_id)
 
     # =========================================================================
+    # Person tags on the queue-item ledger (db/queue_mentions.py) - ent#631
+    # =========================================================================
+
+    def create_person_mention(self, **kwargs):
+        return self._queue_mention_ops.create(**kwargs)
+
+    def list_person_mentions_for(self, email, limit=200):
+        return self._queue_mention_ops.list_for_addressee(email, limit)
+
+    def get_person_mention(self, item_id):
+        return self._queue_mention_ops.get(item_id)
+
+    def mark_person_mention_read(self, item_id, email, now):
+        return self._queue_mention_ops.mark_read(item_id, email, now)
+
+    def list_person_mentions_by_prefix(self, prefix, limit=2000, agent_names=None):
+        return self._queue_mention_ops.list_by_request_prefix(prefix, limit, agent_names)
+
+    # =========================================================================
     # Operator Queue (delegated to db/operator_queue.py) - OPS-001
     # =========================================================================
 
@@ -3831,15 +3867,19 @@ class DatabaseManager:
 
     def create_native_operator_queue_item(self, agent_name, item, *, max_pending, channel,
                                           raised_by, to_role, resolved_to, proposal,
-                                          supersedes_expired, exclude_request_id_prefixes=None):
+                                          supersedes_expired, exclude_request_id_prefixes=None,
+                                          replaces=None, guard_pending_proposal=False):
         # trinity-enterprise#611: an agent-raised ask — replay, depth cap and insert
         # in one per-agent serialized step. #3130: the prefixes leave platform
-        # rows out of the depth cap.
+        # rows out of the depth cap. #3247: `replaces` ends one of the agent's
+        # own pending asks in the same transaction.
         return self._operator_queue_ops.create_native_item(
             agent_name, item, max_pending=max_pending, channel=channel,
             raised_by=raised_by, to_role=to_role, resolved_to=resolved_to,
             proposal=proposal, supersedes_expired=supersedes_expired,
             exclude_request_id_prefixes=exclude_request_id_prefixes,
+            replaces=replaces,
+            guard_pending_proposal=guard_pending_proposal,
         )
 
     def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
@@ -3858,6 +3898,15 @@ class DatabaseManager:
     def list_expired_operator_queue_proposals(self, agent_name, limit, raised_by=None):
         # trinity-enterprise#611: the native create's re-ask guard (C6).
         return self._operator_queue_ops.list_expired_proposals_for_agent(agent_name, limit, raised_by)
+
+    def list_pending_operator_queue_proposals(self, agent_name, limit, raised_by=None):
+        # #3247 T8: the native create's pending-proposal guard (`already_pending`).
+        return self._operator_queue_ops.list_pending_proposals_for_agent(agent_name, limit, raised_by)
+
+    def list_pending_operator_queue_asks(self, agent_name, limit, exclude_request_id_prefixes=None):
+        # #3247: the agent's own pending asks for the Execution Context line.
+        return self._operator_queue_ops.list_pending_asks_for_agent(
+            agent_name, limit, exclude_request_id_prefixes)
 
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):
@@ -4211,9 +4260,10 @@ class DatabaseManager:
             agent_name, include_retired=include_retired
         )
 
-    def agreed_metric_labels(self, names):
-        """Labels every active declaration of a metric name agrees on (ent#843)."""
-        return self._metric_definition_ops.agreed_labels(list(names))
+    def metric_declarations_elsewhere(self, agent_name, names):
+        """Metric names the owner's other agents actively declare, with their
+        agreed label (ent#843). See MetricDefinitionOperations."""
+        return self._metric_definition_ops.declarations_elsewhere(agent_name, list(names))
 
     def reconcile_metric_definitions(self, agent_name: str, declared, source: str):
         """Set-diff the declared metrics into the registry; returns a summary dict."""
@@ -4255,6 +4305,20 @@ class DatabaseManager:
         """One metric's points inside a window, newest first, `limit + 1` deep."""
         return self._metric_point_ops.series_points(
             agent_name, metric, since_iso, until_iso, limit
+        )
+
+    def metric_series_points_for_dims(
+        self,
+        agent_name: str,
+        metric: str,
+        dims,
+        absent_keys,
+        since_iso: str,
+        limit: int,
+    ):
+        """One dimension series' newest points since `since_iso` (#3293)."""
+        return self._metric_point_ops.series_points_for_dims(
+            agent_name, metric, dict(dims), list(absent_keys), since_iso, limit
         )
 
     def count_metric_points_candidates(self, retention_days: int, limit: int) -> int:

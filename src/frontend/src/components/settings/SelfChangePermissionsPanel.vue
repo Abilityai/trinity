@@ -1,6 +1,6 @@
 <template>
   <!--
-    Permissions to change itself (trinity-enterprise#756) — the four grants of
+    Permissions to change itself (trinity-enterprise#756) — the self-change grants of
     trinity-enterprise#164 as admin-only toggles. Visible to the owner (and
     admins); anyone else gets a 404 from the read and the card does not render.
     Every state shares the card's footprint: skeleton → toggles, or LoadFailed.
@@ -12,8 +12,8 @@
   >
     <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Permissions to change itself</h3>
     <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      What this agent may change about itself and other agents on its own. All four are off until an
-      instance admin turns one on; people and the system agent never need them.
+      What this agent may change about itself and other agents on its own. Every one is off until an
+      instance admin turns it on; people and the system agent never need them.
     </p>
 
     <div v-if="view.state === 'loading'" aria-busy="true" data-testid="self-change-loading">

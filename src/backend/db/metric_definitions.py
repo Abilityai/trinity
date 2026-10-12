@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select, update
 
 from .engine import get_engine, make_insert
-from .tables import metric_definitions
+from .tables import agent_ownership, metric_definitions
 from utils.helpers import utc_now_iso
 
 STATUS_ACTIVE = "active"
@@ -93,27 +93,39 @@ class MetricDefinitionOperations:
         with get_engine().connect() as conn:
             return [self._row_to_dict(r) for r in conn.execute(stmt).mappings()]
 
-    def agreed_labels(self, names: List[str]) -> Dict[str, str]:
-        """``{name: label}`` for metric names whose ACTIVE declarations, across
-        every agent, all carry the same non-blank label (trinity-enterprise#843).
+    def declarations_elsewhere(self, agent_name: str, names: List[str]) -> Dict[str, Optional[str]]:
+        """``{name: label | None}`` for the metric names an ACTIVE declaration by
+        ANOTHER live agent of the SAME owner carries (trinity-enterprise#843).
 
-        The Workspace role card shows a metric another agent tracks by that
-        agent's label rather than its code name. Two agents labelling one name
-        differently is no answer (the card falls back to readable words); a
-        name nobody labels is absent. Labels only — never which agent declared.
+        Presence answers "another agent tracks this number". The value is the
+        label every such declaration agrees on, else None (two labels, or a
+        blank). Scoped to the owner on purpose: the Workspace role card shows
+        this to external clients, and an agent of another owner must not be
+        able to author text on this owner's card. An agent with no ownership
+        row matches nothing. Labels only — never which agent declared.
         """
         wanted = sorted({n for n in names if isinstance(n, str) and n})
         if not wanted:
             return {}
-        t = metric_definitions
-        stmt = select(t.c.name, t.c.label).where(
-            t.c.name.in_(wanted), t.c.status == STATUS_ACTIVE)
+        t, o = metric_definitions, agent_ownership
+        owner_id = select(o.c.owner_id).where(o.c.agent_name == agent_name).scalar_subquery()
+        stmt = (
+            select(t.c.name, t.c.label)
+            .select_from(t.join(o, o.c.agent_name == t.c.agent_name))
+            .where(
+                t.c.name.in_(wanted),
+                t.c.status == STATUS_ACTIVE,
+                t.c.agent_name != agent_name,
+                o.c.owner_id == owner_id,
+                o.c.deleted_at.is_(None),
+            )
+        )
         seen: Dict[str, set] = {}
         with get_engine().connect() as conn:
             for row in conn.execute(stmt).mappings():
-                label = (row["label"] or "").strip()
-                seen.setdefault(row["name"], set()).add(label)
-        return {n: next(iter(ls)) for n, ls in seen.items() if len(ls) == 1 and "" not in ls}
+                seen.setdefault(row["name"], set()).add((row["label"] or "").strip())
+        return {n: (next(iter(ls)) if len(ls) == 1 and "" not in ls else None)
+                for n, ls in seen.items()}
 
     # ---------------------------------------------------------------------
     # Write

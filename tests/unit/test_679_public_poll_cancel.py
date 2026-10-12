@@ -68,10 +68,11 @@ def test_cancelled_surfaces_error_and_response():
     assert out["response"] == "partial work"
 
 
-def test_failed_still_surfaces_error_regression():
+def test_failed_still_surfaces_an_error_regression():
+    # #3461: a reason, but the visitor's fixed line — never the row's own text.
     out = _poll(_execution("failed", response=None, error="boom"))
     assert out["status"] == "failed"
-    assert out["error"] == "boom"
+    assert out["error"] == "Failed to process your request. Please try again."
 
 
 def test_running_hides_response_and_error():

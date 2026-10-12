@@ -2481,10 +2481,11 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   names the two properties the tab form had to answer for (participant scoping,
   and dismissal vs switching) — §5.30 answers both.
 - Main is named by its **role** in the tab strip and the header and is not
-  renameable. An archived chat stays a tab — the operator ruled it “becomes the
-  newest tab” — and growth is bounded by `OverflowTabs`' counted “N more” rather
-  than by hiding rows; you simply never LAND in one by default. An unused Main is
-  filtered from the **sidebar** only.
+  renameable. ~~An archived chat stays a tab — the operator ruled it “becomes the
+  newest tab”.~~ ⚠️ **Superseded 2026-10-08 by §5.41** (ent#841): an archived
+  chat — Reset's retired Main included — leaves the strip and the sidebar's
+  active groups and is listed under **Archived**. An unused Main is filtered
+  from the **sidebar** only (unless it is starred, #3356).
 - The sidebar orders agents by most recent collaboration then name, applied
   before the collapse. This is **not** ent#491 (incubating): `orderRosterAgents`
   ships the order this AC states and leaves `primaryName` as its seam.
@@ -3425,7 +3426,7 @@ to localStorage in the clear.
 - **Flow**: `docs/memory/feature-flows/workspace-drafts.md`
 
 ### 5.36 Workspace — the role card in Agent details: role, objectives with metric freshness, readiness (trinity-enterprise#527)
-- **Status**: ✅ Implemented (2026-09-21) — the Role + Readiness half; the relationship line waits for ent#500. OSS-core (Workspace).
+- **Status**: ✅ Implemented (2026-09-21); the role and the relationship line read the assignment record since 2026-10-07 (ent#811/#814 follow-up, the #3271 / ent#818 live check). OSS-core (Workspace).
 - **Requirement ID**: WORKSPACE_ROLE_CARD
 - **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness; + #676, 2026-09-30, the objectives cut over to the ent#666 join)
 - **Description**: When a companion has a role (Tandem, ent#497), the Info rail's
@@ -3436,17 +3437,24 @@ to localStorage in the clear.
 - **Files are truth, read through the platform, never a second store.** Everything the
   card shows about the role comes from the agent's own container on each read
   (`client_portal/role_card.py`, via the agent client — the same door the Files tab
-  uses): `template.yaml → x-role: {role, status, seat?}` (written by the
-  `create-agent:role-companion` wizard, #511) and `x-canon.clone_path` (default
-  `canon`); the role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
+  uses): `template.yaml → x-canon.clone_path` (default `canon`) and `x-role.status`
+  (the template's readiness claim, #511); the role file `<canon>/roles/<id>.yaml`
+  where `<id>` is **the seat on record** — the seat this agent serves for the
+  viewer (`assignment_provider.resolve_served_seat`: held → the viewer's own →
+  the primary's), never `x-role.role`. `seat_source` (holds / person / primary /
+  none) is rendered as words, never a person. No seat → `role.error = no_seat`
+  with the supported objectives still listed. **Your relationship** is the
+  viewer's assignment kind (`kinds_for` on the provider; primary / approver /
+  collaborator / viewer), "no assignment recorded" only when there is none.
+  The role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
   (framework §3.4 grammar — `owner: role:<id>` or `supporting_agents` names this
   agent). The role file is the card's own read; the objectives and their numbers
   are **not** — they come from the one objective ↔ metric join
   (`objective_join_service.read_objective_join`, §50 of
   `lifecycle-observability.md`), called in process with the template and the agent
   client the card already holds (trinity-enterprise#676). Nothing is cached or
-  copied platform-side. Every read is fail-soft and **named**: no `x-role` → no
-  card at all (the panel is unchanged, AC 5); a role file that cannot be read or
+  copied platform-side. Every read is fail-soft and **named**: no seat, no canon
+  and no `x-role` → no card at all (the panel is unchanged, AC 5); a role file that cannot be read or
   parsed → the card says so (`role.error`), never an empty role; a stopped agent
   → "the agent is stopped; the card reads its files when it runs"; objectives
   that could not be read → one line saying so (`objectives_error`), never an
@@ -3518,11 +3526,16 @@ to localStorage in the clear.
   for the verdict: a held brief is a `skipped` execution whose reason names the fix
   ("Held: … runs once its owner marks it ready"), a `schedule_execution_skipped` event, and
   advanced run times — never a failure, a retry or an alert. **Every ambiguity fails open
-  and is logged** (verdict call failed, container not running, Docker or template.yaml
-  unreadable within 3 s). The template is read only to learn whether the agent is a
-  companion; `x-role.status` is agent-writable and is never trusted (#663). Honest limit: an
-  *unstamped* companion can take itself out of scope (drop `x-role`, or stall the read into
-  fail-open); an owner's stamp is the one thing it cannot touch.
+  and is logged** (verdict call failed, stamp unreadable). `x-role.status` is
+  agent-writable and is never trusted (#663). **Who is a companion (trinity-enterprise#813,
+  ruling 2026-10-06):** asked only for an unstamped agent, and answered by the seat on
+  record (`assignment_provider.resolve_seat`), not the template — a companion is an agent
+  whose primary is assigned and holds a seat. An agent holding a seat itself (an autonomous
+  player), no primary with a seat, no seat lookup or a lookup error all read as "not a
+  companion", so the brief fires; each decision is logged with its reason. The template is
+  no longer read, so an agent cannot take itself out of scope by editing its own files —
+  the seat is admin-written. A companion template with no assigned primary therefore sends
+  its brief until its primary is assigned.
   - **Rollout (ruled 2026-09-24, amended from option 1 at plan review)**: a one-time,
     database-only seed on both migration tracks stamps `ready` (`changed_by =
     rollout:ent#689`) for every live agent with autonomy on and an enabled, non-deleted
@@ -3558,14 +3571,16 @@ to localStorage in the clear.
     "not measured yet", never "— / 1").
   - **Supported objectives** in a separate group, **collapsed by default** with a count
     ("Also contributes to · N"), headings only — no metric rows, no per-metric warning.
-    Where the numbers are tracked elsewhere it says so **once per objective**, neutral:
-    "Tracked by <agent>" when one agent serves every number this agent reads for it
-    (an agent it holds a read grant on), else "Tracked by another agent". An agent that
-    only supports objectives still shows the folded group.
-  - **Readable metric names**: the declared label, else the label every *active*
-    declaration of that name agrees on (so a metric another agent tracks shows by that
-    agent's label — `db.agreed_metric_labels`, labels only, never who declared), else the
-    code name turned into words (`runway_months` → "Runway (months)"). A raw snake_case
+    Where another of the owner's agents actively declares one of its numbers it says
+    so **once per objective**, neutral: "Tracked by another agent". The card never
+    names that agent (external clients read it), and says nothing when no agent
+    declares the number. An agent that only supports objectives still shows the folded
+    group.
+  - **Readable metric names**: the declared label, else the label the *active*
+    declarations by the **same owner's** other live agents agree on (so a metric another
+    agent tracks shows by that agent's label — `db.metric_declarations_elsewhere`,
+    labels only, never who declared; an agent of another owner can never put text on
+    this card), else the code name turned into words (`runway_months` → "Runway (months)"). A raw snake_case
     name never reaches the card; a failed lookup still falls back to words.
   - **Warning colour only for real problems**: stale ("not updated recently"), behind /
     off target, a file that was not read, an incomplete list. Findings that remain under a
@@ -3938,3 +3953,108 @@ to localStorage in the clear.
 - **Not in scope**: the editable "What would be sent" (09-20 ruling); #609; the `people_for`
   provider; `may_end` (rides #164); run pills with step labels (need a message→execution link).
 - **Flow**: `docs/memory/feature-flows/workspace-inbox.md`
+
+### 5.41 Workspace — close a chat from its tab, the tab's unread count, and a star that sticks (trinity-enterprise#841, abilityai/trinity#3356)
+- **Status**: ✅ Implemented (2026-10-08)
+- **Requirement ID**: WORKSPACE_CLOSE_CHAT
+- **GitHub Issue**: abilityai/trinity-enterprise#841, abilityai/trinity#3356
+- **Description**: Closing a chat takes one click: an **×** on its tab.
+  Closing **archives** the chat and never deletes it.
+- **Key Features**:
+  - Every chat tab but Main carries an × ("Archive chat"): revealed on
+    hover/focus from `sm:` up, always drawn on touch, a real button reachable by
+    keyboard, also on the rows of the strip's "N more" menu. One click, no
+    confirmation — nothing is lost. **Main cannot be closed** (no ×; the server
+    answers a named 409) — Reset is its retire action.
+  - **One archive rule (operator, 2026-10-08).** Closing sets the same
+    `archived_at` Reset's retired Main carries, and *every* archived chat leaves
+    the tab strip and the sidebar's active groups (Starred and the date groups).
+    This reverses §5.23's ent#523 ruling that a Reset archive "becomes the newest
+    tab". The chat on screen is the one exception — a deep link to an archived
+    chat still draws its tab.
+  - **Found and reopened.** The sidebar lists archived chats in a collapsed
+    **Archived · N** group. Opening one reopens it (clears `archived_at`) as an
+    ordinary active chat; a retired Main reopens with `is_main = 0`.
+  - **Undo.** A "Chat archived · Undo" toast follows a successful close (8 s);
+    Undo reopens the chat and returns to it if it was the open one. A refused
+    close reverts the tab and names the reason in an `InlineError` under the strip.
+  - **Neighbour on close.** Closing the open chat moves to the tab on its
+    right, else its left (Main is first, so there is one), else the agent page.
+  - **Starred chats** can be closed: the star (per-viewer chat state) is not
+    touched, the chat leaves Starred while archived, and reopening restores its
+    pinned place.
+  - **A reply in flight.** The × of the OPEN chat is inert while its reply is in
+    flight, with a tooltip saying why. A background chat can be closed mid-turn:
+    the reply still lands in the archived chat and is there on reopen.
+  - **Rooms are excluded**: the strip lists one agent's 1:1 chats, so a room has
+    no tab to close; a room keeps its own lifecycle.
+  - **Unread on the tab.** A chat with unread replies that is not on screen
+    shows the sidebar row's count on its tab, in the same solid blue
+    (`badgeVariant: 'primary'`), and in the "N more" menu. The strip is
+    fixed-width, so the count shortens that tab's label and moves nothing.
+  - **The star on the tab.** A starred chat's tab draws a filled star before its
+    label (the tab's own ink), in the strip and in the "N more" menu. Tabs are
+    192px (`w-48`, was 160) to carry the star, the count and the ×.
+  - **A star sticks on the first click (#3356).** A chat-state read already in
+    flight when the star is clicked used to answer with the pre-click state and
+    overwrite it. Local star writes (and tab closes) are now held over any read
+    issued before they settled (`createWriteGuard`). A starred, never-used Main
+    is listed in the sidebar so the header star has somewhere to show.
+- **API**: `PUT` / `DELETE /api/enterprise/client-portal/agents/{name}/sessions/{id}/archive`
+  (roster- then session-scoped, uniform 404, idempotent, 60/min per viewer). No schema change.
+
+### 5.42 Workspace — tag a person into a conversation; the tag reaches their Inbox (trinity-enterprise#631)
+- **Status**: ✅ Implemented (2026-10-10)
+- **Requirement ID**: WORKSPACE_PERSON_TAG
+- **GitHub Issue**: abilityai/trinity-enterprise#631 (the pointer half of epic ent#630; the seat stays incubating)
+- **Description**: In a 1:1 chat or a room, a person can `@` a colleague on the same
+  instance and that colleague is told. A tag is a **pointer, not a seat**: it changes no
+  membership and grants no access. Before this, `@` and a person's name was inert text that
+  looked like it worked (`resolve_mentions` matches agent participants only).
+- **One item, on the existing ledger**: each tagged person gets ONE item in their Workspace
+  Inbox — an `operator_queue` row (the ent#610 ledger) of type `mention`, addressed to them,
+  carrying who tagged them, which conversation and which message. Kind **Unread**, never
+  **Action**: the row starts `delivered` and becomes `read`, never `pending`, so no ask budget,
+  expiry, ending observer or operator badge can see it. No new store, no fifth notification
+  path, no schema change.
+- **Who may tag**: a person with a platform account (on the platform door or a platform
+  Workspace session). Refused by name: an agent key (`agents_cannot_tag`) — nothing lets an
+  agent tag a person on its own initiative, and `mention-` is a platform-reserved queue id
+  prefix so its queue file cannot forge one either; a non-person platform key; an external
+  Workspace client (`tagging_unavailable` — the colleagues it would list are the
+  organisation's, an internal fact, #78).
+- **Who may be tagged (the ent#450 pattern)**: an account that exists, is not suspended, has
+  an email (the Inbox's address) and can already reach one of the conversation's agents
+  (owner, shared, or an admin). The picker reads them from the server only once there is a
+  query, capped at 8 and rate-limited — never a directory. The same predicate answers the
+  send: an unknown name (or one outside that set — one refusal, so it is not an account
+  oracle) is refused **by name, with the reason**, before anything is written (`422
+  unknown_person`, `name`); so is tagging yourself and more than 10 people in one message.
+- **Bounded and idempotent**: tags are deduplicated case-insensitively, and the row's id is
+  derived from (conversation, message, person), so the same person named twice — or a
+  message delivered twice, or a retried turn — is one item.
+- **Stored, and distinct from a wake**: the message's `mentions` stay the agents to wake,
+  computed from the text exactly as before; a person is never a wake target. The person
+  pointer is stored apart, on the ledger, keyed to the message. The tags travel beside the
+  text (`tags: [email]` on the post), not parsed out of it.
+- **What the tagged person sees**: the Inbox lists the item in Unread (New) and All, counted
+  as one thing that came back. Opening it shows the tagged message with a few messages around
+  it **only when they could already see the conversation** (a live room participant, or an
+  admin on the platform door — the admin bypass never rides a portal session, #78). Otherwise
+  the item says they can't see it — not even the tagger's own words cross — and names who can
+  let them in (a room's moderator; for a 1:1 chat, the tagger, whose chat it is). No cost,
+  no execution id, no addressee in the projection. It is marked read once its card is on screen.
+- **What the tagger sees**: under their own message, each tagged person and how far it got —
+  "in their Inbox", "read", or "not delivered" (the message landed but the write failed).
+  Only on the sender's own messages; a room carries the whole-room map so a tag on an older
+  message turns read on the next poll.
+- **In-app only, said plainly**: the item lives in the Trinity Inbox; nothing is emailed
+  (out-of-app reach is ent#564). The card says so, and the tagger's marks say "in their Inbox".
+- **Operator door**: a person's tag is not the operator's queue — the Operating Room's list,
+  totals and item read leave `mention` rows out.
+- **API**: `POST /api/rooms/{id}/messages` and `POST …/client-portal/agents/{name}/chat[/stream]`
+  take optional `tags`; `GET /api/rooms/{id}/people?q=` and
+  `GET …/client-portal/agents/{name}/people?q=` (the picker); `GET /api/rooms/{id}` adds
+  `own_tags` and per-message `tags`; history rows carry `tags` on the reader's own messages;
+  `GET /api/enterprise/client-portal/mentions`, `GET …/mentions/{id}`, `POST …/mentions/{id}/read`.
+- **Flow**: `feature-flows/workspace-person-tag.md`.

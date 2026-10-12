@@ -3372,6 +3372,12 @@ async def create_agent_internal(
     # Breakers only: no slots exist for a name nothing is running under yet, and
     # the full sweep is reserved for teardown paths.
     clear_agent_breakers(config.name)
+    # trinity-enterprise#754: and the last-known skills listing, which teardown
+    # already clears — again here because a live read in flight during the
+    # delete could have written it back after that clear. Not inside
+    # `clear_agent_breakers`: that also runs on every start.
+    from services import agent_skills_listing
+    agent_skills_listing.forget(config.name)
 
     # QUOTA-001: per-role durable-agent quota (429; ephemeral agents bypass it).
     _enforce_role_quota(config, current_user)

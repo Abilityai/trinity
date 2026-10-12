@@ -601,12 +601,6 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
 See [local-agent-deploy.md](local-agent-deploy.md) for the deploy-time behavior
 change and the companion `collect_mcp_credential_warnings()` advisory.
 
-### get_name_from_template (`services/template_service.py:361-380`)
-```python
-def get_name_from_template(path: Path) -> Optional[str]:
-    """Extract agent name from template.yaml."""
-```
-
 ---
 
 ## Agent Container Initialization

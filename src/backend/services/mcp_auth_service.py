@@ -37,7 +37,7 @@ from fastapi import BackgroundTasks, HTTPException
 
 from database import db
 from models import McpInlineAgent, McpInlineVerifyResponse
-from services import rate_limiter
+from services import login_policy_gate, rate_limiter
 from services.connector_service import fetch_live_playbooks, resolve_exposed_playbooks
 
 logger = logging.getLogger(__name__)
@@ -114,6 +114,11 @@ def _resolve_and_create_code(email: str, session_id: Optional[str]) -> Optional[
     every failure is a silent suppression, because the caller has already
     answered 202 and there is no channel left to signal on.
     """
+    # ent#849: SSO-only policy. Silent like every other suppression here.
+    if not login_policy_gate.email_code_allowed():
+        logger.info("[ent#849] inline login code suppressed: email-code sign-in disabled")
+        return None
+
     if not _email_is_known(email):
         logger.info("[#848] inline login code suppressed: unknown address (session=%s)", session_id)
         return None
@@ -215,6 +220,11 @@ def verify_login_code(email: str, code: str) -> Optional[dict]:
     """
     email = normalize_email(email)
     if not email or not code:
+        return None
+
+    # ent#849: checked before redeeming, so the code is not consumed and the
+    # refusal is the router's uniform 401.
+    if not login_policy_gate.email_code_allowed():
         return None
 
     if not db.verify_login_code(email, code):

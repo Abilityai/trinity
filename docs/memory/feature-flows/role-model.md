@@ -3,17 +3,18 @@
 ## Overview
 Expands the user role system from 2 tiers (admin/user) to 4 tiers: admin > creator > operator > user. Adds server-side role enforcement via a `require_role()` dependency factory, new user management API endpoints, and a Settings UI section for admins to change user roles.
 
-**Implementation Status**: Complete (ROLE-001, GitHub Issue #143)
+**Implementation Status**: Complete (ROLE-001, GitHub Issue #143). Since trinity-enterprise#837 the `user` rung is **Workspace-only**: `get_current_user` refuses it on every operator route with 403 `workspace_only` — see [workspace-only-role.md](workspace-only-role.md).
 
 ## Revision History
 | Date | Changes |
 |------|---------|
+| 2026-10-09 | trinity-enterprise#837 — `user` is Workspace-only (the operator floor in `get_current_user`; `role_level` / `is_workspace_only_role` beside `ROLE_HIERARCHY`, shared with `require_role`). Settings: role pickers read "user — Workspace only", the whitelist form takes a role, User Management counts and filters the Workspace-only accounts. Corrected the stale `creator` default (#314 made it the whitelist row's role, `user` when none). |
 | 2026-03-20 | Initial documentation |
 
 ## User Story
-As a platform admin, I want to assign fine-grained roles to users so that I can control who can create agents, who can only operate existing agents, and who can only access public links.
+As a platform admin, I want to assign fine-grained roles to users so that I can control who can create agents, who can only operate existing agents, and who works with agents in the Workspace only.
 
-As a whitelisted user signing up via email, I get the `creator` role by default so that I can immediately create and manage agents without requiring additional admin action.
+As a whitelisted user signing up via email, I get the role recorded on my whitelist row (`user` — Workspace only — unless the admin picked another).
 
 ---
 
@@ -24,7 +25,7 @@ As a whitelisted user signing up via email, I get the `creator` role by default 
 | admin | Password login | Yes | Full platform control |
 | creator | Whitelisted email signup | Yes | Create and manage own agents |
 | operator | Whitelisted email, role manually set | No | Run existing agents only |
-| user | Public links | No | Public link interactions only |
+| user | Whitelisted email (the default), single sign-on, public self-signup | No | **Workspace only** — refused on operator routes (403 `workspace_only`, trinity-enterprise#837) |
 
 **Hierarchy** (lowest to highest): `user` < `operator` < `creator` < `admin`
 
@@ -163,7 +164,7 @@ async def deploy_local_agent(
 ):
 ```
 
-### 3. New Email Users Default to `creator`
+### 3. New Email Users Take Their Whitelist Row's Role (#314; this section's original `creator` default is historical)
 
 **File**: `src/backend/db/email_auth.py:246-248`
 

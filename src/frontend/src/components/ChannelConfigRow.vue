@@ -47,6 +47,7 @@
 <script setup>
 import { ref, reactive, watch } from 'vue'
 import api from '../api'
+import ChannelConfigDialog from './ChannelConfigDialog.vue'
 
 const props = defineProps({
   title: { type: String, required: true },

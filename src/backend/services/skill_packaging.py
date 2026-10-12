@@ -201,7 +201,10 @@ def extract_contract(frontmatter: Optional[Dict[str, Any]]) -> Tuple[Dict[str, A
     if automation is not None and not isinstance(automation, str):
         automation = None
 
-    user_invocable = scope.get("user_invocable")
+    # Both spellings (#3134): Claude Code and the libraries write the hyphen,
+    # which wins inside one source; a `trinity:` block wins either way.
+    sources = ([trinity_block] if isinstance(trinity_block, dict) else []) + [fm]
+    user_invocable = _first_present(sources, ("user-invocable", "user_invocable"))
     if not isinstance(user_invocable, bool):
         user_invocable = True
 
@@ -236,7 +239,6 @@ def extract_contract(frontmatter: Optional[Dict[str, Any]]) -> Tuple[Dict[str, A
     # Lifecycle keys (#672). A malformed value is NAMED rather than ignored: a
     # library whose validation runs this parser fails on `frontmatter_invalid*`,
     # which is what keeps such a library and the platform agreeing.
-    sources = ([trinity_block] if isinstance(trinity_block, dict) else []) + [fm]
     deprecated = _first_present(sources, ("deprecated",))
     if deprecated is not None and not isinstance(deprecated, bool):
         warnings.append("frontmatter_invalid:deprecated")

@@ -23,7 +23,8 @@
         </p>
         <p v-else-if="card.role.mission" class="mt-1 text-sm">{{ card.role.mission }}</p>
         <p v-if="card.role.path" class="mt-1 text-[11px] text-gray-400 font-mono break-all">{{ card.role.path }}</p>
-        <p v-if="card.seat" class="mt-1 text-[11px] text-gray-400">Seat · {{ card.seat }}</p>
+        <!-- ent#814: where this seat comes from, for you — never a person. -->
+        <p v-if="seatSourceText" class="mt-1 text-[11px] text-gray-400" data-testid="portal-role-seat-source">{{ seatSourceText }}</p>
       </div>
 
       <!-- Objectives — the portal projection of the ONE objective ↔ metric
@@ -31,35 +32,42 @@
            responsible for first, what it only contributes to folded away,
            readable metric names, and warning colour only for a real problem.
            An agent that simply has none renders nothing here, as before. -->
-      <template v-if="card.objectives.length || card.objectives_error">
+      <template v-if="card.objectives.length || card.objectives_error || (noSeat && card.role.error !== 'no_seat')">
+        <!-- trinity-enterprise#812: owning nothing because nobody's seat is on
+             record is a named state, with what to do — never a silent blank. -->
+        <p v-if="noSeat && card.role.error !== 'no_seat'" class="mt-3 mb-1.5 text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-no-seat">
+          {{ roleErrorText('no_seat') }}
+        </p>
         <!-- Zero objectives for a NAMED reason: a read that did not happen is
              never shown as "this agent has none" (principle 15). -->
-        <p v-if="!card.objectives.length" class="mt-3 text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-objectives-error">
+        <p v-if="!card.objectives.length && card.objectives_error" class="mt-3 text-[12.5px] text-status-warning-700 dark:text-status-warning-300" data-testid="portal-role-objectives-error">
           {{ objectivesErrorText(card.objectives_error) }}
         </p>
 
-        <template v-else>
+        <template v-if="card.objectives.length">
           <template v-if="ownedObjectives.length">
-            <h3 class="mt-3 mb-1 text-[11px] font-medium text-gray-400">What this agent is responsible for</h3>
+            <h3 class="mt-3 mb-1 text-[11px] font-medium text-gray-500 dark:text-gray-400">What this agent is responsible for</h3>
             <ul class="space-y-1.5" data-testid="portal-role-owned">
               <li v-for="o in ownedObjectives" :key="o.id"
                   class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-[12.5px]"
                   data-testid="portal-role-objective">
                 <p class="font-medium">{{ heading(o) }}</p>
-                <p v-if="horizonText(o.horizon)" class="text-[11px] text-gray-400">{{ horizonText(o.horizon) }}</p>
+                <p v-if="horizonText(o.horizon)" class="text-[11px] text-gray-500 dark:text-gray-400">{{ horizonText(o.horizon) }}</p>
                 <ul v-if="o.metrics.length" class="mt-1 space-y-0.5">
                   <li v-for="m in o.metrics" :key="m.name"
                       :data-testid="m.stale ? 'portal-role-metric-stale' : 'portal-role-metric'">
                     <!-- Wraps: badges beside the line must not crush the name in a narrow rail. -->
                     <div class="flex items-center gap-x-2 gap-y-0.5 flex-wrap tabular-nums">
                       <span class="min-w-0" data-testid="portal-role-metric-line">{{ metricLine(m) }}</span>
+                      <!-- ent#731: a number that must not move while the objective is pursued. -->
+                      <BaseBadge v-if="m.role === 'guard'" variant="neutral" title="Must stay where it is while this objective is pursued" data-testid="portal-role-metric-guard">Guard</BaseBadge>
                       <!-- Position against the target, never pace. Stale is orthogonal: both can show. -->
                       <BaseBadge v-if="gapBadge(m)" :variant="gapBadge(m).variant" dot data-testid="portal-role-metric-gap">{{ gapBadge(m).label }}</BaseBadge>
                       <!-- Freshness is the backend's verdict (the one 2× cadence rule) — never recomputed here. -->
                       <BaseBadge v-if="m.stale" variant="warning" dot :title="m.last_point_at || undefined">not updated recently</BaseBadge>
                     </div>
                     <!-- A finding is never a blank — but a normal state is neutral text. -->
-                    <p v-if="findingLine(m)" class="text-[11px] text-gray-400" data-testid="portal-role-metric-finding">
+                    <p v-if="findingLine(m)" class="text-[11px] text-gray-500 dark:text-gray-400" data-testid="portal-role-metric-finding">
                       {{ findingLine(m) }}
                     </p>
                   </li>
@@ -73,7 +81,7 @@
           <div v-if="supportedObjectives.length" class="mt-3" data-testid="portal-role-supported">
             <button
               type="button"
-              class="flex items-center gap-1.5 text-[11px] font-medium text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+              class="flex items-center gap-1.5 text-[11px] font-medium text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
               :aria-expanded="supportedOpen ? 'true' : 'false'"
               data-testid="portal-role-supported-toggle"
               @click="supportedOpen = !supportedOpen"
@@ -86,7 +94,7 @@
                   class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-1.5 text-[12.5px]"
                   data-testid="portal-role-supported-objective">
                 <p>{{ heading(o) }}</p>
-                <p v-if="supportNote(o)" class="text-[11px] text-gray-400" data-testid="portal-role-tracked-by">{{ supportNote(o) }}</p>
+                <p v-if="supportNote(o)" class="text-[11px] text-gray-500 dark:text-gray-400" data-testid="portal-role-tracked-elsewhere">{{ supportNote(o) }}</p>
               </li>
             </ul>
           </div>
@@ -103,7 +111,7 @@
 
       <!-- Your relationship (ent#500 when it lands; stated, never blank). -->
       <p class="mt-3 text-[12.5px]" data-testid="portal-role-relationship">
-        <span class="text-gray-400">Your relationship · </span>{{ card.relationship || 'no assignment recorded' }}
+        <span class="text-gray-400">Your relationship · </span>{{ relationshipText }}
       </p>
 
       <!-- Readiness: the owner's stamp, never the template's word. -->
@@ -194,12 +202,35 @@ function flip() {
   return store.flipAgentReadiness(props.agentName, next)
 }
 
+// ent#814: the seat on the card is the one this agent serves for YOU.
+const SEAT_SOURCE_TEXT = {
+  holds: 'The agent holds this seat itself',
+  person: 'Your seat on this agent',
+  primary: "Its primary's seat",
+}
+const seatSourceText = computed(() => SEAT_SOURCE_TEXT[card.value?.seat_source] || '')
+
+// ent#638 kinds — the viewer's assignment on this agent.
+const RELATIONSHIP_TEXT = {
+  primary: 'primary — it works for you',
+  approver: 'approver',
+  collaborator: 'collaborator',
+  viewer: 'viewer',
+}
+const relationshipText = computed(() =>
+  RELATIONSHIP_TEXT[card.value?.relationship] || 'no assignment recorded')
+
+// trinity-enterprise#812: the join's `no_seat` finding, carried on the card.
+const noSeat = computed(() => (card.value?.finding_codes || []).includes('no_seat'))
+
 function roleErrorText(code) {
   return {
     role_file_not_found: "The role file is not in the agent's canon yet — it will show once the file exists.",
     role_file_unreadable: 'The role file could not be read from the agent. Try again in a moment.',
     role_file_invalid: 'The role file is not valid YAML (or not a role) — fix the file; nothing is edited here.',
     role_id_invalid: 'The role id in template.yaml is not a valid id.',
+    // trinity-enterprise#812: owned objectives come from the seat on record.
+    no_seat: 'This agent neither holds a seat nor serves someone who holds one, so it owns no objective yet.',
     canon_path_invalid: 'The canon path in template.yaml is not a valid path.',
   }[code] || 'The role could not be loaded.'
 }
@@ -252,10 +283,13 @@ function metricLine(m) {
   return `${name}: ${shown(m.actual, m)}${target}${when}`
 }
 
-/** "Tracked by <agent>" once per supported objective, neutral. */
+/**
+ * Said once per supported objective, neutral. Never names the agent: the card
+ * is read by external clients, and naming another agent to them is a decision
+ * this card does not make (merge-train review, 2026-10-08).
+ */
 function supportNote(o) {
-  if (!o.tracked_elsewhere) return ''
-  return o.tracked_by ? `Tracked by ${o.tracked_by}` : 'Tracked by another agent'
+  return o.tracked_elsewhere ? 'Tracked by another agent' : ''
 }
 
 /**
@@ -271,11 +305,11 @@ function findingLine(m) {
 
 function findingText(code) {
   return {
-    metric_undeclared: "This metric isn't being measured yet, so there is no number to show.",
-    metric_not_declared_here: 'Another agent tracks this number.',
     metric_retired: "This metric is no longer measured, so its last number isn't shown.",
     direction_mismatch: "The objective and the metric disagree on which way is good. The comparison follows the metric's own setting.",
     direction_undeclared: "Nothing says whether higher or lower is better here, so it can't be compared with its target.",
+    guard_target_unset: 'Target not set. This guard gets a level to hold once there is a baseline.',
+    guard_direction_invalid: 'This guard names a direction. A guard is only checked for staying put, so the direction is ignored.',
   }[code] || "This metric can't be compared with its target right now."
 }
 

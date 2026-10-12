@@ -40,7 +40,7 @@ No. Unsent text survives switching agents, chat tabs and rooms, and comes back e
 
 ## What is "Suggested for you" in the Workspace?
 
-A short list computed for you and the agent in front of you: questions it is waiting on you to answer, decisions past their review date, playbooks you haven't run, a nudge when you haven't talked to it in a while, and — for the agent's owner or an admin — schedules that keep failing, never ran, or won't run because autonomy is off. Each item shows the signal it came from. Accepting one never sends anything: it pre-fills the composer or opens the section or page it names. **Dismiss** hides an item until its state changes. It appears on the Info tab and below the hints on an empty chat, for platform users only. See [Workspace](../sharing-and-access/workspace.md#suggestions).
+A short list computed for you and the agent in front of you: questions it is waiting on you to answer, decisions past their review date, skills you haven't run, a nudge when you haven't talked to it in a while, and — for the agent's owner or an admin — schedules that keep failing, never ran, or won't run because autonomy is off. Each item shows the signal it came from. Accepting one never sends anything: it pre-fills the composer or opens the section or page it names. **Dismiss** hides an item until its state changes. It appears on the Info tab and below the hints on an empty chat, for platform users only. See [Workspace](../sharing-and-access/workspace.md#suggestions).
 
 ## How do I make the agent forget the conversation and start fresh?
 
@@ -48,7 +48,7 @@ Start a new chat (**New chat** or **⌘J** / **Ctrl+J**): it has no memory of th
 
 ## What do `/` and `@` do in the Workspace composer?
 
-They open a typeahead. Type `/` at the start of a word for the agent's playbooks — picking one splices its starter prompt into the field without sending — and `@` to bring another agent in. ↓ then Enter (or Tab for the top row) inserts the pick, Esc dismisses the list, and Enter on its own always sends. Picking an `@` agent from a 1:1 opens a **room** containing both agents and posts your message there; rooms are covered in the [Collaboration FAQ](collaboration.md), and `/` playbooks are not offered inside one. See [Workspace](../sharing-and-access/workspace.md#the-composer).
+They open a typeahead. Type `/` at the start of a word for the agent's skills — picking one splices its starter prompt into the field without sending — and `@` to bring another agent in. ↓ then Enter (or Tab for the top row) inserts the pick, Esc dismisses the list, and Enter on its own always sends. Picking an `@` agent from a 1:1 opens a **room** containing both agents and posts your message there; rooms are covered in the [Collaboration FAQ](collaboration.md), and `/` skills are not offered inside one. See [Workspace](../sharing-and-access/workspace.md#the-composer).
 
 ## Who can see my chat history?
 

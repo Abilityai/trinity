@@ -57,12 +57,12 @@ VIEWER = "gary@example.com"
 #: What a Workspace client may see of one joined metric. A literal on purpose:
 #: a key the join grows later must turn this red before it reaches a client.
 #: ent#843 added `label` (a readable name, never a raw code), and on the
-#: objective `client_heading` (canon's plain heading), `tracked_elsewhere` and
-#: `tracked_by` (the one agent this agent reads the number from, when known).
-METRIC_KEYS = {"name", "label", "type", "unit", "target", "actual", "last_point_at",
+#: objective `client_heading` (canon's plain heading) and `tracked_elsewhere`.
+#: ent#731 added `role` (primary | guard, a fixed value).
+METRIC_KEYS = {"name", "label", "role", "type", "unit", "target", "actual", "last_point_at",
                "stale", "freshness", "gap", "finding"}
 OBJECTIVE_KEYS = {"id", "statement", "client_heading", "horizon", "status", "owned",
-                  "tracked_elsewhere", "tracked_by", "metrics"}
+                  "tracked_elsewhere", "metrics"}
 
 
 def _ago(**delta) -> str:
@@ -330,9 +330,9 @@ def test_a_metric_crosses_as_exactly_the_client_fields():
 
     assert set(row) == METRIC_KEYS
     assert row == {
-        # ent#843: no declared label → empty here; `fill_metric_labels` fills
+        # ent#843: no declared label → empty here; `apply_declarations_elsewhere` fills
         # it (agreed label, else words) before the card is served.
-        "name": "close_rate", "label": "", "type": "percentage", "unit": "%",
+        "name": "close_rate", "label": "", "role": "primary", "type": "percentage", "unit": "%",
         "target": 35, "actual": 30.0,
         "last_point_at": "2026-09-22T11:59:00.000000Z",
         "stale": False, "freshness": "fresh",
@@ -888,3 +888,21 @@ def test_the_card_module_does_not_import_the_metrics_stack_at_module_top():
              if "objective_join" in name or "metric_read" in name
              or "metric_points" in name]
     assert heavy == []
+
+
+@pytest.fixture(autouse=True)
+def _seat_on_record():
+    """trinity-enterprise#812: the join reads the seat from Trinity's record,
+    not from `x-role`; record the seat these templates declare, as a companion's."""
+    from services import assignment_provider as ap
+
+    class _Seats:
+        def assignment_for(self, agent_name, triggered_by):
+            return None
+
+        def seat_for(self, agent_name):
+            return {"case": "serves", "role_id": ROLE, "seats": [ROLE]}
+
+    ap.register_provider(_Seats())
+    yield
+    ap.clear_provider()

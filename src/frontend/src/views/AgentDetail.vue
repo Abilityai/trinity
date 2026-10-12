@@ -265,11 +265,15 @@
               <LoopsPanel :agent-name="agent.name" :agent-status="agent.status" />
             </div>
 
-            <!-- Playbooks Tab Content -->
-            <div v-if="activeTab === 'playbooks'" class="p-6">
-              <PlaybooksPanel
+            <!-- Skills Tab Content (trinity-enterprise#754: own + shared skills,
+                 Run, Requires approval — it absorbed the Playbooks tab) -->
+            <div v-if="activeTab === 'skills'" class="p-6">
+              <SkillsTab
                 :agent-name="agent.name"
                 :agent-status="agent.status"
+                :can-manage="!!agent.can_share"
+                :is-system="!!agent.is_system"
+                :is-ephemeral="!!agent.ephemeral"
                 :notify="showNotification"
                 @run-with-instructions="handlePlaybookRunWithInstructions"
               />
@@ -283,15 +287,6 @@
             <!-- Files Tab Content -->
             <div v-if="activeTab === 'files'">
               <FilesPanel :agent-name="agent.name" :agent-status="agent.status" />
-            </div>
-
-            <!-- Skills Tab Content -->
-            <div v-if="activeTab === 'skills'" class="p-6">
-              <SkillsPanel
-                :agent-name="agent.name"
-                :can-manage="!!agent.can_share"
-                :agent-running="agent.status === 'running'"
-              />
             </div>
 
             <!-- Shared Folders Tab Content -->
@@ -365,7 +360,7 @@ import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
 import { useSessionsStore } from '../stores/sessions'  // SESSION_TAB_2026-04 Phase 3
 import { emotionCacheVersion, emotionAvatarUrl as buildEmotionUrl } from '../utils/avatarEmotion'
-import { buildTabs } from '../utils/agentTabs'
+import { buildTabs, TAB_ALIASES } from '../utils/agentTabs'
 import NavBar from '../components/NavBar.vue'
 
 // Component name for KeepAlive matching
@@ -404,8 +399,7 @@ import AccessPanel from '../components/AccessPanel.vue'
 import PermissionsPanel from '../components/PermissionsPanel.vue'
 import FilesPanel from '../components/FilesPanel.vue'
 import TerminalPanelContent from '../components/TerminalPanelContent.vue'
-import SkillsPanel from '../components/SkillsPanel.vue'
-import PlaybooksPanel from '../components/PlaybooksPanel.vue'
+import SkillsTab from '../components/skills/SkillsTab.vue'  // trinity-enterprise#754
 import ChatPanel from '../components/ChatPanel.vue'
 import NeverminedPanel from '../components/NeverminedPanel.vue'
 import A2aPanel from '../components/A2aPanel.vue'  // trinity-enterprise#158: A2A config tab
@@ -419,6 +413,7 @@ import { useAgentTerminal } from '../composables/useAgentTerminal'
 import { useGitSync } from '../composables/useGitSync'
 import { useAgentSettings } from '../composables/useAgentSettings'
 import { useSessionActivity } from '../composables/useSessionActivity'
+import { useTabRoute } from '../composables/useTabRoute'
 
 // Setup
 const route = useRoute()
@@ -438,17 +433,32 @@ const activeTab = ref('overview')  // #1107: Overview is the default landing tab
 // #2153: resolved against every id the page can render (see ALL_TAB_IDS, which
 // the tab builder derives), not a hand-maintained subset. The old list omitted
 // a2a, loops, playbooks, access and nevermined, so those links died silently.
-// Legacy ?tab= ids that moved/renamed — keep old deep-links working (#1108).
-// ent#358: `session` is no longer an alias — it REDIRECTS (see below). The
-// surface it named lives in the Workspace now, so resolving it to a local tab
-// would silently land the user on stateless chat while their link asked for a
-// continuous conversation.
-const TAB_ALIASES = { guardrails: 'settings' }
+// Legacy ?tab= ids that moved/renamed — keep old deep-links working (#1108):
+// `TAB_ALIASES` (utils/agentTabs.js; trinity-enterprise#754 added
+// `playbooks → skills`). ent#358: `session` is no longer an alias — it
+// REDIRECTS (see below). The surface it named lives in the Workspace now, so
+// resolving it to a local tab would silently land the user on stateless chat
+// while their link asked for a continuous conversation.
 // Resolve a ?tab= value to a live tab id (applying aliases), or null if unknown.
 function resolveDeepLinkTab(requested) {
   const resolved = TAB_ALIASES[requested] || requested
   return ALL_TAB_IDS.includes(resolved) ? resolved : null
 }
+
+// #2900: the tab is in the URL. A change to `activeTab` (a tab click, or any
+// handler below that assigns it) pushes `?tab=`, so Back steps through tabs and
+// a reload keeps the one showing; a Back/Forward step on this page writes the
+// ref. `selectTab(…, { replace: true })` and `syncTabUrl()` are for the
+// normalising writes, which must not add a history entry. See the composable
+// for why this does not reopen #2130.
+const { selectTab, syncUrl: syncTabUrl } = useTabRoute({
+  activeTab,
+  route,
+  router,
+  routeName: 'AgentDetail',
+  defaultTab: 'overview',
+  resolveTab: resolveDeepLinkTab,
+})
 
 // What the deep link selected, so visibility can be reconciled once the agent
 // loads. Null once reconciled or once the user has moved.
@@ -482,9 +492,11 @@ let skipNextActivation = false
 // two hooks can't drift again.
 //
 function applyDeepLinkRouting() {
-  if (!route.query.tab) return
-  const resolvedTab = resolveDeepLinkTab(route.query.tab)
-  if (!resolvedTab) return
+  const resolvedTab = route.query.tab ? resolveDeepLinkTab(route.query.tab) : null
+  // #2900: no tab named (or one that names nothing). The view is KeepAlive-
+  // cached, so it may be showing a tab remembered from the last visit — make
+  // the URL say so, or a reload would land somewhere else.
+  if (!resolvedTab) { syncTabUrl(); return }
   // `brain` is the one id that NAVIGATES when selected (a watcher pushes
   // /agents/:name/brain). Applying it before the agent loads would bounce a
   // caller off the page and back when the capability turns out to be absent, so
@@ -511,7 +523,10 @@ function reconcileDeepLinkVisibility() {
     return
   }
   // Not visible to this viewer — fall back, but never over a later choice.
-  if (activeTab.value === requested) activeTab.value = 'overview'
+  // #2900: by `replace`, so Back does not return to a tab that is not there.
+  if (activeTab.value === requested) selectTab('overview', { replace: true })
+  // The deferred `brain` link never became the tab; stop the URL claiming it.
+  else syncTabUrl()
 }
 
 // ent#358: a `?tab=session` link (or any older session deep link) asked for the
@@ -1330,7 +1345,7 @@ watch(() => route.params.name, async (newName, oldName) => {
     nextTick(() => {
       const validTabIds = visibleTabs.value.map(t => t.id)
       if (!validTabIds.includes(activeTab.value)) {
-        activeTab.value = 'overview'
+        selectTab('overview', { replace: true })  // #2900: a correction, not a step
       }
     })
     startAllPolling()
@@ -1540,8 +1555,9 @@ const handleOverviewNavigate = (tabId) => {
 }
 
 const handleOpenTask = (executionId) => {
-  activeTab.value = 'tasks'
-  router.replace({ query: { ...route.query, execution: executionId } })
+  // #2900: one navigation for both keys — a tab write and a separate
+  // `execution` write would cancel each other.
+  selectTab('tasks', { query: { execution: executionId } })
 }
 
 // Handle item click from Info tab - switch to Tasks tab with prefilled message
@@ -1570,15 +1586,15 @@ const handleCreateSchedule = (message) => {
   })
 }
 
-// Handle run-with-instructions from Playbooks tab
+// Handle run-with-instructions from the Skills tab (Run / Edit & Run)
 const handlePlaybookRunWithInstructions = (prefillText) => {
   // Check if this is a navigation request (one-click run completed)
   if (prefillText.startsWith('__NAVIGATE_TASKS__:')) {
     const executionId = prefillText.replace('__NAVIGATE_TASKS__:', '')
     // Navigate to Tasks tab with execution highlighted via query param
-    activeTab.value = 'tasks'
     // The TasksPanel will pick up the execution via the highlight-execution-id prop
-    router.replace({ query: { ...route.query, execution: executionId } })
+    // (#2900: tab and execution in one navigation, as in handleOpenTask).
+    selectTab('tasks', { query: { execution: executionId } })
     return
   }
 

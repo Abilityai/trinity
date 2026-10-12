@@ -1,385 +1,202 @@
 # Phase 20: Live Execution Streaming
 
-> **Purpose**: Validate real-time execution log streaming, Live indicator, and stop functionality
-> **Duration**: ~20 minutes
-> **Assumes**: Phase 2 PASSED (agents running), Phase 7 PASSED (scheduling works)
-> **Output**: Live streaming, stop button, and queue release verified
+> **Purpose**: Validate the Tasks panel's run / Live / Stop controls and the Execution Details page (transcript, status, navigation, not-found).
+> **Duration**: ~12 minutes
+> **Assumes**: the fixture trio is running and you are logged in as admin
+> **Output**: a task can be run inline, its execution opens in Execution Details, a finished transcript renders and survives a refresh, and an unknown execution id fails honestly
+> **Last verified**: 2026-10-09 against source (not yet browser-run)
 
 ---
 
 ## Background
 
-**Live Execution Streaming** (EXEC-009 to EXEC-013):
-- Real-time SSE streaming of Claude Code execution logs
-- "Live" indicator with green pulsing badge for running tasks
-- Auto-scroll behavior during streaming
-- Stop button terminates execution with SIGINT/SIGKILL
-- Queue automatically releases after termination
+Tasks are run from an inline box at the top of the agent's Tasks tab
+(`components/TasksPanel.vue`) — there is no "Create Task" dialog. A running row shows a green
+"Live" link and a "Stop execution" button; every server-side row links to
+`/agents/:name/executions/:executionId` (`views/ExecutionDetail.vue`).
 
-**User Stories**:
-- EXEC-009: Real-time execution logs (SSE)
-- EXEC-010: "Live" indicator for running tasks
-- EXEC-011: Auto-scroll during streaming
-- EXEC-012: Stop running execution
-- EXEC-013: See which executions are running
+Execution Details streams a running execution with `fetch` + `ReadableStream` against
+`GET /api/agents/{name}/executions/{id}/stream` (not `EventSource` — it needs the Bearer
+header). For a finished execution it loads `…/executions/{id}` and `…/executions/{id}/log`.
 
----
+Replaces the January flow that used `/agents`, a "Create Task" button, an EventSource check and
+host `docker logs`. `test-echo` replies in a few seconds, so the Live/Stop steps are written as
+"if still live … otherwise SKIPPED"; the transcript checks use the seeded execution.
+
+This phase sends **one** task to `test-echo`.
 
 ## Prerequisites
 
-- [ ] Phase 2 PASSED (agents created and running)
-- [ ] At least one agent available for testing
-- [ ] Phase 7 PASSED (scheduling works) for scheduled task tests
+- [ ] Logged in to `http://localhost` as `admin` with `ADMIN_PASSWORD` from `.env`
+- [ ] `$TOKEN` holds an admin Bearer token
+- [ ] `test-echo` is `running`
+- [ ] fixtures.json provides the seeded **task execution id on `test-echo`** (call it `$EXEC`)
 
----
+## Test: Tasks panel
 
-## Test: Trigger Long-Running Task
-
-### Step 1: Navigate to Agent Detail
+### Step 1: Open the Tasks tab
 **Action**:
-- Go to http://localhost/agents
-- Click on any running agent (e.g., test-echo)
-- Wait for detail page to load
-
+- Navigate to `http://localhost/agents`, then click the `test-echo` name link in the list.
+- Click the "Tasks" tab.
 **Expected**:
-- [ ] Agent detail page loads
-- [ ] Tasks tab visible
-- [ ] Agent status: Running
+- [ ] `/agents` lands on `/?view=list`; the agent page opens at `/agents/test-echo` on the Overview tab
+- [ ] The Tasks tab shows the heading "Tasks" with "All executions — chats, tasks, schedules, and agent-to-agent"
+- [ ] A trigger filter defaulting to "All triggers" and a queue pill reading "Idle" (or "Busy")
+- [ ] A text box with placeholder "Enter task message... (Enter to run, Shift+Enter for newline)" and a "Run" button, disabled while the box is empty
+- [ ] The history list contains at least the seeded row (not "No tasks yet")
 
----
-
-### Step 2: Create Long-Running Task
+### Step 2: Queue endpoint
 **Action**:
-- Click "Tasks" tab
-- Click "Create Task" or "+ Task" button
-- Enter task message: "Write a detailed 500-word essay about the history of computing. Take your time and be thorough."
-- Click "Run" or "Execute"
-
-**Expected**:
-- [ ] Task submission accepted
-- [ ] Task appears in task list
-- [ ] Status shows "Running" or spinner
-
-**Verify**:
-- [ ] Task ID generated
-- [ ] Timestamp recorded
-- [ ] No errors
-
----
-
-## Test: Live Indicator
-
-### Step 3: Verify Live Button Appears
-**Action**:
-- Look at the running task in Tasks panel
-- Find the "Live" button/badge
-
-**Expected**:
-- [ ] Green pulsing badge visible
-- [ ] "Live" text or icon displayed
-- [ ] Badge animates (pulsing/breathing effect)
-- [ ] Badge only appears for running tasks
-
-**Verify**:
-- [ ] Completed tasks do NOT have Live badge
-- [ ] Pending tasks do NOT have Live badge
-- [ ] Only running tasks show Live
-
----
-
-### Step 4: Click Live Button
-**Action**:
-- Click the "Live" button on the running task
-- Wait for navigation
-
-**Expected**:
-- [ ] Navigates to Execution Detail page
-- [ ] URL pattern: `/agents/{name}/executions/{id}`
-- [ ] Page shows execution metadata
-
-**Verify**:
-- [ ] Correct execution ID in URL
-- [ ] Page title matches task
-
----
-
-## Test: Real-Time Streaming
-
-### Step 5: Verify SSE Streaming Active
-**Action**:
-- On Execution Detail page, observe the log area
-- Watch for new log entries appearing
-
-**Expected**:
-- [ ] "Live" indicator at top of page
-- [ ] Log entries appear in real-time
-- [ ] No page refresh needed
-- [ ] Entries stream as Claude Code runs
-
-**Verify**:
-- [ ] DevTools Network tab shows EventSource connection
-- [ ] Connection type: `text/event-stream`
-- [ ] Events arriving continuously
-
----
-
-### Step 6: Verify Log Entry Types
-**Action**:
-- Watch the streaming log entries
-- Identify different entry types
-
-**Expected Entry Types**:
-- [ ] `init` - Session initialization
-- [ ] `assistant-text` - Claude's text responses
-- [ ] `tool-call` - Tool invocations (Read, Write, Bash, etc.)
-- [ ] `tool-result` - Tool outputs
-- [ ] `result` - Final completion
-
-**Verify**:
-- [ ] Each entry has timestamp
-- [ ] Tool calls show tool name
-- [ ] Text entries show content
-
----
-
-### Step 7: Verify Auto-Scroll
-**Action**:
-- Let log entries accumulate
-- Observe scroll behavior
-
-**Expected**:
-- [ ] Log area auto-scrolls as new entries arrive
-- [ ] Latest entry always visible
-- [ ] Smooth scrolling (not jumpy)
-
-**Manual Scroll Test**:
-- [ ] Scroll up manually
-- [ ] Auto-scroll pauses when user scrolls up
-- [ ] Auto-scroll resumes when scrolled to bottom
-
----
-
-## Test: Stop Running Execution
-
-### Step 8: Find Stop Button
-**Action**:
-- On Execution Detail page (while task running)
-- Or: Go back to Tasks panel
-- Look for Stop button on running task
-
-**Expected**:
-- [ ] Stop button visible (red icon)
-- [ ] Button only enabled for running tasks
-- [ ] Tooltip: "Stop execution"
-
----
-
-### Step 9: Stop the Execution
-**Action**:
-- Click Stop button
-- Confirm if prompted
-- Wait 5-10 seconds
-
-**Expected**:
-- [ ] Confirmation dialog (if implemented)
-- [ ] Button shows loading state
-- [ ] Execution terminates
-- [ ] Status changes to "Cancelled" or "Stopped"
-
-**Verify**:
-- [ ] Task no longer running
-- [ ] Live indicator disappears
-- [ ] Final log entry shows termination
-
----
-
-### Step 10: Verify Queue Release
-**Action**:
-- Check execution queue status
-- Try to start another task
-
-**Expected**:
-- [ ] Queue slot released
-- [ ] New task can start immediately
-- [ ] No "agent busy" error
-
-**API Check**:
 ```bash
-# Check queue status
-curl http://localhost:8000/api/agents/{name}/executions/queue
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/test-echo/queue \
+  | jq '{agent_name, is_busy, queue_length, current: (.current_execution != null)}'
+```
+**Expected**:
+- [ ] `agent_name` is `test-echo`, `queue_length` is `0`
+- [ ] `is_busy` matches the pill from Step 1 (`false` ↔ "Idle")
+
+### Step 3: Run one task
+**Action**:
+- Click into the task box, type `sweep 20 live check`, and press Enter.
+- Immediately take a snapshot of the top row of the history list.
+**Expected**:
+- [ ] The box clears and a new row appears at the top with the message `sweep 20 live check`
+- [ ] The row's status badge reads `running` and its trigger badge reads `manual`
+- [ ] No error notification
+
+### Step 4: Live link and Stop button (only while running)
+**Action**:
+- If the top row still reads `running`: look at its action icons. **Do not click Stop.**
+- If it already reads `success`: record `SKIPPED (run finished)` for this step.
+**Expected** (if still running):
+- [ ] A green link with the text "Live" (tooltip "View live execution") once the row has a server execution id
+- [ ] A stop button with tooltip "Stop execution" may appear after the panel's next queue poll (0.5 s and 2 s after submit) — record whether it did
+
+### Step 5: Completion
+**Action**:
+- Wait up to 60 s for the top row's badge to leave `running`.
+- Click the row's expand chevron (tooltip "Expand").
+**Expected**:
+- [ ] Badge reads `success`
+- [ ] The expanded response contains `Echo: sweep 20 live check`, `Words: 4` and `Characters: 19`
+- [ ] The row no longer shows "Live" or "Stop execution"; it shows a link with tooltip "Open execution details" and a button "View execution log (modal)"
+- [ ] The queue pill reads "Idle"
+
+## Test: Execution Details (new run)
+
+### Step 6: Open the run's detail page
+**Action**:
+- On the row from Step 5, click the link with tooltip "Open execution details".
+**Expected**:
+- [ ] URL matches `/agents/test-echo/executions/<id>`; record `<id>` as `$NEW`
+- [ ] Heading "Execution Details" with a status badge reading `success`
+- [ ] Under it: a link to the agent (its name), "/", and the first 8 characters of the id followed by "..."
+- [ ] Four cards: "Duration", "Cost", "Context", "Triggered By" (DOM text `manual`, shown capitalised)
+- [ ] "Task Input" shows `sweep 20 live check`; "Response Summary" shows the echo reply
+- [ ] No "Stop" button and no "Auto-scroll ON/OFF" toggle (both exist only while streaming)
+
+### Step 7: Live streaming view (observation)
+**Action**:
+- This step applies only if Step 4 found the row still `running` **and** you clicked "Live" instead of waiting. Otherwise record `SKIPPED (run finished)`.
+**Expected** (if reached while running):
+- [ ] Next to "Execution Transcript": a pulsing dot with the text "Live", and a toggle reading "Auto-scroll ON" (clicking it reads "Auto-scroll OFF")
+- [ ] Header button "Stop" with tooltip "Stop execution"; "Completed:" reads "In progress..."
+- [ ] Before the first entry arrives: "Waiting for execution output..."
+- [ ] When the run ends the "Live" marker disappears without a manual refresh and the badge reads `success`
+
+## Test: Execution Details (seeded run)
+
+### Step 8: Transcript of the seeded execution
+**Action**:
+- Navigate to `http://localhost/agents/test-echo/executions/$EXEC` (the execution id from fixtures.json).
+**Expected**:
+- [ ] Heading "Execution Details"; record the status badge text
+- [ ] A row with "Started:", "Completed:" (a date, not "In progress...") and "Execution ID:" showing the full `$EXEC`
+- [ ] "Task Input" shows the seeded message
+- [ ] Under "Execution Transcript": either transcript entries with an "N entries" counter, or the line "No execution transcript available for this task." — record which
+- [ ] No "Live" marker
+**Verify**:
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/test-echo/executions/$EXEC | jq '{status, triggered_by}'
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/test-echo/executions/$EXEC/log | jq '{has_log}'
+```
+- [ ] `status` matches the badge; `has_log: true` ↔ entries shown, `has_log: false` ↔ the "No execution transcript…" line
+
+### Step 9: Refresh keeps the page
+**Action**:
+- Reload the browser on the Step 8 URL.
+**Expected**:
+- [ ] Same URL, same heading, same status and the same transcript state
+- [ ] No redirect to `/login` or `/`; no console errors
+
+### Step 10: Copy id and back navigation
+**Action**:
+- Click the header button with tooltip "Copy execution ID". Source shows no confirmation for this button — record whether anything visible happens.
+- Click the back arrow (tooltip "Back to Tasks").
+**Expected**:
+- [ ] URL becomes `/agents/test-echo?tab=tasks` and the Tasks tab is selected (not Overview)
+- [ ] The history list is populated, including the `sweep 20 live check` row
+
+### Step 11: Unknown execution id
+**Action**:
+- Navigate to `http://localhost/agents/test-echo/executions/00000000-0000-0000-0000-000000000000`.
+**Expected**:
+- [ ] Heading "Execution Details" still renders, with no status badge
+- [ ] A red card "Failed to load execution" with the text "Execution not found" and a "Try Again" button
+- [ ] No endless spinner; clicking "Try Again" returns to the same card
+**Verify**:
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/agents/test-echo/executions/00000000-0000-0000-0000-000000000000   # 404
 ```
 
----
-
-### Step 11: Verify Termination Signal Flow
+### Step 12: Execution id under the wrong agent
 **Action**:
-- Check agent logs for termination signals
-
-**Expected Signal Flow**:
-1. SIGINT sent (graceful termination)
-2. 5 second timeout
-3. SIGKILL if needed (force termination)
-
-```bash
-# Check agent logs
-docker logs agent-test-echo | grep -i "signal\|SIGINT\|SIGKILL\|terminate"
-```
-
----
-
-## Test: Running Task Visibility
-
-### Step 12: Check Running Tasks Across Agents
-**Action**:
-- Start tasks on multiple agents
-- Navigate to Dashboard or Agents page
-
+- Navigate to `http://localhost/agents/test-counter/executions/$EXEC` (a `test-echo` execution under `test-counter`).
 **Expected**:
-- [ ] Running tasks visible per agent
-- [ ] Task count displayed
-- [ ] Visual indicator for agents with running tasks
+- [ ] The same "Failed to load execution" / "Execution not found" card — the `test-echo` transcript is not shown under another agent's URL
 
-**Verify**:
-- [ ] Can identify which agents have work in progress
-- [ ] Execution stats update
-
----
-
-### Step 13: Entry Points to Live View
+### Step 13: Narrow width and dark theme
 **Action**:
-- Test multiple entry points to Execution Detail
-
-**Entry Points**:
-1. **Tasks Panel**: Click "Live" badge on running task
-2. **Tasks Panel**: Click external link icon on any task
-3. **Timeline View**: Click on execution bar (if Dashboard Timeline enabled)
-
+- Back on `http://localhost/agents/test-echo/executions/$EXEC`, resize the viewport to 390 px wide.
+- Click the theme button in the top nav (tooltip "Light mode (click to switch)" / "Dark mode (click to switch)" / "System theme (click to switch)") until the page is dark; record the starting tooltip first.
 **Expected**:
-- [ ] All entry points navigate to same Execution Detail page
-- [ ] Correct execution ID passed
-- [ ] Streaming works from any entry point
+- [ ] At 390 px the four cards stack in one column and the transcript stays inside the viewport (no horizontal page scrollbar)
+- [ ] In dark theme the "Task Input" block and transcript text remain readable (no dark-on-dark or white panels)
 
----
+## Cleanup / Restore
 
-## Test: Late Joiner Support
+- Restore the viewport size and click the theme button until its tooltip matches the one recorded in Step 13.
+- The one execution created in Step 3 stays in `test-echo`'s history; that is expected and nothing depends on it. Nothing else was changed.
 
-### Step 14: Join Running Execution Late
-**Action**:
-- Start a long-running task
-- Wait 30 seconds
-- Open new browser tab
-- Navigate to the execution detail page
+## Manual-only (not run unattended)
 
-**Expected**:
-- [ ] Buffered entries loaded (catch-up)
-- [ ] Previous log entries visible
-- [ ] Live streaming continues from current point
-- [ ] No missing entries
-
-**Verify**:
-- [ ] Late joiner sees complete log history
-- [ ] SSE connection established
-- [ ] Real-time updates continue
-
----
-
-## Test: Execution After Completion
-
-### Step 15: View Completed Execution
-**Action**:
-- Let an execution complete naturally
-- Or: Navigate to a completed task
-- Click on the task to view details
-
-**Expected**:
-- [ ] "Live" indicator NOT present
-- [ ] Full transcript available
-- [ ] All log entries visible
-- [ ] Metadata shows completion status
-
-**Verify**:
-- [ ] Duration displayed
-- [ ] Cost displayed (if applicable)
-- [ ] No streaming (static view)
-
----
+- **Stopping a live run and the Live/Auto-scroll view** need a task that runs long enough to
+  catch; the fixtures answer too quickly to make this deterministic. Manually: run a long task on
+  an agent of your own, click "Live", confirm entries stream in, toggle "Auto-scroll OFF/ON",
+  click "Stop", and confirm the row ends as `cancelled`.
+- **Termination signal flow** (container logs) needs host `docker` access.
 
 ## Critical Validations
 
-### SSE Connection Health
-**Validation**: Verify SSE connection is stable
-
-```bash
-# Check for EventSource in browser console
-# Or use curl to test SSE endpoint
-curl -N http://localhost:8000/api/agents/{name}/executions/{id}/stream
-```
-
-### Activity Record Created
-**Validation**: Termination creates activity record
-
-- [ ] Check `agent_activities` table for `EXECUTION_CANCELLED` type
-- [ ] Activity linked to execution ID
-- [ ] Timestamp accurate
-
----
+1. A task typed into the inline box and submitted with Enter completes as `success` with the exact echo reply.
+2. The row's detail link opens `/agents/test-echo/executions/<id>` with status, cards and task input.
+3. The seeded execution's page matches the API (`status`, `has_log`) and survives a reload.
+4. An unknown id, and a valid id under the wrong agent, both show "Failed to load execution" / "Execution not found".
 
 ## Success Criteria
 
-Phase 20 is **PASSED** when:
-- [ ] Long-running task can be started
-- [ ] "Live" green pulsing badge appears for running tasks
-- [ ] Clicking Live navigates to Execution Detail page
-- [ ] SSE streaming shows real-time log entries
-- [ ] All log entry types display correctly
-- [ ] Auto-scroll works during streaming
-- [ ] Manual scroll pauses auto-scroll
-- [ ] Stop button terminates execution
-- [ ] Queue releases after termination
-- [ ] Multiple entry points work (Tasks, Timeline)
-- [ ] Late joiners see buffered entries
-- [ ] Completed executions show full transcript
-
----
+- [ ] All four critical validations hold
+- [ ] "Back to Tasks" returns to the Tasks tab via `?tab=tasks`
+- [ ] Exactly one task was sent to a fixture agent
+- [ ] Live/Stop steps are either verified or recorded as `SKIPPED (run finished)`
 
 ## Troubleshooting
 
-**Live badge doesn't appear**:
-- Task may have completed too quickly
-- Use longer-running task
-- Check task status in API
-
-**SSE not streaming**:
-- Check browser supports EventSource
-- Verify SSE endpoint exists
-- Check backend logs for SSE errors
-- Verify agent-server has streaming endpoint
-
-**Stop doesn't work**:
-- Check process registry has execution
-- Verify SIGINT handling in agent
-- Check backend proxy endpoint
-- Review termination signal flow in logs
-
-**Queue not releasing**:
-- Check Redis queue state
-- Verify `complete()` called after termination
-- Check for race conditions
-
-**Missing log entries**:
-- Check buffer size in agent-server
-- Verify SSE message format
-- Check for JSON parse errors
-
----
-
-## Next Phase
-
-Once Phase 20 is **PASSED**, proceed to:
-- **Phase 21**: Session Management
-
----
-
-**Status**: Ready for Testing
-**Last Updated**: 2026-01-14
-**User Stories**: EXEC-009, EXEC-010, EXEC-011, EXEC-012, EXEC-013
+- **"Run" stays disabled / "Agent must be running to execute tasks"**: `test-echo` is not
+  running. Report it; do not start it from this phase.
+- **Row ends `failed`**: expand it — the error text is the API `detail` from `POST /api/agents/test-echo/task`. Record it verbatim.
+- **Top row has no detail link right after submit**: a just-submitted row is local until the
+  server row replaces it when the request returns; wait for completion (Step 5).
+- **Banner "Unable to connect to live stream. The execution is still running — refresh the page
+  to check for updates." with a "Retry" button**: the stream could not be opened. Record it.

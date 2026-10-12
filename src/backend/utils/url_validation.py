@@ -87,6 +87,13 @@ class EmbeddedCredentialError(ValueError):
     """A URL carries userinfo (`https://<token>@host/...`)."""
 
 
+_EMBEDDED_CREDENTIAL_MESSAGE = (
+    "Repository URL must not embed a token or password. It is stored "
+    "and displayed in plain text. Configure a GitHub PAT in Settings "
+    "for private repositories instead."
+)
+
+
 def reject_embedded_credentials(url: str) -> None:
     """Refuse a URL embedding a token or password.
 
@@ -103,14 +110,28 @@ def reject_embedded_credentials(url: str) -> None:
 
     Lives here rather than in the router so it is importable without pulling in
     the whole `routers` package (which drags in the agent-service chain).
+
+    A protocol-relative `//tok@host` already has its authority, so it gets no
+    assumed scheme — the same `had_authority` rule as `strip_url_credentials`
+    (#3323).
     """
-    parsed = urlparse(url if "://" in url else f"https://{url}")
+    text = url.strip()
+    # `https://` + `//tok@host` parses with an EMPTY netloc, so `.username` is
+    # None and the token passed. Mirrors the strip twin below; keep them aligned.
+    had_authority = "://" in text or text.startswith("//")
+    try:
+        parsed = urlparse(text if had_authority else _ASSUMED_SCHEME + text)
+    except ValueError:
+        # Only the `//` shape is newly parsed with an authority; anything else
+        # raises exactly as before (#3322 owns that class). Fall back to the
+        # shared authority regex rather than turn `//[oops` into a new 500.
+        if not text.startswith("//"):
+            raise
+        if _AUTHORITY_USERINFO_RE.match(text):
+            raise EmbeddedCredentialError(_EMBEDDED_CREDENTIAL_MESSAGE) from None
+        return
     if parsed.username or parsed.password:
-        raise EmbeddedCredentialError(
-            "Repository URL must not embed a token or password. It is stored "
-            "and displayed in plain text. Configure a GitHub PAT in Settings "
-            "for private repositories instead."
-        )
+        raise EmbeddedCredentialError(_EMBEDDED_CREDENTIAL_MESSAGE)
 
 
 def strip_url_credentials(url: str) -> str:

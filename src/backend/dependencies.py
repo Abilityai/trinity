@@ -359,8 +359,20 @@ PORTAL_DELEGATE_ALLOWED_ROUTES = {
 }
 
 
+# #3404 — HOW a Workspace session was minted, carried as the `minted_by` claim.
+# The emailed-code sign-in and the ent#163 delegated exchange mint the same
+# token, so without it a session a `portal_delegate` key asserted was read as
+# the person's own proof. One decision reads it: whether the session may
+# self-approve a gated skill (`PortalPrincipal.self_approves`), which only
+# `PORTAL_MINT_OTP` may — an allowlist, so a token with no claim (minted before
+# this shipped, or by a caller that did not say) is unproven too.
+PORTAL_MINT_OTP = "otp"
+PORTAL_MINT_DELEGATE = "delegate"
+
+
 def create_portal_session_token(
-    email: str, mode: str = "prod", session_start: Optional[int] = None
+    email: str, mode: str = "prod", session_start: Optional[int] = None,
+    minted_by: Optional[str] = None,
 ) -> str:
     """Mint a Workspace session token for a verified email. Carries no ``sub``
     (no platform identity) — only the email + the portal scope.
@@ -389,16 +401,35 @@ def create_portal_session_token(
     absolute_deadline = start + absolute_s
     expires_in = max(1, min(idle_deadline, absolute_deadline) - now)
 
+    data = {
+        "scope": PORTAL_SESSION_SCOPE,
+        "email": email.lower(),
+        "iat": now,
+        "sst": start,
+    }
+    if minted_by:
+        data["minted_by"] = minted_by  # #3404
     return create_access_token(
-        data={
-            "scope": PORTAL_SESSION_SCOPE,
-            "email": email.lower(),
-            "iat": now,
-            "sst": start,
-        },
+        data=data,
         expires_delta=timedelta(seconds=expires_in),
         mode=mode,
     )
+
+
+def portal_session_minted_by(token: str) -> Optional[str]:
+    """The `minted_by` claim of a portal session token, or None (#3404).
+
+    Says nothing about validity — `decode_portal_session` decides that; call
+    this only on a token it accepted. None for a token that carries no claim.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("scope") != PORTAL_SESSION_SCOPE:
+        return None
+    minted_by = payload.get("minted_by")
+    return minted_by if isinstance(minted_by, str) and minted_by else None
 
 
 def decode_portal_session(token: str) -> Optional[str]:
@@ -562,7 +593,12 @@ def renew_portal_session(token: str) -> Optional[str]:
     if started + absolute_s <= now:
         return None  # capped out — a fresh sign-in is required
 
-    new_token = create_portal_session_token(email, session_start=started)
+    # #3404: `minted_by` is carried through like `sst` — using a session must
+    # not turn a delegate-minted one into the person's own (or back).
+    minted_by = payload.get("minted_by")
+    new_token = create_portal_session_token(
+        email, session_start=started,
+        minted_by=minted_by if isinstance(minted_by, str) else None)
 
     # Retire the old jti, but only after a grace: requests already in flight are
     # still carrying it, and a hard revoke here would 401 them mid-rotation.
@@ -631,6 +667,28 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
     FastAPI dependency to get the current authenticated user.
 
     Validates JWT token OR MCP API key and returns User object.
+
+    trinity-enterprise#837 — this is the OPERATOR door, so it also enforces the
+    operator floor (`enforce_operator_floor`): a Workspace-only principal is
+    refused here, on every route that authenticates through it, unless the route
+    is marked `@workspace_route` or is an agent's own runtime surface. The
+    Workspace doors resolve the credential through
+    `resolve_platform_user_unfloored` instead.
+    """
+    user = await resolve_platform_user_unfloored(request, token)
+    enforce_operator_floor(request, user)
+    return user
+
+
+async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
+    """Resolve a platform credential (JWT or MCP API key) to its `User`.
+
+    Every scope fence below applies; the operator floor does NOT (ent#837). Only
+    the Workspace doors call this directly — `get_portal_principal`, the rooms
+    principal and the Workspace voice start — because the Workspace is exactly
+    where a Workspace-only member belongs. Every other caller goes through
+    `get_current_user`. `test_837_workspace_only_floor.py` pins the caller set,
+    so a new door is a reviewed edit rather than a quiet way around the floor.
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -837,6 +895,11 @@ async def get_optional_user(
     including one whose session merely expired — and it is safe because every
     route using this makes its own authorization decision afterwards. Do not
     reach for it on a route that would otherwise have required auth.
+
+    The operator floor (ent#837) refuses a Workspace-only principal here too, so
+    on an unmarked route a `user` reads as None, an anonymous visitor. The shared
+    canvas route is marked `@workspace_route` for exactly that reason: an
+    `authorized` link must still recognise the member it was shared with.
     """
     if not token:
         return None
@@ -895,19 +958,126 @@ def _enforce_ephemeral_key_fence(request: Request, agent_name: str) -> None:
         return
     if not isinstance(info, dict) or not info.get("is_ephemeral"):
         return
+    if _is_own_runtime_route(request, agent_name, _EPHEMERAL_ALLOWED_ROUTES):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Ephemeral agent keys are restricted to heartbeat, result delivery, reports, notifications, and self-info",
+    )
+
+
+def _is_own_runtime_route(request: Request, agent_name: str, routes) -> bool:
+    """True when the routed path matches one of `routes` and any `{name}` it
+    names is `agent_name` itself, carried as a parameter of the route that
+    matched. A static route registered ahead of `/{agent_name}` spells a name
+    in its path without carrying one (`GET /api/agents/slots` for an agent
+    named `slots`), so it is never the agent's own. Reads the routed path,
+    never the Host-built URL (#3102)."""
     method = request.method.upper()
     path = request.scope["path"]
-    for allowed_method, pattern in _EPHEMERAL_ALLOWED_ROUTES:
+    for allowed_method, pattern in routes:
         if method != allowed_method:
             continue
         match = pattern.fullmatch(path)
         if match:
             bound_name = match.groupdict().get("name")
-            if bound_name is None or bound_name == agent_name:
-                return
+            if bound_name is None:
+                return True
+            if bound_name == agent_name and agent_name in request.path_params.values():
+                return True
+    return False
+
+
+# --------------------------------------------------------------------------- #
+# trinity-enterprise#837 — the operator floor: the `user` rung is Workspace-only.
+# --------------------------------------------------------------------------- #
+# Ruled 2026-10-07: platform role `user` means a member who works with agents
+# through the Workspace; the operator UI starts at `operator`. No new role —
+# ROLE_HIERARCHY is unchanged, and a role outside it ranks below `user`.
+#
+# The floor lives in `get_current_user`, the door every operator route
+# authenticates through, for the reason the fences above live there: a rule on
+# the routes someone remembered is open on every route they did not (#1890
+# moved the agent refusal into the admin gates after five incidents). It covers
+# OSS and enterprise routes alike and fails CLOSED on a route added tomorrow — a
+# Workspace feature that calls an unmarked operator route 403s for a `user`,
+# which is the safe direction for a boundary.
+#
+# Two exceptions, both explicit:
+#   * an interactive session (the SPA's JWT) on a route marked
+#     `@workspace_route("<reason>")` — an operator-side route the Workspace
+#     itself calls. The mark sits on the handler and is read from
+#     `scope["route"].endpoint`, so the decision is next to the route, survives
+#     a path rename, and an enterprise route opts in the same way without OSS
+#     naming it. A key — even the person's own `user`-scoped one, minted before
+#     the upgrade and no longer listable or revocable by them — does not pass:
+#     the Workspace's own doors are where a key scripts the Workspace;
+#   * an agent whose owner is Workspace-only, on its own runtime surface — an
+#     agent never exceeds its owner (Decision 2). Everything else it did is
+#     refused until an admin raises the owner's role (there is no ownership
+#     transfer).
+#
+# The refusal depends only on the principal and the matched route, never on
+# whether an addressed agent exists, so it discloses nothing (Invariant #8).
+WORKSPACE_ONLY_DETAIL = {
+    "code": "workspace_only",
+    "message": "This account works in the Workspace. Open /workspace.",
+}
+
+WORKSPACE_ROUTE_ATTR = "__trinity_workspace_route__"
+
+# The ephemeral set (liveness, result delivery, reports, notifications,
+# self-info) plus the agent's own asks and the skill-gate check. The in-container
+# hook reads a refused check as "no verdict" and falls back to the marker, which
+# fails CLOSED for a gated skill, so the check stays reachable.
+_AGENT_SELF_ROUTES = _EPHEMERAL_ALLOWED_ROUTES + (
+    ("POST", re.compile(r"^/api/agents/(?P<name>[^/]+)/operator-queue$")),
+    ("GET", re.compile(r"^/api/agents/(?P<name>[^/]+)/operator-queue/[^/]+$")),
+    ("POST", re.compile(r"^/api/skill-gate/check$")),
+)
+
+
+def workspace_route(reason: str):
+    """Mark an operator-side route the Workspace calls (ent#837).
+
+    Sets an attribute on the function and returns the function itself, so
+    FastAPI sees the same signature. Keep it BELOW the route decorator (the
+    route census checks this), so a future version that wraps the function
+    cannot leave the registered one unmarked::
+
+        @router.get("/me/preferences")
+        @workspace_route("the Workspace conversation reads the viewer's preferences")
+        async def get_my_preferences(current_user: User = Depends(get_current_user)):
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("workspace_route needs a reason")
+
+    def mark(endpoint):
+        setattr(endpoint, WORKSPACE_ROUTE_ATTR, reason)
+        return endpoint
+
+    return mark
+
+
+def enforce_operator_floor(request: Request, user: User) -> None:
+    """Refuse a Workspace-only principal off its allowed routes (403 `workspace_only`)."""
+    if not is_workspace_only_role(user.role):
+        return
+    if user.connector_agent:
+        # A connector key serves the external consumers of one agent, as a
+        # public link does, and the ent#46 fence (already applied by the
+        # resolver) confines it to that agent's chat and playbook list.
+        return
+    if user.agent_name:
+        if _is_own_runtime_route(request, user.agent_name, _AGENT_SELF_ROUTES):
+            return
+    elif is_interactive_principal(user):
+        route = request.scope.get("route")
+        if getattr(getattr(route, "endpoint", None), WORKSPACE_ROUTE_ATTR, None):
+            return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="Ephemeral agent keys are restricted to heartbeat, result delivery, reports, notifications, and self-info",
+        detail=dict(WORKSPACE_ONLY_DETAIL),
     )
 
 
@@ -1162,9 +1332,11 @@ PERSON_SCOPES = frozenset({None, "user"})
 def is_person_principal(current_user: User) -> bool:
     """Is this caller a PERSON — the only author an ask's ending may record?
 
-    The endings ledger records `disposed_by` as `person`, `timeout` or — for a
-    platform alert the platform itself ended (#3130/#3246) — `platform`; only
-    `person` is a principal (trinity-enterprise#611). An agent-scoped key resolves to its OWNER
+    The endings ledger records `disposed_by` as `person`, `timeout`, — for a
+    platform alert the platform itself ended (#3130/#3246) — `platform`, or
+    `agent` (#3247: an agent replacing its OWN pending ask, the one ending an
+    agent may author); only `person` is a principal (trinity-enterprise#611).
+    This gate decides who may record `person`. An agent-scoped key resolves to its OWNER
     carrying the owner's role, so before this an agent could answer or cancel any
     ask its owner could reach — its own approval included — and the row recorded
     the owner. Recording that as `person` would make the ledger lie.
@@ -1486,6 +1658,25 @@ def _reject_scope_at_admin_gate(
 ROLE_HIERARCHY = ["user", "operator", "creator", "admin"]
 
 
+def role_level(role: Optional[str]) -> int:
+    """A role's rank on ROLE_HIERARCHY; -1 for a role outside it (below `user`)."""
+    return ROLE_HIERARCHY.index(role) if role in ROLE_HIERARCHY else -1
+
+
+def is_workspace_only_role(role: Optional[str]) -> bool:
+    """Below `operator`: the `user` rung and any role outside the ladder (ent#837)."""
+    return role_level(role) < ROLE_HIERARCHY.index("operator")
+
+
+def owner_is_workspace_only(owner_row: Optional[dict]) -> bool:
+    """The floor for a door that resolves a key's owner ROW itself (`/ws/events`).
+
+    An owner that could not be resolved counts as Workspace-only — refused,
+    the way `get_current_user` refuses a key with no owner.
+    """
+    return is_workspace_only_role((owner_row or {}).get("role"))
+
+
 def require_role(min_role: str):
     """
     Dependency factory that requires the current user to have at least `min_role`.
@@ -1518,7 +1709,7 @@ def require_role(min_role: str):
     """
     def _require_role(current_user: User = Depends(get_current_user)) -> User:
         _reject_connector_principal(current_user)
-        user_level = ROLE_HIERARCHY.index(current_user.role) if current_user.role in ROLE_HIERARCHY else -1
+        user_level = role_level(current_user.role)
         min_level = ROLE_HIERARCHY.index(min_role) if min_role in ROLE_HIERARCHY else len(ROLE_HIERARCHY)
         if user_level < min_level:
             raise HTTPException(
@@ -1852,6 +2043,14 @@ _CAPABILITY_REFUSALS = {
         "ephemeral helper does not). Even with it, an agent reaches only agents "
         "its owner owns, deletes only agents it spawned, and cannot change its "
         "own read-only mode or guardrails." + _ask_for_it("agents.manage"),
+    ),
+    "projects.manage": (
+        "project_management_not_permitted",
+        "This agent does not hold the project-management permission, which creating "
+        "a Workspace project on its owner's behalf, or importing one of its own "
+        "folder projects, requires. Working on a project it is already on needs no "
+        "grant; adding people or changing who can see a project is never granted."
+        + _ask_for_it("projects.manage"),
     ),
 }
 

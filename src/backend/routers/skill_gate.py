@@ -18,10 +18,11 @@ Read by anyone with access to the agent (an agent key: its own, or — holding
 agent or is an admin, or by an agent holding `skills.manage` on an agent its
 owner owns — never on itself (the agent a gate constrains must not lift it).
 """
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from db.capability_grants import CAPABILITY_SKILLS_MANAGE
 from dependencies import (
+    can_manage_agent_skills,
     get_current_user,
     get_owned_agent_by_name,
     get_self_agent,
@@ -98,11 +99,22 @@ def _refused(e: skill_gate_map_service.SkillGateMapRefused) -> HTTPException:
 async def list_agent_skill_gates(
     agent_name: str = Depends(get_skill_gate_readable_agent_by_name),
     current_user: User = Depends(get_current_user),
+    probe: bool = Query(
+        False,
+        description="trinity-enterprise#754: also read whether the agent enforces "
+                    "gates inside itself (`hook`). Honoured only for a person who "
+                    "may manage the agent's skills; everyone else gets `hook: null`.",
+    ),
 ):
     """The agent's gated skills, who approves each and whether that approver
     kind reaches anyone right now."""
     view = skill_gate_map_service.list_gates(agent_name)
     view["gates"] = [_for_principal(g, current_user) for g in view["gates"]]
+    view["approvers"] = skill_gate_map_service.approver_status(agent_name, current_user)
+    # One /health read per tab load by a manager — not a read amplifier for
+    # every viewer (the #3052 `probe` precedent on GET .../skill-sets).
+    probe = probe and is_person_principal(current_user) and can_manage_agent_skills(current_user, agent_name)
+    view["hook"] = await skill_gate_map_service.hook_status(agent_name) if probe else None
     return view
 
 

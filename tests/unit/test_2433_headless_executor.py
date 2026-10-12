@@ -54,7 +54,7 @@ def test_pool_is_its_own_named_executor():
 
 def test_headless_runs_go_to_the_dedicated_pool_not_the_default():
     src = _HE_SRC.read_text()
-    assert "run_in_executor(_HEADLESS_EXECUTOR, _run_headless_subprocess, ctx)" in src
+    assert "run_in_executor(_HEADLESS_EXECUTOR, run_owned_subprocess)" in src
     assert re.search(r"run_in_executor\(\s*None\s*,\s*_run_headless_subprocess", src) is None, (
         "the headless subprocess run must never go back to the CPU-sized default executor"
     )

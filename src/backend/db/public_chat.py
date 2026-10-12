@@ -137,16 +137,34 @@ class PublicChatOperations:
         link_id: str,
         session_identifier: str
     ) -> Optional[PublicChatSession]:
-        """Look up a session by link ID and identifier."""
+        """Look up a session by link ID and identifier.
+
+        Mirrors the normalisation in ``get_or_create_session`` (#3443): an
+        identifier is stored verbatim unless it is an email, so the exact
+        string is matched first and only an ``email`` row is reachable through
+        its lowercased form. Lowercasing unconditionally made a mixed-case
+        anonymous token miss the row it had just created.
+        """
         with get_engine().connect() as conn:
             row = conn.execute(
                 select(public_chat_sessions).where(
                     and_(
                         public_chat_sessions.c.link_id == link_id,
-                        public_chat_sessions.c.session_identifier == session_identifier.lower(),
+                        public_chat_sessions.c.session_identifier == session_identifier,
                     )
                 )
             ).mappings().first()
+            lowered = session_identifier.lower()
+            if row is None and lowered != session_identifier:
+                row = conn.execute(
+                    select(public_chat_sessions).where(
+                        and_(
+                            public_chat_sessions.c.link_id == link_id,
+                            public_chat_sessions.c.session_identifier == lowered,
+                            public_chat_sessions.c.identifier_type == 'email',
+                        )
+                    )
+                ).mappings().first()
             return self._row_to_session(row) if row else None
 
     def get_session(self, session_id: str) -> Optional[PublicChatSession]:

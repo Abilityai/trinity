@@ -26,6 +26,22 @@ VALID_TOKEN = "sk-ant-oat01-test-access-token-12345"
 VALID_TOKEN_2 = "sk-ant-oat01-test-access-token-67890"
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _restore_auto_switch_setting(api_client: TrinityApiClient):
+    """Put the instance's auto-switch setting back the way this module found it.
+
+    Several tests here end on `enabled=false` (and one deletes the stored row),
+    so a run against a developer's instance used to leave auto-switch OFF
+    (#2420). The effective value is what the operator observes, so that is what
+    is read and restored.
+    """
+    before = api_client.get("/api/subscriptions/settings/auto-switch")
+    yield
+    if before.status_code == 200:
+        enabled = "true" if before.json().get("enabled") else "false"
+        api_client.put(f"/api/subscriptions/settings/auto-switch?enabled={enabled}")
+
+
 # =============================================================================
 # Auto-Switch Setting Tests (SMOKE)
 # =============================================================================

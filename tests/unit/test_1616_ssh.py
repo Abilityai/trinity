@@ -410,14 +410,6 @@ async def test_cleanup_is_fail_open_on_redis_error():
 
 
 @pytest.mark.asyncio
-async def test_cleanup_alias_delegates():
-    redis_client = Mock()
-    redis_client.scan_iter.return_value = []
-    _, svc = _load_with_redis(redis_client)
-    assert await svc.cleanup_expired_keys() == 0
-
-
-@pytest.mark.asyncio
 async def test_cleanup_uses_scan_not_keys():
     """The sweep must iterate with SCAN, never the blocking KEYS — the backend
     Redis ACL user is `-@dangerous` and `KEYS` raises NoPermissionError, which

@@ -1,5 +1,6 @@
 /**
- * The four self-change permissions an admin grants an agent (trinity-enterprise#164),
+ * The self-change permissions an admin grants an agent (trinity-enterprise#164, and
+ * `projects.manage` from trinity-enterprise#588),
  * as the agent's Settings shows them (trinity-enterprise#756).
  *
  * Pure: the copy, the order and the permission-request match live here so the
@@ -31,6 +32,12 @@ export const SELF_CHANGE_CAPABILITIES = [
     label: 'Manage other agents',
     can: "Create, deploy and delete agents, and change their model, resources, timeout and guardrails — only agents its owner owns.",
     without: 'Without it, it can still spawn short-lived helpers. It can never lift its own read-only mode or guardrails.',
+  },
+  {
+    id: 'projects.manage',
+    label: 'Start projects',
+    can: "Create a Workspace project on its owner's behalf, and bring in one of its own folder projects.",
+    without: 'Without it, it still works on projects it is already on. Adding people or changing who can see a project is never granted.',
   },
 ]
 

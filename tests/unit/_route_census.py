@@ -514,6 +514,10 @@ ADMIN_WIDENED: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
 # Reviewed uses an agent key may make. key -> ("METHOD /full/path", reason)
 AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     # The agent's own runtime surface (#2996 §3.4 regression set).
+    "routers/agent_files.py::get_agent_canon_roles": (
+        "GET /api/agents/{agent_name}/canon/roles",
+        "a READ of the agent's own canon seats (trinity-enterprise#817); an agent key is "
+        "self-gated to its own canon, the same rule and budget as its objectives"),
     "routers/agents.py::agent_heartbeat": (
         "POST /api/agents/{agent_name}/heartbeat",
         "liveness; authenticates the agent's own agent-scoped key outside get_current_user (#307)"),
@@ -592,18 +596,13 @@ _PULL = "pull seam: internal secret OR the agent's own scoped key (#1081)"
 _INLINE = "internal secret + inline-auth flag (#848)"
 
 OWN_AUTH: Dict[str, Tuple[str, str]] = {
-    "routers/internal.py::agent_files_share": ("POST /api/internal/agent-files/share", _SECRET),
-    "routers/internal.py::complete_activity": ("POST /api/internal/activities/{activity_id}/complete", _SECRET),
     "routers/internal.py::execute_task_internal": ("POST /api/internal/execute-task", _SECRET),
     "routers/internal.py::internal_agent_brief_readiness": ("GET /api/internal/agents/{agent_name}/brief-readiness", _SECRET),
     "routers/internal.py::internal_agent_pre_check": ("POST /api/internal/agents/{agent_name}/pre-check", _SECRET),
-    "routers/internal.py::internal_agent_sync_health": ("GET /api/internal/agents/{agent_name}/sync-health-status", _SECRET),
-    "routers/internal.py::internal_health": ("GET /api/internal/health", _SECRET),
     "routers/internal.py::internal_next_task": ("GET /api/internal/next-task", _PULL),
     "routers/internal.py::internal_task_result": ("POST /api/internal/tasks/{execution_id}/result", _PULL),
     "routers/internal.py::log_audit_entry": ("POST /api/internal/audit", _SECRET),
     "routers/internal.py::mcp_exposed_agents": ("GET /api/internal/mcp-exposed-agents", _SECRET),
-    "routers/internal.py::track_activity": ("POST /api/internal/activities/track", _SECRET),
     "routers/internal.py::validate_execution": ("POST /api/internal/validate-execution", _SECRET),
     "routers/setup.py::get_setup_status": ("GET /api/setup/status", "unauthenticated by design (first-run status)"),
     "routers/setup.py::set_admin_password": ("POST /api/setup/admin-password", "unauthenticated by design until setup completes, then refused"),
@@ -652,7 +651,16 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
 }
 
 # Check lives in services/. key -> ("METHOD /full/path", service function, behavioural test id)
-DELEGATED: Dict[str, Tuple[str, str, str]] = {}
+DELEGATED: Dict[str, Tuple[str, str, str]] = {
+    # trinity-enterprise#631: the people picker of a room. Its principal is
+    # `get_room_principal` (a platform user OR a Workspace client), so no
+    # dependency gate fits; the refusal of agents, system keys and external
+    # clients is `person_mention_service.tagger_for`, reached first.
+    "shared_sessions/router.py::room_people": (
+        "GET /api/rooms/{room_id}/people",
+        "shared_sessions.service.room_people -> person_mention_service.tagger_for",
+        "tests/unit/test_ent631_person_mention.py::test_an_agent_key_cannot_list_people_to_tag"),
+}
 
 # WebSocket routes — out of the HTTP census, pinned so a new one is a visible edit.
 WEBSOCKET_ROUTES = frozenset({
@@ -666,7 +674,7 @@ WEBSOCKET_ROUTES = frozenset({
 
 # The exact size of the frozen baseline. Lower it in the same change that
 # removes an entry; it never goes up.
-FROZEN_BASELINE_COUNT = 359
+FROZEN_BASELINE_COUNT = 355
 
 
 def load_baseline(path: Path = BASELINE_PATH) -> Dict[str, str]:

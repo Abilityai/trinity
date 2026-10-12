@@ -347,30 +347,6 @@ class SshService:
             public_key=public_key
         )
 
-    def list_active_keys(self, agent_name: Optional[str] = None) -> list:
-        """
-        List active SSH keys, optionally filtered by agent.
-
-        Args:
-            agent_name: Optional agent name filter
-
-        Returns:
-            List of key metadata dictionaries
-        """
-        pattern = f"{SSH_ACCESS_PREFIX}{agent_name or '*'}:*"
-        # SCAN, not KEYS: the backend Redis ACL user is `-@dangerous`, which
-        # blocks `KEYS` (#1616 — caught live: it raises NoPermissionError). SCAN
-        # is allowed and is the production-safe incremental iteration anyway.
-        keys = list(self.redis_client.scan_iter(match=pattern))
-
-        result = []
-        for key in keys:
-            data = self.redis_client.get(key)
-            if data:
-                result.append(json.loads(data))
-
-        return result
-
     async def cleanup_expired_credentials(self) -> int:
         """
         Remove EXPIRED ephemeral SSH keys from the container ``authorized_keys``
@@ -445,11 +421,6 @@ class SshService:
 
         return cleaned
 
-    # Backwards compatibility alias
-    async def cleanup_expired_keys(self) -> int:
-        """Backwards compatible wrapper for cleanup_expired_credentials."""
-        return await self.cleanup_expired_credentials()
-
     async def revoke_key(self, agent_name: str, comment: str) -> bool:
         """
         Immediately revoke an SSH key.
@@ -514,11 +485,6 @@ class SshService:
             logger.info(f"Cleaned up {len(redis_keys)} SSH credentials for agent {agent_name}")
 
         return len(redis_keys)
-
-    # Backwards compatibility alias
-    async def cleanup_agent_keys(self, agent_name: str) -> int:
-        """Backwards compatible wrapper for cleanup_agent_credentials."""
-        return await self.cleanup_agent_credentials(agent_name)
 
 
 def get_ssh_host() -> str:

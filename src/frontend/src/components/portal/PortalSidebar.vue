@@ -254,7 +254,7 @@
              depends on who is looking — a platform user can go make an agent,
              an external client can only ask whoever invited them. -->
         <div v-if="!roster.length && !loadingRoster" class="px-2 py-3 text-xs text-gray-500 dark:text-gray-400">
-          <template v-if="isPlatformSession">
+          <template v-if="isPlatformSession && !workspaceOnly">
             No agents yet.
             <a href="/" class="text-action-primary-600 hover:underline">Create one →</a>
           </template>
@@ -331,6 +331,35 @@
             @open="$emit('open-thread', t)"
             @toggle-star="$emit('toggle-star', t)"
           />
+        </div>
+
+        <!-- ent#841: closed (archived) chats — nothing is deleted, and this is
+             where they are found again. Collapsed by default: they are out of
+             the way on purpose. Opening one reopens it as an active chat. -->
+        <div v-if="archived.length" class="mt-3" data-testid="sidebar-archived">
+          <button
+            type="button"
+            class="w-full flex items-center gap-1 px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide"
+            :class="META_INK"
+            :aria-expanded="archivedOpen"
+            data-testid="sidebar-archived-toggle"
+            @click="archivedOpen = !archivedOpen"
+          >
+            <svg class="w-3 h-3 transition-transform" :class="archivedOpen ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7" /></svg>
+            Archived · {{ archived.length }}
+          </button>
+          <template v-if="archivedOpen">
+            <ChatRow
+              v-for="t in archived"
+              :key="rowKey(t)"
+              :thread="t"
+              :active="isActive(t)"
+              :avatar-for="avatarFor"
+              :rename="rename"
+              @open="$emit('open-thread', t)"
+              @toggle-star="$emit('toggle-star', t)"
+            />
+          </template>
         </div>
       </template>
     </div>
@@ -429,6 +458,9 @@ const props = defineProps({
   // active row class, the auto-expand below, and `visibleAgentRows`' `keep`.
   activeAgentName: { type: String, default: null },
   isPlatformSession: { type: Boolean, default: false },
+  // trinity-enterprise#837: a `user` cannot make an agent, so the empty roster
+  // asks for a share instead of pointing at the operator UI.
+  workspaceOnly: { type: Boolean, default: false },
   // ent#661 — the roster's capability, and whether a Projects page is on screen.
   projectsAvailable: { type: Boolean, default: false },
   projectsActive: { type: Boolean, default: false },
@@ -482,7 +514,15 @@ defineExpose({ focusSearch, searchHasFocus })
 // #2258: the accessible name of the footer button, per principal kind.
 const signOutLabel = computed(() => signOutLabelFor(props.isPlatformSession))
 
-const split = computed(() => partitionStarred(props.threads))
+// ent#841: an archived chat is out of the active list — Starred included (a
+// closed starred chat keeps its star, and gets its pinned place back when it is
+// reopened) — and is listed once, under Archived, newest closed first.
+const activeThreads = computed(() => props.threads.filter((t) => !t.archived_at))
+const archived = computed(() => props.threads
+  .filter((t) => t.archived_at)
+  .sort((a, b) => String(b.archived_at).localeCompare(String(a.archived_at))))
+const archivedOpen = ref(false)
+const split = computed(() => partitionStarred(activeThreads.value))
 const starred = computed(() => split.value.starred)
 const grouped = computed(() => groupThreadsByDate(split.value.rest))
 
@@ -494,7 +534,8 @@ const waitingFor = (name) => waiting.value[name] || 0
 const asksStore = useClientPortalStore()
 // trinity-enterprise#610 (D13): the pinned Inbox row's two counts — `needs` is
 // `askCount` (pending asks), `came` is `totalUnread` over these threads.
-const inbox = computed(() => inboxCounts(props.threads, asksStore.openAsks))
+// trinity-enterprise#631: plus the tags not yet opened.
+const inbox = computed(() => inboxCounts(props.threads, asksStore.openAsks, asksStore.mentions))
 // #2424: the ask twin of `waiting`. Kept a separate map on purpose — see the
 // Inbox-row comment in the template.
 const asksPerAgent = computed(() => asksByAgent(asksStore.openAsks))

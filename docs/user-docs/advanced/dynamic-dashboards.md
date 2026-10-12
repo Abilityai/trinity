@@ -179,7 +179,7 @@ A tile whose selector cannot match shows a reason instead of a number, never the
 |---|---|
 | `dims must be a mapping of dimension: value`, or `dims value for 'channel' must be text`, with a hint | The selector is malformed. Fix it as the hint says. |
 | `dimension 'region' is not declared for this metric; declared: channel` | The key is not in the metric's `dimensions`. |
-| A grey footer: `channel=tiktok`, **no recent data**, and a hint | No recent series matches. The channel may not have reported yet, the value may be misspelled (the hint suggests a casing fix), or a rarely-reporting channel may sit outside the window Trinity reads: each metric's 200 newest points and 50 newest series. |
+| A grey footer: `channel=tiktok`, **no recent data**, and a hint | No recent series matches. The channel may not have reported yet, or the value may be misspelled (the hint suggests a casing fix). Each `dims:` tile reads its own series, so a channel that reports rarely still shows its number next to a busy one; it reads **no recent data** only when it has had no point for 90 days. |
 
 The agent's compatibility report also flags a `dims:` selector that can never match, and a `metric:` that is not a name (check **X-009**), so an agent can catch the mistake without opening the dashboard.
 

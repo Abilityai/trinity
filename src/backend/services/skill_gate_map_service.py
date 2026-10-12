@@ -43,9 +43,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
+import httpx
+
 from database import db
 from db.skill_gates import ORIGIN_CLEARED, ORIGIN_LIBRARY_DEFAULT, ORIGIN_SET
 from services import role_addressing, skill_gate_service
+from services.agent_auth import agent_httpx_client
 from services.skill_gate_service import SkillGate  # noqa: F401 — re-exported for callers
 from services.skill_packaging import SKILL_NAME_RE
 
@@ -148,6 +151,133 @@ def list_gates(agent_name: str) -> Dict[str, Any]:
         "approver_kinds": approver_kinds(),
         "default_deadline_hours": skill_gate_service.DEFAULT_DEADLINE_HOURS,
     }
+
+
+def approver_status(agent_name: str, principal) -> List[Dict[str, Any]]:
+    """trinity-enterprise#754: every approver kind this install resolves, as
+    the caller sees it — does it reach anyone now (the picker disables a kind
+    nobody fills), and is the caller one of its people (the card's "you
+    approve this")?
+
+    `viewer_fills` is decided exactly as `skill_gate_service.enforce` decides
+    self-approval — the same requester (`requester_from_principal`, so an
+    agent key, a connector or the event loopback never fills a kind) and the
+    same casefolded people list — so the card cannot say "you approve this"
+    for a run the gate would hold, or the reverse. Booleans only: no person
+    data leaves the server."""
+    requester = skill_gate_service.requester_from_principal(principal)
+    me = requester.email.strip().casefold() if requester.is_person and requester.email else ""
+    out = []
+    for kind in approver_kinds():
+        try:
+            people = skill_gate_service.approver_people(agent_name, kind)
+        except Exception:  # noqa: BLE001 — a read never fails on one kind's lookup
+            logger.warning("[skill_gate_map] approver lookup failed for %s/%s", agent_name, kind,
+                           exc_info=True)
+            people = []
+        out.append({"kind": kind, "reachable": bool(people), "viewer_fills": bool(me) and me in people})
+    return out
+
+
+def self_approved_flags(agent_name: str, execution_ids: Iterable[str],
+                        principal) -> Dict[str, Tuple[bool, bool]]:
+    """trinity-enterprise#754: `{execution id: (self_approved, by_viewer)}` for
+    the runs among `execution_ids` that went through without approval because
+    their requester is the approver — read from ent#752's `self_approved`
+    records, never from today's gate config (a run is marked by what happened
+    to it). `by_viewer` is true only for a person whose casefolded email is
+    the record's requester key, so the email itself never leaves the server.
+    Runs with no record are absent (false). Never raises: a marker is a hint,
+    never a reason to fail the executions read.
+
+    For people only (operator ruling, the ent#754 review): beside a row's
+    `source_user_email` the marker says that person fills the gate's approver
+    kind, so a machine principal (an agent, connector or system key, or an
+    agent-scoped MCP key) reads no flag at all — the rule the gate map applies
+    to `set_by` (#715). A person's own user-scoped MCP key is that person
+    (`PERSON_SCOPES`, the line `enforce` draws to let them self-approve), so it
+    reads what they read in the browser."""
+    requester = skill_gate_service.requester_from_principal(principal)
+    if not requester.is_person:
+        return {}
+    mine = f"person:{requester.email.strip().casefold()}" if requester.email else None
+    return _self_approved_flags_for_key(agent_name, execution_ids, mine)
+
+
+def _self_approved_flags_for_key(agent_name: str, execution_ids: Iterable[str],
+                                 viewer_key: Optional[str]) -> Dict[str, Tuple[bool, bool]]:
+    ids = [e for e in execution_ids if e]
+    if not ids:
+        return {}
+    try:
+        runs = db.get_self_approved_runs(agent_name, ids)
+    except Exception:  # noqa: BLE001
+        logger.warning("[skill_gate_map] self-approved read failed for %s", agent_name, exc_info=True)
+        return {}
+    return {eid: (True, viewer_key is not None and key == viewer_key) for eid, key in runs.items()}
+
+
+def annotate_self_approved_turns(agent_name: str, messages: List[Dict[str, Any]],
+                                 viewer_email: Optional[str], *, viewer_is_person: bool = True) -> None:
+    """trinity-enterprise#754 (C9): mark, in place, each Workspace agent reply
+    whose turn went through without approval because its requester is the
+    approver. A Workspace message names the turn that wrote it (#3166's
+    `execution_id`), so this is the executions marker applied to a thread.
+    The viewer is the portal session's person — the same identity the
+    Workspace gate requester carries — compared casefolded; no email is added
+    to the payload. Questions, rows no turn wrote and older rows (no
+    `execution_id`) read false, and so does every row for a machine viewer
+    (people only, as `self_approved_flags`). One read per thread; never raises."""
+    viewer = (viewer_email or "").strip().casefold()
+    replies = [m for m in messages if m.get("role") == "assistant" and m.get("execution_id")
+               and viewer_is_person]
+    flags = _self_approved_flags_for_key(
+        agent_name, [m["execution_id"] for m in replies], f"person:{viewer}" if viewer else None)
+    for m in messages:
+        hit = flags.get(m.get("execution_id")) if m.get("role") == "assistant" else None
+        m["gate_self_approved"], m["gate_self_approved_by_viewer"] = hit or (False, False)
+
+
+# trinity-enterprise#754: the in-agent gate check's states, as the agent's
+# `/health → skill_gate_hook` reports them (ent#752, `agent_server/routers/
+# info.py::_skill_gate_hook`), plus two of the platform's own: `predates` — a
+# 200 /health without the field, i.e. an image built before the hook, the
+# common case the owner's warning exists for — and `unknown` — no usable
+# answer at all, which is NOT "not ok" and warns nobody.
+HOOK_STATES = frozenset({"ok", "missing", "not_root_owned", "writable", "unsupported_runtime"})
+HOOK_PREDATES = "predates"
+HOOK_UNKNOWN = "unknown"
+HOOK_PROBE_TIMEOUT_SECONDS = 3.0
+
+
+async def _read_health(agent_name: str):
+    async with agent_httpx_client(agent_name, timeout=HOOK_PROBE_TIMEOUT_SECONDS) as client:
+        return await client.get(f"http://agent-{agent_name}:8000/health")
+
+
+async def hook_status(agent_name: str) -> str:
+    """Is the gate enforced inside the agent? One direct `GET /health` with a
+    short timeout and NO circuit-breaker bookkeeping — a probe from the Skills
+    tab must never mark an agent unhealthy (the `gitignore_clone` pattern).
+    Never raises."""
+    try:
+        # The cap is on the whole probe: httpx's timeout is per phase, so an
+        # agent trickling its answer held one read for 10 s (PR review).
+        response = await asyncio.wait_for(_read_health(agent_name), HOOK_PROBE_TIMEOUT_SECONDS)
+        if response.status_code != 200:
+            return HOOK_UNKNOWN
+        data = response.json()
+    except (httpx.HTTPError, ValueError, asyncio.TimeoutError):  # stopped, slow, unreachable or not JSON
+        return HOOK_UNKNOWN
+    except Exception:  # noqa: BLE001 — no answer too, but one that may recur on every call
+        logger.debug("[skill_gate_map] hook probe for %s failed", agent_name, exc_info=True)
+        return HOOK_UNKNOWN
+    if not isinstance(data, dict):
+        return HOOK_UNKNOWN
+    if "skill_gate_hook" not in data:
+        return HOOK_PREDATES
+    value = data["skill_gate_hook"]
+    return value if isinstance(value, str) and value in HOOK_STATES else HOOK_UNKNOWN
 
 
 def explicit_gate_names(agent_name: str, names: Iterable[str]) -> List[str]:

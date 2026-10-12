@@ -233,6 +233,23 @@ class TestRaisesAnApproval:
         assert (info.value.status_code, info.value.code) == (503, "approval_unavailable")
         assert gate.db.count_pending_gate_requests(agent) == 0
 
+    async def test_a_refused_raise_surfaces_its_real_code(self, gate, monkeypatch):
+        """#3247 F1: the sink's refusal (`AskRejected.status_code`) reaches the
+        caller as that code — not an AttributeError turned into a 503."""
+        import services.ask_service as ask_svc
+        _gated(gate)
+        agent = "fin-751-r5e"
+
+        def _refuse(agent_name, ask):
+            raise ask_svc.AskRejected(409, "already_pending", "dup", request_id="x-1")
+        monkeypatch.setattr(gate.svc, "_raise_ask", _refuse)
+        with pytest.raises(gate.svc.SkillGateRefused) as info:
+            await _enforce(gate, agent, "/pay-invoice 1", _agent_requester(gate.svc),
+                           occurrence_key="occ")
+        assert (info.value.status_code, info.value.code) == (409, "already_pending")
+        assert info.value.extra == {"request_id": "x-1"}
+        assert gate.db.count_pending_gate_requests(agent) == 0
+
     async def test_the_request_text_is_sanitised_before_it_is_stored_or_shown(self, gate):
         _gated(gate)
         secret = "ghp_" + "A" * 36

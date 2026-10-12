@@ -74,7 +74,7 @@ function card(over = {}) {
     agent_name: AGENT,
     role: { id: 'sales-lead', title: 'Sales Lead', mission: 'Close ICP-fit pipeline.', status: 'active',
             review_by: '2099-12-01', stale: false, path: 'canon/roles/sales-lead.yaml', error: null },
-    seat: 'gary@example.com',
+    seat_source: 'person',
     objectives: [{
       id: 'q4-close-rate', statement: 'Raise close rate this quarter.', horizon: 'quarter', status: 'active', owned: true,
       metrics: [
@@ -195,6 +195,8 @@ describe('PortalAgentRole (mounted)', () => {
     ['metric_retired', 'no longer measured'],
     ['direction_mismatch', 'disagree on which way is good'],
     ['direction_undeclared', 'whether higher or lower is better'],
+    ['guard_target_unset', 'Target not set'],
+    ['guard_direction_invalid', 'only checked for staying put'],
     ['a_code_this_build_has_never_heard_of', "can't be compared with its target"],
   ])('finding %s is the Workspace\'s own sentence, never a blank', async (code, copy) => {
     const w = await mountWith(card({ objectives: [{ id: 'o', statement: 'S', owned: true, metrics: [
@@ -216,6 +218,20 @@ describe('PortalAgentRole (mounted)', () => {
       expect(w.find('[data-testid="portal-role-metric-finding"]').exists()).toBe(false)
       expect(row(w, 'm').text()).toContain('not measured yet')
     })
+
+  // trinity-enterprise#731: a guard must not move while the objective is
+  // pursued. Unlabelled, its off_target would read as a missed goal.
+  it('a guard row carries a Guard badge and a primary row does not', async () => {
+    const w = await mountWith(card({ objectives: [{ id: 'o', statement: 'S', owned: true, metrics: [
+      metric('close_rate', { role: 'primary', target: 35, actual: 30, gap: { status: 'behind' } }),
+      metric('spend', { role: 'guard', target: 4000, actual: 5000, gap: { status: 'off_target' } }),
+    ] }] }))
+    const guard = row(w, 'spend').find('[data-testid="portal-role-metric-guard"]')
+    expect(guard.exists()).toBe(true)
+    expect(guard.text()).toBe('Guard')
+    expect(row(w, 'spend').text()).toContain('off target')
+    expect(row(w, 'close_rate').find('[data-testid="portal-role-metric-guard"]').exists()).toBe(false)
+  })
 
   it('a row with no finding shows no finding line', async () => {
     const w = await mountWith(card())
@@ -247,6 +263,16 @@ describe('PortalAgentRole (mounted)', () => {
     expect(w.text()).not.toContain('Objectives')
   })
 
+  it('an agent with no seat on record says so, and still lists the work it supports (ent#812)', async () => {
+    const sentence = 'This agent neither holds a seat nor serves someone who holds one, so it owns no objective yet.'
+    const none = await mountWith(card({ objectives: [], objectives_error: null, finding_codes: ['no_seat'] }))
+    expect(none.get('[data-testid="portal-role-no-seat"]').text()).toBe(sentence)
+    expect(none.find('[data-testid="portal-role-objectives-error"]').exists()).toBe(false)   // not a failed read
+    const supporting = await mountWith(card({ finding_codes: ['no_seat'] }))
+    expect(supporting.get('[data-testid="portal-role-no-seat"]').text()).toBe(sentence)
+    expect(supporting.findAll('[data-testid="portal-role-objective"]')).toHaveLength(1)
+  })
+
   it('a list with objective files that failed to read says it may be incomplete', async () => {
     const w = await mountWith(card({ objectives_partial: true }))
     expect(w.findAll('[data-testid="portal-role-objective"]')).toHaveLength(1)   // what did load still shows
@@ -269,6 +295,37 @@ describe('PortalAgentRole (mounted)', () => {
     const w = await mountWith(card({ role: { id: 'sales-lead', error: 'role_file_not_found', path: 'canon/roles/sales-lead.yaml' }, objectives: [] }))
     expect(w.get('[data-testid="portal-role-title"]').text()).toBe('sales-lead')
     expect(w.get('[data-testid="portal-role-error"]').text()).toContain("not in the agent's canon yet")
+  })
+
+  it('says where the seat comes from, for this viewer — never a person (ent#814)', async () => {
+    const mine = await mountWith(card({ seat_source: 'person' }))
+    expect(mine.get('[data-testid="portal-role-seat-source"]').text()).toBe('Your seat on this agent')
+    const held = await mountWith(card({ seat_source: 'holds' }))
+    expect(held.get('[data-testid="portal-role-seat-source"]').text()).toBe('The agent holds this seat itself')
+    const primary = await mountWith(card({ seat_source: 'primary' }))
+    expect(primary.get('[data-testid="portal-role-seat-source"]').text()).toBe("Its primary's seat")
+    const none = await mountWith(card({ seat_source: 'none' }))
+    expect(none.find('[data-testid="portal-role-seat-source"]').exists()).toBe(false)
+  })
+
+  it("the viewer's relationship comes from their assignment, and is stated when there is none", async () => {
+    const primary = await mountWith(card({ relationship: 'primary' }))
+    expect(primary.get('[data-testid="portal-role-relationship"]').text()).toContain('primary — it works for you')
+    const approver = await mountWith(card({ relationship: 'approver' }))
+    expect(approver.get('[data-testid="portal-role-relationship"]').text()).toContain('approver')
+    const unknown = await mountWith(card({ relationship: 'owner-of-everything' }))
+    expect(unknown.get('[data-testid="portal-role-relationship"]').text()).toContain('no assignment recorded')
+  })
+
+  it('no seat on record is said once, on the role, and the supported work still shows', async () => {
+    const sentence = 'This agent neither holds a seat nor serves someone who holds one, so it owns no objective yet.'
+    const w = await mountWith(card({
+      seat_source: 'none', finding_codes: ['no_seat'],
+      role: { id: null, title: null, error: 'no_seat', path: null },
+    }))
+    expect(w.get('[data-testid="portal-role-error"]').text()).toBe(sentence)
+    expect(w.find('[data-testid="portal-role-no-seat"]').exists()).toBe(false)
+    expect(w.findAll('[data-testid="portal-role-objective"]').length).toBe(1)
   })
 
   it('a stopped agent says the files live in the container', async () => {
@@ -345,13 +402,13 @@ describe('PortalAgentRole (mounted)', () => {
 describe('PortalAgentRole — objectives in plain words (ent#843)', () => {
   const owned = (over = {}) => ({
     id: 'own-1', statement: 'H10: lift close rate (ADR-0042)', client_heading: null, horizon: 'quarter',
-    status: 'active', owned: true, tracked_elsewhere: false, tracked_by: null,
+    status: 'active', owned: true, tracked_elsewhere: false,
     metrics: [metric('close_rate', { type: 'percentage', unit: '%', target: 35, actual: 30, last_point_at: fresh, freshness: 'fresh' })],
     ...over,
   })
   const supported = (id, over = {}) => ({
     id, statement: `Support ${id}`, client_heading: null, horizon: 'year', status: 'active', owned: false,
-    tracked_elsewhere: true, tracked_by: null,
+    tracked_elsewhere: true,
     metrics: [
       metric('finance_ar_overdue_usd', { label: 'Finance AR overdue (USD)', finding: { code: 'metric_not_declared_here' } }),
       metric('runway_months', { label: 'Runway (months)', finding: { code: 'metric_not_declared_here' } }),
@@ -374,16 +431,17 @@ describe('PortalAgentRole — objectives in plain words (ent#843)', () => {
   })
 
   it('a supported objective shows its heading and ONE neutral "tracked" note — no metric rows, no per-metric warning', async () => {
-    const w = await mountWith(card({ objectives: [owned(), supported('s1', { tracked_by: 'finance-agent' }), supported('s2')] }))
+    const w = await mountWith(card({ objectives: [owned(), supported('s1'), supported('s2', { tracked_elsewhere: false })] }))
     await w.get('[data-testid="portal-role-supported-toggle"]').trigger('click')
     const items = w.findAll('[data-testid="portal-role-supported-objective"]')
     expect(items).toHaveLength(2)
     expect(items[0].text()).toContain('Support s1')
-    expect(items[0].get('[data-testid="portal-role-tracked-by"]').text()).toBe('Tracked by finance-agent')
-    expect(items[1].get('[data-testid="portal-role-tracked-by"]').text()).toBe('Tracked by another agent')
+    // Never names the agent: the card is read by external clients.
+    expect(items[0].get('[data-testid="portal-role-tracked-elsewhere"]').text()).toBe('Tracked by another agent')
+    expect(items[1].find('[data-testid="portal-role-tracked-elsewhere"]').exists()).toBe(false)
     for (const it_ of items) {
       expect(it_.findAll('[data-testid^="portal-role-metric"]')).toHaveLength(0)
-      expect(it_.findAll('[data-testid="portal-role-tracked-by"]')).toHaveLength(1)
+      expect(it_.findAll('[data-testid="portal-role-tracked-elsewhere"]').length).toBeLessThanOrEqual(1)
       expect(it_.html()).not.toContain('status-warning')
     }
     expect(w.text()).not.toContain('Another agent measures this one')

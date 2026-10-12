@@ -150,6 +150,8 @@ def test_every_free_text_field_the_prompt_renders_is_scanned_or_named_platform_c
         "execution_id": "a platform id",
         "primary_user_display": "assignment provider display name (ent#500)",
         "role_id": "an assignment id",
+        "served_role_id": "a seat id from the assignment provider, sanitized like role_id (ent#814)",
+        "served_person_email": "never rendered: it only picks the seat served_role_id names (ent#814)",
     }
     strings = {f.name for f in dataclasses.fields(ExecutionContext)
                if typing.get_type_hints(ExecutionContext)[f.name] == typing.Optional[str]}

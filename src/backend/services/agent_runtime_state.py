@@ -73,6 +73,12 @@ CLEARED_KEYSPACES: Tuple[str, ...] = (
     # container has a new process table, so no dwell can legitimately span
     # the boundary.
     "agent:canary_zombie:",
+    # trinity-enterprise#754: the agent's last-known skills listing (Skills tab
+    # on a stopped agent), TTL-less. Cleared ONLY on the teardown paths
+    # (`clear_agent_runtime_state`) and the create path — never in
+    # `clear_agent_breakers`, which also runs on every start, where the copy is
+    # exactly what a stopped-then-started agent still needs.
+    "agent:skills_list:",
 )
 
 # Deliberately NOT cleared here, each with the reason. Registered so the parity
@@ -122,6 +128,20 @@ EXEMPT_KEYSPACES: Dict[str, str] = {
         "mid-deploy would unserialize the very deploy holding it (the "
         "agent:bind_op: reasoning). Fail-open on Redis down; the prepop "
         "attached-volume 409 is the destructive-collision backstop."
+    ),
+    "agent:api_key_route:": (
+        "Transition-notification dedupe marker for the SUB-003 walk (#3470): set "
+        "when a turn was routed to the platform API key, read when a later turn "
+        "serves on a subscription again (the 'returned to its subscription' "
+        "notice), 24h TTL. Informational only — it never decides a credential, "
+        "so a stale or missing marker changes a notification and nothing else; "
+        "clearing it on a lifecycle event would only re-fire the same notice."
+    ),
+    "agent:pool_exhausted_notice:": (
+        "Once-per-hour dedupe marker for the 'no subscription could serve a turn' "
+        "operator alert (#3470), carrying its own TTL. A Workspace user re-sending "
+        "a message must not page the operator per message; clearing it on a "
+        "lifecycle event would only re-fire the alert."
     ),
     "agent:mcp_key_regen:": (
         "Short-lived SETNX MCP-key rotation lock carrying its own TTL (#1854). "
@@ -202,3 +222,12 @@ async def clear_agent_runtime_state(agent_name: str) -> None:
         await get_slot_service().force_clear_slots(agent_name)
     except Exception as e:  # noqa: BLE001
         logger.warning("clear_agent_runtime_state: slot clear failed for %s: %s", agent_name, e)
+
+    # trinity-enterprise#754: a recycled name must not show its predecessor's
+    # skills as "last known". `forget` is already fail-open.
+    try:
+        from services import agent_skills_listing
+
+        agent_skills_listing.forget(agent_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("clear_agent_runtime_state: skills-list clear failed for %s: %s", agent_name, e)

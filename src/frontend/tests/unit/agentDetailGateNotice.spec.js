@@ -31,7 +31,7 @@ function element(tag) {
 }
 
 describe('AgentDetail — the gated-run notice reaches a toast', () => {
-  it.each(['PlaybooksPanel', 'DashboardPanel'])('%s gets the toast host', (tag) => {
+  it.each(['SkillsTab', 'DashboardPanel'])('%s gets the toast host', (tag) => {
     expect(element(tag)).toMatch(/:notify="showNotification"/)
   })
 
