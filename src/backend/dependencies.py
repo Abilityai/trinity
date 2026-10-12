@@ -1271,6 +1271,20 @@ def reject_agent_principal(current_user: User) -> None:
         )
 
 
+def human_only(current_user: User = Depends(get_current_user)) -> User:
+    """Route-level form of `reject_agent_principal`.
+
+    Attach as `dependencies=[Depends(human_only)]` so it runs BEFORE the route's
+    ownership dependency. Since trinity-enterprise#629 that dependency narrows
+    an agent key to itself and the agents it spawned, and answers anything else
+    with the uniform 404 — so an inline guard in the handler body never ran for
+    a sibling target, and the agent was told "not found" instead of the rule it
+    hit. Refusing on the principal alone, before any lookup, discloses nothing
+    about the target (#186)."""
+    reject_agent_principal(current_user)
+    return current_user
+
+
 def reject_non_interactive_principal(current_user: User) -> None:
     """Interactive-human-only guard — an ALLOWlist, not a denylist (#1854).
 
