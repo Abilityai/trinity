@@ -66,13 +66,11 @@ For monitoring integrations that must keep working under enforced two-factor, an
 
 ## Managing User Roles
 
-**Admin only**: Navigate to **Settings → Access** and find the **User Management** section.
+**Admin only.** A role applies on every agent. Change it in **Settings → Access → User Management**: find the user in the table (when some accounts are Workspace-only, the section says how many; **Show only these** filters the table to them) and pick a new role from the dropdown (`user` reads "user — Workspace only").
 
-1. Find the user in the table. When some accounts are Workspace-only, the section says how many; **Show only these** filters the table to them.
-2. Select a new role from the dropdown (`user` reads "user — Workspace only").
-3. The change takes effect immediately on their next request.
+An agent's **Access** tab can also show a role select on each person's row ("Platform role · every agent"). Every change there asks you to confirm it first; lowering someone to `user` reminds you they lose the operator UI on every agent. Where a person has no account yet, the row can offer **Give a platform account**, which creates their account right away (as `user`, unless an earlier allow-list entry set another role) so you can assign them to the agent; they then sign in at `/login`.
 
-You cannot change your own role.
+The change takes effect on their next request. You cannot change your own role, and the role can only be changed from a signed-in session (an API key is refused); every change is recorded in the audit log.
 
 ## For Agents
 
@@ -81,7 +79,7 @@ User roles are stored in the `users` table. The role is checked on each API requ
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/users` | GET | List all users (admin-only) |
-| `/api/users/{username}/role` | PUT | Change a user's role (admin-only) |
+| `/api/users/{username}/role` | PUT | Change a user's role (admin, signed-in session only — API keys are refused; audited as `role_change`) |
 
 **Request body:**
 ```json

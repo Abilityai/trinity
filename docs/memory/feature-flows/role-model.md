@@ -8,6 +8,7 @@ Expands the user role system from 2 tiers (admin/user) to 4 tiers: admin > creat
 ## Revision History
 | Date | Changes |
 |------|---------|
+| 2026-10-12 | trinity-enterprise#837 PR 2 — the role route refuses every key (`reject_non_interactive_principal`) and audits `role_change` (from → to); the Access tab's rows carry a role select (every change confirmed) next to Settings → User Management. |
 | 2026-10-09 | trinity-enterprise#837 — `user` is Workspace-only (the operator floor in `get_current_user`; `role_level` / `is_workspace_only_role` beside `ROLE_HIERARCHY`, shared with `require_role`). Settings: role pickers read "user — Workspace only", the whitelist form takes a role, User Management counts and filters the Workspace-only accounts. Corrected the stale `creator` default (#314 made it the whitelist row's role, `user` when none). |
 | 2026-03-20 | Initial documentation |
 
@@ -33,8 +34,9 @@ As a whitelisted user signing up via email, I get the role recorded on my whitel
 
 ## Entry Points
 - **UI**: `src/frontend/src/views/Settings.vue:796-866` - User Management section with role dropdowns
+- **UI**: `src/frontend/src/components/AccessPanel.vue` - Agent Detail › Access: a role select on each other Active person's row, every change confirmed (trinity-enterprise#837)
 - **API**: `GET /api/users` - List all users (admin-only)
-- **API**: `PUT /api/users/{username}/role` - Change a user's role (admin-only)
+- **API**: `PUT /api/users/{username}/role` - Change a user's role (admin, interactive session only; audited)
 
 ---
 
@@ -201,18 +203,24 @@ async def list_users(current_user: User = Depends(require_admin)):
     ]
 ```
 
-**PUT /api/users/{username}/role** (lines 46-77) — change role, admin-only:
+**PUT /api/users/{username}/role** — change role, an interactive admin only, audited:
 ```python
 @router.put("/{username}/role")
-async def update_user_role(username: str, body: UserRoleUpdate,
+async def update_user_role(username: str, body: UserRoleUpdate, request: Request,
         current_user: User = Depends(require_admin)):
+    reject_non_interactive_principal(current_user)   # ent#837: no key, trinity-system's included
     if username == current_user.username:
         raise HTTPException(status_code=400, detail="Cannot change your own role")
     if body.role not in VALID_ROLES:
         raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: ...")
+    previous = db.get_user_by_username(username)
     updated = db.update_user_role(username, body.role)
     if not updated:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    if previous_role != updated["role"]:
+        await platform_audit_service.log(event_action="role_change", details={"from": ..., "to": ...}, ...)
+    if updated.get("email"):   # the whitelist row follows, or a re-bind could restore the old role
+        db.set_whitelist_default_role(updated["email"], updated["role"])
     return {"username": updated["username"], "role": updated["role"]}
 ```
 
@@ -371,7 +379,7 @@ Admin-only. Returns all platform users without password hashes.
 
 ### PUT /api/users/{username}/role
 
-Admin-only. Changes the role of the specified user.
+Admin, from an interactive session (any API key gets 403). Changes the role of the specified user, points their whitelist row (if any) at the new role, and records a `role_change` audit row (from → to); a no-op writes none.
 
 **Request Body:**
 ```json

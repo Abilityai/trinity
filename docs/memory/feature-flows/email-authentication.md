@@ -488,6 +488,7 @@ CREATE INDEX idx_email_login_codes_code ON email_login_codes(code)
 | `is_email_whitelisted(email)` | 27-35 | Check if email is in whitelist |
 | `add_to_whitelist(email, added_by, source, *, default_role)` | 37-90 | Add email to whitelist (default_role is a required kwarg, #314) |
 | `get_whitelist_default_role(email)` | 92-103 | Read default_role for a whitelisted email |
+| `set_whitelist_default_role(email, default_role)` | — | Point an existing row at a new role (never creates one). Called by `PUT /api/users/{username}/role` on every successful change (trinity-enterprise#837): the row is what an account created for the address gets — again after a re-bind — so it must follow the account's role |
 | `remove_from_whitelist(email)` | 69-83 | Remove email from whitelist |
 | `list_whitelist(limit)` | 85-104 | Get all whitelisted emails with metadata |
 | `create_login_code(email, expiry_minutes)` | 110-145 | Generate 6-digit code with 10 min expiry |

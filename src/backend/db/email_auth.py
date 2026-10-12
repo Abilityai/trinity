@@ -117,6 +117,29 @@ class EmailAuthOperations:
             conn.execute(stmt)
         return True
 
+    def set_whitelist_default_role(self, email: str, default_role: str) -> bool:
+        """Point an email's whitelist row at `default_role` (trinity-enterprise#837).
+
+        A row's role is what an account created for the address gets — at a first
+        sign-in, and again if that account later re-binds to another address. So
+        when an admin changes the account's role, the row follows: left at the old
+        role, a demoted person could re-bind away and sign in with the old address
+        as a NEW account at the old role. Never creates a row; returns whether one
+        was updated.
+        """
+        if default_role not in _VALID_DEFAULT_ROLES:
+            raise ValueError(
+                f"Invalid default_role: {default_role!r}. "
+                f"Must be one of {sorted(_VALID_DEFAULT_ROLES)}"
+            )
+        stmt = (
+            update(email_whitelist)
+            .where(func.lower(email_whitelist.c.email) == email.lower())
+            .values(default_role=default_role)
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount > 0
+
     def _whitelist_source(self, email: str) -> Optional[str]:
         """The source of an email's whitelist row, `""` for a row with none,
         or None when the email has no row."""

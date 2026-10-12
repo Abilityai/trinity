@@ -27,7 +27,9 @@ operator UI. No database migration runs, and no role is rewritten.
   sign-in enabled, `MCP_INLINE_AUTH_ENABLED`, off by default, an MCP client that signs in with
   a shared address still gets a Workspace-only `user` account.) A platform account is an admin's
   decision: add the email to Settings → Access → Email Whitelist (which now has a role
-  picker, default `user`), or change a role in User Management.
+  picker, default `user`), give the person one from their row on an agent's Access tab
+  (**Give a platform account**, which creates the account at once so they can be assigned to
+  the agent), or change a role in User Management.
 
 ## Who is affected
 
@@ -62,7 +64,12 @@ Every account whose role is `user`. They usually got it from one of these:
    Workspace-only, and **Show only these** filters the table to them.
 
 2. **Raise anyone who operates agents** to `operator`: Settings → Access → User Management →
-   Role, or `PUT /api/users/{username}/role` with `{"role": "operator"}` as an admin.
+   Role, the role select on the person's row on any agent's Access tab, or
+   `PUT /api/users/{username}/role` with `{"role": "operator"}` from an admin's signed-in
+   session. The route no longer accepts API keys (an admin's own keys and `trinity-system`'s
+   included), so a script that changed roles with a key now gets 403; every change is
+   recorded in the audit log as `role_change`, and also updates the person's row on the
+   Email Whitelist ("Role at first sign-in") to the new role.
 
 3. **If accounts are created on first single sign-on**, set the provider's default role to
    `operator` for a team of operators, or raise each account after it first signs in.
