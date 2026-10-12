@@ -668,7 +668,7 @@ import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
 import AskMarkdown from '../components/operator/AskMarkdown.vue'
 import { apiErrorMessage } from '../utils/apiError'
-import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
+import { isGateRefusal, pendingApprovalMessage, storedChatMessage } from '../utils/skillGate'
 import { viewState, staleBannerMessage, listFrom } from '../utils/loadingState'
 import {
   queueResponseKind, buildQueueResponse, queueTypeLabel,
@@ -1098,7 +1098,7 @@ async function selectSession(session) {
   showSessions.value = false
   try {
     const res = await http.get(`/api/agents/${chatAgent.value}/chat/sessions/${session.id}`)
-    chatMessages.value = res.data.messages || []
+    chatMessages.value = (res.data.messages || []).map(storedChatMessage)
     scrollChatToBottom()
   } catch (e) {
     console.error('Failed to load session:', e)
@@ -1160,6 +1160,8 @@ async function sendChatMessage() {
     if (held) {
       userEntry.held = true
       chatMessages.value.push({ role: 'system', content: held, held: true, timestamp: new Date().toISOString() })
+      // trinity#3526: the request was saved to a conversation — stay in it.
+      if (submitRes.data.chat_session_id) chatSessionId.value = submitRes.data.chat_session_id
       return
     }
     const executionId = submitRes.data.execution_id

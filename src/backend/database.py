@@ -2123,6 +2123,9 @@ class DatabaseManager:
     def get_chat_session(self, session_id: str):
         return self._chat_ops.get_chat_session(session_id)
 
+    def find_chat_session_by_message_source(self, agent_name: str, user_id: int, source: str):
+        return self._chat_ops.find_chat_session_by_message_source(agent_name, user_id, source)
+
     def get_chat_messages(self, session_id: str, limit: int = 100):
         return self._chat_ops.get_chat_messages(session_id, limit)
 
