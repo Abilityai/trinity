@@ -957,6 +957,41 @@ class OperatorQueueOperations:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_item(row) if row else None
 
+    def update_pending_problem_report(
+        self, agent_name: str, request_id: str, *, question: str, context: Dict,
+        now: Optional[str] = None,
+    ) -> bool:
+        """Rewrite a still-pending Workspace problem report's text (trinity#3521).
+
+        The Workspace records a thumbs-down on the click and sends the comment
+        as a second request with the same per-person / target / day id, which
+        `create_item`'s ON CONFLICT DO NOTHING turned into a no-op — the alert
+        kept saying there was no comment. This is the narrow update path that
+        `_problem_report_id`'s docstring placed at the sink.
+
+        Scoped by `(agent_name, request_id)` AND `type` AND `status='pending'`:
+        an item a person already ended is never rewritten or reopened, and a
+        row of another kind under the same id is never touched. Same db-sink
+        belts as an insert. Returns whether a row changed.
+        """
+        if question and len(str(question).encode("utf-8")) > _DB_BELT_QUESTION_MAX_BYTES:
+            raise ValueError(f"operator-queue 'question' exceeds {_DB_BELT_QUESTION_MAX_BYTES} bytes")
+        context_json = json.dumps(context) if context else None
+        if context_json and len(context_json.encode("utf-8")) > _DB_BELT_CONTEXT_MAX_BYTES:
+            raise ValueError(f"operator-queue 'context' exceeds {_DB_BELT_CONTEXT_MAX_BYTES} bytes")
+        stmt = (
+            update(operator_queue)
+            .where(and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.request_id == request_id,
+                operator_queue.c.type == "workspace_problem_report",
+                operator_queue.c.status == "pending",
+            ))
+            .values(question=question, context=context_json, last_seen_at=now or utc_now_iso())
+        )
+        with get_engine().begin() as conn:
+            return bool(conn.execute(stmt).rowcount)
+
     def list_pending_proposals_for_agent(
         self, agent_name: str, limit: int, raised_by: Optional[str] = None,
     ) -> List[Dict]:
