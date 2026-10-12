@@ -2201,9 +2201,12 @@ class DatabaseManager:
     def create_activity(self, activity):
         return self._activity_ops.create_activity(activity)
 
-    def complete_activity(self, activity_id: str, status: str = "completed", details: dict = None, error: str = None):
-        """#1804: returns an ``ActivityCloseOutcome`` (tri-state), not a bool."""
-        return self._activity_ops.complete_activity(activity_id, status, details, error)
+    def complete_activity(self, activity_id: str, status: str = "completed", details: dict = None, error: str = None,
+                          *, completed_at=None):
+        """#1804: returns an ``ActivityCloseOutcome`` (tri-state), not a bool.
+        ``completed_at`` (#3589): the producer's terminal instant, else now."""
+        return self._activity_ops.complete_activity(activity_id, status, details, error,
+                                                    completed_at=completed_at)
 
     def close_open_activities_for_executions(self, execution_ids, status: str = "failed", error: str = None):
         """#1804: batched bulk-sweep close (one transaction, no per-row WS)."""
