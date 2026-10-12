@@ -89,6 +89,13 @@ def _drop_hidden(items: List[Dict[str, Any]], owned: Optional[Set[str]]) -> List
     return [item for item in items if not _hidden_from(item, owned)]
 
 
+def _hidden_for(item: Dict[str, Any], current_user: User) -> bool:
+    """`_hidden_from` for one row, resolving the caller's agents only when the
+    row is owner-only — every other row costs no lookup."""
+    return (operator_queue_service.is_owner_only(item)
+            and _hidden_from(item, _owned_set(current_user)))
+
+
 def _assert_agent_accessible(agent_name: str, accessible: Optional[Set[str]]) -> None:
     """Raise 403 if the user cannot access the given agent."""
     if accessible is not None and agent_name not in accessible:
@@ -253,9 +260,8 @@ async def bulk_cancel_queue_items(
     ids = list(dict.fromkeys(body.ids))  # dedupe, keep order — honest skipped count
     # trinity-enterprise#866: an owner-only row a caller cannot read is not
     # theirs to end either; it counts as skipped, like an inaccessible id.
-    owned = _owned_set(current_user)
     cancellable = [i for i in ids
-                   if not _hidden_from(db.get_operator_queue_item(i) or {}, owned)]
+                   if not _hidden_for(db.get_operator_queue_item(i) or {}, current_user)]
     ending = ask_service.bulk_cancel(
         cancellable, accessible, actor=_actor(current_user, request), reason=body.reason,
     )
@@ -326,7 +332,7 @@ async def get_queue_item(
         raise HTTPException(status_code=404, detail="Queue item not found")
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(item["agent_name"], accessible)
-    if _hidden_from(item, _owned_set(current_user)):
+    if _hidden_for(item, current_user):
         raise HTTPException(status_code=404, detail="Queue item not found")  # ent#866
     visible = _for_principal(operator_queue_service.annotate_aging([item]), current_user)
     if not visible:
@@ -356,7 +362,7 @@ async def respond_to_queue_item(
 
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(existing["agent_name"], accessible)
-    if _hidden_from(existing, _owned_set(current_user)):
+    if _hidden_for(existing, current_user):
         raise HTTPException(status_code=404, detail="Queue item not found")  # ent#866
 
     if existing["status"] != "pending":
@@ -470,7 +476,7 @@ async def cancel_queue_item(
 
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(existing["agent_name"], accessible)
-    if _hidden_from(existing, _owned_set(current_user)):
+    if _hidden_for(existing, current_user):
         raise HTTPException(status_code=404, detail="Queue item not found")  # ent#866
 
     if existing["status"] != "pending":
