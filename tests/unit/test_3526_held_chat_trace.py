@@ -288,3 +288,10 @@ def test_the_voice_context_leaves_a_held_request_out(sender):
     db.add_chat_message(sid, FIN, sender.id, SENDER_EMAIL, "user", "what is overdue?")
     summary = voice._build_context_summary(sid)
     assert summary == "User: what is overdue?"
+
+
+def test_a_staged_secret_in_a_held_request_is_not_stored(sender, monkeypatch):
+    monkeypatch.setattr(_PERSIST, "get_staged_values", lambda: ["s3cr3t-staged-value"])
+    held = _held(sender, message=f"{TEXT} with s3cr3t-staged-value", user_message=None)
+    stored = _messages(held.detail()["chat_session_id"])[0][1]
+    assert "s3cr3t-staged-value" not in stored and TEXT in stored

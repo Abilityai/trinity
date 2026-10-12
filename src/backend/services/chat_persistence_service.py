@@ -25,6 +25,7 @@ from models import ParallelTaskRequest, TaskExecutionStatus
 from database import db
 from utils.helpers import utc_now_iso
 from db.write_params import ChatMessageFields
+from services.runtime_secret_scrub import get_staged_values, scrub_text
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,9 @@ def persist_held_request(agent_name: str, request: ParallelTaskRequest, held,
         if existing:
             return existing
         session = _resolve_session(agent_name, request, user_id, user_email)
+        # ent#279: the notice names skills and the request may quote earlier
+        # turns — neither is stored with a staged secret in it.
+        staged = get_staged_values()
         for role, content in (("user", request.user_message or request.message),
                               ("system", held.message)):
             db.add_chat_message(
@@ -98,7 +102,7 @@ def persist_held_request(agent_name: str, request: ParallelTaskRequest, held,
                 user_id=user_id,
                 user_email=user_email,
                 role=role,
-                content=content,
+                content=scrub_text(staged, content),
                 fields=ChatMessageFields(source=source),
             )
         return session.id
