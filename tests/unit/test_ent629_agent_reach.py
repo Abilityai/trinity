@@ -39,7 +39,7 @@ _TESTS = str(Path(__file__).resolve().parents[1])
 if _TESTS not in sys.path:
     sys.path.insert(0, _TESTS)
 
-from db_harness import db_backend, seed_agent, seed_user  # noqa: E402,F401
+from db_harness import db_backend, seed_agent, seed_schedule, seed_user  # noqa: E402,F401
 
 import dependencies  # noqa: E402
 from models import User  # noqa: E402
@@ -458,3 +458,135 @@ def test_every_exemption_still_exists():
         fns = [n for n in ast.walk(tree)
                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn_name]
         assert fns, f"{rel}::{fn_name} no longer exists — drop it from _EXEMPT"
+
+
+# ---------------------------------------------------------------------------
+# Part E — the #3346 review (webmixgamer, 2026-10-12)
+# ---------------------------------------------------------------------------
+
+def _real_app(router_module, **overrides):
+    """A real router under TestClient, with `get_current_user` overridden by a
+    FRESH principal per request (the per-request reach record must never ride
+    from one request to the next)."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    app = FastAPI()
+    app.include_router(router_module.router)
+    found = set()
+
+    def walk(dependant):
+        for sub in dependant.dependencies:
+            if getattr(sub.call, "__name__", "") == "get_current_user":
+                found.add(sub.call)
+            walk(sub)
+
+    for route in router_module.router.routes:
+        if getattr(route, "dependant", None) is not None:
+            walk(route.dependant)
+    for call in found:
+        app.dependency_overrides[call] = overrides.get("user", _agent_key)
+    return TestClient(app, raise_server_exceptions=True)
+
+
+def test_a_skills_holder_never_reaches_another_users_agent_through_the_skills_fence(fleet, monkeypatch):
+    """Review point 1: one capability, one bound. The skills routes used the
+    plain owner fence, which `can_user_share_agent` answers True for ANY agent
+    when the owner is admin — the files tab refused the same target."""
+    _holding(monkeypatch, "skills.manage")
+
+    class _Req:
+        method = "PUT"
+        scope = {"path": "/x"}
+        client = None
+        state = type("S", (), {})()
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(dependencies.get_skill_managed_agent_by_name(
+            request=_Req(), agent_name=FOREIGN, current_user=_agent_key()))
+    assert exc.value.status_code == 404
+    assert dependencies.can_manage_agent_skills(_agent_key(), FOREIGN) is False
+    assert dependencies.can_manage_agent_skills(_agent_key(), C) is True
+
+
+def test_a_schedules_holder_enables_a_siblings_schedule_through_the_real_route(fleet, monkeypatch):
+    """Review point 4: the per-request record relies on FastAPI handing the
+    fence and the path dependency the SAME principal object."""
+    import routers.schedules as rs
+    seed_schedule("s-c", agent_name=C, owner_id=1)
+    _holding(monkeypatch, "schedules.manage")
+    client = _real_app(rs)
+    r = client.post(f"/api/agents/{C}/schedules/s-c/enable")
+    assert r.status_code == 200, r.text
+    _holding(monkeypatch)                                   # the grant revoked
+    monkeypatch.setattr("services.platform_audit_service.platform_audit_service.log",
+                        lambda **kw: asyncio.sleep(0))
+    assert client.post(f"/api/agents/{C}/schedules/s-c/enable").status_code == 403
+
+
+def test_credential_export_refuses_an_agent_key_by_name_before_the_owner_fence(fleet):
+    """Review point 4: without the route-level `human_only`, the narrowed owner
+    fence answers a sibling with 404 and the agent never learns the rule."""
+    import routers.credentials as rc
+    r = _real_app(rc).post(f"/api/agents/{C}/credentials/export")
+    assert r.status_code == 403
+    assert "human-only" in r.json()["detail"]
+
+
+def test_the_queue_reach_stays_inside_a_non_admin_owners_agents(db_backend, monkeypatch):
+    """Review point 4: `reach &= owner_names | {me}` — a non-admin owner's key
+    must not reach, through an edge, an agent its owner cannot access."""
+    from database import db
+    import routers.operator_queue as oq
+    seed_user(1, OWNER, role="user")
+    seed_user(2, OTHER, role="user")
+    for name in (A, B):
+        seed_agent(name, owner_id=1)
+    seed_agent(FOREIGN, owner_id=2)
+    db.add_agent_permission(A, B, created_by=OWNER)
+    db.add_agent_permission(A, FOREIGN, created_by=OTHER)
+    monkeypatch.setattr(dependencies.db, "get_agent_mcp_api_key", lambda agent: None)
+    from sqlalchemy import text
+    from db.engine import get_engine
+    with get_engine().begin() as conn:
+        conn.execute(text("UPDATE users SET email = 'owner@example.com' WHERE id = 1"))
+    key = User(id=1, username=OWNER, role="user", email="owner@example.com",
+               mcp_scope="agent", agent_name=A)
+    assert oq._accessible_set(key) == {A, B}
+
+
+def test_a_soft_deleted_child_is_not_in_the_spawned_set(fleet):
+    """Review point 4: `deleted_at IS NULL` in `list_agents_spawned_by_key`."""
+    from sqlalchemy import text
+    from db.engine import get_engine
+    with get_engine().begin() as conn:
+        conn.execute(text("UPDATE agent_ownership SET deleted_at = '2026-10-12T00:00:00Z' "
+                          "WHERE agent_name = :s"), {"s": SPAWN})
+    assert fleet.list_agents_spawned_by_key(A, "key-a") == []
+
+
+@pytest.mark.parametrize("target,reachable", [
+    (A, True),          # itself
+    (B, True),          # an edge
+    (SPAWN, True),      # spawned with the key it holds now — no edge needed
+    (C, False),         # a sibling with no edge
+    ("no-such-agent", False),
+])
+def test_the_reach_endpoint_decides_from_the_database_not_containers(fleet, target, reachable):
+    """Review point 2: the MCP gate's answer. No Docker is consulted — the
+    fleet fixture has no containers at all, which the old list read as "none
+    permitted"."""
+    from services.agent_service.permissions import agent_reach_logic
+    assert agent_reach_logic(A, target, _agent_key())["reachable"] is reachable
+
+
+def test_the_reach_endpoint_is_refused_for_an_agent_outside_the_callers_reach(fleet):
+    from services.agent_service.permissions import agent_reach_logic
+    assert _status(agent_reach_logic, C, B, _agent_key()) == 403
+
+
+def test_an_agent_key_never_reads_every_users_chats(fleet):
+    """Review point 5: "may call" is not "may read everyone's conversations"."""
+    from routers.chat import _sees_every_user
+    assert _sees_every_user(_human()) is True
+    assert _sees_every_user(_human("user")) is False
+    assert _sees_every_user(_agent_key()) is False

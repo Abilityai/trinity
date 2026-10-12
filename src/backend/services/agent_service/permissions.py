@@ -74,6 +74,37 @@ async def get_agent_permissions_logic(
     }
 
 
+def agent_reach_logic(agent_name: str, target: str, current_user: User) -> dict:
+    """May `agent_name` call `target`? Answered from the database alone
+    (trinity-enterprise#629, #3346 review).
+
+    The MCP layer's `enforce` gate read the lenient permissions list, which is
+    built from the Docker-filtered fleet: a target with no container (a crashed
+    ghost a parent must discard, a child being recreated) read as "not
+    permitted", a spawned child whose edge was removed was refused although the
+    backend admits it, and a Docker read fault refused every call. The answer
+    is the edge OR the spawn record — the same facts `agent_may_reach` decides
+    the backend's use tier with — and never depends on a container.
+
+    The caller must be able to see `agent_name` (same rule as the permissions
+    read); the target's existence is not disclosed beyond the boolean.
+    """
+    from dependencies import _spawned_by_caller
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
+        raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
+    if target == agent_name:
+        return {"source_agent": agent_name, "target_agent": target, "reachable": True}
+    try:
+        reachable = (db.get_agent_owner(target) is not None
+                     and (bool(db.is_agent_permitted(agent_name, target))
+                          or _spawned_by_caller(agent_name, target)))
+    except Exception:  # noqa: BLE001 — fail closed, like the edge read elsewhere
+        logger.warning("[ent#629] reach lookup %s -> %s failed; treating as unreachable",
+                       agent_name, target)
+        reachable = False
+    return {"source_agent": agent_name, "target_agent": target, "reachable": reachable}
+
+
 def _strict_permissions(agent_name: str, current_user: User) -> dict:
     """The permissions answer built from ONE tri-state Docker snapshot
     (trinity-enterprise#815).

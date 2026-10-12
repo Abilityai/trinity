@@ -1556,6 +1556,12 @@ def _capability_admitted(current_user, target_agent: str) -> bool:
     return isinstance(reach, set) and target_agent in reach
 
 
+def _is_agent_principal(current_user) -> bool:
+    """An agent-scoped key (the principal a capability bound applies to)."""
+    agent = getattr(current_user, "agent_name", None)
+    return getattr(current_user, "mcp_scope", None) == "agent" and isinstance(agent, str) and bool(agent)
+
+
 def _admit_capability_reach(current_user, target_agent: str) -> None:
     """Record that a capability fence admitted an agent key to `target_agent`.
 
@@ -2053,17 +2059,10 @@ def get_owned_agent_by_name(
             owner/admin — a uniform 404 so a non-existent and an unowned agent
             are indistinguishable (enumeration-safe, #186).
     """
-    return _owned_agent_or_404(agent_name, current_user, narrow=True)
-
-
-def _owned_agent_or_404(agent_name: str, current_user: User, *, narrow: bool) -> str:
-    """The owner fence behind ``get_owned_agent_by_name``. ``narrow=False`` is
-    for a dependency whose CAPABILITY already is the agent's grant to manage
-    its owner's other agents (ent#596) — there, the plain owner fence applies."""
     _enforce_connector_scope(current_user, agent_name, owner_op=True)
     exists = db.get_agent_owner(agent_name) is not None
     allowed = db.can_user_share_agent(current_user.username, agent_name)
-    reach = agent_may_reach(current_user, agent_name, manage=True) if narrow else True
+    reach = agent_may_reach(current_user, agent_name, manage=True)
     if not (exists and allowed and reach):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -2266,6 +2265,11 @@ def can_manage_agent_skills(current_user: User, agent_name: str) -> bool:
         return False
     if capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is not None:
         return False
+    if _is_agent_principal(current_user) and not owner_owns_agent(current_user, agent_name):
+        # The same bound as the write fence: a holder reaches only agents its
+        # owner OWNS — `can_user_share_agent` is True for any agent when the
+        # owner is admin (#3346 review).
+        return False
     return bool(db.can_user_share_agent(current_user.username, agent_name))
 
 
@@ -2443,28 +2447,13 @@ async def get_skill_managed_agent_by_name(
     await enforce_agent_capability(
         request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
     )
-    return get_capability_owned_agent_by_name(agent_name, current_user)
-
-
-def get_capability_owned_agent(
-    agent_name: str = Path(..., description="Agent name from path"),
-    current_user: User = Depends(get_current_user),
-) -> str:
-    """Path-dependency form of `get_capability_owned_agent_by_name`, ONLY for a
-    route whose capability dependency (`require_person_or_capability`) already
-    refused a non-holder and bounded a holder to its owner's agents — e.g. the
-    skill gate writes (trinity-enterprise#753). On any other route it would hand
-    an agent key the owner's reach."""
-    return get_capability_owned_agent_by_name(agent_name, current_user)
-
-
-def get_capability_owned_agent_by_name(agent_name: str, current_user: User) -> str:
-    """The owner fence a CAPABILITY dependency applies after its grant check.
-
-    Not narrowed to the agent's reach (ent#629): the capability IS the instance
-    admin's grant to manage the owner's other agents (ent#596) — the fence still
-    stops it at the owner's agents."""
-    return _owned_agent_or_404(agent_name, current_user, narrow=False)
+    if _is_agent_principal(current_user):
+        # The bound every capability fence applies (trinity-enterprise#629 ×
+        # #596): the owner must OWN the target, then the request's reach admits
+        # it. One mechanism — the owner fence below is the narrowed one.
+        _refuse_unless_owners_agent(current_user, agent_name)
+        _admit_capability_reach(current_user, agent_name)
+    return get_owned_agent_by_name(agent_name=agent_name, current_user=current_user)
 
 
 # ============================================================================

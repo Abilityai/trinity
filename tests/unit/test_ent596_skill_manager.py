@@ -166,8 +166,13 @@ def owner_fence(monkeypatch):
         return agent_name
 
     from routers import skills
-    # ent#629: the capability's owner fence is its own seam (not narrowed to reach).
-    monkeypatch.setitem(skills.get_skill_managed_agent_by_name.__globals__, "get_capability_owned_agent_by_name", fence)
+    g = skills.get_skill_managed_agent_by_name.__globals__
+    monkeypatch.setitem(g, "get_owned_agent_by_name", fence)
+    # #3346 review: a holder meets the owner bound (`owner_owns_agent`) first —
+    # HOLDER and SIBLING are the owner's, OUTSIDER is another user's.
+    monkeypatch.setattr(g["db"], "get_agent_owner", lambda name: (
+        {"owner_username": "someone-else"} if name == OUTSIDER
+        else {"owner_username": "owner"} if name in (HOLDER, SIBLING) else None))
     return reached
 
 
@@ -201,6 +206,18 @@ def test_a_holder_manages_itself_and_siblings_but_never_beyond_its_owner(grants,
         _run_fence(_principal("agent", HOLDER), OUTSIDER)
     assert exc.value.status_code == 404   # the grant widened nothing
     audit.assert_not_awaited()
+
+
+def test_a_holder_never_reaches_another_users_agent_even_on_an_admin_owned_install(grants, owner_fence, audit):
+    """#3346 review: the skills routes went through the plain owner fence,
+    which `can_user_share_agent` answers True for ANY agent when the owner is
+    admin — so one grant had two bounds (the files tab refused, these admitted).
+    The holder is refused at the owner bound, before the owner fence is asked."""
+    with pytest.raises(HTTPException) as exc:
+        _run_fence(_principal("agent", HOLDER, role="admin"), OUTSIDER)
+    assert exc.value.status_code == 404
+    assert owner_fence == []
+    assert deps.can_manage_agent_skills(_principal("agent", HOLDER, role="admin"), OUTSIDER) is False
 
 
 @pytest.mark.parametrize("scope", [None, "user", "system"])

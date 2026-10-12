@@ -55,6 +55,10 @@ function stubFetch(permitted: string[] = []): AuditRow[] {
       rows.push(JSON.parse(String(init?.body)));
       return json({ event_id: `ev_${rows.length}`, status: "logged" });
     }
+    const reach = url.match(/\/api\/agents\/[^/]+\/reach\/([^/?]+)$/);
+    if (reach) {
+      return json({ reachable: permitted.includes(decodeURIComponent(reach[1])) });
+    }
     if (/\/api\/agents\/[^/]+\/permissions$/.test(url)) {
       return json({ source_agent: "alpha", permitted_agents: permitted.map((name) => ({ name })), available_agents: [] });
     }
