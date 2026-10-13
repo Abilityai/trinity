@@ -1292,7 +1292,10 @@ def _aauth_problem(exc: "aauth_verifier.AAuthError") -> JSONResponse:
 
 
 def _aauth_request_facts(request: Request) -> "aauth_verifier.InboundRequest":
-    raw_path = request.scope.get("raw_path") or request.url.path.encode("utf-8")
+    # The signature base's `@path` is the request target as sent, still encoded
+    # (`raw_path`); the routed `scope["path"]` is the fallback. `request.url` is
+    # rebuilt from the Host header and is never read here (#3102).
+    raw_path = request.scope.get("raw_path") or request.scope["path"].encode("utf-8")
     if isinstance(raw_path, bytes):
         raw_path = raw_path.decode("latin-1")
     headers: Dict[str, str] = {}
@@ -1368,7 +1371,7 @@ async def _a2a_aauth_jsonrpc(request: Request, issuer: str):
             await platform_audit_service.log(
                 event_type=AuditEventType.AUTHENTICATION, event_action="a2a_aauth_refused",
                 source="a2a", actor_external_id=exc.identity, actor_ip=caller_ip,
-                target_type="agent", target_id=agent_name, endpoint=str(request.url.path),
+                target_type="agent", target_id=agent_name, endpoint=request.scope["path"],
                 details=aauth_inbound.audit_details(
                     None, identity=exc.identity, issuer=exc.issuer,
                     verification="failed", allowlist="not_evaluated", error=exc.code,
@@ -1380,7 +1383,7 @@ async def _a2a_aauth_jsonrpc(request: Request, issuer: str):
         await platform_audit_service.log(
             event_type=AuditEventType.AUTHORIZATION, event_action="a2a_aauth_denied",
             source="a2a", actor_external_id=verified.identity, actor_ip=caller_ip,
-            target_type="agent", target_id=agent_name, endpoint=str(request.url.path),
+            target_type="agent", target_id=agent_name, endpoint=request.scope["path"],
             details=aauth_inbound.audit_details(verified, allowlist="denied"),
         )
         await aauth_inbound.record_activity(agent_name, verified, allowlist="denied",

@@ -678,7 +678,6 @@ async def upsert_a2a_outbound_endpoint(
             # ent#623: switching an endpoint to aauth drops its stored secret.
             "credential_cleared": bool(body.clear_credentials) or body.auth_scheme == "aauth",
             "auth_scheme": record["auth_scheme"],
-            "credential_cleared": bool(body.clear_credentials),
             # The KIND, not the value — and the store's conclusion rather than
             # the request's, so the row says what was actually written when the
             # operator left the field out.
