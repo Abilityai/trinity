@@ -79,6 +79,13 @@ def b(monkeypatch):
 
     monkeypatch.setattr(a2a, "db", types.SimpleNamespace(
         get_a2a_exposed=lambda name: name in state["exposed"],
+        # trinity-enterprise#838 (on dev since the branch was cut): the door asks
+        # the agent's A2A scope; "public" is the pre-#838 behaviour.
+        get_a2a_scope=lambda name: {"scope": "public", "keyless": False},
+        # ent#679 (on dev since the branch was cut): a bearer-less request reaches
+        # the payment door, which asks whether the agent is priced; None = not
+        # priced, so the stranger gets today's 401 bytes.
+        get_nevermined_config_with_key=lambda name: None,
         can_user_access_agent=lambda user, name: True,
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=lambda eid, reason=None: False,
@@ -174,7 +181,10 @@ def _send(text="ping", mid="m-1"):
 def _bearer(b):
     user = types.SimpleNamespace(id=7, username="alice", email="alice@example.com",
                                  role="user", agent_name=None, mcp_key_id="k7")
-    b.app.dependency_overrides[deps.get_current_user] = lambda: user
+    # ent#679 (on dev since the branch was cut): the door resolves its principal
+    # through `get_user_or_anonymous`, which CALLS `get_current_user` rather than
+    # depending on it, so the override has to sit on the optional dependency.
+    b.app.dependency_overrides[deps.get_user_or_anonymous] = lambda: user
     return user
 
 
