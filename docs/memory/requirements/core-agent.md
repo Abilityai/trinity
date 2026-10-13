@@ -4088,7 +4088,9 @@ to localStorage in the clear.
   recency, every non-room row of the agent including archived ones. It is taken by
   one watcher keyed on the agent on stage (not by each door), retaken once when the
   thread list first becomes trustworthy (a cold link), and cleared when no agent is
-  on stage. Re-clicking the agent already on stage keeps it.
+  on stage — the Inbox, the unreachable notice, or a room whether opened from the
+  sidebar or reached by URL (Back, a link). Re-clicking the agent already on stage
+  keeps it.
 - **AC-2 — the strip holds still**: while the snapshot names the agent on stage,
   the tabs are drawn in its order. A reply, a send, or a poll that re-sorts the
   thread list changes a badge only. A chat born mid-visit sits directly after Main
@@ -4101,8 +4103,15 @@ to localStorage in the clear.
   last open for that agent this session — in memory per tab, never persisted;
   then the fresh-session arms of ent#784 (a drafted chat, the empty chat, a new
   chat). A route-driven landing replaces the history entry, so Back does not loop.
+  **Behaviour change, by that ruling:** Back to `/workspace/a/:name`, or a click on
+  the agent's sidebar row, from one of that agent's chats now returns to the chat
+  left open in this session (arm 1) — before ent#856 it opened a fresh chat. This
+  is the landing the operator ruled for, not a side effect.
 - **AC-4 — forget on close**: closing (archiving) or losing a chat removes it from
   the session's last-open memory (`forgetLastOpen`), on top of `agentLanding`'s
   own validation.
 - **Out**: any endpoint or schema change.
-- **Tests**: `portalChatTabsHold.spec.js`, `portalAgentLandingUnread.spec.js`.
+- **Tests**: `portalChatTabsHold.spec.js`, `portalAgentLandingUnread.spec.js`
+  (pure); `portalChatCycle.mount.spec.js`, `portalAgentLandingStage.mount.spec.js`,
+  `portalAgentLandingRemount.mount.spec.js` (mounted). Flow:
+  `feature-flows/workspace-chat-tabs-and-titles.md` § *The strip holds still*.
