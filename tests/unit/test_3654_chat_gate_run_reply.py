@@ -116,3 +116,11 @@ def test_a_failing_execution_read_does_not_break_the_session_read(ran, monkeypat
 
     monkeypatch.setattr(db, "get_execution", _boom)
     assert "It finished successfully" in _view(sid)[1]["gate"]["text"]
+
+
+def test_a_credential_in_the_reply_is_redacted_in_the_chat(ran):
+    """The reply reaches the conversation through `outcome_text`'s scrub, as it
+    reaches the Inbox."""
+    token = "ghp_" + "A" * 36                        # built here: a shape, never a real key
+    chat, _inbox, _sid = ran(TaskExecutionStatus.SUCCESS, response=f"I used {token} and stopped.")
+    assert token not in chat and "I used" in chat and "and stopped." in chat
