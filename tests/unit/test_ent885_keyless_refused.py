@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import types
 from pathlib import Path
 
@@ -75,6 +76,24 @@ def _seed_legacy_row() -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _unseed() -> None:
+    """Undo ``_seed_legacy_row``. The unit DB is shared by the whole island, and
+    the outbound validator DOES read ``a2a_trusted_networks``: a CGNAT entry left
+    behind makes a later file's "CGNAT is refused" test admit the address."""
+    conn = sqlite3.connect(os.environ["TRINITY_DB_PATH"])
+    try:
+        conn.execute("DELETE FROM system_settings WHERE key = 'a2a_trusted_networks'")
+        conn.execute("DELETE FROM agent_ownership WHERE agent_name = ?", (LEGACY,))
+        conn.commit()
+    finally:
+        conn.close()
+    # Never imported here (this file must outlive the module), but if another
+    # test loaded it, drop its per-worker cache of the row just deleted.
+    tn = sys.modules.get("services.a2a_trusted_networks")
+    if tn is not None:
+        tn._entries_cache.update(at=float("-inf"), entries=[])
 
 
 @pytest.fixture()
@@ -155,7 +174,8 @@ def door(monkeypatch):
         peer["ip"] = src
         return http.get(f"/a2a/{LEGACY}/.well-known/agent-card.json", headers=headers or {})
 
-    return types.SimpleNamespace(call=call, card=card, state=state)
+    yield types.SimpleNamespace(call=call, card=card, state=state)
+    _unseed()
 
 
 # --------------------------------------------------------------------------- #
