@@ -809,6 +809,20 @@ export function shouldEscapeStage(path, query) {
 // browser the person just asked to leave — the reported bug with an honest
 // sign on it. A client's button ends only their portal session, and says so.
 // Pure so the label the view renders is the one the test pins.
+// #3672 — the sidebar's ONE load verdict. The roster, the chat list and the
+// asks feed land at different times, and each used to re-lay the list as it
+// arrived (rows re-ordered and grew a subtitle when chats landed; an asked
+// agent was appended past the collapse limit when asks landed). So the list
+// shows skeleton rows until all three have a verdict, then renders in one
+// pass. `resolved` is the shell's "bootstrap placed the caller" bit — roster
+// and chats read, success OR failure (both catch). The asks feed counts as
+// settled on a 404/403 (`asksAbsent`) or a failed read (`asksFailed`) too, so
+// the list can never wait forever. Keyed on state, never a timer (§6). Strict
+// booleans: a truthy stand-in is not a verdict.
+export function sidebarSettled({ resolved = false, asksLoaded = false, asksAbsent = false, asksFailed = false } = {}) {
+  return resolved === true && (asksLoaded === true || asksAbsent === true || asksFailed === true)
+}
+
 export const SIGN_OUT_LABEL_PLATFORM = 'Sign out of Trinity'
 export const SIGN_OUT_LABEL_CLIENT = 'Sign out'
 

@@ -147,9 +147,14 @@ describe('ent#474 — the tab contract', () => {
     expect(railEmptyCopy(tab('canvas'), ['a', 'b']).body).toContain('an agent in this room')
   })
 
-  it('docks Work first, platform-only, as the design pass rules', () => {
-    expect(RAIL_TAB_ORDER[0]).toBe('work')
+  it('opens on Work by default, platform-only, as the design pass rules', () => {
+    // ent#892: Work is no longer FIRST in the strip (Info is), but it is still
+    // the tab a rail opens on, and a remembered tab still wins.
     expect(RAIL_DEFAULT_TAB).toBe('work')
+    expect(defaultRailState().tab).toBe('work')
+    const visible = visibleTabs(ALL_TABS, PLATFORM)
+    expect(activeTabFor(defaultRailState(), visible)).toBe('work')
+    expect(activeTabFor({ tab: 'files' }, visible)).toBe('files')
     const work = RAIL_TABS.find((t) => t.id === 'work')
     expect(work.door).toBe(RAIL_DOORS.PLATFORM)
     expect(work.signal).toBe(RAIL_SIGNAL_LIVE)
@@ -157,12 +162,10 @@ describe('ent#474 — the tab contract', () => {
     expect(work.empty.action).toBe('See what you can ask')
   })
 
-  it('keeps the fixed order Work · Loops · Canvas · Files', () => {
-    // ent#836: Asks is last — the one tab that comes and goes with data, placed
-    // where its arrival moves no other tab.
-    expect(RAIL_TAB_ORDER).toEqual(['work', 'loops', 'canvas', 'files', 'projects', 'info', 'asks'])
+  it('keeps the fixed order Info · Canvas · Files · Projects · Asks · Work · Loops (ent#892)', () => {
+    expect(RAIL_TAB_ORDER).toEqual(['info', 'canvas', 'files', 'projects', 'asks', 'work', 'loops'])
     // PLATFORM has exactly one participant, so Info's SOLO_AGENT door passes.
-    expect(visibleTabs(ALL_TABS, PLATFORM).map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'info'])
+    expect(visibleTabs(ALL_TABS, PLATFORM).map((t) => t.id)).toEqual(['info', 'canvas', 'files', 'asks', 'work', 'loops'])
   })
 
   // ent#661 — Projects needs the platform door AND the roster capability. A
@@ -171,7 +174,7 @@ describe('ent#474 — the tab contract', () => {
   it('shows Projects only to a session the roster gave the capability', () => {
     expect(tab('projects')).toMatchObject({ door: RAIL_DOORS.AUDIENCE, capability: 'projects', icon: 'folder', empty: null })
     const withCap = { ...PLATFORM, capabilities: { projects: true } }
-    expect(visibleTabs(ALL_TABS, withCap).map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'projects', 'info'])
+    expect(visibleTabs(ALL_TABS, withCap).map((t) => t.id)).toEqual(['info', 'canvas', 'files', 'projects', 'asks', 'work', 'loops'])
     expect(tabPassesDoor(tab('projects'), PLATFORM)).toBe(false)
     expect(tabPassesDoor(tab('projects'), { ...PLATFORM, capabilities: { projects: 'true' } })).toBe(false)
     // v2.4: an invited outside client gets the capability from its roster, and the tab.
@@ -213,7 +216,7 @@ describe('ent#474 — doors', () => {
     expect(tabPassesDoor(null, PLATFORM)).toBe(false)
   })
 
-  it('an external-client session gets NO platform-only tab — exactly Canvas · Files', () => {
+  it('an external-client session gets NO platform-only tab', () => {
     // Design artboard 6: the external-client door. Work and Loops never render
     // for a client, and — because the shell feeds stores off THIS list
     // (`feedsFor`) — are never fetched for one either.
@@ -223,8 +226,8 @@ describe('ent#474 — doors', () => {
     // capability removal for exactly the audience the Workspace exists for
     // (the #2128 class). SOLO_AGENT gates on the conversation's shape, never on
     // who is asking.
-    expect(visibleTabs(RAIL_TABS, CLIENT).map((t) => t.id)).toEqual(['canvas', 'files', 'info'])
-    expect(visibleTabs(RAIL_TABS, PLATFORM).map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'info'])
+    expect(visibleTabs(RAIL_TABS, CLIENT).map((t) => t.id)).toEqual(['info', 'canvas', 'files', 'asks'])
+    expect(visibleTabs(RAIL_TABS, PLATFORM).map((t) => t.id)).toEqual(['info', 'canvas', 'files', 'asks', 'work', 'loops'])
     // A client with no participant yet (a room's first beat) keeps Canvas only —
     // Info needs exactly one, so it is absent here as well as in a room.
     expect(visibleTabs(RAIL_TABS, { isPlatform: false, participants: [] }).map((t) => t.id)).toEqual(['canvas'])
@@ -232,7 +235,7 @@ describe('ent#474 — doors', () => {
 
   it('ignores malformed registry entries', () => {
     expect(visibleTabs([null, { label: 'no id', door: RAIL_DOORS.AUDIENCE }, ...RAIL_TABS], PLATFORM)
-      .map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'info'])
+      .map((t) => t.id)).toEqual(['info', 'canvas', 'files', 'asks', 'work', 'loops'])
     expect(visibleTabs(undefined, PLATFORM)).toEqual([])
   })
 })
@@ -269,11 +272,11 @@ describe('ent#474 — state: collapsed by default, persisted, validated', () => 
   })
 
   it('a remembered tab this session may not see falls back to the first it may', () => {
-    const visible = visibleTabs(ALL_TABS, CLIENT)     // canvas, files
-    expect(activeTabFor({ tab: 'work' }, visible)).toBe('canvas')
+    const visible = visibleTabs(ALL_TABS, CLIENT)     // info, canvas, files, asks (ent#892)
+    expect(activeTabFor({ tab: 'work' }, visible)).toBe('info')
     expect(activeTabFor({ tab: 'files' }, visible)).toBe('files')
     expect(activeTabFor({ tab: 'work' }, [])).toBeNull()
-    expect(activeTabFor(null, visible)).toBe('canvas')
+    expect(activeTabFor(null, visible)).toBe('info')
   })
 })
 
@@ -307,12 +310,14 @@ describe('ent#474 — the collapsed signal', () => {
   it('reports only VISIBLE tabs — a signal for a hidden tab never leaks', () => {
     const signals = { work: { live: 1 }, canvas: { updated: true }, files: { updated: true } }
     const forClient = collapsedSignals(signals, visibleTabs(ALL_TABS, CLIENT))
-    expect(forClient.map((s) => s.id)).toEqual(['canvas', 'files', 'info'])
+    expect(forClient.map((s) => s.id)).toEqual(['info', 'canvas', 'files', 'asks'])
     // ent#547: the static tab is in the strip and carries NO shape — nothing
     // writes an `info` entry into the signals map, so `signalFor` answers
     // `emptySignal()` and its dot never lights. That is the static contract
     // holding at read time, with no special case in the reader.
-    expect(forClient.filter((s) => s.id !== 'info').every((s) => s.shape === RAIL_SIGNAL_UPDATED)).toBe(true)
+    expect(forClient.filter((s) => s.id === 'canvas' || s.id === 'files').every((s) => s.shape === RAIL_SIGNAL_UPDATED)).toBe(true)
+    // ent#892: Asks is always in the strip now, and dark with nothing waiting.
+    expect(forClient.find((s) => s.id === 'asks').shape).toBeNull()
     expect(forClient.find((s) => s.id === 'info').shape).toBeNull()
     expect(hasLiveSignal({ work: { live: 1 } }, visibleTabs(RAIL_TABS, CLIENT))).toBe(false)
     expect(hasLiveSignal({ work: { live: 1 } }, visibleTabs(RAIL_TABS, PLATFORM))).toBe(true)
@@ -337,10 +342,10 @@ describe('ent#474 — the collapsed signal', () => {
     const visible = visibleTabs(ALL_TABS, PLATFORM)
     const signals = { work: { live: 1 }, loops: { live: 1 }, canvas: { updated: true }, files: { updated: true } }
     expect(stripSegments(signals, visible)).toEqual([
-      { id: 'work', shape: RAIL_SIGNAL_LIVE, text: 'Work · 1 running' },
-      { id: 'loops', shape: RAIL_SIGNAL_LIVE, text: 'Loops · 1 running' },
       { id: 'canvas', shape: RAIL_SIGNAL_UPDATED, text: 'Canvas updated' },
       { id: 'files', shape: RAIL_SIGNAL_UPDATED, text: 'Files updated' },
+      { id: 'work', shape: RAIL_SIGNAL_LIVE, text: 'Work · 1 running' },
+      { id: 'loops', shape: RAIL_SIGNAL_LIVE, text: 'Loops · 1 running' },
       // ent#547: Info is deliberately ABSENT here. When anything is signalling,
       // `stripSegments` reports only the tabs that carry a shape — the strip is
       // a summary of what is happening, and a static tab is never part of that.
@@ -348,9 +353,10 @@ describe('ent#474 — the collapsed signal', () => {
       // back to naming every visible tab.
     ])
     expect(stripSegments({}, visibleTabs(RAIL_TABS, CLIENT))).toEqual([
+      { id: 'info', shape: null, text: 'Info' },
       { id: 'canvas', shape: null, text: 'Canvas' },
       { id: 'files', shape: null, text: 'Files' },
-      { id: 'info', shape: null, text: 'Info' },
+      { id: 'asks', shape: null, text: 'Asks' },
     ])
   })
 

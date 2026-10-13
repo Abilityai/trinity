@@ -1479,7 +1479,9 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   `signal` (the shape it carries). `visibleTabs(tabs, session)` is the ONE gate
   for render AND mount: a tab whose door the session fails has no icon, no
   label and no mounted body, so nothing it would fetch is ever requested. An
-  unknown door fails closed. Fixed order Work · Loops · Canvas · Files.
+  unknown door fails closed. Fixed order (since trinity-enterprise#892) Info ·
+  Canvas · Files · Projects · Asks · Work · Loops; the tab a rail opens on is
+  still Work (`RAIL_DEFAULT_TAB`).
 - **AC-3 — the collapsed rail signals live activity without opening**: two
   shapes, one hue (principle 24) — *live now* (8px dot in a 3px ring,
   `motion-safe:animate-pulse`, static under reduced motion) and *updated since
@@ -1556,6 +1558,21 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   `⌥.` (ent#621) reaches it, the collapsed strip shows its dot and "Asks · 2
   asks", and the open strip's tab carries the count. A room lists every
   participant's asks grouped by agent, absence visible.
+- **AC-11 — the Asks tab is always present; the order reads Info · Canvas ·
+  Files · Projects · Asks · Work · Loops (trinity-enterprise#892)**: operator
+  ruling 2026-10-13 supersedes AC-10's presence rule. The Asks tab renders like
+  every other tab (door `AGENT` only), and with nothing waiting its body shows an
+  empty state that names the agent ("Nothing from scout is waiting on you…") with
+  **Open the Inbox** (the agent's asks home, `?tab=action&from=<agent>`). Its
+  body has all four states (`railAsksView`): a skeleton before the asks feed has
+  a verdict, LoadFailed for a failed first read, the empty state only after a
+  read succeeded with nothing waiting (a 404/403 verdict reads as empty), the
+  rows otherwise. Its "needs you" mark still appears only when an ask waits. No
+  tab moves when asks arrive or clear, so Asks no longer has to be last and
+  takes its place in the reading order. The default tab (Work) and a viewer's
+  remembered tab are unchanged; `⌥.` walks the new visual order. A session that
+  cannot see Work (an outside client) falls back to the first visible tab, which
+  is now Info.
 - **Not in this slice (recorded on the issue)**: the Work tab's content
   (#457), re-homing Loops / Canvas / Files (#472's second child), the sidebar /
   thread tab strip / top band / Agent-details panel / drop target of the
