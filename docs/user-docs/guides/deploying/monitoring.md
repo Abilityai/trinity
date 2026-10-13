@@ -121,7 +121,7 @@ docker exec trinity-postgres psql -U trinity -d trinity -tc "SELECT pg_size_pret
 
 #### Backups and retention
 
-The database backs itself up nightly at 03:30 UTC and before every migration. Check it without a shell — the block reports the last run's status, the age of the newest success, artifact count and bytes:
+The database backs itself up nightly at 03:30 UTC and before every migration. Check it without a shell on the **Database backups** card in **Settings → Retention**, or over the API — the block reports the last run's status, the age of the newest success, artifact count and bytes:
 
 ```bash
 curl -s -H "Authorization: Bearer <token>" http://localhost:8000/api/settings/retention | jq .backup

@@ -28,7 +28,7 @@ As the owner of a finance agent, I want "pay an invoice" to run only after the p
 
 ### Components
 
-- **Operations → Needs Response** (`components/operator/QueueCard.vue`) and the **Workspace Inbox** render the approval as an ordinary ask. The question names who asked and previews the request, and `QueueProposal` shows `kind: gated_skill`, the skills, the exact input, the requester and the fingerprints. A dedicated card is trinity-enterprise#755.
+- **Operations → Needs Response** (`components/operator/QueueCard.vue`) and the **Workspace Inbox** render the approval as an ordinary ask. The question names who asked and previews the request, and the request itself is drawn by the approval card (§7, trinity-enterprise#755). Who asked is `Requester.display()`: a person by email, or — an account with none, such as the built-in admin — by username (trinity#3527), never "A caller". A **person's** request that carries the Chat tab's or `/m`'s history leads with the message typed that turn (`requested_message` → `split_chat_history`; the FIRST marker splits, so an ambiguous split shows more as the request, never less). Only a person's request is split: the platform's chat surfaces build that prefix, and any other requester — agent, connector, channel, public — could type it to choose what the card leads with, so theirs is shown whole (PR #3648 review). With the split, the question says it was sent with earlier messages as context, and the card shows that message as **Request** (`card_view.request`) above the **Full input**, which is what Approve runs and which is never folded while a Request row is shown. In the Workspace a gate's Approve / Reject sends in one click, with any note typed first (`decidedByOptions` → `oneClick` in `PortalAsks.vue`); every other approval keeps pick → note → Send (#2375). Answered, the card reads "You approved" / "You rejected" plus the note, and the Inbox row "Approved · you" / "Rejected · you" ([workspace-inbox.md](workspace-inbox.md), trinity#3524).
 - **A refused decision:** a 403 `not_addressee` (the approval was addressed to someone else) is shown on that card as an `InlineError` beside the controls (`components/operator/QueueCard.vue:134`, `data-testid="queue-not-addressee-notice"`) and stays until dismissed. `/m` does the same (`views/MobileAdmin.vue:1294`).
 - **The Workspace thread:** a held turn is answered with the notice as a normal assistant reply, never a Failed turn. An approved run's result arrives later in the same thread ("**Finished**" plus the result).
 - **The other run senders (trinity#3274)** read the 202 through `utils/skillGate.js` (`pendingApprovalMessage`, `isGateRefusal`), show the server's own `message`, and poll nothing:
@@ -216,6 +216,36 @@ Then the audit (best-effort, after the lock). A failed re-sync on a running agen
 
 **Library metadata** — `skill_packaging.extract_contract` reads `approval:` (top level or the `trinity:` block) from the closed set `{"recommended"}`; anything else is `frontmatter_invalid:approval`. It rides `list_skills()` entries and `SkillInfo.approval`. Since trinity-enterprise#754 the agent server also reports it for the agent's own skills (`SkillInfo.approval` on its `GET /api/skills`, same precedence and closed set), for display only: it never creates or decides a gate.
 
+### 7. The approval card (trinity-enterprise#755)
+
+```
+operator_queue row (raised_by = gate, type = approval)
+  └─ skill_gate_service.card_view(item, viewer_email, with_run_ids)
+       record = skill_gate_requests[item.request_id]      same agent, else no card
+       skills[]      record.skills + description from agent_skills_listing.recall (Redis, fail-open)
+       requester     kind, label (the proposal's frozen display), agent, execution_id*
+       also_sent     the context lines the gate wrote into the question ("Also sent to …"), else ''
+       state         the record's state
+       execution_id* the approved run
+       waiting_on[]  resolved_to, each as the account name, else the address (only name_approvers)
+       can_decide    viewer ∈ resolved_to
+       (* only with_run_ids)
+  ├─ routers/operator_queue._for_principal   a person's row: gate (run ids and approvers on)
+  └─ client_portal/asks/service._project     WorkspaceAsk.gate (run ids for a platform viewer)
+
+components/operator/GatedSkillRequest.vue   (utils/skillGateCard.js)
+  Agent · Skill(s) + description · Input (proposal.input, folded past 600 chars / 8 lines)
+  Also sent (when set) · Requested by (+ "from this run") · Raised · Deadline
+  Waiting on (viewer cannot decide) · "Approve runs it once…" (viewer can decide)
+  outcome line: badge + sentence + "Open the run"
+  the hosts do not draw the ask's question on a gate card: the card says it once
+  drawn by PortalAsks (Inbox pane, chat card), QueueCard, ResolvedCard, MobileAdmin
+```
+
+- `QueueCard` and `/m` render no response controls when `gate.can_decide` is false. The server's `may_end` stays the rule; the card only stops offering what it would refuse.
+- Beside a picked Reject, the note field is labelled Reason. `resolve` passes the ask's `response_text` to `_notify`, and `outcome_text` quotes it ("Reason given: …", one line, 500 characters, substituted last, with `"` and the `[Trinity]` marker neutralised). `request_status` reads the same reason for the conversation trace.
+- The record trails the ask by one poll cycle. An ask the clock ended reads Expired on the card before the record moves; an ask just approved shows its outcome once the record leaves `pending`.
+
 ### Database Operations
 
 `skill_gate_requests` exists on both tracks: SQLite `skill_gate_requests_table`, and Alembic `0088_skill_gate_requests` on top of `0087_pull_sync`. Columns:
@@ -237,6 +267,7 @@ Then the audit (best-effort, after the lock). A failed re-sync on a running agen
 
 - **The requester's notice** (`_notify`; text from `outcome_text`). Who is told follows one rule, `outcome_delivery` (`agent_task` / `inbox` / `none`), which the pending answer also carries (#3233):
   - **Agent requester:** a platform task, trigger `skill_gate` (analytics bucket "Operator queue"), naming the request, the outcome, the originating execution and the run's execution id. It never says which person decided (#715), and it contains no slash.
+  - **A rejection's note** (trinity#3525) is the reason path of trinity-enterprise#755: `resolve` passes the approver's `response_text` on a rejection (never on `approver_not_addressed`, never on an approval) to `_notify(reason=…)`, and `outcome_text` quotes it as `Reason given: "…"` on one bounded line (`REJECT_REASON_MAX_CHARS` = 500) to both the agent's task and a person's Inbox notice (§7).
   - **Person requester, including a Workspace caller:** an Inbox `alert` addressed to them, with a `gate-note-…` id that never counts against the agent's ask budget. It is worded for a person, without the `[Trinity]` marker. A person who decided their own request is not told of that decision (approved, rejected, cancelled). An approval that then could not run (`stale`, `not_run`, `unknown`) is news, and is sent once.
   - **The decider is never named by email** (trinity#3274, `_decider_label`). A request a platform session or key made (`source_user_id` frozen — only the `/chat` and `/task` seams and the platform's own producers set it) reads the decider's display name (`users.name`, one line, without `@`). Everyone else reads "the agent's approver": the Workspace, the inline connector, operator resumes, a decider with no usable name, and a failed lookup. Most email-login accounts have no name, so the label is the common case.
   - **Every notice leads with the outcome** in a few words — "Approved, now running", "Finished successfully", "Failed", "Cancelled", "Rejected", "Expired", "Not run", "Not confirmed" (`_HEADLINE`), then "— your request …" — because the Workspace Work panel and the Inbox clip a notice after about two lines, and the shared opening made "running" and "finished" look identical.
@@ -375,11 +406,15 @@ These are covered by unit tests:
 | `tests/unit/test_ent751_gate_guards.py` | discovery guards and the frozen-dispatch parity |
 | `tests/unit/test_ent329_operator_resume.py`, `tests/unit/test_ent611_ask_endings.py` | what the gate reads on a resume and an ending |
 | `src/frontend/tests/unit/queueCardNotAddressee.spec.js`, `mobileAdminNotAddressee.spec.js` | the refusal shown on the card |
+| `tests/unit/test_ent755_gate_card_view.py` | the card view: skills and descriptions, requester, who decides, run ids, each ending, no card for an ask the gate did not raise; the rejection reason reaching the requester |
+| `src/frontend/tests/unit/mobileAdminGateCard.mount.spec.js` | `/m`: the card, no options for a non-addressee, Reject's reason |
+| `src/frontend/tests/unit/gatedSkillCard.mount.spec.js` | the card mounted alone, in `QueueCard` and in `PortalAsks`: fields, folded input, waiting-on, outcomes and run links, no controls for a non-addressee, Reject's reason |
 | `src/mcp-server/src/chat-gate.test.ts` | the MCP results and the forwarded turn; the delivery-honest suffix and the inline connector tier (#3274) |
 | `tests/unit/test_3274_gate_context.py` | the context scan at the backstop, `/task` and `/chat`; raw vs rendered; scanned apart; the `ExecutionContext` parity |
 | `tests/unit/test_3274_gate_replay.py` | `/task` and fan-out replay the message and the system prompt apart; legacy records |
 | `tests/unit/test_3520_gate_completion_notice.py` | the completion notice on success, failure and cancel, the declined-under-success reply, empty and oversized replies, once per run (a second event, the sweep, two racing workers), the restart sweep, a run ending before `dispatched` is written, ordinary and self-approved runs ignored, a person's Inbox copy, the pending answer's promise, the clearance states |
 | `tests/unit/test_3274_gate_notice.py` | `outcome_delivery` on the 202 and its retry, `_notify` parity per kind, the decider label, the held row's text |
+| `tests/unit/test_3524_gate_approval_card.py` | the rejection note to an agent and to a person (sanitised, bounded, absent on approval and without a note); a person with no email named by username; history split on both chat shapes and the first-marker rule; the viewer's own answer on the Workspace projection; a recent gate answer's request line |
 | `tests/unit/test_3526_held_chat_trace.py` | a held Chat-tab request saved once to the session; a person's re-send replayed while pending (and not for an agent, another person, another text, or after a decision); the session read's `gate` state; the voice context |
 | `tests/unit/test_3274_gate_wiring.py` | the loopback flag, the observer registration and the sweep call, each through the code that runs it |
 | `tests/unit/test_3274_channel_quote.py`, `test_3274_public_skipped_status.py` | the Telegram quote; the public status route for a held turn |
@@ -410,7 +445,7 @@ These are covered by unit tests:
 - **Part of this flow:** the gate map (trinity-enterprise#753, §6).
 - **Downstream / shared:**
   - the ask sink and its endings (`operating-room.md`, trinity-enterprise#611);
-  - the approval card (trinity-enterprise#755);
+  - the approval card (§7, trinity-enterprise#755) in the Workspace Inbox ([workspace-inbox.md](workspace-inbox.md));
   - the completion report back to a channel or thread (ent#457);
   - the connector playbooks (`mcp-connector.md`);
   - the guardrail hooks this hook sits beside (GUARD-002, `requirements/security.md` §28.2) and the chat's own session (#2958).

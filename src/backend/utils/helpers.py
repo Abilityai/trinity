@@ -166,7 +166,7 @@ def duration_ms_between(
     return None if ms > _PG_INT4_MAX else ms
 
 
-def terminal_completed_at(given: Optional[datetime]) -> datetime:
+def terminal_completed_at(given: Optional[datetime], *, floor: Optional[datetime]) -> datetime:
     """The instant a terminal write records as ``completed_at`` (#3589).
 
     ``None`` — every writer that finalizes as the turn ends — is now. A value
@@ -176,7 +176,7 @@ def terminal_completed_at(given: Optional[datetime]) -> datetime:
     recorded a 64 s turn as 5 m 33 s — a fabricated duration on a recovery
     path, the #45 / #767 / #1804 class.
 
-    Three rules, in ONE place so every producer of a terminal timestamp
+    Four rules, in ONE place so every producer of a terminal timestamp
     inherits them (``update_execution_status`` and ``complete_activity`` both
     call this):
 
@@ -184,24 +184,48 @@ def terminal_completed_at(given: Optional[datetime]) -> datetime:
     * never in the future: a producer clock ahead of ours is clamped to now and
       logged, so a billed duration can never exceed the wall clock that has
       actually elapsed;
+    * never before ``floor`` — the row's own server-written ``started_at``: a
+      turn cannot end before it starts. Both producers of the instant are
+      agent-controlled (the retained-results file and the #1083 callback), and
+      retention hard-DELETEs on ``completed_at < cutoff``, so an unfloored past
+      value lets an agent backdate its row into the next sweep — a self-erasing
+      audit trail (trinity-enterprise#882). The floor wins over the future-clamp
+      when a skewed ``started_at`` sits ahead of our clock, because "cannot end
+      before it starts" is the invariant retention reads; duration is 0 either
+      way. A floored write is still a successful claim, never a refusal.
+      ``floor`` is keyword-only and required — ``None`` is an explicit
+      "this writer has no trusted start instant" decision, never an omission;
     * the low end (producer clock behind ours) stays the #1832 clamp in
       ``duration_ms_between``.
     """
     now = utc_now()
-    if given is None:
-        return now
-    if given.tzinfo is None:
-        given = given.replace(tzinfo=timezone.utc)
-    if given > now:
+    resolved = now if given is None else given
+    if resolved.tzinfo is None:
+        resolved = resolved.replace(tzinfo=timezone.utc)
+    if resolved > now:
         import logging  # local: this module has no logger of its own
 
         logging.getLogger(__name__).warning(
             "[#3589] terminal completed_at %s is %.1fs in the future — clamping "
             "to now (producer clock ahead of ours)",
-            given.isoformat(), (given - now).total_seconds(),
+            resolved.isoformat(), (resolved - now).total_seconds(),
         )
-        return now
-    return given
+        resolved = now
+    if floor is not None and floor.tzinfo is None:
+        # Same convention as `given`: a naive instant is UTC, never a crash
+        # on the terminal write path.
+        floor = floor.replace(tzinfo=timezone.utc)
+    if floor is not None and resolved < floor:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "[#3589] terminal completed_at %s is %.1fs before started_at — "
+            "flooring at started_at (a backdated producer value would erase the "
+            "row on the next retention sweep)",
+            resolved.isoformat(), (floor - resolved).total_seconds(),
+        )
+        resolved = floor
+    return resolved
 
 
 def parse_env_content(content: str) -> List[Tuple[str, str]]:

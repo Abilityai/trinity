@@ -106,7 +106,7 @@ Add capabilities and keep your agent in sync.
 
 # Add GitHub Issues task management — pick the one that fits the work
 /agent-dev:add-backlog             # the agent's own dev backlog: /backlog, /claim, /autoplan, /commit, /close, /groom, /roadmap, /sprint, /work-loop
-/agent-dev:add-project-management  # cross-actor projects: /project-init, /project-task, /project-steward, /project-reconcile, /project-intake
+/agent-dev:add-project-management  # cross-actor projects: /project-init, /project-task, /project-steward, /project-reconcile, /project-intake, /project-status
 
 # Push changes to Trinity
 git push

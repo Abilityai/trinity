@@ -43,6 +43,8 @@ Channel and voice triggers (`telegram`, `slack`, `whatsapp`, `voip`, `voice`, `p
 
 A chat turn the runtime itself reports as an error is recorded as `failed`, with the runtime's error as the cause — even when the turn had already printed some text (an `API Error: …` line, say). The one exception: when the agent's own transcript proves the turn finished, the finished answer is kept and opens with a recovery notice.
 
+When the runtime names the API error that ended a run — for example `API Error: 400 Output blocked by content filtering policy` — that error is what the failed run records, rather than a guess at the cause such as an out-of-memory kill or a missing credential. This needs an agent on a current base image.
+
 ## How It Works
 
 ### Executions Tab (Operations Page)
@@ -77,7 +79,7 @@ An agent can read its own evaluations — seeing its own bad score is the feedba
 6. **Stop** button terminates a running execution.
 7. **Continue as Chat** button resumes the execution as an interactive chat session.
 
-Durations are always non-negative, and a run that ends through a recovery path (a timeout, a restart, an expired lease) closes its activity record with a real duration rather than being left open until a sweep guesses one.
+Durations are always non-negative, and a run that ends through a recovery path (a timeout, a restart, an expired lease) closes its activity record with a real duration rather than being left open until a sweep guesses one. When the platform loses its connection to an agent mid-turn and later collects the finished result from the agent, the run records the time the agent finished, not the time the result was collected, so its duration matches the transcript.
 
 ### Tasks Tab (per-agent)
 

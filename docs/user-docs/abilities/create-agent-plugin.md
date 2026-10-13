@@ -1,6 +1,6 @@
 # create-agent Plugin
 
-Create new Claude Code agents from an interview (create-agent v2.2.0). The `custom` wizard asks about your domain and builds a fully configured, Trinity-compatible agent; `website` scaffolds a site; `review`, `adjust`, and `clone` work on agents you already have.
+Create new Claude Code agents from an interview (create-agent v2.2.1). The `custom` wizard asks about your domain and builds a fully configured, Trinity-compatible agent; `website` scaffolds a site; `review`, `adjust`, and `clone` work on agents you already have.
 
 > **create-agent 2.0.0 (2026-09-14):** the eight pre-built domain wizards (prospector, chief-of-staff, webmaster, recon, receptionist, ghostwriter, kb-agent, doctor) were retired. Describe the same domain to `/create-agent:custom` and the interview builds it. If you used `kb-agent`, run `/create-agent:custom` and then `/agent-dev:add-memory` for the knowledge graph.
 
@@ -75,7 +75,8 @@ The wizard ends by handing off to `/trinity:onboard`, which deploys from the age
 - **The brief is the answer.** Purpose, name, skills, plugins, credentials, and schedules come from the argument. Decorative choices take their defaults silently.
 - **Real gaps go out as one ask.** Anything the new agent cannot work without and the brief does not say (a data source, an account, a locale) is collected and raised as a single `ask_operator` question, never guessed.
 - **One approval before anything leaves the workspace.** The skill outlines, schedules, and credentials needed travel in one approval ask. Nothing is pushed or created until a person approves it.
-- **The agent is created on the builder's own instance.** With a usable GitHub token it creates a private repo and calls `create_agent` from it. Without one it falls back to `deploy_local_agent` and says plainly that the new agent has no reproducible source and no auto-sync.
+- **The agent is created on the builder's own instance.** With a usable GitHub token it creates a private repo and calls `create_agent` from it. Without one it falls back to `deploy_local_agent` and says plainly that the new agent has no reproducible source and no auto-sync. Either call needs the builder agent to hold the **Manage other agents** permission, which an instance admin grants in that agent's Settings; without it the create is refused and the skill names the missing permission instead of retrying.
+- **The approval ask has real endings.** It offers explicit options; a person can pick one, answer *something else* (which approves none of them), cancel, dismiss, or let it expire, and the wizard proceeds only on an approving choice.
 - **Schedules stay declared `enabled: false`** until a person reviews the new agent.
 
 ## Usage Examples

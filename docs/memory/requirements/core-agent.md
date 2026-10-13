@@ -3580,6 +3580,34 @@ to localStorage in the clear.
   dashboard's 30 s agent poll patches `readiness`/`brief_held` in place, so a flip reaches an
   open tab without a reload.
 
+- **Objectives in plain words (trinity-enterprise#843, 2026-10-08).** The card answers a
+  client's question — "what is this agent for, and is it on track?" — not the canon's:
+  - **Owned first** under "What this agent is responsible for", each metric as one line
+    ("Runway: 7.2 months (target 12 months) · updated 2h ago"; no value yet reads
+    "not measured yet", never "— / 1").
+  - **Supported objectives** in a separate group, **collapsed by default** with a count
+    ("Also contributes to · N"), headings only — no metric rows, no per-metric warning.
+    Where another of the owner's agents actively declares one of its numbers it says
+    so **once per objective**, neutral: "Tracked by another agent". The card never
+    names that agent (external clients read it), and says nothing when no agent
+    declares the number. An agent that only supports objectives still shows the folded
+    group.
+  - **Readable metric names**: the declared label, else the label the *active*
+    declarations by the **same owner's** other live agents agree on (so a metric another
+    agent tracks shows by that agent's label — `db.metric_declarations_elsewhere`,
+    labels only, never who declared; an agent of another owner can never put text on
+    this card), else the code name turned into words (`runway_months` → "Runway (months)"). A raw snake_case
+    name never reaches the card; a failed lookup still falls back to words.
+  - **Warning colour only for real problems**: stale ("not updated recently"), behind /
+    off target, a file that was not read, an incomplete list. Findings that remain under a
+    metric are neutral notes; "not measured" and "tracked elsewhere" are not repeated.
+  - Horizons read "this quarter" / "this month" / "this year" / "this week".
+  - An objective may carry an optional **`client_heading`** in canon — a plain heading for
+    client screens; the card uses it and falls back to `statement`. (Convention half:
+    the canon objective format in trinity-pm.)
+  - Honest status is unchanged (principle 15); the operator agent page keeps the full
+    canon detail.
+
 ### 5.37 Workspace — the seat-level decision record: why a thing was approved, deferred or killed (trinity-enterprise#638)
 - **Status**: ✅ Implemented (2026-09-22). OSS-core (Workspace).
 - **Requirement ID**: WORKSPACE_SEAT_DECISIONS
@@ -3621,9 +3649,10 @@ to localStorage in the clear.
   (`GET/POST /api/enterprise/client-portal/agents/{name}/decisions`,
   `POST …/decisions/{id}/actions`, `PortalAgentDecisions.vue`).
 - **Readers**: own seat always; the agent OWNER (`role_card._is_owner`) every seat,
-  writable; a stakeholder the assignment provider recognises through the optional seam
-  method `kinds_for(agent_name, reader_email) -> {kind, role_id}` every seat read-only
-  (per-agent in v1 — DEBT_INBOX 2026-09-22); no provider → own seat only. Writes: own
+  writable; nobody else. An assignment kind (`kinds_for(agent_name, reader_email) ->
+  {kind, role_id}`) does **not** widen the read: it answers the role card's
+  relationship line only, and a kind is per agent, not per role, so it would hand an
+  approver every person's decisions (#3660; per-role stakeholder reads are #3381). Writes: own
   seat, or the owner on a named seat; a foreign id is the uniform 404.
 - **Read into context**: the seat's active decisions (criterion first, bounded) ride the
   shared memory block on every turn — public link, channels, seat runs, Workspace — so

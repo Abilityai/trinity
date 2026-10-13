@@ -39,6 +39,7 @@ from services.template_service import (
     credential_mcp_server_names,
     fetch_template_metadata_result_for_create,
     get_github_template,
+    is_catalog_github_template,
     metadata_reason_is_unreadable,
     generate_credential_files,
 )
@@ -1618,7 +1619,8 @@ async def _resolve_template(
             tr.git_mode_decision = await _apply_agent_kind_default(
                 config, tr.github_repo_for_agent, tr.github_pat_for_agent,
                 tr.fork_upstream_repo, github_pat_tier=tr.github_pat_tier,
-                catalog_template=bool(gh_template),
+                # #3545: `gh_template` is truthy for every `github:` repo.
+                catalog_template=is_catalog_github_template(repo_path),
             )
             logger.info(
                 f"[ent#705] git mode for {config.name}: "
@@ -2035,8 +2037,8 @@ def _build_env_vars(
     # #946 / #1081 Phase 2: opt an allowlisted pilot agent into the pull worker
     # pool. Returns {} (a no-op) for every non-pilot agent, so the default push
     # behavior is unchanged. See services/agent_service/pull_mode.py.
-    from services.agent_service.pull_mode import pull_mode_env_vars
-    env_vars.update(pull_mode_env_vars(config.name))
+    from services.agent_service.pull_mode import apply_pull_mode_env
+    apply_pull_mode_env(config.name, env_vars)
     return env_vars, auto_assigned_subscription_id
 
 
