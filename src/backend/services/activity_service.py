@@ -143,7 +143,9 @@ class ActivityService:
         activity_id: str,
         status: str = ActivityState.COMPLETED,
         details: Optional[Dict] = None,
-        error: Optional[str] = None
+        error: Optional[str] = None,
+        *,
+        completed_at: Optional[datetime] = None,
     ) -> bool:
         """
         Mark an activity as completed or failed.
@@ -153,6 +155,8 @@ class ActivityService:
             status: ActivityState value ("completed" or "failed")
             details: Additional details to merge with existing details
             error: Error message if failed
+            completed_at: #3589 — the instant the producer says the work
+                ended (the watchdog claim's `retained_at`); None stamps now
 
         Returns:
             bool: True if activity was found and updated
@@ -165,7 +169,8 @@ class ActivityService:
         # Update in database. #1804: the db layer is a lattice CAS returning a
         # tri-state outcome — ALREADY_CLOSED is a DESIGNED no-op (a second
         # closer refused, nothing clobbered), not a failure.
-        outcome = db.complete_activity(activity_id, status, details, error)
+        outcome = db.complete_activity(activity_id, status, details, error,
+                                       completed_at=completed_at)
 
         if outcome is ActivityCloseOutcome.UPDATED:
             # Broadcast via WebSocket
