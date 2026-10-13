@@ -23,6 +23,7 @@ from services import (
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 from services.agent_service import (
+    agent_reach_logic,
     get_agent_permissions_logic,
     set_agent_permissions_logic,
     add_agent_permission_logic,
@@ -279,6 +280,18 @@ async def get_agent_permissions(
 ):
     """Get permissions for an agent."""
     return await get_agent_permissions_logic(agent_name, current_user, strict=strict)
+
+
+@router.get("/{agent_name}/reach/{target}")
+async def get_agent_reach(
+    agent_name: str,
+    target: str,
+    current_user: User = Depends(get_current_user),
+):
+    """May `agent_name` call `target` — the edge or the spawn record, decided
+    from the database, never from the container list (trinity-enterprise#629).
+    The MCP layer's agent-to-agent gate reads this."""
+    return agent_reach_logic(agent_name, target, current_user)
 
 
 @router.put("/{agent_name}/permissions")
@@ -841,18 +854,18 @@ async def share_agent_file(
     agent_name matches the path. User-scoped MCP keys of non-owners
     are rejected.
     """
-    # Owner gate (the agent's owner always passes)
-    assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can share files from this agent.")
-
-    # Defense in depth: if this is an agent-scoped key, it must be for
-    # the same agent. Prevents Agent A's key from being used to share
-    # files from Agent B's volume even when both are owned by the same user.
+    # An agent-scoped key may share only from its OWN volume. Checked first so
+    # the refusal names the rule; the owner gate below (narrowed to the agent's
+    # reach since ent#629) would refuse a sibling too, less specifically.
     actor_agent = getattr(current_user, "agent_name", None)
     if actor_agent and actor_agent != agent_name:
         raise HTTPException(
             status_code=403,
             detail="Agent-scoped MCP key cannot share files for a different agent.",
         )
+
+    # Owner gate (the agent's owner always passes)
+    assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can share files from this agent.")
 
     try:
         result = await create_share(

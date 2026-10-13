@@ -15,12 +15,12 @@ admin would prove nothing about the boundary. The admin JWT is used only to
 arrange things (edges, stop/start, a disposable callee) and to read back what
 the platform recorded.
 
-**Where the boundary lives — and where it does not.** The permission edge is
-enforced by the MCP server. An agent key used raw against the backend resolves
-to its owner carrying the owner's role (architecture.md Invariant #8), so the
-REST dispatch routes admit a sibling with no edge. Whether that is design or a
-gap is abilityai/trinity-enterprise#629's ruling; by decision at the #2349 plan
-gate this public file carries no reproducer for it.
+**Where the boundary lives.** The permission edge is enforced by the MCP
+server, which is what this journey drives. The backend holds the same line one
+hop down (abilityai/trinity-enterprise#629): an agent key used raw against a
+REST route reaches only itself, its edge targets and the agents it spawned
+(`dependencies.agent_may_reach`), pinned by
+`tests/unit/test_ent629_agent_reach.py` rather than by this journey.
 
 **Credential-free vs keyed.** Attribution (IA-01, AC-01), the denial, the
 stopped callee (IA-03), the fan-out bound (IA-02), the loop budget and the

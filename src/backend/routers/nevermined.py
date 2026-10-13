@@ -13,7 +13,7 @@ from typing import List
 
 from models import User
 from database import db
-from dependencies import get_current_user, assert_admin
+from dependencies import get_current_user, assert_admin, agent_may_reach
 from db_models import NeverminedConfigCreate, NeverminedConfig, NeverminedPaymentLog
 from services.nevermined_payment_service import (
     get_nevermined_payment_service,
@@ -41,7 +41,7 @@ def _require_read_access(agent_name: str, current_user: User):
     # existing-but-inaccessible case, mirroring _require_write_access and the
     # dependencies.py helpers (#186 equal-query-count discipline).
     exists = _agent_exists(agent_name)
-    allowed = db.can_user_access_agent(current_user.username, agent_name)
+    allowed = (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name))
     if not (exists and allowed):
         raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -51,7 +51,7 @@ def _require_write_access(agent_name: str, current_user: User):
 
     Uniform 404 for both non-existent and unowned agents (#186).
     """
-    allowed = current_user.role == "admin" or db.can_user_share_agent(current_user.username, agent_name)
+    allowed = (current_user.role == "admin" or db.can_user_share_agent(current_user.username, agent_name)) and agent_may_reach(current_user, agent_name, manage=True)
     if not (_agent_exists(agent_name) and allowed):
         raise HTTPException(status_code=404, detail="Agent not found")
 

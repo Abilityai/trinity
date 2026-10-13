@@ -1160,6 +1160,10 @@ class DatabaseManager:
         """#1854: re-point a parent's spawned children at its current key id."""
         return self._agent_ops.reconcile_spawn_key_id(agent_name, current_key_id)
 
+    def list_agents_spawned_by_key(self, agent_name: str, key_id: str) -> List[str]:
+        """ent#629: live agents spawned by `agent_name` with key `key_id`."""
+        return self._agent_ops.list_agents_spawned_by_key(agent_name, key_id)
+
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
 

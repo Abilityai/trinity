@@ -81,6 +81,11 @@ describe("ent#628 run_agent_loop is gated where server.ts registers it (real tra
             agent_name: CALLER,
           });
         }
+        const reach = url.match(new RegExp(`^/api/agents/${CALLER}/reach/([^/?]+)$`));
+        if (reach) {
+          permissionReads++;
+          return send(200, { reachable: permitted.includes(decodeURIComponent(reach[1])) });
+        }
         if (url === `/api/agents/${CALLER}/permissions`) {
           permissionReads++;
           return send(200, {

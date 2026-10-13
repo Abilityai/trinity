@@ -17,6 +17,7 @@ from fastapi import HTTPException
 
 from models import User
 from database import db
+from dependencies import agent_may_reach
 from services.docker_service import get_agent_container
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ async def get_autonomy_status_logic(
 
     Returns whether autonomy mode is enabled and schedule counts.
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)
@@ -86,7 +87,7 @@ async def set_autonomy_status_logic(
     - enabled: True to enable autonomy, False to disable
     """
     # Only owner can modify autonomy
-    if not db.can_user_share_agent(current_user.username, agent_name):
+    if not (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True)):
         raise HTTPException(status_code=403, detail="Only the owner can modify autonomy settings")
 
     container = get_agent_container(agent_name)
@@ -177,7 +178,7 @@ async def get_all_autonomy_status_logic(
     # Filter to agents the user can access
     result = {}
     for agent_name, autonomy_enabled in all_status.items():
-        if db.can_user_access_agent(current_user.username, agent_name):
+        if (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
             # Skip system agent
             if db.is_system_agent(agent_name):
                 continue

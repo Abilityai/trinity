@@ -39,6 +39,11 @@ def fake_db(monkeypatch):
                         lambda username, agent: (username, agent) in state.sharers, raising=False)
     monkeypatch.setattr(dependencies.db, "agent_has_capability",
                         lambda agent, cap: agent in state.capable, raising=False)
+    # #3346 review: an agent key's capability is bounded to agents its owner
+    # OWNS (`owner_owns_agent`), not merely ones it may share.
+    monkeypatch.setattr(dependencies.db, "get_agent_owner",
+                        lambda agent: {"owner_username": "alice"} if agent == AGENT else None,
+                        raising=False)
     return state
 
 

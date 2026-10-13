@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 
 from database import db
 from dependencies import (
+    agent_may_reach,
     get_current_user,
     AuthorizedAgent,
     OwnedAgent,
@@ -112,7 +113,7 @@ def _report_or_404(report_id: str, current_user: User) -> dict:
     allowlist entry is now this single helper rather than one per route.
     """
     report = db.get_report(report_id)
-    if not report or not db.can_user_access_agent(current_user.username, report["agent_name"]):
+    if not report or not (db.can_user_access_agent(current_user.username, report["agent_name"]) and agent_may_reach(current_user, report["agent_name"])):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
     return report
 
