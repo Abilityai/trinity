@@ -22,7 +22,7 @@ without AS verification would be a silent widening (plan decision #18).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from services.aauth import discovery, jose
@@ -59,7 +59,7 @@ CHECKS = (
 class ResourceToken:
     """A verified resource token (service-internal; ``token`` is re-presented to the PS)."""
 
-    token: str
+    token: str = field(repr=False)
     jti: str
     iss: str
     aud: str

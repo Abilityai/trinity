@@ -49,6 +49,10 @@ _DENIAL_CODES = ("denied", "abandoned", "revoked", "user_unreachable")
 _POLL_CODES = {408: "expired", 410: "gone", 429: "slow_down"}
 
 
+class PendingBudgetExceeded(Exception):
+    """The agent already holds ``person_token.MAX_PENDING_PER_AGENT`` open records (shared with ent#878)."""
+
+
 def _get_redis():
     from services import rate_limiter
 
@@ -128,12 +132,19 @@ def _scope(record: Dict[str, Any]) -> str:
 
 
 def save_pending(agent_name: str, record: Dict[str, Any], *, now: int) -> str:
-    """Persist ``record`` (``kind`` ∈ PENDING_KINDS) and return its handle. Raises when Redis fails."""
+    """Persist ``record`` (``kind`` ∈ PENDING_KINDS) and return its handle.
+
+    Raises ``PendingBudgetExceeded`` at the shared per-agent bound, anything else when Redis fails.
+    """
     if record.get("kind") not in PENDING_KINDS or record.get("agent") != agent_name:
         raise ValueError("not an ent#879 pending record")
     client = _get_redis()
     if client is None:
         raise RuntimeError("pending state unavailable (Redis)")
+    # One budget for both issues: these records join ent#878's per-agent set,
+    # so the bound person_token() enforces is enforced here too.
+    if pt._open_pending_count(client, agent_name) >= pt.MAX_PENDING_PER_AGENT:
+        raise PendingBudgetExceeded(f"this agent already has {pt.MAX_PENDING_PER_AGENT} open interactions")
     handle = secrets.token_urlsafe(24)
     record = dict(record)
     record["scope"] = _scope(record)

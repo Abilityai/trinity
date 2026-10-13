@@ -49,6 +49,8 @@ from unit.test_ent878_aauth_person_token import FakePS, FakeRedis  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
+rc_save_pending = rc._save_pending          # the real seam, for tests that re-install it over Seams
+
 OUR = "https://a.example"
 PS = "https://ps.example"
 RES = "https://res.example"
@@ -198,7 +200,7 @@ class Seams:
 
 
 def auth_token_for(presented: rc.Presented, jkt_jwk, *, exp=NOW + 3600, **claims):
-    body = {"iss": PS, "dwk": "aauth-person.json", "aud": RES, "sub": presented.sub, "scope": "senzing",
+    body = {"iss": PS, "ps": PS, "dwk": "aauth-person.json", "aud": RES, "sub": presented.sub, "scope": "senzing",
             "jti": "at-" + os.urandom(4).hex(), "iat": NOW, "exp": exp, "cnf": {"jwk": jkt_jwk}}
     body.update(claims)
     return jose.sign_jws({"alg": "RS256", "typ": "aa-auth+jwt", "kid": "ps-kid"}, body, Ed25519PrivateKey.generate())
@@ -462,6 +464,7 @@ def test_resource_token_happy_path():
     got = verify(rk, mint(rk))
     assert got.sub == PRESENTED["sub"] and got.presented_jti == PRESENTED["jti"] and got.scope == "senzing"
     assert got.aud == PS and got.jti == "rt-1" and rk.calls == [(RES, rk.res.kid, "aauth-resource.json")]
+    assert got.token not in repr(got)
 
 
 @pytest.mark.parametrize("check, mutate", [
@@ -535,12 +538,14 @@ def test_auth_token_inspection_binds_to_our_key_and_caps_expiry():
     ({"iss": OTHER}, None), ({"aud": OTHER}, None), ({"sub": "someone"}, None), ({"dwk": "aauth-agent.json"}, None),
     ({"exp": NOW - 1}, None), ({"iat": NOW + 600}, None), ({"cnf": {"jwk": {"kty": "OKP"}}}, None),
     ({}, {"typ": "aa-person+jwt"}),
+    ({"ps": OTHER}, None),                                  # minted for another person server
+    ({"exp": NOW + 24 * 3600}, None),                       # draft: auth token lifetime ≤ 1 h
 ])
 def test_auth_token_inspection_refusals(claims, header):
     key = Ed25519PrivateKey.generate()
     jwk = jose.public_jwk(key.public_key())
     pres = rc.Presented("person", "t", "ps-directed-sub", "pt-1", NOW + 900)
-    body = {"iss": PS, "dwk": "aauth-person.json", "aud": RES, "sub": pres.sub, "jti": "at-1", "iat": NOW,
+    body = {"iss": PS, "ps": PS, "dwk": "aauth-person.json", "aud": RES, "sub": pres.sub, "jti": "at-1", "iat": NOW,
             "exp": NOW + 3600, "cnf": {"jwk": jwk}, **claims}
     hdr = {"alg": "RS256", "typ": "aa-auth+jwt", "kid": "k", **(header or {})}
     with pytest.raises(ValueError):
@@ -575,6 +580,7 @@ def test_input_refusals_before_any_egress(harness, seams):
     assert call(method="PUT").code == "invalid_method"
     assert call(path="/v1/../x").code == "invalid_path"
     assert call(path="/authorize").code == "invalid_path"           # a declared control endpoint
+    assert call(path="/authorize/").code == "invalid_path"          # ... with one trailing slash
     assert res.calls == []
 
 
@@ -760,7 +766,11 @@ def test_exchange_pending_unrecordable_is_a_refusal(harness, seams, monkeypatch)
     bind_person_token(harness)
     res.script = [res.require_auth]
     seams.exchange_script = [auth_token.ExchangePending("approval", PS + "/p", 5)]
-    monkeypatch.setattr(rc, "_save_pending", lambda call, kind, extra: None)
+    monkeypatch.setattr(rc, "_save_pending", rc_save_pending)
+
+    def boom(*a, **k):
+        raise RuntimeError("redis down")
+    monkeypatch.setattr(ps_client, "save_pending", boom)
     assert call().code == "state_unavailable"
 
 
@@ -1002,7 +1012,7 @@ class FakePS2(FakePS):
     def auth_token_for(self, request: httpx.Request, *, sub=None, cnf=None, header=None, **claims):
         doc = json.loads(request.content.decode()) if request.content else {}
         _, pres, _, _ = jose.decode_unverified(doc["presented_token"])
-        body = {"iss": PS, "dwk": "aauth-person.json", "aud": RES, "sub": sub or pres["sub"], "scope": "senzing",
+        body = {"iss": PS, "ps": PS, "dwk": "aauth-person.json", "aud": RES, "sub": sub or pres["sub"], "scope": "senzing",
                 "jti": "at-" + os.urandom(4).hex(), "iat": NOW, "exp": NOW + 3600,
                 "cnf": {"jwk": cnf or pres["cnf"]["jwk"]}}
         body.update(claims)
@@ -1445,6 +1455,48 @@ def test_resume_resource_deferred_poll(live):
     handle = call().handle
     ps_client.forget_auth_token(AGENT, resource=RES, key_thumbprint=signer.agent_token_info(AGENT, now=NOW).thumbprint)
     assert resume(handle, now=NOW + 1).code == "token_unavailable"
+
+
+def test_pending_records_share_ent878_open_interaction_budget(live):
+    """M1: resource-client records count against ent#878's per-agent bound — so
+    they are checked against it too. Three open → the fourth is refused with the
+    same code ent#878 uses; a terminal outcome frees the slot."""
+    ps, res = live["ps2"], live["res"]
+    ps.auth_script = [lambda req: FakePS2.auth_ok(ps.auth_token_for(req))]
+    bind_person_token(live)
+    res.script = [res.require_auth, FakeResource.deferred(retry_after="0")]
+    handles = [call().handle]
+    for _ in range(pt.MAX_PENDING_PER_AGENT - 1):
+        res.script = [FakeResource.deferred(retry_after="0")]
+        out = call()
+        assert out.outcome == "pending"
+        handles.append(out.handle)
+    assert len(set(handles)) == pt.MAX_PENDING_PER_AGENT
+    res.script = [FakeResource.deferred(retry_after="0")]
+    out = call()
+    assert out.outcome == "refusal" and out.code == "too_many_pending"
+    assert len(live["redis"].handles()) == pt.MAX_PENDING_PER_AGENT       # nothing was written
+    # the same bound ent#878 enforces, from the same set
+    assert asyncio.run(pt.person_token(AGENT, "https://other-res.example", now=NOW)).code == "too_many_pending"
+    # a terminal outcome frees a slot
+    res.script = [FakeResource.ok({"done": True})]
+    assert resume(handles[0], now=NOW + 1).outcome == "result"
+    res.script = [FakeResource.deferred(retry_after="0")]
+    assert call().outcome == "pending"
+
+
+def test_call_budget_clock_starts_at_entry(harness, seams, monkeypatch):
+    """L3: slow discovery spends the call's budget — the send is cut, not granted a fresh 25 s."""
+    res = harness["res"]
+    bind_person_token(harness)
+    real = resource_meta.metadata
+
+    async def slow(resource):
+        await asyncio.sleep(0.7)
+        return await real(resource)
+    monkeypatch.setattr(resource_meta, "metadata", slow)
+    out = call(budget_seconds=1.0)
+    assert out.code == "timeout" and res.calls == []
 
 
 def test_pending_consent_is_recorded_or_refused_never_half(live, monkeypatch):

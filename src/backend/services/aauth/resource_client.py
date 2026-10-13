@@ -242,8 +242,8 @@ def _forget_auth(call: _Call) -> None:
         logger.warning("[aauth] auth-token cache eviction failed for %s", call.agent, exc_info=True)
 
 
-def _save_pending(call: _Call, kind: str, extra: Dict[str, Any]) -> Optional[str]:
-    """Persist a pending record; the handle, or None when it cannot be recorded (fail closed)."""
+def _save_pending(call: _Call, kind: str, extra: Dict[str, Any]) -> Union[str, Refusal]:
+    """Persist a pending record; the handle, or a refusal when it cannot be recorded (fail closed)."""
     record = {
         "kind": kind, "agent": call.agent, "our_issuer": call.our_issuer, "ps_issuer": call.ps,
         "resource": call.resource, "method": call.method, "path": call.path,
@@ -253,9 +253,12 @@ def _save_pending(call: _Call, kind: str, extra: Dict[str, Any]) -> Optional[str
     }
     try:
         return ps_client.save_pending(call.agent, record, now=call.now)
+    except ps_client.PendingBudgetExceeded as exc:
+        return call.refusal("too_many_pending", str(exc))
     except Exception:  # noqa: BLE001
         logger.error("[aauth] could not persist pending record for %s", call.agent, exc_info=True)
-        return None
+        what = "the deferred answer" if kind == "resource_polling" else "the pending consent"
+        return call.refusal("state_unavailable", f"{what} could not be recorded (Redis)")
 
 
 async def _exchange(call: _Call, verified: resource_token.ResourceToken,
@@ -271,6 +274,13 @@ async def _exchange(call: _Call, verified: resource_token.ResourceToken,
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+def _is_control_path(path: str, meta: resource_meta.ResourceMetadata) -> bool:
+    """Equal to a declared control endpoint once one trailing slash is stripped (case-sensitive)."""
+    def strip(p: str) -> str:
+        return p[:-1] if len(p) > 1 and p.endswith("/") else p
+    return strip(path) in {strip(cp) for cp in meta.control_paths()}
+
+
 def path_ok(path: Any) -> bool:
     """``/…`` of pchar-without-``%``, no ``..`` segment, no ``//``, bounded, not ``/.well-known/``."""
     if not isinstance(path, str) or not path or len(path) > MAX_PATH_CHARS or not _PATH_RE.match(path):
@@ -351,6 +361,7 @@ async def call_resource(
     """Climb the ladder once. Raises ``signer.SigningUnavailable`` when AAuth is inert."""
     from services import a2a_client
 
+    deadline = time.monotonic() + max(0.0, float(budget_seconds))    # the budget covers discovery too
     our_issuer = config.active_issuer()
     if not our_issuer:
         raise signer.SigningUnavailable("AAuth is not enabled on this instance (flag off or no issuer)")
@@ -381,7 +392,7 @@ async def call_resource(
         meta = await resource_meta.metadata(resource)
     except resource_meta.ResourceMetadataError as exc:
         return Refusal(exc.code, exc.detail, resource=resource)
-    if path in meta.control_paths():
+    if _is_control_path(path, meta):
         return Refusal("invalid_path", "path is one of the resource's declared control endpoints", resource=resource)
     extra = tuple(meta.additional_signature_components)
     if set(extra) - set(httpsig.REQUIRED_COMPONENTS) - httpsig.SUPPORTED_EXTRA_COMPONENTS:
@@ -394,7 +405,7 @@ async def call_resource(
                  content_type=content_type, justification=justification, now=now, our_issuer=our_issuer,
                  ps=config.get_person_server(), meta=meta, jkt=info.thumbprint, agent_info=info,
                  factory=client_factory or a2a_client._http_client,
-                 deadline=time.monotonic() + max(0.0, float(budget_seconds)))
+                 deadline=deadline)
     call.tokens.add(info.token)
 
     held = _held_auth(call)
@@ -609,8 +620,8 @@ async def _exchange_and_continue(call: _Call, verified: resource_token.ResourceT
             "presented_sub": presented.sub, "presented_exp": presented.exp,
             "resource_token_jti": verified.jti, "next_poll_at": call.now + out.retry_after,
         })
-        if handle is None:
-            return call.refusal("state_unavailable", "the pending consent could not be recorded (Redis)")
+        if isinstance(handle, Refusal):
+            return handle
         expires_at = call.now + PENDING_TTL
         if out.requirement == "interaction":
             link = requirement.interaction_link(out.url, out.code) if out.url and out.code else None
@@ -664,8 +675,8 @@ async def _deferred(call: _Call, resp: egress.CappedResponse, presented: Present
         "pending_url": pending_url, "retry_after": retry_after, "token_kind": presented.kind,
         "presented_jti": presented.jti, "next_poll_at": call.now + retry_after,
     })
-    if handle is None:
-        return call.refusal("state_unavailable", "the deferred answer could not be recorded (Redis)")
+    if isinstance(handle, Refusal):
+        return handle
     return ResourcePending(handle=handle, retry_after=retry_after, requirement="deferred", at="resource",
                            challenges=list(call.challenges), expires_at=call.now + PENDING_TTL,
                            resource=call.resource)
@@ -708,6 +719,7 @@ async def resume(agent_name: str, handle: Any, *, now: Optional[int] = None, wai
     """Continue a pending call by its handle (fail closed: ``handle_unknown``)."""
     from services import a2a_client
 
+    deadline = time.monotonic() + max(0.0, float(budget_seconds))    # the budget covers discovery too
     our_issuer = config.active_issuer()
     if not our_issuer:
         raise signer.SigningUnavailable("AAuth is not enabled on this instance (flag off or no issuer)")
@@ -736,7 +748,7 @@ async def resume(agent_name: str, handle: Any, *, now: Optional[int] = None, wai
                  content_type=record.get("content_type"), justification=None, now=now, our_issuer=our_issuer,
                  ps=config.get_person_server(), meta=meta, jkt=info.thumbprint, agent_info=info,
                  factory=client_factory or a2a_client._http_client,
-                 deadline=time.monotonic() + max(0.0, float(budget_seconds)),
+                 deadline=deadline,
                  challenges=list(record.get("challenges") or []))
     call.tokens.add(info.token)
     if info.thumbprint != record.get("key_thumbprint"):

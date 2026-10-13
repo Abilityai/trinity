@@ -7,9 +7,11 @@ taste T5: inspection only, no PS signature check; the resource verifies it):
 
 * ``typ`` ``aa-auth+jwt``; ``dwk`` ∈ ``aauth-person.json`` | ``aauth-access.json``
   (three-party today; four-party is one check removal);
-* ``iss`` == the resource token's ``aud`` (our PS); ``aud`` == the resource;
+* ``iss`` == the resource token's ``aud`` (our PS); ``ps`` == our PS too;
+  ``aud`` == the resource;
 * ``cnf.jwk`` thumbprint == this agent's current key (proof of possession);
 * ``sub`` == the sub we presented; ``exp`` in the future, integers only;
+  lifetime ``exp − iat`` ≤ 1 h (draft §Auth Token Structure);
 * the held expiry is capped by the presented token's expiry and ``expires_in``.
 """
 from __future__ import annotations
@@ -22,7 +24,7 @@ from services.aauth import jose
 TOKEN_TYPE = "aa-auth+jwt"
 METADATA_DOCUMENTS = frozenset({"aauth-person.json", "aauth-access.json"})
 CLOCK_SKEW = 60
-MAX_LIFETIME = 24 * 3600
+MAX_LIFETIME = 3600                  # draft: an auth token MUST NOT live longer than 1 h
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,8 @@ def inspect_auth_token(raw: Any, *, resource: str, ps: str, agent_jkt: str, pres
         raise ValueError("auth token dwk is not a person/access server document")
     if claims.get("iss") != ps:
         raise ValueError("auth token iss is not our person server")
+    if claims.get("ps") != ps:
+        raise ValueError("auth token ps is not our person server")
     if claims.get("aud") != resource:
         raise ValueError("auth token aud is not the resource")
     sub, jti = claims.get("sub"), claims.get("jti")
@@ -91,7 +95,7 @@ def inspect_auth_token(raw: Any, *, resource: str, ps: str, agent_jkt: str, pres
         raise ValueError("auth token iat/exp are not integers")
     if exp <= now:
         raise ValueError("auth token has already expired")
-    if iat - now > CLOCK_SKEW or exp - iat > MAX_LIFETIME + CLOCK_SKEW:
+    if iat - now > CLOCK_SKEW or exp - iat > MAX_LIFETIME:
         raise ValueError("auth token lifetime is not acceptable")
     cnf = claims.get("cnf")
     cnf_jwk = cnf.get("jwk") if isinstance(cnf, dict) else None
