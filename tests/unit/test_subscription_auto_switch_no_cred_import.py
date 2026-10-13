@@ -110,7 +110,27 @@ def _restore_sys_modules():
     Bounds the blast radius of this file's module-loader stubs so they
     cannot leak into other test files in the same pytest session.
     """
+    _MISSING = object()
+
+    def _parent_attr(name):
+        parent_name, _, child = name.rpartition(".")
+        parent = sys.modules.get(parent_name) if parent_name else None
+        return parent, child
+
     saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    # Also snapshot the parent package ATTRIBUTE. `_load_auto_switch` pops and
+    # re-imports `services.subscription_auto_switch`, which rebinds
+    # `services.subscription_auto_switch` on the package. Restoring only the
+    # sys.modules slot left the attribute pointing at this file's copy, so a
+    # later `import services.subscription_auto_switch as m` (attribute lookup)
+    # and `from services.subscription_auto_switch import x` (sys.modules lookup)
+    # resolved to two different module objects — a monkeypatch on one was
+    # invisible to callers of the other (test_2572 TestTheApplyPhase).
+    saved_attrs = {}
+    for name in _STUBBED_MODULE_NAMES:
+        parent, child = _parent_attr(name)
+        if parent is not None:
+            saved_attrs[name] = (parent, child, getattr(parent, child, _MISSING))
     try:
         yield
     finally:
@@ -119,6 +139,12 @@ def _restore_sys_modules():
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = value
+        for name, (parent, child, value) in saved_attrs.items():
+            if value is _MISSING:
+                if hasattr(parent, child):
+                    delattr(parent, child)
+            else:
+                setattr(parent, child, value)
 
 
 # ─── Module loaders ──────────────────────────────────────────────────────

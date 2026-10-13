@@ -340,7 +340,14 @@ class TestRespondToQueueItem:
         assert_status(response, 200)
         data = response.json()
         assert data["id"] == item_id
-        assert data["status"] == "responded"
+        # #2372: answering a PLATFORM-raised item (an alert no agent will ever
+        # acknowledge) is its last event, so it lands `acknowledged` instead of
+        # `responded`. Which kind the first pending row is depends on the
+        # instance, so pin both shapes rather than only one.
+        if data["status"] == "acknowledged":
+            assert data["acknowledged_at"] is not None
+        else:
+            assert data["status"] == "responded"
         assert data["response"] == decision
         assert data["response_text"] == "Looks good"
         assert data["responded_at"] is not None
