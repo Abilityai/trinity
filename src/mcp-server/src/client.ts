@@ -4049,6 +4049,16 @@ export class TrinityClient {
     return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/aauth/person-token`, body);
   }
 
+  /**
+   * Call an allow-listed AAuth resource as `name`, or resume a pending call by
+   * its handle (trinity-enterprise#879). Own-key only on the backend; the
+   * response never carries a token. Same bounded fetch as the A2A hop: the
+   * backend's own budget is 25 s, under the 40 s gateway deadline.
+   */
+  async callAAuthResource(name: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/aauth/resource-call`, body);
+  }
+
   // --- Credential vault (trinity-enterprise#279) ----------------------------
   // Agent-facing discovery + fetch. Both are agent-scoped-key-only on the
   // backend; `request()` throws a typed `ApiError` on any non-2xx so the tool

@@ -56,8 +56,23 @@ def content_digest(body: bytes) -> str:
     return f"sha-256=:{base64.b64encode(hashlib.sha256(body).digest()).decode('ascii')}:"
 
 
-def components_for(method: str) -> Tuple[str, ...]:
-    return REQUIRED_COMPONENTS + (BODY_COMPONENTS if method.upper() == "POST" else ())
+#: The only extra components a resource may ask for (``additional_signature_components``
+#: in its metadata, ent#879) that this signer can produce. Anything else is refused
+#: by the caller before signing — never silently dropped from the covered set.
+SUPPORTED_EXTRA_COMPONENTS = frozenset(BODY_COMPONENTS)
+
+
+def components_for(method: str, extra: Tuple[str, ...] = ()) -> Tuple[str, ...]:
+    """The covered components for ``method``: the profile set, the body pair on
+    POST, plus any supported ``extra`` a resource demands (de-duplicated, in
+    the profile's order, so the serialised list is stable)."""
+    base = REQUIRED_COMPONENTS + (BODY_COMPONENTS if method.upper() == "POST" else ())
+    wanted = set(base) | set(extra)
+    unsupported = wanted - set(REQUIRED_COMPONENTS) - SUPPORTED_EXTRA_COMPONENTS
+    if unsupported:
+        raise SignatureFormatError("unsupported_signature_components",
+                                   f"cannot cover {sorted(unsupported)} in a signature")
+    return tuple(c for c in REQUIRED_COMPONENTS + BODY_COMPONENTS if c in wanted)
 
 
 def _params(components: Tuple[str, ...], created: int) -> str:
@@ -108,16 +123,24 @@ def sign(
     content_type: Optional[str],
     created: int,
     private_key,
+    extra_components: Tuple[str, ...] = (),
 ) -> SignedHeaders:
-    """Produce the three (four on POST) headers for one request."""
+    """Produce the three (four on POST) headers for one request.
+
+    ``agent_token`` is whatever goes in ``Signature-Key`` — the agent token, or
+    (ent#879) a person/auth token whose ``cnf`` is ``private_key``'s public half.
+    ``extra_components`` lets a GET cover ``content-digest``/``content-type``
+    when a resource's metadata asks for them (the digest is then of the empty body).
+    """
     method = method.upper()
-    components = components_for(method)
+    components = components_for(method, extra_components)
     sig_key = signature_key_header(agent_token)
     values = {"@method": method, "@authority": authority_value, "@path": path, "signature-key": sig_key}
     digest = None
-    if method == "POST":
+    if "content-digest" in components:
         digest = content_digest(body)
         values["content-digest"] = digest
+    if "content-type" in components:
         values["content-type"] = content_type or ""
     params = _params(components, created)
     raw = private_key.sign(signature_base(values, components, params))

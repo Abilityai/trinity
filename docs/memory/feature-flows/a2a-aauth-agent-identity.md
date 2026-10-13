@@ -78,6 +78,7 @@ key. The token says *who this is*; the signature proves *this request is theirs*
 | GET | `/.well-known/aauth-resource.json` | none | Resource metadata: `access_mode: agent-token`, `signature_window`, `additional_signature_components` |
 | POST | `/a2a/{name}` | **AAuth** *or* bearer | The existing JSON-RPC task endpoint. A request carrying `Signature-Key` takes the AAuth path; everything else is unchanged |
 | POST | `/api/agents/{name}/aauth/person-token` | the agent's **own** key only | ent#878: obtain a person token for `resource` as the agent, or resume a pending binding by `pending_handle` (Flow 5). Uniform 404 while inert — before body validation |
+| POST | `/api/agents/{name}/aauth/resource-call` | the agent's **own** key only | ent#879: call an allow-listed AAuth resource (`{resource}{path}`) as the agent — the whole requirement ladder, every token held by the platform — or resume a pending call by `pending_handle` (Flow 6). Same gates as the person-token route, consulted before the allow-list |
 
 All three documents answer a uniform **404** unless AAuth is live (flag on **and**
 a valid issuer), so a default install publishes nothing. They are per-IP rate
@@ -91,6 +92,7 @@ limited like the public card route.
 | `aauth_issuer` | `system_settings` → `AAUTH_ISSUER` | This instance's AAuth identity domain, `https://<host>` |
 | `aauth_signing_key_encrypted` | `system_settings` | The instance key envelope. Blocked on the generic settings PUT/DELETE; included in the credential-rotation script |
 | `aauth_person_server` | `system_settings` → `AAUTH_PERSON_SERVER` | ent#878: the person server agents bind through, `https://<host>` (same strict rule as the issuer, never repaired). Unset → `person_server_unconfigured` |
+| `aauth_resource_allowlist` | `system_settings` → `AAUTH_RESOURCE_ALLOWLIST` | ent#879: the AAuth resources agents may call — a JSON list or comma-separated `https://<host>` identifiers, origin equality. **Fail-closed**: unset, malformed or one bad entry → nothing is allowed. Admin settings catch-all only (the grant half); no UI row yet |
 | `agent_ownership.a2a_exposed` | OSS column | Pre-existing per-agent exposure, default off |
 | inbound allow-list | private A2A module | One list per agent; `aauth:`-prefixed entries are the AAuth audience |
 | endpoint registry `auth_scheme` | `system_settings` (AES-GCM envelope) | Per outbound endpoint: `bearer` (default) or `aauth` |
@@ -327,6 +329,113 @@ The response model has no field that can carry the token (pinned by test); the a
 row carries `token_jti`, the key thumbprint, the outcome, a bounded `ps_error`,
 `execution_id` and `trigger_source` — never the token, the handle, the url or the code.
 
+## Flow 6 — Calling a resource: the requirement ladder (ent#879)
+
+The resource leg. An agent calls an **allow-listed** AAuth resource (`{resource}{path}`,
+e.g. the Senzing sanctions API) as itself; the platform climbs the draft's requirement
+ladder — agent token → person token (Flow 5) → an **auth token** the person server mints
+against a **resource token** the resource issued — presents the right token, holds all of
+them, and relays the answer. The agent sees `token_kind`, the ordered `challenges`, the
+resource's body and `AAuth-Budget`, or the link + code its owner must consent at. Nothing
+it sees is a credential.
+
+1. The agent calls `call_aauth_resource(resource, method, path, body, justification,
+   dedup_label)` (MCP; self-acting, agent scope only). The route takes the agent's
+   **own** key through Flow 5's gates — flag live (the uniform 404 precedes body
+   validation) → own key (403 `aauth_agent_only`) → the rate budgets (20 calls / min /
+   agent, 30 resumes, 120 fleet) — and only then the **allow-list**: origin equality
+   against `aauth_resource_allowlist`, fail-closed (403 `resource_not_allowed`). A
+   refused principal never learns what is listed.
+2. **Effect guard.** A new call runs under `effect_guard("aauth_resource", {resource,
+   method, path}, dedup_label)` — the body is not identity (#1084). Only a terminal
+   `result` / `denied` completes the claim; a pending answer, an expiry or a transient
+   refusal releases it, so the post-consent retry under the same label runs for real
+   instead of replaying a dead pending. A completed replay answers the stored snapshot
+   with `replayed: true` and sends nothing. A resume never enters the guard.
+3. **Resource metadata** (`/.well-known/aauth-resource.json`): `issuer` = the resource,
+   same-origin `jwks_uri` and control endpoints; `access_mode` picks the starting rung
+   (Senzing says `auth-token`, so the client starts at the person token — the resource
+   never has to challenge `person-token`); `additional_signature_components` honoured
+   for `content-type` / `content-digest` only. `path` may not be a declared control
+   endpoint, `/.well-known/…`, contain `..`, `//`, `?`, `#` or `%` — it is signed
+   byte-for-byte as sent.
+4. **Send**, signed by the agent key with the presented token in `Signature-Key` and
+   `AAuth-Capabilities: interaction`. 2xx → `result` (body capped + sanitised, every
+   token the call held scrubbed, `AAuth-Budget` parsed). 401 `requirement=person-token`
+   → Flow 5's `person_token` (an `interaction_required` if the owner has not bound yet)
+   → retry once. 401 `requirement=auth-token; resource-token="…"` → step 5.
+5. **Verify the resource token** (the sink, one red test per check): JWKS `kid` +
+   Ed25519 signature + no forbidden headers; `iss` = the resource, `dwk` =
+   `aauth-resource.json`, `aud` = our PS (three-party; an Access-Server `aud` is refused
+   `unsupported_aud`), `agent_jkt` = our current key, `ps` = ours, `sub` +
+   `presented_jti` = the token we just presented, `exp` future, `iat` not future,
+   lifetime ≤ 1 h. A failure is a named refusal + a WARN "possible tampering", never a
+   PS trip. An auth-token challenge while presenting the **agent** token is
+   `unexpected_challenge` (the agent token is never a `presented_token`).
+6. **Exchange** at the PS: signed `POST auth_token_endpoint {resource_token,
+   presented_token, justification, capabilities: ["interaction"]}`, `Prefer: wait=10`.
+   200 → the `aa-auth+jwt` is inspected (`typ`, `iss` = the resource token's `aud`,
+   `aud` = the resource, `cnf` = our key, `sub`, `exp` ≤ the presented token's; the PS
+   signature is **not** verified, plan T5), cached in Redis under
+   `aauth:at:{sha256(issuer|ps|agent|key_thumbprint|resource|scope)}` with TTL
+   `exp − 300`, and the original request is re-sent with it → `result`
+   (`token_kind: auth`, `challenges: ["auth-token"]`, budget cost 2 on Senzing). 202
+   `requirement=interaction; url; code` → `interaction_required` with a pending handle
+   (kind `ps_interaction`) and the same **relay only to your OWNER, privately** rule;
+   202 `requirement=approval` → `pending` (`ps_approval`). 400
+   `expired_presented_token` / `invalid_presented_token` → forget the person token, ONE
+   fresh chain. 403 `user_unreachable` → `denied`; 502 → `ps_unreachable`.
+7. **Second call** (a new `dedup_label`): the held auth token is presented first →
+   `result` with `challenges: []`, **zero PS trips** — the AC, and the demo's beat.
+   A 401 `Signature-Error: expired_jwt` on it → evict, fall to the person token, ONE
+   re-authorization; a step-up `requirement=auth-token` while presenting an auth token
+   → one more exchange with that token as `presented_token`.
+8. **Resume** (`pending_handle` alone): the record (Redis, Flow 5's namespace; carries
+   the STORED method / path / body / key thumbprint, never a token) is loaded for this
+   agent, issuer and PS; inside `retry_after` the stored shape is answered with no
+   network; otherwise one signed `GET` of the pending URL with `Prefer: wait=15` —
+   PS 200 → cache the auth token and **re-send the stored request** (what runs is what
+   the person consented to, never caller arguments); 403 → `denied`; 408 → `expired`;
+   410 → `gone`; 429 → `+5 s`. A resource-side 202 (`resource_polling`) is polled the
+   same way with the auth token. A rotated key since the consent → `key_rotated`
+   (start over); another agent's / issuer's / PS's handle → `handle_unknown`.
+9. Every call writes one audit row (`EXECUTION aauth_resource_call` after egress,
+   `AUTHORIZATION aauth_resource_refused` before it) with the agent, resource, method,
+   path, token kind, outcome, status, budget, `challenges`, `replayed` / `resumed`,
+   `execution_id` + `trigger_source` — never a token, the body, the justification, a
+   handle, a url or a code — and one activity row (direction `aauth_resource`).
+
+Bounds: ≤ 6 resource sends, ≤ 3 PS exchanges, one 25 s budget, per-leg `min(10 s,
+remaining)`; nothing is polled inline on the first call; a POST that times out after it
+was sent is reported `possibly_executed` (#914) and the tool tells the agent not to
+re-send blindly.
+
+Live proof: `demo.sh run` step 7 (`bind.sh`, waits for the owner) + step 8
+(`senzing_check.py` with the agent's own key: identity, the challenge sequence actually
+seen, the top candidates' `match_key` / `match_level`, the budget cost, then the second
+call with zero PS trips, then A's audit rows); `demo.sh rehearse` runs 1–8 with no
+pause. `senzing_check.py` works from a laptop with the agent's MCP key.
+
+### Refusals (Flow 6)
+
+| Outcome | HTTP | Carries |
+|---|---|---|
+| Prototype inert (flag off / no issuer) — also for a malformed body, both shapes | 404 | Uniform |
+| Not the agent's own key (human, sibling, `system`) — before the allow-list | 403 | `aauth_agent_only` |
+| Resource not listed (or the list is empty / malformed / unreadable) | 403 | `resource_not_allowed` |
+| Resource wants payment | 402 | `payment_required` (surfaced, never retried) |
+| `aauth_person_server` unset; a concurrent call holds the same effect claim | 409 | `person_server_unconfigured`, `effect_in_progress` |
+| Body shape (call XOR resume), bad path / method / body size, unsupported signature components, pull-mode agent without an execution id | 422 | pydantic detail, `invalid_*`, `unsupported_signature_components`, `effect_unguarded` |
+| The resource's 429, or a local rate budget | 429 | `rate_limited` + `retry_after`, or the limiter's detail |
+| Pending state unreadable / unwritable (Redis) | 503 | `state_unavailable` — never an in-memory fallback |
+| The call budget ran out | 504 | `timeout` (+ `possibly_executed` after a POST was sent) |
+| The peer did something we refused or could not use | 502 | `resource_metadata_invalid`, `resource_unreachable`, `resource_token_invalid:<check>`, `unsupported_requirement:<value>`, `unexpected_challenge`, `agent_token_rejected`, `person_token_rejected`, `ps_rejected:<code>`, `ps_unreachable`, `gone`, `key_rotated`, `too_many_rounds`, `step_up_loop`, `token_unavailable`, `unsupported_aud`, `endpoint_*` |
+| Protocol outcomes | 200 | `outcome`: `result` · `interaction_required` / `pending` (handle + `retry_after`, link + code on an interaction) · `denied` (`denied` / `abandoned` / `revoked` / `user_unreachable`, `do_not_retry`) · `expired` (`pending_expired` / `handle_unknown`, `do_not_retry`) |
+
+No request or response field can carry a token (pinned by test): `token_kind` is one of
+`agent` / `person` / `auth`, and the body text has every token the call held scrubbed on
+top of the platform patterns.
+
 ## Trust model
 
 - **What the callee verifies:** the caller controls the private key matching the
@@ -374,9 +483,32 @@ row carries `token_jti`, the key thumbprint, the outcome, a bounded `ps_error`,
 8. The held person token is per worker (a second worker re-requests; a bound agent
    gets a direct 200, no second consent), and the PS's signature over it is **not**
    verified here (plan T4; the resource verifies it — #558 task G).
-9. `request_person_token` is **advertised but inert** while the flag is off: always
-   registered, with the backend's 404 reported as `aauth_disabled` (plan T3
-   deviation; dynamic registration through the #846 reconciler is registered debt).
+9. `request_person_token` and `call_aauth_resource` are **advertised but inert** while
+   the flag is off: always registered, with the backend's 404 reported as
+   `aauth_disabled` (plan T3 deviation; dynamic registration through the #846
+   reconciler is registered debt).
+10. **Resource allow-list is a settings key** (ent#879, T6): `aauth_resource_allowlist`
+    is edited by an admin through the settings catch-all; fail-closed, origin equality,
+    no Settings-UI row (registered debt). It is the only thing between an LLM-supplied
+    URL and a signed server-side request, which is why it fails closed on every
+    unreadable state rather than honouring the lines that parsed.
+11. **Auth tokens and pending records live in Redis** under the transient-secret
+    posture (Invariant #12): proof-of-possession-bound (useless without the agent key),
+    TTL-bounded (`exp − 300`, 30 min for a record), never persisted to SQLite, never
+    logged. A Redis outage reads as "not held" (one more PS exchange) or
+    `state_unavailable`, never as an unsigned call or an in-memory fallback.
+12. **The PS signature over the auth token is not verified** (plan T5): the token is
+    inspected (`typ`, `iss`, `aud`, `cnf`, `sub`, `exp`) and the resource verifies it;
+    RS256/ES256 verification against an operator-listed PS JWKS is #558 task G.
+13. **Four-party `aud` deferred**: a resource token whose `aud` names an Access Server
+    rather than our PS is refused `unsupported_aud`; only the three-party exchange
+    (Senzing's) is implemented. The PS `interaction_endpoint` relay and
+    `authorization_endpoint` pre-authorisation (T8) are likewise out of scope.
+14. **The effect guard arms only for a real execution** of the agent (the MCP path): a
+    script run with `execution_id=manual` proceeds unguarded and says so; an unknown id
+    is refused on a pull-pilot agent (#2392). A `result` snapshot (the sanitised answer —
+    for Senzing, sanctions candidates) persists 24 h in `idempotency_keys`, the #736
+    precedent.
 
 ## Diagrams worth drawing
 
@@ -404,4 +536,5 @@ row carries `token_jti`, the key thumbprint, the outcome, a bounded `ps_error`,
 - `feature-flows/a2a-outbound-call.md` — the calling half this extends (#736)
 - `docs/memory/requirements/mcp.md` §32.8 — the requirement, including out-of-scope
 - `docs/memory/requirements/mcp.md` §32.9 — the person-token binding leg (ent#878), Flow 5
+- `docs/memory/requirements/mcp.md` §32.10 — the resource-call ladder (ent#879), Flow 6
 - `docs/memory/learnings.md` (2026-09-17) — why a second instance needs its own Docker daemon

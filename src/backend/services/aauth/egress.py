@@ -52,11 +52,13 @@ async def request_capped(
     content: Optional[bytes] = None,
     secret: Optional[str] = None,
     timeout: Optional[httpx.Timeout] = None,
+    peer: str = "person server",
 ) -> CappedResponse:
     """One pinned request to the LOGICAL ``url``; every status comes back.
 
     ``secret`` is scrubbed from any transport error text (h11 echoes an illegal
     header value verbatim, and for a signed request that value is the token).
+    ``peer`` names the party in error text (ent#879 dials resources too).
     """
     from services import a2a_client
     from services.a2a_client import A2ACallError
@@ -84,21 +86,21 @@ async def request_capped(
             if 300 <= resp.status_code < 400:
                 raise EgressError(
                     "redirect",
-                    "The person server returned a redirect. Redirects are refused: a "
+                    f"The {peer} returned a redirect. Redirects are refused: a "
                     "validated destination that redirects is an SSRF bypass, not a hop.",
                 )
             encoding = (resp.headers.get("content-encoding") or "").strip().lower()
             if encoding and encoding != "identity":
-                raise EgressError("encoding", "The person server returned a compressed response; refused rather than decoded.")
+                raise EgressError("encoding", f"The {peer} returned a compressed response; refused rather than decoded.")
             declared = resp.headers.get("content-length")
             if declared and declared.isdigit() and int(declared) > max_bytes:
-                raise EgressError("too_large", f"The person server response exceeds the {max_bytes}-byte ceiling.")
+                raise EgressError("too_large", f"The {peer} response exceeds the {max_bytes}-byte ceiling.")
             chunks = []
             total = 0
             async for chunk in resp.aiter_raw():
                 total += len(chunk)
                 if total > max_bytes:
-                    raise EgressError("too_large", f"The person server response exceeds the {max_bytes}-byte ceiling.")
+                    raise EgressError("too_large", f"The {peer} response exceeds the {max_bytes}-byte ceiling.")
                 chunks.append(chunk)
             return CappedResponse(
                 status=resp.status_code,
@@ -108,10 +110,10 @@ async def request_capped(
     except EgressError:
         raise
     except httpx.TimeoutException:
-        raise EgressError("timeout", "The person server timed out.") from None
+        raise EgressError("timeout", f"The {peer} timed out.") from None
     except httpx.HTTPError as exc:
         detail = str(exc)
         if secret:
             detail = a2a_client.scrub_secret_and_urls(detail, secret)
         detail = a2a_client.redact_url_userinfo(a2a_client.sanitize_text(detail))
-        raise EgressError("unreachable", f"The person server could not be reached: {detail}") from None
+        raise EgressError("unreachable", f"The {peer} could not be reached: {detail}") from None
