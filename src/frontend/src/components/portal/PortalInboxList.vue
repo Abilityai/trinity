@@ -168,6 +168,8 @@ import { newLabel } from './portalInbox'
 import { mentionWhere } from './portalMentions'
 import { priorityBadge, expiresSoonLabel, needsExpiryTick, nextExpiryEntry, askKindIcon } from './portalAskUrgency'
 import { queueTypeLabel, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
+// trinity#3524: an answered approval's verdict on its row.
+import { workspaceOwnAnswer } from '@/utils/operatorQueue'
 import { formatLocalDateTime } from '@/utils/timestamps'
 
 const props = defineProps({
@@ -239,7 +241,11 @@ const kindLabel = (it) => queueTypeLabel(it.ask && it.ask.kind) || 'Ask'
 function askStatusLabel(it) {
   const s = it.status
   if (s === 'answered') {
-    if (it.ask?.ended_by === 'you') return 'Answered · you'
+    if (it.ask?.ended_by === 'you') {
+      // trinity#3524: an approval's row says which way it went.
+      const own = workspaceOwnAnswer(it.ask)
+      return own?.past ? `${own.past[0].toUpperCase()}${own.past.slice(1)} · you` : 'Answered · you'
+    }
     // trinity-enterprise#816: a shared ask another person answered first.
     if (it.ask?.ended_by === 'someone_else') return `Answered · ${it.ask.answered_by || 'someone else'}`
     return 'Answered'

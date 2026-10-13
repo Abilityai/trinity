@@ -28,6 +28,7 @@ from dependencies import get_current_user, get_optional_user, assert_owns, works
 from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
 from services import agent_skills_listing, canvas_share_service, login_policy_gate, rate_limiter
+from services import chat_persistence_service
 from services.agent_auth import agent_httpx_client
 from services.chat_execution_service import terminate_execution as _terminate_execution
 from services.chat_signals import ChatDispatchError
@@ -1138,7 +1139,7 @@ async def get_public_link_session_detail(
     return {
         "session": session.model_dump(),
         "message_count": len(messages),
-        "messages": [m.model_dump() for m in messages],
+        "messages": chat_persistence_service.session_messages_view(agent_name, messages),
     }
 
 # ---------------------------------------------------------------------------

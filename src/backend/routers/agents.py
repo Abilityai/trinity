@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, capability_fence
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, capability_fence
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -490,7 +490,7 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     agent_dict["is_shared"] = not agent_dict["is_owner"] and not is_admin and \
                                db.is_agent_shared_with_user(agent_name, current_user.username)
     agent_dict["is_system"] = owner.get("is_system", False) if owner else False
-    agent_dict["can_share"] = db.can_user_share_agent(current_user.username, agent_name)
+    agent_dict["can_share"] = (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True))
     # ent#181: the detail endpoint is what AgentHeader loads on page open — it
     # must carry the label too, or the header shows the slug until the first
     # edit and the surfaces disagree (§1.3.1 FR-3). One extra read; not the list
@@ -1812,71 +1812,6 @@ async def agent_execution_result(
             execution_id, result.status, payload.terminal_reason,
         )
     return {"ok": True, "replayed": False, "status": result.status}
-
-
-# ============================================================================
-# Activity Stream Endpoints
-# ============================================================================
-
-@router.get("/{agent_name}/activities")
-async def get_agent_activities(
-    agent_name: AuthorizedAgentByName,
-    activity_type: Optional[str] = None,
-    activity_state: Optional[str] = None,
-    limit: int = 100
-):
-    """Get activity history for a specific agent."""
-    container = get_agent_container(agent_name)
-    if not container:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    activities = db.get_agent_activities(
-        agent_name=agent_name,
-        activity_type=activity_type,
-        activity_state=activity_state,
-        limit=limit
-    )
-
-    return {
-        "agent_name": agent_name,
-        "count": len(activities),
-        "activities": activities
-    }
-
-
-@router.get("/activities/timeline")
-async def get_activity_timeline(
-    start_time: Optional[str] = None,
-    end_time: Optional[str] = None,
-    activity_types: Optional[str] = None,
-    limit: int = 100,
-    current_user: User = Depends(get_current_user)
-):
-    """Get cross-agent activity timeline."""
-    types_list = activity_types.split(",") if activity_types else None
-
-    all_activities = db.get_activities_in_range(
-        start_time=start_time,
-        end_time=end_time,
-        activity_types=types_list,
-        limit=limit * 2
-    )
-
-    filtered_activities = []
-    for activity in all_activities:
-        agent_name = activity.get("agent_name")
-        if db.can_user_access_agent(current_user.username, agent_name):
-            filtered_activities.append(activity)
-            if len(filtered_activities) >= limit:
-                break
-
-    return {
-        "count": len(filtered_activities),
-        "start_time": start_time,
-        "end_time": end_time,
-        "activity_types": types_list,
-        "activities": filtered_activities  # Frontend expects "activities" (fixed 2026-01-15)
-    }
 
 
 # ============================================================================

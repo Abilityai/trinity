@@ -373,3 +373,44 @@ journeys:
     # No catalog invariant covers "a pointer grants no access" yet — an empty
     # list, not an invented id.
     invariants: []
+
+  - id: J21
+    issue: "abilityai/trinity-enterprise#795"
+    promise: "A business action my agent asks another agent for runs only after the right person approves it, exactly once, and my agent is told how it ended."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: tests/system_chains/test_j21_approval_chain.py
+    built: false
+    owner: trinity
+    # `partial` until the canon approval map exists (ent#757): the gate is set on
+    # the instance and the canon half reports NOT RUN. Expiry waits a real hour,
+    # so it runs only with CHAIN_GATE_EXPIRY=1. No catalog invariant covers
+    # "approval before run, exactly once" yet — an empty list, not an invented id.
+    invariants: []
+
+  - id: J22
+    issue: "abilityai/trinity-enterprise#795"
+    promise: "A project is worked by agents and people from open to close: an agent cannot close its own task, a person verifies it, and anyone on the project can read who did what."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: tests/system_chains/test_j22_project_chain.py
+    built: false
+    owner: trinity
+    # `partial`: tasks are not dispatched to agents as playbook calls and there is
+    # no steward run to repeat — both report NOT RUN until the project skills'
+    # platform mode (ent#788).
+    invariants: []
+
+  - id: J23
+    issue: "abilityai/trinity-enterprise#795"
+    promise: "My project's record shows an action approved inside it: who approved it and how it ended."
+    actor: user
+    lanes: [local]
+    tier: live-stack
+    harness: tests/system_chains/test_j23_approved_action_in_project_chain.py
+    built: false
+    owner: trinity
+    # Skeleton: NOT RUN — no platform writer joins a gate request to a project (ent#880).
+    invariants: []

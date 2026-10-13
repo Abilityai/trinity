@@ -16,13 +16,13 @@ import { strict as assert } from "node:assert";
 import { createLoopTools } from "./loops.js";
 import { createChatTools } from "./chat.js";
 import { TOOL_ACCESS_POLICY, withAgentAccess, type ToolAccessPolicy } from "../access.js";
-import type { TrinityClient } from "../client.js";
+import { ApiError, type TrinityClient } from "../client.js";
 import type { LoopStatus, McpAuthContext } from "../types.js";
 
 type FakeOpts = {
   permitted?: boolean;
   loop?: Partial<LoopStatus> | null;
-  statusThrows?: string;
+  statusThrows?: string | Error;
   stopThrows?: string;
 };
 
@@ -41,7 +41,7 @@ function makeFake(opts: FakeOpts = {}) {
     },
     getLoopStatus: async (id: string) => {
       calls.push(`status:${id}`);
-      if (opts.statusThrows) throw new Error(opts.statusThrows);
+      if (opts.statusThrows) throw opts.statusThrows instanceof Error ? opts.statusThrows : new Error(opts.statusThrows);
       const loop =
         opts.loop === undefined
           ? { loop_id: id, agent_name: "bravo-agent", status: "running", runs: [{ run_number: 1 }], last_response: "SECRET-REPLY", total_cost: 0.5 }
@@ -181,6 +181,19 @@ describe("ent#628 get_loop_status resolves, then gates", () => {
     assert.match(out.error, /API error \(404\)/);
   });
 
+  it("a backend 403 on the read (ent#629 reach) is the same uniform refusal, never a raw API error", async () => {
+    const { fake, calls } = makeFake({ statusThrows: new ApiError(403, '{"detail":"Access denied"}') });
+    const tools = createLoopTools(fake, false);
+    const text = await tools.getLoopStatus.execute({ loop_id: "loop_1" }, session("agent", "alpha"));
+    const out = JSON.parse(text);
+    assert.equal(out.success, false);
+    assert.equal(out.error, "Access denied");
+    assert.equal(out.reason, "Loop 'loop_1' not found or not accessible");
+    assert.ok(out.hint);
+    assert.ok(!text.includes("API error"));
+    assert.deepEqual(calls, ["status:loop_1"]);
+  });
+
   it("a user key reads through — the backend already authorised the fetch", async () => {
     const { fake, calls } = makeFake({ permitted: false });
     const tools = createLoopTools(fake, false);
@@ -198,6 +211,15 @@ describe("ent#628 stop_loop resolves, then gates, then stops", () => {
     assert.equal(out.success, false);
     assert.equal(out.reason, "Loop 'loop_1' not found or not accessible");
     assert.deepEqual(calls, ["status:loop_1", "perm:alpha->bravo-agent"]);
+  });
+
+  it("a backend 403 on the resolve refuses uniformly and never sends the stop", async () => {
+    const { fake, calls } = makeFake({ statusThrows: new ApiError(403, '{"detail":"Access denied"}') });
+    const tools = createLoopTools(fake, false);
+    const out = JSON.parse(await tools.stopLoop.execute({ loop_id: "loop_1" }, session("agent", "alpha")));
+    assert.equal(out.success, false);
+    assert.equal(out.reason, "Loop 'loop_1' not found or not accessible");
+    assert.deepEqual(calls, ["status:loop_1"]);
   });
 
   it("a permitted caller stops the loop once", async () => {

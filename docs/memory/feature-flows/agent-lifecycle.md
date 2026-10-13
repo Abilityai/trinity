@@ -399,6 +399,7 @@ async def start_agent_internal(agent_name: str) -> dict:
     #   - Neither: both must be absent
     await container_reload(container)
     was_already_running = getattr(container, "status", None) == "running"
+    mcp_key_match = check_agent_mcp_key_matches(container, agent_name)  # #1854: one verdict, used twice
     needs_recreation = (
         not await check_shared_folder_mounts_match(container, agent_name) or
         not check_public_folder_mount_matches(container, agent_name) or
@@ -407,10 +408,12 @@ async def start_agent_internal(agent_name: str) -> dict:
         not check_resource_limits_match(container, agent_name) or
         not check_full_capabilities_match(container, agent_name) or
         not check_guardrails_env_matches(container, agent_name) or
-        not check_agent_auth_token_env_matches(container, agent_name)
+        not check_agent_auth_token_env_matches(container, agent_name) or
+        not check_pull_mode_env_matches(container, agent_name) or   # #3590, flag only
+        not mcp_key_match
     )
 
-    # #1809: ninth predicate — a rebuilt trinity-agent-base is adopted on the
+    # #1809: image predicate — a rebuilt trinity-agent-base is adopted on the
     # next COLD start. Lazy (the Docker round-trip runs only when no other
     # predicate already fired), gated on `not was_already_running` (a start of
     # a RUNNING agent stays an idempotent no-op — never an image-driven kill),
@@ -550,6 +553,26 @@ shape #1816 was filed to fix. #1816's intent (`trinity-system` never loses `unle
 recreate) now holds fleet-wide by construction. See [container-capabilities.md](container-capabilities.md)
 → Container Restart Policy.
 
+**Pull-worker opt-in — one owner, #3590** *(the same shape as #2541, one property later)*: the
+`TRINITY_PULL_MODE` / `TRINITY_MAX_PARALLEL_TASKS` pair is applied by `pull_mode.apply_pull_mode_env`
+(pop `PULL_MODE_ENV_KEYS`, then `.update(pull_mode_env_vars(name))`) from **all three** env assemblers —
+`crud._build_env_vars`, `recreate_container_with_updated_config` and `recreate_missing_container`. The
+rebuild-from-nothing path re-derives its env independently and had never applied the opt-in, so
+`docker rm -f` + `POST /start` rebuilt a pilot with no worker while `is_pull_pilot_agent` (allowlist only)
+kept routing its work to the durable queue — every task sat `queued`, no log line, agent reported healthy.
+`test_1811`'s literal-key parity scan could not see it: the keys reach create through a helper call, and it
+scans `_build_base_env`, one of six create sub-builders. Guard: `tests/unit/test_3590_rebuild_pull_env.py`
+drives the real `recreate_missing_container` and guards the writer set by AST in two halves: the three known
+assemblers are pinned on the call, and an unknown fourth is *found* — every caller of the shared provision tail
+must call the helper, and every `containers_run(..., environment=)` site under `services/` (rglob) must be a
+registered runner. `system_agent_service._create_system_agent` is registered with its reason: `trinity-system`
+assembles its own env and is not a pull pilot; if an operator ever lists it, the predicate recreates it on its
+next cold start through the drift path, which applies the helper. The drift predicate
+`check_pull_mode_env_matches` (tenth term of the `needs_recreation` chain; the #1809 image check runs after
+it) compares the baked flag with the allowlist in both directions (pre-flag container on a pilot, stale flag after de-pilot) and
+NOT the pool size (#3039's live resize); unobserved attrs match, never a 500 on the start path. Canary B-08
+`workers_missing` (#2840) still reports the state; it no longer needs a manual recreate to clear it.
+
 **Canonical cold restart — `restart_agent_internal` (#1860)** (`src/backend/services/agent_service/lifecycle.py:469-488`, directly after `start_agent_internal` :257):
 
 ```python
@@ -639,10 +662,7 @@ async def get_agent_logs_endpoint(agent_name: AuthorizedAgentByName, request: Re
 
 #### Activity Stream Endpoints
 
-| Endpoint | Line | Description |
-|----------|------|-------------|
-| `GET /api/agents/{agent_name}/activities` | :568-591 | Agent activity history. Params: `activity_type`, `activity_state`, `limit` |
-| `GET /api/agents/activities/timeline` | :594-626 | Cross-agent activity timeline. Params: `start_time`, `end_time`, `activity_types` (CSV), `limit`. Filters by user access |
+None in `routers/agents.py` — the per-agent `GET /api/agents/{agent_name}/activities` and `GET /api/agents/activities/timeline` had no callers and were removed in #3434. The cross-agent timeline is `GET /api/activities/timeline` (`routers/activities.py`); see [activity-stream.md](activity-stream.md).
 
 ### Docker Service (`src/backend/services/docker_service.py`)
 
@@ -1087,6 +1107,7 @@ await log_audit_event(
 
 | Date | Changes |
 |------|---------|
+| 2026-10-12 | **#3590 — the #1559 rebuild bakes the pull-worker env**: `pull_mode.apply_pull_mode_env` is the one owner of the set-or-clear idiom, called from all three env assemblers (`crud._build_env_vars`, drift recreate, `recreate_missing_container`); `check_pull_mode_env_matches` joins the start-path drift chain (flag only, fail-safe on unobserved attrs) so a pilot running a pre-flag container — or a de-piloted agent still carrying the flag — is recreated on `POST /start`; two warnings where the path used to be silent (pool-size settings fallback; pull env applied with no `TRINITY_MCP_API_KEY`). Guard: `tests/unit/test_3590_rebuild_pull_env.py` (21; with the rebuild call removed four go red: the rebuild test, the mint-failure warning test, the AST writer-set pin and the provision-tail caller scan). See → Pull-worker opt-in. |
 | 2026-09-07 | **#2541 — agent containers are born `unless-stopped`**: `AGENT_RESTART_POLICY` joins `AGENT_TMPFS_MOUNT` / `AGENT_LOG_CONFIG` in `capabilities.py` and is passed by all three create sites; the shared recreate tail bakes it **unconditionally**, which retires #1816's keyword-only `restart_policy` carry-forward and its now-dead `old_host_config` extraction — a faithful carry-forward carried Docker's default `no` forward forever, and the tail's other caller (`recreate_missing_container`, #1559) passed nothing at all. `restarting` now normalizes to `stopped` in **both** `docker_service` normalizers. Guard: `tests/unit/test_2541_restart_policy_parity.py`. Existing containers adopt on recreate — [AGENT_RESTART_POLICY_2026-09.md](../../migrations/AGENT_RESTART_POLICY_2026-09.md). |
 | 2026-07-31 | **#1919 — fleet-restart lock hardening** (PR #1912 review follow-up): the per-iteration lease refresh became an ownership-checked pre-action gate (`lock_token_matches` shared helper in `redis_breaker_util`, foreign ⇒ stop with `stopped_early="lease_lost_foreign"` + `processed` partial-run honesty in summary/audit, absent ⇒ SETNX re-acquire + `lease_reacquired` audit flag, EXPIRE→0 = absent, refresh errors fail-open with one throttled warning); `list_all_agents_fast()` moved inside the `try/finally` (abnormal exit audited as `stopped_early="error"` + class name); TTL 900→2100 sized above `skill_service._INJECT_LOCK_TTL_SECONDS` (1800) so one slow agent can no longer outlive the whole lease. +11 unit tests. |
 | 2026-07-31 | **#1860 — fleet restart adopts a rebuilt base image**: new canonical cold-restart helper `restart_agent_internal(agent_name, *, stop_timeout=30)` (`lifecycle.py:469-488` — explicit stop is load-bearing so the #1809 cold-start-only drift predicate can fire); `POST /api/ops/fleet/restart` routes each agent through it instead of raw stop+start, skips ephemeral ghosts (ent#69), adds `reject_agent_principal`, a single-flight `ops:fleet_restart` SETNX lock (409, 900s TTL, compare-and-delete release), explicit `recreated`/`recreate_reason`/injection field copy + `summary.recreated`, and a partial-safe `fleet_restart` audit entry written in `finally` with a per-agent `recreated: {name: reason}` map. Inline stop→start copies in `system_agent.py`/`systems.py`/`subscription_auto_switch.py` consolidate under #1817. See "Canonical cold restart" above. |

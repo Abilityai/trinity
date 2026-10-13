@@ -115,7 +115,7 @@ Every MCP key carries a scope. The scope is fixed at creation and decides what t
 | Scope | What it can reach | How it is created |
 |-------|-------------------|-------------------|
 | `user` | **The owner's full role**, including admin. Every write, every MCP tool. Never expires. | Any user, for themselves — **Settings → MCP Keys → Create API Key** (the default; admins see it as the **Standard** choice under **Key scope**) |
-| `agent` | Its own agent (heartbeats, reports, result callbacks) plus whatever its owner has shared with it; agent-to-agent calls are governed by the permissions matrix. **Never satisfies an admin gate.** | Minted automatically when an agent is created and injected into the container |
+| `agent` | Its own agent (heartbeats, reports, result callbacks), the agents it is permitted to call, and the agents it spawned — see [What an agent key reaches](#what-an-agent-key-reaches). **Never satisfies an admin gate.** | Minted automatically when an agent is created and injected into the container |
 | `system` | The platform's own system agent; bypasses agent permission checks | Minted for `trinity-system` only |
 | `connector` | Consumption-only, bound to one agent: its exposed skills and chat, nothing else | Minted from the agent's **Expose via MCP** panel (`POST /api/agents/{name}/connector/key`, owner only); the secret is shown once |
 | `portal_delegate` | Exactly one route — exchanging an end-user email for a Workspace session, so a trusted backend can act as that person. Every other path is refused. | Admin, human-only — the **Portal delegate** choice on the create-key form; the exchange endpoint requires an entitlement |
@@ -156,10 +156,22 @@ The human-only gate applies to:
 
 Two more sets of routes are human-only for any owner, not only admins:
 
-- **A person only** — a browser session or the person's own `user` key. Agent-scoped keys (on their own agent or any other), the system key, and every other scope get a 403 with code `person_required`. This covers every agent configuration write under `PUT /api/agents/{name}/...`: `autonomy`, `read-only`, `resources`, `capabilities`, `capacity`, `timeout`, `public-channel-model`, `guardrails` and `api-key-setting`, plus turning an agent's git pull sync on or off (`PUT /api/agents/{name}/git/pull-sync`). The refusal comes before the owner check, so it reveals nothing about whether the agent exists. An agent's own key can still create, enable and disable its schedules; autonomy decides whether they fire.
+- **A person only** — a browser session or the person's own `user` key. Agent-scoped keys (on their own agent or any other), the system key, and every other scope get a 403 with code `person_required`. This covers `PUT /api/agents/{name}/autonomy`, `capabilities`, `capacity` and `api-key-setting`, plus turning an agent's git pull sync on or off (`PUT /api/agents/{name}/git/pull-sync`). The refusal comes before the owner check, so it reveals nothing about whether the agent exists. An agent's own key can still create, enable and disable its schedules; autonomy decides whether they fire.
+- **A person, or an agent an admin granted the permission** — `PUT /api/agents/{name}/read-only`, `resources`, `timeout`, `public-channel-model` and `guardrails` accept an agent key only while that agent holds **Manage other agents**, only on an agent its owner owns, and never its own read-only mode or guardrails. Without the grant the agent gets a named 403 (`agent_management_not_permitted`). Other agent writes are fenced the same way: another agent's schedules, instruction files, creating and deleting agents, and skills. See [Agent Configuration → Permissions to Change Itself](../agents/agent-configuration.md#permissions-to-change-itself).
 - **A signed-in session only** — no MCP key of any scope, your own included. This covers creating or listing MCP keys, changing your sign-in email (`POST /api/users/me/email/code` and `PUT /api/users/me/email`), setting or clearing your personal GitHub token (`PUT` / `DELETE /api/users/me/github-pat`), and your stored UI preferences (`/api/users/me/preferences`).
 
 If you hit a 403 on one of these from an automation, that is the gate working as intended — perform the action from the UI or with a user session.
+
+### What an agent key reaches
+
+An agent-scoped key carries its owner's role, but on the backend's own routes it reaches only:
+
+- **Its own agent.**
+- **Agents it may call** — those its owner allowed on its [Permissions](../collaboration/agent-permissions.md) tab. It can chat with them, give them tasks and loops, and read their history and logs. Being allowed to call an agent never lets it manage that agent.
+- **Agents it spawned** with its current key. It can call and manage those.
+- **The owner's other agents, on the routes a granted permission covers** — for example another agent's schedule routes for an agent holding **Change other agents' schedules**. See [Permissions to Change Itself](../agents/agent-configuration.md#permissions-to-change-itself).
+
+Any other agent is refused with the same answer as an agent the key may not access (usually `404`, as for one that does not exist), so the key learns nothing about it. This applies whether the agent calls through MCP tools or straight against the backend with its injected key. The operator queue an agent key reads is narrowed the same way, and an agent key never gets the admin view of every user's chat history or sessions. Fleet-wide list routes, such as the agent list, are not narrowed this way: they still answer an agent key with its owner's view. People, `user` keys and the system key are not affected.
 
 ### WebSocket Authentication
 

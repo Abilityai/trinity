@@ -1,3 +1,4 @@
+import { unitsAgo } from '@/utils/timestamps'
 // ===========================================================================
 // Cost formatting (#92) — the single, canonical way to render a USD cost.
 // Do NOT inline `toFixed` on cost values or add local `formatCost` helpers;
@@ -176,10 +177,9 @@ export function useFormatters() {
     const diffSeconds = Math.floor((now - date) / 1000)
 
     if (diffSeconds < 60) return 'just now'
-    const ago = (n, unit) => `${n} ${unit}${n === 1 ? '' : 's'} ago`
-    if (diffSeconds < 3600) return ago(Math.floor(diffSeconds / 60), 'minute')
-    if (diffSeconds < 86400) return ago(Math.floor(diffSeconds / 3600), 'hour')
-    if (diffSeconds < 604800) return ago(Math.floor(diffSeconds / 86400), 'day')
+    if (diffSeconds < 3600) return unitsAgo(Math.floor(diffSeconds / 60), 'minute')
+    if (diffSeconds < 86400) return unitsAgo(Math.floor(diffSeconds / 3600), 'hour')
+    if (diffSeconds < 604800) return unitsAgo(Math.floor(diffSeconds / 86400), 'day')
     return date.toLocaleDateString()
   }
 

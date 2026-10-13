@@ -19,6 +19,37 @@ from testkit.assertions import (
 )
 
 
+def _timeline_watermark(api_client):
+    """`created_at` of the newest timeline row (None if unreadable or empty).
+
+    Passed back as `start_time`, it bounds a later read to "rows written from
+    here on" by the backend's own clock.
+    """
+    response = api_client.get("/api/activities/timeline", params={"limit": 1})
+    if response.status_code != 200:
+        return None
+    rows = response.json().get("activities", [])
+    return rows[0].get("created_at") if rows else None
+
+
+def _agent_activities(api_client, agent_name, limit=500, since=None):
+    """One agent's activity rows, or None when the timeline read fails.
+
+    #3434 removed `GET /api/agents/{name}/activities` (no product caller); read
+    the live cross-agent timeline and filter client-side by agent, as the MCP
+    tool `get_agent_activity_summary` does. The route has no agent filter, so
+    callers looking for rows they have just caused pass `since`: unbounded, the
+    read is the newest `limit` rows of the whole fleet.
+    """
+    params = {"limit": limit}
+    if since:
+        params["start_time"] = since
+    response = api_client.get("/api/activities/timeline", params=params)
+    if response.status_code != 200:
+        return None
+    return [a for a in response.json().get("activities", []) if a.get("agent_name") == agent_name]
+
+
 class TestParallelTaskEndpoint:
     """REQ-PARALLEL-001: Parallel task endpoint tests."""
 
@@ -686,16 +717,10 @@ class TestAsyncModeActivities:
         created_agent
     ):
         """Async task creates TASK_STARTED activity."""
-        # Get initial activity count
-        activities_before = api_client.get(
-            f"/api/agents/{created_agent['name']}/activities"
-        )
-
-        # Activities endpoint returns {"agent_name": ..., "count": ..., "activities": [...]}
-        initial_count = 0
-        if activities_before.status_code == 200:
-            data = activities_before.json()
-            initial_count = data.get("count", 0)
+        # Get initial activity count, bounded server-side to "from now on"
+        since = _timeline_watermark(api_client)
+        activities_before = _agent_activities(api_client, created_agent['name'], since=since)
+        initial_count = len(activities_before) if activities_before is not None else 0
 
         # Submit async task
         response = api_client.post(
@@ -717,12 +742,9 @@ class TestAsyncModeActivities:
         current_count = initial_count
 
         while time.time() - start < max_wait:
-            activities_after = api_client.get(
-                f"/api/agents/{created_agent['name']}/activities"
-            )
-            if activities_after.status_code == 200:
-                data = activities_after.json()
-                current_count = data.get("count", 0)
+            activities_after = _agent_activities(api_client, created_agent['name'], since=since)
+            if activities_after is not None:
+                current_count = len(activities_after)
                 if current_count > initial_count:
                     break
             time.sleep(2)
@@ -817,6 +839,7 @@ class TestAsyncModeUnifiedExecutor:
         includes async /task executions after the refactor.
         """
         agent_name = created_agent["name"]
+        since = _timeline_watermark(api_client)
 
         resp = api_client.post(
             f"/api/agents/{agent_name}/task",
@@ -832,10 +855,10 @@ class TestAsyncModeUnifiedExecutor:
         found = None
         for _ in range(15):
             time.sleep(1)
-            acts_resp = api_client.get(f"/api/agents/{agent_name}/activities")
-            if acts_resp.status_code != 200:
+            acts = _agent_activities(api_client, agent_name, since=since)
+            if acts is None:
                 continue
-            for a in acts_resp.json().get("activities", []):
+            for a in acts:
                 if a.get("activity_type") != "chat_start":
                     continue
                 details = a.get("details")

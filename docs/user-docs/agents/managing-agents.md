@@ -34,7 +34,7 @@ Click any agent to open its detail page. The page lands on the **Overview** tab 
 
 Tabs marked *owners only* are hidden from users an agent is merely shared with, and are never shown on the system agent. **Dashboard**, **Brain**, **Git**, and **A2A** appear only when that agent or instance supports them.
 
-Every visible tab is deep-linkable with `?tab=` — including the conditional ones. A `?tab=` value naming a tab you cannot see falls back to Overview. Three legacy links still resolve: `?tab=guardrails` opens **Settings**, `?tab=playbooks` opens **Skills**, and `?tab=session` redirects to that agent's [Workspace](../sharing-and-access/workspace.md) conversation.
+Every visible tab is deep-linkable with `?tab=` — including the conditional ones. The URL follows the tab you pick, so a reload keeps you on that tab, you can copy the address to link to it, and the browser's Back button steps back through the tabs you visited before it leaves the page. Returning to an agent page through a link that names no tab (from the Dashboard, say) keeps the tab you were on, as long as that agent has it. A `?tab=` value naming a tab you cannot see falls back to Overview, and the address is corrected to match. Three legacy links still resolve: `?tab=guardrails` opens **Settings**, `?tab=playbooks` opens **Skills**, and `?tab=session` redirects to that agent's [Workspace](../sharing-and-access/workspace.md) conversation.
 
 When the window is too narrow to fit every tab, the trailing tabs collapse into a **More ▾** menu at the end of the tab strip. If the active tab is inside the menu, the More button carries the active highlight. Deep links via `?tab=` work either way.
 

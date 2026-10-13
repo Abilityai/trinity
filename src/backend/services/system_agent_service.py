@@ -134,11 +134,6 @@ class SystemAgentService:
         await container_reload(container)
         return container.status == "running"
 
-    def is_registered(self) -> bool:
-        """Check if the system agent is registered in the database."""
-        owner = db.get_agent_owner(SYSTEM_AGENT_NAME)
-        return owner is not None
-
     async def ensure_deployed(self) -> dict:
         """
         Ensure the system agent is deployed and running.

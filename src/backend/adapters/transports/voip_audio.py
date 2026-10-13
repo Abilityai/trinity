@@ -34,12 +34,3 @@ def pcm24k_to_ulaw8k(pcm24: bytes, state):
     """
     pcm8, state = audioop.ratecv(pcm24, SAMPLE_WIDTH, 1, GEMINI_OUT_RATE, TWILIO_SAMPLE_RATE, state)
     return audioop.lin2ulaw(pcm8, SAMPLE_WIDTH), state
-
-
-def pop_frames(buffer: bytearray):
-    """Pop all complete 160-byte μ-law frames from `buffer` (mutates it)."""
-    frames = []
-    while len(buffer) >= FRAME_BYTES:
-        frames.append(bytes(buffer[:FRAME_BYTES]))
-        del buffer[:FRAME_BYTES]
-    return frames

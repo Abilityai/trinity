@@ -51,6 +51,12 @@ class WorkspaceAsk(BaseModel):
     # Discuss are refused on a shared ask (`shared_ask`) until they are per
     # person.
     answered_by: Optional[str] = None
+    # trinity#3524: the viewer's OWN answer to an ask they answered (`ended_by
+    # = you`) — the decision as `WorkspaceAskAnswered.answer` reads it, and
+    # their note when they gave one; both excerpts. None on every other ask:
+    # an operator's or a co-addressee's note never crosses.
+    answer: Optional[str] = None
+    answer_note: Optional[str] = None
     shared: bool = False
     chat_id: Optional[str] = None   # the thread it was attached to, when known
     # ent#734: raised BY the turn serving `chat_id` (draw it as a tile there),
@@ -71,6 +77,12 @@ class WorkspaceAsk(BaseModel):
     # gate). The surface hides the "Something else" chip, which the sink would
     # refuse (`not_off_menu`). Says nothing else about the gate.
     decided_by_options: bool = False
+    # trinity-enterprise#755: the gated-skill approval card's platform view
+    # (`skill_gate_service.card_view`) — the skills and their descriptions, who
+    # asked, who it waits on, and how the request ended. Platform-computed from
+    # the gate's record, for an ask the gate raised; None otherwise. Execution
+    # ids are filled for a platform viewer only.
+    gate: Optional[Dict[str, Any]] = None
     # ent#430 AC #5: whether answering this ask sets work in motion, so a
     # surface can say "answered" without implying the agent started working.
     # Populated only on the ANSWER response — a pending ask has not been
@@ -152,6 +164,10 @@ class WorkspaceAskAnswered(BaseModel):
     title: str
     answer: Optional[str] = None
     ended_at: Optional[str] = None
+    # trinity#3524: what a gated-skill approval asked for — every gate ask on
+    # one agent shares a title — as a short excerpt of the request typed that
+    # turn. None for any other ask.
+    request: Optional[str] = None
 
 
 class WorkspaceAskContext(BaseModel):

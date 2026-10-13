@@ -84,6 +84,22 @@ from services.platform_prompt_service import (
     is_execution_context_enabled,
 )
 from db.write_params import ExecutionResult, TaskExecutionFields
+from db.skill_gate_requests import APPROVED_RUN_STATES
+
+
+def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str]) -> Optional[str]:
+    """The person a scheduled seat run is addressed to (ent#637), or None —
+    picks the seat the prompt names (trinity-enterprise#814). One row read, and
+    only for a schedule fire; fail-soft."""
+    from services import schedule_seat_memory
+
+    if not execution_id or (triggered_by or "").lower() not in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS:
+        return None
+    try:
+        return schedule_seat_memory.seat_for_execution(db.get_execution(execution_id))
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_served_person_for({execution_id}) failed: {e}")
+        return None
 
 
 def _resolve_agent_runtime(agent_name: str) -> str:
@@ -1936,7 +1952,7 @@ class TaskExecutionService:
             if execution_id:
                 approved = db.get_gate_request_by_dispatched_execution(execution_id)
                 if (approved and approved.get("agent_name") == agent_name
-                        and approved.get("state") in ("dispatching", "dispatched")):
+                        and approved.get("state") in APPROVED_RUN_STATES):
                     return
             fields = _with_row_attribution(fields, execution_id)
             requester = gate_requester or skill_gate_service.requester_for_dispatch(
@@ -2305,6 +2321,7 @@ class TaskExecutionService:
                 schedule_cron=(schedule_context or {}).get("cron"),
                 schedule_next_run=(schedule_context or {}).get("next_run"),
                 execution_id=execution_id,
+                served_person_email=_served_person_for(execution_id, triggered_by),
             )
             effective_system_prompt = compose_system_prompt(
                 execution_context=exec_ctx,
@@ -3267,6 +3284,9 @@ class TaskExecutionService:
                         compact_metadata=compact_metadata_json,
                         retry_count=envelope.retry_count or None,
                         turn_integrity=turn_integrity_json,
+                        # #3589: the producer's terminal instant (the watchdog
+                        # claim's `retained_at`); None = the writer stamps now.
+                        completed_at=envelope.completed_at,
                     ),
                 )
                 if not won:
@@ -3303,6 +3323,7 @@ class TaskExecutionService:
                 await activity_service.complete_activity(
                     activity_id=activity_id,
                     status=ActivityState.COMPLETED,
+                    completed_at=envelope.completed_at,  # #3589, same instant as the row
                     details={
                         "session_id": envelope.session_id,
                         "cost_usd": total_cost,
@@ -3428,6 +3449,7 @@ class TaskExecutionService:
                     tool_calls=salvage_tool_calls_json,
                     claude_session_id=salvage_session_id,
                     retry_count=envelope.retry_count or None,
+                    completed_at=envelope.completed_at,  # #3589
                 ),
             )
         # #671/H4: complete the activity, record the AUTH breaker outcome, and
@@ -3440,6 +3462,7 @@ class TaskExecutionService:
                 activity_id=activity_id,
                 status=activity_state_for_terminal(envelope.status),
                 error=envelope.error,
+                completed_at=envelope.completed_at,  # #3589, same instant as the row
             )
         # Compare by ``.value``, NOT by enum-member equality — ``@dataclass`` on
         # the fieldless ``TaskExecutionErrorCode`` str-Enum gives every member a

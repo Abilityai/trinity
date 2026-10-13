@@ -95,7 +95,7 @@
 - **Configurable Settings** (via Settings UI or DB):
   - `channel_rate_limit_max` — Messages per window (default: 30)
   - `channel_rate_limit_window` — Window in seconds (default: 60)
-  - `channel_timeout_seconds` — Execution timeout (default: 120)
+  - `channel_timeout_seconds` — no reader since #221 (channel executions use the agent's own timeout); setting it has no effect
   - `channel_allowed_tools` — Comma-separated tool list (default: WebSearch,WebFetch)
 - **API Endpoints (new in 2026-03-26)**:
   - `GET /api/settings/slack/status` — Transport connection state + workspace info
@@ -798,11 +798,12 @@ degrade quietly). #2086 centralizes it.
   selectable Claude model, add one `ModelEntry` to `MODEL_CATALOG` and re-run
   `python scripts/gen_model_catalog.py`.** This is the docs/PR-checklist step the
   AC requires ("docs say where the file is").
-- **FR-7 — Known-deferred display drift**: `routers/ops.py::_format_model_name` and
-  its frontend twin `stores/observability.js::formatModelName` are display
-  prettifiers with no model list (a new id renders via their title-case fallback).
-  They are the same drift class but are **deliberately out of scope** for #2086 —
-  tracked as a follow-up, not silently folded into the centralized catalog.
+- **FR-7 — Known-deferred display drift**: `services/ops_costs_service.py::_format_model_name`
+  (formerly in `routers/ops.py`) is a display prettifier with no model list (a new
+  id renders via its title-case fallback). It is the same drift class but is
+  **deliberately out of scope** for #2086 — tracked as a follow-up, not silently
+  folded into the centralized catalog. Its former frontend twin,
+  `stores/observability.js::formatModelName`, was removed with the store in #3434.
 
 ### 48.1 Voice Replies v2 — Voice as a Per-Message Capability (trinity-enterprise#117)
 
@@ -1065,9 +1066,12 @@ private module; this section is the edition-agnostic surface it needs.
   creator), where it stands (tasks by status, and what needs attention, each
   opening Tasks), the declared agent metrics a member picked (value, a small
   trend, and the platform's one stale verdict), and **Needs you**: the
-  viewer's own open asks on the project, answered in place with the Inbox's
-  component (`PortalAsks` narrowed by `askIds` — it can only narrow the
-  viewer's own list), with everyone else's as a count. The Projects list shows
+  viewer's own open asks on the project as Inbox-style list rows (agent,
+  when, one-line title — never the ask's body, #3574), each answered in place
+  behind **Answer** with the Inbox's component (`PortalAsks` narrowed by
+  `askIds` — it can only narrow the viewer's own list) or opened selected in
+  the Inbox, with everyone else's as a count; the hub's cards size to their
+  own content, never to a neighbour's. The Projects list shows
   health and an attention count per row, and an **I steward** tab lists what
   needs the steward across their projects. Guests see none of it. An ask an
   agent raises over MCP records the raising turn from the same

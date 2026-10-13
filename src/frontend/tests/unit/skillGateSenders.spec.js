@@ -125,6 +125,56 @@ describe('ChatPanel', () => {
     expect(second.message).not.toContain(NOTICE)
   })
 
+  // trinity#3526 — the held request is saved to the conversation, so a reload
+  // shows it, with the decision once there is one, and still out of the history.
+  const DECIDED = 'Your request gate-abc to run the skill pay-invoice on fin was rejected; nothing was run.'
+  const stored = (gate) => ({ data: { messages: [
+    { role: 'user', content: '/pay-invoice 100 EUR', source: 'gate:gate-abc', timestamp: '2026-10-11T00:29:08Z', gate },
+    { role: 'system', content: NOTICE, source: 'gate:gate-abc', timestamp: '2026-10-11T00:29:08Z', gate },
+  ] } })
+  const reloaded = (gate) => ({
+    '/chat/sessions/s1': stored(gate),
+    '/chat/sessions': { data: { sessions: [{ id: 's1', status: 'active' }] } },
+  })
+
+  it('shows a saved held request and its notice after a reload', async () => {
+    serve(reloaded({ request_id: 'gate-abc', state: 'pending', text: null }))
+    const w = await chatPanel()
+    expect(w.text()).toContain('/pay-invoice 100 EUR')
+    expect(w.find('[data-testid="chat-system-line"]').text()).toBe(NOTICE)
+  })
+
+  it('shows the decision in place of the waiting notice once it is decided', async () => {
+    serve(reloaded({ request_id: 'gate-abc', state: 'denied', text: DECIDED }))
+    const w = await chatPanel()
+    expect(w.find('[data-testid="chat-system-line"]').text()).toBe(DECIDED)
+    expect(w.text()).not.toContain('waiting for a decision')
+  })
+
+  it('leaves a saved held request out of the next turn\'s history', async () => {
+    serve(reloaded({ request_id: 'gate-abc', state: 'denied', text: DECIDED }),
+      { '/task': PENDING })
+    const w = await chatPanel()
+    await w.vm.sendMessage('what is on today?')
+    await flush()
+    const sent = axios.post.mock.calls.find(c => c[0].endsWith('/task'))[1]
+    expect(sent.message).toBe('what is on today?')
+    expect(sent.chat_session_id).toBe('s1')
+  })
+
+  it('adopts the session the held request was saved to', async () => {
+    serve({ '/chat/sessions': { data: [] } },
+      { '/task': { ...PENDING, data: { ...PENDING.data, chat_session_id: 's9' } } })
+    const w = await chatPanel()
+    await w.vm.sendMessage('/pay-invoice 100 EUR')
+    await flush()
+    await w.vm.sendMessage('what is on today?')
+    await flush()
+    const second = axios.post.mock.calls.filter(c => c[0].endsWith('/task'))[1][1]
+    expect(second.chat_session_id).toBe('s9')
+    expect(second.create_new_session).toBe(false)
+  })
+
   it('names a refusal instead of an object', async () => {
     serve({ '/chat/sessions': { data: [] } }, { '/task': () => Promise.reject(refusal()) })
     const w = await chatPanel()

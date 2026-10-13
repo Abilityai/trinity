@@ -652,6 +652,10 @@ class PortalRoleMetric(BaseModel):
     projection of the objective ↔ metric join (`ObjectiveMetricRead`), never
     that model whole. A field added here is a disclosure decision."""
     name: str
+    # ent#843: what the card shows — the declared label, the label every
+    # declaring agent agrees on, or the code name turned into words. Never a
+    # raw snake_case name.
+    label: str = ""
     # primary | guard (ent#731) — a fixed value, so a guard row can be labelled
     # without any author text crossing.
     role: str = "primary"
@@ -673,9 +677,15 @@ class PortalRoleMetric(BaseModel):
 class PortalRoleObjective(BaseModel):
     id: str
     statement: Optional[str] = None
+    # ent#843: the canon's plain heading for client screens, when written.
+    client_heading: Optional[str] = None
     horizon: Optional[str] = None
     status: Optional[str] = None
     owned: bool = False
+    # ent#843: for a SUPPORTED objective — another of the owner's agents
+    # declares its numbers. Said once per objective, never per metric, and
+    # never which agent: external clients read this card.
+    tracked_elsewhere: bool = False
     metrics: list[PortalRoleMetric] = Field(default_factory=list)
 
 
@@ -688,7 +698,7 @@ class PortalRoleInfo(BaseModel):
     stale: bool = False
     path: Optional[str] = None
     # role_file_not_found | role_file_unreadable | role_file_invalid |
-    # role_id_invalid | canon_path_invalid — the card SAYS the file failed.
+    # role_id_invalid | canon_path_invalid | no_seat — the card SAYS why.
     error: Optional[str] = None
 
 
@@ -704,7 +714,10 @@ class PortalRoleCard(BaseModel):
     `role` is None when the agent carries no `x-role` (no card is rendered)."""
     agent_name: str
     role: Optional[PortalRoleInfo] = None
-    seat: Optional[str] = None
+    # ent#814: where the seat on the card came from, for THIS viewer —
+    # holds (the agent's own) | person (the viewer's own) | primary | none.
+    # Never a person: the old `seat` carried x-role's email.
+    seat_source: Optional[Literal["holds", "person", "primary", "none"]] = None
     objectives: list[PortalRoleObjective] = Field(default_factory=list)
     # ent#676 — why `objectives` is empty when that is NOT simply true:
     # objectives_rate_limited | agent_unreachable | objectives_timeout |
@@ -718,7 +731,8 @@ class PortalRoleCard(BaseModel):
     finding_codes: list[str] = Field(default_factory=list)
     readiness: Optional[PortalRoleReadiness] = None
     walkthrough: Optional[PortalRoleWalkthrough] = None
-    # ent#500's assignment kind, when it lands; None renders as "no assignment recorded".
+    # The viewer's assignment kind on the agent (`kinds_for`): primary |
+    # approver | collaborator | viewer. None renders as "no assignment recorded".
     relationship: Optional[str] = None
     can_flip_readiness: bool = False
     # ent#689: a live seat-delivery schedule is being held because readiness is

@@ -63,18 +63,6 @@ SCOPE_SCOPED = "scoped"
 _FALLBACK_BUFFER_MAX = 1024
 
 
-def _serialize(event: Any) -> Dict[str, str]:
-    """Convert an event (dict or already-json-encoded str) into the flat
-    string map Redis XADD expects."""
-    if isinstance(event, str):
-        try:
-            parsed = json.loads(event)
-        except (json.JSONDecodeError, TypeError):
-            parsed = {"raw": event}
-        return {"data": json.dumps(parsed)}
-    return {"data": json.dumps(event)}
-
-
 def _deserialize(fields: Dict[str, str]) -> Dict[str, Any]:
     raw = fields.get("data") if isinstance(fields, dict) else None
     if not raw:

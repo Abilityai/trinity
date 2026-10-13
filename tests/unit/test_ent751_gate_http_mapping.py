@@ -81,8 +81,12 @@ def test_the_notice_names_no_role_and_promises_only_a_decision():
 
     e = SkillApprovalRequired(request_id="gate-x", agent_name="testfix", skills=["pay-invoice"],
                               approver_role="primary", expires_at=None, outcome_delivery="inbox")
+    # trinity#3520: an Inbox / agent requester IS told — once at the decision,
+    # and again when an approved run ends — so the answer says exactly that.
     assert e.message == ("Not run: the skill pay-invoice on testfix needs approval before it "
-                         "can run. Request gate-x is waiting for a decision.")
+                         "can run. Request gate-x is waiting for a decision. You will be told "
+                         "when it is decided, and again when an approved run ends, with how it "
+                         "ended.")
     assert e.detail()["approver_role"] == "primary"      # the role stays machine-readable
 
 

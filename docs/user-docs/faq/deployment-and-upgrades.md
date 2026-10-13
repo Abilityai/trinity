@@ -48,11 +48,11 @@ Install `doctl` and sign it in with a DigitalOcean API token that has **Write** 
 
 ## Can I run Trinity on AWS?
 
-Yes. On your own EC2 instance — x86_64, 8 GiB of memory (`t3a.large` or larger), Ubuntu 24.04, a public IPv4 address, and a security group open on 80 and 443 — clone a release with AWS support to `/opt/trinity` and run `./scripts/deploy/start.sh --provision --cloud aws --hosted --unattended` as root. It reads the public IP from the instance metadata service, installs Docker, Caddy with a certificate for that IP, and the host firewall, then installs Trinity from prebuilt images. v0.9.5 and earlier reject `--cloud aws`. A CloudFormation template ships in the repo and an AWS Marketplace listing is pending; the public AMI they launch is not published yet. See [Deploy on AWS](../guides/deploying/aws.md).
+Yes, two ways. The quickest is the Trinity AMI on the [AWS Marketplace](https://aws.amazon.com/marketplace/pp/prodview-q6f3biwa662o2): subscribe, launch it on a large or xlarge instance with a public IPv4 address and a security group open on 80 and 443, wait a few minutes for first boot, then open `https://<public-ip>/` and claim the admin account with the EC2 instance ID. The software is free; you pay AWS for the instance. Or, on your own EC2 instance — x86_64, 8 GiB of memory (`t3a.large` or larger), Ubuntu 24.04, a public IPv4 address, and the same security group — clone a release with AWS support to `/opt/trinity` and run `./scripts/deploy/start.sh --provision --cloud aws --hosted --unattended` as root. It reads the public IP from the instance metadata service, installs Docker, Caddy with a certificate for that IP, and the host firewall, then installs Trinity from prebuilt images. v0.9.5 and earlier reject `--cloud aws`. A CloudFormation template ships in the repo; give it the AMI ID from your Marketplace subscription. See [Deploy on AWS](../guides/deploying/aws.md).
 
 ## Why does the setup page on my AWS instance ask for an EC2 instance ID?
 
-Because nobody supplied an admin password, so the install took the instance-ID claim: it wrote the instance's ID to a claim file, and `/setup` refuses to create the admin until you type the same ID. Anyone can find a public IP, but only someone with access to your AWS account can read the instance ID (EC2 console → Instances → Instance ID, starting `i-`). The admin email is optional on this form — leave it blank to sign in as `admin`. To skip the claim, pass `ADMIN_PASSWORD` in the environment when you run the installer. See [Deploy on AWS → Claim the admin account](../guides/deploying/aws.md#step-2-claim-the-admin-account).
+Because nobody supplied an admin password (the Marketplace AMI never takes one), so the install took the instance-ID claim: it wrote the instance's ID to a claim file, and `/setup` refuses to create the admin until you type the same ID. Anyone can find a public IP, but only someone with access to your AWS account can read the instance ID (EC2 console → Instances → Instance ID, starting `i-`). The admin email is optional on this form — leave it blank to sign in as `admin`. To skip the claim, pass `ADMIN_PASSWORD` in the environment when you run the installer. See [Deploy on AWS → Claim the admin account](../guides/deploying/aws.md#step-2-claim-the-admin-account).
 
 ## My EC2 instance got a new IP after a stop/start — do I need to do anything?
 
@@ -149,6 +149,10 @@ PostgreSQL. SQLite reached end-of-support on September 1, 2026: it no longer rec
 ## I upgraded my hosted install — did it move me to PostgreSQL?
 
 No. When `start.sh --hosted` finds an existing `trinity.db`, it writes an empty `DATABASE_URL=` to `.env`, so the install stays on SQLite and never boots an empty PostgreSQL beside your data. It still generates `POSTGRES_PASSWORD` and starts an idle `trinity-postgres` container, because the hosted compose file needs both. Every run then prints a warning that SQLite reached end-of-support, with a pointer to the migration guide. Moving is a separate step you choose: the Ops Agent's `/migrate-to-postgres` skill, or `docs/migrations/SQLITE_TO_POSTGRES.md`. See [Upgrading](../guides/deploying/upgrading.md).
+
+## Can I roll a hosted install on the bundled PostgreSQL back to an older release?
+
+Not to v0.9.5 or earlier. Those releases' `docker-compose.hosted.yml` has no `postgres` service, so the backend would start without its database; your data stays in the `trinity_postgres-data` volume, and the way back is to roll forward again. A hosted install that stayed on SQLite (an empty `DATABASE_URL=` line in `.env`) rolls back normally. On the newer compose file, never delete that `DATABASE_URL=` line: an absent line selects the bundled PostgreSQL, and only an empty one keeps SQLite. See [Upgrading → Rollback](../guides/deploying/upgrading.md#rollback).
 
 ## Why does start.sh refuse to run because POSTGRES_PASSWORD is missing?
 

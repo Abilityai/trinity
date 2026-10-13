@@ -433,7 +433,7 @@ The install records `do-script` as its provenance, so the first-run **Secure thi
 
 ## AWS
 
-Three ways onto EC2 share the same installer (`start.sh --provision --cloud aws`): a script install on your own Ubuntu 24.04 instance, a CloudFormation stack, and an AWS Marketplace listing (pending). With no admin password supplied, the setup page asks for the instance's **EC2 instance ID** before it creates the admin, so someone who finds the IP cannot claim it. A timer follows a changed public IP after a stop/start. Step by step: [Deploy on AWS](aws.md).
+Three ways onto EC2 share the same installer (`start.sh --provision --cloud aws`): the [AWS Marketplace AMI](https://aws.amazon.com/marketplace/pp/prodview-q6f3biwa662o2) (subscribe, launch, nothing to install), a script install on your own Ubuntu 24.04 instance, and a CloudFormation stack. With no admin password supplied, the setup page asks for the instance's **EC2 instance ID** before it creates the admin, so someone who finds the IP cannot claim it. A timer follows a changed public IP after a stop/start. Step by step: [Deploy on AWS](aws.md).
 
 ## Vultr
 

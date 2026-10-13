@@ -1007,9 +1007,23 @@ export class TrinityClient {
   /**
    * Check if source agent is permitted to call target agent (Phase 9.10)
    */
+  /**
+   * May `sourceAgent` call `targetAgent`? Decided by the backend from the
+   * database — the permission edge or the spawn record — never from the
+   * Docker-filtered permissions list, so a target with no container, a spawned
+   * child, or a Docker read fault no longer reads as "not permitted"
+   * (trinity-enterprise#629). Fails closed: any error is `false`.
+   */
   async isAgentPermitted(sourceAgent: string, targetAgent: string): Promise<boolean> {
-    const permitted = await this.getPermittedAgents(sourceAgent);
-    return permitted.includes(targetAgent);
+    try {
+      const response = await this.request<{ reachable: boolean }>(
+        "GET",
+        `/api/agents/${encodeURIComponent(sourceAgent)}/reach/${encodeURIComponent(targetAgent)}`
+      );
+      return response.reachable === true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -4014,6 +4028,35 @@ export class TrinityClient {
     body: { endpoint: string; task_id: string },
   ): Promise<unknown> {
     return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/a2a/task`, body);
+  }
+
+  /**
+   * Obtain (or resume obtaining) a person token for a resource as `name`
+   * (trinity-enterprise#878). Own-key only on the backend; the response never
+   * carries the token. Same bounded fetch as the A2A hop: the backend waits on
+   * the person server for up to `wait` + 8 s.
+   */
+  async requestPersonToken(
+    name: string,
+    body: {
+      resource: string;
+      pending_handle?: string;
+      wait?: number;
+      execution_id?: string;
+      trigger_source?: "mcp" | "api" | "script";
+    },
+  ): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/aauth/person-token`, body);
+  }
+
+  /**
+   * Call an allow-listed AAuth resource as `name`, or resume a pending call by
+   * its handle (trinity-enterprise#879). Own-key only on the backend; the
+   * response never carries a token. Same bounded fetch as the A2A hop: the
+   * backend's own budget is 25 s, under the 40 s gateway deadline.
+   */
+  async callAAuthResource(name: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/aauth/resource-call`, body);
   }
 
   // --- Credential vault (trinity-enterprise#279) ----------------------------

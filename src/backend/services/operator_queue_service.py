@@ -365,6 +365,22 @@ def is_about_a_person(item: dict) -> bool:
 # exclusion runs BEFORE the limit. One tuple, read by SQL and Python alike.
 ABOUT_A_PERSON_ID_PREFIXES = _ABOUT_A_PERSON_ID_PREFIXES
 
+# trinity-enterprise#866: the rows about a person that are the agent OWNER's
+# alone. A Workspace client's complaint names the rater and quotes their words
+# (ent#499, trinity#3521); a person the agent is merely SHARED with is often a
+# client too, so reading it would tell one client which others rated the agent
+# and what they wrote — the facts `evaluations.py` already withholds from a
+# shared non-owner. Deliberately not the whole `_ABOUT_A_PERSON_ID_PREFIXES`:
+# a shared operator must still see and answer a skill gate's approval (`gate-`).
+OWNER_ONLY_ID_PREFIXES = ("workspace-problem-",)
+
+
+def is_owner_only(item: dict) -> bool:
+    """Is this row readable only by its agent's owner (and admins)? Compared
+    like `is_about_a_person`, so the SQL twin excludes exactly the same rows."""
+    candidate = item.get("request_id") or ""
+    return str(candidate).strip().lower().startswith(OWNER_ONLY_ID_PREFIXES)
+
 
 # ============================================================================
 # trinity-enterprise#815 — a broad listing is complete before the limit
@@ -596,9 +612,15 @@ def list_for_principal(
     offset: int = 0,
     agent_names=None,
     cursor: Optional[str] = None,
+    owned_agents=None,
 ) -> dict:
     """One page of `GET /api/operator-queue` for this caller, with the fields
     that make it honest (trinity-enterprise#815).
+
+    `owned_agents` (trinity-enterprise#866): the agents this caller OWNS, or None
+    when the owner-only rule does not apply (an admin). With a set, an
+    owner-only row (`OWNER_ONLY_ID_PREFIXES`) is listed only for those agents —
+    a SQL condition like every other visibility filter, so `total` stays exact.
 
     Every visibility filter is a SQL condition on the one WHERE builder, so the
     page, `total` and the flags are computed over the same rows:
@@ -626,6 +648,9 @@ def list_for_principal(
     exclude = ABOUT_A_PERSON_ID_PREFIXES if exclude_about_a_person else None
     where = dict(filters, accessible_agent_names=agents,
                  exclude_request_id_prefixes=exclude)
+    if owned_agents is not None:
+        where.update(owner_only_request_id_prefixes=OWNER_ONLY_ID_PREFIXES,
+                     owner_agent_names=set(owned_agents))
     warnings = []
     next_cursor = None
     if cursor is None:

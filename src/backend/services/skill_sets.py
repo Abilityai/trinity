@@ -73,14 +73,6 @@ class SetDef:
         return "partial" if self.missing else "ok"
 
 
-def split_set_ref(name: str) -> Optional[str]:
-    """`set:dev-backlog` → `dev-backlog`; anything else → None."""
-    if isinstance(name, str) and name.startswith(SET_PREFIX):
-        rest = name[len(SET_PREFIX):]
-        return rest if NAME_RE.match(rest) else None
-    return None
-
-
 def _schedules(raw) -> Tuple[List[dict], bool]:
     if raw is None:
         return [], False

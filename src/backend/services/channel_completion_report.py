@@ -690,8 +690,12 @@ def _is_approved_gate_run(execution_id: str) -> bool:
     approved background run, and reporting it would post the reply twice."""
     try:
         from database import db
+        from db.skill_gate_requests import APPROVED_RUN_STATES
         record = db.get_gate_request_by_dispatched_execution(execution_id)
-        return bool(record) and record.get("state") in ("dispatching", "dispatched")
+        # trinity#3520: the terminal fan-out runs BEFORE this report at every
+        # terminal site, so a finished run's record already reads `succeeded`
+        # / `failed` here — still an approved background run.
+        return bool(record) and record.get("state") in APPROVED_RUN_STATES
     except Exception:  # noqa: BLE001
         logger.warning("[ent#751] gate-record read failed for %s; not reporting", execution_id)
         return False

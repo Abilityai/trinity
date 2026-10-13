@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 
@@ -105,6 +106,11 @@ class TerminalEnvelope:
         previous_attempt_cost: #678 R2 — failed-first-attempt cost rolled into
             the terminal cost write.
         execution_time_ms: wall-clock used for the activity-completion detail.
+        completed_at: #3589 — the instant the PRODUCER says the turn ended
+            (aware UTC), threaded to both terminal writers so ``duration_ms``
+            measures the turn, not the turn plus however late the terminal
+            reached the backend. ``None`` (the sync path, every current agent
+            image) → the writers stamp now.
         raw_response: full response dict threaded back via ``TaskExecutionResult``
             (Session router consumes ``compact_events``); empty for callbacks.
     """
@@ -119,7 +125,17 @@ class TerminalEnvelope:
     retry_count: Optional[int] = None
     previous_attempt_cost: float = 0.0
     execution_time_ms: Optional[int] = None
+    completed_at: Optional[datetime] = None
     raw_response: dict = field(default_factory=dict)
+
+
+def _aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Pydantic parses an ISO string without an offset to a NAIVE datetime;
+    the writers subtract an aware ``started_at`` from it, so normalize here
+    (naive = UTC, the ``parse_iso_timestamp`` convention)."""
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
 def terminal_from_callback_payload(payload: Any, execution_id: str) -> TerminalEnvelope:
@@ -189,4 +205,5 @@ def terminal_from_callback_payload(payload: Any, execution_id: str) -> TerminalE
         execution_log=getattr(payload, "execution_log", None),
         session_id=getattr(payload, "session_id", None),
         execution_time_ms=getattr(payload, "execution_time_ms", None),
+        completed_at=_aware_utc(getattr(payload, "completed_at", None)),  # #3589
     )

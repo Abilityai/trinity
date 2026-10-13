@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
+import { createRouter, createMemoryHistory } from 'vue-router'
 
 vi.mock('@/stores/auth', () => ({
   useAuthStore: () => ({ isAuthenticated: true, authHeader: {}, logout: vi.fn() }),
@@ -176,11 +177,18 @@ describe('needs you', () => {
       { id: 'q1', agent_name: 'scout', kind: 'question', title: 'Mine here', question: '?', status: 'pending', created_at: '2026-09-30T10:00:00Z' },
       { id: 'q9', agent_name: 'scout', kind: 'question', title: 'Mine elsewhere', question: '?', status: 'pending', created_at: '2026-09-30T10:00:00Z' },
     ]
-    mount(ProjectHub, { props: { project: project({ asks: { mine: ['q1'], others_open: 2 } }) }, attachTo: document.body })
+    // #3574: a row is a router-link into the Inbox, so the hub mounts with a router.
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/:p(.*)*', component: { template: '<div/>' } }] })
+    await router.push('/workspace/projects/prj_1')
+    mount(ProjectHub, { props: { project: project({ asks: { mine: ['q1'], others_open: 2 } }) }, global: { plugins: [router] }, attachTo: document.body })
     await flushPromises()
     const card = byTestId('project-needs-you').textContent
     expect(card).toContain('Mine here')
     expect(card).not.toContain('Mine elsewhere')
+    // #3574: a list row, not the ask card — the body is behind Answer.
+    expect(byTestId('project-ask-row-q1')).not.toBeNull()
+    expect(byTestId('portal-ask-q1')).toBeNull()
+    expect(byTestId('project-hub').className).toContain('lg:items-start')
     expect(byTestId('project-asks-others').textContent).toContain('2 asks are waiting on other people')
   })
 

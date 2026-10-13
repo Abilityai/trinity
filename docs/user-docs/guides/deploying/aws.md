@@ -1,21 +1,36 @@
 # Deploy on AWS
 
-Install Trinity on an EC2 instance of your own. One command, run as root on a fresh Ubuntu 24.04 instance, installs Docker, a web server with an HTTPS certificate for the instance's public IP, a host firewall, and Trinity itself from prebuilt images. You then prove the instance is yours by entering its EC2 instance ID when you create the admin account.
-
-## When to Use This
-
-- You want Trinity on a server of its own, and your infrastructure is on AWS.
-- You can launch an EC2 instance and open a shell on it (SSH or EC2 Instance Connect).
+Run Trinity on AWS, in your own account and VPC. The quickest route is the Trinity AMI on the [AWS Marketplace](https://aws.amazon.com/marketplace/pp/prodview-q6f3biwa662o2): subscribe, launch, and open the address — no shell needed. The other is a script install on an EC2 instance of your own: one command, run as root on a fresh Ubuntu 24.04 instance, installs Docker, a web server with an HTTPS certificate for the instance's public IP, a host firewall, and Trinity itself from prebuilt images. Either way you prove the instance is yours by entering its EC2 instance ID when you create the admin account.
 
 Three ways onto EC2 run the same installer (`start.sh --provision --cloud aws`):
 
 | Path | Status | What you do |
 |---|---|---|
-| **Script install** on your own instance | Available | The procedure on this page |
-| **CloudFormation stack** (`packer/aws/trinity.cfn.yaml`) | Template in the repo; the public Trinity AMI it launches is not published yet | Create the stack with an AMI ID; it adds an Elastic IP and a security group for 80/443 |
-| **AWS Marketplace AMI** | Listing pending | Subscribe, then launch |
+| **AWS Marketplace AMI** | Available | Subscribe on the listing, launch from the EC2 console, claim the admin in the browser — [below](#aws-marketplace-ami) |
+| **Script install** on your own instance | Available | The steps under [Procedure](#procedure) |
+| **CloudFormation stack** (`packer/aws/trinity.cfn.yaml`) | Template in the repo; no one-click Launch Stack link yet | Create the stack with the AMI ID from your Marketplace subscription; it adds an Elastic IP and a security group for 80/443 |
 
-All three end the same way: open `https://<public-ip>/`, enter the instance ID, set a password. For any other Linux server, see [Single-Server Deployment](single-server.md).
+All three end the same way: open `https://<public-ip>/`, enter the instance ID, set a password. For any other Linux server, see [Single-Server Deployment](single-server.md). For every path side by side, including the DigitalOcean 1-Click, see [Deploying Trinity](../deploying-trinity.md).
+
+## AWS Marketplace AMI
+
+The AMI is a 64-bit x86 image on Ubuntu 24.04 LTS with Trinity, Docker, Caddy, Redis and PostgreSQL baked in, so first boot downloads nothing but the certificate. The software is free; you pay AWS for the EC2 instance, its EBS volume and the public IPv4 address.
+
+**Instance size.** Launch it on a large (2 vCPU / 8 GiB, `t3a.large` recommended) or xlarge (4 vCPU / 16 GiB) instance. Large fits the platform with a few agents; xlarge leaves headroom for several agents running at once. Trinity caps every agent's CPU limit at the host's CPU count, so a 2-vCPU instance runs agents with 2 CPUs. An Elastic IP is optional but keeps the address across a stop/start.
+
+1. **Subscribe and launch.** From the [listing](https://aws.amazon.com/marketplace/pp/prodview-q6f3biwa662o2), continue to launch into the EC2 console. Give the instance a **public IPv4 address** and a security group that allows **TCP 80 and 443** from anywhere (port 80 carries the certificate validation and a redirect). Keep 22 closed, or open it to your own address only. The instance needs no IAM role and no user data.
+2. **Wait for first boot.** It takes a few minutes: the instance reads its public IP, obtains a Let's Encrypt certificate for it, and starts Trinity on the bundled PostgreSQL.
+3. **Copy the instance ID and public IPv4** from the EC2 console (**Instances → Instance ID**, starting `i-`).
+4. **Open `https://<public-ip>/`.** The browser shows no warning. The **Create your admin account** form asks for the **EC2 instance ID** — the same claim as the script install ([Step 2](#step-2-claim-the-admin-account)). The AMI always uses the claim and ignores any password in user data.
+5. **Connect Claude.** As in [Step 3](#step-3-connect-claude). Because the image recorded `aws-marketplace`, the setup also offers **Secure this instance** — see [Hardening a Marketplace Install](hardening.md).
+
+**Verify.** `https://<public-ip>/` shows the **Create your admin account** form with a valid padlock, and **Settings → General → Build Info** shows install source **AWS Marketplace**. With a shell on the instance (SSH or EC2 Instance Connect), the [script-install checks](#verify) apply too: the AMI has the same files, timer and health endpoint, and day-two operations are the same ([Managing the Instance](#managing-the-instance)). Problems with the image itself go to [GitHub issues](https://github.com/abilityai/trinity/issues) with the `aws-marketplace` label.
+
+## Script Install: When to Use It
+
+- You already have an EC2 instance, or want to build from a plain Ubuntu image rather than the Marketplace AMI.
+- You want the admin password set before the instance is reachable, instead of claiming it in the browser.
+- You can open a shell on the instance (SSH or EC2 Instance Connect).
 
 ## Pre-flight
 
@@ -101,7 +116,7 @@ It never pulls or upgrades Trinity, and it logs only when something changed or f
 - an Elastic IP;
 - no IAM role.
 
-The instance goes into a default subnet of the region's default VPC, or into `SubnetId` (set `VpcId` with it), and always gets a public IPv4 address. The stack outputs `TrinityUrl` and `InstanceId` — the value the setup form asks for. The Trinity AMI boots with no user data and always takes the instance-ID claim, ignoring any password in user data. The public AMI and the one-click Launch Stack link are not published yet; this page will carry them when they are.
+The instance goes into a default subnet of the region's default VPC, or into `SubnetId` (set `VpcId` with it), and always gets a public IPv4 address. The stack outputs `TrinityUrl` and `InstanceId` — the value the setup form asks for. The Trinity AMI boots with no user data and always takes the instance-ID claim, ignoring any password in user data. Use the AMI ID from your [Marketplace subscription](#aws-marketplace-ami) for your region as `ImageId`. A one-click Launch Stack link is not published yet.
 
 ## Security Notes
 

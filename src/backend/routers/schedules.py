@@ -27,6 +27,7 @@ from models import (
     WebhookStatusResponse,
 )
 from dependencies import (
+    agent_may_reach,
     capability_fence,
     get_current_user,
     get_authorized_agent,
@@ -171,7 +172,7 @@ def _enforce_delivery_target_authority(current_user, name: str, email) -> None:
         # False — which would have refused the OWNER too, turning this gate from
         # a narrowing into a functional break. Every other call site in the
         # codebase passes `current_user.username`.
-        can_own = db.can_user_share_agent(current_user.username, name)
+        can_own = (db.can_user_share_agent(current_user.username, name) and agent_may_reach(current_user, name, manage=True))
     except Exception:  # noqa: BLE001 — an unreadable ownership check refuses
         can_own = False
     if not can_own:

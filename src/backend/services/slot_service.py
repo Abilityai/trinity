@@ -507,16 +507,6 @@ class SlotService:
 
         return reclaimed
 
-    async def get_active_count(self, agent_name: str) -> int:
-        """Get count of active slots for an agent."""
-        slots_key = self._slots_key(agent_name)
-        return self.redis.zcard(slots_key)
-
-    async def is_at_capacity(self, agent_name: str, max_parallel_tasks: int) -> bool:
-        """Check if agent is at capacity."""
-        active = await self.get_active_count(agent_name)
-        return active >= max_parallel_tasks
-
     async def force_clear_slots(self, agent_name: str) -> int:
         """
         Force clear all slots for an agent (emergency use).

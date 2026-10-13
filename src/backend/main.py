@@ -68,7 +68,6 @@ from routers.analytics import router as analytics_router  # #1107 — Agent Over
 from routers.activities import router as activities_router
 from routers.settings import router as settings_router
 from routers.systems import router as systems_router
-from routers.observability import router as observability_router
 from routers.system_agent import router as system_agent_router
 from routers.ops import router as ops_router
 from routers.public_links import router as public_links_router, set_websocket_manager as set_public_links_ws_manager
@@ -117,6 +116,9 @@ from routers.users import router as users_router
 from routers.debug import router as debug_router  # #306 soak instrumentation
 from routers.a2a import router as a2a_router  # #737 A2A Agent Cards
 from routers.a2a import a2a_server_router  # ent#157 A2A inbound server (well-known + JSON-RPC)
+from routers.aauth import router as aauth_router  # ent#623 AAuth discovery documents (prototype, flag OFF)
+from routers.aauth_person import router as aauth_person_router  # ent#878 AAuth person token (own-key only, 404 unless live)
+from routers.aauth_resource import router as aauth_resource_router  # ent#879 AAuth resource call (own-key only, 404 unless live)
 from routers.admin_recovery import router as admin_recovery_router  # #834 Phase 1c
 from routers.messages import router as messages_router  # Proactive Messaging (#321)
 from routers.public_memory import router as public_memory_router  # MEM-001 write path (#888)
@@ -1366,7 +1368,6 @@ app.include_router(executions_router)  # EXEC-022 / Issue #18 — Unified Execut
 app.include_router(analytics_router)  # #1107 — Agent Detail Overview analytics
 app.include_router(settings_router)
 app.include_router(systems_router)
-app.include_router(observability_router)
 app.include_router(system_agent_router)
 app.include_router(ops_router)
 app.include_router(public_links_router)
@@ -1380,7 +1381,7 @@ app.include_router(audit_log_router)  # SEC-001 / #20: Platform audit log (Phase
 app.include_router(canary_router)  # CANARY-001 / #411: Invariant violations
 app.include_router(compatibility_router)  # #668: Agent compatibility validation
 app.include_router(skills_router) # Skills Management System
-app.include_router(internal_router)  # Internal agent-to-backend endpoints (no auth)
+app.include_router(internal_router)  # Internal agent-to-backend endpoints (verify_internal_secret: X-Internal-Secret, not a user principal)
 app.include_router(internal_pull_router)  # #1081 pull seams — dual auth: internal secret OR agent's own scoped MCP key
 app.include_router(tags_router)  # Agent Tags (ORG-001)
 app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)
@@ -1424,6 +1425,9 @@ app.include_router(users_router)  # User Management (ROLE-001)
 app.include_router(debug_router)  # #306 soak dashboard
 app.include_router(a2a_router)  # A2A Agent Cards (#737)
 app.include_router(a2a_server_router)  # A2A inbound server: /a2a/{name}/.well-known + JSON-RPC (ent#157)
+app.include_router(aauth_router)  # AAuth /.well-known/aauth-* (ent#623, 404 unless the prototype flag is on)
+app.include_router(aauth_person_router)  # AAuth person token: POST /api/agents/{name}/aauth/person-token (ent#878)
+app.include_router(aauth_resource_router)  # AAuth resource call: POST /api/agents/{name}/aauth/resource-call (ent#879)
 app.include_router(admin_recovery_router)  # Soft-delete admin recovery (#834 Phase 1c)
 app.include_router(loops_agent_router)  # Sequential agent loops (#740)
 app.include_router(loops_loop_router)  # Sequential agent loops (#740)

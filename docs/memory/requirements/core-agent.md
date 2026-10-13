@@ -2610,6 +2610,14 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   (`comment_withheld`) is untouched. The operator sees the comment; the agent
   still does not — including through its own key: the operator queue's reads
   never return this item to a machine principal (trinity-enterprise#715).
+- **The agent's owner and admins only** (trinity-enterprise#866). A person the
+  agent is merely *shared* with is often a client too, so the alert — which names
+  the rater and quotes their words — is owner-only: the queue lists it to a
+  non-admin only for agents they own (a SQL condition, so `total` stays exact),
+  answers it by id as "not found", and refuses to acknowledge, cancel or
+  bulk-cancel it. The same facts `GET /evaluations` already withholds from a
+  shared non-owner. Only this kind is owner-only (`OWNER_ONLY_ID_PREFIXES`): a
+  shared operator still sees and answers a skill gate's approval.
 - **Routed through the budget, never allowlisted** (#1677). The volume here is
   driven by a *client* clicking, so this is an agent-influenceable emitter by
   the classification rule and goes through
@@ -2618,12 +2626,20 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   direct `create_operator_queue_item` would fail the CI emitter guard, and
   reusing the generic `alert` type would have made five unrelated alerts on that
   agent silence every problem report.
-- **One item per person per target, by construction.** The id is derived from
-  the evaluator and the target, so a re-rate hits `create_item`'s
-  `ON CONFLICT DO NOTHING`. **Stated residual**: `create_item` has no UPDATE
-  path, so an edited comment does not reach an item already raised — the same
-  residual ent#434's alert carries, and it is a shared fix, not a per-emitter
-  one.
+- **One item per person per target per UTC day, by construction.** The id is
+  derived from the evaluator, the target and the day, so a re-rate hits
+  `create_item`'s `ON CONFLICT DO NOTHING`.
+- **A comment sent after the rating reaches the item** (trinity#3521). The
+  Workspace records the thumbs-down on the click and sends the comment as a
+  second request, so the click has usually raised the item already. A request
+  that carries words rewrites the item's `question` and `context.has_comment`
+  through `db.update_pending_problem_report` — pending items of this type only,
+  so an item a person already ended is never rewritten or reopened. Only words
+  ever write text: a bare re-rate cannot erase a comment. The update adds no row,
+  so it spends no budget. Both requests run in the background, so the service
+  attaches once more after its own create (the click's create can land in
+  between). **Stated residual**: a comment sent after the operator ended that
+  day's item does not reach it; the next day's item carries the next report.
 - **Emitted off the response path.** `create_bounded_alert` is async and the
   rating route is a sync `def`, so the emit rides `BackgroundTasks` beside the
   existing `capture-feedback` dispatch. A rating is recorded whether or not the
@@ -3426,7 +3442,7 @@ to localStorage in the clear.
 - **Flow**: `docs/memory/feature-flows/workspace-drafts.md`
 
 ### 5.36 Workspace — the role card in Agent details: role, objectives with metric freshness, readiness (trinity-enterprise#527)
-- **Status**: ✅ Implemented (2026-09-21) — the Role + Readiness half; the relationship line waits for ent#500. OSS-core (Workspace).
+- **Status**: ✅ Implemented (2026-09-21); the role and the relationship line read the assignment record since 2026-10-07 (ent#811/#814 follow-up, the #3271 / ent#818 live check). OSS-core (Workspace).
 - **Requirement ID**: WORKSPACE_ROLE_CARD
 - **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness; + #676, 2026-09-30, the objectives cut over to the ent#666 join)
 - **Description**: When a companion has a role (Tandem, ent#497), the Info rail's
@@ -3437,17 +3453,24 @@ to localStorage in the clear.
 - **Files are truth, read through the platform, never a second store.** Everything the
   card shows about the role comes from the agent's own container on each read
   (`client_portal/role_card.py`, via the agent client — the same door the Files tab
-  uses): `template.yaml → x-role: {role, status, seat?}` (written by the
-  `create-agent:role-companion` wizard, #511) and `x-canon.clone_path` (default
-  `canon`); the role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
+  uses): `template.yaml → x-canon.clone_path` (default `canon`) and `x-role.status`
+  (the template's readiness claim, #511); the role file `<canon>/roles/<id>.yaml`
+  where `<id>` is **the seat on record** — the seat this agent serves for the
+  viewer (`assignment_provider.resolve_served_seat`: held → the viewer's own →
+  the primary's), never `x-role.role`. `seat_source` (holds / person / primary /
+  none) is rendered as words, never a person. No seat → `role.error = no_seat`
+  with the supported objectives still listed. **Your relationship** is the
+  viewer's assignment kind (`kinds_for` on the provider; primary / approver /
+  collaborator / viewer), "no assignment recorded" only when there is none.
+  The role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
   (framework §3.4 grammar — `owner: role:<id>` or `supporting_agents` names this
   agent). The role file is the card's own read; the objectives and their numbers
   are **not** — they come from the one objective ↔ metric join
   (`objective_join_service.read_objective_join`, §50 of
   `lifecycle-observability.md`), called in process with the template and the agent
   client the card already holds (trinity-enterprise#676). Nothing is cached or
-  copied platform-side. Every read is fail-soft and **named**: no `x-role` → no
-  card at all (the panel is unchanged, AC 5); a role file that cannot be read or
+  copied platform-side. Every read is fail-soft and **named**: no seat, no canon
+  and no `x-role` → no card at all (the panel is unchanged, AC 5); a role file that cannot be read or
   parsed → the card says so (`role.error`), never an empty role; a stopped agent
   → "the agent is stopped; the card reads its files when it runs"; objectives
   that could not be read → one line saying so (`objectives_error`), never an
@@ -3519,11 +3542,16 @@ to localStorage in the clear.
   for the verdict: a held brief is a `skipped` execution whose reason names the fix
   ("Held: … runs once its owner marks it ready"), a `schedule_execution_skipped` event, and
   advanced run times — never a failure, a retry or an alert. **Every ambiguity fails open
-  and is logged** (verdict call failed, container not running, Docker or template.yaml
-  unreadable within 3 s). The template is read only to learn whether the agent is a
-  companion; `x-role.status` is agent-writable and is never trusted (#663). Honest limit: an
-  *unstamped* companion can take itself out of scope (drop `x-role`, or stall the read into
-  fail-open); an owner's stamp is the one thing it cannot touch.
+  and is logged** (verdict call failed, stamp unreadable). `x-role.status` is
+  agent-writable and is never trusted (#663). **Who is a companion (trinity-enterprise#813,
+  ruling 2026-10-06):** asked only for an unstamped agent, and answered by the seat on
+  record (`assignment_provider.resolve_seat`), not the template — a companion is an agent
+  whose primary is assigned and holds a seat. An agent holding a seat itself (an autonomous
+  player), no primary with a seat, no seat lookup or a lookup error all read as "not a
+  companion", so the brief fires; each decision is logged with its reason. The template is
+  no longer read, so an agent cannot take itself out of scope by editing its own files —
+  the seat is admin-written. A companion template with no assigned primary therefore sends
+  its brief until its primary is assigned.
   - **Rollout (ruled 2026-09-24, amended from option 1 at plan review)**: a one-time,
     database-only seed on both migration tracks stamps `ready` (`changed_by =
     rollout:ent#689`) for every live agent with autonomy on and an enabled, non-deleted
@@ -3551,6 +3579,34 @@ to localStorage in the clear.
   paused only when it is true, so the list never claims a pause the card does not. The
   dashboard's 30 s agent poll patches `readiness`/`brief_held` in place, so a flip reaches an
   open tab without a reload.
+
+- **Objectives in plain words (trinity-enterprise#843, 2026-10-08).** The card answers a
+  client's question — "what is this agent for, and is it on track?" — not the canon's:
+  - **Owned first** under "What this agent is responsible for", each metric as one line
+    ("Runway: 7.2 months (target 12 months) · updated 2h ago"; no value yet reads
+    "not measured yet", never "— / 1").
+  - **Supported objectives** in a separate group, **collapsed by default** with a count
+    ("Also contributes to · N"), headings only — no metric rows, no per-metric warning.
+    Where another of the owner's agents actively declares one of its numbers it says
+    so **once per objective**, neutral: "Tracked by another agent". The card never
+    names that agent (external clients read it), and says nothing when no agent
+    declares the number. An agent that only supports objectives still shows the folded
+    group.
+  - **Readable metric names**: the declared label, else the label the *active*
+    declarations by the **same owner's** other live agents agree on (so a metric another
+    agent tracks shows by that agent's label — `db.metric_declarations_elsewhere`,
+    labels only, never who declared; an agent of another owner can never put text on
+    this card), else the code name turned into words (`runway_months` → "Runway (months)"). A raw snake_case
+    name never reaches the card; a failed lookup still falls back to words.
+  - **Warning colour only for real problems**: stale ("not updated recently"), behind /
+    off target, a file that was not read, an incomplete list. Findings that remain under a
+    metric are neutral notes; "not measured" and "tracked elsewhere" are not repeated.
+  - Horizons read "this quarter" / "this month" / "this year" / "this week".
+  - An objective may carry an optional **`client_heading`** in canon — a plain heading for
+    client screens; the card uses it and falls back to `statement`. (Convention half:
+    the canon objective format in trinity-pm.)
+  - Honest status is unchanged (principle 15); the operator agent page keeps the full
+    canon detail.
 
 ### 5.37 Workspace — the seat-level decision record: why a thing was approved, deferred or killed (trinity-enterprise#638)
 - **Status**: ✅ Implemented (2026-09-22). OSS-core (Workspace).
@@ -3593,9 +3649,10 @@ to localStorage in the clear.
   (`GET/POST /api/enterprise/client-portal/agents/{name}/decisions`,
   `POST …/decisions/{id}/actions`, `PortalAgentDecisions.vue`).
 - **Readers**: own seat always; the agent OWNER (`role_card._is_owner`) every seat,
-  writable; a stakeholder the assignment provider recognises through the optional seam
-  method `kinds_for(agent_name, reader_email) -> {kind, role_id}` every seat read-only
-  (per-agent in v1 — DEBT_INBOX 2026-09-22); no provider → own seat only. Writes: own
+  writable; nobody else. An assignment kind (`kinds_for(agent_name, reader_email) ->
+  {kind, role_id}`) does **not** widen the read: it answers the role card's
+  relationship line only, and a kind is per agent, not per role, so it would hand an
+  approver every person's decisions (#3660; per-role stakeholder reads are #3381). Writes: own
   seat, or the owner on a named seat; a foreign id is the uniform 404.
 - **Read into context**: the seat's active decisions (criterion first, bounded) ride the
   shared memory block on every turn — public link, channels, seat runs, Workspace — so

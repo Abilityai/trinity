@@ -17,7 +17,14 @@ The lattice (``_ENTERED_FROM``) is written as "may be entered from", never as
 is refused by construction:
 
     pending ──claim──▶ dispatching ──▶ dispatched | stale | not_run | unknown
+       │                    │               │
+       │                    └───────────────┴──▶ succeeded | failed
        └──▶ denied | expired | cancelled | refused
+
+``succeeded`` / ``failed`` record how the approved run ENDED (trinity#3520),
+entered from ``dispatched`` — or from ``dispatching`` when the run ends before
+the dispatch was recorded. The compare-and-set that lands is the one that
+tells the requester, so the completion notice is sent once per run.
 
 A ``self_approved`` row (trinity-enterprise#752) is outside the lattice: an
 approver's own request ran at once, and the row records which run it cleared
@@ -48,6 +55,8 @@ DENIED = "denied"
 EXPIRED = "expired"
 CANCELLED = "cancelled"
 REFUSED = "refused"
+SUCCEEDED = "succeeded"
+FAILED = "failed"
 SELF_APPROVED = "self_approved"
 SELF_APPROVED_READ_CHUNK = 500   # ids per statement in `get_self_approved_runs`
 
@@ -62,7 +71,19 @@ _ENTERED_FROM = {
     STALE: (DISPATCHING,),
     NOT_RUN: (DISPATCHING,),
     UNKNOWN: (DISPATCHING,),
+    SUCCEEDED: (DISPATCHING, DISPATCHED),
+    FAILED: (DISPATCHING, DISPATCHED),
 }
+# The states of a record whose request was APPROVED and handed to a run — the
+# ONE definition every reader outside the gate service uses (#3630 review):
+# `RAN_STATES` once the run started (whatever became of it), plus
+# `dispatching` (claimed, the run is being started). A reader that spelled
+# out `("dispatching", "dispatched")` stopped matching the moment a finished
+# run moved the record to `succeeded` / `failed`.
+RAN_STATES = (DISPATCHED, SUCCEEDED, FAILED)
+APPROVED_RUN_STATES = (DISPATCHING,) + RAN_STATES
+# The execution statuses that end an approved run (trinity#3520).
+RUN_TERMINAL_STATUSES = ("success", "failed", "cancelled", "skipped")
 TERMINAL_STATES = tuple(_ENTERED_FROM)
 # `self_approved` is never a transition target and never a source.
 STATES = (PENDING, DISPATCHING) + TERMINAL_STATES + (SELF_APPROVED,)
@@ -315,6 +336,21 @@ class SkillGateRequestOperations:
                 .where(and_(skill_gate_requests.c.state == DISPATCHING,
                             skill_gate_requests.c.decided_at < claimed_before,
                             has_run))
+                .order_by(skill_gate_requests.c.decided_at)
+                .limit(limit))
+        with get_engine().connect() as conn:
+            return [_row(r) for r in conn.execute(stmt)]
+
+    def list_gate_requests_ended_unreported(self, limit: int = 200) -> List[Dict]:
+        """`dispatching` / `dispatched` records whose approved run already
+        ENDED (trinity#3520) — the terminal hook never ran for them (the worker
+        died, or the backend restarted mid-run). The sweep reports them now."""
+        run_ended = exists().where(and_(
+            schedule_executions.c.id == skill_gate_requests.c.dispatched_execution_id,
+            schedule_executions.c.status.in_(RUN_TERMINAL_STATUSES)))
+        stmt = (select(skill_gate_requests)
+                .where(and_(skill_gate_requests.c.state.in_((DISPATCHING, DISPATCHED)),
+                            run_ended))
                 .order_by(skill_gate_requests.c.decided_at)
                 .limit(limit))
         with get_engine().connect() as conn:

@@ -72,6 +72,10 @@ Add credentials using one of four methods on the **Credentials** tab:
 
 MCP server configuration is different. An `.env` injection does not rewrite `.mcp.json`; to change an MCP server's credential on a running agent, inject an updated `.mcp.json` directly (it is structurally validated first).
 
+### Who can read credential files
+
+Reading an agent's credential files — `.env`, `.mcp.json`, key and certificate files, SSH and cloud credentials, the runtimes' login files — is for the agent's **owner** or an **admin**, signed in or with their own `user` key. Someone the agent is shared with keeps chatting with it, and the agent keeps using its credentials, but opening one of these files shows a message saying who to ask. Agent, system and connector keys cannot read them. When the Credentials tab cannot read a file it shows the server's message beside the file list and does not open the editor. The full list of files and the Files tab's behaviour are in [Agent Files → Reading credential files](../agents/agent-files.md#reading-credential-files).
+
 ### Credential Pattern in the Agent
 
 ```
@@ -170,10 +174,12 @@ The inject, export, import, checklist, and drift routes are owner-only **and hum
 
 - `get_credential_status(name)` -- Check credential file status.
 - `inject_credentials(name, credentials)` -- Inject credentials into the agent.
-- `export_credentials(name)` -- Export credentials to encrypted file.
-- `import_credentials(name)` -- Import credentials from encrypted file.
-- `get_credential_encryption_key()` -- Retrieve the encryption key.
+- `export_credentials(name)` -- Export credentials to encrypted file. The agent's owner or an admin only, with a user-scoped or system-scoped key.
+- `import_credentials(name)` -- Import credentials from encrypted file. The agent's owner or an admin only, with a user-scoped or system-scoped key.
+- `get_credential_encryption_key()` -- Retrieve the encryption key. An administrator only, with a user-scoped or system-scoped key.
 - `list_available_credentials()` / `fetch_credential(name)` -- Read a granted vault credential at runtime (see [Credential Vault](#credential-vault)).
+
+`export_credentials`, `import_credentials` and `get_credential_encryption_key` are human-only: an agent-scoped key can never call them, so they are not listed in an agent's MCP session at all. If one of them is refused, the tool returns `{"success": false, "error": "…"}` with `human_only`, `admin_only` or `not_authorized` set, rather than an error string.
 
 ## See Also
 

@@ -647,11 +647,11 @@ def test_a_persons_notice_reads_as_text_for_a_person(gate):
     _answer(rid, _GATE.REJECT)
     _resolve(rid)
     (note,) = _notes()
-    assert note["question"].startswith("Your request ")       # no "[Trinity]" machine prefix
+    assert note["question"].startswith("Rejected — your request ")   # no "[Trinity]" machine prefix
 
 
 def test_an_agents_notice_keeps_its_platform_prefix(gate):
     rid = _raise_request()
     _answer(rid, _GATE.REJECT)
     _resolve(rid)
-    assert gate.woken[0][1].startswith("[Trinity] Your request ")
+    assert gate.woken[0][1].startswith("[Trinity] Rejected — your request ")

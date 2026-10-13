@@ -380,6 +380,8 @@ def delete_agent_ownership(self, agent_name: str) -> bool:
 
 > **Note (2026-01-30)**: Git Pull was changed from Owner-only to Authorized (owner/shared/admin). See [github-sync.md](github-sync.md) for details.
 
+> **Credential files (2026-10-06, trinity-enterprise#819)**: a share grants the accessor tier. Reading credential files (`.env`, `.mcp.json`, keys and similar) through the Files routes is owner-tier, so a shared user gets a 403 that says to ask the agent's owner or an admin. A shared user still chats with the agent, which keeps using its credentials; managing credentials was already owner-only. On an agent not yet running the current base image, a shared user's file reads are refused with 403 `agent_restart_required` until the agent is stopped and started through Trinity. See [file-browser.md](file-browser.md).
+
 ---
 
 ## Side Effects
@@ -416,7 +418,7 @@ produce Workspace-only `user` accounts. See [workspace-only-role.md](workspace-o
 2. **Owner-Only Sharing**: Only owners and admins can share (`OwnedAgentByName` dependency)
 3. **Cascade Delete**: Shares removed when agent deleted
 4. **Access Validation**: Every endpoint validates via `OwnedAgentByName` dependency
-5. **No platform login**: sharing writes no login whitelist row (trinity-enterprise#837); the Access tab copy says adding a person grants Workspace access
+5. **No platform login**: sharing writes no login whitelist row (trinity-enterprise#837); the Access tab copy says adding a person grants Workspace access. For an admin, a person's row carries their platform role (a select, every change confirmed) or, with no account yet, **Give a platform account** (trinity-enterprise#837 PR 2); assigning someone in "People this agent serves" also shares the agent with them, after the assignment is written
 6. **System Agent Protection**: System agents cannot be shared (tab hidden in UI)
 
 ---
@@ -455,6 +457,7 @@ Working - Agent sharing fully functional with email-based collaboration
 
 | Date | Changes |
 |------|---------|
+| 2026-10-12 | **trinity-enterprise#837 PR 2.** The Access tab's rows: a role select for an admin (every change confirmed; a cancel or refusal snaps back), **Give a platform account** on a Pending row, "never signed in"; the list loads via `viewState` and reloads in place. "People this agent serves" shares the agent with a person after assigning them and warns on an assignment the agent isn't shared for. See [workspace-only-role.md](workspace-only-role.md). |
 | 2026-10-09 | **trinity-enterprise#837 — sharing stops creating platform logins.** `share_agent_endpoint` and `decide_access_request_endpoint` no longer call `add_to_whitelist`; the person signs in to the Workspace with the code. The Access tab (`AccessPanel.vue`) says adding a person grants Workspace access ("Add person"); the operator UI is the platform role. See [workspace-only-role.md](workspace-only-role.md). |
 | 2026-04-22 | **#446 — team-share gate hardening + Sharing UX**. `share_agent` now deletes stale pending `access_requests` rows atomically with the share insert (manual Team Share now clears the owner's Pending list). Email normalization (`.strip().lower()`) added in `share_agent`, `is_agent_shared_with_email`, and `email_has_agent_access` as defense-in-depth. `SharingPanel.vue` restructured to distinguish **Identity Proof** (`require_email`) from **Authorization** (Team Sharing allow-list + approval queue); dead-end warning shown when `require_email=true && !open_access && shares.length===0`. New unit test file: `tests/test_team_share_gate_unit.py`. Canonical gate semantics continue to live in [unified-channel-access-control.md](unified-channel-access-control.md). |
 | 2026-04-12 | **Issue #311 — unified cross-channel access control**: `agent_sharing` is now the cross-channel allow-list (web + Telegram + Slack). Added 4 endpoints to `routers/sharing.py` for access policy (`require_email`, `open_access`) and pending access requests (approve/deny). `SharingPanel.vue` gained a Channel Access Policy section + Pending Access Requests list (direct axios, no composable). New `SharingMixin` helpers: `is_agent_shared_with_email`, `email_has_agent_access`. `delete_agent_ownership` now also cascades `access_requests`. Canonical primitive lives in [unified-channel-access-control.md](unified-channel-access-control.md). |

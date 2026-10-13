@@ -2,7 +2,7 @@
 """
 Public download endpoint for outbound agent file sharing (FILES-001 Step 4).
 
-Resolves the token-scoped URLs minted by POST /api/internal/agent-files/share.
+Resolves the token-scoped URLs minted by POST /api/agents/{name}/shared-files.
 Unauthenticated — the 192-bit `sig` token IS the auth credential, minted at
 share time and known only to the recipient.
 
@@ -400,7 +400,7 @@ async def download_shared_file(
     preview: Optional[str] = None,
 ):
     """
-    Serve a file previously registered via POST /api/internal/agent-files/share.
+    Serve a file previously registered via POST /api/agents/{name}/shared-files.
 
     Query parameters:
     - sig (required): 192-bit token minted at share time, sole auth credential.

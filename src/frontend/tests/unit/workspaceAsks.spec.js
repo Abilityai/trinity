@@ -515,9 +515,18 @@ describe('#2375 — the panel goes through the shared module (source-asserted)',
     // A tap only arms Send: the option click goes through `pick`, which writes
     // the pick and moves focus to the note (ent#610 §3g B2) — and never sends.
     expect(sfc).toMatch(/@click="pick\(ask, opt\)"/)
+    // trinity#3527: the ONE exception is a skill gate (`oneClick` =
+    // `decidedByOptions`), whose Approve / Reject is the whole decision. Past
+    // that branch the pick never sends.
+    expect(sfc).toMatch(/const oneClick = \(ask\) => decidedByOptions\(ask\)/)
     const pickBody = sfc.match(/function pick\(ask, opt\) \{([\s\S]*?)\n\}/)?.[1] || ''
-    expect(pickBody).toMatch(/picks\[ask\.id\] = /)
-    expect(pickBody).not.toMatch(/submit|answerAsk/)
+    // Cut the one-click branch out by slicing, not `.replace` (CodeQL reads a
+    // regex strip of source text as incomplete HTML sanitisation).
+    const branch = pickBody.match(/if \(oneClick\(ask\)\) \{[\s\S]*?\n  \}/)?.[0] || ''
+    expect(branch).not.toBe('')
+    const general = pickBody.split(branch).join('')
+    expect(general).toMatch(/picks\[ask\.id\] = /)
+    expect(general).not.toMatch(/submit|answerAsk/)
     // What arms Send is proven by behaviour, not by its source text (#3242
     // reversed it: "Something else" plus a typed instruction is sendable without
     // a pick) — see portalAskSomethingElse.mount.spec.js and

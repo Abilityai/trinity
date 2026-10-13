@@ -14,6 +14,8 @@
 
 ### SQLite (`/data/trinity.db`)
 
+**Orphan tables (#3432):** installs upgraded from before #3432 — SQLite and PostgreSQL alike — may carry `process_schedules` and `process_schedule_executions`, which the scheduler's boot path created ad hoc outside both migration tracks; the scheduler no longer creates or reads them, nothing else references them, and they are deliberately left in place (no migration), so #746 autogenerate will surface them as unknown tables.
+
 **users:**
 ```sql
 CREATE TABLE users (
@@ -104,7 +106,8 @@ CREATE TABLE agent_sharing (
     shared_with_email TEXT NOT NULL,
     shared_by_id INTEGER NOT NULL,
     created_at TEXT NOT NULL,
-    allow_proactive INTEGER DEFAULT 0,
+    allow_proactive INTEGER DEFAULT 0,  -- three-state since trinity-enterprise#817: NULL = not asked, 0 = declined, 1 = consented; code writes a new share NULL (the DDL default is unchanged, data-only migration
+                                       -- SQLite `proactive_consent_not_asked` / Alembic `0098_proactive_consent_not_asked` moved the legacy DEFAULT-0 rows to NULL); only 1 permits proactive contact, before and after
     UNIQUE(agent_name, shared_with_email),
     FOREIGN KEY (shared_by_id) REFERENCES users(id)
 );

@@ -121,6 +121,10 @@ async function boot(opts: { pull?: boolean; reportBackEnabled?: boolean } = {}):
           agent_name: CALLER,
         });
       }
+      const reach = url.match(new RegExp(`^/api/agents/${CALLER}/reach/([^/?]+)$`));
+      if (reach) {
+        return json(res, 200, { reachable: [TARGET, HELPER, CALLER].includes(decodeURIComponent(reach[1])) });
+      }
       if (url === `/api/agents/${CALLER}/permissions`) {
         return json(res, 200, { permitted_agents: [{ name: TARGET }, { name: HELPER }, { name: CALLER }] });
       }

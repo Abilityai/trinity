@@ -447,66 +447,31 @@ Existing agents keep their OTel config until restarted.
 |------|--------|
 | `src/backend/services/agent_service/crud.py` | OTel env var injection (lines 308-316) |
 | `src/backend/services/system_agent_service.py` | OTel env var injection for system agents (lines 191-198) |
-| `src/backend/routers/observability.py` | Metrics API endpoints (257 lines) |
-| `src/backend/routers/ops.py` | Cost endpoint powered by OTel (lines 728-869) |
-| `src/backend/main.py` | Added observability router import (line 41) and registration (line 289) |
+| `src/backend/routers/observability.py` | Metrics API endpoints — **removed in #3434** (no callers); read path is `GET /api/ops/costs` |
+| `src/backend/routers/ops.py` | `GET /api/ops/costs` route gate (admin or `ops`-scope key) |
+| `src/backend/services/ops_costs_service.py` | Cost rollup: Prometheus scrape, `parse_prometheus_metrics()` / `calculate_totals()` (moved here from `routers/observability.py` in #3434) |
 | `docker-compose.yml` | Added otel-collector service (lines 207-228) |
 | `config/otel-collector.yaml` | Collector configuration with health_check extension (73 lines) |
 | `.env.example` | OTel environment variables (lines 95-112) |
 | `docs/DEPLOYMENT.md` | Added OpenTelemetry section |
-| `src/frontend/src/stores/observability.js` | Pinia store for observability state (268 lines) — **unused after Dashboard removal** |
+| `src/frontend/src/stores/observability.js` | Pinia store for observability state — **removed in #3434** (no importer after the Dashboard removal) |
 | `src/frontend/src/components/ObservabilityPanel.vue` | Collapsible metrics panel — **removed from Dashboard 2026-04-18, file deleted in #2492** (unreferenced) |
 
 ---
 
 ## Frontend Layer (Phase 2.5: UI Integration)
 
-### Backend API Endpoints
+### Backend API Endpoint: `GET /api/ops/costs`
 
-**File**: `src/backend/routers/observability.py`
+The single read path for collected OTel metrics. The former `GET /api/observability/metrics` and `GET /api/observability/status` routes (`routers/observability.py`) had no callers and were removed in #3434; `GET /api/ops/costs` returns equivalent totals, plus threshold alerts and a per-model cost list.
 
-#### GET /api/observability/metrics (lines 140-218)
+- **Route gate**: `src/backend/routers/ops.py` — `get_ops_costs()` calls `assert_admin(current_user, allow_scopes={"ops"})`, so it accepts an admin or a bounded read-only `ops`-scope MCP key (#2323), then delegates.
+- **Service**: `src/backend/services/ops_costs_service.py` — `get_ops_costs_impl()` scrapes `OTEL_PROMETHEUS_ENDPOINT` (default `http://trinity-otel-collector:8889/metrics`, 5 s timeout) and parses it with `parse_prometheus_metrics()` (Prometheus text format → structured dict) and `calculate_totals()` (aggregates across models). Both helpers moved here from `routers/observability.py` in #3434.
 
-**File**: `src/backend/routers/observability.py` (257 lines total)
-
-Fetches and parses Prometheus metrics from the OTel Collector.
-
-```python
-@router.get("/metrics")
-async def get_observability_metrics(
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Get OpenTelemetry metrics from the OTEL Collector.
-    Returns structured metrics data including:
-    - Cost breakdown by model
-    - Token usage by model and type
-    - Productivity metrics (lines, sessions, commits, PRs)
-    Returns {enabled: false} when OTel is not configured.
-    """
-```
-
-**Business Logic** (lines 23-137 in `src/backend/routers/observability.py`):
-1. `parse_prometheus_metrics()` - Parses Prometheus text format into structured dict
-2. `calculate_totals()` - Aggregates metrics across all models
-
-**Error Handling**:
-- Returns `{enabled: false}` when `OTEL_ENABLED=0`
-- Returns `{available: false, error: "..."}` on connection/timeout errors
-- Non-blocking - dashboard continues to work if collector unavailable
-
-#### GET /api/observability/status (lines 221-257)
-
-Quick status check without full metrics parsing.
-
-```python
-@router.get("/status")
-async def get_observability_status(
-    current_user: User = Depends(get_current_user)
-):
-    """Quick check without full metrics parsing."""
-    # Returns: enabled, collector_configured, collector_reachable
-```
+**Status reporting** (there is no separate status route — the same endpoint reports it):
+- `OTEL_ENABLED=0` → `{enabled: false, message, setup_instructions: [...]}`
+- Collector non-200, unreachable, timed out, or any other failure → `{enabled: true, available: false, error, timestamp}` (the generic-failure `error` names only the exception class; details go to the backend log, #1917)
+- Success → `{enabled: true, available: true, ...}` as below
 
 #### Response Format
 
@@ -514,98 +479,39 @@ async def get_observability_status(
 {
   "enabled": true,
   "available": true,
-  "metrics": {
-    "cost_by_model": {"claude-sonnet": 0.0234, "claude-haiku": 0.0012},
-    "tokens_by_model": {
-      "claude-sonnet": {"input": 1523, "output": 892, "cacheRead": 45678}
-    },
-    "lines_of_code": {"added": 42, "removed": 15},
-    "sessions": 5,
-    "active_time_seconds": 3600,
-    "commits": 3,
-    "pull_requests": 1
-  },
-  "totals": {
+  "timestamp": "2026-01-01T00:00:00Z",
+  "summary": {
     "total_cost": 0.0246,
     "total_tokens": 48093,
-    "tokens_by_type": {"input": 1523, "output": 892, "cacheRead": 45678},
-    "total_lines": 57,
+    "daily_limit": 50.0,
+    "cost_percent_of_limit": 0.0
+  },
+  "alerts": [],
+  "cost_by_model": [
+    {
+      "model": "Claude Sonnet",
+      "model_id": "claude-sonnet-4-5",
+      "cost": 0.0234,
+      "input_tokens": 1523,
+      "output_tokens": 892,
+      "cache_read_tokens": 45678,
+      "cache_creation_tokens": 0
+    }
+  ],
+  "tokens_by_type": {"input": 1523, "output": 892, "cacheRead": 45678},
+  "productivity": {
     "sessions": 5,
     "active_time_seconds": 3600,
+    "active_time_formatted": "1h",
     "commits": 3,
-    "pull_requests": 1
+    "pull_requests": 1,
+    "lines_added": 42,
+    "lines_removed": 15
   }
 }
 ```
 
-#### Router Registration
-
-**File**: `src/backend/main.py`
-- Import: line 41
-- Registration: line 289
-
-```python
-from routers.observability import router as observability_router
-# ...
-app.include_router(observability_router)
-```
-
----
-
-### Frontend State Management
-
-**File**: `src/frontend/src/stores/observability.js` (268 lines)
-
-#### State (lines 5-39)
-
-```javascript
-export const useObservabilityStore = defineStore('observability', {
-  state: () => ({
-    enabled: false,        // OTEL_ENABLED in backend
-    available: false,      // Collector reachable
-    error: null,           // Error message if any
-    loading: false,        // Fetch in progress
-    lastUpdated: null,     // Timestamp of last fetch
-    metrics: {
-      cost_by_model: {},
-      tokens_by_model: {},
-      lines_of_code: {},
-      sessions: 0,
-      active_time_seconds: 0,
-      commits: 0,
-      pull_requests: 0
-    },
-    totals: { /* aggregated values */ },
-    pollInterval: null,
-    pollIntervalMs: 60000  // 60 seconds
-  })
-})
-```
-
-#### Getters (lines 41-148)
-
-| Getter | Purpose |
-|--------|---------|
-| `isOperational` | `enabled && available` - OTel fully working |
-| `formattedTotalCost` | Currency format: `$0.0234` |
-| `formattedTotalTokens` | K/M suffix: `1.5M`, `234K` |
-| `formattedActiveTime` | Duration: `1h 30m` |
-| `costBreakdown` | Sorted array for cost-by-model display |
-| `tokensByType` | Aggregated by type (input, output, cache) |
-| `linesBreakdown` | Added/removed breakdown |
-| `hasData` | `total_cost > 0 || total_tokens > 0 || sessions > 0` |
-
-#### Actions (lines 151-267)
-
-| Action | Purpose |
-|--------|---------|
-| `fetchMetrics()` | GET /api/observability/metrics |
-| `fetchStatus()` | GET /api/observability/status (lightweight) |
-| `startPolling()` | Begin 60-second polling interval |
-| `stopPolling()` | Clear interval on unmount |
-| `setPollingInterval(ms)` | Change polling frequency |
-| `formatModelName(model)` | "claude-haiku-4-5-20251001" -> "Claude Haiku" |
-| `formatNumber(num)` | Number -> K/M suffix string |
+`daily_limit` comes from the `ops_cost_limit_daily_usd` setting (default 50.0); `alerts` carries a `cost_limit_approaching` warning at ≥80% of it or a `cost_limit_exceeded` critical entry at ≥100%. Unlike the removed `/api/observability/metrics`, `cost_by_model` is a list of `{model, model_id, cost, ...}` objects rather than a `{model: cost}` map — the shapes are equivalent, not identical.
 
 ---
 
@@ -618,7 +524,7 @@ export const useObservabilityStore = defineStore('observability', {
 **Previous implementation** (for reference):
 - Header stats showed total cost and token count
 - ObservabilityPanel displayed detailed breakdown
-- observabilityStore fetched metrics on mount
+- observabilityStore fetched metrics on mount (store removed in #3434)
 
 ---
 
@@ -819,6 +725,7 @@ docker compose logs otel-collector --since 30s | grep Traces
 
 | Date | Changes |
 |------|---------|
+| 2026-10-09 | #3434: `routers/observability.py` (`/api/observability/{metrics,status}`) and `stores/observability.js` removed (no callers). Read path documented as `GET /api/ops/costs`; parse helpers now in `services/ops_costs_service.py`. |
 | 2026-04-18 | **REMOVED Dashboard UI**: OTel header stats (cost, tokens, warning) and ObservabilityPanel removed from Dashboard.vue. Backend metrics collection unchanged. A dedicated Observability page planned for future. |
 | 2026-04-14 | Added Distributed Tracing section (RELIABILITY-002): backend auto-instrumentation for FastAPI/httpx/Redis, trace_id in logs, 10% sampling |
 | 2026-01-23 | Updated line numbers for crud.py (308-316), docker-compose.yml (207-228), observability.py, main.py (289), Dashboard.vue (357, 371, 35-56, 340, 430-431), ObservabilityPanel.vue (185 lines). Added system_agent_service.py and ops.py to files modified. Added health_check endpoint port 13133 to docker-compose. Updated otel-collector.yaml to show health_check extension and telemetry config. |

@@ -137,9 +137,8 @@ message/voip/share entries are exposed as MCP tool params on `messages.ts` /
   sanitized snapshot, an exception releases the claim for retry.
 - **Routers** surface a concurrent in-flight duplicate as **409**
   (`messages.py`, `voip.py`, `agent_files.py`, `a2a.py`) and a refused
-  unguarded effect as **422** `{"reason": "effect_unguarded"}` (same routers plus
-  `internal.py`'s `/agent-files/share`, which carries no id and is therefore
-  refused for a pull-mode agent); `paid.py` returns a retryable
+  unguarded effect as **422** `{"reason": "effect_unguarded"}` (same routers);
+  `paid.py` returns a retryable
   "settlement already in progress" result. The VoIP router keeps its boundary
   `Idempotency-Key` gate as the OUTER layer.
 

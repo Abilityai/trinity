@@ -13,6 +13,7 @@ from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_p
 from services.agent_auth import agent_httpx_client
 from services import (
     agent_skills_listing,
+    canon_roles_service,
     metric_access_service,
     metric_read_service,
     objective_join_service,
@@ -22,6 +23,7 @@ from services import (
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 from services.agent_service import (
+    agent_reach_logic,
     get_agent_permissions_logic,
     set_agent_permissions_logic,
     add_agent_permission_logic,
@@ -40,6 +42,7 @@ from services.agent_service import (
     set_file_sharing_status_logic,
 )
 from models import (
+    CanonRolesRead,
     CreateFolderRequest,
     FileUpdateRequest,
     ObjectiveJoinRead,
@@ -279,6 +282,18 @@ async def get_agent_permissions(
     return await get_agent_permissions_logic(agent_name, current_user, strict=strict)
 
 
+@router.get("/{agent_name}/reach/{target}")
+async def get_agent_reach(
+    agent_name: str,
+    target: str,
+    current_user: User = Depends(get_current_user),
+):
+    """May `agent_name` call `target` — the edge or the spawn record, decided
+    from the database, never from the container list (trinity-enterprise#629).
+    The MCP layer's agent-to-agent gate reads this."""
+    return agent_reach_logic(agent_name, target, current_user)
+
+
 @router.put("/{agent_name}/permissions")
 async def set_agent_permissions(
     agent_name: str,
@@ -445,6 +460,31 @@ async def get_agent_metrics(
             detail="metric_store_unavailable",
             headers={"Retry-After": "30"},
         )
+
+
+@router.get("/{agent_name}/canon/roles", response_model=CanonRolesRead)
+async def get_agent_canon_roles(
+    agent_name: AuthorizedAgentByName,
+    current_user: User = Depends(get_current_user),
+):
+    """The seats this agent's canon defines — `<canon>/roles/*.yaml` with each
+    file's id, `title` and `updated` stamp (trinity-enterprise#817).
+
+    Read from the agent's own container through the same door as its objectives,
+    and drawing on the same per-agent budget (`objectives_read_budget`), because
+    it is the same kind of fan-out against the same container. An agent key reads
+    only its own canon. OSS-core (operator ruling 2026-10-06).
+    """
+    if current_user.agent_name and current_user.agent_name != agent_name:
+        raise HTTPException(
+            status_code=403,
+            detail="Agent-scoped key may only read its own canon",
+        )
+    objectives_read_budget.enforce(
+        agent_name,
+        detail="Canon read rate limit exceeded for this agent.",
+    )
+    return await canon_roles_service.read_canon_roles(agent_name)
 
 
 @router.get("/{agent_name}/objectives", response_model=ObjectiveJoinRead)
@@ -814,18 +854,18 @@ async def share_agent_file(
     agent_name matches the path. User-scoped MCP keys of non-owners
     are rejected.
     """
-    # Owner gate (the agent's owner always passes)
-    assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can share files from this agent.")
-
-    # Defense in depth: if this is an agent-scoped key, it must be for
-    # the same agent. Prevents Agent A's key from being used to share
-    # files from Agent B's volume even when both are owned by the same user.
+    # An agent-scoped key may share only from its OWN volume. Checked first so
+    # the refusal names the rule; the owner gate below (narrowed to the agent's
+    # reach since ent#629) would refuse a sibling too, less specifically.
     actor_agent = getattr(current_user, "agent_name", None)
     if actor_agent and actor_agent != agent_name:
         raise HTTPException(
             status_code=403,
             detail="Agent-scoped MCP key cannot share files for a different agent.",
         )
+
+    # Owner gate (the agent's owner always passes)
+    assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can share files from this agent.")
 
     try:
         result = await create_share(

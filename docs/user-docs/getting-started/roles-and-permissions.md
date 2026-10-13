@@ -11,7 +11,7 @@ Trinity uses a 4-tier role system to control who can create agents, manage exist
 | **operator** | No | Assigned agents only | Set by an admin, or a whitelist entry added with role `operator` |
 | **user** | No | No — **Workspace only** | The default for whitelist entries and single sign-on accounts; public self-signup |
 
-**`user` means a member who works with agents in the Workspace.** A `user` account signs in at `/login` and lands in `/workspace`: the agents shared with them (plus any they own), their chats, the Inbox, Work, rooms, loops, voice, files and projects. Everything else — the Dashboard, agent pages, Operations, Library, Settings, and the API behind them — starts at **operator**. The refusal is server-side: an operator route answers a `user` with `403 workspace_only` ("This account works in the Workspace. Open /workspace."), whether the call comes from the browser, the API or an MCP key the account owns.
+**`user` means a member who works with agents in the Workspace.** A `user` account signs in at `/login` and lands in `/workspace`: the agents shared with them (plus any they own), their chats, the Inbox (including asks addressed to them), Work, rooms, loops, voice and files. Everything else — the Dashboard, agent pages, Operations, Library, Settings, and the API behind them — starts at **operator**. The refusal is server-side: an operator route answers a `user` with `403 workspace_only` ("This account works in the Workspace. Open /workspace."), whether the call comes from the browser, the API or an MCP key the account owns.
 
 Roles are hierarchical: admin > creator > operator > user. Higher roles inherit all permissions of lower roles.
 
@@ -66,13 +66,11 @@ For monitoring integrations that must keep working under enforced two-factor, an
 
 ## Managing User Roles
 
-**Admin only**: Navigate to **Settings → Access** and find the **User Management** section.
+**Admin only.** A role applies on every agent. Change it in **Settings → Access → User Management**: find the user in the table (when some accounts are Workspace-only, the section says how many; **Show only these** filters the table to them) and pick a new role from the dropdown (`user` reads "user — Workspace only").
 
-1. Find the user in the table. When some accounts are Workspace-only, the section says how many; **Show only these** filters the table to them.
-2. Select a new role from the dropdown (`user` reads "user — Workspace only").
-3. The change takes effect immediately on their next request.
+An agent's **Access** tab can also show a role select on each person's row; the role it sets applies on every agent. Every change there asks you to confirm it first; lowering someone to `user` reminds you they lose the operator UI on every agent. Where a person has no account yet, the row can offer **Give a platform account**, which creates their account right away (as `user`, unless an earlier allow-list entry set another role) so you can assign them to the agent; they then sign in at `/login`.
 
-You cannot change your own role.
+The change takes effect on their next request. You cannot change your own role, and the role can only be changed from a signed-in session (an API key is refused); every change is recorded in the audit log. Lowering a role also lowers the person's email-whitelist entry to match, so a later sign-in with that address cannot bring the old role back. Raising a role leaves that entry as it was.
 
 ## For Agents
 
@@ -81,7 +79,7 @@ User roles are stored in the `users` table. The role is checked on each API requ
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/users` | GET | List all users (admin-only) |
-| `/api/users/{username}/role` | PUT | Change a user's role (admin-only) |
+| `/api/users/{username}/role` | PUT | Change a user's role (admin, signed-in session only — API keys are refused; audited as `role_change`) |
 
 **Request body:**
 ```json
