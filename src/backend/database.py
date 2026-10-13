@@ -4282,6 +4282,11 @@ class DatabaseManager:
             agent_name, include_retired=include_retired
         )
 
+    def metric_declarations_elsewhere(self, agent_name, names):
+        """Metric names the owner's other agents actively declare, with their
+        agreed label (ent#843). See MetricDefinitionOperations."""
+        return self._metric_definition_ops.declarations_elsewhere(agent_name, list(names))
+
     def reconcile_metric_definitions(self, agent_name: str, declared, source: str):
         """Set-diff the declared metrics into the registry; returns a summary dict."""
         return self._metric_definition_ops.reconcile(agent_name, declared, source)
