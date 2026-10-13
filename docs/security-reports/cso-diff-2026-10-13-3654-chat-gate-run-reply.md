@@ -21,7 +21,7 @@ The diff changes the text one existing read returns. `skill_gate_service.request
 | Secrets in diff | None. The redaction test builds its token-shaped string at run time. |
 | Enterprise-docs guard | `enterprise-docs-guard.yml` pattern run over the diff's `docs/` additions with a positive control — no hits. |
 | Concealed Unicode | Zero-width and bidi scan over the changed doc and test — no hits. |
-| Guard regression suites | `test_3654_chat_gate_run_reply.py` 10/10 (9 red before the fix); `test_3526_held_chat_trace.py`, `test_3520_gate_completion_notice.py`, `test_ent755_gate_card_view.py`, `test_3274_gate_notice.py` green. |
+| Guard regression suites | `test_3654_chat_gate_run_reply.py` 10/10 (all 10 red with the fix reverted); `test_3526_held_chat_trace.py`, `test_3520_gate_completion_notice.py`, `test_ent755_gate_card_view.py`, `test_3274_gate_notice.py` green. |
 
 ## Hypotheses
 
