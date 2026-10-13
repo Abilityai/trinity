@@ -202,7 +202,10 @@ class TestUpdateExecutionStatus:
             "claude_session_id": "sess-1", "compact_metadata": "{}", "retry_count": 1,
             "turn_integrity": "complete",
             # #3589: a datetime in, the Z-suffixed ISO string out (to_utc_iso).
-            "completed_at": datetime(2026, 10, 12, 9, 51, 51, tzinfo=timezone.utc),
+            # In-window (after the row's own started_at): a past instant below
+            # it is floored since trinity-enterprise#882 — floor behaviour is
+            # pinned in test_882_completed_at_floor.py, persistence here.
+            "completed_at": datetime.now(timezone.utc),
         }
         assert set(values) == {f.name for f in dataclasses.fields(ExecutionResult)}
         assert schedule_ops.update_execution_status(eid, "success", ExecutionResult(**values)) is True
