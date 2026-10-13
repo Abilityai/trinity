@@ -3649,9 +3649,10 @@ to localStorage in the clear.
   (`GET/POST /api/enterprise/client-portal/agents/{name}/decisions`,
   `POST …/decisions/{id}/actions`, `PortalAgentDecisions.vue`).
 - **Readers**: own seat always; the agent OWNER (`role_card._is_owner`) every seat,
-  writable; a stakeholder the assignment provider recognises through the optional seam
-  method `kinds_for(agent_name, reader_email) -> {kind, role_id}` every seat read-only
-  (per-agent in v1 — DEBT_INBOX 2026-09-22); no provider → own seat only. Writes: own
+  writable; nobody else. An assignment kind (`kinds_for(agent_name, reader_email) ->
+  {kind, role_id}`) does **not** widen the read: it answers the role card's
+  relationship line only, and a kind is per agent, not per role, so it would hand an
+  approver every person's decisions (#3660; per-role stakeholder reads are #3381). Writes: own
   seat, or the owner on a named seat; a foreign id is the uniform 404.
 - **Read into context**: the seat's active decisions (criterion first, bounded) ride the
   shared memory block on every turn — public link, channels, seat runs, Workspace — so
