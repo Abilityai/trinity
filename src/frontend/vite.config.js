@@ -103,10 +103,11 @@ export default defineConfig({
       '/a2a/': {
         target: `http://${backendHost}:8000`,
         changeOrigin: false,
-        // trinity-enterprise#838: the backend reads X-Real-IP from this proxy
-        // to decide whether a caller is on a trusted network. Overwrite it from
-        // the socket, as prod nginx does with $remote_addr — a client-sent
-        // value must never pass through.
+        // routers/public.py::_get_client_ip (#181) trusts X-Real-IP from this
+        // proxy's container (it sits inside _get_trusted_networks()) and keys
+        // the public-route rate limits on it. Overwrite it from the socket, as
+        // prod nginx does with $remote_addr — a client-sent value passed through
+        // would let a dev-mode client pick its own rate-limit bucket.
         configure: (proxy) => {
           proxy.on('proxyReq', (proxyReq, req) => {
             proxyReq.setHeader('X-Real-IP', req.socket.remoteAddress || '')
