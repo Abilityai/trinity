@@ -5840,8 +5840,23 @@
       "file": "unit/test_3526_held_chat_trace.py",
       "feature": "#3526",
       "added": "2026-10-12",
-      "categories": ["backend", "unit", "chat"],
+      "categories": [
+        "backend",
+        "unit",
+        "chat"
+      ],
       "description": "A gated request held from the Chat tab is saved once to the chat session with its notice (source gate:<request_id>), the 202 names the session, a foreign session id falls back to the sender's own, and a failed save still answers pending. A person re-sending the same request while one is pending gets it back ahead of the caps; an agent, another person, another text or a decided request each raise their own. The session read carries the request's state and decision text; the voice context leaves held rows out."
+    },
+    {
+      "file": "unit/test_3590_rebuild_pull_env.py",
+      "feature": "#3590",
+      "added": "2026-10-12",
+      "categories": [
+        "backend",
+        "unit",
+        "agent-lifecycle"
+      ],
+      "description": "The #1559 rebuild-from-nothing path bakes the pull-worker env for an allowlisted pilot (driven through the real recreate_missing_container, red before the fix on KeyError TRINITY_PULL_MODE); apply_pull_mode_env is the one owner of the set-or-clear idiom (pilot on empty dict, de-pilot clears, idempotent, module-global lookup honours stubs, MCP-key-absent and settings-fallback warnings); check_pull_mode_env_matches joins the start-path drift chain (flag only, fail-safe on unobserved attrs) and start_agent_internal recreates a pilot whose container lacks the flag; AST writer-set guard pins the three env assemblers on apply_pull_mode_env; a structural scan over services/ (rglob) finds an unknown fourth: every provision-tail caller must apply the helper and every containers_run(environment=) site must be a registered runner."
     }
   ]
 }
