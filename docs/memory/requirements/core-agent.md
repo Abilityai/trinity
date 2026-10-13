@@ -3821,7 +3821,7 @@ to localStorage in the clear.
 - **Three windows (tabs)**:
   | Tab | Membership | Source |
   |---|---|---|
-  | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked; ordered by urgency — expiring within 24h first (soonest first), then priority (critical > high > medium > low), then the longest-waiting (§3g C1) | the ONE asks list (`openAsks`) |
+  | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked; **Newest first by default** (raised time, newest first; ties on id), **Urgency on the sort control** — expiring within 24h first (soonest first), then priority (critical > high > medium > low), then the longest-waiting (§3g C1, unchanged); see *Action's sort* below (trinity-enterprise#856) | the ONE asks list (`openAsks`) |
   | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included | the sidebar's `threads` + `GET /chat-state?previews=true` |
   | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed; rooms wait for PR C), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule, the 200-ask read cap when hit, and — to a viewer with rooms — that rooms are not here yet (§3g D-4) | the same two lists |
 - **One unread model (AC 6)**: the unit of Unread is a **chat**, read through the existing
@@ -3957,6 +3957,40 @@ to localStorage in the clear.
   When split, the tab's first row is previewed (the rail column does not pop in on the first
   click); the preview is never a read and never enters the URL — `?item=` holds only what the
   reader opened (§3g S5, T2).
+- **Action's sort — Newest by default, Urgency on a switch (trinity-enterprise#856, operator
+  ruling 2026-10-09)**: an inbox reads newest first; urgency is one click away, not the default.
+  - **AC B1** Action opens Newest first (`askRecencyCompare`: `created_at` desc, id desc — the
+    rule All already uses for its rows). **AC B2** the Urgency order is §3g C1, unchanged.
+  - **AC B3** the control is a `BaseSelect variant="ghost"` ("Newest" / "Urgency", named
+    "Sort asks") in the list's head line, beside the total. The line's 44px box is held on
+    every tab and in every state (loading, empty, failed), so switching tab or sort moves
+    nothing; the native select gives keyboard operation and the phone picker.
+  - **AC B4** the choice lives in `?sort=` (`newest` | `urgency`; anything else is ignored)
+    and in a per-viewer memory (`localStorage`, keyed by the viewer bucket the column widths
+    use). Precedence: the URL, then the memory, then Newest. A change writes both, through
+    `router.replace` (never a history entry). A refused storage degrades to session-only.
+  - **AC B5** a sort change starts a new visit of the list (`visitKey` carries the sort), so
+    the rows re-sort on the click and hold still after it, as on a tab change.
+  - **AC B6** `?from=` narrowing and paging work the same in both orders (the filter runs on
+    the sorted list).
+  - **AC B7** the row marks that say WHY an ask is urgent (priority, "Expires in …") render in
+    both orders.
+  - **T1 — Action only.** Unread and All are already recency, and Urgency means nothing for a
+    chat or a tag row; the control is not drawn there, and a stray `?sort=` on those tabs is
+    removed from the URL like a stray `?from=`.
+  - **T2 — the operator queue's Open tab (Operations) is left as it is**: priority, then the
+    longest-waiting — an operator's triage surface with its own semantics, outside the
+    Workspace and outside this change.
+  - **T3 — the rail's Asks list follows Action's default, passed explicitly**
+    (`actionItems(openAsks, now, INBOX_SORT_DEFAULT)`): its rows open the Inbox on Action,
+    which shows the same order. It has no control and does not read the viewer's memory.
+  - **T5 — inconsistencies recorded, not fixed here**: (i) an unknown priority ranks as
+    **medium** in the Workspace (a malformed priority must not bury an ask) and **last** in
+    the operator queue; (ii) expiry affects order **only in the Workspace** (the queue has no
+    expiry mark); (iii) within a priority the server returns pending asks **newest first**
+    (`db/operator_queue.py::list_items`) while both clients show the **longest-waiting
+    first**, so a page truncated at the read cap drops the oldest — a public bug listed in the
+    PR's handoffs, not fixed here (no endpoint change).
 - **Known properties (stated, not bugs)**:
   - A viewer who has never read anything has no baseline, so nothing counts for them — a first
     deliverable included (the inherited #557 rule).
@@ -4078,7 +4112,8 @@ to localStorage in the clear.
 
 ### 5.43 Workspace — recency that holds still (trinity-enterprise#856)
 
-- **Status**: 🚧 in progress (Part A — chat tabs and landing)
+- **Status**: 🚧 in progress (Part A — chat tabs and landing; Part B — Action's sort — is
+  specified in §5.40)
 - **Why**: the operator's 2026-10-09 ruling — a reply must change a badge, never a
   position, while the person is looking at the strip; recency is the order you
   ARRIVE to, not an order that re-sorts under the cursor.
