@@ -56,9 +56,9 @@ Each deliverable card carries **Useful** / **Not what I needed**. Agent messages
 - One click records the rating. **Not what I needed** also opens a comment box (*What were you looking for instead? (optional)*) — the rating is already saved by then, so closing the box loses nothing.
 - One rating per person per deliverable. Clicking the other option corrects it; clicking the one you already gave does nothing — there is no un-rate.
 - After a comment is sent you see one of two acknowledgements, and both are true: **Thanks — passed on to the agent.** when the agent has a `capture-feedback` skill (the words are handed to it in a background turn of its own, never posted into your chat), or **Thanks — recorded for the team.** when it does not.
-- A negative rating also raises a heads-up in the operator queue — *A Workspace client rated a response as not useful*, with the comment if there was one — so the person running the instance hears about it. One such item per person per deliverable per day. See [Approvals](../automation/approvals.md).
+- A negative rating also raises a heads-up in the operator queue — *A Workspace client rated a response as not useful*, with the comment if there was one — so the person running the instance hears about it. One such item per person per deliverable per day; a comment typed after the click is added to that existing heads-up rather than raising a second one. See [Approvals](../automation/approvals.md).
 
-**What the rated agent learns.** Tallies only. An agent can read that it was rated up or down, but never the words and never who rated it — a comment is untrusted text from someone who is, by construction, annoyed, and handing it to the thing being criticised is a prompt-injection path. Operators of the agent read comments in full.
+**What the rated agent learns.** Tallies only. An agent can read that it was rated up or down, but never the words and never who rated it — a comment is untrusted text from someone who is, by construction, annoyed, and handing it to the thing being criticised is a prompt-injection path. The agent's owner and admins read comments in full; a person the agent is merely shared with does not.
 
 ### Exporting
 

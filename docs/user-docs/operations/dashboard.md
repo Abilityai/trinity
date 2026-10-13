@@ -124,7 +124,7 @@ The former standalone Agents page, folded into the Dashboard as a third mode (`/
 3. **Run** and **Autonomy** toggles inline on each row.
 4. Sort by **Newest First**, **Oldest First**, **Name (A-Z)**, **Name (Z-A)**, **Running First**, or **Success Rate**; filter by name (**Search agents...**) and status (**All** / **Running** / **Stopped**). These two filters persist per browser.
 5. Select multiple rows for bulk tag operations.
-6. Three responsive layouts — the row list reflows down to mobile widths.
+6. Three responsive layouts — the row list reflows down to mobile widths. The layout follows the width of the list itself, not just the window, so opening the **Systems** sidebar on a tablet-width window switches the list to the compact row rather than squeezing cells over each other.
 7. System agents pin to the top and hide the Run toggle.
 
 Tag and owner filtering use the shared Dashboard header controls; **Clear** (and **Clear all filters** in the no-match state) clears both the row-level and header-level filters at once.

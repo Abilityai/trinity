@@ -207,10 +207,19 @@ metrics:
     direction: up        # up | down | hold
     target: 35
     by: 2026-12-31
+guard_metrics:           # optional: numbers that must not move meanwhile
+  - name: cost_per_lead
+    target: 40           # the level to hold, once there is a baseline
+    tolerance: 5
 status: active
 ```
 
-Trinity reads the active objectives the agent owns (through its role) or supports, and joins each metric to its latest recorded value and freshness. Each row reports the target, the actual, whether it is stale, and a gap:
+The join needs only the agent's canon declaration (`x-canon` in `template.yaml`). Trinity reads the active objectives the agent owns or supports, and joins each metric to its latest recorded value and freshness.
+
+- **Owned** objectives are the ones whose `owner: role:<id>` names the agent's seat on record: the seat the agent holds itself, or else the seats held by the people it serves, its primary first. The `x-role` entry in `template.yaml` does not decide this. An agent with no seat owns nothing and gets a `no_seat` finding that says what to do; objectives that name it in `supporting_agents` still show.
+- **Guard metrics** are numbers the objective must not move while it is pursued. Each guard joins the same metric list, tagged `role: "guard"`, and is always judged as a hold — `on_target` within its `tolerance` or `off_target` — whatever direction the metric declares elsewhere. Guards are counted in `summary.guards`, apart from the objective's own metrics, so an objective without guards reports exactly as before. A guard list that is not a list (`guard_metrics_invalid`), a guard with no target yet (`guard_target_unset`) or a guard given a direction (`guard_direction_invalid`, the word is ignored) is named as a finding.
+
+Each row reports the target, the actual, whether it is stale, and a gap:
 
 - `gap.status` is **position**, not pace: `behind`, `on_target`, or `ahead` for `up` and `down`; `on_target` or `off_target` for `hold`. It never says whether the agent is late against `by`.
 - A stale metric still gets a gap, with `stale: true` beside it.
@@ -239,7 +248,7 @@ These tools act on the calling agent's own metrics. An agent records only its ow
 | `record_metrics(points, execution_id?)` | Record up to 1,000 points (`{metric, value, ts?, dims?}`) against declared metrics. A point's identity is `(metric, ts, dims)`: re-sending the same value deduplicates, and a different value at the same identity corrects the stored point in place (reported as `corrected`). Pass `execution_id` so a re-delivered turn replays instead of recording twice; an optional `idempotency_key` makes a re-sent identical batch return the first result. Never throws — refusals come back with a reason code per point |
 | `refresh_metric_definitions()` | Re-read `template.yaml` and reconcile the registry after you change `metrics:`. Needs the agent running |
 | `get_metrics(agent?, metric?, window?, since?, until?, include_retired?)` | Declared metrics with the latest value, freshness, and a bounded series (up to 120 buckets each). Name one `metric` for its raw points, newest first. `agent` reads another agent's metrics (needs a permission grant on it; otherwise refused, not retryable) |
-| `get_objectives()` | Your objectives joined to your metrics: target, actual, freshness, and gap. Use it instead of computing a gap from `get_metrics`. A metric you do not declare yourself can still get an actual when exactly one agent you hold a grant on serves it |
+| `get_objectives()` | Your objectives joined to your metrics, guards included: target, actual, freshness, and gap. Use it instead of computing a gap from `get_metrics`. A metric you do not declare yourself can still get an actual when exactly one agent you hold a grant on serves it |
 
 ### API
 

@@ -104,7 +104,7 @@ There is nothing to build. One command re-pulls the four platform images **and**
 
 Do not substitute a bare `docker compose -f docker-compose.hosted.yml pull`: the agent base image is not a compose service, so that pull skips it and leaves every agent on the old runtime. `start.sh --hosted` also performs Step 4 for you — `docker compose up -d` recreates only the containers whose image changed and leaves the agent network in place — so continue at [Step 5](#step-5-verify).
 
-**Upgrading a hosted install that runs on SQLite.** The first run on a release that bundles PostgreSQL generates `POSTGRES_PASSWORD`, sees your existing `trinity.db`, and writes `DATABASE_URL=` (empty) to `.env` — so the install **stays on SQLite** and nothing is migrated. It prints a warning that SQLite reached end-of-support, with a pointer to `docs/migrations/SQLITE_TO_POSTGRES.md`, on every run until you move. An idle `trinity-postgres` container starts beside it. Moving is a separate, deliberate step: the Ops Agent's `/migrate-to-postgres` skill, or the manual guide. See [Single Server → Database backend](single-server.md#database-backend).
+**Upgrading a hosted install that runs on SQLite.** The first run on a release that bundles PostgreSQL generates `POSTGRES_PASSWORD`, sees your existing `trinity.db`, and writes `DATABASE_URL=` (empty) to `.env` — so the install **stays on SQLite** and nothing is migrated. It prints a warning that SQLite reached end-of-support, with a pointer to `docs/migrations/SQLITE_TO_POSTGRES.md`, on every run until you move. An idle `trinity-postgres` container starts beside it. Moving is a separate, deliberate step: the Ops Agent's `/migrate-to-postgres` skill, or the manual guide. Never delete that `DATABASE_URL=` line: on the hosted compose file an *absent* line selects the bundled PostgreSQL — which is empty — and only an *empty* line keeps SQLite. See [Single Server → Database backend](single-server.md#database-backend).
 
 On a Marketplace Droplet whose admin was created in the browser, `.env` carries a blank `ADMIN_PASSWORD` with `ADMIN_PASSWORD_SOURCE=browser`; the re-run honours that marker and never generates a password over the one you chose. Setting a real `ADMIN_PASSWORD` in `.env` before the re-run is the deliberate way to reset it.
 
@@ -277,6 +277,8 @@ echo 'TRINITY_IMAGE_TAG=v0.9.0' >> .env
 git checkout v0.9.0
 ```
 
+**A hosted install on the bundled PostgreSQL cannot roll back to v0.9.5 or earlier.** Those releases' `docker-compose.hosted.yml` has no `postgres` service, so the backend would start without its database. The data stays in the `trinity_postgres-data` volume; roll forward again instead. An install that stayed on SQLite (`DATABASE_URL=` empty) rolls back normally. To restore a PostgreSQL backup, see [Backup and Restore](backup-and-restore.md).
+
 ### 4. Rebuild and restart
 
 ```bash
@@ -294,7 +296,7 @@ docker compose restart backend frontend mcp-server scheduler
 
 ## Automation
 
-The [Ops Agent](ops-agent.md)'s `/update` skill runs the source-install procedure end to end (pull, rebuild the four platform images, restart, verify, and flag a stale base image). It builds from source, so on a hosted install use `start.sh --hosted` as above instead.
+The [Ops Agent](ops-agent.md)'s `/update` skill runs this procedure end to end: back up, pull, rebuild the four platform images, restart, verify, and flag a stale base image. On a hosted install (`COMPOSE_FILE=docker-compose.hosted.yml`) it builds nothing: it checks out the release tag matching the server's `TRINITY_IMAGE_TAG` and runs `start.sh --hosted`, so set the new tag in the server's `.env` first. It then reports which database the backend runs on, so you can confirm that did not change.
 
 ---
 
