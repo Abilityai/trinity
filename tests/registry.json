@@ -196,6 +196,18 @@
       "description": "The keyless trusted-network A2A path is gone: through the real router over the real unit SQLite with a row an rc1-rc3 database still carries (a2a_scope='internal', a2a_keyless_internal=1) and a trusted CIDR seeded, a caller with no credential gets 401 and no dispatch on message/send, message/stream, tasks/get and tasks/cancel from a CGNAT peer, via X-Real-IP, with cloudflared headers and from the public internet; a keyed caller from the public internet runs the task and is never 404'd for its address; the card is served at the public origin; statically, nothing under src/backend reads a2a_scope, a2a_keyless_internal or source_host outside the DDL/migration homes and the db object has no get_a2a_scope/set_a2a_scope."
     },
     {
+      "file": "unit/test_ent885_outbound_allowlist.py",
+      "feature": "trinity-enterprise#885",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "a2a",
+        "security",
+        "unit"
+      ],
+      "description": "The trusted-networks list is an outbound endpoint allowlist (operator ruling 2026-10-13): with the list written through the real set_entries into the real unit SQLite, a tailnet peer on CGNAT / plain http is refused with the v0.9.5 reason (endpoint_not_https / endpoint_private_address) at register time (a2a_outbound.upsert_endpoint) and at call time (a2a_client.validate_endpoint) when its host is off the list, and is registered and called when the list names its CIDR, its *.suffix or its exact name; a stranger's name under a different suffix gets nothing; un-listing refuses the next call."
+    },
+    {
       "file": "unit/test_ent841_close_chat.py",
       "feature": "abilityai/trinity-enterprise#841",
       "added": "2026-10-08",
