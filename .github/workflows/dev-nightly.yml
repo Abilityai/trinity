@@ -11,7 +11,7 @@ name: dev-nightly
 #   unit         the 3-seed pytest-randomly matrix the PR gate no longer runs
 #                (Tier 1 runs one seed; #2945's explicit trade), each seed
 #                compared against the committed failure baseline;
-#   integration  the live-stack suite (`tests/` minus unit/ and process_engine/)
+#   integration  the live-stack suite (`tests/` minus unit/)
 #                against a stack booted from `dev`, absolute failures reported.
 #
 # A red night opens or updates ONE tracking issue (the frontend-e2e nightly
@@ -159,7 +159,7 @@ jobs:
             exit 1
           fi
           ( cd tests && python -m pytest -m "not slow" \
-              --ignore=unit --ignore=process_engine \
+              --ignore=unit \
               --continue-on-collection-errors \
               --timeout=300 --timeout-method=signal \
               --junit-xml="$GITHUB_WORKSPACE/junit-integration-dev.xml" \

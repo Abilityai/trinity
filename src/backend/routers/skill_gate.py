@@ -124,7 +124,7 @@ async def set_agent_skill_gate(
     body: SkillGateSetRequest,
     request: Request,
     current_user: User = Depends(_gate_writer),
-    agent_name: str = Depends(get_owned_agent_by_name),
+    agent_name: str = Depends(get_owned_agent_by_name),  # _gate_writer admitted a holder first
 ):
     """Gate a skill on the agent, or change its gate. Only the fields sent are
     applied."""
@@ -142,7 +142,7 @@ async def clear_agent_skill_gate(
     skill_name: str,
     request: Request,
     current_user: User = Depends(_gate_writer),
-    agent_name: str = Depends(get_owned_agent_by_name),
+    agent_name: str = Depends(get_owned_agent_by_name),  # _gate_writer admitted a holder first
 ):
     """Clear the gate on a skill. Idempotent."""
     try:

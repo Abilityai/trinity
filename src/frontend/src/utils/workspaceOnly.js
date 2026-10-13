@@ -21,6 +21,19 @@ const WORKSPACE_HOME = '/workspace'
 /** How the role pickers name the rung (ruled 2026-10-09; the other options keep their names). */
 export const WORKSPACE_ONLY_ROLE_LABEL = 'user — Workspace only'
 
+/** The platform roles a picker offers, lowest first (`ROLE_HIERARCHY`). */
+export const PLATFORM_ROLES = ['user', 'operator', 'creator', 'admin']
+
+/** A role as a picker or a badge names it. */
+export function platformRoleLabel(role) {
+  return role === 'user' ? WORKSPACE_ONLY_ROLE_LABEL : role
+}
+
+/** The short form beside a person's name: `Ann · Workspace only` / `Sam · operator`. */
+export function platformRoleShort(role) {
+  return role === 'user' ? 'Workspace only' : role
+}
+
 /**
  * Only the server-reported `user` rung. An unknown or missing role is NOT
  * Workspace-only here: a role still loading must not bounce an operator out of

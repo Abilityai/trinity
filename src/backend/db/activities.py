@@ -27,6 +27,7 @@ from models import ActivityState, ActivityType, ActivityCloseOutcome
 from utils.helpers import (
     duration_ms_between,
     parse_iso_timestamp,
+    terminal_completed_at,
     to_utc_iso,
     utc_now_iso,
 )
@@ -230,8 +231,16 @@ class ActivityOperations:
 
     def complete_activity(self, activity_id: str, status: str = ActivityState.COMPLETED,
                           details: Optional[Dict] = None,
-                          error: Optional[str] = None) -> "ActivityCloseOutcome":
+                          error: Optional[str] = None,
+                          *, completed_at: Optional[datetime] = None) -> "ActivityCloseOutcome":
         """Close an activity: state, completion time, duration.
+
+        ``completed_at`` (#3589): the instant the producer says the work ended,
+        when the closer has one — the #2944 watchdog claim passes the agent's
+        ``retained_at``, minutes before this write. ``None`` (every closer that
+        runs as the work ends) stamps now. Same rules as the execution writer
+        (``utils.helpers.terminal_completed_at``): naive → UTC, never in the
+        future.
 
         #1804: this is now a **compare-and-set**, not an unconditional UPDATE.
         Every CAS-won terminal writer closes the paired activity, so a second
@@ -256,7 +265,7 @@ class ActivityOperations:
 
             # Use parse_iso_timestamp to handle both 'Z' and non-'Z' timestamps
             started_at = parse_iso_timestamp(row["started_at"])
-            completed_at = parse_iso_timestamp(utc_now_iso())
+            completed_at = terminal_completed_at(completed_at)
             # #2434: `completed_at` here IS when the work stopped, so this is a
             # real measurement — but an activity with no owning closer can sit
             # `started` arbitrarily long (#1804's class), and past the int4

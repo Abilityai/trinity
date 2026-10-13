@@ -15,7 +15,8 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 
 from database import db
 from dependencies import (
-    get_authorized_agent, get_current_user, assert_agent_access, resolve_source_agent, workspace_route,
+    agent_may_reach, get_authorized_agent, get_current_user, assert_agent_access, resolve_source_agent,
+    workspace_route,
 )
 from models import (
     LoopRunResponse,
@@ -118,7 +119,13 @@ def _build_status_response(loop: dict) -> LoopStatusResponse:
 
 
 def _check_loop_access(loop: dict, user: User) -> None:
-    """Caller must be the loop initiator, agent owner, or admin."""
+    """Caller must be the loop initiator, agent owner, or admin.
+
+    trinity-enterprise#629: reach first. An agent key carries its owner's role
+    and user id, so both shortcuts below would admit it to every sibling's loop
+    (each one "started by" the shared owner)."""
+    if not agent_may_reach(user, loop["agent_name"]):
+        raise HTTPException(status_code=403, detail="Access denied")
     if user.role == "admin":
         return
     if loop["started_by_user_id"] == user.id:

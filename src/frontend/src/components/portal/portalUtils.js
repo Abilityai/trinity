@@ -783,6 +783,12 @@ export function asksHomeRoute(agentName = null) {
   if (agentName) query.from = agentName
   return { path: WORKSPACE_INBOX, query }
 }
+// The "Open in Inbox" link, wherever a surface draws one (the asks-waiting line
+// on Work and Info; a project's Needs you row, #3574): a 44px target on a touch
+// screen and the design-system ring (A2 round 1's rule; round 2: keyed on the
+// pointer, not the width — a tablet is touch too).
+export const INBOX_LINK_CLASS = 'inline-flex items-center max-sm:min-h-11 [@media(pointer:coarse)]:min-h-11 text-action-primary-600 dark:text-action-primary-400 hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40'
+
 export function asksWaitingLabel(n) {
   const k = Number(n) || 0
   return k > 0 ? `${k} ${k === 1 ? 'ask' : 'asks'} waiting on you` : ''

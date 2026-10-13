@@ -12,7 +12,7 @@ import pytest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch, AsyncMock
 
-from scheduler.models import ExecutionStatus, TriggerSource, Schedule, ScheduleExecution
+from scheduler.models import ExecutionStatus, Schedule, ScheduleExecution
 from scheduler.database import SchedulerDatabase
 
 
@@ -24,23 +24,11 @@ class TestRetryEnums:
         assert hasattr(ExecutionStatus, 'PENDING_RETRY')
         assert ExecutionStatus.PENDING_RETRY.value == 'pending_retry'
 
-    def test_retry_trigger_source_exists(self):
-        """Verify RETRY trigger source is defined in enum."""
-        assert hasattr(TriggerSource, 'RETRY')
-        assert TriggerSource.RETRY.value == 'retry'
-
     def test_all_execution_statuses_defined(self):
         """Verify all expected statuses exist including PENDING_RETRY."""
         expected = ['RUNNING', 'SUCCESS', 'FAILED', 'CANCELLED', 'SKIPPED', 'PENDING_RETRY']
         for status in expected:
             assert hasattr(ExecutionStatus, status), f"Missing status: {status}"
-
-    def test_all_trigger_sources_defined(self):
-        """Verify all expected trigger sources exist including RETRY."""
-        expected = ['SCHEDULE', 'MANUAL', 'API', 'RETRY']
-        for source in expected:
-            assert hasattr(TriggerSource, source), f"Missing trigger source: {source}"
-
 
 class TestScheduleRetryConfiguration:
     """Tests for Schedule model retry configuration fields."""

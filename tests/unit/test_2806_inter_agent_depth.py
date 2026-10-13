@@ -103,6 +103,9 @@ def world(db_backend, monkeypatch):
     db.register_agent_owner(A, OWNER)
     db.register_agent_owner(B, OWNER)
     db.register_agent_owner(C_FOREIGN, "depth-other")
+    # ent#629: an agent key reaches a sibling only over an agent_permissions edge
+    # (the backend now holds what the MCP layer checks) — A calls B here.
+    db.add_agent_permission(A, B, created_by=OWNER)
     owner = db.get_user_by_username(OWNER)
 
     capacity = _Capacity()

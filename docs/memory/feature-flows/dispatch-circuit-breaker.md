@@ -151,7 +151,7 @@ upstream `acquire()` gate already admitted, so router-only agents still self-hea
 - `tests/integration/test_dispatch_breaker.py` — the Lua state machine against
   real Redis: threshold open, success reset, ignored outcomes never move state
   (R2), retry_after, half-open probe close, probe-fail backoff growth, heartbeat
-  seam, `get_all_dispatch_states`/`get_dispatch_states_for`/`reset_dispatch`, and
+  seam, `get_dispatch_states_for`/`reset_dispatch`, and
   the `record_success` no-op guard (skips the HASH write when already closed+0,
   still resets accumulated sub-threshold failures).
 - `tests/integration/test_fail_queued_for_agent.py` — sets FAILED (not CANCELLED),

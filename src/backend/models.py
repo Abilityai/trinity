@@ -6,7 +6,7 @@ import os
 import re
 import unicodedata
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, StrictInt, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, PrivateAttr, SecretStr, StrictInt, field_validator, model_validator
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from datetime import datetime
 from enum import Enum
@@ -488,6 +488,13 @@ class User(BaseModel):
     # agent created could reach `/task` looking like the admin in a browser.
     # `dependencies.is_person_principal` refuses it.
     is_event_loopback: bool = False
+    # trinity-enterprise#629 + #164: the agents a capability fence admitted an
+    # agent key to on THIS request (`dependencies._admit_capability_reach`).
+    # Private, so it is never serialized and never set from a token: the only
+    # writers are the two fences, after the grant check and the owner bound.
+    # One principal object per request (FastAPI caches `get_current_user`), so
+    # it cannot outlive the request that earned it.
+    _capability_reach: set = PrivateAttr(default_factory=set)
 
 
 class Token(BaseModel):
@@ -1649,16 +1656,6 @@ class GithubPatPropagationResult(BaseModel):
 # Outbound File Sharing (FILES-001)
 # =============================================================================
 
-class ShareFileRequest(BaseModel):
-    """Body for POST /api/internal/agent-files/share (internal, agent-server path)."""
-    agent_name: str = Field(..., max_length=128)
-    filename: str = Field(..., min_length=1, max_length=255)
-    display_name: Optional[str] = Field(default=None, max_length=255)
-    expires_in: Optional[int] = None
-    # NOTE: `one_time` is deferred — the schema retains the columns
-    # so we can re-enable it later without a migration.
-
-
 class ShareFileMcpRequest(BaseModel):
     """Body for POST /api/agents/{agent_name}/shared-files (MCP path).
 
@@ -2327,6 +2324,15 @@ class ExecutionResultEnvelope(BaseModel):
     # writer that does persist it inherits the guarantee instead of rediscovering
     # the int4 ceiling in production. A bad value is a clean 422.
     execution_time_ms: Optional[int] = Field(None, ge=0, le=2**31 - 1)
+    # #3589: the instant the producer says the turn ended, when it has one.
+    # The writers (`update_execution_status`, `complete_activity`) measure
+    # `duration_ms` to it instead of to the write time: the #2944 watchdog
+    # claim fills it from the agent's `retained_at` (≥ 180 s + up to a cleanup
+    # cycle before the write), and the #1083 callback arrives late the same
+    # way (retried to the lease deadline, re-sent by the startup sweep) once
+    # the agent stamps it. Normalized in the writer — naive → UTC, never in
+    # the future. Absent (every current agent image) → the writer stamps now.
+    completed_at: Optional[datetime] = None
 
 
 # =============================================================================
@@ -3280,23 +3286,6 @@ class ImageGenerateRequest(BaseModel):
 # =============================================================================
 # Internal Models (routers/internal.py)
 # =============================================================================
-
-
-class ActivityTrackRequest(BaseModel):
-    """Request model for tracking activity start."""
-    agent_name: str
-    activity_type: str  # e.g., "schedule_start"
-    user_id: Optional[int] = None
-    triggered_by: str = "schedule"  # schedule, manual, user, agent, system
-    related_execution_id: Optional[str] = None
-    details: Optional[Dict] = None
-
-
-class ActivityCompleteRequest(BaseModel):
-    """Request model for completing an activity."""
-    status: str = ActivityState.COMPLETED  # ActivityState: completed, failed, cancelled
-    details: Optional[Dict] = None
-    error: Optional[str] = None
 
 
 class InternalTaskExecutionRequest(BaseModel):
