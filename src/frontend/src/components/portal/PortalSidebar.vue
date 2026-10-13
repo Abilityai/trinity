@@ -36,13 +36,13 @@
       </button>
 
       <!-- ent#661: the person's Projects list — shown only when the roster
-           says this principal has the capability (internal-only). -->
+           says this principal has the capability (internal-only).
+           #3672 (operator ruling): NO placeholder holds its slot while the
+           roster is out. Most installs (every OSS one) are not entitled to
+           Projects, so a held slot appeared and then vanished there — a layout
+           shift on every load to spare a late pop-in on the few entitled
+           installs. The link renders once the roster says `projectsAvailable`. -->
       <PortalSidebarProjectsLink v-if="projectsAvailable" :active="projectsActive" @open="$emit('open-projects')" />
-      <!-- #3672: the capability rides the roster, so the link used to appear
-           a beat after the first paint and push the search box and both lists
-           down. A platform session (the audience that has Projects) holds its
-           slot while the list has no verdict; an outside client never had it. -->
-      <PortalSkeleton v-else-if="!settled && isPlatformSession" variant="sidebar-link" />
 
       <!-- Search -->
       <div class="relative">

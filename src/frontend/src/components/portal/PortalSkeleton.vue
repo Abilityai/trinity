@@ -19,8 +19,6 @@
               (#3672) — rows shaped like the agent row (26px avatar, name,
               subtitle) and the chat row (22px avatar, title), so the loaded
               list lands on the same footprint
-    sidebar-link
-              the Projects link's slot, held while its capability is unknown
 
   Rules the recipe carries so its consumers cannot forget them:
     * `aria-busy` on the placeholder root and ONE `sr-only` line — a screen
@@ -117,18 +115,6 @@
   </div>
 
   <!-- ============================ SIDEBAR LINK ============================= -->
-  <!-- The Projects link's 36px slot (icon + label, `px-3 py-2 text-sm`). Silent:
-       the agents block below carries the section's one spoken line. -->
-  <div
-    v-else-if="variant === 'sidebar-link'"
-    class="flex items-center gap-2 px-3 py-2 h-9"
-    aria-hidden="true"
-    data-testid="portal-skeleton-sidebar-link"
-  >
-    <div :class="[BLOCK_STRONG, 'w-4 h-4 rounded']"></div>
-    <div :class="[BLOCK, 'h-3 w-16 rounded']"></div>
-  </div>
-
   <!-- ============================ SIDEBAR CHATS ============================ -->
   <!-- A date-group overline and four chat rows, widths varied so it reads as
        a list of titles rather than a stack of identical bars. -->
@@ -169,7 +155,7 @@
 
 <script setup>
 defineProps({
-  // 'stage' | 'thread' | 'briefing' | 'rail' | 'sidebar-agents' | 'sidebar-chats' | 'sidebar-link'
+  // 'stage' | 'thread' | 'briefing' | 'rail' | 'sidebar-agents' | 'sidebar-chats'
   variant: { type: String, required: true },
   // The `thread` variant is also nested inside `stage`, which already carries
   // the live-region text; the nested copy stays silent so a screen reader

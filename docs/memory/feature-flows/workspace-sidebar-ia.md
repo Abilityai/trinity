@@ -458,7 +458,7 @@ Portal.vue
 │     feed has a verdict (404/403 and a failed read count) — state, never a timer
 ├─ sidebarReady  LATCHED true once settled; reset only when the session ends
 └─ <PortalSidebar :settled="sidebarReady">   (column and drawer)
-      Projects slot   PortalSkeleton "sidebar-link" while !settled for a platform session
+      Projects link   rendered only once the roster says projectsAvailable — NO held slot
       Agents          PortalSkeleton "sidebar-agents" while !settled (or #2159's retry case),
                       then ONE wrapper .ws-fade-in with rows, toggle and empty copy
       Chats           PortalSkeleton "sidebar-chats" while !settled, then ONE wrapper
@@ -472,6 +472,12 @@ Portal.vue
 fast and with staggered latency; the 0.0003 left is in the Inbox pane header, not
 the sidebar. Layout-shift entries count existing elements that MOVE, not content that
 pops in, so the "before" number understates the jump a person sees.
+
+The Projects link is the one arrival left unheld, by operator ruling. Its capability
+rides the roster and most installs (every OSS one) are not entitled to it, so a held
+slot appeared and then vanished there — a new shift on every load to spare a late
+pop-in on the few entitled installs. Those accept the pop-in; nothing renders between
+**New chat** and the search box before the roster answers.
 
 Tests: `portalSidebarCalmLoad.mount.spec.js`.
 

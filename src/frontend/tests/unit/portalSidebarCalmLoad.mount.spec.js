@@ -16,9 +16,11 @@
  *   - once settled, both sections render in one pass, inside the same fade
  *     class (`ws-fade-in`, which `prefers-reduced-motion` turns off in CSS);
  *   - an empty chat list keeps a stable empty state instead of collapsing;
- *   - the Projects link, whose capability rides the roster, has its slot held
- *     for a platform session while there is no verdict, so its arrival does
- *     not push the search box and both lists down (the measured residual).
+ *   - the Projects link, whose capability rides the roster, holds NO slot
+ *     before the verdict (operator ruling): a held slot appeared and then
+ *     vanished on every install not entitled to Projects (all OSS ones), so
+ *     the link simply renders once the roster says `projectsAvailable` and
+ *     an entitled install accepts the late pop-in.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -142,23 +144,36 @@ describe('#3672 — after the verdict, everything lands in one pass with one fad
   })
 })
 
-describe('#3672 — the Projects link does not push the lists down when the roster lands', () => {
-  it('a platform session holds the link\'s slot while there is no verdict', async () => {
+// The element right after "New chat" in the top block. With no Projects
+// link it must be the search box's wrapper — anything else (a placeholder, a
+// held slot) sits between them and would vanish later, which is the shift.
+function afterNewChat(w) {
+  const newChat = w.findAll('button').find((b) => b.text().includes('New chat'))
+  return newChat.element.nextElementSibling
+}
+
+describe('#3672 — the Projects link holds no placeholder slot (operator ruling)', () => {
+  it('a platform session before the verdict renders nothing between New chat and search', async () => {
     const w = sidebar({ roster: [], threads: [], settled: false, isPlatformSession: true })
     await flushPromises()
-    expect(w.find('[data-testid="portal-skeleton-sidebar-link"]').exists()).toBe(true)
-    // Once the roster says Projects is available, the link takes the slot.
-    await w.setProps({ projectsAvailable: true })
-    expect(w.find('[data-testid="portal-skeleton-sidebar-link"]').exists()).toBe(false)
-    expect(w.find('[data-testid="sidebar-projects"]').exists()).toBe(true)
+    const next = afterNewChat(w)
+    expect(next.querySelector('input[type="search"]')).not.toBeNull()
+    expect(w.find('[data-testid="sidebar-projects"]').exists()).toBe(false)
+    // The only busy regions are the two lists — no third, link-shaped one.
+    expect(w.findAll('[aria-busy="true"]').length).toBe(2)
   })
 
-  it('no slot once settled without the capability, and none for an outside client', async () => {
-    const settled = sidebar({ roster: ROSTER, threads: THREADS, settled: true, isPlatformSession: true })
+  it('settled without the capability: still nothing there, so nothing ever vanished', async () => {
+    const w = sidebar({ roster: ROSTER, threads: THREADS, settled: true, isPlatformSession: true })
     await flushPromises()
-    expect(settled.find('[data-testid="portal-skeleton-sidebar-link"]').exists()).toBe(false)
-    const client = sidebar({ roster: [], threads: [], settled: false, isPlatformSession: false })
+    expect(afterNewChat(w).querySelector('input[type="search"]')).not.toBeNull()
+    expect(w.find('[data-testid="sidebar-projects"]').exists()).toBe(false)
+  })
+
+  it('the link renders once the roster says projectsAvailable, verdict or not', async () => {
+    const w = sidebar({ roster: [], threads: [], settled: false, isPlatformSession: true })
     await flushPromises()
-    expect(client.find('[data-testid="portal-skeleton-sidebar-link"]').exists()).toBe(false)
+    await w.setProps({ projectsAvailable: true })
+    expect(afterNewChat(w).getAttribute('data-testid')).toBe('sidebar-projects')
   })
 })
