@@ -43,6 +43,7 @@ import { createAuthTools } from "./tools/auth.js";
 import { createGitTools } from "./tools/git.js";
 import { createA2ATools } from "./tools/a2a.js";
 import { createA2ACallTools } from "./tools/a2a_call.js";
+import { createAAuthTools } from "./tools/aauth.js";
 import { createCredentialVaultTools } from "./tools/credential_vault.js";
 import { createProjectTools } from "./tools/projects.js";
 import { createAssignmentTools } from "./tools/assignments.js";
@@ -677,6 +678,7 @@ export async function createServer(config: ServerConfig = {}) {
     createRoomTools(client, requireApiKey),          // Shared sessions / rooms (ent#169)
     createA2ATools(client, requireApiKey),           // A2A control plane — exposure/card/allow-list/endpoints (ent#160)
     createA2ACallTools(client, requireApiKey),       // A2A runtime — outbound call_a2a_agent / get_a2a_task (#736)
+    createAAuthTools(client, requireApiKey),         // AAuth person token — request_person_token, self-acting (trinity-enterprise#878)
     createCredentialVaultTools(client, requireApiKey), // Credential vault runtime — list/fetch (license-blind proxy, ent#279)
     createProjectTools(client, requireApiKey),       // Workspace Projects — list/get read tools (license-blind proxy, ent#661)
     createAssignmentTools(client, requireApiKey),     // Role assignments — read who an agent serves (license-blind proxy, ent#500)

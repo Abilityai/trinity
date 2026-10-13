@@ -32,6 +32,8 @@ _BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import dependencies as deps  # noqa: E402
+import routers.aauth_person as rp  # noqa: E402
 from services import a2a_client  # noqa: E402
 from services.aauth import config, egress, httpsig, jose, keys, person_server, requirement, signer, verifier  # noqa: E402
 from services.aauth import person_token as pt  # noqa: E402
@@ -750,3 +752,177 @@ def test_audit_details_name_the_outcome_and_never_the_secret_strings(harness):
     assert pt.audit_details(AGENT, refused)["reason"] == "denied"
     assert pt.audit_action(issued) == "aauth_person_token_issued"
     assert pt.audit_action(request_token(resource="https://r2.example", now=NOW + 1)) is None
+
+
+# --------------------------------------------------------------------------- #
+# Checkpoint B — the route (routers/aauth_person.py) and its audit row
+# --------------------------------------------------------------------------- #
+import ast as _ast  # noqa: E402
+import types as _types  # noqa: E402
+
+
+def _user(**over):
+    base = dict(id=1, username="admin", email="admin@example.com", role="admin",
+                agent_name=None, mcp_key_id=None, mcp_scope=None)
+    base.update(over)
+    return _types.SimpleNamespace(**base)
+
+
+AGENT_KEY = _user(agent_name=AGENT, mcp_key_id="k-echo", mcp_scope="agent")
+HUMAN = _user()
+SIBLING_KEY = _user(agent_name="sibling", mcp_key_id="k-sib", mcp_scope="agent")
+
+
+@pytest.fixture()
+def route(harness, monkeypatch):
+    from fastapi import FastAPI, Path
+    from fastapi.testclient import TestClient
+
+    state = {"audit": [], "rate": [], "user": AGENT_KEY}
+    monkeypatch.setattr(rp.rate_limiter, "enforce",
+                        lambda key, limit, window, detail="": state["rate"].append((key, limit, window)))
+
+    class _Audit:
+        async def log(self, **kw):
+            state["audit"].append(kw)
+    monkeypatch.setattr(rp, "platform_audit_service", _Audit())
+
+    app = FastAPI()
+    app.include_router(rp.router)
+
+    async def _agent(agent_name: str = Path(...)):
+        return agent_name
+    app.dependency_overrides[deps.get_authorized_agent_by_name] = _agent
+    app.dependency_overrides[deps.get_current_user] = lambda: state["user"]
+    http = TestClient(app)
+
+    def post(body, agent=AGENT):
+        return http.post(f"/api/agents/{agent}/aauth/person-token", json=body)
+
+    ps = harness["ps_fake"]
+    now = int(time.time())
+
+    def live_token(req, **claims):
+        return ps.ok(ps.person_token_for(agent_token_of(req), iat=now, exp=now + 3600, **claims))
+    return _types.SimpleNamespace(post=post, state=state, ps=ps, live_token=live_token, harness=harness)
+
+
+def test_route_is_a_uniform_404_when_aauth_is_inert(route):
+    route.harness["issuer"] = None
+    r = route.post({"resource": RES})
+    assert r.status_code == 404 and route.ps.posts == [] and route.state["audit"] == []
+
+
+def test_route_admits_only_the_agents_own_key(route):
+    for principal in (HUMAN, SIBLING_KEY, _user(agent_name=None, mcp_scope="system")):
+        route.state["user"] = principal
+        r = route.post({"resource": RES})
+        assert r.status_code == 403 and r.json()["detail"]["reason"] == "aauth_agent_only"
+    assert route.ps.posts == [] and route.state["rate"] == [] and route.state["audit"] == []
+
+
+def test_route_names_configuration_refusals(route):
+    route.harness["ps"] = None
+    r = route.post({"resource": RES})
+    assert r.status_code == 409 and r.json()["detail"]["reason"] == "person_server_unconfigured"
+    route.harness["ps"] = PS
+    r = route.post({"resource": "https://res.example/path"})
+    assert r.status_code == 422 and r.json()["detail"]["reason"] == "invalid_resource"
+    route.harness["no_redis"] = True
+    r = route.post({"resource": RES})
+    assert r.status_code == 503 and r.json()["detail"]["reason"] == "state_unavailable"
+    assert [a["event_action"] for a in route.state["audit"]] == ["aauth_person_token_refused"] * 3
+    assert route.post({"resource": RES, "pending_handle": "short"}).status_code == 422   # pydantic shape
+    assert route.post({"resource": RES, "wait": 16}).status_code == 422
+
+
+def test_route_issues_audits_and_never_echoes_the_token(route):
+    route.ps.post_script.append(route.live_token)
+    r = route.post({"resource": RES, "execution_id": "exec-1", "trigger_source": "mcp"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["outcome"] == "issued" and body["success"] and body["aud"] == RES and body["cached"] is False
+    assert "eyJ" not in r.text and "present it" in body["next_step"].lower() or "holds a person token" in body["next_step"]
+    assert route.state["rate"] == [("aauth_pt_post:echo", 10, 60), ("aauth_pt:fleet", 120, 60)]
+    (row,) = route.state["audit"]
+    assert row["event_type"].value == "credentials" and row["event_action"] == "aauth_person_token_issued"
+    assert row["target_id"] == AGENT and row["mcp_key_id"] == "k-echo"
+    assert row["details"]["token_jti"] == body["jti"] and row["details"]["execution_id"] == "exec-1"
+    assert row["details"]["trigger_source"] == "mcp" and "eyJ" not in json.dumps(row["details"])
+    # A cache hit is not a state change: no second audit row.
+    r2 = route.post({"resource": RES})
+    assert r2.json()["cached"] is True and len(route.state["audit"]) == 1 and len(route.ps.posts) == 1
+
+
+def test_route_pending_then_resume(route):
+    route.ps.post_script.append(route.ps.pending())
+    r = route.post({"resource": RES})
+    body = r.json()
+    assert r.status_code == 200 and body["outcome"] == "pending" and body["success"]
+    inter = body["interaction"]
+    assert inter["link"] == PS + "/auth?code=ABCD-1234" and inter["retry_after"] == 5 and inter["status"] == "pending"
+    assert "owner" in body["next_step"].lower() and "privately" in body["next_step"].lower()
+    (row,) = route.state["audit"]
+    assert row["event_action"] == "aauth_person_token_pending"
+    blob = json.dumps(row["details"])
+    assert inter["pending_handle"] not in blob and "ABCD-1234" not in blob and "/auth" not in blob
+    assert row["details"]["trigger_source"] == "api"
+
+    # Resume right away: inside the interval → stored pending, no poll, no audit.
+    r = route.post({"resource": RES, "pending_handle": inter["pending_handle"]})
+    assert r.json()["outcome"] == "pending" and route.ps.polls == [] and len(route.state["audit"]) == 1
+    assert route.state["rate"][-2][0] == "aauth_pt_poll:echo"
+
+    # Make the record pollable now, then the person approves.
+    redis = route.harness["redis"]
+    key = redis.handles()[0]
+    rec = json.loads(redis.kv[key]); rec["next_poll_at"] = 0; redis.kv[key] = json.dumps(rec)
+    route.ps.poll_script.append(route.live_token)
+    r = route.post({"resource": RES, "pending_handle": inter["pending_handle"], "wait": 2})
+    assert r.json()["outcome"] == "issued" and route.ps.polls[0].headers["prefer"] == "wait=2"
+    assert route.state["audit"][-1]["event_action"] == "aauth_person_token_issued"
+    assert redis.handles() == []
+    # The handle is gone: a later resume is a refusal the agent can act on (200, not an error).
+    r = route.post({"resource": RES, "pending_handle": inter["pending_handle"]})
+    assert r.status_code == 200 and r.json() == {**r.json(), "outcome": "refused", "reason": "pending_unknown", "success": False}
+
+
+def test_route_terminal_denial_is_an_outcome_not_an_error(route):
+    route.ps.post_script.append(route.ps.pending())
+    handle = route.post({"resource": RES}).json()["interaction"]["pending_handle"]
+    redis = route.harness["redis"]
+    key = redis.handles()[0]
+    rec = json.loads(redis.kv[key]); rec["next_poll_at"] = 0; redis.kv[key] = json.dumps(rec)
+    route.ps.poll_script.append(route.ps.problem(403, "denied"))
+    r = route.post({"resource": RES, "pending_handle": handle})
+    assert r.status_code == 200 and r.json()["outcome"] == "refused" and r.json()["reason"] == "denied"
+    assert r.json()["ps_status"] == 403 and "do not retry" in r.json()["next_step"].lower()
+    assert route.state["audit"][-1]["event_action"] == "aauth_person_token_denied"
+
+
+def test_response_model_has_no_field_that_can_carry_the_token():
+    from models import PersonTokenInteraction, PersonTokenResponse
+
+    fields = set(PersonTokenResponse.model_fields) | set(PersonTokenInteraction.model_fields)
+    assert not {f for f in fields if "token" in f and f != "jti"} - {"reissued_for_key"}
+    assert set(PersonTokenResponse.model_fields) == {
+        "success", "outcome", "jti", "aud", "sub", "issuer", "exp", "cached", "reissued_for_key",
+        "interaction", "reason", "message", "ps_status", "next_step",
+    }
+
+
+def test_router_is_registered_in_main_after_the_aauth_router():
+    """Composition-root pin (tdd Q4). The route tests above build their own app, so
+    this is the one place the `main.py` hand-off is asserted: the import AND the
+    `include_router` call, in order after the #623 router. A source pin, on top of
+    the executed tests — deleting the registration line goes red here."""
+    tree = _ast.parse(open(os.path.join(_BACKEND, "main.py"), encoding="utf-8").read())
+    imported = any(isinstance(n, _ast.ImportFrom) and n.module == "routers.aauth_person"
+                   and any(a.name == "router" and a.asname == "aauth_person_router" for a in n.names)
+                   for n in _ast.walk(tree))
+    included = [n.args[0].id for n in _ast.walk(tree)
+                if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+                and n.func.attr == "include_router" and n.args and isinstance(n.args[0], _ast.Name)
+                and n.args[0].id in ("aauth_router", "aauth_person_router")]
+    assert imported and included == ["aauth_router", "aauth_person_router"]
+    assert open(rp.__file__, encoding="utf-8").readline().strip() == "# mcp: tools/aauth.ts"
