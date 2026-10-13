@@ -2010,3 +2010,46 @@ async def test_image_reaches_spawn_through_real_execution_body(tmp_path, monkeyp
     else:
         assert (await call)[0] == "answer"
     assert paths and not paths[0].exists()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_image_execution_terminates_before_removing_files(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+    from pathlib import Path
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(CodexRuntime, "is_available", lambda self: True)
+    registry = _install_fake_codex(monkeypatch, result_text=None, stdout_events=[])
+    fake_popen = codex_runtime.subprocess.Popen
+    started = threading.Event()
+    stopped = threading.Event()
+    paths = []
+    terminated = []
+    def spawn(cmd, **kwargs):
+        process = fake_popen(cmd, **kwargs)
+        paths.append(Path(cmd[cmd.index("--image") + 1]))
+        def wait(timeout=None):
+            started.set()
+            stopped.wait(timeout=5)
+            return 0
+        process.wait = wait
+        return process
+    def terminate(*args, **kwargs):
+        assert paths[0].exists()
+        assert not registry.unregistered
+        terminated.append(True)
+        stopped.set()
+    monkeypatch.setattr(codex_runtime.subprocess, "Popen", spawn)
+    monkeypatch.setattr(codex_runtime, "_terminate_process_group", terminate)
+    task = asyncio.create_task(CodexRuntime().execute_headless(
+        prompt="x", execution_id="cancel-image", images=[{"media_type": "image/png", "data": "YQ=="}]))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert terminated
+        assert registry.unregistered == ["cancel-image"]
+        assert not paths[0].exists()
+    finally:
+        stopped.set()

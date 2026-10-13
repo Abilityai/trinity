@@ -1409,6 +1409,24 @@ class CodexRuntime(AgentRuntime):
                     loop.run_in_executor(reader_executor, read_subprocess_output),
                     timeout=timeout_seconds + 60,
                 )
+            except asyncio.CancelledError:
+                # Keep the execution registered and its image files available
+                # until the child has been terminated. Repeated cancellation
+                # must not abandon this bounded process-group cleanup.
+                cleanup = loop.run_in_executor(
+                    None,
+                    lambda: _terminate_process_group(
+                        process, graceful_timeout=2, pgid=process_pgid,
+                        execution_tag=execution_id,
+                    ),
+                )
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        pass
+                cleanup.result()
+                raise
             except asyncio.TimeoutError:
                 logger.error(
                     "[Codex] outer timeout on %s — killing group as last resort",
