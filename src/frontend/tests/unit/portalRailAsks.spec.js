@@ -24,7 +24,7 @@ import {
 import {
   ASKS_TAB_ID, railAskItems, askInboxRoute, asksSignalFrom, asksTabPresent,
 } from '@/components/portal/portalRailAsks'
-import { actionItems, filterByAgent, itemKey } from '@/components/portal/portalInbox'
+import { actionItems, filterByAgent, itemKey, INBOX_SORT_DEFAULT } from '@/components/portal/portalInbox'
 import { asksByAgent, WORKSPACE_INBOX } from '@/components/portal/portalUtils'
 import { nextRailTab } from '@/components/portal/portalKeymap'
 
@@ -86,12 +86,29 @@ describe('ent#836 — the Asks tab in the registry', () => {
   })
 })
 
+describe('ent#856 T3 — the rail follows Action\'s default order', () => {
+  // Newest and Urgency disagree here: the old critical ask leads under urgency,
+  // the new low one under newest. The rail has no control of its own, and its
+  // rows open the Inbox on Action, which opens in the default order.
+  const SPLIT = [
+    ask('old-crit', 'scout', { priority: 'critical', created_at: '2026-10-07T06:00:00Z' }),
+    ask('new-low', 'scout', { priority: 'low', created_at: '2026-10-07T10:30:00Z' }),
+  ]
+  it('lists the default (Newest) order, not urgency', () => {
+    expect(INBOX_SORT_DEFAULT).toBe('newest')
+    const rows = railAskItems(SPLIT, ['scout'], NOW)
+    expect(rows.map((r) => r.id)).toEqual(['new-low', 'old-crit'])
+    expect(rows.map((r) => r.id)).toEqual(actionItems(SPLIT, NOW, INBOX_SORT_DEFAULT).map((r) => r.id))
+    expect(rows.map((r) => r.id)).not.toEqual(actionItems(SPLIT, NOW, 'urgency').map((r) => r.id))
+  })
+})
+
 describe('ent#836 — the rows are the Inbox Action list, narrowed', () => {
   it('a 1:1 lists exactly what Action shows filtered to that agent, in that order', () => {
     const expected = filterByAgent(actionItems(ASKS, NOW), 'scout')
     const rows = railAskItems(ASKS, ['scout'], NOW)
     expect(rows.map((r) => r.key)).toEqual(expected.map((r) => r.key))
-    // Urgency order, not insertion: the ask expiring within the day leads.
+    // Action's default order (ent#856: Newest), not insertion.
     expect(rows[0].id).toBe('a3')
     // Pending only — the answered one is in no row.
     expect(rows.some((r) => r.id === 'done')).toBe(false)

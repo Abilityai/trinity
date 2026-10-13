@@ -677,7 +677,7 @@ describe('answering an ask in the pane (D8)', () => {
 
 describe('a selection restored from the URL (D8)', () => {
   it('a deep-linked ask is held in place once answered, exactly as a clicked one is', async () => {
-    // §3g C1: Action is oldest-first among equals, so a2 (newer) is second.
+    // trinity-enterprise#856: Action opens Newest first, so a1 (older) is second.
     store.asks = [ask('a1', { created_at: iso(20) }), ask('a2', { created_at: iso(1) })]
     store.asksLoaded = true
     store.answerAsk = vi.fn(async (id) => {
@@ -686,16 +686,16 @@ describe('a selection restored from the URL (D8)', () => {
       return answered
     })
     // Reload / deep link: the URL names the item, nobody clicked it.
-    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:a2' } })
-    await w.find('[data-testid="inbox-ask-input-a2"]').setValue('yes')
-    await w.find('[data-testid="inbox-ask-input-a2"]').element.form.dispatchEvent(new Event('submit'))
+    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:a1' } })
+    await w.find('[data-testid="inbox-ask-input-a1"]').setValue('yes')
+    await w.find('[data-testid="inbox-ask-input-a1"]').element.form.dispatchEvent(new Event('submit'))
     await flushPromises()
-    expect(store.answerAsk).toHaveBeenCalledWith('a2', expect.anything())
-    expect(has(w, 'inbox-row-ask:a2')).toBe(true)
-    expect(has(w, 'inbox-row-ended-ask:a2')).toBe(true)
+    expect(store.answerAsk).toHaveBeenCalledWith('a1', expect.anything())
+    expect(has(w, 'inbox-row-ask:a1')).toBe(true)
+    expect(has(w, 'inbox-row-ended-ask:a1')).toBe(true)
     // …and it keeps its place: second, where the reader last saw it.
     const keys = w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))
-    expect(keys).toEqual(['ask:a1', 'ask:a2'])
+    expect(keys).toEqual(['ask:a2', 'ask:a1'])
   })
 })
 
