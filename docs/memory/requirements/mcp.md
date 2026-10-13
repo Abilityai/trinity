@@ -981,56 +981,52 @@ revision — the kind is a label inside the existing envelope.
 
 ---
 
-### 32.7 A2A Trusted Internal Networks (trinity-enterprise#838)
+### 32.7 A2A Outbound Endpoint Allowlist (trinity-enterprise#838, outbound-only since trinity-enterprise#885)
 - **Status**: 🚧 In Progress
-- **Implements**: trinity-enterprise#838 (parent trinity-enterprise#421).
-  Builds on #736/#761 (outbound) and ent#157 (inbound).
+- **Implements**: trinity-enterprise#838 (parent trinity-enterprise#421),
+  narrowed to outbound only by trinity-enterprise#885. Builds on #736/#761
+  (outbound) and ent#157 (inbound).
 - **Problem**: instances on one private network (a tailnet, a VPN) could not
   call each other's agents: outbound refused private/CGNAT addresses and
-  `http://`, and inbound required a key or a payment for every pair.
-- **Trusted networks** (OSS-core, admin and human only):
-  `GET/PUT /api/settings/a2a-trusted-networks`. Entries are CIDRs, exact host
-  names or `*.domain`. Refused by name: a CIDR overlapping the platform's own
-  Docker networks (agents and the public tunnel reach the backend from there),
-  loopback, link-local (cloud metadata), reserved and multicast ranges,
-  anything broader than /8 (IPv4) or /32 (IPv6), a one-label wildcard. The
-  generic `PUT /api/settings/{key}` refuses the key. Optional
-  `internal_base_url`: the origin an internal-scope agent's card advertises.
-- **Outbound**: an endpoint is trusted when its host matches a name entry or
+  `http://`, so two instances hardened to serve plain HTTP over a tailnet had
+  no address to call each other on.
+- **Allowlist** (OSS-core, admin and human only):
+  `GET/PUT /api/settings/a2a-trusted-networks` (setting key
+  `a2a_trusted_networks`; the name predates the narrowing and is kept).
+  Entries are CIDRs, exact host names or `*.domain`. Refused by name: a CIDR
+  overlapping the platform's own Docker networks (agents and the public tunnel
+  reach the backend from there), loopback, link-local (cloud metadata),
+  reserved and multicast ranges, anything broader than /8 (IPv4) or /32
+  (IPv6), a one-label wildcard. The generic `PUT /api/settings/{key}` refuses
+  the key.
+- **Outbound**: an endpoint is allowed when its host matches a name entry or
   every address it resolves to is public or inside a CIDR entry. When CIDR
-  entries exist, every non-public address must be inside one — a trusted name
-  that resolves outside them is refused. A trusted endpoint may be
+  entries exist, every non-public address must be inside one — an allowed name
+  that resolves outside them is refused. An allowed endpoint may be
   private/CGNAT and `http://`; metadata, loopback and the platform networks are
-  refused whatever the entries say. Re-checked on every call, pinned as before.
-  Every other endpoint keeps the public-HTTPS rule unchanged.
-- **Inbound scope** (OSS columns `agent_ownership.a2a_scope` `public|internal`
-  and `a2a_keyless_internal`, written only by the entitled enterprise exposure
-  route): an internal-scope agent answers only requests from a trusted CIDR and
-  never through the public tunnel (cloudflared's `CF-Connecting-IP`/`Cf-Ray`).
-  To anyone else its card is 404, a keyed call 404 and an anonymous call the
-  401 an unexposed agent gives.
-- **Source**: the TCP peer, or `X-Real-IP` only when the peer is the platform's
-  own proxy, found by container name (`A2A_PROXY_HOSTS`, default
-  `trinity-frontend`). nginx and the Vite dev proxy both overwrite it, and an
-  agent on the bridge cannot name its own source. Host names never grant
-  inbound trust.
-- **Keyless** (default on for an internal-scope agent; switch per agent): a
-  trusted caller runs `message/send`/`message/stream` with no key,
-  rate-limited per source (120/min) and per agent (300/min), attributed in
-  `schedule_executions.source_host`. `tasks/get`/`tasks/cancel` see only tasks
-  stamped with the caller's own address. With keyless off, a trusted caller
-  needs a key. The inbound allow-list governs keyed callers only.
-- **Card**: an internal-scope agent advertises `internal_base_url`. Outbound
-  discovery tries the registered endpoint's own card before the origin's
-  (§32.5), without which one Trinity could not discover another's per-agent card.
-- **Unchanged**: public scope, key-authenticated calls and the x402 gate (#679).
-  The anonymous door still runs its limiter before any DB read; the trusted
-  list it consults first is cached per worker (5 s).
-- **Network boundary is an ops step**: pair keyless trust with a network ACL
-  that admits A2A traffic only between your own instances.
-- **Tests**: `tests/unit/test_ent838_a2a_trusted_networks.py`, enterprise
-  `tests/test_838_a2a_internal_scope.py`.
-- **Flow**: `docs/memory/feature-flows/a2a-inbound-server.md` → Trusted internal networks
+  refused whatever the entries say. Checked when the endpoint is registered and
+  again on every call, pinned as before. Every other endpoint keeps the
+  public-HTTPS rule (`endpoint_private_address` / `endpoint_not_https`).
+- **Inbound: nothing reads the list.** Every inbound A2A call needs a Trinity
+  credential or an x402 payment, whatever network it arrives from: a caller
+  with no credential gets the 401 an unexposed agent gives. The keyless
+  trusted-network door, the internal-only scope and the inbound source
+  resolution #3361 shipped in rc1–rc3 were removed before 1.0 (ent#885,
+  operator ruling 2026-10-10 on ent#862). The columns
+  `agent_ownership.a2a_scope`, `agent_ownership.a2a_keyless_internal` and
+  `schedule_executions.source_host` stay in the DDL, unread and unwritten,
+  until a post-1.0 drop under #746; an rc-era row with `a2a_scope='internal'`
+  now behaves as an ordinary exposed agent (card served, keyed calls run).
+- **Card discovery**: outbound discovery tries the registered endpoint's own
+  card before the origin's (§32.5), without which one Trinity could not
+  discover another's per-agent card.
+- **Unchanged**: key-authenticated calls and the x402 gate (#679).
+- **Tests**: `tests/unit/test_ent838_a2a_trusted_networks.py` (admin list +
+  outbound), `tests/unit/test_ent885_outbound_allowlist.py` (on the list →
+  admitted at register and call time; off it → the v0.9.5 refusal),
+  `tests/unit/test_ent885_keyless_refused.py` (no credential → 401, no
+  dispatch, from any network).
+- **Flow**: `docs/memory/feature-flows/a2a-inbound-server.md` → Outbound endpoint allowlist
 
 ### 32.8 AAuth Agent Identity on the A2A Seam — prototype (ent#623)
 - **Status**: 🧪 Prototype on a branch, flag OFF by default — not a platform
