@@ -15,16 +15,29 @@
 # Usage:
 #   scripts/dev/aauth_prototype/demo.sh up        # tunnels + fronts + B + wire both sides
 #   scripts/dev/aauth_prototype/demo.sh rewire    # new tunnel URLs → re-point issuers/allow-list/endpoint
-#   scripts/dev/aauth_prototype/demo.sh run       # the scenario (see below)
+#   scripts/dev/aauth_prototype/demo.sh run       # the scenario (see below); step 7 waits for the owner
+#   scripts/dev/aauth_prototype/demo.sh rehearse  # steps 1–8 with no pauses (binding asserted, not performed)
 #   scripts/dev/aauth_prototype/demo.sh status
 #   scripts/dev/aauth_prototype/demo.sh down      # tunnels, fronts, B (A's flag switched back off)
 #   scripts/dev/aauth_prototype/bind.sh <agent> <resource>   # ent#878: bind an agent to its owner at the
 #                                                            # person server (link + code), live
+#   scripts/dev/aauth_prototype/senzing_check.py --agent <a> --key <the agent's MCP key> --name … --country …
+#                                                            # ent#879: the sanctions check from a laptop
 #
 # Person server (ent#878): `up`/`wire` set `aauth_person_server` on A (AAUTH_PERSON_SERVER,
 # default https://person.hello.coop). Do NOT `rewire` after binding an agent with bind.sh:
 # a new tunnel host is a new issuer, and the person server sees a NEW agent
 # (aauth:<agent>@<new-host>) — the binding must be redone.
+# Resources (ent#879): `up`/`wire` set `aauth_resource_allowlist` on A to the Senzing
+# sanctions resource + whoami (AAUTH_SENZING, AAUTH_WHOAMI); `down` clears both keys.
+# Step 8 passes `execution_id` + a per-call `dedup_label` (the #1084 effect guard's
+# identity). The guard ARMS only for a real execution row owned by the agent — the
+# MCP tool path, where the session carries the id — so a script run is honest about
+# it: DEMO_EXECUTION_ID defaults to `manual` (no execution to re-deliver: proceeds
+# unguarded, no alarm; an unknown id would be refused on a pull-pilot agent). Set it
+# to a live execution id of the agent to watch the same label replay instead of
+# re-charging. SANCTIONS_NAME / SANCTIONS_COUNTRY pick the screened name (an entry
+# listed on OpenSanctions); the defaults are a well-known listed person.
 #
 # Scenario (`run`), all against the real endpoints:
 #   1. whoami.aauth.dev echoes A's test-echo identity   (a verifier that is not ours)
@@ -33,6 +46,9 @@
 #   4. tampered signature                                 (401 before the body is parsed)
 #   5. bearer call to B with B's own MCP key              (dual acceptance)
 #   6. B's audit rows                                     (who called, verification, decision)
+#   7. bind A/test-echo to its owner at the person server (ent#878: link + code, waits for `issued`)
+#   8. sanctions check at senzing.aauth.dev as A/test-echo  (ent#879: the ladder — person-token →
+#      auth-token → 200 — then a second call with ZERO person-server trips; A's audit rows)
 #
 # Requirements: docker, cloudflared, python3, the A dev stack running from this
 # clone, ADMIN_PASSWORD in ./.env. State lives in $STATE (default /tmp/aauth-demo).
@@ -49,6 +65,11 @@ A_AGENT="${A_AGENT:-test-echo}"
 A_OTHER_AGENT="${A_OTHER_AGENT:-test-counter}"
 B_AGENT="${B_AGENT:-bravo}"
 PERSON_SERVER="${AAUTH_PERSON_SERVER:-https://person.hello.coop}"   # ent#878
+SENZING="${AAUTH_SENZING:-https://senzing.aauth.dev}"                 # ent#879
+WHOAMI="${AAUTH_WHOAMI:-https://whoami.aauth.dev}"
+SANCTIONS_NAME="${SANCTIONS_NAME:-Viktor Bout}"                       # listed on OpenSanctions (override freely)
+SANCTIONS_COUNTRY="${SANCTIONS_COUNTRY:-Russia}"
+DEMO_EXECUTION_ID="${DEMO_EXECUTION_ID:-manual}"                      # see the header: `manual` runs unguarded, honestly
 B_IMAGES=(trinity-backend:latest trinity-scheduler:latest trinity-mcp-server:latest
           trinity-agent-base:latest redis:7-alpine timberio/vector:0.43.1-alpine alpine:3.20)
 mkdir -p "$STATE"; chmod 700 "$STATE"
@@ -173,9 +194,10 @@ wire() {
   a_tok=$(token_for "$A_API" "$(envval "$REPO/.env" ADMIN_PASSWORD)")
   b_tok=$(token_for "$B_API" "$(envval "$STATE/b.env" ADMIN_PASSWORD)")
 
-  say "A: issuer $a_url, person server $PERSON_SERVER, outbound on, endpoint bravo-remote → $b_url/a2a/$B_AGENT (aauth, no credential)"
+  say "A: issuer $a_url, person server $PERSON_SERVER, resources $SENZING + $WHOAMI, outbound on, endpoint bravo-remote → $b_url/a2a/$B_AGENT (aauth, no credential)"
   setting "$A_API" "$a_tok" aauth_issuer "$a_url"
   setting "$A_API" "$a_tok" aauth_person_server "$PERSON_SERVER"     # ent#878 (bind.sh needs it)
+  setting "$A_API" "$a_tok" aauth_resource_allowlist "$SENZING,$WHOAMI"   # ent#879 (origin equality, fail-closed)
   setting "$A_API" "$a_tok" aauth_prototype_enabled true
   setting "$A_API" "$a_tok" a2a_outbound_enabled true
   api "$A_API" "$a_tok" PUT /api/settings/a2a-endpoints \
@@ -202,7 +224,67 @@ call_as() {  # agent → prints status + body
     -d "{\"endpoint\": \"bravo-remote\", \"message\": \"Reply with exactly: pong from bravo\", \"dedup_label\": \"demo-$(date +%s%N)\"}"
 }
 
+step7_bind() {   # $1 = "wait" (run: bind.sh, waits for the owner) | "assert" (rehearse: one POST, must be issued)
+  say "7. Bind A/$A_AGENT to its owner at $PERSON_SERVER for $SENZING (ent#878)"
+  if [ "$1" = "wait" ]; then
+    "$HERE/bind.sh" "$A_AGENT" "$SENZING"
+    return
+  fi
+  local key out code
+  key=$(agent_key "$A_AGENT"); out="$STATE/bind-$A_AGENT.json"
+  code=$(curl -sS -o "$out" -w '%{http_code}' -X POST "$A_API/api/agents/$A_AGENT/aauth/person-token" \
+    -H "Authorization: Bearer $key" -H 'Content-Type: application/json' \
+    -d "{\"resource\": \"$SENZING\", \"wait\": 0, \"trigger_source\": \"script\"}")
+  python3 - "$out" "$code" <<'PY7'
+import json, sys
+doc = json.load(open(sys.argv[1])); code = sys.argv[2]
+if code == "200" and doc.get("outcome") == "issued":
+    print(f"  binding present: jti={doc['jti']} sub={doc['sub']} cached={doc.get('cached')} (no pause)")
+elif code == "200" and doc.get("outcome") == "pending":
+    i = doc["interaction"]
+    print("  NOT bound yet — rehearse asserts, it does not wait. Bind first:  bind.sh", "(owner link:", i.get("link"), ")")
+else:
+    print(f"  HTTP {code}: {doc.get('detail') or doc.get('reason')} — bind first with bind.sh")
+PY7
+}
+
+step8_sanctions() {   # $1 = extra senzing_check.py flags ("" | "--no-wait")
+  say "8. Sanctions check at $SENZING as A/$A_AGENT (ent#879): the ladder, then a cached second call"
+  local a_url a_tok; a_url=$(cat "$STATE/a.url")
+  echo "  identity: aauth:$A_AGENT@${a_url#https://}  (A signs as the agent; the person server names the owner)"
+  # shellcheck disable=SC2086
+  python3 "$HERE/senzing_check.py" --api "$A_API" --agent "$A_AGENT" --key "$(agent_key "$A_AGENT")" \
+    --resource "$SENZING" --name "$SANCTIONS_NAME" --country "$SANCTIONS_COUNTRY" \
+    --execution-id "$DEMO_EXECUTION_ID" $1 || echo "  (senzing_check.py exit $?)"
+  say "8b. A's audit rows for the resource calls (token kind, challenges, budget — never a token)"
+  a_tok=$(token_for "$A_API" "$(envval "$REPO/.env" ADMIN_PASSWORD)")
+  api "$A_API" "$a_tok" GET "/api/audit-log?limit=30" >"$STATE/audit-a.json"
+  python3 - "$STATE/audit-a.json" <<'PY8'
+import json, sys
+rows = json.load(open(sys.argv[1])).get("entries", [])
+for r in reversed(rows):
+    if not str(r.get("event_action", "")).startswith("aauth_resource"):
+        continue
+    d = r.get("details") or {}
+    print("  {ts} {act:<24} outcome={o} token_kind={tk} challenges={ch} cost={c} status={st} reason={re} exec={ex}".format(
+        ts=r.get("timestamp", "")[:19], act=r.get("event_action"), o=d.get("outcome"), tk=d.get("token_kind"),
+        ch=d.get("challenges"), c=d.get("budget_cost"), st=d.get("status"), re=d.get("reason"), ex=d.get("execution_id")))
+PY8
+}
+
 run() {
+  steps_1_to_6
+  step7_bind wait
+  step8_sanctions ""
+}
+
+rehearse() {   # 1–8 with no human pause: step 7 asserts the binding, step 8 does not poll a consent
+  steps_1_to_6
+  step7_bind assert
+  step8_sanctions "--no-wait"
+}
+
+steps_1_to_6() {
   local b_url b_tok; b_url=$(cat "$STATE/b.url")
   b_tok=$(token_for "$B_API" "$(envval "$STATE/b.env" ADMIN_PASSWORD)")
 
@@ -273,7 +355,9 @@ down() {
   setting "$A_API" "$a_tok" aauth_prototype_enabled false
   setting "$A_API" "$a_tok" a2a_outbound_enabled false
   api "$A_API" "$a_tok" DELETE /api/settings/a2a-endpoints/bravo-remote >/dev/null || true
-  echo "  A: AAuth + outbound switched off, demo endpoint removed"
+  api "$A_API" "$a_tok" DELETE /api/settings/aauth_resource_allowlist >/dev/null || true   # ent#879
+  api "$A_API" "$a_tok" DELETE /api/settings/aauth_person_server >/dev/null || true        # ent#878
+  echo "  A: AAuth + outbound switched off, demo endpoint, resource allow-list and person server removed"
   echo "  (B's data volume trinity-b-dind-data kept; 'docker volume rm trinity-b-dind-data' resets B)"
 }
 
@@ -297,7 +381,8 @@ case "${1:-}" in
     ;;
   wire) wire ;;
   run) run ;;
+  rehearse) rehearse ;;
   status) status ;;
   down) down ;;
-  *) sed -n '2,32p' "$0"; exit 2 ;;
+  *) sed -n '2,44p' "$0"; exit 2 ;;
 esac

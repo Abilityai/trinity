@@ -115,7 +115,7 @@ def _response(outcome: pt.Outcome) -> PersonTokenResponse:
                                next_step=_next_step(outcome))
 
 
-def _require_live() -> None:
+def require_live() -> None:
     """Gate 1, as a DEPENDENCY so it runs before the body is validated.
 
     FastAPI solves every `Depends` before it validates body params, so with the
@@ -123,19 +123,28 @@ def _require_live() -> None:
     inline call in the handler would let a 422 reveal the route exists while
     inert (review I4). It is declared after `get_current_user` in the
     signature, so an unauthenticated caller still sees 401 first.
+
+    Public: `routers/aauth_resource.py` (ent#879) takes the same gate — one
+    mechanism for every route that signs as the agent, never a second copy.
     """
     if not aauth_config.active_issuer():
         raise HTTPException(status_code=404, detail="Not found")
 
 
-def _assert_own_key(current_user: User, agent_name: str) -> None:
+def assert_own_key(current_user: User, agent_name: str, *,
+                   what: str = "A person token is requested") -> None:
+    """Gate 2 (the module header): the agent's OWN key, or 403 `aauth_agent_only`.
+
+    `what` names the action in the message; the reason code is the same for
+    every AAuth route, so a caller learns one rule, not one per route.
+    """
     if not current_user.agent_name or current_user.agent_name != agent_name:
         raise HTTPException(
             status_code=403,
             detail={
                 "reason": "aauth_agent_only",
                 "message": (
-                    "A person token is requested AS the agent's AAuth identity, so only the agent "
+                    f"{what} AS the agent's AAuth identity, so only the agent "
                     "itself may call this (use the agent's own key)."
                 ),
             },
@@ -148,10 +157,10 @@ async def request_person_token(
     body: PersonTokenRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
-    _live: None = Depends(_require_live),
+    _live: None = Depends(require_live),
 ):
     """Obtain a person token for `body.resource` as `agent_name`, or resume a pending binding."""
-    _assert_own_key(current_user, agent_name)
+    assert_own_key(current_user, agent_name)
 
     resuming = body.pending_handle is not None
     if resuming:

@@ -4120,6 +4120,42 @@
       "description": "AAuth person token (the binding leg): the AAuth-Requirement / Retry-After / interaction url+code grammar; the per-agent key is HKDF-derived and equal across workers in a window, min_remaining keeps a chain on one key from an empty AND a populated cache (the key retires at window_end); PS metadata rules (four required fields, same-origin token endpoints, off-host jwks_uri, negative cache); the capped PS egress returns every status with headers and pins the a2a_client guards and the token scrub; the signed POST replays through verifier.verify_request; 200 issues/caches/serves the held token with refresh at the margin and on key change; 202 persists a Redis record and returns link+code, the same handle before next_poll_at without network; resume drives 202/200/403/408/410/429 with terminal deletes, slow-down back-off, un-persisted refresh answering slow_down, handle scoped to the agent, rolled-key reissue; every POST refusal is named and records nothing; Redis down refuses before any POST and at persist; open interactions capped; audit details name the outcome and never the token/handle/url/code. Route: uniform 404 when inert even for a malformed body, own-key only (403), named configuration refusals incl. the POST-429 next_step, issue/pending/resume/denial through TestClient with audit rows, response model has no token field, router registered after the aauth router."
     },
     {
+      "file": "unit/test_ent879_aauth_resource_client.py",
+      "feature": "abilityai/trinity-enterprise#879",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "security",
+        "a2a",
+        "unit"
+      ],
+      "description": "AAuth outbound resource client (the ladder + the two sinks), on synthetic keys and recorded Senzing/Hellō header shapes: discovery resolves a resource key under aauth-resource.json cached per (issuer, dwk); httpsig/signer cover the supported extra components, carry a presented person/auth token in Signature-Key while the AGENT key signs, and refuse a rotated key; resource_meta (issuer equality, same-origin jwks/control endpoints, tolerant AAuth-Budget, caches, non-JSON/redirect refused); resource_token.verify_resource_token happy path and ONE RED TEST PER CHECK (iss, dwk, aud, agent_jkt, ps, sub, presented_jti, expired, future iat, lifetime, typ, alg, header params, kid, signature, malformed) — claims checked before any key fetch; auth-token inspection binds to our key and caps expiry; the ladder through the real signer → egress → MockTransport path: input refusals before egress, agent-token direct answer with budget, person-token challenge, auth-token mode starts at the person token, pending → interaction_required, the full person → auth chain, cached auth token presented first with no PS trip, tampered resource tokens refused before the PS, unexpected_challenge for an agent token, exchange pending/approval recorded or refused never half, expired_presented_token gets ONE fresh chain then refuses, step-up once, expired_jwt re-auth once, agent-token retry once, unknown requirements never retried, resource 202 → handle without polling, status mapping (402/403/408/410/429), round + time budgets, possibly_executed after a POST timeout, tokens scrubbed from bodies and errors; the allow-list fail-closed matrix (empty/missing/malformed/prefix/case/port → nothing allowed, settings then env); ps_client auth-token cache (margin, key, outage → not held, value never in repr), pending records kind- and agent-scoped, the exchange's signed POST shape + holding, an auth token bound elsewhere refused, refusal/denial mapping, PS failures; resume polls then re-sends the STORED request, early/slow-down/denied states, terminal vs transient PS answers, unknown/wrong-agent/rotated/re-pointed handles, resource-deferred poll."
+    },
+    {
+      "file": "unit/test_ent879_aauth_resource_route.py",
+      "feature": "abilityai/trinity-enterprise#879",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "security",
+        "a2a",
+        "unit"
+      ],
+      "description": "POST /api/agents/{name}/aauth/resource-call through TestClient over the real ladder and the scripted resource + person server: uniform 404 while inert for every body shape, the agent's OWN key only (human, sibling, system → 403 aauth_agent_only) BEFORE the allow-list is consulted, the discriminated call-XOR-resume body with bounded fields, no request or response field can carry a token (token_kind is a three-word Literal; field sets pinned); a result through the full chain with status/body/budget/token_kind/challenges and an audit row whose details name the outcome and never a token, the body, the justification or an id; the second call reuses the auth token with zero PS trips; the same dedup_label replays the snapshot without a second send (body is not identity); a pending outcome RELEASES the effect claim so the post-consent retry runs for real; resume by handle polls the PS with Prefer: wait and re-sends the STORED body outside the guard, then handle_unknown is an expired outcome; denied / approval-pending are 200 outcomes with do_not_retry; refusals are mapped errors (403 resource_not_allowed, 409 person_server_unconfigured, 503 state_unavailable as AUTHORIZATION rows before egress; 402 / 429 + retry_after / 502 unsupported_requirement as EXECUTION rows after it); a POST timeout is 504 with possibly_executed; an in-flight duplicate is 409; a missing execution id runs unguarded or is refused 422 on a pull agent; GET sends no body and the justification is INFO-logged not audited; snapshot round-trip; registered in main.py after the person-token router with the # mcp: header; the path resolves beside the agent catch-all; the gate helpers are the person-token router's."
+    },
+    {
+      "file": "mcp-server/src/tools/aauth.test.ts",
+      "feature": "abilityai/trinity-enterprise#878, abilityai/trinity-enterprise#879",
+      "added": "2026-10-13",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "a2a",
+        "unit"
+      ],
+      "description": "request_person_token (ent#878): self-acting agent-scope gate without a round-trip, issued/pending/refused pass through with next_step, a token-shaped field never does, HTTP errors become honest flags (aauth_disabled on 404) and the tool never throws. ent#879 call_aauth_resource: the call-XOR-resume zod schema (dedup_label required on a new call, a handle travels alone, bad paths/methods/bodies refused), description under 2,048 chars naming the actor and the retry rules, the self-acting agent-scope gate without a round-trip, method defaults to POST and body to null with trigger_source=mcp, result / interaction_required / denied pass through, any token-shaped field is stripped, every HTTP refusal becomes {outcome: refusal, refusal{http_status,...}, do_not_retry, next_step} with the retryable set pinned (rate_limited, state_unavailable, effect_in_progress, plain timeout) and possibly_executed final, a gateway abort is a retryable refusal with possibly_pending."
+    },
+    {
       "file": "mcp-server/src/audit-denial.test.ts",
       "feature": "#2807",
       "added": "2026-09-16",

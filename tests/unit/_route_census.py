@@ -530,6 +530,11 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
         "POST /api/agents/{agent_name}/aauth/person-token",
         "a USE of the agent's AAuth identity (trinity-enterprise#878): the handler refuses every principal "
         "but the agent's OWN key (403 aauth_agent_only) — a human may not make the backend sign as the agent"),
+    "routers/aauth_resource.py::call_aauth_resource": (
+        "POST /api/agents/{agent_name}/aauth/resource-call",
+        "a USE of the agent's AAuth identity (trinity-enterprise#879): the same own-key gate as the person-token "
+        "route — every principal but the agent's OWN key is refused (403 aauth_agent_only) before the allow-list "
+        "is consulted, so a human may neither make the backend sign as the agent nor probe the allow-list"),
     "routers/notifications.py::create_notification": (
         "POST /api/notifications", "an agent raises a notification; agent name comes from its key (NOTIF-001)"),
     # MCP schedule tools — the agent's own use; autonomy (person-only) bounds cron firing.
