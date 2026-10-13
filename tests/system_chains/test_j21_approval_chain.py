@@ -209,6 +209,9 @@ def cast(chain_client):
 # --------------------------------------------------------------------------- the chain
 
 @pytest.mark.chain("J21", "An approval rule is enforced end to end")
+# The tier's 900 s per-test timeout cannot hold a one-hour deadline: the
+# expiry step widens it, and only when it is asked for.
+@pytest.mark.timeout(int(EXPIRY_DEADLINE_S + 20 * 60) if EXPIRY_ENABLED else 900)
 def test_an_approval_rule_is_enforced_end_to_end(chain, chain_client, cast):
     client = chain_client
     executor, requester = cast["executor"], cast["requester"]
