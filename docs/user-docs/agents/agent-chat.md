@@ -29,6 +29,8 @@ The tab is **text only**. Voice lives in the Workspace: the **Talk** button in t
 
 The agent must be running; a stopped agent shows **Agent Not Running** in place of the input.
 
+The floating **Help** launcher is hidden on this tab so it never covers **Send**. A help conversation you already had open stays open when you switch to Chat. See [Getting Help](../getting-started/help.md).
+
 ### Stopping a turn
 
 While a turn runs, **Send** becomes **Stop**. Click it, or press **Esc** with nothing else open, to cancel the in-flight turn: the turn ends as cancelled (not failed) and your message text returns to the input, in front of anything you typed while waiting. A cancel that loses the race to the reply says nothing — the reply is already on screen. A refused cancel leaves the input untouched and says the turn is still running. Stop is available once the turn has an execution id, which takes about a second.

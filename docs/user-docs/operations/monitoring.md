@@ -32,6 +32,8 @@ Fleet health lives on the **Health** tab of the [Operations page](operating-room
 
 The tab shows summary cards (Total Agents, Healthy, Degraded, Unhealthy, Critical), active alerts, and a per-agent health list with a status filter. Admins can trigger a fleet-wide check with **Check All** or a single-agent check from each row.
 
+- **Active Alerts** lists every alert its header counts. A long list scrolls inside the panel (about five rows tall, reachable from the keyboard) instead of growing the page.
+- An agent whose transport circuit breaker is not closed carries a **Breaker open** or **Breaker dormant** badge on its row, with the number of failed connection attempts. Open means the agent is not answering and requests fail fast until a probe succeeds; dormant means the platform has stopped probing it after too many failed probes — run a health check on the agent to reset it. A closed breaker shows nothing.
 - Real-time WebSocket updates push health state changes as they occur.
 - Individual agent health is visible in both the agent header and the Agents listing page.
 
@@ -129,7 +131,7 @@ Agent-purge sweeps always require an acknowledgement because every one destroys 
 
 Two knobs govern recorded metric points: the retention window `metrics_retention_days` (default 365) and the write quota `metrics_daily_point_cap` — how many points one agent may record per UTC day (default 100,000; `0` = unlimited). Unlike the other windows, both can come from the environment: `METRICS_RETENTION_DAYS` and `METRICS_DAILY_POINT_CAP` (left commented out in `.env.example`). A saved value wins over the variable, and the variable wins over the default. `GET /api/settings/retention` reports the quota under `quotas.metrics_daily_point_cap` with its `value` and `source` (`db-row`, `env`, or `code-default`).
 
-The recorded-metric-points sweep uses a larger threshold (100,000 rows, one agent-day at the default daily cap), because a busy fleet ages more than 1,000 points out of the window every cycle. It still stops for approval when you narrow the window and a large backlog expires at once, and one approval covers the whole backlog even when it takes several cycles to drain.
+The recorded-metric-points sweep uses a larger threshold (100,000 rows, one agent-day at the default daily cap), because a busy fleet ages more than 1,000 points out of the window every cycle. It still stops for approval when you narrow the window and a large backlog expires at once, and one approval covers the whole backlog even when it takes several cycles to drain. When the window comes from `METRICS_RETENTION_DAYS`, the approval is bound to that environment value — the same window the sweep uses.
 
 #### Changing a window
 
@@ -154,7 +156,7 @@ Endpoints:
 
 ### Database Backups
 
-Trinity backs up its own database every night at 03:30 UTC and before migrations at boot, into `~/trinity-data/backups/`. The `backup` block of `GET /api/settings/retention` reports whether backups are enabled, the schedule, the last result and its age, `stale` (no success for more than 3 days), and the files on disk. A failed or skipped backup, or a stale run of them, raises an operator-queue alert. Backups sit on the same disk as the database: they protect against corruption and mistakes, not disk loss. See [Backup and Restore](../guides/deploying/backup-and-restore.md).
+Trinity backs up its own database every night at 03:30 UTC and before migrations at boot, into `~/trinity-data/backups/`. Admins see the status on the **Database backups** card in **Settings → Retention**: a state badge (**Healthy**, **Stale**, **Last backup failed**, **Skipped — not enough disk space**, **No backup yet** or **Off**), the last successful backup, the recovery points, the location, the schedule and how long backups are kept. The `backup` block of `GET /api/settings/retention` reports whether backups are enabled, the schedule, the last result and its age, `stale` (no success for more than 3 days), and the files on disk. A failed or skipped backup, or a stale run of them, raises an operator-queue alert. Backups sit on the same disk as the database: they protect against corruption and mistakes, not disk loss. See [Backup and Restore](../guides/deploying/backup-and-restore.md).
 
 ## Real-Time Event Reliability
 
