@@ -415,7 +415,8 @@ class TestNginxForwardsTheClientScheme:
     def test_every_proxied_location_forwards_the_mapped_value(self):
         # /api/, /a2a/ and /mcp all proxy to the backend; a door that lied about
         # the scheme on one of them would mint tokens for the wrong origin.
-        assert self.CONF.count("proxy_set_header X-Forwarded-Proto $fwd_proto;") == 3
+        # 4 since ent#623: the /.well-known/aauth- discovery location forwards it too.
+        assert self.CONF.count("proxy_set_header X-Forwarded-Proto $fwd_proto;") == 4
 
     def test_hsts_still_reads_the_incoming_header_directly(self):
         assert "map $http_x_forwarded_proto $hsts_header {" in self.CONF

@@ -639,6 +639,13 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
     "routers/public.py::tls_allowed": ("GET /api/public/tls-allowed", "unauthenticated by design (reverse-proxy on-demand TLS probe)"),
     "routers/a2a.py::a2a_well_known_card": ("GET /a2a/{agent_name}/.well-known/agent-card.json", "unauthenticated by design (A2A discovery card)"),
     "routers/a2a.py::a2a_jsonrpc": ("POST /a2a/{agent_name}", "ent#679: a Trinity MCP key OR an x402 payment token; decided in-handler (get_user_or_anonymous → 401 unless exposed AND priced)"),
+    # trinity-enterprise#623: AAuth discovery documents. Anonymous by design —
+    # a peer fetches them from the issuer origin before it holds any credential;
+    # they carry only public material (issuer, JWKS public keys, signature
+    # requirements) and answer a uniform 404 while the prototype flag is off.
+    "routers/aauth.py::aauth_agent_metadata": ("GET /.well-known/aauth-agent.json", "unauthenticated by design (AAuth agent-provider metadata; 404 unless the prototype flag is on)"),
+    "routers/aauth.py::aauth_jwks": ("GET /.well-known/aauth-jwks.json", "unauthenticated by design (AAuth JWKS, public keys only; 404 unless the prototype flag is on)"),
+    "routers/aauth.py::aauth_resource_metadata": ("GET /.well-known/aauth-resource.json", "unauthenticated by design (AAuth resource metadata; 404 unless the prototype flag is on)"),
     "routers/mcp_keys.py::validate_mcp_api_key_http_endpoint": ("POST /api/mcp/validate", "validates the presented MCP key itself (MCP server auth)"),
     "main.py::health_check": ("GET /health", "unauthenticated by design (health probe)"),
     "routers/slack.py::handle_slack_event": ("POST /api/public/slack/events", "Slack request signature"),
