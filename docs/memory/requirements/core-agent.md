@@ -4075,3 +4075,34 @@ to localStorage in the clear.
   `own_tags` and per-message `tags`; history rows carry `tags` on the reader's own messages;
   `GET /api/enterprise/client-portal/mentions`, `GET …/mentions/{id}`, `POST …/mentions/{id}/read`.
 - **Flow**: `feature-flows/workspace-person-tag.md`.
+
+### 5.43 Workspace — recency that holds still (trinity-enterprise#856)
+
+- **Status**: 🚧 in progress (Part A — chat tabs and landing)
+- **Why**: the operator's 2026-10-09 ruling — a reply must change a badge, never a
+  position, while the person is looking at the strip; recency is the order you
+  ARRIVE to, not an order that re-sorts under the cursor.
+- **AC-1 — the arrival snapshot**: on arriving at an agent (any door — row, key,
+  deep link, `/c/:id`, bootstrap, Undo, Reset, the return from the Inbox or a
+  room) the shell takes ONE snapshot of that agent's chat order: Main first, then
+  recency, every non-room row of the agent including archived ones. It is taken by
+  one watcher keyed on the agent on stage (not by each door), retaken once when the
+  thread list first becomes trustworthy (a cold link), and cleared when no agent is
+  on stage. Re-clicking the agent already on stage keeps it.
+- **AC-2 — the strip holds still**: while the snapshot names the agent on stage,
+  the tabs are drawn in its order. A reply, a send, or a poll that re-sorts the
+  thread list changes a badge only. A chat born mid-visit sits directly after Main
+  (the provisional tab's slot), born chats among themselves by creation time. A
+  closed chat drops out and the gap closes; Undo returns it to its own slot. A
+  deep-linked archived chat is drawn at its arrival slot. The switch-chat keys and
+  close-next walk the same frozen order the eye reads.
+- **AC-3 — landing arms (operator ruling 2026-10-13)**, in order: **0** the agent's
+  most recent unarchived chat with an unread answer (Main included); **1** the chat
+  last open for that agent this session — in memory per tab, never persisted;
+  then the fresh-session arms of ent#784 (a drafted chat, the empty chat, a new
+  chat). A route-driven landing replaces the history entry, so Back does not loop.
+- **AC-4 — forget on close**: closing (archiving) or losing a chat removes it from
+  the session's last-open memory (`forgetLastOpen`), on top of `agentLanding`'s
+  own validation.
+- **Out**: any endpoint or schema change.
+- **Tests**: `portalChatTabsHold.spec.js`, `portalAgentLandingUnread.spec.js`.
