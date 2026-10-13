@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Sequence
 
-from sqlalchemy import select, insert, update, and_, case
+from sqlalchemy import select, insert, update, and_, case, or_
 
 from .engine import get_engine
 from .query_helpers import latest_per_group
@@ -41,6 +41,17 @@ logger = logging.getLogger(__name__)
 _DISPATCH_ACTIVITY_TYPES = (
     ActivityType.CHAT_START.value,
     ActivityType.SCHEDULE_START.value,
+)
+
+# Companion activity types (#3588): opened by the PRODUCER of an inter-agent
+# turn (the caller's collaboration row, the self-task row), sharing the
+# execution's ``related_execution_id`` but never closeable AS the dispatch
+# activity. ``tool_call`` shares the eid too and is deliberately absent — it
+# has its own closers (#45); ``execution_cancelled`` is an event row, closed
+# at creation.
+_COMPANION_ACTIVITY_TYPES = (
+    ActivityType.AGENT_COLLABORATION.value,
+    ActivityType.SELF_TASK.value,
 )
 
 def queued_activity_ids(backlog_metadata: Optional[str]) -> List[str]:
@@ -265,7 +276,10 @@ class ActivityOperations:
 
             # Use parse_iso_timestamp to handle both 'Z' and non-'Z' timestamps
             started_at = parse_iso_timestamp(row["started_at"])
-            completed_at = terminal_completed_at(completed_at)
+            # Floored at this row's own server-written `started_at`
+            # (trinity-enterprise#882): the producer instant is agent-controlled
+            # and a backdated value would age the row into the next prune.
+            completed_at = terminal_completed_at(completed_at, floor=started_at)
             # #2434: `completed_at` here IS when the work stopped, so this is a
             # real measurement — but an activity with no owning closer can sit
             # `started` arbitrarily long (#1804's class), and past the int4
@@ -466,6 +480,55 @@ class ActivityOperations:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).first()
         return row[0] if row else None
+
+    def get_open_companion_activity_ids_for_execution(
+        self,
+        execution_id: str,
+        *,
+        extra_ids: Sequence[str] = (),
+        include_failed: bool = False,
+    ) -> List[str]:
+        """Open companion (collaboration / self-task) activity ids for an
+        execution (#3588).
+
+        The claim path's inverse of :meth:`get_open_activity_id_for_execution`:
+        it matches ONLY ``_COMPANION_ACTIVITY_TYPES`` — the Codex #8 dispatch
+        filter stays untouched, and a companion is closed AS a companion in a
+        separate step, never in the dispatch activity's place. Set-wise (no
+        ``limit 1``): an execution can own both a collaboration and a self-task
+        row.
+
+        ``extra_ids`` is the #2329 belt — the ids the row's ``backlog_metadata``
+        names, included in the SAME state-filtered query so an already-closed
+        metadata id never comes back (callers count returned ids as closeable).
+
+        ``include_failed`` mirrors the dispatch lookup: the lookup must agree
+        with the close CAS — an authoritative COMPLETED close may upgrade a
+        provisionally-FAILED companion per ``_close_predicate`` and must be
+        able to FIND it.
+        """
+        states = [ActivityState.STARTED.value]
+        if include_failed:
+            states.append(ActivityState.FAILED.value)
+        key = agent_activities.c.related_execution_id == execution_id
+        ids = [i for i in (extra_ids or ()) if i]
+        if ids:
+            key = or_(key, agent_activities.c.id.in_(ids))
+        stmt = (
+            select(agent_activities.c.id)
+            .where(
+                and_(
+                    key,
+                    # The type filter bounds BOTH arms: even a metadata id can
+                    # only ever resolve to a companion row, never a dispatch one.
+                    agent_activities.c.activity_type.in_(_COMPANION_ACTIVITY_TYPES),
+                    agent_activities.c.activity_state.in_(states),
+                )
+            )
+            .order_by(agent_activities.c.created_at.asc())
+        )
+        with get_engine().connect() as conn:
+            return [row[0] for row in conn.execute(stmt)]
 
     def get_agent_activities(self, agent_name: str, activity_type: Optional[str] = None,
                             activity_state: Optional[str] = None, limit: int = 100) -> List[Dict]:

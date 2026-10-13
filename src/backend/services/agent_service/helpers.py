@@ -590,6 +590,34 @@ def check_guardrails_env_matches(container, agent_name: str) -> bool:
         return False
 
 
+def check_pull_mode_env_matches(container, agent_name: str) -> bool:
+    """#3590: the container's ``TRINITY_PULL_MODE`` flag agrees with the
+    ``PULL_MODE_PILOT_AGENTS`` allowlist. ``False`` signals ``start_agent``
+    to recreate — a pilot running a pre-flag container (the allowlist was
+    edited after create, or the container was rebuilt by a path that forgot
+    the opt-in) runs no pull worker while the backend routes its work to the
+    durable queue; a de-piloted agent still carrying the flag keeps pulling.
+    Canary B-08 reports both states as ``workers_missing`` and used to send
+    the operator to a manual recreate.
+
+    Flag only — the pool size (``TRINITY_MAX_PARALLEL_TASKS``) is NOT compared:
+    a changed parallel limit is #3039's live resize, not a recreate on every
+    start. Fail-safe: unreadable attrs match, never a 500 on the start path.
+    """
+    from services.pull_pilot import is_pull_pilot_agent
+
+    try:
+        attrs = container.attrs
+        if not attrs:
+            return True  # not observed — never a drift verdict on a blind read
+        env_list = attrs.get("Config", {}).get("Env", []) or []
+        env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
+    except Exception:  # noqa: BLE001 — attrs absent or shaped differently
+        return True
+    baked = env_dict.get("TRINITY_PULL_MODE", "").strip().lower() == "true"
+    return baked == bool(is_pull_pilot_agent(agent_name))
+
+
 def check_agent_auth_token_env_matches(container, agent_name: str) -> bool:
     """#1159: verify the container's ``TRINITY_AGENT_AUTH_TOKEN`` matches the
     token derived for the agent's CURRENT name. Returns ``True`` if it matches,

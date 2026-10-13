@@ -161,7 +161,15 @@ The agent already has its own `.claude/skills/<name>/` directory that the platfo
 
 ## Why is my orchestrator agent refused with `skill_management_not_permitted`?
 
-Changing an agent's skills — another agent's or its own — is a separate permission, and no agent holds it by default. An admin grants it in **Settings → Agents → Skill managers**; only a person at the UI can grant or revoke it. People who own the agent, admins and the system agent are not affected. A granted agent still reaches only its owner's agents. See [Skills and Playbooks](../automation/skills-and-playbooks.md#who-can-change-an-agents-skills).
+Changing an agent's skills — another agent's or its own — is a separate permission, and no agent holds it by default. An admin grants it in **Settings → Agents → Skill managers**, or with the **Change skills** toggle on the agent's Settings tab; only a person at the UI can grant or revoke it. People who own the agent, admins and the system agent are not affected. A granted agent still reaches only its owner's agents. The same kind of named refusal covers other agents' schedules, instructions and agent management, each with its own permission. See [Skills and Playbooks](../automation/skills-and-playbooks.md#who-can-change-an-agents-skills) and [Permissions to Change Itself](../agents/agent-configuration.md#permissions-to-change-itself).
+
+## How do I make a skill wait for someone's approval before it runs?
+
+Open the agent's **Skills** tab and, as its owner or an admin, turn on **Requires approval** on the skill's card and pick who approves (the primary contact, or an approver role where your install offers one). From then on any request that names the skill — from a person, another agent, a schedule or a channel — is held before the agent sees it, and the approver gets a card to approve or reject. When the approver asks for it themselves, it runs at once and is marked *Ran without approval*. Gates are per agent, and can also be set over the API or with the `set_skill_gate` MCP tool. See [Skills and Playbooks → Requiring approval for a skill](../automation/skills-and-playbooks.md#requiring-approval-for-a-skill).
+
+## What happens after a gated skill request is approved?
+
+The request runs once, exactly as it appeared on the card, as a new execution on the agent. An agent that asked gets a notice when the request is decided and a second when the approved run ends, with its status and a short quote of the reply or error; a person gets the same two notices in their Workspace Inbox. Each notice opens with the outcome (*Approved, now running*, *Finished successfully*, *Failed*, …). Schedules, channel users and public-link visitors get only the request id up front. A rejection, an expiry or a cancellation runs nothing. See [Approvals → Gated-skill approvals](../automation/approvals.md#gated-skill-approvals).
 
 ## How can I see whether a schedule is actually performing well?
 
@@ -193,7 +201,7 @@ Because skills carry executable scripts, and with fleet re-inject on, a source t
 
 ## The add-project-management plugin installs nothing — where did it go?
 
-It's deprecated: it stays in the marketplace for one release as a pointer stub, and its skill now lives in agent-dev as `/agent-dev:add-project-management`. The five runtime skills it installs — `/project-init`, `/project-task`, `/project-steward`, `/project-reconcile` and `/project-intake` — are also standalone in the agent-dev plugin (now 30 skills) and mirrored into the bundled community skills catalog, so on Trinity you can assign them to a deployed agent from the Library without running the installer at all; `/project-init` materializes the project standard itself on first run. Also new in agent-dev: `/agent-dev:commit` doubles as a plain save — with no issue claimed it becomes a checkpoint commit of the agent-state files (memory, outputs, skills, `CLAUDE.md`, `template.yaml` — never `.env` or anything credential-shaped). See [Abilities Marketplace](../automation/abilities-marketplace.md#deprecated-add-project-management-v130).
+It's deprecated: it stays in the marketplace for one release as a pointer stub, and its skill now lives in agent-dev as `/agent-dev:add-project-management`. The runtime skills it installs — `/project-init`, `/project-task`, `/project-steward`, `/project-reconcile`, `/project-intake` and, since agent-dev 1.22, `/project-status` — are also standalone in the agent-dev plugin (now 31 skills) and mirrored into the bundled community skills catalog, so on Trinity you can assign them to a deployed agent from the Library without running the installer at all; `/project-init` materializes the project standard itself on first run. Also new in agent-dev: `/agent-dev:commit` doubles as a plain save — with no issue claimed it becomes a checkpoint commit of the agent-state files (memory, outputs, skills, `CLAUDE.md`, `template.yaml` — never `.env` or anything credential-shaped). See [Abilities Marketplace](../automation/abilities-marketplace.md#deprecated-add-project-management-v130).
 
 ## Do I need to install the trinity plugin inside my agent before it can run /trinity skills?
 
@@ -234,6 +242,10 @@ Yes, in the Workspace. Click **Discuss** on an approval or a question to open a 
 ## How do I tell an agent its ask doesn't need a decision?
 
 Click **Dismiss** on the ask in the Workspace. It ends without an answer, after a 5-second **Undo** window and with no confirmation. The agent reads it as `dismissed` with an empty answer and is told not to raise the same ask again straight away; if its owner turned on the wake, it is woken once. Alerts have no Dismiss: acknowledge them with **Got it**. See [Approvals](../automation/approvals.md#asks-addressed-to-a-workspace-user).
+
+## Why does an expired approval say "whether the action went ahead is unknown"?
+
+Because the agent, not Trinity, held that action. When an agent asks for approval and nobody answers before the deadline, the ask expires as *not approved*, but Trinity cannot see whether the agent went ahead anyway. The Resolved tab, the queue detail and the mobile admin say so, and the agent reads `disposition_reason: "outcome_unknown"`. An expired approval for a gated skill never says this: the platform held that request, so nothing ran. See [Approvals](../automation/approvals.md#concepts).
 
 ## Why does a heads-up in the Operations queue say "seen 5 times" instead of filing new rows?
 

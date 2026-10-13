@@ -72,6 +72,10 @@ Add credentials using one of four methods on the **Credentials** tab:
 
 MCP server configuration is different. An `.env` injection does not rewrite `.mcp.json`; to change an MCP server's credential on a running agent, inject an updated `.mcp.json` directly (it is structurally validated first).
 
+### Who can read credential files
+
+Reading an agent's credential files — `.env`, `.mcp.json`, key and certificate files, SSH and cloud credentials, the runtimes' login files — is for the agent's **owner** or an **admin**, signed in or with their own `user` key. Someone the agent is shared with keeps chatting with it, and the agent keeps using its credentials, but opening one of these files shows a message saying who to ask. Agent, system and connector keys cannot read them. When the Credentials tab cannot read a file it shows the server's message beside the file list and does not open the editor. The full list of files and the Files tab's behaviour are in [Agent Files → Reading credential files](../agents/agent-files.md#reading-credential-files).
+
 ### Credential Pattern in the Agent
 
 ```

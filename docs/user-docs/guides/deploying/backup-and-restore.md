@@ -24,13 +24,15 @@ Trinity backs up its own database; this page covers what that gives you, the man
 | SQLite | `trinity-backup-YYYYMMDD.db` — a consistent online copy via SQLite's backup API (never a raw file copy) |
 | PostgreSQL | `trinity-backup-YYYYMMDD.dump` — `pg_dump -Fc` (custom format, restorable with `pg_restore`) |
 | Pre-migration | `pre-migration-YYYYMMDD-HHMMSS.db` — an extra safety copy taken automatically at boot when a schema migration is about to run (SQLite) |
-| Retention | `backup_retention_days` (default **14**, bounds 1–3650) — set via `PUT /api/settings/ops/config` (the Retention tab in Settings does not list it). The newest **3** artifacts are always kept, regardless of age. Like every retention window, it is stored per install and does not change on upgrade. |
+| Retention | `backup_retention_days` (default **14**, bounds 1–3650) — set via `PUT /api/settings/ops/config` (the **Database backups** card on the Retention tab shows it, read-only). The newest **3** artifacts are always kept, regardless of age. Like every retention window, it is stored per install and does not change on upgrade. |
 | Default | **Enabled.** Disable with `DB_BACKUP_ENABLED=false` in `.env` — this turns off both the nightly job and the boot-time pre-migration copy |
 | Failure visibility | A failed or skipped backup raises an item in Operations → Needs Response, and a "backups are stale" alarm re-fires weekly while the newest success is older than 3 days |
 
 ### Checking backup status (no shell needed)
 
-As an admin:
+As an admin, open **Settings → Retention**. The **Database backups** card shows one state badge — **Healthy**, **Stale**, **Last backup failed**, **Skipped — not enough disk space**, **No backup yet** or **Off** — and the last successful backup (relative time, exact time on hover), the number and total size of recovery points, the backup folder with the same-disk caveat, the nightly schedule, and how long backups are kept. A failed or skipped attempt outranks an older success, so a failing install never reads **Healthy**; the last good backup is still listed. The badge stays empty while the page loads, and a backend too old to report backups, or one that could not read the status, says so instead of showing a state.
+
+Or over the API:
 
 ```bash
 curl -s -H "Authorization: Bearer <token>" \

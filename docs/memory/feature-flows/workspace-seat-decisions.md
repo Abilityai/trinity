@@ -42,7 +42,7 @@ person (Workspace principal)
   ▼
 client_portal/seat_decisions.page      _require_roster (uniform 404)
   │  readable_seats: own seat (writable) ∪ owner → every seat (writable)
-  │                  ∪ provider.kinds_for(agent, me) ∈ READER_KINDS → every seat (read-only)
+  │                  (an assignment kind never widens it — #3660)
   │  rows per seat → to_human(row, writable)  (status = effective_status: expired computed)
   │  stats(own seat rows): recorded, reused, reuse_rate, reversed, ask_classes[{criteria, reversals, expired, stable}]
   ▼
@@ -88,10 +88,12 @@ every turn ──► platform_prompt_service.format_user_memory_block(record)
   back (`to_agent` labels the decider `seat` / `owner`) — an execution can be an
   anonymous public turn, the audience the assignment provider must never expose staff
   identities to.
-- **Readers per assignment kind, safely.** The assignment record is private; the seam
-  gains one optional method (`kinds_for`), read through `getattr`, allowlisted,
-  failure → `None`. A core build reads own-seat only; the owner (creator / infra owner,
-  `role_card._is_owner`) reads every seat. Per-agent in v1 — DEBT_INBOX 2026-09-22.
+- **Readers: own seat, and the owner.** The owner (creator / infra owner,
+  `role_card._is_owner`) reads every seat; everyone else reads their own. The seam's
+  optional `kinds_for` (read through `getattr`, allowlisted, failure → `None`) answers
+  the role card's relationship line only. It never widens this read: a kind is per
+  agent, not per role, so it would hand an approver every person's decisions (#3660).
+  Per-role stakeholder reads are #3381.
 - **Conversion, not volume.** `reused` counts records a LATER record cited; a
   superseding record does not implicitly cite its predecessor. Per ask class the raw
   evidence (criteria, reversals, expired) plus `stable` (≥3, one criterion, no reversal)

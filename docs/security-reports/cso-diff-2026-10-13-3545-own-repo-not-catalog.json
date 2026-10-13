@@ -1,0 +1,103 @@
+{
+ "version": "1.2.3",
+ "date": "2026-10-13",
+ "mode": "daily",
+ "scope": "diff",
+ "base": "origin/dev@05612cd78",
+ "issue": "abilityai/trinity#3545",
+ "counts_as_full_run": false,
+ "phases_run": [
+  0,
+  1,
+  2,
+  7,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14
+ ],
+ "phases_not_applicable_in_diff": [
+  3,
+  4,
+  5,
+  6,
+  8
+ ],
+ "stack_cve_quicklist": [
+  {
+   "component": "all rows",
+   "verdict": "coverage_gap",
+   "reason": "diff changes no dependency, image or workflow; rows not re-assessed"
+  }
+ ],
+ "attack_surface": {
+  "new_oss_endpoints": 0,
+  "changed_oss_endpoints": [
+   "POST /api/agents (git-mode decision for github: templates)",
+   "GET /api/templates/{id} (override matching is case- and .git-insensitive)"
+  ],
+  "new_ws_channels": 0,
+  "new_agent_context_ingress": 0,
+  "frontend_surfaces": []
+ },
+ "findings": [],
+ "hypotheses": [
+  {
+   "title": "An unreadable registry lists nothing, so a registry template reads as not-catalog",
+   "file": "src/backend/services/template_service.py",
+   "confidence": 4,
+   "why_not_a_finding": "A working branch still requires a per-user token, token login equal to the repository owner, and a passing push probe. The only principal who can pass is the personal-account owner of that repository, who can already push to it with the same token. No boundary is crossed.",
+   "failure_direction": "open, stated in the is_catalog_github_template docstring"
+  },
+  {
+   "title": "A renamed catalog repository's old name reads as not-catalog",
+   "file": "src/backend/services/agent_service/crud.py",
+   "confidence": 4,
+   "why_not_a_finding": "Same bound as above: owner and catalog checks compare the typed name, and the owner check limits the grant to the repository's own personal-account owner. Whether GitHub redirects the push was not tested.",
+   "follow_up": "compare the canonical full_name from the repository API in both checks"
+  }
+ ],
+ "coverage_gaps": [
+  "Stack CVE quicklist not re-assessed (no dependency, image or workflow in the diff)",
+  "No scanner run (Phase 3 not applicable in diff)",
+  "Auth guard tests (test_293, test_2996, test_1310) not run: the diff changes no auth dependency or route",
+  "GitHub push behaviour through a repository-rename redirect not tested",
+  "Docker pass not run"
+ ],
+ "out_of_diff_observations": [
+  "crud.py: the 'Dynamic GitHub template' branch of _resolve_github_repo_and_pat and the copy-intent else branch are unreachable, because get_github_template builds a template for every github: id"
+ ],
+ "supply_chain_summary": {
+  "scanner": "none (not applicable in diff)",
+  "changed_dependencies": 0
+ },
+ "filter_stats": {
+  "candidates": 4,
+  "dropped_below_gate": 2,
+  "dropped_not_security": 2,
+  "reported": 0
+ },
+ "totals": {
+  "critical": 0,
+  "high": 0,
+  "medium": 0,
+  "low": 0
+ },
+ "trend": "not computed for diff runs",
+ "boundary_review": {
+  "property": "an agent never receives a working (push) branch on a repository its creator does not own",
+  "before": "every per-user-token create from a github: template returned pull-only at the catalog branch; the owner check and push probe never ran",
+  "after": "catalog membership is read from the admin list, else the registry, plus the bundled defaults; non-catalog repositories proceed to the owner check and push probe, unchanged",
+  "grant_conditions": [
+   "not fork-to-own, source_mode not set explicitly, kind agent, not ephemeral",
+   "a token of tier per_user or per_agent",
+   "repository not in the catalog (case- and .git-insensitive)",
+   "token login equals repository owner, case-insensitive",
+   "push probe ok"
+  ],
+  "widening": "repositories the creator's own GitHub account owns and can push to",
+  "tightening": "a respelled catalog repository (case, .git suffix) is still the catalog repository"
+ }
+}
