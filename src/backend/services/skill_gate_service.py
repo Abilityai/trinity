@@ -286,7 +286,7 @@ async def enforce(
                     role, expires_at, card_context=card_context)
     from services.ask_service import AskRejected
     try:
-        receipt = _raise_ask(agent_name, ask)
+        receipt = _raise_ask(agent_name, ask, addressees=approvers, to_role=role)
     except AskRejected as e:
         db.transition_gate_request(request_id, "refused", detail=e.code)
         raise SkillGateRefused(e.status_code, e.code, e.message, **e.extra) from e
@@ -300,7 +300,8 @@ async def enforce(
             "The approval could not be raised; nothing was run. Try again shortly.") from e
     db.attach_gate_ask(request_id, receipt["id"])
     raise SkillApprovalRequired(request_id=request_id, agent_name=agent_name, skills=names,
-                                approver_role=role, expires_at=receipt.get("expires_at"),
+                                approver_role=role, approver_label=role_addressing.role_label(role),
+                                expires_at=receipt.get("expires_at"),
                                 outcome_delivery=outcome_delivery(
                                     requester.kind, agent_name=requester.agent_name,
                                     email=requester.email))
@@ -313,17 +314,25 @@ async def enforce(
 def _approvers(agent_name: str, role: str) -> List[str]:
     """The casefolded emails `role` reaches on `agent_name`; refuses when it
     reaches nobody (an `approver` with no assignments provider, an `operator`
-    role, an owner with no email)."""
+    role, an owner with no email, a canon role nobody is seated in).
+
+    `role` is the stored approver: a kind (`primary` | `approver`), or a canon
+    role `role:<id>` (trinity-enterprise#848) resolved through the assignments
+    provider alone — no owner fallback, so no provider and "nobody" refuse
+    alike. The refusal names the role's label, never a person."""
+    role_id = role_addressing.parse_role_id(role)
     try:
-        res = role_addressing.resolve(agent_name, role)
+        res = (role_addressing.resolve_role_id(agent_name, role_id) if role_id
+               else role_addressing.resolve(agent_name, role))
     except role_addressing.RoleRefused:
         res = None
     people = [p.casefold() for p in (res.people if res else []) if p]
     if not people:
         raise SkillGateRefused(
             422, "role_unassigned",
-            f"Nobody fills the {role} role for {agent_name}, so this gated request "
-            "can't be approved. Ask the agent's owner to assign one.", role=role)
+            f"Nobody fills the {role_addressing.role_label(role)} role for {agent_name}, "
+            "so this gated request can't be approved. Ask the agent's owner to assign one.",
+            role=role)
     return people
 
 
@@ -557,7 +566,10 @@ def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints
         "question": (f"{who} asked {agent_name} to run {skills}.\n\n{_request_lines(clean_text, requester.kind)}{beside}"
                      f"{ASK_FOOTER}"),
         "options": list(OPTIONS),
-        "to": role,
+        # The sink validates `to` against the kinds an agent may name; a canon
+        # role (`role:<id>`, ent#848) is recorded through `_raise_ask`'s
+        # `to_role` instead, and reads as an `approver` here.
+        "to": role if role_addressing.parse_role_id(role) is None else "approver",
         "expires_at": expires_at,
         "proposal": {
             "kind": "gated_skill",
@@ -570,19 +582,26 @@ def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints
     }
 
 
-def _raise_ask(agent_name: str, ask: Dict[str, Any]) -> Dict[str, Any]:
+def _raise_ask(agent_name: str, ask: Dict[str, Any], *, addressees: Optional[List[str]] = None,
+               to_role: Optional[str] = None) -> Dict[str, Any]:
     """Raise through the one ask sink. After a timeout an identical proposal
-    must name the expired ask it supersedes (C6); the gate links it itself."""
+    must name the expired ask it supersedes (C6); the gate links it itself.
+
+    `addressees` is the list `enforce` decided self-approval with and
+    `to_role` the stored approver (a kind or `role:<id>`): the sink records
+    them as the ask's audience instead of resolving the role a second time
+    (trinity-enterprise#848, T10)."""
     from services import ask_service
 
+    audience = {"addressees": addressees, "to_role_override": to_role} if addressees else {}
     try:
-        return ask_service.raise_ask(agent_name, ask, raised_by="gate", channel="gate")
+        return ask_service.raise_ask(agent_name, ask, raised_by="gate", channel="gate", **audience)
     except ask_service.AskRejected as e:
         expired = (e.extra or {}).get("expired_request_id")
         if e.code != "reask_requires_link" or not expired:
             raise
         return ask_service.raise_ask(agent_name, {**ask, "supersedes_expired": expired},
-                                     raised_by="gate", channel="gate")
+                                     raised_by="gate", channel="gate", **audience)
 
 
 def _answer_for_record(record: Dict[str, Any], role: str):
@@ -604,6 +623,7 @@ def _pending_from_record(record: Dict[str, Any], role: str) -> SkillApprovalRequ
         expires_at = (row or {}).get("expires_at")
     return SkillApprovalRequired(request_id=record["request_id"], agent_name=record["agent_name"],
                                  skills=record.get("skills") or [], approver_role=role,
+                                 approver_label=role_addressing.role_label(role),
                                  expires_at=expires_at,
                                  outcome_delivery=outcome_delivery(
                                      record.get("requester_kind"), agent_name=record.get("source_agent"),
@@ -1854,6 +1874,12 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
         "state": record.get("state"),
         "execution_id": record.get("dispatched_execution_id") if with_run_ids else None,
         "waiting_on": [_person_label(p) for p in people] if name_approvers else [],
+        # trinity-enterprise#848: the approver the ask went to, as a value and
+        # a label — a kind's name, or a canon role's ("Head of sales"). Shown
+        # to every viewer: a role is not a person. None when the row names none.
+        "waiting_role": ({"value": item["to_role"],
+                          "label": role_addressing.role_label(item["to_role"])}
+                         if item.get("to_role") else None),
         "can_decide": (viewer_email or "").strip().casefold() in people,
     }
 
