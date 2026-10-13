@@ -1086,6 +1086,113 @@ revision — the kind is a label inside the existing envelope.
   backend signs on the agent's behalf; inbound AAuth is inert without the
   private allow-list module.
 
+### 32.9 AAuth Person Token — binding an agent to its owner (ent#878)
+- **Status**: 🧪 Prototype on the §32.8 stack, flag OFF by default — not a
+  platform promise. Chained after §32.8; the resource/auth-token leg (ent#879,
+  `call_aauth_resource`) is §32.10.
+- **Implements**: trinity-enterprise#878 (evaluation home: ent#558)
+- **Description**: An agent obtains a **person token** (`aa-person+jwt`) for
+  one resource from its owner's **person server** (PS), as itself (the §32.8
+  signature profile), after its owner has bound it once through the PS's
+  link-and-code flow. The platform signs, holds and refreshes the token; the
+  agent sees its metadata (`jti/aud/sub/exp`) and, while a binding is pending,
+  the link + code it must relay to its owner. Nothing the agent sees is a
+  credential. Flow: `feature-flows/a2a-aauth-agent-identity.md` Flow 5.
+- **FR-1 — Person server setting + discovery**: `aauth_person_server`
+  (`system_settings` → `AAUTH_PERSON_SERVER`; `https://<host>`, the issuer's
+  strict server-identifier rule, never repaired). Unset → every request
+  refuses `person_server_unconfigured` (409). `{ps}/.well-known/aauth-person.json`
+  must carry `issuer` (= the configured PS), `jwks_uri`, `auth_token_endpoint`,
+  `person_token_endpoint`; the two token endpoints must be on the PS's own
+  origin (the only URLs a SIGNED request goes to on the PS's say-so);
+  `jwks_uri` MAY be off-host. Pinned egress, 64 KB cap, 8 s deadline, 5 min
+  positive / 60 s negative cache per worker.
+- **FR-2 — Request as the agent**: a signed
+  `POST {person_token_endpoint} {"resource", "capabilities": ["interaction"]}`
+  with `Prefer: wait=N` (POST 5 s, resume 15 s, cap 15, total deadline
+  wait + 8 — under the MCP gateway ceiling). The agent token is refreshed
+  BEFORE the PS request so ≥ 20 min remain. `resource` must be an https server
+  identifier (`invalid_resource` → 422). The PS leg uses its own capped egress
+  (`services/aauth/egress.py`) that returns every status with headers, under
+  the `a2a_client` guards (pinned address, no redirects, identity encoding,
+  wire-size cap, token scrubbed from transport errors).
+- **FR-3 — One key per chain**: the per-agent signing key is HKDF-SHA256-derived
+  from the instance seed (`info = "aauth-agent-key|<issuer>|<agent>|<hour
+  window>"`), so every worker holds the same key inside a window and a person
+  token obtained on one worker (`cnf.jwk` names that key) is presentable on
+  the other. A caller asks for `min_remaining` seconds of key life and gets a
+  key whose window — cached or freshly minted — still has that long left, so a
+  whole challenge chain (person token → resource token → auth token → call)
+  finishes on one key. `signer.current_agent_key()` exposes key + RFC 7638
+  thumbprint for ent#879's `presented_token` signing.
+- **FR-4 — Holding and refresh**: the token lives in **worker memory** keyed by
+  `(our issuer, PS, agent, resource)` and stamped with the key thumbprint it
+  was bound to; `held_token()` serves it while ≥ 5 min remain, the PS is
+  unchanged and the thumbprint is still the agent's current key. A token is
+  accepted only as a `aa-person+jwt` JWS whose `iss` is the PS, `aud` the
+  resource, `cnf` our key, `exp` ≤ 1 h (clamped by `expires_in` and the agent
+  token's own `exp`); else `token_invalid`. The PS's signature over it is not
+  verified here (the resource verifies it).
+- **FR-5 — Pending interaction (Redis)**: a 202 with `AAuth-Requirement:
+  requirement=interaction; url=…; code=…` + `Location` + `Retry-After` becomes
+  a record under a 192-bit random `pending_handle` (`aauth:pt:handle:{sha256}`,
+  pointer `aauth:pt:pending:{sha256(scope)}`, a per-agent set; TTL 30 min;
+  max 3 open per agent → `too_many_pending`). Every PS-chosen string is
+  validated before it is fetched, relayed or stored: the interaction url on the
+  PS's origin, the code Crockford base32 (4–32 symbols), `Location` resolved
+  relative and same-origin, `Retry-After` clamped 1–60 s. A second call before
+  `next_poll_at` answers the same handle with no network call. `resume(handle)`
+  is a signed GET of the pending URL driving the draft's state machine: 202
+  continue · 200 issued · 403 denied/abandoned/revoked · 408 expired · 410 gone
+  · 429 slow down (+5 s step, record kept) · an empty 404 `poll_rejected`
+  (record kept — never delete a live binding on an ambiguous status). A record
+  that cannot be persisted is `state_unavailable` (503), never an in-memory
+  fallback; an un-persisted refresh answers `slow_down` so the client backs off
+  anyway. A handle belonging to another agent, PS or issuer answers the uniform
+  `pending_unknown`. A 200 on resume whose `cnf` is no longer our key (window
+  edge) discards the record and re-requests — a bound agent gets a direct 200
+  — reported as `reissued_for_key`.
+- **FR-6 — Route**: `POST /api/agents/{name}/aauth/person-token`
+  (`AuthorizedAgentByName`; the flag gate is a `Depends`, so with the prototype
+  inert even a malformed body answers the uniform 404; then the agent's OWN key
+  only — a human, a sibling agent or a `system` key gets 403 `aauth_agent_only`,
+  the §32.8 FR-7 rule, stricter than `a2a.py`'s attribution-only self-check).
+  Body `{resource, pending_handle?, wait?, execution_id?, trigger_source?}`;
+  `PersonTokenResponse` has NO field that can carry the token (pinned). Budgets:
+  10 new requests / min / agent, 30 polls / min / agent, 120 / min fleet-wide.
+  Audit (`CREDENTIALS`) on state change only —
+  `aauth_person_token_{issued,pending,denied,refused}` with `token_jti`, the key
+  thumbprint, the outcome, a bounded `ps_error`, `execution_id` +
+  `trigger_source` — never the token, handle, url or code.
+- **FR-7 — MCP tool `request_person_token(resource, pending_handle?)`**
+  (`tools/aauth.ts`, `operatorOnly`): self-acting — the agent comes from the key,
+  agent scope only (`system` refused too; the backend wants the agent's own
+  key). Returns `{success, outcome, jti, aud, sub, exp, cached,
+  interaction?{url, code, link, pending_handle, retry_after}, next_step}` and
+  never the token. **Advertised but inert when the flag is off**: the tool is
+  always registered and the backend 404 becomes `{success: false,
+  aauth_disabled: true}` (the `call_a2a_agent` precedent); dynamic registration
+  through the #846 reconciler is registered debt. The description names the
+  actor: relay the link only to your OWNER, privately (through `ask_operator`
+  when no person is in the conversation) — whoever approves first becomes the
+  person the agent acts for.
+- **FR-8 — Live proof**: `scripts/dev/aauth_prototype/bind.sh <agent>
+  <resource>` binds against the real PS with the agent's own key, prints link +
+  code, polls honouring `retry_after`, exits 0 on `issued` printing
+  `jti/aud/sub/exp`; `demo.sh up`/`wire` sets `aauth_person_server`. Do not
+  `rewire` after binding — a new issuer host is a new agent to the PS.
+- **Out of scope**: resource tokens / auth tokens / presenting the token to a
+  resource (ent#879); RS256/ES256 verification of PS-issued tokens (#558 task
+  G); owner-only delivery of the binding link (registered debt); dynamic MCP
+  tool registration; missions, budgets, sub-agents, UI. **Stated limits**: the
+  binding is to whoever approves first — the link is relayed by the agent in
+  whatever channel it is in (the tool says owner-only, privately; the audit row
+  records execution + trigger source); the instance key signs for every agent,
+  so the PS binds the **instance's** name for the agent and a new issuer host
+  is a new agent to it; the held token is per worker (a second worker
+  re-requests — a bound agent gets a direct 200, no second consent); the tool
+  is advertised but inert while the flag is off.
+
 ## 45. Per-Agent MCP Exposure — Dedicated Dynamic Tools (#846)
 
 **Description**: A per-agent owner-toggled flag (`mcp_exposed`, default off) that publishes
