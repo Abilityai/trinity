@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3524_gate_approval_card.py",
+      "feature": "abilityai/trinity#3524 #3525 #3527",
+      "added": "2026-10-12",
+      "categories": [
+        "backend",
+        "skill-gate",
+        "workspace",
+        "unit"
+      ],
+      "description": "The gated-skill approval card and its ending: an approver's rejection note reaches the requesting agent and a person's Inbox notice through the trinity-enterprise#755 reason path (absent on approval and without a note); a person with no email is named by username, never 'A caller'; a request carrying chat history leads with the new message (first-marker split); the Workspace projection carries the viewer's own answer and note; a recent gate answer names its request."
+    },
+    {
       "file": "unit/test_ent819_files_read_tier.py",
       "feature": "trinity-enterprise#819",
       "added": "2026-10-06",
@@ -5868,6 +5880,17 @@
         "agent-lifecycle"
       ],
       "description": "The #1559 rebuild-from-nothing path bakes the pull-worker env for an allowlisted pilot (driven through the real recreate_missing_container, red before the fix on KeyError TRINITY_PULL_MODE); apply_pull_mode_env is the one owner of the set-or-clear idiom (pilot on empty dict, de-pilot clears, idempotent, module-global lookup honours stubs, MCP-key-absent and settings-fallback warnings); check_pull_mode_env_matches joins the start-path drift chain (flag only, fail-safe on unobserved attrs) and start_agent_internal recreates a pilot whose container lacks the flag; AST writer-set guard pins the three env assemblers on apply_pull_mode_env; a structural scan over services/ (rglob) finds an unknown fourth: every provision-tail caller must apply the helper and every containers_run(environment=) site must be a registered runner."
+    },
+    {
+      "file": "unit/test_882_completed_at_floor.py",
+      "feature": "trinity-enterprise#882",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "unit",
+        "execution"
+      ],
+      "description": "A terminal completed_at is floored at the row's own server-written started_at in both writers (update_execution_status and complete_activity): a backdated producer value (agent-authored retained_at or #1083 callback) lands in the completed_at COLUMN as started_at with duration 0 and the status still terminal, so an agent cannot age its own row into the next retention sweep; an in-window value passes verbatim (the #3589 behaviour), the future-clamp is unchanged, the floor wins over the clamp on server skew, and the helper's floor parameter is keyword-only and required so a future third writer cannot silently skip the decision."
     },
     {
       "file": "unit/test_3588_close_cancelled_claimed_activities.py",

@@ -276,7 +276,10 @@ class ActivityOperations:
 
             # Use parse_iso_timestamp to handle both 'Z' and non-'Z' timestamps
             started_at = parse_iso_timestamp(row["started_at"])
-            completed_at = terminal_completed_at(completed_at)
+            # Floored at this row's own server-written `started_at`
+            # (trinity-enterprise#882): the producer instant is agent-controlled
+            # and a backdated value would age the row into the next prune.
+            completed_at = terminal_completed_at(completed_at, floor=started_at)
             # #2434: `completed_at` here IS when the work stopped, so this is a
             # real measurement — but an activity with no owning closer can sit
             # `started` arbitrarily long (#1804's class), and past the int4

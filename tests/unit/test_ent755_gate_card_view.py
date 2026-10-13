@@ -185,6 +185,8 @@ def test_a_rejection_without_a_reason_says_nothing_about_one(card):
 
 
 class _Asker:
+    kind = "agent"   # a real Requester always carries its kind
+
     def display(self):
         return f"Agent {REQ}"
 

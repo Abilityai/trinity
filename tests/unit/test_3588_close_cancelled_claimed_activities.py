@@ -55,6 +55,9 @@ from db_harness import db_backend, run as _hrun, scalar as _hscalar, seed_execut
 
 pytestmark = pytest.mark.unit
 
+# Seeded rows start BEFORE this instant: a terminal completed_at is floored at
+# the row's own started_at (trinity-enterprise#882), so a row seeded "now" would
+# have this past instant raised to its start.
 _T = datetime(2026, 10, 13, 9, 30, 0, tzinfo=timezone.utc)
 
 # The activity types a terminal path creates or owns. `tool_call` is excluded
@@ -112,7 +115,7 @@ def _seed_exec(eid: str, status: str, *, agent="callee-a", started_at=None,
     seed_schedule(f"sched-{eid}")
     seed_execution(
         f"sched-{eid}", agent, exec_id=eid,
-        started_at=_iso(started_at or (_now() - timedelta(seconds=90))),
+        started_at=_iso(started_at or (_T - timedelta(seconds=90))),
         status=status, duration_ms=duration_ms, cost=None, triggered_by="agent",
     )
     _hrun(
@@ -131,7 +134,7 @@ def _seed_activity(aid: str, type_: str, eid: str, *, state="started",
         "started_at, related_execution_id, created_at, triggered_by, details) "
         "VALUES (:i, :a, :t, :s, :sa, :e, :sa, 'agent', :d)",
         i=aid, a=agent, t=type_, s=state,
-        sa=_iso(started_at or (_now() - timedelta(seconds=80))),
+        sa=_iso(started_at or (_T - timedelta(seconds=80))),
         e=eid, d=json.dumps(details) if details else None,
     )
     return aid

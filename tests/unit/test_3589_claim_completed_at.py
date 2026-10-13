@@ -81,19 +81,19 @@ class TestTerminalCompletedAtHelper:
         from utils.helpers import terminal_completed_at
 
         before = _now()
-        got = terminal_completed_at(None)
+        got = terminal_completed_at(None, floor=None)
         assert before <= got <= _now()
         assert got.tzinfo is not None
 
     def test_a_past_instant_is_kept_verbatim(self):
         from utils.helpers import terminal_completed_at
 
-        assert terminal_completed_at(_T) == _T
+        assert terminal_completed_at(_T, floor=None) == _T
 
     def test_naive_is_utc(self):
         from utils.helpers import terminal_completed_at
 
-        assert terminal_completed_at(_T.replace(tzinfo=None)) == _T
+        assert terminal_completed_at(_T.replace(tzinfo=None), floor=None) == _T
 
     def test_a_future_instant_is_clamped_to_now(self):
         """A producer's clock ahead of ours must not bill a turn as longer than
@@ -102,7 +102,7 @@ class TestTerminalCompletedAtHelper:
         from utils.helpers import terminal_completed_at
 
         future = _now() + timedelta(minutes=5)
-        got = terminal_completed_at(future)
+        got = terminal_completed_at(future, floor=None)
         assert got < future
         assert got <= _now()
 
