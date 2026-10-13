@@ -110,6 +110,9 @@ def _load_crud(monkeypatch, docker_available=True):
     # Dynamic-vs-predefined dispatch keys on this: a truthy return picks the
     # predefined branch. Default None ⇒ dynamic github:owner/repo path.
     template_service.get_github_template = MagicMock(return_value=None)
+    # #3545: catalog membership is its own question — an unstubbed MagicMock
+    # would answer "catalog" for every repo.
+    template_service.is_catalog_github_template = MagicMock(return_value=False)
     # ent#14 S2: the creation path reads `template.yaml` through the
     # reason-preserving form and UNPACKS the pair — the `fork_to_own` gate
     # decides on the reason, so it can no longer be dropped. An unstubbed
@@ -388,6 +391,7 @@ def _script_github_template(ctx, fork_to_own_meta=None):
         "mcp_servers": [],
         "fork_to_own": fork_to_own_meta,
     }
+    ctx["template_service"].is_catalog_github_template.return_value = True
 
 
 def _patch_repo_validation(monkeypatch, crud, default_branch="main",
@@ -1353,8 +1357,15 @@ _OWN_REPO = "alice/brain"
 
 
 async def _create_own_repo(crud, ctx, monkeypatch, name, login=("valid", "alice"), **kw):
-    _script_github_template(ctx)
-    ctx["template_service"].get_github_template.return_value = None  # dynamic
+    # #3545: the production shape — the resolver builds a template for a repo
+    # in no catalog, and the catalog predicate says so.
+    ctx["template_service"].get_github_template.return_value = {
+        "github_repo": _OWN_REPO,
+        "resources": {"cpu": "2", "memory": "4g"},
+        "mcp_servers": [],
+        "fork_to_own": None,
+    }
+    ctx["template_service"].is_catalog_github_template.return_value = False
     _patch_repo_validation(monkeypatch, crud, login=login)
     return await crud.create_agent_internal(
         _github_config(name, template=f"github:{_OWN_REPO}", **kw), _user(), None)
@@ -1377,6 +1388,22 @@ async def test_ent705_agent_default_on_the_creators_own_repo_gets_the_trio(crud_
     assert result.git_mode["source_mode"] is False
     assert result.git_mode["kind"] == "agent"
     assert "working branch" in result.git_mode["reason"]
+
+
+@pytest.mark.asyncio
+async def test_3545_catalog_membership_is_asked_about_the_bare_repo(crud_env, monkeypatch):
+    """Not the `github:`-prefixed id, and not the `@branch` suffix: either
+    would read every catalog repo as unlisted."""
+    crud, ctx = crud_env
+    _own_token(monkeypatch, crud)
+    ctx["template_service"].get_github_template.return_value = {
+        "github_repo": _OWN_REPO, "resources": {}, "mcp_servers": [], "fork_to_own": None,
+    }
+    _patch_repo_validation(monkeypatch, crud, login=("valid", "alice"))
+    await crud.create_agent_internal(
+        _github_config("gc-bare", template=f"github:{_OWN_REPO}@dev"), _user(), None)
+
+    ctx["template_service"].is_catalog_github_template.assert_called_once_with(_OWN_REPO)
 
 
 @pytest.mark.asyncio
@@ -1422,7 +1449,8 @@ async def test_ent705_a_repo_someone_else_owns_stays_pull_only_even_when_pushabl
     _own_token(monkeypatch, crud)
     ctx["git_service"].probe_push_access = AsyncMock(return_value=("ok", ""))
     _script_github_template(ctx)
-    ctx["template_service"].get_github_template.return_value = None  # dynamic
+    ctx["template_service"].get_github_template.return_value["github_repo"] = "Abilityai/cornelius"
+    ctx["template_service"].is_catalog_github_template.return_value = False
     _patch_repo_validation(monkeypatch, crud, login=("valid", "alice"))
     result = await crud.create_agent_internal(
         _github_config("gc-org", template="github:Abilityai/cornelius"), _user(), None)

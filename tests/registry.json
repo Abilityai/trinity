@@ -8,6 +8,18 @@
       "description": "Inclusive audit time bounds on real temporary SQLite across list/count/stats/calendar/heatmap and in-process JSON/CSV export; optional fractions, offsets, upper bounds covering the hour, minute or second they state, the calendar day window, years before 1000, out-of-range offset bounds, exact microseconds, other filters, pagination, unchanged hash payloads, legacy malformed bounds and non-admin rejection."
     },
     {
+      "file": "unit/test_3524_gate_approval_card.py",
+      "feature": "abilityai/trinity#3524 #3525 #3527",
+      "added": "2026-10-12",
+      "categories": [
+        "backend",
+        "skill-gate",
+        "workspace",
+        "unit"
+      ],
+      "description": "The gated-skill approval card and its ending: an approver's rejection note reaches the requesting agent and a person's Inbox notice through the trinity-enterprise#755 reason path (absent on approval and without a note); a person with no email is named by username, never 'A caller'; a request carrying chat history leads with the new message (first-marker split); the Workspace projection carries the viewer's own answer and note; a recent gate answer names its request."
+    },
+    {
       "file": "unit/test_ent819_files_read_tier.py",
       "feature": "trinity-enterprise#819",
       "added": "2026-10-06",
@@ -4700,6 +4712,17 @@
       "description": "ent#527 rider (ruling 2026-09-24): the owner's readiness stamp on the agents list and the fleet grid. One batched read on a real database returns only stamped agents, names a rollout seed as such, never carries who flipped it, skips an unknown state and does not query for an empty list; GET /api/agents attaches it per agent from that one read, None when unstamped. brief_held rides next to it: the role card's shared predicates (is_seat_delivery_schedule, brief_is_held), one batched schedule read over the calibrating+autonomy candidates only, fail-soft to no claim, so the list's calibrating tooltip never says a brief is paused when the card would not."
     },
     {
+      "file": "unit/test_ent843_role_card_plain_words.py",
+      "feature": "trinity-enterprise#843",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "workspace",
+        "metrics"
+      ],
+      "description": "The Workspace role card's objectives in plain words: readable metric names (declared label, the label the same owner's other agents' active declarations agree on via db.metric_declarations_elsewhere, else the code name in words; never snake_case, a failed lookup still words; another owner's agent cannot author the card); a supported objective tracked elsewhere says so once, never named, and only when another agent really declares the number; the canon's optional client_heading through the join."
+    },
+    {
       "file": "unit/test_ent676_role_card_join.py",
       "feature": "abilityai/trinity-enterprise#676",
       "added": "2026-09-30",
@@ -5847,8 +5870,45 @@
       "file": "unit/test_3526_held_chat_trace.py",
       "feature": "#3526",
       "added": "2026-10-12",
-      "categories": ["backend", "unit", "chat"],
+      "categories": [
+        "backend",
+        "unit",
+        "chat"
+      ],
       "description": "A gated request held from the Chat tab is saved once to the chat session with its notice (source gate:<request_id>), the 202 names the session, a foreign session id falls back to the sender's own, and a failed save still answers pending. A person re-sending the same request while one is pending gets it back ahead of the caps; an agent, another person, another text or a decided request each raise their own. The session read carries the request's state and decision text; the voice context leaves held rows out."
+    },
+    {
+      "file": "unit/test_3590_rebuild_pull_env.py",
+      "feature": "#3590",
+      "added": "2026-10-12",
+      "categories": [
+        "backend",
+        "unit",
+        "agent-lifecycle"
+      ],
+      "description": "The #1559 rebuild-from-nothing path bakes the pull-worker env for an allowlisted pilot (driven through the real recreate_missing_container, red before the fix on KeyError TRINITY_PULL_MODE); apply_pull_mode_env is the one owner of the set-or-clear idiom (pilot on empty dict, de-pilot clears, idempotent, module-global lookup honours stubs, MCP-key-absent and settings-fallback warnings); check_pull_mode_env_matches joins the start-path drift chain (flag only, fail-safe on unobserved attrs) and start_agent_internal recreates a pilot whose container lacks the flag; AST writer-set guard pins the three env assemblers on apply_pull_mode_env; a structural scan over services/ (rglob) finds an unknown fourth: every provision-tail caller must apply the helper and every containers_run(environment=) site must be a registered runner."
+    },
+    {
+      "file": "unit/test_882_completed_at_floor.py",
+      "feature": "trinity-enterprise#882",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "unit",
+        "execution"
+      ],
+      "description": "A terminal completed_at is floored at the row's own server-written started_at in both writers (update_execution_status and complete_activity): a backdated producer value (agent-authored retained_at or #1083 callback) lands in the completed_at COLUMN as started_at with duration 0 and the status still terminal, so an agent cannot age its own row into the next retention sweep; an in-window value passes verbatim (the #3589 behaviour), the future-clamp is unchanged, the floor wins over the clamp on server skew, and the helper's floor parameter is keyword-only and required so a future third writer cannot silently skip the decision."
+    },
+    {
+      "file": "unit/test_3588_close_cancelled_claimed_activities.py",
+      "feature": "#3588",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability"
+      ],
+      "description": "No activity created or owned by a terminal path stays `started` (#1804 class; the invariant is a scoped DB query, never a call-shape mock): the three cancel sites record the execution_cancelled EVENT created+completed in one breath via _record_cancel_event (fail-open, ordered after the real closes; already_finished labelled and pinned); the queued-cancel site runs the #1804 owner close so the #2329 metadata companions close (a queued row has no dispatch activity); the watchdog claim closes direct-dispatch collaboration/self-task companions from the PERSISTED row — state+instant row-derived, so a failure-style lost CAS stamps the standing terminal (e.g. a cancel's CANCELLED), never the lost envelope's FAILED — counts into report.activities_closed_on_recovery AND the startup stats, lets an authoritative close upgrade a provisional FAILED companion (the lookup agrees with the CAS), and keeps row/activity completed_at in agreement even when retained_at is unreadable."
     }
   ]
 }

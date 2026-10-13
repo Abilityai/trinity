@@ -67,12 +67,13 @@ class AssignmentProvider(Protocol):
         ...
 
     # OPTIONAL (ent#638): what ``reader_email`` holds on ``agent_name`` — the
-    # seat decision record's reader gate reads it through ``getattr`` so a
-    # provider that predates it is simply "no answer". Shaped as
+    # Workspace role card's "Your relationship" line reads it through
+    # ``getattr`` so a provider that predates it is simply "no answer". Shaped as
     # ``{"kind": "primary"|"approver"|"collaborator"|"viewer", "role_id": str|None}``
     # or ``None``; anything else, or a raise, is treated as ``None`` by the
-    # consumer (``services/seat_decision_service.reader_kind``) — never a
-    # wider read. Per-agent in v1: a kind on the agent reads every seat.
+    # consumer (``services/seat_decision_service.reader_kind``). A display read
+    # only: it grants no access, and the seat-decision reader gate does not
+    # consult it (#3660; per-role reads are #3381).
     # def kinds_for(self, agent_name: str, reader_email: str) -> Optional[dict]: ...
 
     # OPTIONAL (trinity-enterprise#611): the people who fill ``role`` for

@@ -10,6 +10,16 @@ the card is a projection. **The role is the seat on record, not the template
 (ent#811/#814):** the seat this agent serves *for the viewer*; the relationship line is
 the viewer's assignment kind (`kinds_for`).
 
+**Plain words (ent#843).** The objectives block is owned-first ("What this agent is
+responsible for"), with supported objectives folded under "Also contributes to · N"
+(headings and one neutral "Tracked by another agent" note each, only when another of the
+owner's agents declares the number). Metrics read by label — declared, agreed across the
+owner's other agents' declarations, or the code name in words — and warning colour is kept for
+stale, behind/off target and unread files. `role_card.portal_objective` adds
+`client_heading` and a candidate `tracked_elsewhere`; `apply_declarations_elsewhere`
+(one owner-scoped read, `db.metric_declarations_elsewhere`) confirms it and sets every
+metric's `label` before the card is served.
+
 ## Flow
 
 ```
@@ -192,6 +202,15 @@ ent#689: `tests/unit/test_ent689_readiness_gate.py` (the verdict, every fail-ope
 endpoint, the rollout source, `brief_held`, the seed on both tracks against real SQLite) and
 `tests/scheduler_tests/test_ent689_readiness_gate.py` (held → skipped row + event, never
 dispatched; manual / webhook / non-seat not asked; every error fires).
+
+ent#843: `tests/unit/test_ent843_role_card_plain_words.py` — readable names (words
+fallback, declared label wins, the join's code-name fallback ignored), `apply_declarations_elsewhere`
+(agreed label, words, a failed lookup), `declarations_elsewhere` on a real database (owner scope, agreement,
+conflict, blank, retired rows), "tracked elsewhere" once per objective, never named, and
+only when another agent really declares the number, and `client_heading` through the join. `portalAgentRole.spec.js`
+adds owned-first, the collapsed supported group (headings only, one neutral note, no
+warning colour), the plain heading, "this quarter", no snake_case on the card, and the
+group folding again on an agent switch.
 
 ## Related Flows
 

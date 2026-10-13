@@ -137,6 +137,15 @@ describe('PortalAskContext (mounted)', () => {
     expect(el(w, 'inbox-ask-context-answer-text').find('strong').text()).toBe('Send')
   })
 
+  it('trinity#3524: a gate ask\'s recent answer names its request, so two of them differ', async () => {
+    const w = await mountCtx({ origin: MAIN, run: null, recent_answers: [
+      { id: 'g1', title: 'Approve the skill /deploy on scout', answer: 'Approve', ended_at: ago(7 * H), request: 'deploy staging' },
+      { id: 'g2', title: 'Approve the skill /deploy on scout', answer: 'Reject', ended_at: ago(M) },
+    ] })
+    const requests = w.findAll('[data-testid="inbox-ask-context-answer-request"]')
+    expect(requests.map((r) => r.text())).toEqual(['(“deploy staging”)'])
+  })
+
   it('an unverified origin says where it was filed, with no excerpt and no deliverables read', async () => {
     const w = await mountCtx({ origin: MAIN, run: null, recent_answers: [] })
     expect(el(w, 'inbox-ask-context-origin').text()).toContain('Filed in your Main chat')

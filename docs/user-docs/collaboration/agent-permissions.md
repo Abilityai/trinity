@@ -22,7 +22,9 @@ Explicit permission model controlling which agents can communicate with which. R
 **Enforcement:**
 
 - When Agent A attempts to call `chat_with_agent("agent-b", ...)`, the MCP server checks whether Agent A has permission to communicate with Agent B.
-- If permission has not been granted, the MCP tool returns an `Access denied` result and the call is blocked. An agent can always reach itself.
+- If permission has not been granted, the MCP tool returns an `Access denied` result and the call is blocked. An agent can always reach itself, and the agents it spawned.
+- The backend enforces the same rule on its own routes, so an agent that calls the backend directly with its injected key cannot chat with, task, loop, or read the history and logs of an agent it is not permitted to call. A refused target answers like one that does not exist. See [Authentication → What an agent key reaches](../api-reference/authentication.md#what-an-agent-key-reaches).
+- A permission means **may call**, never **may manage**: it does not let Agent A change Agent B's configuration, schedules, credentials or git token. Those need a permission an admin grants — see [Permissions to Change Itself](../agents/agent-configuration.md#permissions-to-change-itself).
 - The same check gates starting a loop on another agent (`run_agent_loop`) and reading or stopping that loop (`get_loop_status`, `stop_loop`). See [Agent Loops](../automation/agent-loops.md#permission-checks-on-the-loop-tools).
 - Permissions also gate shared folder access and event subscriptions between agents.
 - A grant also lets the calling agent read the target's declared metrics (`get_metrics` with `agent` set to the target). These cross-agent reads count against the reader's own rate budget and are recorded in the audit log.
@@ -55,6 +57,7 @@ Turning **Mount Shared Folders** off on the consuming agent works the same way: 
 | `/api/agents/{name}/permissions/{target}` | POST | Grant one target (owner or admin; human only) |
 | `/api/agents/{name}/permissions/{target}` | DELETE | Withdraw one target (owner or admin; human only) |
 | `/api/agents/permissions-edges` | GET | Every permission edge between agents you can access, in one call |
+| `/api/agents/{name}/reach/{target}` | GET | Whether `name` may call `target` — `{source_agent, target_agent, reachable}`, decided from the permission or the spawn record, never from which containers are running. The MCP server's agent-to-agent check reads it |
 
 Every grant, replacement and withdrawal is written to the audit log.
 

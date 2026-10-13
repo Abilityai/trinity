@@ -345,6 +345,32 @@ async def _claim_retained_result(
         # lost its CAS returns unchanged — the counter below is observability,
         # and the row is correct either way.)
         return "lost"
+    # #3588: apply_result closed only the single dispatch activity it was
+    # handed; the caller-side collaboration / self-task companions (which share
+    # related_execution_id, possibly with NO backlog_metadata — a direct-dispatch
+    # /task hop) stayed `started` until the 120-minute sweep fabricated their
+    # duration. Close them from the PERSISTED row — a failure-style apply_result
+    # that lost its CAS reaches this line looking exactly like a winner, and the
+    # row-derived close is what keeps that case honest (the companions take the
+    # standing terminal, e.g. the cancel's CANCELLED, never the lost envelope's
+    # FAILED). Fail-open: a close failure never flips a claimed verdict.
+    try:
+        from services.activity_service import activity_service
+
+        companions_closed = await activity_service.close_companion_activities(
+            execution_id, details_extra={"recovered_by": "watchdog_claim"}
+        )
+        if companions_closed:
+            if report is not None:
+                report.activities_closed_on_recovery += companions_closed
+            if stats is not None:
+                stats["activities_closed"] = (
+                    stats.get("activities_closed", 0) + companions_closed
+                )
+    except Exception as e:  # noqa: BLE001 — the claim itself already stands
+        logger.warning(
+            f"[Watchdog] companion-activity close failed for {execution_id}: {e}"
+        )
     if report is not None:
         report.results_recovered += 1
     if stats is not None:

@@ -15,8 +15,11 @@ record), never on an agent's own report that it is done.
 | J17 | A fact reaches its owner | **not run** — blocked by ent#793 and fact routing (ent#804) |
 | J18 | A library change reaches every holder | runs when given a test skills repo (below), else **not run** |
 | J19 | An objective reaches the person | runs on any stack with Docker; **partial** — the brief step is not run (below) |
+| J21 | An approval rule is enforced end to end | runs on any stack with Docker, email-code sign-in and the enterprise modules; **partial** — the canon steps wait for the canon approval map (ent#757), and expiry runs only with `CHAIN_GATE_EXPIRY=1` |
+| J22 | A project is run across agents and people | runs where J21 runs (no model turn needed); **partial** — task dispatch as playbook calls and the steward re-run have no platform writer yet |
+| J23 | An approved action inside a project | **not run** — no platform writer joins a gate request to a project (ent#880) |
 
-They are journeys J15–J19 in `tests/journeys/catalog.yaml`; the harnesses are in
+They are journeys J15–J19 and J21–J23 in `tests/journeys/catalog.yaml`; the harnesses are in
 `tests/system_chains/`.
 
 ## Running them
@@ -41,6 +44,18 @@ stack, runs the chains and uploads `chain-report` (configure
 To look at what a chain did in the UI, set `CHAIN_KEEP_AGENTS=1`: the agents it
 created are left in place (named in the report as **kept agents**) instead of
 deleted — delete them yourself afterwards.
+
+**J21 and J22 use real people** (trinity-enterprise#795). Each run provisions two
+`chain-*-<run>@example.com` accounts and signs them in by the real email-code
+flow; the code is read from the platform's own `email_login_codes` row where the
+stack runs (`stack_reads.py`), so the target needs email-code sign-in on and the
+same Docker socket the agent-key steps need. The accounts are left in place —
+they are inert, and a run never depends on an earlier run's. J21's approved run
+needs a model credential on the target; without one those steps are **not run**.
+The approver is reached only through their own Workspace asks read, so the
+executor is shared with both people, as a company naming an approver would.
+`CHAIN_GATE_EXPIRY=1` adds the real-time expiry step (the shortest deadline is
+one hour; allow ~75 minutes).
 
 The chains are collected only with `TRINITY_CHAIN_TESTS=1`, which the runner
 sets — they never ride along with `run-full.sh` or the per-PR journey lane.
