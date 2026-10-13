@@ -421,6 +421,21 @@ def held_token(agent_name: str, resource: str, *, now: Optional[int] = None) -> 
     return held if held.key_thumbprint == thumbprint else None
 
 
+def forget(agent_name: str, resource: str) -> bool:
+    """Drop the held token for ``(agent, resource)`` on this worker (ent#879).
+
+    Called when the PS reports ``expired_presented_token`` /
+    ``invalid_presented_token`` for a token this cache served: the next
+    ``person_token()`` then asks the PS afresh instead of re-presenting it.
+    Returns whether anything was held.
+    """
+    our_issuer, ps_issuer = config.active_issuer(), config.get_person_server()
+    norm = config.normalize_issuer(resource)
+    if not our_issuer or not ps_issuer or not norm:
+        return False
+    return _held.pop((our_issuer, ps_issuer, agent_name, norm), None) is not None
+
+
 def held_token_by_jti(agent_name: str, jti: str, *, now: Optional[int] = None) -> Optional[HeldPersonToken]:
     """Same-worker convenience for ent#879's ``presented_token`` bookkeeping."""
     for (_, _, agent, resource), held in list(_held.items()):

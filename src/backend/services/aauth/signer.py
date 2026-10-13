@@ -67,6 +67,21 @@ class SigningUnavailable(RuntimeError):
     """AAuth signing is off, unconfigured, or the agent name is not a valid local part."""
 
 
+class KeyRotated(SigningUnavailable):
+    """The agent's current key is not the one a presented token is bound to (ent#879).
+
+    A challenge chain pins the thumbprint it started on; if a concurrent
+    refresh rolled the window underneath it, signing with the new key under a
+    token whose ``cnf`` names the old one would be rejected downstream anyway —
+    refuse locally, and let the caller start one fresh chain.
+    """
+
+    def __init__(self, expected: str, current: str):
+        super().__init__("the agent key rotated under a presented token")
+        self.expected = expected
+        self.current = current
+
+
 def _issuer_or_raise() -> str:
     issuer = config.active_issuer()
     if not issuer:
@@ -169,26 +184,44 @@ def sign_request(
     content_type: Optional[str] = None,
     now: Optional[int] = None,
     min_remaining: int = 0,
+    presented_token: Optional[str] = None,
+    expected_key_thumbprint: Optional[str] = None,
+    extra_components: Tuple[str, ...] = (),
 ) -> Dict[str, str]:
     """Headers that sign one request as ``agent_name``.
 
     ``url`` is the LOGICAL target (the registered hostname, not a pinned IP):
     ``@authority`` is its host with a default port dropped, ``@path`` its
     still-encoded path. ``body`` must be the exact bytes that go on the wire.
+
+    ent#879: ``presented_token`` (a person or auth token whose ``cnf`` is this
+    agent's key) goes in ``Signature-Key`` INSTEAD of the agent token; the
+    signature is still made with the agent's own key — the one path that signs
+    as the agent (#623). ``expected_key_thumbprint`` pins the chain's key: a
+    mismatch raises :class:`KeyRotated` rather than signing with a key the
+    presented token does not name. ``extra_components`` covers a resource's
+    ``additional_signature_components`` (only the pair ``httpsig`` can produce;
+    else ``SigningUnavailable``).
     """
     info = agent_token_info(agent_name, now=now, min_remaining=min_remaining)
+    if expected_key_thumbprint is not None and info.thumbprint != expected_key_thumbprint:
+        raise KeyRotated(expected_key_thumbprint, info.thumbprint)
     parts = urlsplit(url)
     scheme = (parts.scheme or "https").lower()
-    signed = httpsig.sign(
-        method=method,
-        authority_value=httpsig.authority(parts.hostname or "", parts.port, scheme),
-        path=parts.path or "/",
-        agent_token=info.token,
-        body=body,
-        content_type=content_type,
-        created=int(time.time()) if now is None else now,
-        private_key=info.key,
-    )
+    try:
+        signed = httpsig.sign(
+            method=method,
+            authority_value=httpsig.authority(parts.hostname or "", parts.port, scheme),
+            path=parts.path or "/",
+            agent_token=presented_token if presented_token is not None else info.token,
+            body=body,
+            content_type=content_type,
+            created=int(time.time()) if now is None else now,
+            private_key=info.key,
+            extra_components=tuple(extra_components),
+        )
+    except httpsig.SignatureFormatError as exc:
+        raise SigningUnavailable(f"{exc.code}: {exc.detail}") from None
     return signed.as_dict()
 
 

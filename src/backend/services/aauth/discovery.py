@@ -22,11 +22,12 @@ workers is a latency difference, never a trust difference.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import urlsplit
 
 import httpx
@@ -36,6 +37,13 @@ from services.aauth import jose
 logger = logging.getLogger(__name__)
 
 METADATA_PATH = "/.well-known/aauth-agent.json"
+#: ent#879: the same metadata → ``jwks_uri`` → key shape serves a RESOURCE's
+#: ``aauth-resource.json`` (the resource token's ``dwk``). The well-known
+#: document name is the only difference; the same-origin rule, the caps and
+#: the caches apply unchanged, keyed by ``(issuer, dwk)``.
+AGENT_DOCUMENT = "aauth-agent.json"
+RESOURCE_DOCUMENT = "aauth-resource.json"
+KNOWN_DOCUMENTS = frozenset({AGENT_DOCUMENT, RESOURCE_DOCUMENT})
 MAX_DOCUMENT_BYTES = 64 * 1024
 DISCOVERY_DEADLINE = 8.0
 CACHE_TTL = 300.0
@@ -57,8 +65,14 @@ class _Entry:
     error: Optional[DiscoveryError] = None
 
 
-_cache: Dict[str, _Entry] = {}
-_locks: Dict[str, asyncio.Lock] = {}
+_cache: Dict[Tuple[str, str], _Entry] = {}
+_locks: Dict[Tuple[str, str], asyncio.Lock] = {}
+
+
+def _document_or_raise(dwk: str) -> str:
+    if dwk not in KNOWN_DOCUMENTS:
+        raise DiscoveryError("unknown_key", f"'{dwk}' is not a well-known AAuth document")
+    return dwk
 
 
 def _same_origin(a: str, b: str) -> bool:
@@ -101,14 +115,20 @@ async def _get_json(client: httpx.AsyncClient, url: str) -> Any:
         raise DiscoveryError("unknown_key", "issuer metadata is not JSON") from None
 
 
-async def fetch_issuer_keys(issuer: str, client_factory: Optional[Callable] = None) -> Dict[str, Dict[str, Any]]:
-    """Fetch and validate an issuer's metadata + JWKS. Returns ``{kid: jwk}``."""
+async def fetch_issuer_keys(issuer: str, client_factory: Optional[Callable] = None, *,
+                            dwk: str = AGENT_DOCUMENT) -> Dict[str, Dict[str, Any]]:
+    """Fetch and validate an issuer's metadata + JWKS. Returns ``{kid: jwk}``.
+
+    ``dwk`` names the well-known document (``aauth-agent.json`` for an agent
+    provider, ``aauth-resource.json`` for a resource — ent#879).
+    """
     from services import a2a_client
 
+    document_name = _document_or_raise(dwk)
     factory = client_factory or a2a_client._http_client
     timeout = httpx.Timeout(DISCOVERY_DEADLINE, connect=5.0)
     async with factory(timeout) as client:
-        metadata = await _get_json(client, issuer + METADATA_PATH)
+        metadata = await _get_json(client, f"{issuer}/.well-known/{document_name}")
         if not isinstance(metadata, dict):
             raise DiscoveryError("unknown_key", "issuer metadata is not an object")
         if "issuer" not in metadata:
@@ -135,17 +155,24 @@ async def fetch_issuer_keys(issuer: str, client_factory: Optional[Callable] = No
 
 
 async def resolve_key(issuer: str, kid: str, *, now: Optional[float] = None,
-                      fetcher: Optional[Callable] = None) -> Dict[str, Any]:
-    """The issuer's public JWK for ``kid``, from cache or a bounded fetch."""
+                      fetcher: Optional[Callable] = None, dwk: str = AGENT_DOCUMENT) -> Dict[str, Any]:
+    """The issuer's public JWK for ``kid``, from cache or a bounded fetch.
+
+    The cache is keyed by ``(issuer, dwk)``: an agent provider and a resource
+    on one host publish two documents, and a key found under one must never
+    answer for the other.
+    """
     clock = time.monotonic if now is None else (lambda: now)
-    fetch = fetcher or fetch_issuer_keys
+    document_name = _document_or_raise(dwk)
+    fetch = fetcher or functools.partial(fetch_issuer_keys, dwk=document_name)
+    cache_key = (issuer, document_name)
 
     def _from(entry: _Entry) -> Optional[Dict[str, Any]]:
         if entry.error is not None:
             raise entry.error
         return entry.keys.get(kid)
 
-    entry = _cache.get(issuer)
+    entry = _cache.get(cache_key)
     if entry is not None:
         age = clock() - entry.fetched_at
         fresh = age < (NEGATIVE_TTL if entry.error else CACHE_TTL)
@@ -156,9 +183,9 @@ async def resolve_key(issuer: str, kid: str, *, now: Optional[float] = None,
             if age < MIN_REFETCH_INTERVAL:
                 raise DiscoveryError("unknown_key", "no key with that kid in the issuer JWKS")
 
-    lock = _locks.setdefault(issuer, asyncio.Lock())
+    lock = _locks.setdefault(cache_key, asyncio.Lock())
     async with lock:
-        latest = _cache.get(issuer)
+        latest = _cache.get(cache_key)
         if latest is not None and latest is not entry and clock() - latest.fetched_at < MIN_REFETCH_INTERVAL:
             found = _from(latest)   # someone refreshed while we waited
             if found is not None:
@@ -166,22 +193,22 @@ async def resolve_key(issuer: str, kid: str, *, now: Optional[float] = None,
             raise DiscoveryError("unknown_key", "no key with that kid in the issuer JWKS")
         try:
             keys = await asyncio.wait_for(fetch(issuer), timeout=DISCOVERY_DEADLINE)
-            _cache[issuer] = _Entry(fetched_at=clock(), keys=keys)
+            _cache[cache_key] = _Entry(fetched_at=clock(), keys=keys)
         except asyncio.TimeoutError:
             err = DiscoveryError("unknown_key", "issuer metadata fetch timed out")
-            _cache[issuer] = _Entry(fetched_at=clock(), error=err)
+            _cache[cache_key] = _Entry(fetched_at=clock(), error=err)
             raise err from None
         except DiscoveryError as err:
-            _cache[issuer] = _Entry(fetched_at=clock(), error=err)
+            _cache[cache_key] = _Entry(fetched_at=clock(), error=err)
             raise
         except Exception:  # noqa: BLE001 — a malformed document must not become
             # a 500 that ALSO skips the negative cache, i.e. an unbounded refetch
             # for every request naming that issuer.
             logger.warning("[aauth] discovery failed for %s", issuer, exc_info=True)
             err = DiscoveryError("unknown_key", "issuer metadata could not be read")
-            _cache[issuer] = _Entry(fetched_at=clock(), error=err)
+            _cache[cache_key] = _Entry(fetched_at=clock(), error=err)
             raise err from None
-    found = _cache[issuer].keys.get(kid)
+    found = _cache[cache_key].keys.get(kid)
     if found is None:
         raise DiscoveryError("unknown_key", "no key with that kid in the issuer JWKS")
     return found
