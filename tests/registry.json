@@ -181,7 +181,19 @@
         "security",
         "unit"
       ],
-      "description": "Trusted internal networks for A2A: the admin list refuses the platform's Docker networks, loopback/link-local, anything broader than /8, one-label wildcards and any range holding an attached Docker gateway; outbound accepts a trusted endpoint that is private/CGNAT and http:// but never metadata/loopback/platform, and refuses a trusted name resolving outside the declared CIDRs; the source is the peer or the named proxy's X-Real-IP, never a cloudflared request or a host-forwarded gateway; through the real router an internal-scope agent is unexposed outside (card 404, keyed 404, anonymous 401), a trusted caller runs a keyless task attributed to source_host and reads only its own tasks, keyless off needs a key, public scope is unchanged."
+      "description": "The admin's outbound A2A endpoint allowlist (outbound-only since trinity-enterprise#885): the list refuses the platform's Docker networks, loopback/link-local, anything broader than /8, one-label wildcards and any range holding an attached Docker gateway; outbound accepts a trusted endpoint that is private/CGNAT and http:// but never metadata/loopback/platform, and refuses a trusted name resolving outside the declared CIDRs."
+    },
+    {
+      "file": "unit/test_ent885_keyless_refused.py",
+      "feature": "trinity-enterprise#885",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "a2a",
+        "security",
+        "unit"
+      ],
+      "description": "The keyless trusted-network A2A path is gone: through the real router over the real unit SQLite with a row an rc1-rc3 database still carries (a2a_scope='internal', a2a_keyless_internal=1) and a trusted CIDR seeded, a caller with no credential gets 401 and no dispatch on message/send, message/stream, tasks/get and tasks/cancel from a CGNAT peer, via X-Real-IP, with cloudflared headers and from the public internet; a keyed caller from the public internet runs the task and is never 404'd for its address; the card is served at the public origin; statically, nothing under src/backend reads a2a_scope, a2a_keyless_internal or source_host outside the DDL/migration homes and the db object has no get_a2a_scope/set_a2a_scope."
     },
     {
       "file": "unit/test_ent841_close_chat.py",
