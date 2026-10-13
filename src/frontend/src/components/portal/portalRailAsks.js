@@ -9,7 +9,7 @@
 // through `asksByAgent` exactly as the sidebar reads it, so the tab and the
 // mark cannot disagree.
 
-import { actionItems, itemKey } from './portalInbox'
+import { actionItems, itemKey, INBOX_SORT_DEFAULT } from './portalInbox'
 import { asksHomeRoute } from './portalUtils'
 import { feedView } from './portalRail'
 
@@ -20,14 +20,19 @@ const names = (participants) => (Array.isArray(participants) ? participants : []
   .map((p) => p.trim())
 
 /**
- * The rows: Action's items (pending only, urgency order — `askUrgencyCompare`)
- * kept only for the participants. A filter over the finished list, never a
- * re-sort, so a 1:1 lists exactly `filterByAgent(actionItems(asks), agent)`.
+ * The rows: Action's items (pending only) kept only for the participants. A
+ * filter over the finished list, never a re-sort, so a 1:1 lists exactly
+ * `filterByAgent(actionItems(asks), agent)`.
+ *
+ * trinity-enterprise#856 (T3): in Action's DEFAULT order (Newest), passed by
+ * name so it is a decision rather than an inheritance — the rows open the Inbox
+ * on Action, which opens in that order. The rail has no sort control and does
+ * not read the viewer's remembered Inbox sort.
  */
 export function railAskItems(openAsks, participants, now = Date.now()) {
   const keep = new Set(names(participants))
   if (!keep.size) return []
-  return actionItems(openAsks, now).filter((it) => keep.has(it.agent_name))
+  return actionItems(openAsks, now, INBOX_SORT_DEFAULT).filter((it) => keep.has(it.agent_name))
 }
 
 /**

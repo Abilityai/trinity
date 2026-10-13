@@ -165,8 +165,9 @@ function threadItem(t, previews) {
 
 const byAtDesc = (a, b) => ts(b.at) - ts(a.at) || String(b.id).localeCompare(String(a.id))
 
-// §3g C1 (Andrii 2026-09-29: a 24h bucket plus the A10 badge): Action is
-// ordered by urgency, not recency. Asks expiring within a day lead, soonest
+// §3g C1 (Andrii 2026-09-29: a 24h bucket plus the A10 badge): Action's
+// URGENCY order — since trinity-enterprise#856 the order on the sort switch,
+// with Newest the default (below). Asks expiring within a day lead, soonest
 // first — the row's "Expires in …" badge is the reason it sits there; then
 // priority, an unknown one as medium; then the ask that has waited LONGEST.
 // Ties break on id so a poll can never swap two equal rows.
@@ -187,11 +188,62 @@ export function askUrgencyCompare(a, b, now = Date.now()) {
   return ts(a.created_at) - ts(b.created_at) || String(a.id).localeCompare(String(b.id))
 }
 
-// Action (D8): exactly `openAsks` — pending only — in urgency order (C1).
-export function actionItems(openAsks, now = Date.now()) {
+// trinity-enterprise#856 (operator ruling 2026-10-09): Action opens NEWEST
+// first — an inbox reads newest first — and C1's urgency order is one switch
+// away. Newest is `byAtDesc`'s rule over the ask's raised time: newest first,
+// ties on id descending, so a poll can never swap two equal rows.
+export const INBOX_SORTS = Object.freeze(['newest', 'urgency'])
+export const INBOX_SORT_DEFAULT = 'newest'
+export function normalizeInboxSort(v) {
+  return typeof v === 'string' && INBOX_SORTS.includes(v) ? v : null
+}
+export function askRecencyCompare(a, b) {
+  return ts(b.created_at) - ts(a.created_at) || String(b.id).localeCompare(String(a.id))
+}
+// The sort a tab shows: on Action, the URL (`?sort=`), then the viewer's
+// remembered choice, then Newest; an unknown value at either step is skipped,
+// never obeyed. Unread and All have no sort (they are recency already, and
+// Urgency means nothing for a chat), so null there.
+export function inboxSortFor(tab, query, stored) {
+  if (tab !== 'action') return null
+  return normalizeInboxSort(query) || normalizeInboxSort(stored) || INBOX_SORT_DEFAULT
+}
+// The remembered choice is per viewer — keyed by the identity bucket the
+// column widths use (`useColumnResize.resolveLayoutIdentity`), so one person's
+// choice on a shared browser is not the next login's. Fail-open: a storage that
+// is absent or throws (private mode, quota) costs the memory, nothing else.
+const INBOX_SORT_KEY_PREFIX = 'trinity-workspace-inbox-sort'
+export function inboxSortKey(who) {
+  return `${INBOX_SORT_KEY_PREFIX}:${String(who || '').trim().toLowerCase() || 'anon'}`
+}
+export function loadInboxSort(storage, who) {
+  try {
+    if (!storage || typeof storage.getItem !== 'function') return null
+    return normalizeInboxSort(storage.getItem(inboxSortKey(who)))
+  } catch {
+    return null
+  }
+}
+export function saveInboxSort(storage, who, sort) {
+  try {
+    const v = normalizeInboxSort(sort)
+    if (!v || !storage || typeof storage.setItem !== 'function') return false
+    storage.setItem(inboxSortKey(who), v)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// Action (D8): exactly `openAsks` — pending only — Newest first by default, or
+// in urgency order (C1) on the switch. An unknown sort is the default.
+export function actionItems(openAsks, now = Date.now(), sort = INBOX_SORT_DEFAULT) {
+  const cmp = normalizeInboxSort(sort) === 'urgency'
+    ? (a, b) => askUrgencyCompare(a, b, now)
+    : askRecencyCompare
   return (Array.isArray(openAsks) ? openAsks : [])
     .filter((a) => a && a.id && a.status === 'pending')
-    .sort((a, b) => askUrgencyCompare(a, b, now))
+    .sort(cmp)
     .map(askItem)
 }
 
