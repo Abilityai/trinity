@@ -189,15 +189,16 @@ describe('ent#784 — clicking the agent you are already on keeps the new chat',
     expect(showing(w).agent).toBe('sage')
   })
 
-  it('the same click from a THREAD of that agent still lands fresh', async () => {
-    // Being "on scout" is not being on scout's NEW chat: from one of its
-    // threads the row means what it always meant.
+  it('the same click from a THREAD of that agent returns to that thread (ent#856 arm 1)', async () => {
+    // trinity-enterprise#856 (operator ruling 2026-10-13): every door passes the
+    // chat last open this session, so the agent row from one of its threads
+    // lands back on that thread — and REPLACES `/a/:name`, so Back cannot loop.
     const { w, router } = await boot('/workspace/c/t1')
     expect(showing(w).session).toBe('t1')
     await clickAgentRow(w, 'scout')
-    expect(router.currentRoute.value.path).toBe('/workspace/a/scout')
-    expect(showing(w).newChat).toBe(true)
-    expect(showing(w).session).toBe(null)
+    expect(router.currentRoute.value.path).toBe('/workspace/c/t1')
+    expect(showing(w).newChat).toBe(false)
+    expect(showing(w).session).toBe('t1')
   })
 })
 

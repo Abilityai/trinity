@@ -81,6 +81,9 @@ const props = defineProps({
   busy: { type: Boolean, default: false },
   // ent#841: why the last close failed, from the shell; '' when none.
   closeError: { type: String, default: '' },
+  // trinity-enterprise#856: the arrival snapshot `{ agent, ids }` the strip is
+  // frozen to for the visit; null draws the arrival sort.
+  order: { type: Object, default: null },
 })
 const emit = defineEmits(['select', 'new-chat', 'close', 'dismiss-close-error'])
 
@@ -94,7 +97,7 @@ const CHAT_KEY_HINT = keyHint(CHAT_KEYS, KEY_PLATFORM)
 const CHAT_KEY_SHORTCUTS = keyShortcutsFor(CHAT_KEYS, KEY_PLATFORM)
 
 const tabs = computed(() =>
-  agentChatTabs(props.threads, props.agentName, { activeId: props.activeId, draft: props.draft, draftKeys: props.draftKeys })
+  agentChatTabs(props.threads, props.agentName, { activeId: props.activeId, draft: props.draft, draftKeys: props.draftKeys, order: props.order })
     .map((t) => ({
       ...t,
       signalTitle: `${t.signalTitle || t.label} · ${CHAT_KEY_HINT} switch chat`,
