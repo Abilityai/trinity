@@ -187,6 +187,20 @@ describe('SelfChangePermissionsPanel — races and refreshes (#3330 review)', ()
     await flushPromises()
   })
 
+  // Release testing (B7, finding 6): at 390px the "Granted by <who> · <time>"
+  // line could not shrink (shrink-0), so the card's overflow-hidden clipped it.
+  // It must shrink, but only down to its longest word: min-w-0 / break-words
+  // let a flex item go to ~12px and split "Off" into "O / ff" (caught in the
+  // browser). jsdom does no layout, so this pins the structure, not the pixels.
+  it('the "Granted by" line may shrink and wrap at word breaks instead of being clipped', async () => {
+    route({ grants: grantsBody({ 'schedules.manage': true }) })
+    const w = await mountAs('admin')
+    const meta = byId(w, 'self-change-granted-schedules.manage')
+    expect(meta.text()).toContain('Granted by root')
+    expect(meta.classes()).not.toContain('shrink-0')
+    for (const c of ['min-w-0', 'break-words', 'break-all']) expect(meta.classes()).not.toContain(c)
+  })
+
   it('a failed refresh keeps the toggles on screen and says so', async () => {
     route()
     const w = await mountAs('admin')

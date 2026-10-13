@@ -158,6 +158,7 @@
 
         <BaseCard>
           <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Agents</h2>
+          <p v-if="!p.agents.length" class="mt-1 text-sm text-gray-600 dark:text-gray-300" data-testid="project-agents-empty">No agents yet.</p>
           <ul class="mt-2 space-y-1.5 text-sm">
             <li v-for="a in p.agents" :key="a.agent_name" class="flex items-center gap-2">
               <span class="min-w-0 flex-1 truncate text-gray-900 dark:text-gray-100">{{ a.agent_name }}</span>

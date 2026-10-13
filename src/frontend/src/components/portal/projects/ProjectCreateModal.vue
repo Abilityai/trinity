@@ -64,10 +64,16 @@
         placeholder="name@your-company.com"
         :error="errors.steward"
       />
-      <p class="-mt-2 text-xs text-gray-500 dark:text-gray-400">
-        {{ form.visibility === 'company'
-          ? 'Everyone signed in at your company can see it. Outside clients see it only if invited.'
-          : 'Only people you add can see it. You can change this later.' }}
+      <!-- Both texts sit in one grid cell, the other one invisible, so the line
+           is always as tall as the longer text and switching does not resize
+           the dialog (principle 29). -->
+      <p class="-mt-2 grid text-xs text-gray-500 dark:text-gray-400" data-testid="project-visibility-help">
+        <span :class="['col-start-1 row-start-1', form.visibility === 'company' ? '' : 'invisible']">
+          Everyone signed in at your company can see it. Outside clients see it only if invited.
+        </span>
+        <span :class="['col-start-1 row-start-1', form.visibility === 'company' ? 'invisible' : '']">
+          Only people you add can see it. You can change this later.
+        </span>
       </p>
       <BaseInput
         id="project-tracker"

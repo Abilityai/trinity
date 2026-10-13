@@ -65,7 +65,7 @@
             @update:model-value="(v) => store.setGranted(agentName, cap.id, v)"
           />
           <span
-            class="shrink-0 text-xs text-gray-500 dark:text-gray-400 tabular-nums"
+            class="text-right text-xs text-gray-500 dark:text-gray-400 tabular-nums"
             :title="cap.granted ? absolute(cap.granted_at) : ''"
             :data-testid="`self-change-granted-${cap.id}`"
           >
