@@ -97,6 +97,16 @@ def jwks() -> Dict[str, Any]:
     return {"keys": [get_instance_key().public_jwk]}
 
 
+def instance_seed() -> bytes:
+    """The raw 32-byte Ed25519 seed of the instance key (ent#878).
+
+    The HKDF input every per-agent signing key is derived from (`signer.py`),
+    so two workers hold the SAME agent key inside a window. Never logged, never
+    returned by a route; callers hold it only for the length of a derivation.
+    """
+    return get_instance_key().private_key.private_bytes_raw()
+
+
 def reset_cache() -> None:
     """Tests only."""
     global _cache
