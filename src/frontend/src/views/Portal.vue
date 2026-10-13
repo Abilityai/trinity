@@ -135,6 +135,7 @@
           :projects-available="store.projectsAvailable"
           :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
+          :settled="sidebarReady"
           v-model:search="search"
           :searching="searching"
           :search-results="searchResults"
@@ -185,6 +186,7 @@
             :projects-available="store.projectsAvailable"
             :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
+            :settled="sidebarReady"
             v-model:search="search"
             :searching="searching"
             :search-results="searchResults"
@@ -769,7 +771,8 @@
           />
         </template>
         <!-- ent#836: Asks — the agent's open asks, each a door into the Inbox.
-             Reads the one asks feed; present only while something waits. -->
+             Reads the one asks feed; always present, with an empty state
+             when nothing waits (ent#892). -->
         <template #tab-asks="{ participants }">
           <PortalRailAsks :participants="participants" />
         </template>
@@ -835,7 +838,8 @@
           @focus-composer="() => { railSheetOpen = false; focusConversationComposer() }"
         />
       </template>
-      <!-- ent#836: the sheet's own `#tab-asks`; a row's navigation closes it. -->
+      <!-- ent#836: the sheet's own `#tab-asks`; a row's navigation (or the
+           empty state's "Open the Inbox", ent#892) closes it. -->
       <template #tab-asks="{ participants }">
         <PortalRailAsks :participants="participants" @open="railSheetOpen = false" />
       </template>
@@ -973,12 +977,14 @@ import {
   optimisticRead, rollbackRead, createWriteGuard, applyStarOverrides, agentChatTabs,
   asksHomeRoute,
   // ent#836: the per-agent ask counts the sidebar's mark reads — handed to the
-  // rail's door gate (the Asks tab's presence) and its signal, so the tab and
-  // the mark cannot disagree.
+  // rail's Asks signal, so the tab's mark and the row's mark cannot disagree.
+  // (ent#892 removed the tab's presence rule; the counts no longer gate it.)
   asksByAgent,
   // ent#621 T6: the order the sidebar SHOWS is now computed here, once, and
   // passed down — so the switch-agent keys walk exactly what the eye reads.
   orderRosterAgents,
+  // #3672: the sidebar's one first-load verdict.
+  sidebarSettled,
 } from '@/components/portal/portalUtils'
 // ent#621 — the Workspace key map. The rules are pure and live there; this view
 // owns the one listener and the dispatch table (T3).
@@ -1110,6 +1116,25 @@ const convGen = ref(0)                // bumps on explicit thread switches → r
 // Deliberately a separate bit from `store.rosterLoaded`: that one says the
 // ROSTER reached a verdict, this one says the deep link did.
 const bootstrapResolved = ref(false)
+// #3672 — the sidebar's first-load verdict, LATCHED: once the list has landed
+// it never drops back to skeletons (a background refresh is invisible, §6), so
+// the next bootstrap's `bootstrapResolved = false` cannot re-flash it. It
+// resets only when the session ends, so the next person's first load is calm
+// too. The rule itself is `sidebarSettled` (pure, tested).
+const sidebarReady = ref(false)
+watch(
+  () => [store.isClientSignedIn, sidebarSettled({
+    resolved: bootstrapResolved.value,
+    asksLoaded: store.asksLoaded,
+    asksAbsent: store.asksAbsent,
+    asksFailed: store.asksFailed,
+  })],
+  ([signedIn, settled]) => {
+    if (!signedIn) sidebarReady.value = false
+    else if (settled) sidebarReady.value = true
+  },
+  { immediate: true },
+)
 
 const activeSessionId = computed(() => route.params.sessionId || null)
 const chatUnavailable = computed(() => !!activeSessionId.value && unavailableChatId.value === activeSessionId.value)
@@ -1323,7 +1348,6 @@ const railTabs = computed(() => visibleTabs(RAIL_TABS, {
   isPlatform: store.isPlatformSession,
   participants: railParticipants.value,
   capabilities: { projects: store.projectsAvailable },
-  askCounts: railAskCounts.value,
 }))
 // Keyed on the route and the stage VERDICT — synchronous facts — never on data
 // still arriving (a room's participants land with its own fetch), so a live

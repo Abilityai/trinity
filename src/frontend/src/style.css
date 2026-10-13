@@ -96,3 +96,19 @@ html.dark {
     box-shadow: 0 0 0 12px var(--anchor-tint);
   }
 }
+
+/* #3672 — first-load reveal for list surfaces: content replaces its skeleton
+   with ONE short fade, the same for every section that uses it. Opacity only,
+   so nothing reflows. Reduced motion: an instant reveal (design-system §6). */
+@keyframes ws-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.ws-fade-in {
+  animation: ws-fade-in 180ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ws-fade-in {
+    animation: none;
+  }
+}

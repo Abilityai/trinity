@@ -14,6 +14,13 @@
     briefing  the new-chat hint zone, while the agent's briefing hydrates
     rail      a rail tab body (ent#475) — an overline, three row blocks and a
               second overline, the footprint of a grouped list
+    sidebar-agents / sidebar-chats
+              the sidebar's two lists while the first load has no verdict
+              (#3672) — rows shaped like the agent row (26px avatar, name,
+              subtitle) and the chat row (22px avatar, title), so the loaded
+              list lands on the same footprint
+    sidebar-link
+              the Projects link's slot, held while its capability is unknown
 
   Rules the recipe carries so its consumers cannot forget them:
     * `aria-busy` on the placeholder root and ONE `sr-only` line — a screen
@@ -90,6 +97,57 @@
     <span class="sr-only">Loading…</span>
   </div>
 
+  <!-- ============================ SIDEBAR AGENTS =========================== -->
+  <!-- #2159's three rows, moved here from PortalSidebar (#3672): enough to say
+       "rows are coming", not so many that a small roster jumps on arrival. -->
+  <div
+    v-else-if="variant === 'sidebar-agents'"
+    class="px-2 py-1.5"
+    aria-busy="true"
+    data-testid="portal-skeleton-sidebar-agents"
+  >
+    <div v-for="i in 3" :key="i" class="flex items-center gap-2.5 py-2">
+      <div :class="[BLOCK_STRONG, 'w-[26px] h-[26px] rounded-full shrink-0']"></div>
+      <div class="min-w-0 flex-1 space-y-1.5">
+        <div :class="[BLOCK_STRONG, 'h-3 w-1/2 rounded']"></div>
+        <div :class="[BLOCK, 'h-2.5 w-1/3 rounded']"></div>
+      </div>
+    </div>
+    <span class="sr-only">Loading your agents…</span>
+  </div>
+
+  <!-- ============================ SIDEBAR LINK ============================= -->
+  <!-- The Projects link's 36px slot (icon + label, `px-3 py-2 text-sm`). Silent:
+       the agents block below carries the section's one spoken line. -->
+  <div
+    v-else-if="variant === 'sidebar-link'"
+    class="flex items-center gap-2 px-3 py-2 h-9"
+    aria-hidden="true"
+    data-testid="portal-skeleton-sidebar-link"
+  >
+    <div :class="[BLOCK_STRONG, 'w-4 h-4 rounded']"></div>
+    <div :class="[BLOCK, 'h-3 w-16 rounded']"></div>
+  </div>
+
+  <!-- ============================ SIDEBAR CHATS ============================ -->
+  <!-- A date-group overline and four chat rows, widths varied so it reads as
+       a list of titles rather than a stack of identical bars. -->
+  <div
+    v-else-if="variant === 'sidebar-chats'"
+    class="mt-3"
+    aria-busy="true"
+    data-testid="portal-skeleton-sidebar-chats"
+  >
+    <div class="px-2 pb-2 pt-0.5">
+      <div :class="[BLOCK_STRONG, 'h-2.5 w-14 rounded']"></div>
+    </div>
+    <div v-for="w in CHAT_ROWS" :key="w" class="flex items-center gap-2 px-2.5 py-2">
+      <div :class="[BLOCK_STRONG, 'w-[22px] h-[22px] rounded-full shrink-0']"></div>
+      <div :class="[BLOCK, 'h-3 rounded', w]"></div>
+    </div>
+    <span class="sr-only">Loading your chats…</span>
+  </div>
+
   <!-- =============================== BRIEFING ============================== -->
   <!-- What the hint zone's wrapper reserves room for: a description line, the
        overline, and one row of two hint cards. -->
@@ -111,7 +169,7 @@
 
 <script setup>
 defineProps({
-  // 'stage' | 'thread' | 'briefing' | 'rail'
+  // 'stage' | 'thread' | 'briefing' | 'rail' | 'sidebar-agents' | 'sidebar-chats' | 'sidebar-link'
   variant: { type: String, required: true },
   // The `thread` variant is also nested inside `stage`, which already carries
   // the live-region text; the nested copy stays silent so a screen reader
@@ -127,6 +185,9 @@ const BLOCK_STRONG = `${PULSE} bg-gray-200 dark:bg-gray-800`
 
 // agent · you · agent — widths vary so the placeholder reads as a
 // conversation rather than a stack of identical bars.
+// #3672: the sidebar chat rows' title widths.
+const CHAT_ROWS = ['w-3/4', 'w-1/2', 'w-2/3', 'w-2/5']
+
 const THREAD_ROWS = [
   { user: false, size: 'h-16 w-3/5' },
   { user: true, size: 'h-10 w-2/5' },

@@ -38,6 +38,11 @@
       <!-- ent#661: the person's Projects list — shown only when the roster
            says this principal has the capability (internal-only). -->
       <PortalSidebarProjectsLink v-if="projectsAvailable" :active="projectsActive" @open="$emit('open-projects')" />
+      <!-- #3672: the capability rides the roster, so the link used to appear
+           a beat after the first paint and push the search box and both lists
+           down. A platform session (the audience that has Projects) holds its
+           slot while the list has no verdict; an outside client never had it. -->
+      <PortalSkeleton v-else-if="!settled && isPlatformSession" variant="sidebar-link" />
 
       <!-- Search -->
       <div class="relative">
@@ -90,20 +95,17 @@
 
         <!-- #2159: the roster load is the first thing that happens after
              sign-in and it is not instant on a large fleet. Without this the
-             block renders empty and the page reads as hung, not loading. Three
-             skeleton rows: enough to say "rows are coming", not so many that a
-             small roster jumps when they are replaced. -->
-        <div v-if="loadingRoster && !roster.length" class="px-2 py-1.5" aria-busy="true">
-          <div v-for="i in 3" :key="i" class="flex items-center gap-2.5 py-2 animate-pulse">
-            <div class="w-[26px] h-[26px] rounded-full bg-gray-200 dark:bg-gray-800 shrink-0"></div>
-            <div class="min-w-0 flex-1 space-y-1.5">
-              <div class="h-3 w-1/2 rounded bg-gray-200 dark:bg-gray-800"></div>
-              <div class="h-2.5 w-1/3 rounded bg-gray-100 dark:bg-gray-800/60"></div>
-            </div>
-          </div>
-          <span class="sr-only">Loading your agents…</span>
-        </div>
+             block renders empty and the page reads as hung, not loading.
+             #3672: held until the WHOLE list has a verdict (`settled`), not
+             just the roster — the rows re-order and grow a subtitle when the
+             chats land, and an asked agent joins past the collapse limit when
+             the asks land, so rendering on the roster alone made them jump.
+             The retry arm keeps #2159's "no roster on screen" case. -->
+        <PortalSkeleton v-if="!settled || (loadingRoster && !roster.length)" variant="sidebar-agents" />
 
+        <!-- #3672: everything the section shows once settled, in ONE wrapper
+             with the one fade — so the rows arrive together, never one by one. -->
+        <div v-else class="ws-fade-in" data-testid="sidebar-agents-content">
         <!-- ent#621: the row says it is the one you are in — by click as well as
              by key. `aria-current` rather than `aria-selected`: these are
              navigation destinations, not options in a listbox. -->
@@ -262,6 +264,7 @@
             No agents shared with you yet — ask whoever invited you to share one.
           </template>
         </div>
+        </div>
       </section>
 
       <!-- ============================ CHATS ============================= -->
@@ -302,7 +305,11 @@
         </button>
       </div>
 
-      <template v-else>
+      <!-- #3672: skeleton chat rows until the list's one verdict, then the
+           whole list in one pass with the same fade as the agents above. -->
+      <PortalSkeleton v-else-if="!settled" variant="sidebar-chats" />
+
+      <div v-else class="ws-fade-in" data-testid="sidebar-chats-content">
         <!-- Starred first, and LIFTED OUT of the date groups below (a starred
              chat appears exactly once — see partitionStarred). -->
         <div v-if="starred.length" class="mt-3">
@@ -361,7 +368,18 @@
             />
           </template>
         </div>
-      </template>
+
+        <!-- #3672: a list that turns out empty keeps a stable empty state
+             rather than collapsing to nothing (principle 16: it names the next
+             step). Not with an empty roster: the agents block above already
+             says the truer sentence, and saying it twice is noise (ent#402). -->
+        <div
+          v-if="!activeThreads.length && !archived.length && roster.length"
+          class="mt-3 px-2 py-3 text-xs"
+          :class="META_INK"
+          data-testid="sidebar-chats-empty"
+        >No chats yet — open an agent above, or start a new chat.</div>
+      </div>
     </div>
 
     <!-- Footer: signed-in email + sign out -->
@@ -411,6 +429,7 @@ import PortalKeyCap from './PortalKeyCap.vue'
 import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
 import PortalInboxRow from './PortalInboxRow.vue'
+import PortalSkeleton from './PortalSkeleton.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import DraftMark from '@/components/base/DraftMark.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
@@ -466,6 +485,10 @@ const props = defineProps({
   projectsActive: { type: Boolean, default: false },
   // #2159: distinguishes "still loading" from "loaded, and you have none".
   loadingRoster: { type: Boolean, default: false },
+  // #3672: the list's ONE first-load verdict (`sidebarSettled`, latched by the
+  // shell). False → both sections hold skeleton rows. Defaults to true so a
+  // caller that never loads (a test, a static mount) renders as before.
+  settled: { type: Boolean, default: true },
   search: { type: String, default: '' },
   searching: { type: Boolean, default: false },
   searchResults: { type: Array, default: () => [] },

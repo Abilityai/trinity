@@ -66,6 +66,7 @@ beforeEach(async () => {
   setActivePinia(createPinia())
   store = useClientPortalStore()
   store.asks = ASKS
+  store.asksLoaded = true
   store.agents = [{ name: 'scout', display_label: 'Scout' }, { name: 'bard' }, { name: 'quiet' }]
   router = createRouter({
     history: createMemoryHistory(),
@@ -76,6 +77,52 @@ beforeEach(async () => {
 })
 
 const hrefOf = (link) => decodeURIComponent(link.attributes('href') || '')
+
+// ent#892 — the tab is always present now, so its body owns all four states.
+describe('ent#892 — the Asks tab body with nothing waiting', () => {
+  it('a 1:1 with no asks shows the empty state, naming the agent, and its action opens the Inbox filtered to it', async () => {
+    store.asks = [ask('done', 'quiet', { status: 'answered' })]
+    const w = mount(PortalRailAsks, { props: { participants: ['quiet'] }, global: { plugins: [router] } })
+    await flushPromises()
+    const empty = w.find('[data-testid="portal-rail-asks-empty"]')
+    expect(empty.exists()).toBe(true)
+    expect(empty.text()).toContain('No asks')
+    expect(empty.text()).toContain('Nothing from quiet is waiting on you')
+    expect(w.findAll('[data-testid^="portal-rail-ask-"]').filter((r) => /portal-rail-ask-[^e]/.test(r.attributes('data-testid')))).toEqual([])
+    const open = w.find('[data-testid="portal-rail-asks-open-inbox"]')
+    expect(open.text()).toBe('Open the Inbox')
+    await open.trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/workspace/inbox')
+    expect(router.currentRoute.value.query).toMatchObject({ tab: 'action', from: 'quiet' })
+    expect(w.emitted('open')).toBeTruthy()
+  })
+
+  it('shows a skeleton — never the empty copy — before the asks feed has a verdict', async () => {
+    store.asks = []
+    store.asksLoaded = false
+    const w = mount(PortalRailAsks, { props: { participants: ['scout'] }, global: { plugins: [router] } })
+    await flushPromises()
+    expect(w.find('[data-testid="portal-skeleton-rail"]').exists()).toBe(true)
+    expect(w.find('[data-testid="portal-rail-asks-empty"]').exists()).toBe(false)
+  })
+
+  it('a failed first read says so and offers a retry, never "No asks"', async () => {
+    store.asks = []
+    store.asksLoaded = false
+    store.asksFailed = true
+    const w = mount(PortalRailAsks, { props: { participants: ['scout'] }, global: { plugins: [router] } })
+    await flushPromises()
+    expect(w.text()).toContain("Couldn't load asks")
+    expect(w.find('[data-testid="portal-rail-asks-empty"]').exists()).toBe(false)
+  })
+
+  it('with asks waiting there is no empty state', async () => {
+    const w = mount(PortalRailAsks, { props: { participants: ['scout'] }, global: { plugins: [router] } })
+    await flushPromises()
+    expect(w.find('[data-testid="portal-rail-asks-empty"]').exists()).toBe(false)
+  })
+})
 
 describe('the Asks tab body', () => {
   it('lists the agent\'s open asks in Action order, each a link into the Inbox at that ask', async () => {

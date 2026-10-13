@@ -11,6 +11,7 @@
 
 import { actionItems, itemKey } from './portalInbox'
 import { asksHomeRoute } from './portalUtils'
+import { feedView } from './portalRail'
 
 export const ASKS_TAB_ID = 'asks'
 
@@ -55,4 +56,18 @@ export function asksSignalFrom(askCounts, participants) {
   return { live: 0, updated: true, agents, note: `${count} ${count === 1 ? 'ask' : 'asks'}`, count }
 }
 
-export { asksTabPresent } from './portalRail'
+/**
+ * ent#892 — the body's verdict, now that the tab is always present: the empty
+ * copy only after a read SUCCEEDED with nothing waiting (never in the frame
+ * before the first read lands). An instance that does not serve asks (the
+ * store's 404/403 verdict, `asksAbsent`) has nothing waiting, so it is empty
+ * rather than a skeleton that never resolves. `count` is the narrowed rows.
+ */
+export function railAsksView({ participants = [], asksLoaded = false, asksAbsent = false, asksFailed = false, count = 0 } = {}) {
+  return feedView({
+    participants,
+    hasLoaded: asksLoaded === true || asksAbsent === true,
+    error: asksFailed === true && asksAbsent !== true ? 'failed' : null,
+    count,
+  })
+}

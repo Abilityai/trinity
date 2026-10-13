@@ -4,10 +4,10 @@
  *
  * The decidable rules, pure:
  *   - the registry entry: door AGENT (asks are addressed to clients and
- *     platform users alike), a PRESENCE rule so the tab exists only while a
- *     participant has an open ask, last in the fixed order so its coming and
- *     going moves no other tab, the "updated" signal shape with a note and a
- *     COUNT, no empty state (presence makes it unreachable);
+ *     platform users alike), ALWAYS present (ent#892 removed ent#836's
+ *     presence rule, so nothing in the strip moves when asks arrive or
+ *     clear), the "updated" signal shape with a note and a COUNT, and an
+ *     empty state that names the agent and points at the Inbox;
  *   - the rows are EXACTLY the Inbox's Action tab narrowed to the participants
  *     — the same items, the same urgency order, nothing re-sorted;
  *   - a row's link opens the Inbox on Action, filtered to the agent, with that
@@ -19,10 +19,10 @@
 import { describe, it, expect } from 'vitest'
 import {
   RAIL_TABS, RAIL_TAB_ORDER, RAIL_DOORS, RAIL_SIGNAL_UPDATED,
-  tabPassesDoor, visibleTabs, signalFor, railTitle, stripSegments, collapsedSignals,
+  tabPassesDoor, visibleTabs, signalFor, railTitle, stripSegments, collapsedSignals, railEmptyCopy,
 } from '@/components/portal/portalRail'
 import {
-  ASKS_TAB_ID, railAskItems, askInboxRoute, asksSignalFrom, asksTabPresent,
+  ASKS_TAB_ID, railAskItems, askInboxRoute, asksSignalFrom, railAsksView,
 } from '@/components/portal/portalRailAsks'
 import { actionItems, filterByAgent, itemKey } from '@/components/portal/portalInbox'
 import { asksByAgent, WORKSPACE_INBOX } from '@/components/portal/portalUtils'
@@ -46,43 +46,62 @@ const PLATFORM = { isPlatform: true, participants: ['scout'] }
 const CLIENT = { isPlatform: false, participants: ['scout'] }
 const counts = asksByAgent(ASKS.filter((a) => a.status === 'pending'))
 
-describe('ent#836 — the Asks tab in the registry', () => {
-  it('is registered last, AGENT door, "updated" signal, no empty state, its own icon', () => {
+describe('ent#892 — the Asks tab in the registry', () => {
+  it('sits between Projects and Work, AGENT door, "updated" signal, an empty state, its own icon', () => {
     expect(ASKS_TAB_ID).toBe('asks')
-    expect(tab('asks')).toMatchObject({ door: RAIL_DOORS.AGENT, signal: RAIL_SIGNAL_UPDATED, icon: 'asks', empty: null })
-    expect(typeof tab('asks').presence).toBe('function')
-    expect(RAIL_TAB_ORDER[RAIL_TAB_ORDER.length - 1]).toBe('asks')
+    expect(tab('asks')).toMatchObject({ door: RAIL_DOORS.AGENT, signal: RAIL_SIGNAL_UPDATED, icon: 'asks' })
+    // ent#892: no presence rule — the tab is always there, like every other tab.
+    expect(tab('asks').presence).toBeUndefined()
+    expect(RAIL_TAB_ORDER).toEqual(['info', 'canvas', 'files', 'projects', 'asks', 'work', 'loops'])
   })
 
-  it('exists only while a participant has an open ask — the presence rule, on the one door gate', () => {
-    const withAsks = { ...PLATFORM, askCounts: counts }
-    expect(tabPassesDoor(tab('asks'), withAsks)).toBe(true)
-    expect(tabPassesDoor(tab('asks'), PLATFORM)).toBe(false)                       // no counts at all
-    expect(tabPassesDoor(tab('asks'), { ...PLATFORM, askCounts: {} })).toBe(false)
-    expect(tabPassesDoor(tab('asks'), { ...PLATFORM, askCounts: { quiet: 0 } })).toBe(false)
-    // Another agent's asks are not this conversation's business.
-    expect(tabPassesDoor(tab('asks'), { ...PLATFORM, participants: ['quiet'], askCounts: counts })).toBe(false)
-    // A room: any participant waiting is enough.
-    expect(tabPassesDoor(tab('asks'), { ...PLATFORM, participants: ['quiet', 'bard'], askCounts: counts })).toBe(true)
-    // Nobody in the chat yet (a room's first beat): no tab.
+  it('is always present for a conversation with an agent — with or without asks', () => {
+    expect(tabPassesDoor(tab('asks'), { ...PLATFORM, askCounts: counts })).toBe(true)
+    expect(tabPassesDoor(tab('asks'), PLATFORM)).toBe(true)                        // no counts at all
+    expect(tabPassesDoor(tab('asks'), { ...PLATFORM, askCounts: {} })).toBe(true)
+    expect(tabPassesDoor(tab('asks'), { ...PLATFORM, participants: ['quiet'], askCounts: counts })).toBe(true)
+    expect(tabPassesDoor(tab('asks'), { ...CLIENT })).toBe(true)
+    // Still the AGENT door: nobody in the chat yet (a room's first beat) — no tab.
     expect(tabPassesDoor(tab('asks'), { ...PLATFORM, participants: [], askCounts: counts })).toBe(false)
-    // Asks are addressed to clients too: the door is the conversation's shape, not who is asking.
-    expect(tabPassesDoor(tab('asks'), { ...CLIENT, askCounts: counts })).toBe(true)
-    // Strict: a stringly count is not a count.
-    expect(asksTabPresent({ participants: ['scout'], askCounts: { scout: '2' } })).toBe(false)
   })
 
-  it('joins the visible list last, and leaves it the moment the count is gone', () => {
-    expect(visibleTabs(RAIL_TABS, { ...PLATFORM, askCounts: counts }).map((t) => t.id))
-      .toEqual(['work', 'loops', 'canvas', 'files', 'info', 'asks'])
-    expect(visibleTabs(RAIL_TABS, PLATFORM).map((t) => t.id)).toEqual(['work', 'loops', 'canvas', 'files', 'info'])
-    expect(visibleTabs(RAIL_TABS, { ...CLIENT, askCounts: counts }).map((t) => t.id)).toEqual(['canvas', 'files', 'info', 'asks'])
+  it('no tab moves when asks arrive or clear', () => {
+    const before = visibleTabs(RAIL_TABS, PLATFORM).map((t) => t.id)
+    const after = visibleTabs(RAIL_TABS, { ...PLATFORM, askCounts: counts }).map((t) => t.id)
+    expect(before).toEqual(['info', 'canvas', 'files', 'asks', 'work', 'loops'])
+    expect(after).toEqual(before)
+    expect(visibleTabs(RAIL_TABS, CLIENT).map((t) => t.id)).toEqual(['info', 'canvas', 'files', 'asks'])
   })
 
-  it('⌥. reaches it — it is one more stop on the walk over the visible tabs', () => {
+  it('with no asks it teaches the next step, naming the agent', () => {
+    expect(railEmptyCopy(tab('asks'), ['scout'])).toMatchObject({ title: 'No asks', action: 'Open the Inbox', event: 'open-inbox' })
+    expect(railEmptyCopy(tab('asks'), ['scout']).body).toContain('Nothing from scout is waiting on you')
+    expect(railEmptyCopy(tab('asks'), ['scout', 'bard']).body).toContain('an agent in this room')
+  })
+
+  it('⌥. walks the new visual order', () => {
     const visible = visibleTabs(RAIL_TABS, { ...PLATFORM, askCounts: counts })
-    expect(nextRailTab(visible, 'info')).toBe('asks')
+    expect(nextRailTab(visible, 'files')).toBe('asks')
     expect(nextRailTab(visible, 'asks')).toBe('work')
+    expect(nextRailTab(visible, 'loops')).toBe('info')
+  })
+})
+
+describe('ent#892 — the Asks body\'s verdict', () => {
+  it('loading until the asks feed has a verdict — never the empty copy first', () => {
+    expect(railAsksView({ participants: ['scout'], asksLoaded: false, count: 0 }).state).toBe('loading')
+    expect(railAsksView({ participants: [], asksLoaded: true, count: 0 }).state).toBe('loading')
+  })
+  it('empty only after a read SUCCEEDED with nothing waiting, ready with rows', () => {
+    expect(railAsksView({ participants: ['scout'], asksLoaded: true, count: 0 }).state).toBe('empty')
+    expect(railAsksView({ participants: ['scout'], asksLoaded: true, count: 2 }).state).toBe('ready')
+  })
+  it('an instance that does not serve asks has nothing waiting — empty, not a skeleton forever', () => {
+    expect(railAsksView({ participants: ['scout'], asksAbsent: true, count: 0 }).state).toBe('empty')
+  })
+  it('a failed first read is failed; a failed refresh keeps the rows and is stale', () => {
+    expect(railAsksView({ participants: ['scout'], asksFailed: true, count: 0 }).state).toBe('failed')
+    expect(railAsksView({ participants: ['scout'], asksLoaded: true, asksFailed: true, count: 1 })).toEqual({ state: 'ready', stale: true })
   })
 })
 

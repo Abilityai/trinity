@@ -715,7 +715,7 @@
     },
     "src/frontend/src/components/portal/PortalSidebar.vue": {
       "raw_nongray": 0,
-      "raw_gray": 35,
+      "raw_gray": 29,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalSkeleton.vue": {
