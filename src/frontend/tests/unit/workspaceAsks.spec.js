@@ -520,8 +520,11 @@ describe('#2375 — the panel goes through the shared module (source-asserted)',
     // that branch the pick never sends.
     expect(sfc).toMatch(/const oneClick = \(ask\) => decidedByOptions\(ask\)/)
     const pickBody = sfc.match(/function pick\(ask, opt\) \{([\s\S]*?)\n\}/)?.[1] || ''
-    const general = pickBody.replace(/if \(oneClick\(ask\)\) \{[\s\S]*?\n  \}/, '')
-    expect(general).not.toBe(pickBody)
+    // Cut the one-click branch out by slicing, not `.replace` (CodeQL reads a
+    // regex strip of source text as incomplete HTML sanitisation).
+    const branch = pickBody.match(/if \(oneClick\(ask\)\) \{[\s\S]*?\n  \}/)?.[0] || ''
+    expect(branch).not.toBe('')
+    const general = pickBody.split(branch).join('')
     expect(general).toMatch(/picks\[ask\.id\] = /)
     expect(general).not.toMatch(/submit|answerAsk/)
     // What arms Send is proven by behaviour, not by its source text (#3242

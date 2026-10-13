@@ -85,8 +85,8 @@ No dedicated UI components. This feature is consumed entirely through the MCP to
 5. Events emitted by a human (`source_agent` holds a username) are not shown to non-admins, the
    same as `/ws`: the row carries no provenance that would tell "your own" from an identically
    named agent.
-6. Agent-scoped MCP keys resolve to their owner and see what the owner sees (agent-key narrowing
-   is trinity-enterprise#629). Connector, portal and ops principals are stopped in
+6. Agent-scoped MCP keys resolve to their owner and see what the owner sees: this is a
+   collection read, and trinity-enterprise#629 narrows per-agent routes, not collections. Connector, portal and ops principals are stopped in
    `get_current_user` before this handler.
 
 ### Core Event Emission Flow (lines 366-415)

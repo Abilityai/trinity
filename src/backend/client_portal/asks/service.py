@@ -18,7 +18,7 @@ from typing import List, Optional
 from sqlalchemy.exc import OperationalError
 
 from database import db
-from services import ask_service
+from services import ask_service, skill_gate_service
 from services.operator_queue_choices import (
     SOMETHING_ELSE,
     ReservedAnswerError,
@@ -233,7 +233,8 @@ def _linked_request_id(item: dict, key: str,
 
 
 def _project(item: dict, *, viewer_email: Optional[str] = None,
-             resume_requested: Optional[bool] = None) -> WorkspaceAsk:
+             resume_requested: Optional[bool] = None,
+             is_platform: bool = False) -> WorkspaceAsk:
     """The explicit client-facing projection (see `WorkspaceAsk`).
 
     `chat_id` comes from platform-written context only — enforced since ent#429,
@@ -277,6 +278,8 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         sync=_coarse_sync(item),
         aging=bool(is_aged(item)),
         decided_by_options=ask_service.decided_by_options(item),
+        gate=skill_gate_service.card_view(item, viewer_email=viewer_email,
+                                          with_run_ids=is_platform),
         replaces=_linked_request_id(item, "replaces", viewer_email),
         replaced_by=_linked_request_id(item, "replaced_by", viewer_email),
     )
@@ -427,7 +430,7 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
         logger.warning("[WorkspaceAsks] list failed", exc_info=True)
         raise AsksUnavailable("queue unreadable") from e
 
-    out = [_project(item, viewer_email=email) for item in items or []]
+    out = [_project(item, viewer_email=email, is_platform=is_platform) for item in items or []]
     if chat_id is not None:
         out = [a for a in out if _in_chat(a, chat_id)]
     end = offset + len(items or [])
@@ -451,7 +454,7 @@ def _discussed_in(chat_id: str, email: str, is_platform: bool,
     ) or []
     out = []
     for row in rows:
-        ask = _project(row, viewer_email=email)
+        ask = _project(row, viewer_email=email, is_platform=is_platform)
         if (ask.discussion_chat_id == chat_id
                 and _on_roster(row.get("agent_name") or "", email, is_platform, strict=True)):
             out.append(ask)
@@ -604,7 +607,8 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     # opt-in here is a report of intent — see `_resume_requested`.
     agent = updated.get("agent_name") or item.get("agent_name") or ""
     dispatched = bool(ending.observers_ok and _resume_requested(agent))
-    return _project(updated, viewer_email=email, resume_requested=dispatched)
+    return _project(updated, viewer_email=email, resume_requested=dispatched,
+                    is_platform=is_platform)
 
 
 #: trinity-enterprise#816: why Dismiss and Discuss are refused on a shared ask.
@@ -643,7 +647,7 @@ def dismiss_ask(item_id: str, email: str, is_platform: bool) -> WorkspaceAsk:
             item = conflict.item
         except ask_service.AskNotFound:
             raise AskError(404, "not_found", "Ask not found")
-    return _project(item, viewer_email=email)
+    return _project(item, viewer_email=email, is_platform=is_platform)
 
 
 #: The opening line of a discussion chat (trinity-enterprise#747). A `system`
@@ -761,7 +765,7 @@ def discuss_ask(item_id: str, email: str, is_platform: bool):
     session = portal_db.get_portal_session(chat_id, agent, email) or {}
     return WorkspaceAskDiscussion(
         chat_id=chat_id, agent_name=agent, title=session.get("title") or title,
-        created=created, ask=_project(item, viewer_email=email),
+        created=created, ask=_project(item, viewer_email=email, is_platform=is_platform),
     )
 
 

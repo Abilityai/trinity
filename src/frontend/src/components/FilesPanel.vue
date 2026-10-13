@@ -537,7 +537,7 @@ const downloadFile = async () => {
 
     showNotification(`Downloaded ${selectedFile.value.name}`)
   } catch (e) {
-    showNotification(`Failed to download: ${e.message}`, 'error')
+    showNotification(`Failed to download: ${e.response?.data?.detail || e.message}`, 'error')
   } finally {
     downloading.value = false
   }

@@ -3284,6 +3284,9 @@ class TaskExecutionService:
                         compact_metadata=compact_metadata_json,
                         retry_count=envelope.retry_count or None,
                         turn_integrity=turn_integrity_json,
+                        # #3589: the producer's terminal instant (the watchdog
+                        # claim's `retained_at`); None = the writer stamps now.
+                        completed_at=envelope.completed_at,
                     ),
                 )
                 if not won:
@@ -3320,6 +3323,7 @@ class TaskExecutionService:
                 await activity_service.complete_activity(
                     activity_id=activity_id,
                     status=ActivityState.COMPLETED,
+                    completed_at=envelope.completed_at,  # #3589, same instant as the row
                     details={
                         "session_id": envelope.session_id,
                         "cost_usd": total_cost,
@@ -3445,6 +3449,7 @@ class TaskExecutionService:
                     tool_calls=salvage_tool_calls_json,
                     claude_session_id=salvage_session_id,
                     retry_count=envelope.retry_count or None,
+                    completed_at=envelope.completed_at,  # #3589
                 ),
             )
         # #671/H4: complete the activity, record the AUTH breaker outcome, and
@@ -3457,6 +3462,7 @@ class TaskExecutionService:
                 activity_id=activity_id,
                 status=activity_state_for_terminal(envelope.status),
                 error=envelope.error,
+                completed_at=envelope.completed_at,  # #3589, same instant as the row
             )
         # Compare by ``.value``, NOT by enum-member equality — ``@dataclass`` on
         # the fieldless ``TaskExecutionErrorCode`` str-Enum gives every member a

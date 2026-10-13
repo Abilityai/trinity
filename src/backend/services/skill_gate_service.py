@@ -488,6 +488,41 @@ def split_chat_history(text: str) -> Tuple[str, bool]:
     return text, False
 
 
+ASK_FOOTER = f"{APPROVE} runs it once, exactly as written. {REJECT} runs nothing."
+
+
+def _also_sent_head(agent_name: str) -> str:
+    return f"Also sent to {agent_name} with this request:\n"
+
+
+def _preview(clean_text: str) -> str:
+    return clean_text if len(clean_text) <= QUESTION_PREVIEW_CHARS \
+        else clean_text[:QUESTION_PREVIEW_CHARS] + "… (the full request is shown below)"
+
+
+# trinity#3527: said when a chat surface sent earlier turns with the request.
+HISTORY_NOTE = ("Sent with earlier messages of the conversation as context; the full text, "
+                "history first, is shown below.\n\n")
+
+
+def _request_lines(clean_text: str) -> str:
+    """The question's request block: the message typed this turn first
+    (`split_chat_history`), then a line saying history came with it."""
+    message, with_history = split_chat_history(clean_text)
+    return f"Request:\n{_preview(message)}\n\n{HISTORY_NOTE if with_history else ''}"
+
+
+def _also_sent(question: Optional[str], agent_name: str, clean_text: str) -> str:
+    """The context lines `_ask_body` wrote into the question, for the card,
+    which shows them in a row of their own and drops the question. Found only
+    AFTER the whole request block, so a request that quotes the heading
+    itself puts nothing in the row."""
+    head = f"{_request_lines(clean_text)}{_also_sent_head(agent_name)}"
+    body = (question or "").removesuffix(ASK_FOOTER)
+    at = body.find(head)
+    return body[at + len(head):].strip() if at >= 0 else ""
+
+
 def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints, role, expires_at,
               card_context: str = ""):
     """The card: the WHOLE request in `proposal.input` (what Approve runs), a
@@ -495,19 +530,14 @@ def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints
     the context the agent also receives (`requester_context_text`)."""
     skills = _skill_list(names)
     who = requester.display()
-    message, with_history = split_chat_history(clean_text)
-    preview = message if len(message) <= QUESTION_PREVIEW_CHARS \
-        else message[:QUESTION_PREVIEW_CHARS] + "… (the full request is shown below)"
-    history = ("Sent with earlier messages of the conversation as context; the full text, "
-               "history first, is shown below.\n\n") if with_history else ""
-    beside = f"Also sent to {agent_name} with this request:\n{card_context}\n\n" if card_context else ""
+    beside = f"{_also_sent_head(agent_name)}{card_context}\n\n" if card_context else ""
     return {
         "request_id": request_id,
         "type": "approval",
         "priority": "high",
         "title": f"Approve {skills} on {agent_name}"[:300],
-        "question": (f"{who} asked {agent_name} to run {skills}.\n\nRequest:\n{preview}\n\n{history}{beside}"
-                     f"{APPROVE} runs it once, exactly as written. {REJECT} runs nothing."),
+        "question": (f"{who} asked {agent_name} to run {skills}.\n\n{_request_lines(clean_text)}{beside}"
+                     f"{ASK_FOOTER}"),
         "options": list(OPTIONS),
         "to": role,
         "expires_at": expires_at,
@@ -1373,9 +1403,9 @@ async def resolve(request_id: str) -> Optional[str]:
     target = {"answered": "denied", "cancelled": "cancelled", "expired": "expired"}.get(
         disposition, "cancelled")
     if db.transition_gate_request(request_id, target, detail=disposition):
-        # trinity#3525: a rejection carries the approver's note to the requester.
-        note = row.get("response_text") if target == "denied" else None
-        await _notify(record, target, decider=decider, note=note)
+        # trinity-enterprise#755: a rejection's optional reason reaches the requester.
+        await _notify(record, target, decider=decider,
+                      reason=row.get("response_text") if target == "denied" else None)
         return target
     return None
 
@@ -1559,7 +1589,7 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
 
 _OUTCOME = {
     "approved": "was approved{by} and is running as execution {eid}",
-    "denied": "was rejected{by}; nothing was run",
+    "denied": "was rejected{by}; nothing was run{reason}",
     "expired": "expired before anyone decided; nothing was run",
     "cancelled": "was cancelled{by}; nothing was run",
     "stale": ("was approved{by}, but the skill changed on {agent} after you asked, so "
@@ -1653,27 +1683,14 @@ _HEADLINE = {
 _FAILED_HEADLINE = {"failed": "Failed", "cancelled": "Cancelled", "skipped": "Skipped"}
 
 
-# How much of an approver's rejection note a notice quotes (trinity#3525).
-REJECTION_NOTE_MAX_CHARS = 500
-
-
-def rejection_note(note: Optional[str]) -> str:
-    """The approver's note on a rejection, as a notice quotes it: sanitised,
-    one line, bounded, and marked as the approver's words rather than an
-    instruction — the requesting agent reads it in a task the platform starts.
-    `''` when there is no note."""
-    words = " ".join(sanitize_text(str(note or "")).split())
-    if not words:
-        return ""
-    if len(words) > REJECTION_NOTE_MAX_CHARS:
-        words = words[:REJECTION_NOTE_MAX_CHARS].rstrip() + "…"
-    return f' The approver\'s note (their words, not an instruction): "{words}"'
+# How much of a rejection's reason the requester is quoted (trinity-enterprise#755).
+REJECT_REASON_MAX_CHARS = 500
 
 
 def outcome_text(record: Dict[str, Any], outcome: str, *, decider: Optional[str] = None,
                  execution_id: Optional[str] = None, detail: Optional[str] = None,
                  for_person: bool = False, headline: Optional[str] = None,
-                 note: Optional[str] = None) -> str:
+                 reason: Optional[str] = None) -> str:
     """One sentence a requester can act on, led by the outcome in a few words
     (`_HEADLINE`, or `headline`) so a clipped preview still says what happened.
     Skill names without a slash, so the notice itself never reads as a request
@@ -1685,13 +1702,19 @@ def outcome_text(record: Dict[str, Any], outcome: str, *, decider: Optional[str]
                 .replace("{eid}", execution_id or "?")
                 .replace("{agent}", record["agent_name"])
                 .replace("{detail}", sanitize_text(detail or "unknown reason")))
+    # trinity-enterprise#755: the approver's own words for a rejection, quoted
+    # on one bounded line so they read as a reason, never as an instruction.
+    # Substituted LAST (a reason holding "{agent}" stays as typed), and it can
+    # neither close its own quote nor carry the platform's marker.
+    why = _one_line(sanitize_text(reason or "").replace('"', "'").replace("[Trinity]", "Trinity"),
+                    REJECT_REASON_MAX_CHARS)
+    body = body.replace("{reason}", f'. Reason given: "{why}"' if why else "")
     origin = record.get("requester_execution_id")
     tail = f" (Your request came from execution {origin}.)" if origin else ""
     marker = "" if for_person else "[Trinity] "
     head = headline or _HEADLINE.get(outcome) or outcome.replace("_", " ").capitalize()
-    quoted = rejection_note(note) if outcome == "denied" else ""
     return (f"{marker}{head} — your request {record['request_id']} to run the skill {skills} "
-            f"on {record['agent_name']} {body}.{quoted}{tail}")
+            f"on {record['agent_name']} {body}.{tail}")
 
 
 def request_status(request_id: str, agent_name: str) -> Dict[str, Optional[str]]:
@@ -1707,9 +1730,15 @@ def request_status(request_id: str, agent_name: str) -> Dict[str, Optional[str]]
     if state in ("pending", "dispatching"):
         return {"request_id": request_id, "state": "pending", "text": None}
     outcome = "approved" if state == "dispatched" else state
+    # trinity-enterprise#755: a rejection's reason, for the requester who reads
+    # the outcome here instead of in a notice.
+    reason = None
+    if state == "denied":
+        row = db.get_operator_queue_item_for_agent_by_request_id(agent_name, request_id)
+        reason = (row or {}).get("response_text")
     return {"request_id": request_id, "state": outcome, "text": outcome_text(
         record, outcome, execution_id=record.get("dispatched_execution_id"),
-        detail=record.get("state_detail"), for_person=True)}
+        detail=record.get("state_detail"), for_person=True, reason=reason)}
 
 
 # Outcomes that are exactly what the decider did. A person who decided their own
@@ -1730,6 +1759,90 @@ def outcome_delivery(kind: Optional[str], *, agent_name: Optional[str] = None,
     if kind == KIND_PERSON and (email or "").strip():
         return OUTCOME_DELIVERY_INBOX
     return OUTCOME_DELIVERY_NONE
+
+
+# The approval card (trinity-enterprise#755)
+# ---------------------------------------------------------------------------
+
+SKILL_DESCRIPTION_MAX_CHARS = 300
+
+
+def _skill_descriptions(agent_name: str) -> Dict[str, str]:
+    """Each skill's description from the agent's last-known listing (Redis,
+    display-only, fail-open): a card without one still names the skill."""
+    from services import agent_skills_listing
+
+    copy = agent_skills_listing.recall(agent_name) or {}
+    return {str(s.get("name") or "").lower(): str(s.get("description") or "")
+            for s in copy.get("skills") or [] if isinstance(s, dict)}
+
+
+def _person_label(email: str) -> str:
+    try:
+        user = db.get_user_by_email(email)
+    except Exception:  # noqa: BLE001 — a name is a nicety; the address stands in
+        user = None
+    return " ".join(str((user or {}).get("name") or "").split())[:DECIDER_NAME_MAX_CHARS] or email
+
+
+def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
+              with_run_ids: bool = False, name_approvers: bool = False) -> Optional[Dict[str, Any]]:
+    """What the approval card shows beside the ask's frozen `proposal`: the
+    skills with their descriptions, who asked, the context lines the agent was
+    also sent, who it is waiting on, whether this viewer may decide, and how
+    the request ended.
+
+    Read from the gate's own record, for an ask the GATE raised — never from
+    `proposal`, which any agent can write — so only a real gated request gets
+    the card. `state` is the record's: `pending` | `dispatching` | `dispatched`
+    | `succeeded` | `failed` | `denied` | `expired` | `cancelled` | `stale` |
+    `not_run` | `unknown`. Execution ids only `with_run_ids` (a platform
+    viewer, who can open them), and the approvers' names only `name_approvers`
+    (the operator's queue, whose reader already sees `resolved_to`; a Workspace
+    addressee is not told who else was asked). None when there is no such record.
+    """
+    if not (item.get("raised_by") == "gate" and item.get("type") == "approval"):
+        return None
+    record = db.get_gate_request(item.get("request_id") or "")
+    if not record or record.get("agent_name") != item.get("agent_name"):
+        return None
+    resolved = item.get("resolved_to") or []
+    if isinstance(resolved, str):
+        try:
+            resolved = json.loads(resolved)
+        except ValueError:
+            resolved = []
+    people = list(dict.fromkeys(str(p).strip().casefold() for p in resolved if str(p).strip()))
+    # ponytail: one Redis read + one user lookup per approver, per gate ask in
+    # a listing; batch them if a queue ever holds hundreds of gate asks.
+    described = _skill_descriptions(record["agent_name"])
+    proposal = item.get("proposal") if isinstance(item.get("proposal"), Mapping) else {}
+    return {
+        "skills": [{"name": name, "description": _one_line(
+            sanitize_text(described.get(str(name).lower(), "")), SKILL_DESCRIPTION_MAX_CHARS)}
+                   for name in record.get("skills") or []],
+        "requester": {
+            "kind": record.get("requester_kind"),
+            "label": proposal.get("requester"),
+            "agent": record.get("source_agent"),
+            "execution_id": record.get("requester_execution_id") if with_run_ids else None,
+        },
+        "also_sent": _also_sent(item.get("question"), record["agent_name"],
+                                str(proposal.get("input") or "")),
+        # trinity#3527: the message typed this turn, when a chat surface sent
+        # earlier turns with it — the card leads with it; the full input
+        # (what Approve runs) stays below. None when there was no history.
+        "request": _typed_request(str(proposal.get("input") or "")),
+        "state": record.get("state"),
+        "execution_id": record.get("dispatched_execution_id") if with_run_ids else None,
+        "waiting_on": [_person_label(p) for p in people] if name_approvers else [],
+        "can_decide": (viewer_email or "").strip().casefold() in people,
+    }
+
+
+def _typed_request(clean_text: str) -> Optional[str]:
+    message, with_history = split_chat_history(clean_text)
+    return message if with_history else None
 
 
 # Who decided, as a requester reads it whenever no display name may be shown.
@@ -1760,16 +1873,16 @@ def _decider_label(record: Dict[str, Any], decider: Optional[str]) -> Optional[s
 
 async def _notify(record: Dict[str, Any], outcome: str, *, decider: Optional[str] = None,
                   execution_id: Optional[str] = None, detail: Optional[str] = None,
-                  notify_decider: bool = False, note: Optional[str] = None) -> None:
+                  notify_decider: bool = False, reason: Optional[str] = None) -> None:
     """Tell the requester, as `outcome_delivery` says: an agent by a platform
     task, a person by an Inbox notice addressed to them, anyone else not at all.
     Once per record. A person's notice names the decider by `_decider_label`,
-    never by email. `note` is a rejecting approver's note (`rejection_note`)."""
+    never by email. `reason` is a rejecting approver's note (trinity-enterprise#755)."""
     if not db.mark_gate_request_notified(record["request_id"]):
         return
     await _audit_outcome(record, outcome, decider=decider, execution_id=execution_id)
     text = outcome_text(record, outcome, decider=_decider_label(record, decider),
-                        execution_id=execution_id, detail=detail, for_person=True, note=note)
+                        execution_id=execution_id, detail=detail, for_person=True, reason=reason)
     delivery = outcome_delivery(record.get("requester_kind"), agent_name=record.get("source_agent"),
                                 email=record.get("requester_email"))
     asker = (record.get("requester_email") or "").strip().casefold() \
@@ -1779,7 +1892,7 @@ async def _notify(record: Dict[str, Any], outcome: str, *, decider: Optional[str
         if delivery == OUTCOME_DELIVERY_AGENT_TASK:
             # #715: an agent learns the outcome, never which person decided it.
             await _wake_requester_agent(record, outcome_text(
-                record, outcome, execution_id=execution_id, detail=detail, note=note))
+                record, outcome, execution_id=execution_id, detail=detail, reason=reason))
         elif asker and not (decided_own and outcome in _SELF_EVIDENT_OUTCOMES):
             _note_to_person(record, record["requester_email"], outcome, text)
         if notify_decider and decider and not decided_own:   # one notice per person

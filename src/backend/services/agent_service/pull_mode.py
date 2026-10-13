@@ -26,6 +26,7 @@ ONLY the two non-secret pull knobs below.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Dict
 
@@ -45,10 +46,12 @@ from services.pull_pilot import (  # noqa: F401 — re-exported for back-compat
     pull_owns_dispatch,
 )
 
+logger = logging.getLogger(__name__)
 
-# The container env keys this module manages. Recreate (``lifecycle.py``) pops
-# these BEFORE re-applying ``pull_mode_env_vars`` so de-piloting an agent
-# actually clears the baked pull flag: ``pull_mode_env_vars`` returns ``{}`` for
+
+# The container env keys this module manages. ``apply_pull_mode_env`` pops these
+# BEFORE re-applying ``pull_mode_env_vars`` so de-piloting an agent actually
+# clears the baked pull flag: ``pull_mode_env_vars`` returns ``{}`` for
 # a non-pilot, so a bare ``.update()`` would leave a stale ``TRINITY_PULL_MODE=
 # true`` baked in and the worker would keep running after de-pilot (#1081 B1 —
 # mirrors the guardrails / stall-limit set-or-clear idiom in ``lifecycle.py``).
@@ -72,10 +75,42 @@ def pull_mode_env_vars(agent_name: str) -> Dict[str, str]:
         from services.settings_service import get_effective_max_parallel_tasks
 
         size = get_effective_max_parallel_tasks(agent_name)
-    except Exception:  # noqa: BLE001 — never block agent creation on a settings read
+    except Exception as e:  # noqa: BLE001 — never block agent creation on a settings read
         size = 3
+        # #3590: the fallback used to be silent — a pilot sized 3 when its owner
+        # set 8 was invisible until someone counted workers in the log.
+        logger.warning(
+            "[#3590] pull pilot %r: could not read max_parallel_tasks (%s); "
+            "baking the default pool size %d",
+            agent_name, e, size,
+        )
 
     return {
         "TRINITY_PULL_MODE": "true",
         "TRINITY_MAX_PARALLEL_TASKS": str(size),
     }
+
+
+def apply_pull_mode_env(agent_name: str, env_vars: Dict[str, str]) -> None:
+    """Set-or-clear the pull knobs on a container env, in place.
+
+    The ONE owner of the idiom for every site that assembles an agent container
+    env — creation (``crud._build_env_vars``), the config-drift recreate and the
+    #1559 rebuild-from-nothing (both in ``lifecycle.py``). #3590: the rebuild
+    path re-derived its env independently and never applied the opt-in, so a
+    pilot whose container was lost came back with no worker while the backend
+    kept routing its work to the durable queue — every task sat ``queued`` with
+    no warning. Two prior entries in the learnings ledger name this class
+    ("the create path is never one call site"); a third inline copy would have
+    re-armed it for the fourth site. ``tests/unit/test_3590_rebuild_pull_env.py``
+    pins the writer set.
+
+    Pop first, then update: ``pull_mode_env_vars`` returns ``{}`` for a
+    non-pilot, so a bare ``.update()`` would leave a stale ``TRINITY_PULL_MODE=
+    true`` baked in after de-pilot (#1081 B1). Resolves ``pull_mode_env_vars``
+    through the module global at call time so the suites that stub it keep
+    intercepting.
+    """
+    for key in PULL_MODE_ENV_KEYS:
+        env_vars.pop(key, None)
+    env_vars.update(pull_mode_env_vars(agent_name))

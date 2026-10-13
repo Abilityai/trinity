@@ -18,6 +18,7 @@ renaming step to drift.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 
@@ -60,8 +61,14 @@ class ExecutionResult:
     Every field is written as given — `None` NULLs the column — EXCEPT
     `retry_count` (#678) and `turn_integrity` (#2467): for those two, `None`
     means "leave the column as it is", so a writer that does not derive them
-    never zeroes them. The lease `claim_token` is deliberately NOT here: it is
-    a CAS precondition on the write, not a value the write records.
+    never zeroes them; and EXCEPT `completed_at` (#3589): `None` means "the
+    writer stamps now" (every caller that finalizes as the turn ends), and a
+    value is the instant the PRODUCER says the turn ended — the #2944 watchdog
+    claim passes the agent's `retained_at`, minutes before the write. The
+    writer normalizes it (`utils.helpers.terminal_completed_at`: naive → UTC,
+    never in the future) and measures `duration_ms` to it. The lease
+    `claim_token` is deliberately NOT here: it is a CAS precondition on the
+    write, not a value the write records.
     """
     response: Optional[str] = None
     error: Optional[str] = None
@@ -74,6 +81,7 @@ class ExecutionResult:
     compact_metadata: Optional[str] = None
     retry_count: Optional[int] = None
     turn_integrity: Optional[str] = None
+    completed_at: Optional[datetime] = None
 
 
 @dataclass(frozen=True, kw_only=True)

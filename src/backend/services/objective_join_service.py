@@ -477,6 +477,10 @@ def parse_objective(
         "path": path,
         "schema_version": _text(doc.get("schema_version"), 16),
         "statement": _text(doc.get("statement")),
+        # ent#843: an optional plain-language heading for client screens. The
+        # canon `statement` is written for the team; the Workspace card uses
+        # this when present and falls back to the statement.
+        "client_heading": _text(doc.get("client_heading"), 160),
         "horizon": _text(doc.get("horizon"), 16),
         "status": _text(doc.get("status"), 32),
         "owner": _text(doc.get("owner"), 128),
@@ -606,6 +610,7 @@ def join_objectives(
             "path": obj["path"],
             "schema_version": obj.get("schema_version"),
             "statement": obj.get("statement"),
+            "client_heading": obj.get("client_heading"),
             "horizon": obj.get("horizon"),
             "status": obj.get("status") or ACTIVE_STATUS,
             "owner": obj.get("owner"),
@@ -872,6 +877,11 @@ async def _read_yaml(client, path: str, *,
     status = getattr(response, "status_code", 0)
     if status == 404:
         return None, "not_found"
+    if status == 403:
+        # trinity-enterprise#819: a linked file is not opened; name it in the log.
+        from services.agent_client import client as agent_client_module
+        agent_client_module._warn_if_link_refusal(
+            getattr(client, "agent_name", None), path, response)
     if status != 200:
         return None, "unreadable"
     try:

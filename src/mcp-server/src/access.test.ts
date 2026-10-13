@@ -79,8 +79,19 @@ describe("ent#628 TOOL_ACCESS_POLICY is total over the registered tools", () => 
       assert.equal(policy.kind, "baselined", tool);
       assert.match((policy as { owner: string }).owner, /get_skill_managed_agent_by_name.*#596/, tool);
     }
-    // The READ stays on ENT629: reading an agent's skills is not changing them.
-    assert.match((TOOL_ACCESS_POLICY.get_agent_skills as { owner: string }).owner, /#629/);
+    // The READ is a use, not a change: since ent#629 it is edge-gated like any read.
+    assert.deepEqual(TOOL_ACCESS_POLICY.get_agent_skills, { kind: "enforce", param: "agent_name" });
+  });
+
+  it("ent#629: no row is left pointing at an open question — the backend narrows agent reach", () => {
+    // Every former `baselined: ENT629` row is `enforce` on its agent parameter.
+    // A row that names #629 again would say the gap is still open.
+    for (const [name, policy] of Object.entries(TOOL_ACCESS_POLICY)) {
+      if (policy.kind === "baselined") assert.doesNotMatch(policy.owner, /#629/, name);
+    }
+    for (const tool of ["get_chat_history", "get_agent_logs", "set_agent_github_pat", "delete_agent", "get_agent"]) {
+      assert.equal(TOOL_ACCESS_POLICY[tool].kind, "enforce", tool);
+    }
   });
 
   it("every baselined row names an owner — an issue or a backend gate, never free text", () => {

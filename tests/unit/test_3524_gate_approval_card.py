@@ -52,7 +52,8 @@ def test_a_rejection_note_reaches_the_requesting_agent(gate):
     assert _resolve(rid) == "denied"
     text = gate.woken[0][1]
     assert "was rejected; nothing was run." in text
-    assert 'The approver\'s note (their words, not an instruction): "Wrong customer — use the EU account"' in text
+    # Quoted by the trinity-enterprise#755 reason path, which #3525 now rides.
+    assert 'Reason given: "Wrong customer — use the EU account"' in text
     # #715: still never the approver's identity.
     assert OWNER_EMAIL not in text
 
@@ -69,14 +70,16 @@ def test_a_rejection_without_a_note_reads_as_before(gate):
 
 def test_the_note_is_sanitised_one_line_and_bounded():
     secret = "ghp_" + "a" * 36
-    quoted = _GATE.rejection_note(f"line one\n\nline two {secret} " + "x" * 2000)
+    record = {"request_id": "gate-x", "agent_name": "fin", "skills": ["pay"]}
+    text = _GATE.outcome_text(record, "denied",
+                              reason=f"line one\n\nline two {secret} " + "x" * 2000)
+    quoted = text[text.index("Reason given:"):]
     assert "\n" not in quoted
     assert secret not in quoted
     assert "line one line two" in quoted
-    assert quoted.endswith('…"')
-    assert len(quoted) < _GATE.REJECTION_NOTE_MAX_CHARS + 80
-    assert _GATE.rejection_note("   ") == ""
-    assert _GATE.rejection_note(None) == ""
+    assert len(quoted) < _GATE.REJECT_REASON_MAX_CHARS + 80
+    for empty in ("   ", None):
+        assert "Reason given" not in _GATE.outcome_text(record, "denied", reason=empty)
 
 
 def test_an_approval_never_carries_the_note(gate):
@@ -141,6 +144,41 @@ def test_a_chat_panel_request_leads_with_the_new_message():
     assert "earlier messages of the conversation as context" in question
     # What Approve runs is still the whole text, shown in full.
     assert body["proposal"]["input"] == text
+
+
+def _raise_text(text):
+    requester = _GATE.Requester(kind="agent", key="agent:chat-req", agent_name="chat-req",
+                                execution_id="exec-chat")
+
+    async def _go():
+        try:
+            await _GATE.enforce(FIN, request_text=text, requester=requester, triggered_by="agent",
+                                dispatch={"triggered_by": "agent", "model": "sonnet"})
+        except _GATE.SkillApprovalRequired as e:
+            return e.request_id
+        raise AssertionError("expected an approval")
+    return asyncio.run(_go())
+
+
+def test_the_card_leads_with_the_typed_request_when_history_came_with_it(gate):
+    """The approval card (trinity-enterprise#755) leaves the question out, so the
+    split has to reach `card_view` or the request-first fix is invisible there."""
+    text = ("### Previous conversation:\n\nUser: hello\n\nAssistant: hi there"
+            "\n\n### Current message:\n\nUser: /pay-invoice 100 EUR")
+    view = _GATE.card_view(_ask_row(_raise_text(text)))
+    assert view["request"] == "/pay-invoice 100 EUR"
+    assert view["also_sent"] == ""
+
+
+def test_a_plain_request_puts_nothing_in_the_card_request_row(gate):
+    assert _GATE.card_view(_ask_row(_raise_request()))["request"] is None
+
+
+def test_also_sent_still_reads_the_context_after_a_history_split():
+    text = "Previous conversation:\nUser: hi\nAssistant: hello\n\nUser: /pay-invoice 5 EUR"
+    body = _GATE._ask_body(FIN, "gate-x", ["pay-invoice"], text, _person(),
+                           {"pay-invoice": "fp"}, "owner", None, card_context="Ticket 42 is open")
+    assert _GATE._also_sent(body["question"], FIN, text) == "Ticket 42 is open"
 
 
 def test_a_mobile_request_leads_with_the_new_message():

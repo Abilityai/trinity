@@ -12,6 +12,7 @@ gate and map errors. Only a person ends an ask (`reject_non_person_principal`).
 """
 
 import json
+import logging
 from typing import Any, Dict, List, Optional, Set
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from models import (
@@ -32,7 +33,9 @@ from dependencies import (
 from db_models import User
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.operator_queue_choices import ReservedAnswerError, ResponseNotOfferedError
-from services import ask_service, operator_queue_service
+from services import ask_service, operator_queue_service, skill_gate_service
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api/operator-queue", tags=["operator-queue"])
@@ -60,12 +63,44 @@ def _accessible_set(current_user: User) -> Optional[Set[str]]:
 
     Returns None for admins (no filter — sees everything).
     Returns a set (possibly empty) for regular users.
+
+    trinity-enterprise#629: an agent key carries its OWNER's role, so on an
+    admin-owned install it got None — every agent's queue. It always gets a set,
+    narrowed to its reach (itself, its edges, the agents it spawned).
     """
-    if current_user.role == "admin":
+    is_agent = isinstance(getattr(current_user, "agent_name", None), str) and bool(current_user.agent_name)
+    if current_user.role == "admin" and not is_agent:
         return None
     user_email = current_user.email or ""
-    names = db.get_accessible_agent_names(user_email, is_admin=False)
-    return set(names)
+    is_admin = current_user.role == "admin"
+    names = set(db.get_accessible_agent_names(user_email, is_admin=is_admin))
+    if is_agent:
+        return _agent_reach_set(current_user, names, is_admin=is_admin)
+    return names
+
+
+def _agent_reach_set(current_user: User, owner_names: Set[str], *, is_admin: bool) -> Set[str]:
+    """An agent key's queue scope (trinity-enterprise#629): itself and its
+    edges directly — the same `{self} ∪ permitted` the MCP layer reads — and,
+    of the rest of its owner's agents, the ones it spawned. A non-admin owner's
+    accessible set still bounds it; an admin owner can access every agent, so
+    an edge needs no ownership row to count. The edge read fails closed."""
+    me = current_user.agent_name
+    try:
+        permitted = set(db.get_permitted_agents(me) or [])
+    except Exception:
+        logger.warning("[ent#629] edge list for %s failed; treating as no edges", me)
+        permitted = set()
+    reach = {me} | permitted
+    if not is_admin:
+        reach &= owner_names | {me}
+    try:  # one query, not two lookups per held agent; same key-id rule as the gate
+        key = db.get_agent_mcp_api_key(me)
+        spawned = set(db.list_agents_spawned_by_key(me, key.id)) if key else set()
+    except Exception:
+        logger.warning("[ent#629] spawned list for %s failed; treating as none", me)
+        spawned = set()
+    return reach | (spawned & owner_names)
 
 
 def _owned_set(current_user: User) -> Optional[Set[str]]:
@@ -133,7 +168,13 @@ def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict
         # #3242: whether the reserved "(something else)" answer applies — the
         # sink's own predicate, so no operator surface offers a chip that 422s.
         # A bare boolean; the machine view never needs it (it cannot answer).
-        return [{**item, "decided_by_options": ask_service.decided_by_options(item)}
+        # trinity-enterprise#755: `gate` is the gated-skill approval card's
+        # platform view (None for every other row) — who asked, who it waits
+        # on, whether THIS person may decide, how it ended.
+        return [{**item, "decided_by_options": ask_service.decided_by_options(item),
+                 "gate": skill_gate_service.card_view(
+                     item, viewer_email=current_user.email, with_run_ids=True,
+                     name_approvers=True)}
                 for item in items]
     # #715: the platform's heads-ups ABOUT a person (a client's complaint, the
     # client addresses behind a shared inbox) are the operator's, not a machine's.
