@@ -19,7 +19,7 @@ Click any agent to open its detail page. The page lands on the **Overview** tab 
 | **Canvas** | `canvas` | The surface the agent keeps current -- see [Agent Canvas](agent-canvas.md) |
 | **Schedules** | `schedules` | Cron-based automation -- see [Scheduling](../automation/scheduling.md) |
 | **Loops** | `loops` | Sequential bounded task runs -- see [Agent Loops](../automation/agent-loops.md) |
-| **Playbooks** | `playbooks` | Reusable command templates |
+| **Skills** | `skills` | The agent's own skills and those shared from the library, each with **Run**; owners also set approval and assign skills -- see [Skills](../automation/skills-and-playbooks.md) |
 | **Credentials** | `credentials` | Credential injection and export |
 | **Payments** | `nevermined` | Paid access configuration |
 | **Access** | `access` | Operator access roster (owners only) |
@@ -29,13 +29,12 @@ Click any agent to open its detail page. The page lands on the **Overview** tab 
 | **Git** | `git` | Git sync controls — only for GitHub-synced agents |
 | **Files** | `files` | Workspace file browser |
 | **Folders** | `folders` | Shared folder configuration (owners only) |
-| **Skills** | `skills` | Assign skills from the library (owners only) -- see [Skills](../automation/skills-and-playbooks.md) |
 | **Settings** | `settings` | Per-agent configuration (owners only) -- see [Agent Configuration](agent-configuration.md) |
 | **Info** | `info` | Template metadata and capabilities |
 
 Tabs marked *owners only* are hidden from users an agent is merely shared with, and are never shown on the system agent. **Dashboard**, **Brain**, **Git**, and **A2A** appear only when that agent or instance supports them.
 
-Every visible tab is deep-linkable with `?tab=` — including the conditional ones. A `?tab=` value naming a tab you cannot see falls back to Overview. Two legacy links still resolve: `?tab=guardrails` opens **Settings**, and `?tab=session` redirects to that agent's [Workspace](../sharing-and-access/workspace.md) conversation.
+Every visible tab is deep-linkable with `?tab=` — including the conditional ones. A `?tab=` value naming a tab you cannot see falls back to Overview. Three legacy links still resolve: `?tab=guardrails` opens **Settings**, `?tab=playbooks` opens **Skills**, and `?tab=session` redirects to that agent's [Workspace](../sharing-and-access/workspace.md) conversation.
 
 When the window is too narrow to fit every tab, the trailing tabs collapse into a **More ▾** menu at the end of the tab strip. If the active tab is inside the menu, the More button carries the active highlight. Deep links via `?tab=` work either way.
 
@@ -66,6 +65,8 @@ Toggle an agent between Running and Stopped using the switch on a Dashboard tile
 - **API:** `POST /api/agents/{name}/start` and `POST /api/agents/{name}/stop`
 - **MCP:** `start_agent(name)` and `stop_agent(name)`
 
+A start also delivers the agent's assigned skills, and the start response says how that went. `skills_injection` is the overall status, and `skills_result` lists each skill's status plus any name `conflicts`, with errors reduced to a code. A start that did nothing reports `skipped` with a reason; a missing result reads `unknown`. A conflict does not fail the start, so check `conflicts` to tell it apart from a clean one. The MCP `start_agent` tool adds a line for each skill that did not land.
+
 **After a host reboot.** Agent containers are created with Docker's `unless-stopped` restart policy, so when the host reboots or the Docker daemon restarts, every agent that was running comes back on its own — schedules resume without anyone starting agents by hand. An agent you deliberately stopped stays stopped: the policy honours Docker's manual-stop flag, so a quarantined agent is never resurrected by a reboot. While Docker is bringing agents back they may briefly show as stopped. The policy is set when the container is created; agents created before this behaviour shipped adopt it on their next recreate (a resource, runtime, or base-image change), not on a plain restart — an upgrading install can sweep its existing fleet once using [`AGENT_RESTART_POLICY_2026-09.md`](../../migrations/AGENT_RESTART_POLICY_2026-09.md).
 
 ### Display Label
@@ -91,7 +92,11 @@ Restrictions: system agents cannot be renamed. Only owners and admins have permi
 
 ### Delete
 
-Use the Delete button on the Agent Detail page. A confirmation dialog is required. Deletion cleans up the container, network, sharing records, schedules, activities, and event subscriptions.
+Use the Delete button on the Agent Detail page. A confirmation dialog is required.
+
+Deletion is a soft delete. The container is stopped and removed at once, and the agent's schedules stop firing. Its workspace volumes, schedules, chat history, sharing records, permissions and credentials are kept until a retention sweep purges them (`agent_soft_delete_retention_days`, default 180 days). Until then the name stays reserved, and an admin can recover the agent with `POST /api/admin/soft-deleted/agents/{name}/recover` (list them with `GET /api/admin/soft-deleted/agents`). Recovery restores the record but not the container, so start the agent afterwards.
+
+Volume clean-up stays inside this Trinity installation. Each agent volume carries the installation's id, so when two Trinity stacks share one Docker daemon, neither the purge nor the sweep for orphaned agent volumes touches the other stack's volumes. The orphan sweep never reclaims a volume created before that label existed; unattached ones of those are named in a warning in the backend log for a person to review.
 
 - **API:** `DELETE /api/agents/{name}`
 - **MCP:** `delete_agent(name)`
@@ -100,13 +105,13 @@ Use the Delete button on the Agent Detail page. A confirmation dialog is require
 
 The agent header displays status (Running/Stopped), CPU and memory usage, network I/O, and uptime. Telemetry auto-refreshes every 10 seconds.
 
-Fleet-wide monitoring is available at `GET /api/monitoring/fleet-health`. Health levels, from best to worst: healthy, degraded, unhealthy, critical, unknown.
+Fleet-wide health for the agents you can access is at `GET /api/monitoring/status`; one agent's is at `GET /api/monitoring/agents/{name}`. Admins also have `GET /api/ops/fleet/health` — see [Monitoring](../operations/monitoring.md). Health levels, from best to worst: healthy, degraded, unhealthy, critical, unknown.
 
-- **MCP:** `get_agent_health(name)`, `get_fleet_health()`, `trigger_health_check()`
+- **MCP:** `get_agent_health(name)`, `get_fleet_health()` (includes each agent's git `sync` block), `get_fleet_sync_audit()`, `trigger_health_check()`
 
 ### Resource Allocation
 
-Configure per-agent memory and CPU limits from the agent header: click the gear button ("Configure resources") to open the resource modal. Limits are enforced at the container level and take effect on the next restart -- see [Agent Configuration](agent-configuration.md#resource-allocation) for valid values and fleet-wide defaults.
+Configure per-agent memory and CPU limits from the agent header: click the gear button ("Configure resources") to open the resource modal. Limits are enforced at the container level and take effect on the next restart. A CPU limit above the host's CPU count is capped to that count -- see [Agent Configuration](agent-configuration.md#resource-allocation) for valid values and fleet-wide defaults.
 
 Execution timeout is configurable per agent (range: 60--7200 seconds, default: 3600 seconds / 60 minutes).
 

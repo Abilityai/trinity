@@ -20,8 +20,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Path to the guard script under test
-_GUARD_SCRIPT = Path(__file__).parent.parent.parent / "docker/base-image/hooks/read-only-guard.py"
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import _ent787_hook_harness as H  # noqa: E402
 
 _DEFAULT_CONFIG = {
     "enabled": True,
@@ -33,25 +35,24 @@ _DEFAULT_CONFIG = {
 
 
 def _run_guard(tool_input: dict, config: dict | None, tmp_path: Path) -> subprocess.CompletedProcess:
-    """Execute the guard script with a given tool_input JSON and optional config file."""
+    """Execute the guard with a given tool_input JSON and optional config file.
+
+    The guard reads the root-owned /opt/trinity/read-only-config.json
+    (ent#787); the harness points that module constant at a tmp file and runs
+    the hook under its registered interpreter flags.
+    """
+    cfg_path = tmp_path / "read-only-config.json"
     if config is not None:
-        cfg_path = tmp_path / ".trinity" / "read-only-config.json"
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg_path.write_text(json.dumps(config))
-        home = str(tmp_path)
-    else:
-        home = str(tmp_path)  # no config file → guard exits 0
-
-    stdin_data = json.dumps({"tool_input": tool_input, "tool_name": "Write"})
-
-    result = subprocess.run(
-        [sys.executable, str(_GUARD_SCRIPT)],
-        input=stdin_data,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "HOME": home},
+    return H.run_hook(
+        "read-only-guard.py",
+        {"tool_input": tool_input, "tool_name": "Write"},
+        flags=H.registered_flags("read-only-guard.py"),
+        env=H.registered_env("read-only-guard.py"),
+        tmp=tmp_path,
+        overrides={"_CONFIG_PATH": str(cfg_path),
+                   "_LEGACY_CONFIG_PATH": str(tmp_path / "absent-home-copy.json")},
     )
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +119,19 @@ class TestGuardBlockedPaths:
             tmp_path=tmp_path,
         )
         assert result.returncode == 2
+
+    @pytest.mark.parametrize("path", [
+        "//home/developer/.claude/agents/x.md",
+        "///home/developer/.claude/agents/x.md",
+        "//home/developer/.claude",
+    ])
+    def test_leading_slashes_do_not_skip_a_directory_pattern(self, tmp_path, path):
+        """trinity-enterprise#792: normpath keeps exactly two leading slashes, so
+        `//home/developer/.claude/...` used to match neither the relative nor the
+        directory form of `.claude/*` while the write lands in `.claude/`."""
+        result = _run_guard({"file_path": path}, config=_DEFAULT_CONFIG, tmp_path=tmp_path)
+        assert result.returncode == 2
+        assert "read-only mode" in result.stderr
 
     def test_relative_path_blocked(self, tmp_path):
         """Relative file_path is resolved before pattern matching."""

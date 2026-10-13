@@ -207,10 +207,12 @@ def test_the_reaper_keeps_a_live_room_jsonl(monkeypatch):
                         for u in (session_uuid, room_uuid, orphan_uuid))
     removed = []
 
-    async def _fake_exec(container, cmd, timeout=30):
+    async def _fake_exec(container, cmd, timeout=30, **_kw):
         if cmd.startswith("rm -f"):
             removed.append(cmd)
             return {"exit_code": 0, "output": ""}
+        if "chat-session.json" in cmd:  # #2958: this agent has no /api/chat session
+            return {"exit_code": 0, "output": "__NO_CHAT_SESSION__\n"}
         return {"exit_code": 0, "output": listing}
 
     monkeypatch.setattr(cleanup, "execute_command_in_container", _fake_exec)
@@ -245,7 +247,7 @@ def test_the_reaper_skips_the_sweep_when_the_room_keep_set_cannot_load(monkeypat
 
     reached = {"container": False}
 
-    async def _fake_exec(container, cmd, timeout=30):
+    async def _fake_exec(container, cmd, timeout=30, **_kw):
         reached["container"] = True
         return {"exit_code": 0, "output": ""}
 

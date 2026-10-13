@@ -4,6 +4,7 @@ User-facing highlights for each Trinity release — what changed and why it matt
 
 ## Releases
 
+- [v0.9.5](v0.9.5.md) — 2026-09-17 · Workspace becomes where the work happens: chats per topic, a conversation rail, live execution cards, agent asks, a canvas for every agent, and real-time voice mode; prebuilt images and a guided DigitalOcean install with first-run setup in the browser; subscription usage and headroom visibility; opt-in instance telemetry; credentials encrypted at rest and the GitHub token out of agents' git remotes.
 - [v0.9.0](v0.9.0.md) — 2026-08-17 · Trinity opens outward: Workspace (the client surface) in every build with multi-agent chats and streaming; fresh-install provisioning (remote template registry, UI system installs, guided credentials); multi-source skills library; bidirectional A2A; dashboard org overlay; Agent Reports complete; automatic database backups; deep security hardening. *Illustrated.*
 - [v0.8.5](v0.8.5.md) — 2026-07-26 · Agents coordinate and report back: task-completion report-back, self-reminders, and shared rooms; resilient system deploy; full-directory skill packages; editable display names; personal GitHub tokens; retention safety; reliability & security hardening.
 - [v0.8.0](v0.8.0.md) — 2026-07-08 · Voice replies across channels; Brain Orb mind page for second-brain agents; Grid dashboard; unified agent page; enterprise identity (2FA/SSO); security & reliability hardening. *Illustrated.*

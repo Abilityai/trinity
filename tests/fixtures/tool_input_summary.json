@@ -1,0 +1,169 @@
+{
+  "_comment": "trinity-enterprise#620: the agent server's get_input_summary (docker/base-image/agent_server/utils/helpers.py) and its JS port (src/frontend/src/utils/workActivity.js::summariseToolInput) must agree on these. One summariser feeds the heartbeat line, the other the own-turn stream line, and the Work card renders both — so a case that diverges here is a card that reads differently for the same tool call depending on the feed. Asserted by tests/unit/test_ent620_summary_parity.py and src/frontend/tests/unit/workActivity.spec.js.",
+  "cases": [
+    {
+      "tool": "Read",
+      "input": {
+        "file_path": "/home/developer/src/backend/routers/agents.py"
+      },
+      "summary": ".../routers/agents.py"
+    },
+    {
+      "tool": "Read",
+      "input": {
+        "file_path": "README.md"
+      },
+      "summary": "README.md"
+    },
+    {
+      "tool": "Read",
+      "input": {
+        "file_path": "docs/x.md"
+      },
+      "summary": "docs/x.md"
+    },
+    {
+      "tool": "Read",
+      "input": {},
+      "summary": "..."
+    },
+    {
+      "tool": "Edit",
+      "input": {
+        "file_path": "/a/b/c/d.py",
+        "old_string": "x",
+        "new_string": "y"
+      },
+      "summary": ".../c/d.py"
+    },
+    {
+      "tool": "Write",
+      "input": {
+        "file_path": "/a/b/c.txt",
+        "content": "hello"
+      },
+      "summary": ".../b/c.txt"
+    },
+    {
+      "tool": "Glob",
+      "input": {
+        "pattern": "src/**/*.vue"
+      },
+      "summary": "src/**/*.vue"
+    },
+    {
+      "tool": "Glob",
+      "input": {
+        "path": "src"
+      },
+      "summary": "..."
+    },
+    {
+      "tool": "Grep",
+      "input": {
+        "pattern": "sync_health_service",
+        "path": "src"
+      },
+      "summary": "\"sync_health_service\""
+    },
+    {
+      "tool": "Grep",
+      "input": {
+        "pattern": "a-very-long-pattern-that-goes-past-thirty-characters"
+      },
+      "summary": "\"a-very-long-pattern-that-goes-\""
+    },
+    {
+      "tool": "Grep",
+      "input": {
+        "path": "src"
+      },
+      "summary": "..."
+    },
+    {
+      "tool": "Bash",
+      "input": {
+        "command": "pytest tests/unit -q"
+      },
+      "summary": "pytest tests/unit -q"
+    },
+    {
+      "tool": "Bash",
+      "input": {
+        "command": "cd /home/developer && npm run test:unit -- --reporter=dot --run"
+      },
+      "summary": "cd /home/developer && npm run test:unit -- --repor..."
+    },
+    {
+      "tool": "Task",
+      "input": {
+        "description": "Map the Work card",
+        "prompt": "long prompt"
+      },
+      "summary": "Map the Work card"
+    },
+    {
+      "tool": "Task",
+      "input": {
+        "prompt": "Explore the codebase for every place the heartbeat payload is read"
+      },
+      "summary": "Explore the codebase for every place the heartbeat"
+    },
+    {
+      "tool": "WebFetch",
+      "input": {
+        "url": "https://docs.example.com/a/b?c=d"
+      },
+      "summary": "docs.example.com"
+    },
+    {
+      "tool": "WebSearch",
+      "input": {
+        "query": "vue 3 transition group fixed height slide up example query"
+      },
+      "summary": "vue 3 transition group fixed height slid"
+    },
+    {
+      "tool": "TodoWrite",
+      "input": {
+        "todos": []
+      },
+      "summary": "Updating todos"
+    },
+    {
+      "tool": "AskUserQuestion",
+      "input": {
+        "questions": []
+      },
+      "summary": "Asking question"
+    },
+    {
+      "tool": "mcp__trinity__chat_with_agent",
+      "input": {
+        "agent_name": "sidekick",
+        "message": "please summarise the invoices for me"
+      },
+      "summary": "agent_name: sidekick"
+    },
+    {
+      "tool": "mcp__trinity__list_agents",
+      "input": {},
+      "summary": "..."
+    },
+    {
+      "tool": "SomeUnknownTool",
+      "input": {
+        "count": 3,
+        "label": "0123456789012345678901234567890123456789012345678901234567890"
+      },
+      "summary": "label: 012345678901234567890123456789..."
+    },
+    {
+      "tool": "SomeUnknownTool",
+      "input": {
+        "count": 3
+      },
+      "summary": "..."
+    }
+  ]
+}

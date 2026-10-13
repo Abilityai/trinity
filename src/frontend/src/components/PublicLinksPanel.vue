@@ -27,7 +27,7 @@
 
     <!-- Empty state -->
     <div v-else-if="links.length === 0" class="text-center py-12 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-dashed border-gray-300 dark:border-gray-700">
-      <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
       </svg>
       <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-white">No public links</h3>
@@ -72,7 +72,7 @@
             <!-- URL preview -->
             <div class="mt-2 flex items-center space-x-2">
               <code class="flex-1 text-xs text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded truncate">
-                {{ link.external_url || link.url }}
+                {{ publicLinkUrl(link) }}
               </code>
               <button
                 @click="copyLink(link)"
@@ -159,7 +159,7 @@
                 </div>
               </div>
               <!-- Connected By Info -->
-              <div v-if="slackConnections[link.id]?.connected" class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+              <div v-if="slackConnections[link.id]?.connected" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                 Connected by {{ slackConnections[link.id].connected_by }} on {{ formatDate(slackConnections[link.id].connected_at) }}
               </div>
             </div>
@@ -359,6 +359,7 @@
 import { ref, onMounted, watch } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { publicLinkUrl } from '../utils/publicLinkUrl'
 
 const props = defineProps({
   agentName: {
@@ -591,7 +592,7 @@ const disconnectSlack = async (link) => {
 // Copy link to clipboard
 const copyLink = async (link) => {
   try {
-    const url = link.external_url || link.url
+    const url = publicLinkUrl(link)
     await navigator.clipboard.writeText(url)
     copyNotification.value = 'copied'
     setTimeout(() => {

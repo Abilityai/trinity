@@ -68,6 +68,60 @@ def _is_model_access_error(text: str) -> bool:
     ])
 
 
+# #3012: Claude Code refusing the requested model. Two shapes, both captured
+# from the real CLI (exit 1, zero tokens, no API spend):
+#   * CLI too old for the id: assistant ``error: "invalid_request"``,
+#     ``api_error_code: "claude_code_version_too_old"``, text "API Error: 400
+#     Claude Code 2.1.278 does not support this model; version 2.1.280 or newer
+#     is required. ..."
+#   * id the API does not know: assistant ``error: "model_not_found"``, text
+#     "There's an issue with the selected model (...)".
+# Both also print ``[claude-code:unrecognized_model] {"model": ...}`` on stderr.
+# The backend's SUB-003 fallback classifier matches these same literals for
+# agents still on an older image (src/backend/services/failure_classifier.py
+# ``MODEL_REJECTION_MARKERS``; parity pinned by test_3012_model_rejection.py).
+# A subscription switch cannot fix either, so the result must never be a 503.
+MODEL_UNSUPPORTED_ERROR_CODE = "model_unsupported"
+_UNRECOGNIZED_MODEL_MARKER = "[claude-code:unrecognized_model]"
+_VERSION_TOO_OLD_TEXT = "does not support this model"
+
+
+def _model_rejection_message(
+    metadata: Optional["ExecutionMetadata"], stderr: str = ""
+) -> Optional[str]:
+    """The runtime's own words when Claude Code refused the model, else None.
+
+    Prefers the API sentence the stream parser recorded; falls back to the
+    stderr marker line when the assistant event carried no text. Pass
+    ``stderr`` only for a non-zero exit — the marker is a failure signal.
+
+    Only a turn that spent nothing qualifies: a refused model never reaches
+    the API. A turn that did work and then carries the marker (a subagent's
+    refused ``model:``, a late SIGKILL) keeps its own classification.
+    """
+    if metadata is not None and (
+        metadata.cost_usd or metadata.input_tokens or metadata.output_tokens
+    ):
+        return None
+    if metadata is not None:
+        msg = metadata.error_message or ""
+        if metadata.error_type == "model_not_found" or _VERSION_TOO_OLD_TEXT in msg.lower():
+            return sanitize_text(msg or f"Model not found ({metadata.error_type})")
+    for line in (stderr or "").splitlines():
+        if _UNRECOGNIZED_MODEL_MARKER in line:
+            return sanitize_text(line.strip())
+    return None
+
+
+def _model_rejection_detail(message: str) -> Dict[str, str]:
+    """Structured 400 body for a model rejection — ``error_code`` lets the
+    async callback and pull worker label it without a status-code guess."""
+    return {
+        "message": f"Model unsupported: {message[:400]}",
+        "error_code": MODEL_UNSUPPORTED_ERROR_CODE,
+    }
+
+
 def _is_auth_failure_message(text: str) -> bool:
     """Check if a message indicates an authentication/token failure.
 
@@ -119,6 +173,28 @@ def _format_rate_limit_error(metadata: "ExecutionMetadata") -> str:
     )
 
 
+# Surfaced when a result is flagged is_error but carries no reportable cause.
+# Deliberately NOT the bare "Execution error": ``headless_executor`` renders the
+# detail as f"Execution error: {…}", which would read "Execution error:
+# Execution error". Word choice is load-bearing — it must trip none of
+# is_auth_failure / _is_resume_not_found / _is_rate_limit_message. Pinned by
+# tests/unit/test_1849_ede_diagnostic_filtered.py.
+_NO_ERROR_DETAIL = "Claude Code reported no error detail"
+
+
+def _stream_error_reason(metadata: Optional["ExecutionMetadata"]) -> str:
+    """The error text the stream parser recorded for this run, else "".
+
+    #3340: Claude Code names an API error in its stream ("API Error: 400 Output
+    blocked by content filtering policy") and exits 1 with nothing on stderr.
+    The ``_NO_ERROR_DETAIL`` placeholder is not a reason.
+    """
+    message = ((metadata.error_message if metadata else "") or "").strip()
+    if not message or message.startswith(_NO_ERROR_DETAIL):
+        return ""
+    return sanitize_text(message)
+
+
 def _diagnose_exit_failure(return_code: int, metadata: Optional["ExecutionMetadata"] = None) -> str:
     """Diagnose common Claude Code exit failures when stderr is empty."""
     # Check for rate limit detected during stream parsing
@@ -141,6 +217,12 @@ def _diagnose_exit_failure(return_code: int, metadata: Optional["ExecutionMetada
             f"The agent's configured model may not be available with the current subscription. "
             f"Try using a different model (sonnet, opus) or check subscription settings."
         )
+
+    # #3340: the stream said why it failed — report that, not a guess from the
+    # environment's shape. The callers run their auth checks on the result.
+    stream_error = _stream_error_reason(metadata)
+    if stream_error:
+        return stream_error
 
     # Check for missing credentials
     has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))

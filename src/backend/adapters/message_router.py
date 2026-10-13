@@ -14,10 +14,8 @@ Uses the same execution path as web public chat (EXEC-024) for:
 
 import asyncio
 import logging
-import os
 import re
 import time
-import unicodedata
 from typing import List, Optional, Tuple
 from collections import defaultdict
 
@@ -31,9 +29,19 @@ from services.platform_prompt_service import (
 )
 from services.settings_service import settings_service
 from services.task_execution_service import get_task_execution_service
+from services.skill_gate_errors import SkillGateError
+from services.telegram_group_context import (  # ent#600
+    MAX_AGE_HOURS,
+    MAX_MESSAGES,
+    PRUNE_EVERY,
+    STORE_CAP,
+    format_group_history,
+    reply_quote_line,
+)
+from utils.helpers import iso_cutoff
 from services.docker_utils import container_exec_run
 from services.telegram_media import process_voice
-from services.upload_service import process_file_uploads, format_file_size
+from services.upload_service import process_file_uploads
 from adapters.base import ChannelAdapter, ChannelResponse, FileAttachment, NormalizedMessage, OutboundFile
 
 logger = logging.getLogger(__name__)
@@ -45,7 +53,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_RATE_LIMIT_MAX = 30        # messages per window
 _DEFAULT_RATE_LIMIT_WINDOW = 60     # seconds
-_DEFAULT_CHANNEL_TIMEOUT = 120      # seconds
 _DEFAULT_CHANNEL_ALLOWED_TOOLS = "WebSearch,WebFetch"
 _FILE_UPLOAD_RATE_LIMIT_MAX = 5     # file uploads per window
 _FILE_UPLOAD_RATE_LIMIT_WINDOW = 60 # seconds
@@ -79,10 +86,6 @@ def _get_rate_limit_window() -> int:
     return int(settings_service.get_setting("channel_rate_limit_window", str(_DEFAULT_RATE_LIMIT_WINDOW)))
 
 
-def _get_channel_timeout() -> int:
-    return int(settings_service.get_setting("channel_timeout_seconds", str(_DEFAULT_CHANNEL_TIMEOUT)))
-
-
 def _get_channel_allowed_tools() -> List[str]:
     raw = settings_service.get_setting("channel_allowed_tools", _DEFAULT_CHANNEL_ALLOWED_TOOLS)
     return [t.strip() for t in raw.split(",") if t.strip()]
@@ -98,6 +101,34 @@ def _join_caller_prompts(*parts: Optional[str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Group chat sender formatting (Issue #349)
 # ---------------------------------------------------------------------------
+
+def _session_count(session) -> int:
+    """Lifetime ``message_count`` of a session row (model or mapping)."""
+    count = (
+        session.message_count if hasattr(session, "message_count")
+        else session.get("message_count", 0)
+    )
+    return count if isinstance(count, int) else 0
+
+
+def _reply_quote(message: NormalizedMessage) -> Optional[str]:
+    """The `[Replying to …: "…"]` line a group turn carries (ent#600), or None.
+    One helper for the prompt (`_format_group_sender`) and the skill gate's scan
+    (`_run_agent_task`), so the gate reads the line the agent reads (#3274)."""
+    raw_message = message.metadata.get("raw_message", {})
+    return reply_quote_line(raw_message if isinstance(raw_message, dict) else {},
+                            message.metadata.get("bot_id", ""))
+
+
+def _gate_request_text(message: NormalizedMessage, is_group: bool) -> Optional[str]:
+    """What the skill gate reads of a channel turn: the sender's text, after the
+    quote line in a group. Never the history block or the sender/group labels."""
+    text = getattr(message, "text", None)
+    quote = _reply_quote(message) if is_group else None
+    if quote and text:
+        return f"{quote}\n{text}"
+    return quote or text
+
 
 def _format_group_sender(message: NormalizedMessage) -> str:
     """
@@ -133,6 +164,13 @@ def _format_group_sender(message: NormalizedMessage) -> str:
     else:
         # Fallback to sender_id if no identity info available
         parts.append(f"[From: User #{message.sender_id}]")
+
+    # ent#600: a tagged reply to someone else's message carries the quoted
+    # text — Telegram delivers it with every reply, Privacy Mode or not, so
+    # this slice needs no BotFather setup.
+    quote = _reply_quote(message)
+    if quote:
+        parts.append(quote)
 
     return "\n".join(parts)
 
@@ -302,79 +340,80 @@ def _check_rate_limit(key: str, max_msgs: Optional[int] = None, window: Optional
     return True
 
 
-def _format_file_size(size_bytes: int) -> str:
-    return format_file_size(size_bytes)
-
-
-# Filename sanitization (Issue #487)
-_FILENAME_MAX_LENGTH = 200          # POSIX-safe; leaves room for collision suffix
-_FILENAME_SAFE_CHARS_RE = re.compile(r'[^\w.\-()]')  # keep word chars, dot, hyphen, parens
-
-
-def _sanitize_filename(name: str, file_id: str, used_names: set) -> str:
-    """
-    Sanitize a user-supplied filename for safe placement in the agent workspace.
-
-    Steps:
-    1. NFKC unicode normalize — collapses fullwidth/halfwidth and combining
-       sequences so path-traversal sequences encoded with unicode variants
-       can't slip past the basename check.
-    2. ``os.path.basename`` — drop any leading directories.
-    3. Strip non-safe chars to underscores (keep word chars, dot, hyphen, parens).
-    4. Fall back to ``file_{file_id}`` if the result is empty or pure dots/whitespace.
-    5. Truncate to 200 chars preserving the extension.
-    6. De-dupe against ``used_names`` by appending ``-1``, ``-2``, … before the
-       extension on collision.
-
-    The caller is responsible for adding the returned name to ``used_names``.
-    """
-    normalized = unicodedata.normalize("NFKC", name or "")
-    base = os.path.basename(normalized)
-    safe = _FILENAME_SAFE_CHARS_RE.sub('_', base)
-
-    # Reject names that are empty, dot-only/underscore-only, or hidden
-    # dotfiles (`.env`, `.gitignore`, …). Per-session upload dir already
-    # isolates uploads from the agent's own dotfiles, but rejecting hidden
-    # names preserves the existing security posture (#222) and avoids
-    # surprising agents whose Read tool sees a ``.env``-shaped file in
-    # their workspace.
-    stripped = safe.strip('._')
-    if not stripped or safe.startswith('.'):
-        safe = f"file_{file_id}"
-
-    # Truncate to length cap, preserving extension where possible.
-    if len(safe) > _FILENAME_MAX_LENGTH:
-        stem, dot, ext = safe.rpartition('.')
-        if dot and len(ext) <= 16:
-            keep = _FILENAME_MAX_LENGTH - len(ext) - 1
-            safe = f"{stem[:keep]}.{ext}"
-        else:
-            safe = safe[:_FILENAME_MAX_LENGTH]
-
-    # Collision dedup: append -1, -2, … before the extension.
-    if safe in used_names:
-        stem, dot, ext = safe.rpartition('.')
-        if not dot:
-            stem, ext = safe, ""
-        suffix_n = 1
-        while True:
-            suffix = f"-{suffix_n}"
-            candidate_stem = stem
-            # Trim stem so candidate stays within length cap.
-            max_stem = _FILENAME_MAX_LENGTH - len(suffix) - (len(ext) + 1 if ext else 0)
-            if len(candidate_stem) > max_stem:
-                candidate_stem = candidate_stem[:max_stem]
-            candidate = f"{candidate_stem}{suffix}.{ext}" if ext else f"{candidate_stem}{suffix}"
-            if candidate not in used_names:
-                safe = candidate
-                break
-            suffix_n += 1
-
-    return safe
-
-
 class ChannelMessageRouter:
     """Channel-agnostic message dispatcher."""
+
+    # ------------------------------------------------------------------ #
+    # ent#600: group conversation context
+    # ------------------------------------------------------------------ #
+
+    async def _record_observed_message(
+        self, adapter: ChannelAdapter, message: NormalizedMessage, channel: str
+    ) -> None:
+        """Persist an un-tagged group message as attributed context — never
+        execute it (ent#600).
+
+        Runs before every gate of the turn pipeline on purpose: observation is
+        one small write, not compute, so the per-user turn rate limit would
+        only punch silent holes in the context. The two gates that DO apply
+        are the ones that decide whether this group's words may be stored at
+        all — the per-group toggle and ``group_auth_mode=any_verified`` (a
+        locked group records nothing, exactly as it gets no reply). The
+        evidence that an un-tagged message arrived is noted regardless.
+
+        Bare commands are not conversation and are skipped. Never raises: the
+        transport already returned 200 to Telegram and nothing user-visible
+        depends on this write.
+        """
+        try:
+            if message.text.strip().startswith("/"):
+                return
+            agent_name = await adapter.get_agent_name(message)
+            if not agent_name:
+                return
+            await adapter.note_untagged_seen(message, agent_name)
+            if not await adapter.group_context_enabled(message, agent_name):
+                return
+            policy = db.get_access_policy(agent_name) or {}
+            if policy.get("group_auth_mode", "none") == "any_verified":
+                if not await adapter.is_group_verified(message, agent_name):
+                    return
+            session = db.get_or_create_public_chat_session(
+                agent_name, adapter.get_session_identifier(message), channel
+            )
+            session_id = session.id if hasattr(session, "id") else session["id"]
+            db.add_public_chat_message(
+                session_id, "user", message.text,
+                sender_label=_sender_label(message),
+            )
+            self._prune_group_session_if_due(session_id, _session_count(session), added=1)
+            logger.debug(f"[ROUTER:{channel}] observed group message recorded (session={session_id})")
+        except Exception as e:  # noqa: BLE001 — observation must never surface as an error
+            logger.warning(f"[ROUTER:{channel}] observed-message record failed (non-fatal): {e}")
+
+    @staticmethod
+    def _prune_group_session_if_due(session_id: str, count_before: int, *, added: int) -> None:
+        """Bound a group session to ``STORE_CAP`` rows (ent#600).
+
+        Every group write path calls this — observed messages, tagged turns,
+        and ``all``/``observe``-mode turns alike — so no trigger mode grows a
+        session without limit. One DELETE each time the lifetime count crosses
+        a ``PRUNE_EVERY`` boundary keeps a firehose group cheap; a turn adds
+        two rows, so the check is a crossing, not a modulo on one value.
+        """
+        if count_before // PRUNE_EVERY != (count_before + added) // PRUNE_EVERY:
+            db.prune_public_chat_session(session_id, STORE_CAP)
+
+    @staticmethod
+    def _group_history_block(session_id: str, agent_name: str) -> str:
+        """Bounded, attributed, delimited history for a group turn (ent#600).
+        Over-fetches so ``[NO_REPLY]`` rows don't eat the window."""
+        rows = db.get_recent_public_chat_messages(
+            session_id,
+            limit=MAX_MESSAGES * 2,
+            since=iso_cutoff(MAX_AGE_HOURS),
+        )
+        return format_group_history(rows, agent_name, limit=MAX_MESSAGES)
 
     async def handle_message(self, adapter: ChannelAdapter, message: NormalizedMessage) -> None:
         """Process an incoming message through the full pipeline."""
@@ -387,11 +426,27 @@ class ChannelMessageRouter:
         channel = adapter.channel_type
         logger.info(f"[ROUTER:{channel}] START: sender={message.sender_id}, channel={message.channel_id}")
 
+        # 0. ent#600: an observed group message is RECORDED as context and
+        # never executed — no rate-limit charge, no typing, no reaction, no
+        # reply. Everything below this line is the turn pipeline.
+        if message.metadata.get("observe_only"):
+            await self._record_observed_message(adapter, message, channel)
+            return
+
         # 1–2. Resolve agent + bot token (None ⇒ abort).
         resolved = await self._resolve_agent_and_token(adapter, message, channel)
         if resolved is None:
             return
         agent_name, bot_token = resolved
+
+        # 2-. ent#600: an executed un-tagged turn (all / observe modes) is the
+        # same proof as an observed one that the bot sees this group's
+        # un-tagged messages. Best-effort bookkeeping — never blocks the turn.
+        if message.metadata.get("untagged"):
+            try:
+                await adapter.note_untagged_seen(message, agent_name)
+            except Exception as e:
+                logger.debug(f"[ROUTER:{channel}] note_untagged_seen failed (non-fatal): {e}")
 
         # 2a. Enrich with async-fetched sender/channel identity (#350). No-op on
         # channels whose event already carries identity (Telegram); Slack fills
@@ -459,8 +514,39 @@ class ChannelMessageRouter:
         # leaking prior private conversation context into public group replies.
         # Issue #349: Include sender identity in group messages so agent knows who is speaking.
         if is_group:
+            # ent#600: the group session (keyed per chat) holds the group's own
+            # attributed conversation — observed messages, tagged turns and the
+            # agent's replies/broadcasts — so a tagged turn is answered in
+            # context. Bounded (newest N within a rolling window), rendered as
+            # a delimited reference block, and off per group when the owner
+            # says so.
             sender_context = _format_group_sender(message)
-            context_prompt = f"{sender_context}\n\n{message.text}"
+            history = ""
+            context_on = await adapter.group_context_enabled(message, agent_name)
+            if context_on:
+                history = self._group_history_block(session_id, agent_name)
+            context_prompt = "\n\n".join(
+                part for part in (sender_context, history, message.text) if part
+            )
+            if context_on:
+                # Persist the tagged user turn NOW, after the history read and
+                # before execution: observed messages that arrive during a long
+                # run must sort after it (stored order = what the group saw),
+                # and a failed run must not erase the message from the group's
+                # memory. Step 11 skips the user insert for this turn.
+                db.add_public_chat_message(
+                    session_id, "user", message.text,
+                    sender_email=verified_email,
+                    sender_label=_sender_label(message),
+                )
+                message.metadata["_user_turn_persisted"] = True
+                self._prune_group_session_if_due(session_id, _session_count(session), added=2)
+            else:
+                # Context OFF ⇒ nothing about this group is recorded: not the
+                # tagged turn, not the reply (step 11), not observed messages
+                # (step 0), not broadcasts. The prompt is the pre-ent#600 fresh
+                # one (sender identity + reply quote + the message).
+                message.metadata["_group_unrecorded"] = True
         else:
             context_prompt = db.build_public_chat_context(session_id, message.text)
             # #350: prepend channel + sender identity for channel (non-DM)
@@ -519,6 +605,7 @@ class ChannelMessageRouter:
             result = await self._run_agent_task(
                 adapter, message, agent_name, bot_token, channel, is_group,
                 container, upload_dir, context_prompt, verified_email, image_data,
+                session_id=session_id,
             )
             if result is None:
                 return
@@ -651,6 +738,7 @@ class ChannelMessageRouter:
         context_prompt: str,
         verified_email: Optional[str],
         image_data: list,
+        session_id: Optional[str] = None,
     ):
         """Step 9: assemble public-channel execution params (source identity,
         MEM-001 memory injection, restricted tool set) and run the task.
@@ -709,12 +797,22 @@ class ChannelMessageRouter:
             public_allowed_tools = public_allowed_tools + [_VOICE_REPLY_TOOL]
 
         try:
-            task_execution_service = get_task_execution_service()
+            # #3114: on a pull pilot the turn is queued under this channel
+            # conversation's key and awaited here.
+            from services.task_execution_service import dispatch_and_await_terminal
 
-            result = await task_execution_service.execute_task(
+            result = await dispatch_and_await_terminal(
+                service=get_task_execution_service(),
                 agent_name=agent_name,
                 message=context_prompt,
+                # trinity-enterprise#751: the skill gate reads what THIS sender
+                # wrote, never the sender context + history `context_prompt` wraps
+                # it in — one past mention would gate every later turn. #3274:
+                # plus, in a group, the message they reply to — the quote line
+                # is part of their request (the Workspace twin scans its quote).
+                request_text=_gate_request_text(message, is_group),
                 triggered_by=channel,
+                conversation_key=f"channel:{session_id}" if session_id else None,
                 source_user_email=source_email,
                 timeout_seconds=None,  # Uses agent's configured timeout (TIMEOUT-001)
                 allowed_tools=public_allowed_tools,
@@ -733,6 +831,17 @@ class ChannelMessageRouter:
                 source_channel=channel,
                 source_channel_chat_id=str(message.channel_id) if message.channel_id is not None else None,
                 source_channel_thread=str(message.thread_id) if message.thread_id is not None else None,
+                # ent#549: WHICH human this turn is for — the column's meaning
+                # since ent#457. Stamped only when that is a fact: a verified
+                # speaker in a one-to-one conversation. In a GROUP `verified_email`
+                # is the UNLOCKER's address (set once per group, not per speaker),
+                # which is why MEM-001 above refuses it there too; and
+                # `source_user_email` falls back to a channel-native id. Neither
+                # may decide whose Workspace Files tab lists a file this turn
+                # shares, so `turn_audience.audience_of` reads THIS column and
+                # nothing else. Inert for completion reports: only the portal leg
+                # compares it (`channel_completion_report`).
+                source_channel_client=verified_email if (verified_email and not is_group) else None,
             )
 
             if result.status in ("failed", "cancelled"):
@@ -759,6 +868,21 @@ class ChannelMessageRouter:
             response_text = result.response or ""
             logger.debug(f"[ROUTER:{channel}] Step 9 - agent responded ({len(response_text)} chars, cost=${result.cost or 0:.4f})")
             return result
+
+        except SkillGateError as e:
+            # trinity-enterprise#751: the message names a gated skill — nothing
+            # ran. Say so in the conversation (with the request id when an
+            # approval was raised) instead of an error or an empty reply.
+            logger.info(f"[ROUTER:{channel}] Step 9 - held by the skill gate: {e.code}")
+            await self._resolve_indicator(adapter, message, success=False)
+            await adapter.send_response(
+                message.channel_id,
+                ChannelResponse(text=getattr(e, "message", None) or str(e),
+                                metadata={"bot_token": bot_token, "agent_name": agent_name}),
+                thread_id=message.thread_id,
+            )
+            await self._cleanup_uploads(container, upload_dir)
+            return None
 
         except Exception as e:
             logger.error(f"[ROUTER:{channel}] Step 9 - execution error: {e}", exc_info=True)
@@ -804,21 +928,25 @@ class ChannelMessageRouter:
         # summarization) + a display label (attributed history replay for
         # multi-participant threads); the assistant turn is labelled by agent.
         logger.debug(f"[ROUTER:{channel}] Step 11 - persisting messages")
-        db.add_public_chat_message(
-            session_id, "user", message.text,
-            sender_email=verified_email,
-            sender_label=_sender_label(message),
-        )
-        # #903: stamp the assistant turn only for single-participant sessions so
-        # the sender-filtered MEM-001 summarizer keeps assistant replies in that
-        # user's memory (DMs + web) but never folds a shared-thread reply into
-        # one participant's memory. See _assistant_sender_email for the per-
-        # channel signal handling.
-        db.add_public_chat_message(
-            session_id, "assistant", response_text, cost=result.cost,
-            sender_email=_assistant_sender_email(message, verified_email),
-            sender_label=agent_name,
-        )
+        # ent#600: a group with context off records nothing (step 7).
+        if not message.metadata.get("_group_unrecorded"):
+            if not message.metadata.get("_user_turn_persisted"):
+                # (group turns persisted their user row at step 7 — ent#600)
+                db.add_public_chat_message(
+                    session_id, "user", message.text,
+                    sender_email=verified_email,
+                    sender_label=_sender_label(message),
+                )
+            # #903: stamp the assistant turn only for single-participant sessions
+            # so the sender-filtered MEM-001 summarizer keeps assistant replies in
+            # that user's memory (DMs + web) but never folds a shared-thread reply
+            # into one participant's memory. See _assistant_sender_email for the
+            # per-channel signal handling.
+            db.add_public_chat_message(
+                session_id, "assistant", response_text, cost=result.cost,
+                sender_email=_assistant_sender_email(message, verified_email),
+                sender_label=agent_name,
+            )
 
         # 11a. MEM-001 (#895): mirror the web path — increment per-user count
         # and fire-and-forget the conversation summarizer every 5 messages.
@@ -1094,6 +1222,14 @@ class ChannelMessageRouter:
             # all gate checks and any logging consistent.
             if verified_email:
                 verified_email = verified_email.strip().lower() or None
+
+            # ent#720: a verified email whose account is suspended reaches
+            # nothing — not even an open_access agent. An email verified BEFORE
+            # the suspension is still recorded on the channel link, so the check
+            # has to live here, per message, not only at code redemption.
+            if verified_email and db.is_email_account_suspended(verified_email):
+                logger.info(f"[ROUTER:{channel}] Access denied: account suspended (agent={agent_name})")
+                return False, None
 
             require_email = policy.get("require_email", False)
             open_access = policy.get("open_access", False)

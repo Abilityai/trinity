@@ -36,6 +36,7 @@ is a security incident, higher-severity than E-04's wedged-backlog integrity
 defect even though it rides the same collected field.
 """
 
+import json
 import re
 from typing import List
 
@@ -73,6 +74,33 @@ _SECRET_PATTERNS = [
 ]
 
 
+def _scannable(raw: str) -> str:
+    """``raw`` without the encoded bytes of its ``images`` (#3114).
+
+    A pull pilot's queued turn carries base64 vision input there. Base64 is
+    random text over ``[A-Za-z0-9+/]``, and ``+``/``/`` give ``\b`` a boundary,
+    so a multi-megabyte image matches a prefix such as ``AIza`` by chance often
+    enough to fire a critical violation. Encoded image bytes hold no plaintext
+    credential to find. Only each image's ``data`` is dropped; every other
+    field of an image, and any non-dict entry, is still scanned.
+    """
+    if '"images"' not in raw:
+        return raw
+    try:
+        meta = json.loads(raw)
+    except ValueError:
+        return raw
+    if not isinstance(meta, dict) or not meta.get("images"):
+        return raw
+    images = meta["images"]
+    if isinstance(images, list):
+        images = [
+            {k: v for k, v in img.items() if k != "data"} if isinstance(img, dict) else img
+            for img in images
+        ]
+    return json.dumps({**meta, "images": images})
+
+
 def check(snapshot: Snapshot) -> List[ViolationReport]:
     """One violation per queued row whose backlog_metadata matches a secret pattern."""
     violations: List[ViolationReport] = []
@@ -88,6 +116,7 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
             # column) has nothing to scan.
             if not isinstance(raw, str):
                 continue
+            raw = _scannable(raw)
 
             for pattern_name, pattern in _SECRET_PATTERNS:
                 if pattern.search(raw):

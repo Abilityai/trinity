@@ -64,15 +64,19 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from database import db
+from db.loops import TERMINAL_STATUSES as _LOOP_TERMINAL_STATUSES
 from services.runtime_secret_scrub import get_staged_values, scrub_text
+from services.skill_gate_errors import SkillGateError
 from services.task_execution_service import get_task_execution_service
 from utils.helpers import utc_now_iso
+from db.write_params import ExecutionResult, TaskExecutionFields
 
 logger = logging.getLogger(__name__)
 
 
 # Truncate previous_response to its trailing 2000 chars per spec
 PREV_RESPONSE_TRUNCATE_CHARS = 2000
+
 
 # WebSocket manager injected from main.py
 _websocket_manager = None
@@ -215,6 +219,7 @@ class LoopService:
         source_agent_name: Optional[str] = None,
         source_mcp_key_id: Optional[str] = None,
         source_mcp_key_name: Optional[str] = None,
+        chain_depth: Optional[int] = None,
     ) -> dict:
         """Create the loop row and dispatch its first iteration.
 
@@ -241,6 +246,7 @@ class LoopService:
             source_agent_name=source_agent_name,
             source_mcp_key_id=source_mcp_key_id,
             source_mcp_key_name=source_mcp_key_name,
+            chain_depth=chain_depth,
         )
         loop_id = loop_row["id"]
         db.mark_loop_running(loop_id)
@@ -324,14 +330,33 @@ class LoopService:
             # The idempotency gate. Everything below it happens exactly once per
             # iteration, however many times the terminal is delivered.
             if not db.claim_loop_advance(loop_id, run["run_number"]):
-                logger.debug(
-                    "[Loop] %s run %s already advanced (duplicate terminal for %s)",
-                    loop_id, run["run_number"], execution_id,
+                # #3316: the claim and the run-row close are two writes. A fault
+                # (a `database is locked`, a process kill) between them leaves
+                # the loop claimed for run N while run N's row is still
+                # `running` — and every later delivery, including
+                # `reconcile_after_restart`, would lose this CAS forever. That
+                # state is recognisable: repair it by closing the run here. A
+                # live advance still mid-flight looks the same, so the close is
+                # itself a CAS (`finalize_loop_run` on `status='running'`) and
+                # only one of the two goes on to dispatch.
+                current = db.get_loop(loop_id)
+                if (
+                    current is None
+                    or current.get("status") in _LOOP_TERMINAL_STATUSES
+                    or current.get("runs_completed") != run["run_number"]
+                ):
+                    logger.debug(
+                        "[Loop] %s run %s already advanced (duplicate terminal for %s)",
+                        loop_id, run["run_number"], execution_id,
+                    )
+                    return False
+                logger.warning(
+                    "[Loop] %s run %s claimed but never closed; closing it from "
+                    "execution %s", loop_id, run["run_number"], execution_id,
                 )
-                return False
+                loop = current
 
-            await self._close_run(loop, run, execution_id)
-            return True
+            return await self._close_run(loop, run, execution_id)
         except Exception:  # noqa: BLE001 — never break a terminal write
             logger.exception(
                 "[Loop] advance failed for execution %s", execution_id
@@ -444,7 +469,7 @@ class LoopService:
         status = status.value if hasattr(status, "value") else str(status)
         return status in ("queued", "running", "pending_retry")
 
-    async def _close_run(self, loop: dict, run: dict, execution_id: str) -> None:
+    async def _close_run(self, loop: dict, run: dict, execution_id: str) -> bool:
         """Finalize the run row from its execution, then decide what happens next.
 
         This is the body of the old `for` loop's iteration tail, verbatim in
@@ -452,6 +477,9 @@ class LoopService:
         post-run gates (`stop_signal` > `no_progress` on success;
         `_abort_after_failure` on failure) before falling through to the
         next-iteration gates in `_continue_or_finalize`.
+
+        Returns False, doing nothing past the close, when another caller closed
+        the run row first (#3316 — the close is the second CAS of the advance).
         """
         loop_id = loop["id"]
         run_number = run["run_number"]
@@ -464,15 +492,31 @@ class LoopService:
         cost = getattr(execution, "cost", None)
         duration_ms = getattr(execution, "duration_ms", None)
 
-        db.finalize_loop_run(
+        # trinity-enterprise#751: an iteration the skill gate held (SKIPPED, with
+        # a gate record naming this row) did not fail — its run row reads
+        # `skipped`, so `failed_runs` and `on_failure` never count it — and the
+        # loop stops: each further iteration would raise another approval for
+        # the same template.
+        held = status == "skipped" and bool(db.get_gate_requests_by_origin_executions([execution_id]))
+
+        if not db.finalize_loop_run(
             run["id"],
-            status="completed" if succeeded else "failed",
+            status="completed" if succeeded else ("skipped" if held else "failed"),
             response=response,
             error=None if succeeded else (error or "Unknown task failure"),
             cost=cost,
             duration_ms=duration_ms,
             execution_id=execution_id,
-        )
+        ):
+            logger.debug(
+                "[Loop] %s run %d already closed by another advance", loop_id, run_number,
+            )
+            return False
+
+        if held:
+            await self._finalize(loop, status="stopped", stop_reason="approval_required",
+                                 error=error)
+            return True
 
         runs = db.list_loop_runs(loop_id)
         derived = _DerivedState(runs)
@@ -529,7 +573,7 @@ class LoopService:
                     status=self._promote(loop, "completed", derived),
                     stop_reason="stop_signal_matched",
                 )
-                return
+                return True
 
             # #1157: a pending user-stop or a passed deadline OUTRANKS
             # no_progress — fall through so the next-iteration gates label it
@@ -545,7 +589,7 @@ class LoopService:
                 await self._finalize(
                     loop, status="stopped", stop_reason="no_progress"
                 )
-                return
+                return True
         else:
             logger.warning(
                 "[Loop] %s iteration %d failed (%s)",
@@ -557,9 +601,10 @@ class LoopService:
                 await self._finalize(
                     loop, status=status_, stop_reason=reason, error=terminal_error,
                 )
-                return
+                return True
 
         await self._continue_or_finalize(loop_id)
+        return True
 
     async def _continue_or_finalize(self, loop_id: str, *, parked: bool = False) -> bool:
         """The old `for` loop's top-of-iteration gates, then dispatch.
@@ -654,13 +699,17 @@ class LoopService:
             agent_name=loop["agent_name"],
             message=message,
             triggered_by="loop",
-            source_user_id=loop.get("started_by_user_id"),
-            source_user_email=loop.get("started_by_user_email"),
-            source_agent_name=loop.get("source_agent_name"),
-            source_mcp_key_id=loop.get("source_mcp_key_id"),
-            source_mcp_key_name=loop.get("source_mcp_key_name"),
-            model_used=loop.get("model"),
-            loop_id=loop_id,
+            fields=TaskExecutionFields(
+                source_user_id=loop.get("started_by_user_id"),
+                source_user_email=loop.get("started_by_user_email"),
+                source_agent_name=loop.get("source_agent_name"),
+                source_mcp_key_id=loop.get("source_mcp_key_id"),
+                source_mcp_key_name=loop.get("source_mcp_key_name"),
+                model_used=loop.get("model"),
+                loop_id=loop_id,
+                # #2973: the starter's inherited depth, captured at loop start.
+                chain_depth=loop.get("chain_depth"),
+            ),
         )
         if execution is None:
             logger.error(
@@ -713,7 +762,17 @@ class LoopService:
                 # already did that. Kept because it is the honest description of
                 # the call and would matter if the row were ever created there.
                 loop_id=loop["id"],
+                # trinity-enterprise#751: no `request_text` — the gate reads the
+                # rendered iteration, because that is what an approval would
+                # run and what the approver must see (a `{{previous_response}}`
+                # that names a gated skill gates the iteration: the safe side).
             )
+        except SkillGateError:
+            # trinity-enterprise#751: the iteration names a gated skill; the row
+            # is already SKIPPED. `_close_run` ends the loop `approval_required`
+            # — every further iteration would raise another approval.
+            await self.advance_on_terminal(execution_id)
+            return
         except Exception as exc:  # noqa: BLE001 — a raise must not strand the loop
             logger.exception(
                 "[Loop] %s iteration %d raised during dispatch", loop["id"], run_number
@@ -733,7 +792,9 @@ class LoopService:
                 db.update_execution_status(
                     execution_id=execution_id,
                     status=TaskExecutionStatus.FAILED,
-                    error=error_text,
+                    result=ExecutionResult(
+                        error=error_text,
+                    ),
                 )
                 # #1804: this is a terminal writer, so it owns closing the paired
                 # dispatch activity. `execute_task` may have opened one before

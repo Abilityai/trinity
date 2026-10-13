@@ -169,6 +169,10 @@ _TRAVERSAL_CASES = [
     ("/home/developer/.mcp.json", "explicit absolute path (basename match)"),
     ("/home/developer/./.env", ". segment in absolute path"),
     ("/home/developer/content/../.mcp.json", "absolute path with backtrack"),
+    # trinity-enterprise#792: normpath keeps exactly two leading slashes, the
+    # agent server's resolve() does not
+    ("//home/developer/.ssh/authorized_keys", "two leading slashes (path pattern)"),
+    ("//home/developer/.claude/settings.json", "two leading slashes (path pattern)"),
 ]
 
 
@@ -344,6 +348,38 @@ class TestDefenseInDepth:
         )
         # 403 from deny check confirms backend-layer enforcement
         assert_status(response, 403, message="deny check should run before container_reload")
+
+    @pytest.mark.parametrize("path", [
+        ".ssh",                                   # holds .ssh/* — deleting it removes them
+        ".claude/settings.json",
+        ".claude",                                # holds settings.json
+        "//home/developer/.ssh/authorized_keys",  # trinity-enterprise#792
+        "/proc/self/cwd/.ssh",                    # resolves into the home dir in the agent
+    ])
+    def test_delete_of_a_protected_path_is_refused_at_the_backend(
+        self, api_client: TrinityApiClient, stopped_agent, path
+    ):
+        """trinity-enterprise#792: DELETE carries the deny list too, before the
+        container lookup — so a stopped agent still answers 403, not 400."""
+        response = api_client.delete(
+            f"/api/agents/{stopped_agent['name']}/files",
+            params={"path": path},
+        )
+        assert_status(response, 403, message=f"path={path}")
+        assert response.json().get("detail") == f"Cannot delete protected path: {path}"
+
+    def test_mkdir_with_two_leading_slashes_is_refused_at_the_backend(
+        self, api_client: TrinityApiClient, stopped_agent
+    ):
+        # mkdir takes the path in the JSON body (CreateFolderRequest), not the query
+        response = api_client.post(
+            f"/api/agents/{stopped_agent['name']}/files/mkdir",
+            json={"path": "//home/developer/.ssh/keys"},
+        )
+        assert_status(response, 403, message="mkdir under .ssh with a // prefix")
+        assert response.json().get("detail") == (
+            "Cannot create folder in protected path: //home/developer/.ssh/keys"
+        )
 
 
 # ---------------------------------------------------------------------------

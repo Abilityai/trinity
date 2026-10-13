@@ -30,7 +30,12 @@ logger = logging.getLogger(__name__)
 
 
 def session_key_for_telegram_group(bot_id: str, sender_id: str, chat_id: str) -> str:
-    """Session key for a Telegram group message, via the adapter itself."""
+    """Session key for a Telegram group message, via the adapter itself.
+
+    Since ent#600 group sessions are keyed per chat, so ``sender_id`` no longer
+    shapes the key (kept for the signature) and a broadcast lands in the very
+    session a participant's reply reads — the recall #1649 deferred.
+    """
     from adapters.base import NormalizedMessage
     from adapters.telegram_adapter import TelegramAdapter
 
@@ -43,6 +48,19 @@ def session_key_for_telegram_group(bot_id: str, sender_id: str, chat_id: str) ->
             metadata={"bot_id": bot_id, "is_group": True},
         )
     )
+
+
+def purge_telegram_group_history(agent_name: str, bot_id: str, chat_id: str) -> int:
+    """Delete everything recorded for one Telegram group (ent#600).
+
+    Called when the owner turns the group's context off: "off" means nothing
+    about the group is kept, so what was recorded before the switch goes too —
+    and turning it back on starts from an empty history rather than replaying
+    whatever was still inside the window. Covers the chat's session and every
+    forum-topic session under it. Returns the number of sessions deleted.
+    """
+    base = session_key_for_telegram_group(bot_id=bot_id, sender_id="", chat_id=chat_id)
+    return db.clear_public_chat_sessions_by_identifier(agent_name, "telegram", base)
 
 
 def session_key_for_slack_channel(team_id: str, channel_id: str, thread_ts: str) -> str:
@@ -123,3 +141,84 @@ def persist_outbound_group_message(
             "— the message WAS delivered; history will be missing this turn",
             channel, agent_name, exc_info=True,
         )
+
+
+def persist_suppressed_note(
+    agent_name: str,
+    channel: str,
+    session_identifier: Optional[str],
+    idempotency_key: str,
+    first_sent_at: Optional[str],
+) -> None:
+    """Note in the conversation that a send was suppressed by its idempotency key (ent#665).
+
+    Lands in the session the FIRST send was persisted to, so a person reading the
+    thread sees the repeat was stopped. Role `system`, labelled `Trinity`, with
+    `sender_email=None` so it never folds into one person's MEM-001 memory. The
+    message body is not repeated. Fail-soft, like the delivered-turn writers.
+
+    Kept as one function so dropping the note, if it proves noisy, is one call site
+    per sink.
+    """
+    if not session_identifier:
+        logger.info(
+            "[ent#665] suppressed %s send for agent %s not noted in the conversation: "
+            "the first send recorded no session", channel, agent_name,
+        )
+        return
+    # ent#279: the key is agent-authored free text.
+    note = f'Not sent (idempotency key "{idempotency_key}"): already sent at {first_sent_at}.'
+    _staged = get_staged_values()
+    if _staged:
+        note = scrub_text(_staged, note)
+    try:
+        session = db.get_or_create_public_chat_session(agent_name, session_identifier, channel)
+        session_id = session.id if hasattr(session, "id") else session["id"]
+        db.add_public_chat_message(
+            session_id,
+            "system",
+            note,
+            sender_email=None,
+            sender_label="Trinity",
+        )
+    except Exception:
+        logger.error(
+            "[ent#665] failed to note a suppressed %s send for agent %s", channel, agent_name,
+            exc_info=True,
+        )
+
+
+async def record_group_suppression(
+    agent_name: str,
+    channel: str,
+    target_id: str,
+    intent,
+    idempotency_key: str,
+) -> None:
+    """Audit + conversation note for a group send its idempotency key suppressed (ent#665)."""
+    from services.platform_audit_service import AuditEventType, platform_audit_service
+
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.PROACTIVE_MESSAGE,
+            event_action="group_message_suppressed",
+            source="api",
+            actor_agent_name=agent_name,
+            target_type="group",
+            target_id=target_id,
+            details={
+                "channel": channel,
+                "idempotency_key": idempotency_key,
+                "first_sent_at": intent.first_sent_at,
+                "first_execution_id": intent.first_execution_id,
+            },
+        )
+    except Exception as e:
+        logger.warning("[ent#665] failed to audit a suppressed group send: %s", e)
+    persist_suppressed_note(
+        agent_name=agent_name,
+        channel=channel,
+        session_identifier=intent.first.get("session_identifier"),
+        idempotency_key=idempotency_key,
+        first_sent_at=intent.first_sent_at,
+    )

@@ -20,10 +20,15 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Optional, Union
+from datetime import datetime, timedelta
+from typing import Any, AsyncIterator, NamedTuple, Optional, Union
 
 from database import db
 from db.idempotency import STATE_COMPLETED, STATE_IN_FLIGHT, STATE_NEW
+from models import TaskExecutionStatus
+from services.execution_envelope import TaskExecutionErrorCode
+from services.slot_service import SLOT_TTL_BUFFER
+from utils.helpers import parse_iso_timestamp, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,39 @@ class EffectInProgressError(Exception):
     AND report success). Distinct from a `completed` replay, which returns the
     stored snapshot.
     """
+
+
+# Value the agent's MCP config sends in `X-Trinity-Execution-Id` when the
+# spawning process carries no `TRINITY_EXECUTION_ID` — a person running
+# `claude` in the web terminal or over SSH (#2392). There is no execution to
+# re-deliver, so a send can go without dedup; it is logged, never rejected.
+MANUAL_EXECUTION_ID = "manual"
+
+# Id prefix of the unguarded-effect alarm — reserved in operator_queue_service
+# so an agent cannot pre-create (and so suppress) its own alarm.
+EFFECT_UNGUARDED_ALERT_PREFIX = "effect-unguarded-"
+
+
+class EffectUnguardedError(Exception):
+    """A side effect on a pull-mode agent arrived without a usable execution id (#2392).
+
+    Pull re-delivers the SAME execution after a lease expiry, so the effect
+    guard is the only thing between a re-run and a duplicate message, call or
+    share. Without an id that resolves to the calling agent's own execution the
+    guard cannot de-duplicate, so the effect is refused rather than sent
+    (fail-closed, `TARGET_ARCHITECTURE.md` §Re-Delivery and Side-Effect
+    Recovery). Not retryable: a retry carries the same missing id.
+    """
+
+    def __init__(self, effect_type: str, reason: str) -> None:
+        self.effect_type = effect_type
+        self.reason = reason
+        super().__init__(
+            f"'{effect_type}' refused: this agent runs on the durable queue, where a "
+            f"turn can be re-delivered, and the request carried no usable execution id "
+            f"({reason}), so the send could not be de-duplicated. Do not retry — an "
+            f"operator has been alerted."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -100,17 +138,6 @@ def derive_webhook_key(token: str, body: Optional[bytes]) -> str:
     h.update(b"\x00")
     h.update(body or b"")
     return f"auto:{h.hexdigest()}"
-
-
-def derive_schedule_key(execution_id: str) -> str:
-    """Deterministic key for scheduler dispatch.
-
-    The scheduler creates one execution_id per fire and reuses it across an
-    HTTP-level resend of the same dispatch (the network-blip case #525 targets),
-    so the execution_id is the natural per-fire idempotency token. Intentional
-    #271 retries create a fresh execution_id → fresh key → not suppressed.
-    """
-    return f"sched:{execution_id}"
 
 
 def derive_reminder_key(agent_name: str, message: str, raw_fire_spec: str) -> str:
@@ -248,39 +275,114 @@ def derive_effect_key(
     return f"{effect_type}:{h.hexdigest()}"
 
 
+def _resolve_execution_with_reason(
+    execution_id: Optional[str], agent_name: str, *, log: bool = True
+) -> "tuple[Optional[Any], str]":
+    """Resolve an agent's execution; return `(execution, reason)`.
+
+    `reason` is `ok` when the execution exists AND belongs to `agent_name`,
+    else one of `absent` (no id), `manual` (a person's terminal session, see
+    `MANUAL_EXECUTION_ID`), `unknown` (no such execution), `foreign` (another
+    agent's execution) or `lookup_error` (the lookup itself failed).
+    """
+    if not execution_id:
+        return None, "absent"
+    if execution_id == MANUAL_EXECUTION_ID:
+        return None, "manual"
+    try:
+        execution = db.get_execution(execution_id)
+    except Exception as e:
+        if log:
+            logger.warning(
+                "resolve_and_validate_execution: get_execution(%s) failed: %s",
+                execution_id, e,
+            )
+        return None, "lookup_error"
+    if not execution:
+        return None, "unknown"
+    if getattr(execution, "agent_name", None) != agent_name:
+        if log:
+            logger.warning(
+                "resolve_and_validate_execution: execution %s does not belong to agent %s "
+                "(owner=%s)",
+                execution_id, agent_name, getattr(execution, "agent_name", None),
+            )
+        return None, "foreign"
+    return execution, "ok"
+
+
 def resolve_and_validate_execution(execution_id: Optional[str], agent_name: str) -> Optional[Any]:
     """Return the execution iff it exists AND belongs to `agent_name`; else None.
 
     Generalizes the MEM-001 server-side resolution (routers/public_memory.py):
-    the agent supplies an execution_id, never its own identity, and the backend
-    confirms ownership. FAIL-OPEN by design — a missing execution_id (old image /
-    absent tool arg), a lookup error, or an agent mismatch returns None so the
-    caller proceeds WITHOUT dedup rather than 5xx-ing a legitimate send. Safe
-    today because pull-mode re-delivery is off (fail-open cannot produce a
-    duplicate yet); enabling pull-mode default-ON for side-effect agents requires
-    trusted execution_id injection + fail-closed-when-absent first (a BLOCKING
-    prerequisite on Epic #1045/#1081 — see the contract doc).
+    the backend confirms ownership of the id it is handed. The id reaches the
+    effect sinks from the platform — the agent's MCP config carries it per
+    process (#2392) — with the agent-supplied tool argument as the fallback for
+    older images. What happens when this returns None is the caller's policy;
+    `effect_guard` refuses on a pull-mode agent (`_on_unguarded_effect`).
     """
-    if not execution_id:
-        return None
-    try:
-        execution = db.get_execution(execution_id)
-    except Exception as e:  # fail-open: a lookup hiccup must not block a real send
-        logger.warning(
-            "resolve_and_validate_execution: get_execution(%s) failed — fail-open: %s",
-            execution_id, e,
+    return _resolve_execution_with_reason(execution_id, agent_name)[0]
+
+
+def effect_dedup_required(agent_name: str) -> bool:
+    """True when this agent's turns can be re-delivered, so an effect must dedup.
+
+    Today that is the pull pilots. Phase 5 (#429) puts every agent on the
+    durable queue; this is the one place that flips.
+    """
+    from services.pull_pilot import is_pull_pilot_agent
+    return is_pull_pilot_agent(agent_name)
+
+
+# Reasons that refuse the effect on a pull-mode agent. `manual` has no
+# execution to re-deliver; `lookup_error` is a DB blip that must not stop every
+# send (and `begin()` would fail open on the same outage anyway).
+_REFUSED_REASONS = frozenset({"absent", "unknown", "foreign"})
+
+
+async def _on_unguarded_effect(
+    effect_type: str, agent_name: Optional[str], reason: str
+) -> None:
+    """Refuse (pull-mode) or log (otherwise) an effect sent without dedup (#2392).
+
+    Either way the degraded case is visible: an operator alarm for a refusal,
+    an `effect_guard.degraded` warning for a send that went out unguarded.
+    """
+    if agent_name and reason in _REFUSED_REASONS and effect_dedup_required(agent_name):
+        logger.error(
+            "effect_guard.refused effect_type=%s agent=%s reason=%s — "
+            "pull-mode agent sent an effect without a usable execution id",
+            effect_type, agent_name, reason,
         )
-        return None
-    if not execution:
-        return None
-    if getattr(execution, "agent_name", None) != agent_name:
-        logger.warning(
-            "resolve_and_validate_execution: execution %s does not belong to agent %s "
-            "(owner=%s) — fail-open",
-            execution_id, agent_name, getattr(execution, "agent_name", None),
-        )
-        return None
-    return execution
+        from services.operator_queue_service import create_bounded_alert
+        from utils.helpers import utc_now_iso
+        now = utc_now_iso()
+        await create_bounded_alert(agent_name, {
+            "id": f"{EFFECT_UNGUARDED_ALERT_PREFIX}{agent_name}-{now}",
+            "agent_name": agent_name,
+            "type": "effect_unguarded",
+            "status": "pending",
+            "priority": "high",
+            "title": "Side effect refused: no execution id",
+            "question": (
+                f"{agent_name} tried to send a '{effect_type}' without a usable execution "
+                f"id ({reason}). It runs on the durable queue, where a turn can be "
+                f"re-delivered, so the send was refused rather than risk a duplicate. "
+                f"Usual causes: the agent runs an image older than #2392 (rebuild the "
+                f"base image and restart it); the call came from outside a turn (a "
+                f"person running Codex in the agent's terminal, or a user-scoped key "
+                f"acting for this agent), which carries no id; or the API was called "
+                f"directly instead of through the agent's Trinity MCP tools."
+            ),
+            "context": {"effect_type": effect_type, "reason": reason},
+            "created_at": now,
+        })
+        raise EffectUnguardedError(effect_type, reason)
+    logger.warning(
+        "effect_guard.degraded effect_type=%s agent=%s reason=%s — "
+        "sent without de-duplication",
+        effect_type, agent_name, reason,
+    )
 
 
 class _EffectGuardState:
@@ -327,8 +429,12 @@ async def effect_guard(
     - **fresh claim** → yields `g.dedup_enabled=True`; on clean exit `complete()`
       stores `g.snapshot`, on exception `fail()` releases the claim so a failed
       attempt retries.
-    - **fail-open** → an absent/invalid execution_id (and no payment_request_id),
-      or a claim hiccup, yields a no-op state so the send proceeds without dedup.
+    - **no usable execution_id** (and no payment_request_id) → on a pull-mode
+      agent, raises `EffectUnguardedError` BEFORE yielding and raises an operator
+      alarm (#2392); otherwise yields a no-op state and logs
+      `effect_guard.degraded`. A `manual` id or a lookup error always proceeds.
+    - **fail-open** → a claim hiccup yields a no-op state so the send proceeds
+      without dedup.
 
     Two scopes:
     - Effect path (messages/voip/share): `effect:{execution_id}`, after
@@ -352,7 +458,15 @@ async def effect_guard(
             else None
         )
         if execution is None:
-            # Dedup disabled (absent/invalid execution_id) — run the body, no guard.
+            # Why it did not resolve — re-derived here, not returned above, so
+            # `resolve_and_validate_execution` stays the one patchable seam.
+            reason = (
+                _resolve_execution_with_reason(execution_id, agent_name, log=False)[1]
+                if agent_name is not None
+                else "absent"
+            )
+            # Raises on a pull-mode agent; otherwise the send runs unguarded, logged.
+            await _on_unguarded_effect(effect_type, agent_name, reason)
             yield state
             return
         scope = make_effect_scope(execution_id)  # type: ignore[arg-type]
@@ -384,6 +498,176 @@ async def effect_guard(
         raise
     else:
         complete(decision, execution_id, state.snapshot)
+
+
+# ---------------------------------------------------------------------------
+# Caller-declared intent keys (ent#665)
+#
+# `effect_guard` dedupes WITHIN one execution. A recurring agent's runs are
+# separate executions, so it has no way to say "I already told this person X;
+# do not say it again for N seconds". The caller names the intent with a key;
+# the store decides. The key is ALWAYS the caller's string — never derived from
+# the message, which is the #1422 failure (silent suppression of a legitimate
+# send whose bytes happened to match). Scope is the agent; the key folds in the
+# effect type and the resolved target (recipient email, E.164 number, group).
+# The channel is deliberately NOT part of it: the same news on Telegram then
+# Slack is one interruption.
+# ---------------------------------------------------------------------------
+
+# Ceiling = the cleanup sweep's purge window (`idempotency_purge_expired(ttl_hours=24)`):
+# a row is hard-deleted after 24h, so a longer TTL would promise suppression the
+# store cannot keep.
+# ponytail: per-row expires_at column (+ both migrations) if a weekly window is ever needed.
+INTENT_TTL_MAX_SECONDS = 24 * 3600
+INTENT_TTL_MIN_SECONDS = 60
+# A claim whose sender died mid-send is reclaimable after this long.
+INTENT_IN_FLIGHT_LEASE_SECONDS = 300
+SUPPRESSED_BY_IDEMPOTENCY_KEY = "idempotency_key"
+
+
+class IntentInProgressError(EffectInProgressError):
+    """Another execution holds this intent key and has not finished sending.
+
+    Retryable (409). Never reported as "suppressed": if that send then fails,
+    nobody delivers the message while both callers believe it was sent.
+    """
+
+
+def make_intent_scope(agent_name: str) -> str:
+    return f"intent:{agent_name}"
+
+
+def derive_intent_key(effect_type: str, target: str, idempotency_key: str) -> str:
+    """`{effect_type}:sha256(effect_type \\x00 target \\x00 idempotency_key)`.
+
+    There is no text argument: message content cannot reach the key.
+    """
+    h = hashlib.sha256()
+    h.update(effect_type.encode("utf-8"))
+    h.update(b"\x00")
+    h.update((target or "").strip().lower().encode("utf-8"))
+    h.update(b"\x00")
+    h.update(idempotency_key.encode("utf-8"))
+    return f"{effect_type}:{h.hexdigest()}"
+
+
+class _IntentGuardState:
+    """Yielded by `intent_guard`. On a fresh claim the sink puts what a later
+    suppressed call needs (channel, session_identifier, ...) into `record`."""
+
+    __slots__ = ("suppressed", "first_sent_at", "first_execution_id", "first", "record", "keyed")
+
+    def __init__(self, keyed: bool) -> None:
+        self.keyed = keyed
+        self.suppressed = False
+        self.first_sent_at: Optional[str] = None
+        self.first_execution_id: Optional[str] = None
+        self.first: dict = {}
+        self.record: dict = {}
+
+    def result_fields(self) -> dict:
+        """The fields every sink adds to its result when a key was supplied."""
+        if not self.keyed:
+            return {}
+        if not self.suppressed:
+            return {"sent": True}
+        return {
+            "sent": False,
+            "suppressed_by": SUPPRESSED_BY_IDEMPOTENCY_KEY,
+            "first_sent_at": self.first_sent_at,
+            "first_execution_id": self.first_execution_id,
+        }
+
+
+@asynccontextmanager
+async def intent_guard(
+    effect_type: str,
+    *,
+    agent_name: str,
+    target: str,
+    idempotency_key: Optional[str],
+    ttl_seconds: Optional[int],
+    execution_id: Optional[str],
+) -> AsyncIterator[_IntentGuardState]:
+    """Cross-execution "at most once per TTL" for a human-facing send (ent#665).
+
+    Usage::
+
+        async with intent_guard("message", agent_name=a, target=email,
+                                idempotency_key=k, ttl_seconds=t,
+                                execution_id=eid) as g:
+            if g.suppressed:
+                return suppressed_result(g)      # nothing is sent
+            result = await actually_send(...)
+            g.record = {"channel": ..., "session_identifier": ...}
+            return result
+
+    - no key → a no-op state; nothing is claimed (keyless sends are unchanged).
+    - completed claim inside the TTL → `g.suppressed`, with `first_sent_at`,
+      `first_execution_id` and the first send's `record` in `g.first`.
+    - in-flight claim → `IntentInProgressError` (retryable 409).
+    - fresh claim → the body runs; a clean exit records the send, an exception
+      releases the claim so a refused or failed send does not spend the key.
+    - store error on claim → fail-open, the send proceeds unguarded (logged).
+
+    The TTL is the checking call's: "suppress if this was sent within MY window".
+    """
+    state = _IntentGuardState(keyed=bool(idempotency_key))
+    if not idempotency_key:
+        yield state
+        return
+
+    ttl = ttl_seconds or INTENT_TTL_MAX_SECONDS
+    scope = make_intent_scope(agent_name)
+    key = derive_intent_key(effect_type, target, idempotency_key)
+    try:
+        res = db.idempotency_claim(
+            scope, key, ttl_seconds=ttl,
+            in_flight_lease_seconds=INTENT_IN_FLIGHT_LEASE_SECONDS,
+        )
+    except Exception as e:  # fail-open, like begin()
+        logger.warning(
+            "intent_guard.degraded effect_type=%s agent=%s — claim failed, sending "
+            "without the idempotency key: %s", effect_type, agent_name, e,
+        )
+        yield state
+        return
+
+    claim_state = res.get("state")
+    if claim_state == STATE_IN_FLIGHT:
+        raise IntentInProgressError(
+            f"Another run of this agent is sending '{effect_type}' under idempotency key "
+            f"'{idempotency_key}' right now. Retry shortly; do not change the key."
+        )
+    if claim_state == STATE_COMPLETED:
+        snap = res.get("snapshot") or {}
+        state.suppressed = True
+        state.first_sent_at = snap.get("sent_at")
+        state.first_execution_id = res.get("execution_id")
+        state.first = snap
+        yield state
+        return
+
+    # Only an execution that is this agent's own is recorded as the first sender.
+    owned_execution_id = (
+        execution_id if resolve_and_validate_execution(execution_id, agent_name) else None
+    )
+    try:
+        yield state
+    except BaseException:
+        try:
+            db.idempotency_release(scope, key)
+        except Exception as e:
+            logger.warning("intent_guard release failed: %s", e)
+        raise
+    else:
+        from utils.helpers import utc_now_iso
+        try:
+            db.idempotency_complete(
+                scope, key, owned_execution_id, {**state.record, "sent_at": utc_now_iso()},
+            )
+        except Exception as e:
+            logger.warning("intent_guard complete failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +755,143 @@ def discard_stale_replay(scope: Optional[str], key: Optional[str]) -> None:
         db.idempotency_discard_completed(scope, key)
     except Exception as e:
         logger.warning("Idempotency discard_stale_replay failed (scope=%s): %s", scope, e)
+
+
+# ---------------------------------------------------------------------------
+# Replay liveness (#3245)
+#
+# A stored dispatch receipt names an execution. Replaying it is truthful only
+# while that run can still succeed; once it ended without success (or its row
+# is gone) an identical request should dispatch a new run. These two helpers
+# are the mechanism; the policy (which snapshots, which keys, when to reclaim)
+# lives at the admission seam, `dispatch_admission_service._reclaim_ended_receipt`.
+# ---------------------------------------------------------------------------
+
+LIVENESS_LIVE = "live"                    # queued / running / pending_retry
+LIVENESS_SUCCEEDED = "succeeded"
+LIVENESS_ENDED = "ended"                  # failed / cancelled / skipped — will not succeed
+LIVENESS_GONE = "gone"                    # no execution row
+LIVENESS_MAYBE_ALIVE = "maybe_alive"      # lease_expired FAILED inside its hold window
+LIVENESS_INDETERMINATE = "indeterminate"  # cannot tell — callers must not re-run
+
+_LIVE_STATUSES = frozenset({
+    TaskExecutionStatus.QUEUED.value,
+    TaskExecutionStatus.RUNNING.value,
+    TaskExecutionStatus.PENDING_RETRY.value,
+})
+# Decision D1/Q6 (#3245): `skipped` and `cancelled` count as ended.
+_ENDED_STATUSES = frozenset({
+    TaskExecutionStatus.CANCELLED.value,
+    TaskExecutionStatus.SKIPPED.value,
+})
+# The slot reaper's mark (`cleanup_service._LEASE_EXPIRED_TAG`, parity-tested).
+# `.value`, never the member: `TaskExecutionErrorCode` is a fieldless
+# `@dataclass` str-Enum whose members all compare equal (#1085).
+_LEASE_EXPIRED_PREFIX = f"{TaskExecutionErrorCode.LEASE_EXPIRED.value}:"
+
+
+class Liveness(NamedTuple):
+    """`execution_liveness` result. `hold_until` is set only for `maybe_alive`."""
+    verdict: str
+    hold_until: Optional[datetime] = None
+
+
+def _now() -> datetime:
+    """Aware-UTC clock; a module hook so tests can pin time without sleeping."""
+    return utc_now()
+
+
+def _status_value(status: Any) -> str:
+    return str(getattr(status, "value", status))
+
+
+def lease_expired_horizon(completed_at: Optional[str], agent_name: str) -> datetime:
+    """When a `lease_expired` FAILED stops being "maybe alive" (#3245, decision 1).
+
+    ``completed_at`` (the moment the reaper wrote FAILED) + the agent's CURRENT
+    execution timeout + ``SLOT_TTL_BUFFER``. Anchored at the failure, not the
+    start: the reaper fires only after the slot TTL (timeout + buffer from
+    acquire) already ran out, so a start anchor would never hold. A heuristic,
+    not a bound — the agent's restart sweep re-posts results with no age limit.
+    Raises on a missing/unparseable stamp or an unreadable timeout.
+    """
+    if not completed_at:
+        raise ValueError("no completed_at on a lease_expired FAILED row")
+    failed_at = parse_iso_timestamp(completed_at)  # naive legacy → UTC, always aware
+    timeout = int(db.get_execution_timeout(agent_name))
+    return failed_at + timedelta(seconds=timeout + SLOT_TTL_BUFFER)
+
+
+def execution_liveness(
+    execution_id: Optional[str], agent_name: str, *, now: Optional[datetime] = None,
+) -> Liveness:
+    """Can the run a stored receipt names still succeed? Never raises.
+
+    Reads `get_execution_gate_state` (owner + status) and, only when that says
+    ``failed``, `get_execution_failure_stamp` (status, error, completed_at).
+    Every doubt resolves to ``indeterminate`` — which callers treat as "do not
+    re-run" — except a missing row, which is ``gone`` (decision 3: a vanished
+    row must never wedge a key).
+    """
+    if not execution_id or execution_id == MANUAL_EXECUTION_ID:
+        return Liveness(LIVENESS_INDETERMINATE)
+    try:
+        state = db.get_execution_gate_state(execution_id)
+    except Exception as e:
+        logger.warning("execution_liveness: gate-state read failed for %s: %s", execution_id, e)
+        return Liveness(LIVENESS_INDETERMINATE)
+    if state is None:
+        # The effect resolver calls this `unknown` (no such execution); for
+        # replay purposes it is `gone`.
+        return Liveness(LIVENESS_GONE)
+    owner, status = state
+    if owner != agent_name:
+        return Liveness(LIVENESS_INDETERMINATE)
+    status = _status_value(status)
+    if status in _LIVE_STATUSES:
+        return Liveness(LIVENESS_LIVE)
+    if status == TaskExecutionStatus.SUCCESS.value:
+        return Liveness(LIVENESS_SUCCEEDED)
+    if status in _ENDED_STATUSES:
+        return Liveness(LIVENESS_ENDED)
+    if status != TaskExecutionStatus.FAILED.value:
+        return Liveness(LIVENESS_INDETERMINATE)
+    try:
+        stamp = db.get_execution_failure_stamp(execution_id)
+    except Exception as e:
+        logger.warning("execution_liveness: failure-stamp read failed for %s: %s", execution_id, e)
+        return Liveness(LIVENESS_INDETERMINATE)
+    if stamp is None or _status_value(stamp[0]) != TaskExecutionStatus.FAILED.value:
+        return Liveness(LIVENESS_INDETERMINATE)  # changed between the two reads
+    _, error, completed_at = stamp
+    # Tag first: an ordinary failure is ended without needing a timestamp or
+    # the timeout, so neither can hold it.
+    if not (isinstance(error, str) and error.startswith(_LEASE_EXPIRED_PREFIX)):
+        return Liveness(LIVENESS_ENDED)
+    try:
+        hold_until = lease_expired_horizon(completed_at, agent_name)
+    except Exception as e:
+        logger.warning("execution_liveness: no lease_expired horizon for %s: %s", execution_id, e)
+        return Liveness(LIVENESS_INDETERMINATE)
+    current = now if now is not None else _now()
+    if current < hold_until:
+        return Liveness(LIVENESS_MAYBE_ALIVE, hold_until)
+    return Liveness(LIVENESS_ENDED)
+
+
+def discard_replay_of(
+    scope: Optional[str], key: Optional[str], execution_id: Optional[str],
+) -> Optional[bool]:
+    """Compare-and-delete the completed row for (scope, key) while it still
+    names ``execution_id`` (#3245). True deleted, False no match (another retry
+    already moved the key on), None the delete raised (logged, swallowed)."""
+    if not scope or not key or not execution_id:
+        return False
+    try:
+        return bool(db.idempotency_discard_completed_if_execution(scope, key, execution_id))
+    except Exception as e:
+        logger.warning("Idempotency discard_replay_of failed (scope=%s): %s", scope, e)
+        return None
 
 
 def fail(decision: IdempotencyDecision) -> None:

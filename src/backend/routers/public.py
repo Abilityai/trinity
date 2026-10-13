@@ -24,14 +24,17 @@ from database import (
     PublicChatResponse,
     PublicChatMessage
 )
-from dependencies import get_current_user, get_optional_user, assert_owns
+from dependencies import get_current_user, get_optional_user, assert_owns, workspace_route
 from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
-from services import canvas_share_service
+from services import agent_skills_listing, canvas_share_service, login_policy_gate, rate_limiter
+from services import chat_persistence_service
 from services.agent_auth import agent_httpx_client
 from services.chat_execution_service import terminate_execution as _terminate_execution
 from services.chat_signals import ChatDispatchError
 from services.docker_service import get_agent_container
+from services import sync_waiter
+from services.pull_pilot import pull_queue_allowance
 from services.email_service import email_service
 from services.settings_service import PUBLIC_URL_REACHED_KEY, settings_service
 from services.task_execution_service import get_task_execution_service
@@ -398,6 +401,11 @@ async def get_public_link_info(token: str, request: Request):
     )
 
 
+# trinity-enterprise#754: what an anonymous visitor reads when the agent could
+# not list its skills — one fixed sentence, whatever the agent answered.
+PUBLIC_SKILLS_UNREADABLE = "The agent could not list its skills"
+
+
 @router.get("/playbooks/{token}")
 async def get_public_playbooks(token: str, request: Request):
     """
@@ -412,30 +420,46 @@ async def get_public_playbooks(token: str, request: Request):
 
     agent_name = link["agent_name"]
 
-    # Check if agent is available
-    container = get_agent_container(agent_name)
-    if not container or container.status != "running":
-        raise HTTPException(status_code=503, detail="Agent is not running")
-
+    # trinity-enterprise#754: the one proxy (it also refreshes the agent's
+    # last-known listing). A visitor only ever gets the live list, and only the
+    # per-skill fields this link has always carried — `public_view` keeps to a
+    # fixed list, so `source` / `dir` / `approval` never reach an anonymous one.
+    # An anonymous caller only ever reads fixed sentences: never an exception's
+    # own text, and never the agent's error body (a traceback, a path). The
+    # cause is in the log.
     try:
-        agent_url = f"http://agent-{agent_name}:8000/api/skills"
-        async with agent_httpx_client(agent_name, timeout=10.0) as client:
-            response = await client.get(agent_url)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Agent returned error: {response.text}"
-                )
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Agent is starting up, please try again")
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Could not connect to agent")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch playbooks: {str(e)}")
+        body = await agent_skills_listing.fetch_live(agent_name)
+    except agent_skills_listing.SkillsListUnavailable as e:
+        if e.reason in ("not_found", "not_running"):
+            raise HTTPException(status_code=503, detail="Agent is not running")
+        if e.reason == "agent_error":
+            logger.warning("[public] playbooks for %s: the agent answered %s: %s",
+                           agent_name, e.status_code, e.agent_text[:500])
+            raise HTTPException(status_code=e.status_code, detail=PUBLIC_SKILLS_UNREADABLE)
+        raise HTTPException(status_code=e.status_code, detail=e.detail)   # the platform's own sentences
+    except Exception:
+        logger.warning("[public] playbooks for %s failed", agent_name, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch playbooks")
+    view = agent_skills_listing.public_view(body)
+    if view is None:
+        logger.warning("[public] playbooks for %s: the agent's answer is not a skills list", agent_name)
+        raise HTTPException(status_code=502, detail=PUBLIC_SKILLS_UNREADABLE)
+    return view
+
+
+# ent#849: strong refs so a detached code send is not garbage-collected mid-flight.
+_verification_tasks: set = set()
+
+
+async def _send_verification_if_allowed(link_id, email: str, agent_name: str) -> None:
+    """Mint and send a public-link code off the response path (policy-refused mode)."""
+    try:
+        if not login_policy_gate.email_code_allowed_for(email):
+            return
+        data = db.create_verification(link_id=link_id, email=email, expiry_minutes=10)
+        await email_service.send_verification_code(email, data["code"], agent_name=agent_name)
+    except Exception:
+        logger.exception("Failed to issue public-link verification code")
 
 
 @router.post("/verify/request")
@@ -466,6 +490,26 @@ async def request_verification_code(
             status_code=429,
             detail="Too many verification requests. Please wait 10 minutes."
         )
+
+    # ent#849: while the login policy refuses email codes, every address takes
+    # the same background path: members of the organisation get no code, and
+    # neither the response nor its timing tells a member from an outsider.
+    if not login_policy_gate.email_code_allowed():
+        # The row count above sees only addresses that were sent a code, so
+        # count every request here too, or the 429 would tell them apart.
+        if not rate_limiter.check(
+            f"public_verify_req_email:{verification.email.lower()}",
+            MAX_VERIFICATION_REQUESTS_PER_EMAIL, 10 * 60,
+        ).allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many verification requests. Please wait 10 minutes."
+            )
+        task = asyncio.create_task(_send_verification_if_allowed(
+            link["id"], verification.email, link["agent_name"]))
+        _verification_tasks.add(task)
+        task.add_done_callback(_verification_tasks.discard)
+        return {"message": "Verification code sent", "expires_in_seconds": 10 * 60}
 
     # Create verification code
     verification_data = db.create_verification(
@@ -511,6 +555,11 @@ async def confirm_verification_code(
     check_login_rate_limit(client_ip)
     check_public_link_rate_limit(client_ip)
     link = _validate_public_link(confirmation.token)
+
+    # ent#849: refused before redeeming, with the wrong-code answer.
+    if not login_policy_gate.email_code_allowed_for(confirmation.email):
+        record_login_attempt(client_ip, success=False)
+        return VerificationResponse(verified=False, error="invalid_code")
 
     # Verify the code
     success, error, session_data = db.verify_code(
@@ -822,16 +871,30 @@ async def public_stream_execution(
     async def proxy_stream():
         """Proxy SSE stream from agent container."""
         agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
+        # #3114: hold while a pull pilot's turn is queued, then retry a 404
+        # briefly while the claimed row is running (see routers/chat.py).
+        allowance = pull_queue_allowance(agent_name)
+        attach_retries = sync_waiter.STREAM_ATTACH_RETRIES if allowance else 0
         try:
+            async for tick in sync_waiter.wait_while_queued(execution_id, allowance):
+                yield tick
             async with agent_httpx_client(agent_name, timeout=None) as client:
-                async with client.stream("GET", agent_url) as response:
-                    if response.status_code != 200:
-                        yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
-                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                        return
-
-                    async for chunk in response.aiter_text():
-                        yield chunk
+                while True:
+                    async with client.stream("GET", agent_url) as response:
+                        if response.status_code == 200:
+                            async for chunk in response.aiter_text():
+                                yield chunk
+                            return
+                        if not (
+                            response.status_code == 404
+                            and attach_retries > 0
+                            and sync_waiter.execution_is_running(execution_id)
+                        ):
+                            yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
+                            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                            return
+                        attach_retries -= 1
+                    await asyncio.sleep(sync_waiter.STREAM_ATTACH_RETRY_INTERVAL)
         except httpx.ConnectError:
             yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to connect to agent'})}\n\n"
             yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
@@ -849,6 +912,11 @@ async def public_stream_execution(
             "X-Accel-Buffering": "no"
         }
     )
+
+
+# #3461 — what a visitor is told about a failed turn. Same words as the
+# synchronous path's 502 in `services/public_chat_service.py`.
+_PUBLIC_FAILURE_MESSAGE = "Failed to process your request. Please try again."
 
 
 @router.get("/executions/{token}/{execution_id}/status")
@@ -874,6 +942,7 @@ async def public_execution_status(
     if not execution or execution.agent_name != agent_name:
         raise HTTPException(status_code=404, detail="Execution not found")
 
+    gate = _gate_state(execution)
     return {
         "execution_id": execution.id,
         "status": execution.status,
@@ -881,8 +950,33 @@ async def public_execution_status(
         # "cancelled by user" error; surface both like failed/success so the
         # public poller gets a reason instead of a silent null body.
         "response": execution.response if execution.status in ("success", "failed", "cancelled") else None,
-        "error": execution.error if execution.status in ("failed", "cancelled") else None,
+        # #3461: a FAILED row's error is the operator's diagnosis (exit code,
+        # where to fix the credential) and this route is unauthenticated — the
+        # visitor gets the fixed line the synchronous path already answers
+        # (`run_public_chat`); the detail stays on the row for the operator. A
+        # cancel reason and a gate's notice are written for the visitor.
+        "error": (
+            _PUBLIC_FAILURE_MESSAGE if execution.status == "failed"
+            else execution.error if execution.status == "cancelled" or gate
+            else None
+        ),
+        "gate": gate,
     }
+
+
+def _gate_state(execution):
+    """trinity#3274: the skill gate closes a public turn `skipped`, with its text
+    as the error — "held" when the turn waits for an approval (a gate record
+    names it), "refused" otherwise — so the page stops polling and shows a
+    wait as a notice and a refusal as an error. None for any other row, and for
+    a row this link's own chat did not start (`public`)."""
+    if execution.status != "skipped" or getattr(execution, "triggered_by", None) != "public":
+        return None
+    try:
+        record = db.get_gate_requests_by_origin_executions([execution.id]).get(execution.id)
+    except Exception:  # noqa: BLE001 — unreadable: show it as an error, never as a wait
+        record = None
+    return "held" if record and record.get("state") != "refused" else "refused"
 
 
 @router.post("/executions/{token}/{execution_id}/terminate")
@@ -978,6 +1072,7 @@ async def public_terminate_execution(
 
 
 @router.get("/sessions/{token}")
+@workspace_route("the public chat page lists the signed-in person's own past chats on this link")
 async def get_public_link_sessions(
     token: str,
     limit: int = 20,
@@ -1014,6 +1109,7 @@ async def get_public_link_sessions(
 
 
 @router.get("/sessions/{token}/{session_id}")
+@workspace_route("the public chat page reopens one of the signed-in person's own past chats on this link")
 async def get_public_link_session_detail(
     token: str,
     session_id: str,
@@ -1043,7 +1139,7 @@ async def get_public_link_session_detail(
     return {
         "session": session.model_dump(),
         "message_count": len(messages),
-        "messages": [m.model_dump() for m in messages],
+        "messages": chat_persistence_service.session_messages_view(agent_name, messages),
     }
 
 # ---------------------------------------------------------------------------
@@ -1051,6 +1147,7 @@ async def get_public_link_session_detail(
 # ---------------------------------------------------------------------------
 
 @router.get("/canvas/{token}")
+@workspace_route("an `authorized` canvas link must recognise the member it was shared with, not read them as a stranger")
 async def get_shared_canvas(
     token: str,
     request: Request,
@@ -1076,7 +1173,17 @@ async def get_shared_canvas(
     """
     check_public_link_rate_limit(_get_client_ip(request))
 
-    resolution = canvas_share_service.resolve(token, user)
+    viewer = user
+    if viewer is None:
+        # trinity-enterprise#837: someone an agent was shared with signs in to
+        # the Workspace, not at /login, so an `authorized` link recognises a
+        # Workspace session too — narrowed to what the Workspace shows them.
+        from client_portal.portal_auth import workspace_email_from_request
+
+        email = workspace_email_from_request(request)
+        if email:
+            viewer = canvas_share_service.WorkspaceViewer(email)
+    resolution = canvas_share_service.resolve(token, viewer)
     status_value = resolution["status"]
 
     if status_value == canvas_share_service.ShareResolution.OK:

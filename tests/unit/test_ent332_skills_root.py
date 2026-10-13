@@ -465,15 +465,20 @@ class TestLegacyFallback:
         tar = _tar_bytes({"skills/x/SKILL.md": (b"---\nname: x\n---\nbody\n", 0o644)})
         members, _w, _t = pkg.filter_skill_archive(tar, "x", source_root="skills")
 
+        # #2914: the fallback writes the marker beside SKILL.md, so the dir is
+        # platform-managed on the next sync (never refused as agent-authored).
+        written = []
+
         class _Client:
             async def write_file(self, path, content):
-                assert path == ".claude/skills/x/SKILL.md"
+                written.append(path)
                 return {"success": True}
 
         svc = ss.SkillService()
         result = _run(svc._legacy_fallback(_Client(), "x", members, []))
         assert result["status"] == "fallback"
-        assert result["files_written"] == 1
+        assert result["files_written"] == 2
+        assert written == [".claude/skills/x/SKILL.md", ".claude/skills/x/.trinity-skill.json"]
 
 
 # =============================================================================

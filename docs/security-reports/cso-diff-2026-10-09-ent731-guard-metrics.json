@@ -1,0 +1,37 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-09",
+  "mode": "daily",
+  "scope": "diff",
+  "base": "origin/dev",
+  "issue": "abilityai/trinity-enterprise#731",
+  "phases_run": [0, 1, 2, 3, 5, 7, 8, 9, 10, 11, 12, 13, 14],
+  "phases_skipped": {"4": "no workflow changed", "6": "no webhook or integration changed"},
+  "stack_cve_quicklist": [],
+  "attack_surface": {
+    "new_endpoints": 0, "changed_auth": 0, "new_mcp_tools": 0,
+    "changed_inputs": ["canon objective files: top-level guard_metrics list (author-controlled YAML read through the existing hardened loader)"],
+    "changed_outputs": ["GET /api/agents/{name}/objectives and MCP get_objectives: metrics[].role, summary.guards, three finding codes", "Workspace role card: PortalRoleMetric.role (fixed value guard|primary)"]
+  },
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [],
+  "checks": {
+    "secrets_in_diff": "none (prefix and email/IP grep over added lines)",
+    "invisible_unicode": "none",
+    "v_html_innerHTML": "none added",
+    "bare_yaml_load": "none added; guards parsed from the document the existing safe_yaml read already produced",
+    "enterprise_docs_guard": "no hit on added doc lines",
+    "dependencies": "no manifest, lockfile, Dockerfile or workflow changed",
+    "input_bounds": "guard name via _safe_id, per-list cap MAX_METRICS_PER_OBJECTIVE, target/tolerance via finite_number, direction via _text(16); a non-list guard_metrics is a named finding",
+    "cross_agent_read": "guard names join the referenced set and reach resolve_served_metrics behind the same can_view grant check as primaries; no new read path",
+    "findings_scoping": "guard parse findings travel with their objective and are published only for objectives the read returns",
+    "portal_disclosure": "role crosses as a constant chosen server-side; finding crosses as code only; no author text added to the client projection",
+    "failure_direction": "a malformed guard section degrades to a named finding and the objective still joins"
+  },
+  "supply_chain_summary": {"scanner": "n/a: no dependency change in diff"},
+  "filter_stats": {"candidates": 0, "reported": 0},
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "trend": "first diff run for this issue",
+  "counts_as_full_run": false
+}

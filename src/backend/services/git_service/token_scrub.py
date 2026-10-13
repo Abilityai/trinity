@@ -22,13 +22,11 @@ from . import gitignore
 logger = logging.getLogger(__name__)
 
 
-# How long the in-container remediation sweep may run. Enforced TWICE, because
-# the two bounds free different resources: an in-container `timeout N` prefix
-# frees the `_docker_executor` pool thread (the fixed 6-thread pool the whole
-# backend shares — `to_thread` draws from it too), and `asyncio.wait_for` frees
-# the caller. `execute_command_in_container` accepts a `timeout` and forwards it
-# nowhere, so without both a wedged exec pins a pool thread forever, fleet-wide,
-# from a background pass.
+# How long the in-container remediation sweep may run. Passed to
+# `execute_command_in_container`, which enforces it both in the container
+# (freeing the `_docker_executor` pool thread) and around the await (freeing
+# the caller) — #2969. Without that a wedged exec would pin a pool thread
+# forever, fleet-wide, from a background pass.
 SCRUB_TIMEOUT_S = 60
 
 # One operator alarm per agent per day when the sweep REFUSED to strip: a
@@ -147,6 +145,10 @@ def _alarm_git_token_scrub_unreadable(agent_name: str) -> None:
     `find` enumerated nothing and the probe failed — so an all-zero report says
     nothing about whether a token is there. Nothing is destroyed; the
     remediation simply did not run. Fail-soft.
+
+    Reached only when the repository is unreachable, never when there simply is
+    no repository (#2930) — the caller splits those, so the capabilities
+    explanation below describes the case that actually fired.
     """
     try:
         from database import db
@@ -220,23 +222,22 @@ async def scrub_git_remote_tokens(
             git_dir = await gitignore._detect_git_dir(container_name)
         inner = git_credential_helper.scrub_command(git_dir)
         async with _scrub_semaphore:
-            result = await asyncio.wait_for(
-                execute_command_in_container(
-                    container_name=container_name,
-                    command=f"timeout {SCRUB_TIMEOUT_S} bash -c {shlex.quote(inner)}",
-                    user="root",
-                    environment=(
-                        {git_credential_helper.SEED_ENV_VAR: seed_pat}
-                        if seed_pat else None
-                    ),
+            result = await execute_command_in_container(
+                container_name=container_name,
+                command=f"bash -c {shlex.quote(inner)}",
+                timeout=SCRUB_TIMEOUT_S,
+                user="root",
+                environment=(
+                    {git_credential_helper.SEED_ENV_VAR: seed_pat}
+                    if seed_pat else None
                 ),
-                timeout=SCRUB_TIMEOUT_S + 15,
             )
-    except asyncio.TimeoutError:
-        logger.warning("ent#615: remote-token sweep timed out for %s", agent_name)
-        return report
     except Exception as e:  # noqa: BLE001 — best-effort, container may be down
         logger.warning("ent#615: remote-token sweep error for %s: %s", agent_name, e)
+        return report
+
+    if result.get("timed_out"):
+        logger.warning("ent#615: remote-token sweep timed out for %s", agent_name)
         return report
 
     output = result.get("output", "") or ""
@@ -256,7 +257,21 @@ async def scrub_git_remote_tokens(
         # did not happen, on exactly the hardened installs that will act on the
         # report. Alarmed, not logged: an INFO line indistinguishable from
         # success is how #1638 shipped.
-        _alarm_git_token_scrub_unreadable(agent_name)
+        #
+        # #2930: `root_readable=0` had ONE more cause, and it is the common one.
+        # An agent from a `local:` template has no repository at all, so the
+        # readability test fails on existence, not on permissions — every stock
+        # starter filed this alert on every fresh install, telling a first-time
+        # operator to loosen a capability setting that was not involved. "There
+        # is nothing to sweep" is not an operator's problem; "there is something
+        # I could not look at" still is, and the two are separated by asking
+        # about ROOT (the capability question) rather than about the repo.
+        if report["root_traversable"] and not report["git_present"]:
+            logger.debug(
+                "ent#615: %s has no git repository — nothing to sweep", agent_name
+            )
+        else:
+            _alarm_git_token_scrub_unreadable(agent_name)
     if report["gitmodules_hits"]:
         # A token in the TRACKED `.gitmodules` is already committed and pushed.
         # The sweep cannot fix that; finding one turns "rotate the platform PAT

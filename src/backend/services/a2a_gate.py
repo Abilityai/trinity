@@ -86,10 +86,6 @@ def register_skills_provider(provider: A2ASkillsProvider) -> None:
     logger.info("[a2a_gate] skills provider registered: %s", type(provider).__name__)
 
 
-def get_skills_provider() -> Optional[A2ASkillsProvider]:
-    return _skills_provider
-
-
 def clear_skills_provider() -> None:
     """Drop the skills provider — used by tests to restore the OSS no-op path."""
     global _skills_provider

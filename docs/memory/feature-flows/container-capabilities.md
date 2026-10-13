@@ -82,12 +82,14 @@ async def get_agent_capabilities(
 
 #### PUT /api/agents/{name}/capabilities
 
+**Person-only (#2996)**: the route takes `Depends(require_person)` — a JWT session or the owner's own `user`-scoped key. Agent- and system-scoped keys (and every other key scope) get 403 `person_required` before the owner check, whatever agent they address. See requirements `auth.md` §2.8.
+
 ```python
 @router.put("/{agent_name}/capabilities")
 async def set_agent_capabilities(
     agent_name: str,
     body: dict,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Body: {"full_capabilities": true|false}

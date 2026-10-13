@@ -36,6 +36,8 @@ COVERED = {
     "agent_sessions": "db/sessions.py",
     "enterprise_portal_sessions": "client_portal/db.py",
     "enterprise_room_participants": "shared_sessions/db.py",
+    # #3127: per-user /chat memory on pull pilots.
+    "chat_sessions": "db/chat.py",
 }
 
 
@@ -121,4 +123,19 @@ def test_each_accessor_module_declares_the_accessor_and_is_swept():
         "store a resume handle. Every covered surface must be unioned into the "
         "keep set exactly once — an accessor that exists but is never called "
         "leaves its surface as exposed as it was before the accessor existed."
+    )
+
+
+def test_the_chat_session_marker_is_swept_exactly_once():
+    """#2958: the FOURTH surface stores its resume handle in agent memory, not a
+    table, so the schema anchor above cannot see it. The agent publishes it to a
+    marker file and the sweep reads it through `_chat_session_keep_id`; one call
+    in `_sweep_agent` is the property. The table count above is unaffected
+    (the reader never calls a table accessor)."""
+    sweep_src = (BACKEND / "services" / "session_cleanup_service.py").read_text()
+    body = sweep_src[sweep_src.index("def _sweep_agent"):]
+    assert body.count("self._chat_session_keep_id(") == 1, (
+        "_sweep_agent must union the agent's own /api/chat session into the "
+        "keep set exactly once, or the chat's JSONL is reaped an hour after it "
+        "goes idle"
     )

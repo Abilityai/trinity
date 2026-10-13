@@ -46,7 +46,7 @@ This is an MVP (follow-up to spike #854). For adding a *fourth* runtime, see the
 |---------|--------|-------|
 | System prompt | `--append-system-prompt` | prepended to the prompt; `AGENTS.md` for identity; MCP-tool naming made runtime-aware (no `mcp__trinity__` prefix — see MCP) |
 | Sandbox | none (container is the boundary) | normal → `--sandbox danger-full-access` (Codex's own bwrap sandbox can't create a user namespace in the hardened container — `bwrap: No permissions…` — which blocks every tool; drop it, the container stays the boundary, same as Claude) |
-| Read-only | PreToolUse hook on `~/.trinity/read-only-config.json` | reads the same file → `--sandbox read-only` (Codex has no PreToolUse hook; a fail-closed enforcement story is a fast-follow) |
+| Read-only | PreToolUse hook on root-owned `/opt/trinity/read-only-config.json`, falling back to `~/.trinity/read-only-config.json` while it is missing (trinity-enterprise#787) | reads the same file → `--sandbox read-only` (Codex has no PreToolUse hook; a fail-closed enforcement story is a fast-follow) |
 | Guardrails | `--disallowedTools` + turn caps | sandbox + network; unmappable tool-names **logged** (not dropped) |
 | Credential redaction | sanitizer over response + logs | identical sanitizer calls |
 

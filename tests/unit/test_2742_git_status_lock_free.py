@@ -52,18 +52,30 @@ if _BASE_IMAGE_STR not in sys.path:
 # Explicit file-based loader, evicting any previously cached `agent_server`
 # (shadow or real) so it wins regardless of sys.path order — same pattern as
 # test_1595_git_maintenance.py / test_agent_server_auto_sync.py.
-for _mod in list(sys.modules):
-    if _mod == "agent_server" or _mod.startswith("agent_server."):
-        sys.modules.pop(_mod, None)
-
-_AS_INIT = _BASE_IMAGE / "agent_server" / "__init__.py"
-_as_spec = importlib.util.spec_from_file_location(
-    "agent_server", str(_AS_INIT),
-    submodule_search_locations=[str(_BASE_IMAGE / "agent_server")],
-)
-_as_mod = importlib.util.module_from_spec(_as_spec)
-sys.modules["agent_server"] = _as_mod
-_as_spec.loader.exec_module(_as_mod)
+# Evict ONLY when the registered `agent_server` is not the real base-image
+# package. An unconditional eviction here re-registers the package under a
+# fresh module object, and any earlier-collected file that bound a function
+# from the old copy and later patches by dotted string (test_drain_bounded.py)
+# patches the wrong copy — the REAL drain then runs and its cgroup orphan
+# sweep kills the CI runner / a developer's desktop session (#728 class,
+# trinity-enterprise#620). Guarded pattern: test_git_status_dual_ahead_behind.py;
+# enforced by tests/lint_sys_modules.py.
+_existing = sys.modules.get("agent_server")
+_real_path = str(_BASE_IMAGE / "agent_server")
+if _existing is None or not any(
+    _real_path in p for p in (getattr(_existing, "__path__", None) or [])
+):
+    for _mod in list(sys.modules):
+        if _mod == "agent_server" or _mod.startswith("agent_server."):
+            sys.modules.pop(_mod, None)
+    _AS_INIT = _BASE_IMAGE / "agent_server" / "__init__.py"
+    _as_spec = importlib.util.spec_from_file_location(
+        "agent_server", str(_AS_INIT),
+        submodule_search_locations=[str(_BASE_IMAGE / "agent_server")],
+    )
+    _as_mod = importlib.util.module_from_spec(_as_spec)
+    sys.modules["agent_server"] = _as_mod
+    _as_spec.loader.exec_module(_as_mod)
 
 from agent_server.routers import git as git_mod  # noqa: E402
 
@@ -189,7 +201,7 @@ class TestStatusReadIsLockFree:
         thing a future edit would silently change."""
         git_mod._compute_git_status(status_home)
 
-        assert ["git", "--no-optional-locks", "status", "--porcelain"] in recorded_argvs
+        assert ["git", "--no-optional-locks", "status", "--porcelain", "-z"] in recorded_argvs
         assert ["git", "status", "--porcelain"] not in recorded_argvs, (
             "the unflagged status argv is what takes .git/index.lock"
         )
@@ -248,7 +260,7 @@ class TestStatusReadIsLockFree:
             return sightings["n"]
 
         plain = _sample(["git", "status", "--porcelain"])
-        flagged = _sample(["git", "--no-optional-locks", "status", "--porcelain"])
+        flagged = _sample(["git", "--no-optional-locks", "status", "--porcelain", "-z"])
 
         assert plain > 0, (
             "control lost its teeth: the plain argv was never observed holding "
@@ -1139,7 +1151,7 @@ class TestACommitSurvivesAConcurrentPoll:
         (repo / "agent-work.txt").write_text("the agent's own turn")
 
         frozen = self._freeze_status_holding_the_lock(
-            repo, ["git", "--no-optional-locks", "status", "--porcelain"], attempts=4
+            repo, ["git", "--no-optional-locks", "status", "--porcelain", "-z"], attempts=4
         )
         try:
             assert frozen is None, (

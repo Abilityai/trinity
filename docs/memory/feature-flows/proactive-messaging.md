@@ -26,7 +26,7 @@ Enables agents to send proactive messages to specific users by verified email ac
 - **Redis-based rate limiting**: 10 messages per recipient per hour (survives restarts)
 - **Mandatory audit logging**: All proactive sends logged via platform_audit_service
 - **Multi-channel delivery**: Auto-selection tries telegram → slack → web. WhatsApp is an explicit-only channel (`channel="whatsapp"`) and not part of `auto` — Twilio's 24-hour session window makes it unreliable for inactive recipients.
-- **MCP tool access**: Agents use `send_message` MCP tool for outreach
+- **MCP tool access**: Agents use `send_message` MCP tool for outreach. Its description repeats the delegation contract's rule sentence (ent#568): a send that errored without a named refusal may still have reached the person, so it is never re-sent under a new `dedup_label` or from a later turn (the per-turn effect dedupe, #1084, covers only a same-turn repeat)
 - **History-aware (#1600)**: a delivered message is appended to the recipient's channel session, so the agent's next turn knows what it sent
 
 ## Architecture
@@ -128,6 +128,10 @@ class AgentShare(BaseModel):
     allow_proactive: bool = False  # Can agent send proactive messages to this user
 ```
 
+## Addressed by role (trinity-enterprise#606)
+
+`SendMessageRequest` takes exactly one of `to` (`primary | approver | viewer`) or the deprecated `recipient_email`. `routers/messages._recipient` resolves the role through `services/role_addressing.resolve` (the rule asks and reports share), and the resolved person then goes through the unchanged authorization, rate-limit and channel steps below. A message has one recipient, so a role nobody fills (`role_unassigned`) or several people fill (`role_resolves_to_several`) is a named 422, never a guess. `operator` is not a message recipient — the operators' door is the Operating Room, reached with an `ask_operator` alert. The MCP `send_message` tool echoes the role, never the resolved email. When a role-addressed send then fails authorization (403 `role_not_opted_in`) or delivery (404 `role_no_channel`), the route's detail names the role only — the service's error text carries the resolved email, so it is passed through only for email-addressed sends, where the caller supplied that email itself. The deprecated email path logs `[role_addressing] … deprecated` only for agent-key callers, as reports do.
+
 ## Data Flow
 
 ### 1. Authorization Check
@@ -173,6 +177,15 @@ actor_id=agent_name
 target_type="user"
 target_id=recipient_email
 ```
+
+### 4b. Cross-execution idempotency key (trinity-enterprise#665)
+
+Optional `idempotency_key` + `idempotency_ttl` on the request. After the consent check
+and before the rate limit, `idempotency_service.intent_guard` claims
+`(agent, recipient, key)`. An earlier run's send inside the TTL → nothing is delivered;
+the response carries `sent:false, suppressed_by, first_sent_at, first_execution_id`, an
+audit `suppressed` event is written, and a `Trinity`-labelled `system` row is added to the
+first send's session. Full contract: [effect-idempotency.md](effect-idempotency.md#cross-execution-intent-keys-trinity-enterprise665).
 
 ### 5. Session-History Persistence (#1600)
 

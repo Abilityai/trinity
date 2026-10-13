@@ -69,3 +69,30 @@ html.dark {
 .animate-pulse-subtle {
   animation: pulse-subtle 2s ease-in-out infinite;
 }
+
+/* trinity-enterprise#610 — "Open in chat" / reply landing: the message glows.
+   A token tint behind the row that reaches 12px past it on every side (a
+   box-shadow spread, so nothing reflows), eases in, holds, and eases out over
+   3.2s — ANCHOR_HIGHLIGHT_MS in useConversationAnchor.js removes the class when
+   it ends. Reduced motion: the same tint held still, then gone. */
+@keyframes anchor-glow {
+  0%   { background-color: transparent; box-shadow: 0 0 0 0 transparent; }
+  12%  { background-color: var(--anchor-tint); box-shadow: 0 0 0 12px var(--anchor-tint); }
+  60%  { background-color: var(--anchor-tint); box-shadow: 0 0 0 12px var(--anchor-tint); }
+  100% { background-color: transparent; box-shadow: 0 0 0 12px transparent; }
+}
+.anchor-glow {
+  --anchor-tint: theme('colors.action-primary.100' / 75%);
+  border-radius: 1rem;
+  animation: anchor-glow 3.2s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.dark .anchor-glow {
+  --anchor-tint: theme('colors.action-primary.500' / 16%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .anchor-glow {
+    animation: none;
+    background-color: var(--anchor-tint);
+    box-shadow: 0 0 0 12px var(--anchor-tint);
+  }
+}

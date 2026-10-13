@@ -95,6 +95,12 @@ class SchedulerConfig:
         "PRE_CHECK_TIMEOUT", "70"
     )))
 
+    # trinity-enterprise#689: the readiness verdict is a stamp read plus, for an
+    # unstamped agent, a ≤3 s template read. Fail-open — a timeout fires.
+    readiness_check_timeout: float = field(default_factory=lambda: float(os.getenv(
+        "READINESS_CHECK_TIMEOUT", "5"
+    )))
+
     # Misfire grace time — how long after a missed trigger APScheduler will
     # still execute the job.  Default 30s is far too low for weekly cron jobs
     # whose container may restart.  3600s (1 hour) gives ample runway.
@@ -111,7 +117,7 @@ class SchedulerConfig:
         "MAX_REMINDER_FIRE_ATTEMPTS", "3"
     )))
 
-    # Backend API (for process executions)
+    # Backend API (task dispatch, pre-checks, reminders)
     backend_url: str = field(default_factory=lambda: os.getenv(
         "BACKEND_URL", "http://backend:8000"
     ))

@@ -1,4 +1,4 @@
-# Trinity - Autonomous Agent Orchestration Platform - Requirements
+# Trinity - The Operating System for the AI-Native Company - Requirements
 
 > **SINGLE SOURCE OF TRUTH** — all development must trace back to these documents.
 > Update the relevant area file **BEFORE** implementing any new feature.
@@ -29,8 +29,8 @@ list.
 | [runtimes.md](requirements/runtimes.md) | Multi-runtime support, OpenAI Codex, voice chat, VoIP telephony |
 | [public-access.md](requirements/public-access.md) | Public access, Nevermined payments, mobile admin PWA |
 | [security.md](requirements/security.md) | Security & compliance, operator queue / Operating Room, agent guardrails |
-| [skills.md](requirements/skills.md) | Skills management (GitHub-based), playbooks tab |
-| [lifecycle-observability.md](requirements/lifecycle-observability.md) | Agent soft-delete & retention, compatibility validation, first-run operator profile, agent-reported structured reports |
+| [skills.md](requirements/skills.md) | Skills management (GitHub-based), the agent Skills tab (own + shared, approval) |
+| [lifecycle-observability.md](requirements/lifecycle-observability.md) | Agent soft-delete & retention, compatibility validation, first-run operator profile, agent-reported structured reports, the declared-metric registry / point store / read contract (§47–§49), the objective join (§50), the narrow cross-agent metrics read (§51) |
 | [roadmap.md](requirements/roadmap.md) | Advanced features, planned features, process engine, future vision |
 
 ## How requirements are organized

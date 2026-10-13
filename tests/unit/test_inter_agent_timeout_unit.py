@@ -25,6 +25,7 @@ from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from db.write_params import TaskExecutionFields
 
 # Add backend to path so relative imports inside the target modules resolve.
 _backend_path = os.path.abspath(
@@ -207,6 +208,8 @@ class _FanOutRows:
         self._n = 0
 
     def create_task_execution(self, **kw):
+        if kw.get("fields") is not None:  # #1482: inline the parameter object
+            kw.update(vars(kw.pop("fields")))
         self._n += 1
         eid = f"exec_{self._n}"
         self.rows[eid] = {
@@ -253,6 +256,8 @@ class _FanOutRows:
         return None
 
     def update_execution_status(self, **_kw):
+        if _kw.get("result") is not None:  # #1482: inline the parameter object
+            _kw.update(vars(_kw.pop("result")))
         return True
 
 
@@ -451,7 +456,11 @@ def test_fan_out_aggregate_is_rebuilt_from_the_rows():
         ("gamma", "running", None),
     ):
         execution = rows.create_task_execution(
-            agent_name="delegate-5", fan_out_id=fan_out_id, fan_out_task_id=task_id,
+            agent_name="delegate-5",
+            fields=TaskExecutionFields(
+                fan_out_id=fan_out_id,
+                fan_out_task_id=task_id,
+            ),
         )
         if status != "running":
             rows.finish(execution.id, status=status, response=response,

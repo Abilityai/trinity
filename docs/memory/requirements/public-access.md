@@ -24,7 +24,7 @@
 - **GitHub Issue**: #147
 - **Description**: Email-verified public chat sessions maintain persistent per-user memory (text blob) scoped to `(agent_name, user_email)`, injected into every agent call. Memory is updated via background summarization every 5 messages (auto) or explicitly via the `write_user_memory` MCP tool (agent-initiated, #888). The tool resolves the user email server-side from the execution record — agents never handle email addresses directly.
 - **Database Tables**: `public_user_memory`
-- **API**: `POST /api/agents/{name}/user-memory` (agent-scoped key + execution_id; user-facing triggers only)
+- **API**: `POST /api/agents/{name}/user-memory` (agent-scoped key + execution_id; user-facing triggers, plus a `schedule` run that names a seat — §10.19 of `scheduling.md`, ent#637). Every agent-notes write records a `public_user_memory_writes` row; the person reads and undoes them through the Workspace (`GET/POST /api/enterprise/client-portal/agents/{name}/memory…`)
 - **Flow**: `docs/memory/feature-flows/public-agent-links.md#per-user-persistent-memory-mem-001`
 
 ### 15.1a-3 Agent Website Proxy (SITE-001)
@@ -95,7 +95,7 @@
 - **Configurable Settings** (via Settings UI or DB):
   - `channel_rate_limit_max` — Messages per window (default: 30)
   - `channel_rate_limit_window` — Window in seconds (default: 60)
-  - `channel_timeout_seconds` — Execution timeout (default: 120)
+  - `channel_timeout_seconds` — no reader since #221 (channel executions use the agent's own timeout); setting it has no effect
   - `channel_allowed_tools` — Comma-separated tool list (default: WebSearch,WebFetch)
 - **API Endpoints (new in 2026-03-26)**:
   - `GET /api/settings/slack/status` — Transport connection state + workspace info
@@ -183,7 +183,7 @@
   - Auto-created group configs on first interaction (no manual setup required)
   - Bot added/removed from group detection via `my_chat_member` update events
   - User join/leave detection via `chat_member` events (requires bot admin in group)
-  - Fresh context per group message (no prior session history to prevent context bleed)
+  - Group turns read only the group's own per-chat session — never DM history (superseded the original "fresh context per group message" rule; see TGRAM-GROUP-CTX, §15.1e-ctx)
   - Silent rate limit drops in groups (no error messages visible to all members)
   - Mention text stripped from agent input for cleaner prompts
   - Commands support @botname suffix in groups (e.g., `/help@mybot`)
@@ -208,6 +208,29 @@
 - **Frontend**: TelegramChannelPanel extended with group list, trigger mode radio, welcome message config
 - **Flow**: `docs/memory/feature-flows/telegram-integration.md`
 
+### 15.1e-ctx Telegram Group Conversation Context (TGRAM-GROUP-CTX — ent#600)
+- **Status**: 🔨 In Progress (2026-09-11)
+- **Requirement ID**: TGRAM-GROUP-CTX
+- **Priority**: P1
+- **Description**: In a Telegram group the agent still *speaks* only per the group's trigger mode, but it *knows* the group's recent conversation when it does. Un-tagged messages the bot receives are recorded as attributed context without spending an agent turn; a tagged turn is answered with that bounded history. Replaces TGRAM-GROUP's "fresh context per group message" rule — the reason for that rule (DM history must never reach a group reply) is preserved by construction, because the group's context lives in its own session.
+- **Key Features**:
+  - Group sessions are keyed per chat (`{bot_id}:group:{chat_id}`, plus `:topic:{message_thread_id}` in forum supergroups), not per sender. DMs keep their per-user key; nothing from a DM or another group can appear in a group reply.
+  - In `mention` mode an un-tagged group message is **observed**: persisted to the group session with its speaker label, never executed — no reply, no typing, no reaction, no rate-limit charge. Bare `/commands` are neither executed nor recorded; a command addressed to the bot (`/reset@bot`) counts as tagged.
+  - Every group turn (mention / all / observe) is built as sender identity + a bounded, attributed "recent group conversation" block (default 40 messages within 24 h; `[NO_REPLY]` turns skipped; lines clamped) + the tagged message. The tagged user turn is persisted *before* execution so stored order matches what the group saw. Observed history is untrusted third-party input and is rendered inside a delimited block with sanitized labels.
+  - Zero-config slice: a tagged message that replies to someone else's message carries `[Replying to <name>: "<quote>"]` — works with Privacy Mode on.
+  - Proactive `send_group_message` broadcasts now land in the same group session, closing #1649's "agent can't recall its own broadcast" limitation.
+  - Per-group `context_enabled` (default ON; owner-editable via the existing group PUT + panel toggle; human-only). OFF ⇒ nothing about the group is recorded — no observed messages, no tagged turns or replies, no broadcasts — and group turns run with fresh context (sender identity + reply quote + the message). Switching OFF also deletes what was recorded (the chat's session and its forum-topic sessions), so switching back ON starts from an empty history. Not required config.
+  - Storage bound: a group session is pruned to its newest 500 rows each time its message count crosses a multiple of 50, on every group write path (observed messages, tagged turns, `all`/`observe` turns). Bounds are env-overridable (`TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES`, `TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS`).
+  - Honest status per group: `context_status` ∈ `all_messages` (an un-tagged message has reached the bot here) / `tagged_only` (getMe reports Privacy Mode on; hint names `/setprivacy` → Disable, re-add the bot, or make it a group admin) / `unconfirmed` (Privacy Mode off or unknown, nothing un-tagged seen yet; hint names re-add / Verify) / `off` (toggle off). `can_read_all_group_messages` is refreshed from `getMe` at connect, at Verify, and when the bot is added to a group.
+  - Graceful degradation: with Privacy Mode on the bot never receives un-tagged messages, so behaviour is exactly TGRAM-GROUP's.
+- **Database Changes** (dual-track: `telegram_group_context` + Alembic `0079_telegram_group_context`; all additive, nullable/defaulted):
+  - `telegram_bindings.can_read_all_group_messages INTEGER` (NULL = never checked)
+  - `telegram_group_configs.last_untagged_seen_at TEXT`, `telegram_group_configs.context_enabled INTEGER DEFAULT 1`
+- **API Changes**: `GET /api/agents/{name}/telegram/groups` items gain `context_enabled`, `context_status`, `context_hint`, `last_untagged_seen_at`; `PUT …/groups/{id}` accepts `context_enabled`. MCP `list_channel_groups` passes `context_status` through (Invariant #13).
+- **Known limitations**: no backfill — context starts when the bot can see messages; a group locked by `group_auth_mode=any_verified` records nothing until unlocked; ent#265 completion reports are not written into group context; `/reset@bot` by any member clears the group's shared context.
+- **Journey**: J14 (`tests/journeys/catalog.yaml`, `built: no`)
+- **Flow**: `docs/memory/feature-flows/telegram-integration.md` → Group Conversation Context
+
 ### 15.1h Channel Completion Report-Back (CHANNEL-REPORT — ent#224 Slack, ent#265 Telegram)
 - **Status**: ✅ Slack (2026-07, ent#224) · ✅ Telegram (2026-07, ent#265)
 - **Priority**: P1
@@ -220,6 +243,18 @@
   - **At-most-once**: `effect_guard("channel_completion_report", {channel, chat_id, thread}, execution_id, agent_name=row.agent_name)` (#1084) — identity is the resolved destination, never the generated body; the guard's `agent_name` is ALWAYS the executing agent (a binding-agent passthrough fail-opens resolution and silently disarms dedup). A failed send claims completed (at-most-once bias; never blind-retry an ambiguous send).
   - **Sanitize-before-truncate**: `_summarize` credential-sanitises over a 2× window before capping at 2800 chars (the #1578 emit-chokepoint rule — every egress surface).
   - **D10 structure**: per-channel resolver dispatch map; `SUPPORTED_CHANNELS` derives from it — a WhatsApp leg is additive.
+- **MCP caller contract (#3232)** — how `chat_with_agent` and every dedicated `chat_with_<agent>` tool carry the parent (`src/mcp-server/src/tools/chat.ts::resolveReportBack`, one decision per call):
+  - **Async dispatches report back by default.** An async delegation — `parallel=true, async=true`, or a sequential call the #946 pull pilot routes as a `/task` — sends the caller's turn as `parent_execution_id` with no argument, whenever the platform's `X-Trinity-Execution-Id` header (#2392) names a real turn (not `manual`, not absent). The caller's turn usually ends with the receipt, so the child's note is the only way the person hears the outcome. The default is tied to the dispatch, not to the receipt: an error from the call does not mean nothing will post, because the run may have started.
+  - **Opt-out:** a typed `execution_id="manual"` sends no parent and adds no result fields. It does not change the turn header the MCP server forwards (`callerTurn`, read by the skill gate and pull-mode refusals).
+  - **Self-task with `inject_result=true` is excluded from the default**: the agent already named a destination (its own chat session). A typed id still opts it in, and both deliveries happen.
+  - **Sync stays opt-in.** A `parallel=true` sync call carries a parent only when the agent passes `execution_id`; the caller answers inline, so a default would double-post. A sync call that falls through to `queued_timeout` still reports at its end.
+  - **Which id goes out:** the header turn wins over a typed id (a resumed session can copy a stale one); with no header the typed id is sent only if it passes the header's own format check (`isWellFormedExecutionId`). A typed `manual` or a malformed typed id is never forwarded.
+  - **Sequential `/chat` carries nothing**: `ChatMessageRequest` has no parent field and the `/chat` terminals never spawn a report. A typed id there answers `report_back: off`, reason `sequential_chat`.
+  - **Result fields:** when a parent is sent, the tool result carries `report_back: "requested"` (plus an informational `report_back_note` on default-armed calls); an opted-in call that cannot carry one says `report_back: "off"` with `report_back_reason` (`disabled` > `manual_session` > `invalid_execution_id` > `sequential_chat`) and a future-only note, left off `queued_timeout` / `agent_busy` results. Gate results, depth refusals and thrown errors are never touched. `requested` means a parent was sent, not that a note will land.
+  - **Kill switch:** `MCP_REPORT_BACK_ENABLED=false` (mcp-server env, default `true`) stops every parent, default and typed; default-armed results then carry no fields, so receipts are byte-identical to the pre-#3232 shape.
+  - The parent is **not** part of the idempotency key (Invariant #18). The ent#265 provenance guard stays the only gate on inheritance; the header is not a trust boundary.
+  - **Chains post once per async hop**: A (channel turn) → B async inherits; B → C async inherits from B's row; the thread gets B's note and later C's. B can pass `execution_id="manual"`.
+  - Delivery stays best-effort: per-channel consent, a missing binding or token, or a failed send suppresses the note.
 - **Per-channel consent units**:
   - **Slack**: channel-binding `allow_proactive` (ent#223); no binding / no consent → suppress.
   - **Telegram group**: `telegram_group_configs.allow_proactive` (INTEGER DEFAULT 1 — allow for existing AND new groups; opt-out mute via the "Completion reports" toggle in TelegramChannelPanel; human-only PUT arm — `reject_agent_principal`). Requires `is_active` too.
@@ -228,7 +263,7 @@
   - **Two DM consent regimes (deliberate)**: reporting on *user-initiated work* is the deferred sibling of the inline reply and needs no flag; *agent-initiated outreach* (#321 proactive messaging) keeps its own `agent_sharing.allow_proactive` per-recipient consent. The #321 flag is NOT honored as DM report revocation — it cannot distinguish "explicitly revoked" from "never opted in" (default 0), so honoring it would kill the flagship delegated-DM case for every verified shared user. A future unified consent model inherits this rationale.
 - **Rendering (Telegram)**: pre-escape `&`/`<`/`>` → `_markdown_to_html` → re-cap at 4096 (entity expansion; "message too long" is a 400 the parse-fallback doesn't catch); thread = the triggering `message_id`, passed as `reply_parameters` when numeric, DMs anchored too, `allow_sending_without_reply` makes a deleted original safe.
 - **Database**: `schedule_executions.source_channel_agent TEXT` (nullable; `AgentRef` KEEP — rename cascades, #772 90-day sweep is retention); `telegram_group_configs.allow_proactive INTEGER DEFAULT 1`. Dual-track migration (SQLite `channel_report_back_columns` + Alembic `0031_channel_report_back`).
-- **Known limits (v1)**: lease-reaper/bulk-sweep/pull-sink and operator-terminate (Path B) terminals don't report; a restart mid-inline-turn loses the inline reply and reports nothing (F7); a late token-gated FAILED→SUCCESS resurrection replays the guard — no corrective ✅ (correct at-most-once); fan-out = one report per child execution (per-execution identity — no persisted parent key); pre-migration rows with NULL chat context suppress; Telegram forum topics not threaded (inbound never captures `message_thread_id`); no channel-history persistence of the report.
+- **Known limits (v1)**: lease-reaper/bulk-sweep and operator-terminate (Path B) terminals don't report; a child closed by backend shutdown (the `task_execution_service.py` CancelledError terminal) or by the cleanup service's stale-execution and stale-slot sweeps writes `failed` with no report, so a hung or orphaned child fails silently; a plain sequential `/chat` delegation never reports (#3232, follow-up #3295); a delegated `/task` whose message needs a skill-gate approval never reports: the gate fires before the row is created, so nothing is inherited, and the approved run is re-created from the frozen dispatch, which carries no `source_channel*` (#3232, follow-up); an MCP delegation that repeats a byte-identical earlier one within 24 h is an idempotent replay of the first run (the backend returns before inheritance), so no new child is created and any report goes to the first call's thread — under the async default the replayed receipt still says `requested` (#3296; fix belongs to ent#566's intent key); a restart mid-inline-turn loses the inline reply and reports nothing (F7); a late token-gated FAILED→SUCCESS resurrection replays the guard — no corrective ✅ (correct at-most-once); MCP and REST `fan_out` send no parent (`FanOutRequest` has no parent field), so fan-out children never inherit a conversation and never report (#3232, follow-up) — were they to, fan-out = one report per child execution (per-execution identity — no persisted parent key); pre-migration rows with NULL chat context suppress; Telegram forum topics not threaded (inbound never captures `message_thread_id`); no channel-history persistence of the report.
 - **Deliberate scope cut**: the proactive group-send endpoint (`POST …/telegram/groups/{chat_id}/messages`) is NOT gated on `allow_proactive` here (ent#223 did gate Slack's) — with default 1 the eventual coherence gate is a no-op for un-toggled groups; follow-up issue filed at ship time.
 - **Flow**: `docs/memory/feature-flows/channel-completion-report.md`
 
@@ -438,6 +473,48 @@
   - `verify_payment()` — 15s timeout, wrapped in `asyncio.to_thread()`
   - `settle_payment()` — 30s timeout, 3 retries with exponential backoff
   - Graceful degradation: 501 if SDK not installed
+- **Plan scheme — card (fiat) plans must be payable (#3215)**: the SDK's
+  `build_payment_required` defaults `scheme="nvm:erc4337"`, and the facilitator is
+  POSTed the requirements document verbatim, so `accepts[0].scheme` is the **only**
+  channel the scheme travels through. Passing no scheme made every fiat plan's
+  token fail verification. `_build_payment_required` now takes a `PlanScheme`
+  (`None` = the pre-#3215 document, which is what keeps crypto bytes identical per
+  environment). Two sources, in order:
+  - **the presented token** (`scheme_from_token`) for **verify and settle** — the
+    token body carries `accepted.{scheme,network,planId}`, so the money path makes
+    no network call and a settle re-driven hours after its verify is byte-stable
+    with it. Caller-supplied, therefore allow-listed against the SDK's scheme and
+    `SupportedNetworks` vocabularies and checked against this agent's plan id;
+    anything else falls through to the plan-resolved scheme, then to the default.
+  - **the plan** (`resolve_plan_scheme`) for the **402 and `/info`**: `plans.get_plan`
+    parsed with the SDK's own keys (`registry.price.isCrypto`,
+    `metadata.plan.fiatPaymentProvider`; parity-tested against the SDK's
+    `resolve_scheme`/`resolve_network`), behind a `(environment, plan_id)` cache
+    (positive 300 s, negative 30 s), per-key single-flight futures, its own 2-slot
+    gate — **never** a facilitator slot, so an anonymous 402 flood cannot starve
+    paying traffic — stale-while-revalidate, and a WARNING once per negative window
+    (the SDK swallows the same failures at DEBUG, which is how a card plan silently
+    stayed crypto). Knob: `NEVERMINED_PLAN_LOOKUP_TIMEOUT_SECONDS` (default 5.0),
+    `NEVERMINED_PLAN_LOOKUP_MAX_INFLIGHT` (default 2).
+- **Public origin for `resource.url` (#3215)**: `utils/public_url.py::public_base_url`
+  is the single owner for both surfaces, with two precedences one keyword apart.
+  **Each 402 is minted for the origin the caller actually used** (the paid door, the
+  A2A door, `/info`): configured public origin (Settings `public_chat_url` →
+  `PUBLIC_CHAT_URL` → `FRONTEND_URL`) **only when its host equals the request
+  host**; otherwise the request host with an https **upgrade** (never a downgrade)
+  read from the **raw** `X-Forwarded-Proto` header. **The agent card advertises the
+  configured public origin** (`configured_wins=True`, unchanged from before #3215) —
+  it is a discovery document republished to buyers elsewhere, and the
+  `get_agent_a2a_card` MCP tool reads it from `backend:8000`; with nothing
+  configured it falls back to the request host on the same upgrade-only rule. A
+  buyer that follows the card arrives on the configured host, so the 402 it meets
+  there is minted for that host. Raw, not `request.url.scheme`:
+  the prod/hosted compose `command:` overrides the image CMD and drops
+  `--proxy-headers --forwarded-allow-ips`, so uvicorn applies no forwarded headers
+  there at all. The frontend nginx's `$fwd_proto` map stops it clobbering an
+  upstream `https` with its own `$scheme`. Restoring the uvicorn flags is a trust
+  change (it re-prices `request.client.host` for every per-IP limiter) and is
+  deliberately out of scope.
 
 ### 23.3 Paid Chat Endpoint
 - **Status**: ✅ Implemented (2026-03-04)
@@ -445,7 +522,11 @@
 - **Description**: Public x402 endpoint for external callers
 - **Endpoints**:
   - `POST /api/paid/{agent_name}/chat` — 402/403/200 flow; accepts `Idempotency-Key` (#1018)
-  - `GET /api/paid/{agent_name}/info` — Public agent info + payment requirements
+  - `GET /api/paid/{agent_name}/info` — Public agent info + payment requirements. It
+    is the card's `paymentInfoUrl`, from which a payment-aware client pays on its
+    FIRST request, so it loads the config **with the key** (#3215) to resolve the
+    plan's real scheme and emits an **absolute** `resource.url`. The key is used
+    server-side only and never appears in the body.
 - **Flow**: No header → 402; invalid token → 403; valid → verify → (idempotency gate) → execute → settle → receipt
 - **Settlement-ordering / honest status (#1018)**: `verify_payment` does **not** burn credits —
   only `settle` does. When a settle fails after retries the endpoint keeps HTTP 200 + the delivered
@@ -466,6 +547,14 @@
   converges the stored snapshot to settled. A divergent
   client header never forks execution; an underivable key (missing token/body) disables dedup (fail-open,
   never a constant collision).
+
+### Cross-Execution Idempotency Key on Human-Facing Sends (trinity-enterprise#665)
+- **Status**: ✅ Implemented
+- **Description**: `send_message`, `call_user` and `send_group_message` accept an optional caller-declared `idempotency_key` + `idempotency_ttl` (60–86400 s, default 86400). Two sends with the same `(agent, target, key)` inside the TTL, from any executions, deliver once; the store decides races (one winner; a concurrent claimer gets a retryable 409).
+- **Result**: keyed sends return `sent`; a suppressed send returns `success:true, sent:false, suppressed_by:"idempotency_key", first_sent_at, first_execution_id`. Keyless requests and responses are unchanged.
+- **Never content-derived** (the #1422 failure): the key is the caller's string; the message text is not part of it.
+- **Visibility**: audit event (`suppressed` / `group_message_suppressed` / `voip_call_suppressed`) plus a `Trinity`-labelled `system` row in the first send's conversation session (DM + group; calls audit only).
+- **Order**: consent → key → rate limit → deliver. Composes with the per-turn `effect_guard` (#1084); flow: `feature-flows/effect-idempotency.md`.
 
 ### Configurable Proactive Message Rate Limits (#1609)
 - **Status**: ✅ Implemented (2026-07-14)
@@ -501,6 +590,18 @@
 - **Status**: ✅ Implemented (2026-03-04)
 - **Description**: 4 MCP tools for Nevermined management
 - **Tools**: `configure_nevermined`, `get_nevermined_config`, `toggle_nevermined`, `get_nevermined_payments`
+
+### 23.7 The same paywall on the A2A door (ent#679) — pointer
+- **Status**: 🚧 In Progress
+- **Home**: `docs/memory/requirements/mcp.md` **§32.6**. The A2A inbound door
+  (§32.2 there) owns the gate, so the requirement lives with the door and this
+  is a pointer, not a second description.
+- **What changes here**: §23.3's settle / replay / `success_unsettled` logic is
+  no longer paid-door-only — both doors call one orchestrator
+  (`services/paid_turn_service.py`), so the #1018 branches have one home. The
+  paid door's own behaviour is unchanged. `credits_per_request` now accepts
+  **0** for a Nevermined *duration* plan (charged by time, not per call); a
+  negative is still a named 422 (§32.6 FR-11).
 
 ---
 
@@ -538,7 +639,7 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 - **Description**: Mobile-optimized Operating Room showing items needing attention
 - **Key Features**:
   - Needs Response queue with expandable cards
-  - Respond/acknowledge actions inline, by item type (desktop parity, #2370): approval = select an option → restated consequence → optional note → explicit `Send: <option>` (never a one-tap irreversible answer); question = text answer; alert = `Got it`. The payload is the desktop's — the decision in `response`, a note in `response_text` — built by the shared `utils/operatorQueue.js`, so a Deny can no longer be recorded as an approval
+  - Respond/acknowledge actions inline, by item type (desktop parity, #2370): approval = select an option → restated consequence → optional note → explicit `Send: <option>` (never a one-tap irreversible answer), or the **Something else** chip (#3242; hidden on a gate approval) → required instruction → `Send instruction`; question = text answer; alert = `Got it`. The payload is the desktop's — the decision in `response` (an option, or the reserved `(something else)`), a note or the instruction in `response_text` — built by the shared `utils/operatorQueue.js`, so a Deny can no longer be recorded as an approval
   - Notification list with priority badges
   - Badge count on tab icon
   - Cost alerts summary
@@ -697,11 +798,12 @@ degrade quietly). #2086 centralizes it.
   selectable Claude model, add one `ModelEntry` to `MODEL_CATALOG` and re-run
   `python scripts/gen_model_catalog.py`.** This is the docs/PR-checklist step the
   AC requires ("docs say where the file is").
-- **FR-7 — Known-deferred display drift**: `routers/ops.py::_format_model_name` and
-  its frontend twin `stores/observability.js::formatModelName` are display
-  prettifiers with no model list (a new id renders via their title-case fallback).
-  They are the same drift class but are **deliberately out of scope** for #2086 —
-  tracked as a follow-up, not silently folded into the centralized catalog.
+- **FR-7 — Known-deferred display drift**: `services/ops_costs_service.py::_format_model_name`
+  (formerly in `routers/ops.py`) is a display prettifier with no model list (a new
+  id renders via its title-case fallback). It is the same drift class but is
+  **deliberately out of scope** for #2086 — tracked as a follow-up, not silently
+  folded into the centralized catalog. Its former frontend twin,
+  `stores/observability.js::formatModelName`, was removed with the store in #3434.
 
 ### 48.1 Voice Replies v2 — Voice as a Per-Message Capability (trinity-enterprise#117)
 
@@ -757,6 +859,13 @@ of the epic #24 voice-replies feature.
 - **FR-8 — Migration of existing agents**: an already-`tts_voice_replies_enabled`
   agent keeps all three channel flags ON but no longer auto-speaks every reply
   (behavior change: always-voice → agent-chosen).
+- **FR-9 — A delegated child never speaks (#3232)**: the route answers
+  `{delivered: false, reason: "delegated_turn"}` for an execution whose
+  `source_channel_agent` is set — a child that inherited its parent's channel
+  context only so its consent-gated completion report (§15.1h) can find the way
+  back. Checked before any channel branch; this route has no proactive-consent
+  check of its own, and #3232's async report-back default makes such children
+  common.
 - **API**: `send_voice_reply` MCP tool → `POST /api/agents/{name}/voice-reply`
   (`AuthorizedAgentByName` + agent-scoped self-check; user-facing channel triggers
   only); `GET/PUT /api/agents/{name}/voice-replies` extended with per-channel
@@ -912,3 +1021,60 @@ spoken replies (#2157) stay as composer affordances.
   frame after persistence tells the client when to reload; End always works.
 - **FR-9 — Out of scope**: rooms; acting as the agent (#535); the external
   projection (#285/#446); provider choice (#354, seam kept provider-neutral).
+
+### 48.4 Workspace Projects — the open-core surface (trinity-enterprise#661)
+
+**Description**: An internal user runs sustained work as a **project**: a
+record that links the Workspace chats and rooms where the work happens, with
+members and the agents that may work on it. The record and its rules are a
+private module; this section is the edition-agnostic surface it needs.
+
+- **FR-1 — Capability on the roster**: `projects_available` is true only when
+  the module is entitled AND the principal is a platform user or an outside
+  client invited to a project (asked through the `portal_capabilities` seam,
+  since the core holds no invitations). Fails closed on an older backend, a
+  failed read, or an uninvited outside client.
+- **FR-2 — Turn-context seam**: a provider registry both Workspace composers
+  call on every turn (chat: resumed and cold arms; room: ahead of the file
+  manifest). The platform fills the context from the chat row or room,
+  including whether the audience is internal. No provider → no change.
+- **FR-3 — Addressed gate asks**: a platform (`gate`) raise may name exactly
+  one addressee; an agent's raise may not.
+- **FR-4 — Workspace UI, gated on FR-1**: a Projects list across agents, a
+  project page (goal, status, steward, my chats, others' chats as a count only,
+  agents with consent state, members, rooms), a rail tab for the current agent,
+  and chat-header controls (link, detach, make a project) — never in Main.
+- **FR-5 — Agent tools over MCP**: `list_projects` / `get_project` (with the
+  recent log and open tasks), `list_project_tasks`, `get_project_log`,
+  `create_project_task`, `update_project_task`, `add_project_task_note`,
+  `add_project_log_entry`, `link_to_project` (a file, report, decision or an
+  ask it raised), and for a steward agent `get_steward_digest` /
+  `set_project_health`. License-blind (404 = no module, string 403 =
+  unlicensed); an agent reaches only projects it is active on, and only in a
+  turn whose audience is internal: every call forwards the platform-supplied
+  `X-Trinity-Execution-Id` (#2392), never a tool parameter, and a refusal is a
+  coded 403 the agent can relay.
+- **FR-6 — v2 Workspace surface, gated on FR-1**: a project page with Tasks
+  (the ent#673 fields and status set), an append-only Log, and Files & reports
+  (link a file, report or decision you can already see; the creator may share
+  a file or report with guests); guest invites and a narrow guest view; a
+  one-shot import of a folder project from an agent; a room-header link
+  control; editing name, goal, steward and tracker; and **Wrap up** in a
+  linked chat, which asks the agent to record the chat's outcomes itself.
+- **FR-7 — v3 hub surface, gated on FR-1**: on a project's Overview, its
+  health (on track / at risk / off track and a line, set by its steward or
+  creator), where it stands (tasks by status, and what needs attention, each
+  opening Tasks), the declared agent metrics a member picked (value, a small
+  trend, and the platform's one stale verdict), and **Needs you**: the
+  viewer's own open asks on the project as Inbox-style list rows (agent,
+  when, one-line title — never the ask's body, #3574), each answered in place
+  behind **Answer** with the Inbox's component (`PortalAsks` narrowed by
+  `askIds` — it can only narrow the viewer's own list) or opened selected in
+  the Inbox, with everyone else's as a count; the hub's cards size to their
+  own content, never to a neighbour's. The Projects list shows
+  health and an attention count per row, and an **I steward** tab lists what
+  needs the steward across their projects. Guests see none of it. An ask an
+  agent raises over MCP records the raising turn from the same
+  platform-supplied `X-Trinity-Execution-Id` (only when it is that agent's own
+  execution, winning over an agent-written `context.execution_id`), which is
+  how an ask raised in a project's chat is found on the project.

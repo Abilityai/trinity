@@ -1,0 +1,103 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-08",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/3406-public-link-401",
+  "issue": "abilityai/trinity#3406",
+  "base": "dev @ 82b99c302",
+  "audited": "working tree, pre-commit",
+  "counts_as_full_run": false,
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_not_applicable": {
+    "3": "no dependency change: package.json, package-lock.json, Dockerfiles and requirements untouched",
+    "4": "no workflow change",
+    "5": "no Docker, compose or infrastructure change",
+    "6": "no webhook, channel or integration change",
+    "8": "no agent-shipped file (skills, templates, plugins, .mcp.json, settings.json) changed"
+  },
+  "stack_cve_quicklist": [
+    {
+      "component": "all rows",
+      "verdict": "not touched by the diff (no pin changed)"
+    }
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_mcp_tools": 0,
+    "new_ws_channels": 0,
+    "new_client_inputs": [
+      "Login.vue reads route.query.redirect (validated by utils/safeRedirect.js)"
+    ],
+    "changed_client_requests": [
+      "PublicChat Stop now sends the visitor's session_token as a query parameter on email links (the route's declared transport; same as history/intro/session DELETE)"
+    ],
+    "agent_context_ingress": "none added"
+  },
+  "checks": [
+    "diff secrets scan (AKIA, sk-, ghp_/gho_/github_pat_, xox, re_, private IPs, emails): 0 hits beyond example.com placeholders",
+    "v-html / innerHTML / insertAdjacentHTML / eval / new Function / window.location assignment in added lines: 0",
+    "safeRedirect: vue-router web history builds protocol + '//' + host + base + path, so router.push cannot leave the origin; //host, backslash, control chars, absolute URLs, arrays and /login fall back to '/'; no frontend route performs a write from its query string (Settings ?slack= only shows a message, reachable by a direct link already)",
+    "verdict cannot be driven to sign out a valid session: only get_current_user/OAuth2PasswordBearer/auth.py 401s carry WWW-Authenticate: Bearer, and only for an invalid credential; same-origin API so the header is readable; /login deliberately excluded (a wrong password is challenged and a sibling tab's fresh token rides the request)",
+    "enum completeness: 'logout-in-place' consumed only by reactToPlatformUnauthorized; api.js, main.js and portalHttp report through notifyPlatformUnauthorized",
+    "enterprise-docs-guard pattern replayed over the 7 changed docs and 2 new learnings fragments: 0 hits"
+  ],
+  "findings": [
+    {
+      "id": 1,
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "unstated-failure-direction",
+      "owasp_2025": "A10",
+      "asi": null,
+      "llm": null,
+      "phase": 9,
+      "file": "src/frontend/src/utils/platformSession.js",
+      "symbol": "isBearerChallenge",
+      "title": "New 401 discriminator did not state its failure direction",
+      "exploit": "None directly: the function returns false on any header it cannot read, which is the safe direction (the verdict then ignores). The rubric flags an unstated direction because the next editor cannot tell whether false-on-unknown is deliberate, and flipping it would sign operators out on public pages.",
+      "recommendation": "State in the docstring that it fails toward false and what that costs.",
+      "resolution": "fixed in-branch (docstring states: fails toward false; worst case a lingering dead token, never a signed-out operator)",
+      "verifier": "sequential in-context challenge (a wording check: the pre-fix docstring is the whole evidence)"
+    }
+  ],
+  "hypotheses": [],
+  "informational": [
+    "CWE-598 class, pre-existing: the visitor's 24 h link session travels in the query string of history, intro and session DELETE, and now terminate (the route's declared parameter). Uvicorn access logs record query strings. Not new as a class; the token grants only that visitor's chat on that link and expires in 24 h."
+  ],
+  "coverage_gaps": [
+    "no Docker pass (diff mode, no image change)",
+    "header readability through a deployed proxy chain (nginx / cloudflared) not exercised live; fails safe to 'ignore' if a proxy strips WWW-Authenticate",
+    "live-stack reproduction of the issue pending (operator eyeball step)"
+  ],
+  "supply_chain_summary": {
+    "scanner": "n/a (no dependency change in the diff)",
+    "lockfile_changed": false
+  },
+  "filter_stats": {
+    "candidates": 4,
+    "dropped_hard_exclusion": 1,
+    "below_gate": 2,
+    "reported": 1
+  },
+  "totals": {
+    "CRITICAL": 0,
+    "HIGH": 0,
+    "MEDIUM": 1,
+    "LOW": 0
+  },
+  "trend": "diff run: no fingerprint overlap with prior reports"
+}

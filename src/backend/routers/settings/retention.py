@@ -129,7 +129,7 @@ async def acknowledge_retention_prune(
 
     Human-only. Admin-role alone is NOT sufficient today: an agent-scoped MCP
     key resolves to its owner *carrying the owner's role*, so on an install whose
-    agents are admin-owned (the default — see cornelius_agent_service.CORNELIUS_OWNER)
+    agents are admin-owned (the default — owned by `utils.admin_identity.admin_username()`)
     an agent key passes the admin check. `reject_agent_principal` is therefore
     applied explicitly here. See abilityai/trinity-ops-agent#232 for the
     underlying fix.
@@ -161,9 +161,22 @@ async def acknowledge_retention_prune(
     # Bind the ack to the window actually in force right now, not to whatever the
     # caller says. Otherwise an operator could be socially-engineered into acking a
     # window that isn't the one about to run, and the guard would honour it.
-    effective_raw = db.get_setting_value(
-        body.key, OPS_SETTINGS_DEFAULTS.get(body.key, "0")
-    )
+    #
+    # #3088: "in force" means what the key's SWEEP reads. The env-backed keys
+    # are swept through `resolve_ops_setting` (row → env → code default), so a
+    # verbatim row read here answered the code default for a window the
+    # environment supplies and 409'd its approval forever. Every other key keeps
+    # the verbatim read on purpose: its sweep reads an empty-string row as `0`
+    # (disabled) where the resolver reports the default, and an approval
+    # recorded at that default would be one no sweep consumes.
+    from config import ENV_BACKED_OPS_KEYS
+
+    if body.key in ENV_BACKED_OPS_KEYS:
+        effective_raw, _source = settings_service.resolve_ops_setting(body.key)
+    else:
+        effective_raw = db.get_setting_value(
+            body.key, OPS_SETTINGS_DEFAULTS.get(body.key, "0")
+        )
     try:
         effective = max(int(effective_raw), 0)
     except (TypeError, ValueError):
@@ -187,7 +200,7 @@ async def acknowledge_retention_prune(
         source="api",
         actor_user=current_user,
         actor_ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"key": body.key, "window_days": effective},
     )
@@ -234,15 +247,36 @@ async def get_retention_status(
         RETENTION_OPS_KEYS,
     )
 
+    # Both resolve through `settings_service.resolve_ops_setting` so the env
+    # tier minted for ent#478's two knobs is reported rather than skipped — an
+    # endpoint whose whole job is to say WHERE a window came from must not
+    # answer "code-default" for a value the environment is actually supplying.
+    from config import ENV_BACKED_OPS_KEYS
+    from services.settings_service import settings_service as _settings
+
     def _ops_int(key: str) -> int:
-        raw = db.get_setting_value(key, OPS_SETTINGS_DEFAULTS.get(key, "0"))
+        raw, _src = _settings.resolve_ops_setting(key)
         try:
             return max(int(raw), 0)
         except (TypeError, ValueError):
             return 0
 
     def _ops_source(key: str) -> str:
-        return "db-row" if db.get_setting_value(key, None) is not None else "code-default"
+        _value, source = _settings.resolve_ops_setting(key)
+        return "code-default" if source == "default" else source
+
+    def _quota(key: str) -> dict:
+        # trinity-enterprise#671. Read the way the write boundary ENFORCES it
+        # (`routers/metric_points._ops_int(key, 100000)`): an unparseable value
+        # falls back to the default, because `0` here means UNLIMITED — reporting
+        # garbage as 0 would advertise a cap nobody is applying. Pinned to that
+        # reader by tests/unit/test_ent671_retention_metric_rows.py.
+        raw, source = _settings.resolve_ops_setting(key)
+        try:
+            value = max(int(raw), 0)
+        except (TypeError, ValueError):
+            value = int(OPS_SETTINGS_DEFAULTS[key])
+        return {"value": value, "source": "code-default" if source == "default" else source}
 
     entitled = entitlement_service.is_entitled("retention")
     audit_days = max(int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "365") or 365), 365)
@@ -252,6 +286,7 @@ async def get_retention_status(
     from services.retention_guard import (
         MAX_ROWS_PER_SWEEP,
         FLOOR_AGENTS,
+        FLOOR_METRIC_POINTS,
         FLOOR_SCHEDULES,
         evaluate as _guard_evaluate,
     )
@@ -271,6 +306,14 @@ async def get_retention_status(
         ("schedule_soft_delete_retention_days",
          "Soft-deleted schedules",
          FLOOR_SCHEDULES, db.count_soft_deleted_schedules_past_retention),
+        # trinity-enterprise#478. Unlike the two above, a refusal here is the
+        # EXPECTED path rather than an exception: narrowing the window on a
+        # mature table puts a year of points past the cutoff at once, the guard
+        # refuses, and its acknowledgements are single-use — so without an
+        # approve control the only unblock would be the alarm's link.
+        ("metrics_retention_days",
+         "Recorded metric points",
+         FLOOR_METRIC_POINTS, db.count_metric_points_candidates),
     )
     pending_acknowledgements = []
     blocked_sweeps = []
@@ -321,8 +364,18 @@ async def get_retention_status(
         # EXECUTION_ROW_RETENTION_DAYS et al: zero reads). Only log archival is
         # env-driven. Claiming an escape hatch that does not exist is what left
         # operators with no way to pre-empt #1638.
-        "precedence": "db-row → code-default (OPS windows); env (log archival only)",
+        "precedence": (
+            "db-row → code-default (OPS windows); "
+            "db-row → env → code-default for the env-backed keys "
+            f"({', '.join(sorted(ENV_BACKED_OPS_KEYS))}); "
+            "env (log archival only)"
+        ),
         "sources": {k: _ops_source(k) for k in RETENTION_OPS_KEYS},
+        # trinity-enterprise#671: ops knobs the Retention panel edits that are
+        # NOT retention windows, each with its value AND source (so `sources`
+        # keeps meaning "per retention window"). The metric point quota is a
+        # per-agent per-UTC-day WRITE budget; `0` is unlimited.
+        "quotas": {"metrics_daily_point_cap": _quota("metrics_daily_point_cap")},
         # #1644 blast-radius guard. Reported separately from `windows` because it
         # is not a retention window — it is the threshold above which a prune is
         # refused pending an explicit acknowledgement. Editable in EVERY edition

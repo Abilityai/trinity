@@ -20,10 +20,21 @@ coverage debt is queryable rather than rediscovered.
 | **J07** | A skill I add shows up in the agent's head and it uses it. | user | local | live-stack | **no** | — | SK-01, SK-02, SK-03 | #2346 |
 | **J08** | I can install a marketplace plugin and the agent can use it. | user | local | live-stack | **no** | — | PLG-01 | #2347 |
 | **J09** | I can point Trinity at my repo and get a working agent from it. | user | local | live-stack | **no** | — | RD-01, RD-02, RD-03 | #2348 |
-| **J10** | My agents can call each other, and I can see what they said. | user | local | journey-smoke | **no** | `tests/journeys/test_j10_agent_calls_agent_journey.py` | P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03 | #2349 |
+| **J10** | My agents can call each other, and I can see what they said. | user | local | journey-smoke | **no** | `tests/journeys/test_j10_agent_calls_agent_journey.py` | P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03, IA-04 | #2349 |
 | **J11** | A companion's brief reaches me where I already work, without me asking. | user | local | live-stack | **no** | `tests/journeys/test_j11_brief_delivery_journey.py` | E-01, E-05, L-03 | #2565 |
+| **J12** | My agent's own declaration of what it measures is what Trinity actually knows about it. | user | local | live-stack | **no** | `tests/journeys/test_j12_declared_metrics_journey.py` | L-02, L-03 | #477, #478, #479, #666 |
+| **J13** | My agent tells me what I can do with it and what is waiting on me — and only things that are true. | user | local | live-stack | **no** | `tests/journeys/test_j13_suggestions_journey.py` | — | #465 |
+| **J14** | I can tag the agent in our group chat and it already knows what we've been talking about. | user | local | live-stack | **no** | — | — | abilityai/trinity-enterprise#600 |
+| **J15** | A fleet I roll out from one definition comes up holding its skills and its canon, and the orchestrator sees what I deployed. | operator | local | live-stack | **no** | `tests/system_chains/test_j15_rollout_chain.py` | L-02, SK-02 | abilityai/trinity-enterprise#794 |
+| **J16** | A fact I publish to the canon reaches the agents that use it, and they say which version they read. | user | local | live-stack | **no** | `tests/system_chains/test_j16_canon_fact_chain.py` | — | abilityai/trinity-enterprise#794 |
+| **J17** | A fact that lands at the wrong agent reaches the agent that owns it, and I hold a receipt. | user | local | live-stack | **no** | `tests/system_chains/test_j17_fact_routing_chain.py` | — | abilityai/trinity-enterprise#794 |
+| **J18** | A change I make to a library skill reaches every agent that holds it, and an agent without the permission cannot change skills. | operator | local | live-stack | **no** | `tests/system_chains/test_j18_library_change_chain.py` | SK-01, SK-02, SK-03 | abilityai/trinity-enterprise#794 |
+| **J19** | My agent's objective reaches me: the number it records shows against the target, and reads stale when it stops. | user | local | live-stack | **no** | `tests/system_chains/test_j19_objective_to_person_chain.py` | L-02 | abilityai/trinity-enterprise#794 |
+| **J20** | I can tell a colleague about the work from inside the conversation, and they are told — without being given anything they could not already see. | user | local | live-stack | **no** | `tests/journeys/test_j20_colleague_tagged_journey.py` | — | abilityai/trinity-enterprise#630 |
 
-**0 of 11 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
+**0 of 20 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
+
+_Harnesses not present in `tests/registry.json`: J20._
 
 ## Variants
 
@@ -31,3 +42,5 @@ A journey holds only if it holds on every shape listed for it.
 
 - **J01 · claimable** — I open my new one-click droplet in a browser and create the admin account there, without ever opening a terminal.
 - **J01 · pre-provisioned** — I gave a password when I created the droplet, so it has an admin from the start and nobody else can claim it.
+- **J05 · inbox** — I open the Workspace and the Inbox tells me the run came back, and whether it finished, without my opening the agent.
+- **J11 · inbox** — When I open the Workspace, the brief is waiting in my Inbox, and reading it there clears it everywhere.

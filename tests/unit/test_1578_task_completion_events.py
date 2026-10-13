@@ -31,12 +31,26 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from unit._write_params import flat_kwargs
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _grant_still_held(monkeypatch):
+    """trinity-enterprise#739: delivery re-reads the subscriber -> source edge.
+    These subscriptions are stubs without one; this file is about what a
+    delivery carries, not whether it is permitted
+    (test_ent739_grant_withdrawal.py covers that), so the grant is held."""
+    try:
+        from services import event_dispatch_service as _eds
+    except ImportError:
+        return
+    monkeypatch.setattr(_eds, "_subscription_still_permitted", lambda sub: True)
 
 
 def _await(coro):
@@ -771,7 +785,7 @@ class TestRouterRecursionBreakGate:
                         x_internal_secret=x_internal_secret,
                     )
                 )
-        return mock_db.create_task_execution.call_args.kwargs["triggered_by"]
+        return flat_kwargs(mock_db.create_task_execution.call_args)["triggered_by"]
 
     def test_valid_secret_promotes_to_event(self):
         from services.event_dispatch_service import RESERVED_EVENT_TRIGGER

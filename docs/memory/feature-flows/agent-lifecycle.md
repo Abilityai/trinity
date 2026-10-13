@@ -79,7 +79,7 @@ As a Trinity platform user, I want to create, start, stop, and delete agents so 
 
 **Create Agent Modal** - `src/frontend/src/components/CreateAgentModal.vue`
 - Line 9: Form submit calls `createAgent()`
-- Line 15-22: Agent name input
+- Agent identifier input previews the formatted name before submission (#3463), matching `utils/helpers.py::sanitize_agent_name`: ASCII letters/numbers plus dots, underscores and hyphens, leading non-alphanumeric characters removed, repeated hyphens collapsed, trailing hyphens removed, then lowercase. The raw input still goes to the API. Names that format to empty are blocked with an example next to the field; there is no client-side length cap.
 - Line 26-137: Template selection (blank, GitHub, local)
 - Lines 191-196: `initialTemplate` prop - Pre-selects template when modal opens
 - Line 198: `emit('created', agent)` - Emits created agent for navigation
@@ -639,10 +639,7 @@ async def get_agent_logs_endpoint(agent_name: AuthorizedAgentByName, request: Re
 
 #### Activity Stream Endpoints
 
-| Endpoint | Line | Description |
-|----------|------|-------------|
-| `GET /api/agents/{agent_name}/activities` | :568-591 | Agent activity history. Params: `activity_type`, `activity_state`, `limit` |
-| `GET /api/agents/activities/timeline` | :594-626 | Cross-agent activity timeline. Params: `start_time`, `end_time`, `activity_types` (CSV), `limit`. Filters by user access |
+None in `routers/agents.py` — the per-agent `GET /api/agents/{agent_name}/activities` and `GET /api/agents/activities/timeline` had no callers and were removed in #3434. The cross-agent timeline is `GET /api/activities/timeline` (`routers/activities.py`); see [activity-stream.md](activity-stream.md).
 
 ### Docker Service (`src/backend/services/docker_service.py`)
 

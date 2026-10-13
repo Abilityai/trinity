@@ -15,6 +15,7 @@
 - **Status**: ✅ Implemented (2025-12-28)
 - **Description**: Google's Gemini CLI as alternative runtime
 - **Key Features**: Free tier, 1M token context, native Google Search
+- **CLI contract (#2971)**: the base image pins `@google/gemini-cli` to an exact version (`GEMINI_CLI_VERSION` in `agent_server/services/gemini_cli_args.py` must equal the Dockerfile pin) and every argv the runtime spawns is built in that one module, which the image build smoke-tests against the installed binary (`--smoke`: a real argument parse of each argv shape) so a CLI release that drops a flag fails the build, not every turn. The runtime passes only flags the pinned CLI accepts: the platform system prompt is prepended to the turn input (no `--system-prompt`; `GEMINI_SYSTEM_MD` would replace the CLI's built-in prompt wholesale) and is re-sent per turn as on Codex; `max_turns` is logged, not enforced (no per-run cap in gemini-cli — the wall-clock timeout bounds the run); `--skip-trust` on every spawn (else exit 55 and `--yolo` downgraded). Chat resumes only its own session (`--resume <own id>`, never bare `--resume`), with the #2958 rules: id recorded after a successful turn, dropped by a reset during the turn, a model change starts fresh, one cold retry when the session is gone. The echoed stdin `role:user` event is rewritten to the caller's prompt so the persisted execution log never carries the composed platform prompt.
 
 ### 14.3 Runtime Configuration
 - **Status**: ✅ Implemented (2025-12-28)

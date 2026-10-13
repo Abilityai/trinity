@@ -247,6 +247,27 @@ stranger guessing tokens learns nothing from the difference. An unparseable
 `expires_at` reads as expired: a link whose lifetime cannot be read is one we
 cannot promise is live.
 
+**Signing in from an `authorized` link (#3406).** A signed-out visitor gets
+`401 sign_in_required`, and `SharedCanvas.vue` renders its own card ("Sign in to
+view this canvas") whose link carries `/login?redirect=<the canvas>`. Two things
+used to defeat it.
+- The global 401 handler treated `/canvas/s/` as an operator page and pushed
+  `/login` before the card ever rendered.
+- `Login.vue` read no `redirect`, so every sign-in landed on the dashboard.
+
+Now:
+- **The 401 verdict** (`utils/platformSession.js`) answers `ignore` there when
+  nothing is stored, and `logout-in-place` when a stored token failed. Every 401
+  on this page is the platform credential's, because `get_optional_user` reads a
+  bad token as anonymous. Ending it in place keeps the card, and its Sign in
+  reaches the login form instead of the `/login → /` guard.
+- **`Login.vue`** sends every non-SSO success through `safeRedirect()`
+  (`utils/safeRedirect.js`). That honours an in-app path only: `//host`,
+  backslashes, control characters, absolute URLs, a repeated parameter and
+  `/login` itself all fall back to `/`.
+- **SSO** still lands on the dashboard, because the round trip through the
+  identity provider drops the query.
+
 ### The PDF
 
 **Print-first**, per the issue's own guidance: a print stylesheet over the
@@ -305,9 +326,22 @@ re-sorting only on refetch would leave a just-pinned canvas where it was.
 
 **Living with many** is `CanvasPanel.vue`, shared by Agent Detail and the
 Workspace rail (one rendering layer, as ent#475 established): search over title
-and id once the list passes six, a height-bounded scrolling strip so a long
-list does not cost the rail its other tabs, and a Manage mode giving each row
-its age, its stale mark, a pin toggle and a delete. Decidable rules live in
+and id once the list passes six, and a Manage mode giving each row its age,
+its stale mark, a pin toggle and a delete. **One control row (ent#724,
+design-system principle 30):** the selector is a single `BaseSelect` dropdown
+in a fixed-height row with search, the headroom label and a `Manage`/`Done`
+toggle, rendered identically for 1 canvas and for 40, so the canvas body starts
+at the same y on every agent. The chip strip it replaced grew a row per few
+canvases. A single canvas reads as a disabled one-option select, never a
+different layout (`canvasSelectorVisible` now decides *enabled*, not *shown*).
+Options sort pinned-first with a pin mark and clamp long agent-written titles
+(`canvasOptionLabel`, 60 chars at a word boundary); the full title rides on the
+option's `title` and in the canvas header. Manage opens as a bounded list
+**below** the row (grid-rows height transition, principle 29), so the row never
+moves and Done returns to the canvas that was open. `set_canvas`'s `title`
+description asks agents for ≤ 60 characters and no provenance suffix; the
+`max(300)` schema is unchanged. `canvasPanelControlRow.spec.js` (mounted) pins
+the row's structure across 1, 2 and 40 canvases. Decidable rules live in
 `components/canvas/canvasUtils.js` (`sortCanvases`, `filterCanvases`,
 `selectionState`, `bulkDeletePrompt`, `bulkDeleteOutcome`, `canvasHeadroom`,
 `canvasSelectorVisible`, `canvasAutoSelect`, `canvasSearchVisible`), because
@@ -886,6 +920,26 @@ What it pinned, each now structural rather than per-case:
 - **Switching canvases is guarded.** `CanvasPanel.select` drops a fetch a
   later selection superseded — the header used to name one canvas while the
   slower fetch's blocks belonged to another.
+- **A newly created canvas is followed (#3218).** The panel's selection rules,
+  in order: the first load selects the first row of the pinned-first order; a
+  refresh that brings a canvas id the previous list did not have selects it
+  (`canvasesAppeared` — the id that appeared, never `rows[0]`, so a pinned
+  canvas sorting ahead does not steal it; several at once → the most recently
+  updated) and emits `canvas-selected`, so the next turn carries it; a rewrite
+  of the open canvas re-reads it in place (ent#475); a deleted open canvas
+  falls back to the new arrival if there is one, else the first row; a list
+  sharing no id with the previous one (the panel is not keyed per agent, so
+  switching agents swaps the list under it) reads as a first load, and so does
+  the first list after an empty one (Agent Detail mounts the panel with `[]`
+  before its list loads; an empty list is not a baseline). A rewrite
+  of a *different*, existing canvas does **not** pull focus — deliberately, so
+  an agent maintaining several canvases cannot keep moving the reader. While
+  the reader is mid-interaction (manage mode, a search query, the share dialog)
+  the switch is **deferred**, never forced: the arrival is remembered and
+  followed when the interaction ends, dropped if the reader picks a canvas
+  meanwhile (a match the search selects counts as a pick) or the arrival is
+  gone. Applies on every `CanvasPanel` mount
+  (Agent Detail's Canvas tab, the Workspace rail, the voice column).
 - **The call columns are flex shares, not row percentages.** `<main>`
   `sm:flex-[2_1_0%]` and the voice canvas `sm:flex-[3_1_0%]` — the old
   `w-[40%]` + `w-[60%]` beside the 18rem sidebar summed to 100% + 18rem and
@@ -951,3 +1005,5 @@ rail's Canvas tab outside a call still refreshes on its own triggers.
 | 2026-09-07 | claude | The render bar (#2583): the canvas gallery e2e (17 canvases, Agent Detail + rail + voice column, both themes, measured), the flex-share call columns, per-block containers, the per-block error boundary, bounded table/timeline/diagram-error viewports, container-keyed KPI grid, long-token wrapping, `min(px, 100%)` inline widths, chart legend/flat-range/isolated-point/axis-spacing fixes, the stale-fetch guard on canvas switching, and the `<script setup>` module-state fix that made diagrams vanish |
 | 2026-09-07 | claude | One rich block vocabulary: `image` + `diagram` kinds, `chart` widened to six types on the metric series shape, rich fences in markdown, block ids + `patch_canvas`, the `main` default canvas, voice tools as block edits through the one write path with the write-side audience rule, `### Your Canvas` prompt guidance (ent#536) |
 | 2026-09-14 | claude | Freshness is two facts, never a verdict (#2734): the header renders `updated_at` and the new `agent_last_run_at` and derives nothing; the `may be out of date` badge and its note are deleted; `stale` stays computed and unrendered in the header |
+| 2026-10-05 | claude | A newly created canvas is followed when another is open; deferred while managing, searching or sharing; a rewrite of another canvas does not pull focus (#3218) |
+| 2026-10-08 | claude | #3406: an `authorized` share's own Sign in card is no longer pre-empted by the global 401 redirect (verdict `ignore` / `logout-in-place` on `/canvas/s/`), and signing in from it returns to the canvas (`Login.vue` → `safeRedirect`; SSO still lands on the dashboard) |

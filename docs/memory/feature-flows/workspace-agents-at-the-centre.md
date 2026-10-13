@@ -119,6 +119,23 @@ designated; now there is, and a guess would scatter the agent's own messages
 across whichever chat the person happened to open last. An explicit
 `session_id` still wins.
 
+An ask raised DURING a chat turn is not homeless and skips this rule (ent#734):
+it attaches to the chat of the turn that raised it — see
+[operating-room.md](operating-room.md#which-chat-an-addressed-ask-attaches-to-trinity-enterprise734).
+
+**The Workspace itself lands on the Inbox (ent#610).** A bootstrap on bare
+`/workspace` — no route param, no `agent` / `new` / `voice` key — replaces to
+`/workspace/inbox` before the stage resolves (the route is captured before the first
+await and the replace is awaited inside the `try`, so no conversation flashes). Every
+explicit target still wins, and bare `/workspace` keeps its meaning as the new-chat
+stage `newChatWithAgent` → `escapeStage` lands on. Clicking an agent opens a NEW chat
+with it (ent#784) — unless a draft or an existing empty chat is waiting, per the
+precedence above — and STAYS on `/workspace/a/:name`, which says exactly that, so a
+reload or a copied link keeps the agent. (A drafted THREAD is the one winner that
+leaves the URL: it opens that chat, at `/workspace/c/:id`.) An addressed report with no chat of its
+addressee joins the agent-initiated things that land in Main, at publish time
+(`report_service.resolve_report_session`).
+
 ---
 
 ## Frontend
@@ -185,10 +202,11 @@ rule is a plain function (the ent#392 precedent):
 
 | Function | Rule |
 |---|---|
-| `agentChatTabs` | Main first, then recency; an archive stays a tab (ruled “becomes the newest tab”); Main is labelled by its **role** |
-| `landingThread` | most recently active, **Main as the floor**; never an archived chat |
-| `resolveAgentLanding` | the `?agent=` deep link, delegating to `landingThread` so there is one answer |
-| `orderRosterAgents` | most recent collaboration, then name; `primaryName` is ent#491's seam |
+| `agentChatTabs` | Main first, then recency; an archived chat is not a tab unless it is on screen (ent#841 — it lives in the sidebar's Archived group); every chat but Main is `closable`; Main is labelled by its **role** |
+| `agentLanding` | a **precedence** (ent#784, replacing ent#523's `landingThread`; operator ruling 2026-10-05): a validated `lastOpenSessionId` (live, unarchived, this agent's), then the chat holding an unsent **draft** (newest `updatedAt`; a `new:<agent>` winner = a new chat), then the agent's existing **empty** chat, then a new, empty chat |
+| `resolveAgentLanding` | the `?agent=` deep link, delegating to `agentLanding` so there is one answer |
+| `agentEmptyChat` | arm 4's "empty": unarchived, non-room, no `last_message_at` and `message_count` 0/absent; Main first, then newest `created_at` |
+| `orderRosterAgents` | most recent collaboration, then name; `primaryName` is ent#491's seam. Called **once, in the shell** since ent#621 (`orderedRoster`, handed to both sidebar instances) — the switch-agent keys must walk the order the eye reads, and the sidebar no longer sorts what it is given |
 | `agentPreview` | the newest chat's **title** — the sidebar list carries no message content (#2198), so a body preview would reinstate the N+1 |
 | `composerAvailabilityNotice` | what the composer says for a stopped/unavailable agent |
 
@@ -197,11 +215,49 @@ rule is a plain function (the ent#392 precedent):
 - **Main is not renameable.** It is the same thread for the life of the pair;
   a derived or typed title would make the pinned tab and the header disagree
   about which chat you are in.
-- **A tab is not a landing.** An archived chat stays in the strip — the operator
-  ruled it "becomes the newest tab", and hiding what the system line just pointed
-  at is exactly where the person looks next — but `landingThread` never puts you
-  in one without asking. Two rules, two questions: where can I go, and where am
-  I put.
+- **A tab is not a landing.** `agentLanding` never puts you in an archived chat
+  without asking — and since ent#841 an archived chat is not in the strip either
+  (one archive rule for a closed chat and a Reset archive; both are found in the
+  sidebar's Archived group, superseding the ent#523 "becomes the newest tab" ruling). Two rules, two questions: where can I go, and where am
+  I put. Since ent#784 the landing answer is a new chat unless something of the
+  person's own is waiting (a draft, or an empty chat already open), so the strip
+  is the ONLY way back into a USED one — which is the point: continuity is one
+  click, starting fresh is zero.
+- **A draft outranks a fresh chat, and shares the mark's predicate.** The
+  2026-10-05 ruling: if a chat with the agent holds unsent words, opening the
+  agent goes THERE, because the mark on the agent's row already promises
+  "click here to continue". So the landing's candidate set and that mark's are
+  one set — `portalDrafts.js::isDraftedThread`, read by both `agentsWithDrafts`
+  and `draftedLandingFor` — and a room and an archived thread are excluded on
+  both sides rather than on one. Several drafts resolve by newest `updatedAt`,
+  with the unsaved `new:<agent>` chat weighed on the same clock; a `new:`
+  winner lands on a new chat, which is where those words already live. Each
+  door passes the drafts map IN (`landOnAgent`, `resolveAgentLanding`), so the
+  rule stays pure and testable without the shell.
+- **The empty chat is reused, and only the frontend can hold that.** Arm 4
+  (`agentEmptyChat`): an unarchived, non-room thread with no message sent — no
+  `last_message_at` AND `message_count` 0 or absent, because the cross-agent
+  batch omits the count while the per-agent read carries it, so either field
+  alone would misjudge a row. Main first, then newest `created_at`, so two
+  doors reading one list cannot reuse two different rows. The matching promise
+  on the WRITE side is `ensureMainListed`, which is a GET that INSERTS: it
+  returns early for an agent that already has an empty chat, or visiting one
+  would add a second empty row and then land on one of the two. #2579's "the
+  pinned tab has to be there" still holds for every agent whose chats are all
+  used, which is what it was about.
+- **The doors that RESOLVE, and the doors that ASSERT.** `landOnAgent` (the
+  sidebar/rail row, back/forward, a typed URL, and the switch-agent keys) and
+  `resolveAgentLanding` (`?agent=`) ask `agentLanding` where to land. New chat,
+  ⌘J and the agent picker do not call it at all — they already mean "fresh".
+  The switch-agent keys are on the resolving side on purpose: walking the
+  roster is navigation, not a request for a blank page, so each key press
+  passes the `lastOpenSessionId` the shell remembers for that agent and arm 2
+  returns the person to the chat they were last in (see
+  `workspace-chat-tabs-and-titles.md` → Key map). That split is also the focus
+  rule: a gesture may focus the composer on any pointer (#2579 AC 2), a landing
+  only on a fine one (ent#784) — except a key landing, which focuses the
+  composer unconditionally, because the hands are already on the keyboard and
+  nothing about a chord can slide a keyboard up over a phone.
 - **An unused Main is filtered from the sidebar only.** It exists for every pair
   the moment an agent is opened; the tab strip must still show it from the first
   visit, so this is a projection for one consumer (`sidebarThreads`), not a
@@ -416,11 +472,16 @@ render** (ent#468 Option A), recorded on the issue.
   of INTENT — the dispatch is backgrounded — so the copy is "is picking this up",
   not "has done it". `null`/`false` says only "Sent."; reading an absent value as
   "started" is the over-claim ent#430 spent a blocker removing from this field.
-- **It cannot live on the ask row**, which answering removes. `visible` gates on
+- **It does not live on the ask row.** Answering removed the row until
+  trinity-enterprise#611; now the row is replaced by the server's `answered`
+  projection and stays listed without controls, and the confirmation is still its
+  own item. `visible` gates on
   `items.length > 0 || confirmations.length > 0`; on `items.length` alone the
   surface unmounted at the same instant the confirmation was created, so the
   message would have rendered for zero frames. Timers are cleared on unmount —
   this surface unmounts on every chat switch.
+- **A chat draws only the asks its own turns raised, as rows of its thread (ent#610, the 2026-09-30 ruling as amended; data from ent#734).** `portalChatAsks.chatTurnAsks` keeps an ask whose `raised_in_turn === true` and whose `chat_id` is this chat; `placeAsksInThread` puts each among the messages by SERVER time only (before the first row strictly newer; history rows and a live reply carry the server's `created_at` as `at`; the person's own message, sent from here, is `local` and sits at the newest server time before it, so no browser clock takes part; a row with no time otherwise is a reply just received, the newest; while earlier messages are not shown, an ask older than the first row shown is left out). While it waits it is the one `PortalAsks` card (`testid-prefix="portal-tile-ask"`, thread link off, capped at 40rem); once ended it is one muted row, kind · title · ending with who · when (`askHistoryLine`, `data-testid="portal-chat-ask-ended"`, gray-500 in light, its full title as `title`, the title on its own line on a phone). **An answer collapses the card at once** (the team's ruling on #3101, 2026-10-01): the row carries the confirmation ("Answered by you · just now"), a persistent `aria-live` region (`portal-chat-ask-announce`) says it, and focus moves to the row (`tabindex=-1`) when the card took it down with it — never out of the composer. A failed answer leaves the ask waiting (the store writes only on success), so the card stays open with its error. One watcher over the chat and its waiting ids tells "ended while on screen" from "already ended" (only the first is announced) and survives a chat switch. The chat reads its own chat-turn asks too (`store.fetchChatTurnAsks` → `GET …/asks?chat_id=`, no 7-day window — the queue's retention is the bound), merged under the store's fresher rows; a read for a chat already left is dropped. The asks are read again when a turn's reply lands, and a new waiting tile counts toward "jump to latest". A background ask (schedule / loop / gate — `raised_in_turn` false, `chat_id` = Main as the reply target only) draws in no chat. Nothing sits between the thread and the composer (principle 30): the round 4–5 pinned box, its "N more asks" line and `splitChatAsks` / `pinnedAskIds` / `chatAsksLabel` / `chatAsksElsewhere` are gone. Specs: `portalChatAskTiles.spec.js`, `portalBackgroundAskInboxOnly.spec.js`, `portalChatAsksElsewhere.spec.js` (the retired line).
+- **The thread link is additive (#3055), and only for a chat-turn ask (ent#610 ruling).** `askThreadLink` returns a target only when `raised_in_turn === true` — a background ask's Main is not where it lives. ent#429's "Open the conversation" button has its own `v-if`, and the controls are `<template v-if="!isEnded(ask)">`, so an ask attached to another chat (Main, for every addressed ask) stays answerable in a non-Main chat; `threadLink` (default `true`) lets a host drop the link. Pinned by `portalAskCard.mount.spec.js`.
 
 ## Tests
 
@@ -432,6 +493,15 @@ render** (ent#468 Option A), recorded on the issue.
 - `src/frontend/tests/unit/portalAgentsAtCentre.spec.js` — every pure rule
   above, the ent#524 drop/batch rules, and the source guards that no unit test
   can reach (which surface mounts what, no `[0]` left anywhere)
+- `src/frontend/tests/unit/portalDraftLanding.spec.js` — ent#784's drafts arm as
+  a pure rule: each precedence arm, newest-edit-wins both ways round, the tie,
+  the room and archived exclusions, and the property that every row the sidebar
+  MARKS is a landing candidate (the shared-predicate guarantee)
+- `src/frontend/tests/unit/portalDraftLanding.mount.spec.js` — the same two
+  flows `e2e/workspace-drafts.spec.js:92`/`:116` walk, at the shell's seam: the
+  shell must hand the rule its drafts map and then open the chat it names. Red
+  at `c8af3d70` on exactly the e2e's symptom (`sessionId: null` where the draft
+  was), which is why the pure specs alone were not enough
 - Re-pointed rather than deleted when their subject moved: `portalRatings`,
   `portalReportsRendering`, `portalAvailabilityChip`, `portalAskSingleSource`,
   `portalAgentPageUx`, `portalRail`, `portalLoadingTreatment`,
@@ -449,3 +519,27 @@ Stated so the narrowing is never inferred later from the fact that it merged
   `OverflowTabs` re-measures on `ResizeObserver`
 - ent#491's roster ordering (incubating) — a deterministic order ships and
   leaves the seam
+
+## Changed by ent#784 (2026-10-04)
+
+Opening an agent lands on a **new, empty chat**, not the chat you were most
+recently active in. `landingThread` is deleted; `agentLanding` is the rule, and
+both resolving doors call it. Three consequences worth knowing:
+
+- **Nothing is minted by landing.** The helper is pure and returns a null
+  session; the row is born on the first send (`newThread`, ent#451). An unused
+  Main is still kept out of the chat list by `sidebarThreadsOf`, so repeated
+  visits accumulate no visible empty chats.
+- **`landOnAgent` is synchronous** and no longer awaits `ensureMainListed`. The
+  pinned Main is still minted on the first visit — `watch(activeAgentName)` owns
+  that (ent#523) — it just no longer blocks the landing. `landOnAgent` also asks
+  `guardLeaveCall` first now, so back/forward can no longer end a live call
+  silently (the ent#551 class).
+- **`focusOnMount`** (`always` | `fine-pointer`) carries WHY the composer
+  mounted, which decides whether it may focus itself. `shouldFocusOnRestore` is
+  renamed `shouldAutoFocusComposer` — two reasons, one rule.
+
+Still open above this: ent#621 (agent-switch keys) supplies the
+`lastOpenSessionId` the helper already accepts; ent#577 (Spotlight) is a third
+caller of the same seam. Backend adoption of an empty Main on `new_thread=True`
+is a follow-up, not done here.

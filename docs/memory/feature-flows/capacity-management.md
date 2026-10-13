@@ -64,8 +64,12 @@ live in `settings_service.py`:
 | `clamp_to_ceiling(n)` | the `CapacityManager` facade — clamped at the top of `acquire()` and inside `get_slot_state()` / `get_all_states()`, covering chat ×3, `task_execution_service`, the dashboard, and any future facade reader |
 | `get_effective_max_parallel_tasks(agent)` | the two genuine facade-bypasses: `backlog_service.drain_next` (the `real_slot` re-acquire reuses the same clamped local) and `agent_call_limiter` |
 
-Canary **B-02** compares slot count against the **effective** cap (snapshot
-carries `effective_max_parallel`) so a lowered ceiling doesn't false-fire;
+Canary **B-02**'s push arm compares slot count against the **effective** cap
+(snapshot carries `effective_max_parallel`) so a lowered ceiling doesn't
+false-fire. Its pull arm (#2840) ignores the database cap entirely and reads the
+pool size from the pilot container's own `TRINITY_MAX_PARALLEL_TASKS`, which is
+baked at create and does not follow a later cap or ceiling change until a
+recreate (#3039);
 **S-02** (no overbooking) keeps the stored cap as a valid upper bound (clamping
 only lowers ZCARD vs stored). The `agent_config` GET surfaces `ceiling` +
 `effective_max_parallel_tasks`; `available_slots` is computed from the effective

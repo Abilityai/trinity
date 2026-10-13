@@ -13,10 +13,12 @@ import { createChatTools } from "./tools/chat.js";
 import { createSystemTools } from "./tools/systems.js";
 import { createDocsTools } from "./tools/docs.js";
 import { createSkillsTools } from "./tools/skills.js";
+import { createSkillSourceTools } from "./tools/skill_sources.js";
 import { createRoomTools } from "./tools/rooms.js";  // ent#169 shared sessions
 import { createScheduleTools } from "./tools/schedules.js";
 import { createTagTools } from "./tools/tags.js";
 import { createNotificationTools } from "./tools/notifications.js";
+import { createMetricsTools } from "./tools/metrics.js";
 import { createReportTools } from "./tools/reports.js";
 import { createCanvasTools } from "./tools/canvas.js";
 import { createSubscriptionTools } from "./tools/subscriptions.js";
@@ -31,6 +33,7 @@ import { createVoipTools } from "./tools/voip.js";
 import { createFileTools } from "./tools/files.js";
 import { createPipelineTools } from "./tools/pipelines.js";
 import { createMemoryTools } from "./tools/memory.js";
+import { createDecisionTools } from "./tools/decisions.js";
 import { createLoopTools } from "./tools/loops.js";
 import { policyFor, resolveClient, withAgentAccess, type ToolAccessPolicy } from "./access.js";
 import { createReminderTools } from "./tools/reminders.js";
@@ -41,11 +44,12 @@ import { createGitTools } from "./tools/git.js";
 import { createA2ATools } from "./tools/a2a.js";
 import { createA2ACallTools } from "./tools/a2a_call.js";
 import { createCredentialVaultTools } from "./tools/credential_vault.js";
-// `./tools/assignments.js` (get_agent_assignments, ent#500) exists but is deliberately NOT
-// imported here — see the note beside `createCredentialVaultTools` in `toolGroups`.
-import { withAudit } from "./audit.js";
+import { createProjectTools } from "./tools/projects.js";
+import { createAssignmentTools } from "./tools/assignments.js";
+import { configureAudit, withAudit } from "./audit.js";
 import { installLogRedaction } from "./log-redaction.js";
 import type { McpAuthContext } from "./types.js";
+import { EXECUTION_ID_HEADER, parseExecutionIdHeader } from "./tools/execution_id.js";
 
 export interface ServerConfig {
   name?: string;
@@ -57,12 +61,24 @@ export interface ServerConfig {
   port?: number;
   requireApiKey?: boolean;
   /**
+   * #2807: the shared secret the audit wrapper posts rows with. Read from
+   * INTERNAL_API_SECRET by default; a test passes a literal and points
+   * `trinityApiUrl` at a stub backend so it can read the rows back.
+   */
+  internalApiSecret?: string;
+  /**
    * #946 pull pilot. When true, an agent→agent (scope='agent', non-self)
    * sequential chat_with_agent is routed through the durable async /task path
    * instead of the synchronous /chat. Read from MCP_AGENT_CHAT_PULL_ENABLED at
    * startup (mirrors requireApiKey ← MCP_REQUIRE_API_KEY). Default OFF.
    */
   agentChatPullEnabled?: boolean;
+  /**
+   * #3232 report-back kill switch. When false, no chat_with_* call sends
+   * `parent_execution_id` — neither the async default nor a typed opt-in — so a
+   * delegated run never posts into the caller's conversation. Default ON.
+   */
+  reportBackEnabled?: boolean;
   /**
    * #848 inline email auth. When true, a request arriving with NO Authorization
    * header opens an anonymous sentinel session that may call request_login /
@@ -414,12 +430,23 @@ export async function createServer(config: ServerConfig = {}) {
     // ServerConfig.agentChatPullEnabled). Same env key the backend declares in
     // config.py (MCP_AGENT_CHAT_PULL_ENABLED) so a single-.env deploy can't drift.
     agentChatPullEnabled = process.env.MCP_AGENT_CHAT_PULL_ENABLED === "true",
+    // #3232 report-back kill switch — default ON; "false", "0", "no" or "off"
+    // (any case, whitespace trimmed) turns it off; anything else, unset or
+    // empty included, leaves it on (see ServerConfig.reportBackEnabled).
+    reportBackEnabled = !["false", "0", "no", "off"].includes(
+      (process.env.MCP_REPORT_BACK_ENABLED ?? "").trim().toLowerCase()
+    ),
     // #848 inline email auth — default OFF. When off, a request with no
     // Authorization header is rejected exactly as before and no session is
     // created. When on, it yields an anonymous sentinel session that may only
     // reach the inline-auth tools until verify_login upgrades it.
     inlineAuthEnabled = process.env.MCP_INLINE_AUTH_ENABLED === "true",
+    internalApiSecret = process.env.INTERNAL_API_SECRET || "",
   } = config;
+
+  // #2807: the audit wrapper posts to the same backend the tools proxy to —
+  // one source of truth for the URL, and the secret travels with it.
+  configureAudit({ apiUrl: trinityApiUrl, secret: internalApiSecret });
 
   // Create Trinity API client (base URL only)
   // When requireApiKey is true, tools will create per-request clients with user's MCP API key
@@ -530,6 +557,8 @@ export async function createServer(config: ServerConfig = {}) {
               // value the union does not name arrives here as a plain string.
               scope: scope as McpAuthContext["scope"],
               mcpApiKey: apiKey,  // Store the actual API key for user-scoped requests
+              // #2392: per-request — fastmcp re-authenticates every POST.
+              executionId: parseExecutionIdHeader(readHeader(request.headers[EXECUTION_ID_HEADER])),
             };
             return authContext;
           }
@@ -544,6 +573,14 @@ export async function createServer(config: ServerConfig = {}) {
   // #946 pilot — surface the routing mode at startup so the soak's control vs
   // treatment window is unambiguous in the logs.
   console.log(`Agent→agent chat pull routing (#946): ${agentChatPullEnabled ? "ON (async /task)" : "OFF (sync /chat)"}`);
+  // #3232 — whether delegations can post back into the caller's conversation.
+  console.log(
+    `Delegation report-back (#3232): ${
+      reportBackEnabled
+        ? "ON (async dispatches carry the caller's turn by default)"
+        : "OFF (MCP_REPORT_BACK_ENABLED is false/0/no/off — no parent is ever sent)"
+    }`
+  );
   // #848 — a keyless session tier is a posture change; make it unambiguous in
   // the startup log which mode the server came up in.
   console.log(
@@ -574,7 +611,8 @@ export async function createServer(config: ServerConfig = {}) {
     // with no row in TOOL_ACCESS_POLICY (or an explicit policy, for dynamic
     // tools) cannot register. `enforce` rows run the permission edge before
     // `execute`; the gate sits inside the audit span so a denial is a recorded
-    // call (#2807 decides how it is labelled).
+    // call, labelled `denied` by the stamp `accessDenied` leaves on the call
+    // context (#2807).
     const policy = policyFor(tool, explicitPolicy);
     const execute =
       policy.kind === "enforce"
@@ -608,14 +646,16 @@ export async function createServer(config: ServerConfig = {}) {
   // Build tool groups once, then register + count (SEC-001 Phase 3).
   const toolGroups: Record<string, any>[] = [
     createAgentTools(client, requireApiKey),
-    createChatTools(client, requireApiKey, agentChatPullEnabled),
+    createChatTools(client, requireApiKey, agentChatPullEnabled, reportBackEnabled),
     createSystemTools(client, requireApiKey),
     createDocsTools(),
     createSkillsTools(client, requireApiKey),
+    createSkillSourceTools(client, requireApiKey), // Library source management — admin principals only, own canAccess allow-list (ent#692)
     createScheduleTools(client, requireApiKey),
     createTagTools(client, requireApiKey),
     createNotificationTools(client, requireApiKey),
     createReportTools(client, requireApiKey),     // Agent Reports (#918)
+    createMetricsTools(client, requireApiKey),    // Declared metrics (ent#478)
     createCanvasTools(client, requireApiKey),     // Agent canvas (ent#438)
     createFileTools(client, requireApiKey),       // FILES-001 — outbound file sharing
     createPipelineTools(client, requireApiKey),   // #919 — agent-defined pipeline introspection
@@ -628,6 +668,7 @@ export async function createServer(config: ServerConfig = {}) {
     createMessageTools(client, requireApiKey),
     createVoiceReplyTools(client, requireApiKey), // send_voice_reply — per-message voice (ent#117)
     createMemoryTools(client, requireApiKey),     // MEM-001 write path (#888)
+    createDecisionTools(client, requireApiKey),   // Seat decision record (ent#638)
     createLoopTools(client, requireApiKey),       // Sequential agent loops (#740)
     createReminderTools(client, requireApiKey),   // Agent self-reminders (#1296)
     createVoipTools(client, requireApiKey),       // VoIP telephony — call_user (VOIP-001, #1056)
@@ -637,11 +678,8 @@ export async function createServer(config: ServerConfig = {}) {
     createA2ATools(client, requireApiKey),           // A2A control plane — exposure/card/allow-list/endpoints (ent#160)
     createA2ACallTools(client, requireApiKey),       // A2A runtime — outbound call_a2a_agent / get_a2a_task (#736)
     createCredentialVaultTools(client, requireApiKey), // Credential vault runtime — list/fetch (license-blind proxy, ent#279)
-    // get_agent_assignments (tools/assignments.ts, ent#500) is FENCED — not registered.
-    // 0.9.5 release ruling (work-order F1): the assignments layer is not shipping in this
-    // cut, so the tool that reads it must not be advertised. The module and its unit tests
-    // stay; re-enable by importing `createAssignmentTools` and adding it here (the
-    // `access.ts` policy row and the ent#500 visibility test go back with it).
+    createProjectTools(client, requireApiKey),       // Workspace Projects — list/get read tools (license-blind proxy, ent#661)
+    createAssignmentTools(client, requireApiKey),     // Role assignments — read who an agent serves (license-blind proxy, ent#500)
   ];
   // Operator tools: visible ONLY to fully-credentialed operator scopes.
   for (const group of toolGroups) {
@@ -700,6 +738,7 @@ export async function createServer(config: ServerConfig = {}) {
     client,
     requireApiKey,
     agentChatPullEnabled,
+    reportBackEnabled,
     trinityApiUrl,
     operatorOnly,
     builtinToolNames,

@@ -34,7 +34,7 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, NamedTuple, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -42,17 +42,20 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 
 from database import db
-from dependencies import AuthorizedAgentByName, get_current_user
+from dependencies import AuthorizedAgentByName, get_current_user, get_user_or_anonymous, agent_may_reach
 from models import A2ACallRequest, A2ACallResponse, A2ATaskRequest, User
 from routers.public import _get_client_ip
 from services import (
     a2a_gate,
+    a2a_trusted_networks,
     a2a_outbound_service,
+    a2a_payment_gate,
     a2a_protocol,
     idempotency_service,
+    paid_turn_service,
     rate_limiter,
 )
-from services.a2a_card_service import generate_a2a_card
+from services.a2a_card_service import generate_a2a_card, with_payment_extension
 from services.aauth import config as aauth_config
 from services.aauth import httpsig as aauth_httpsig
 from services.aauth import inbound as aauth_inbound
@@ -63,10 +66,16 @@ from services.a2a_outbound_service import (
     A2AEndpointNotFound,
     A2AOutboundDisabled,
 )
-from services.idempotency_service import EffectInProgressError
+from services.idempotency_service import EffectInProgressError, EffectUnguardedError
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
+from services.nevermined_payment_service import (
+    NEVERMINED_AVAILABLE,
+    get_nevermined_payment_service,
+)
+from services.platform_prompt_service import build_public_channel_caller_prompt
 from services.platform_audit_service import AuditEventType, platform_audit_service
+from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.task_execution_service import (
     dispatch_and_await_terminal,
     get_task_execution_service,
@@ -111,7 +120,7 @@ class _A2AServerRoute(APIRoute):
                 if issuer:
                     return await _a2a_aauth_jsonrpc(request, issuer)
             try:
-                return await handler(request)
+                response = await handler(request)
             except HTTPException as exc:
                 if (
                     exc.status_code == 401
@@ -120,6 +129,18 @@ class _A2AServerRoute(APIRoute):
                 ):
                     exc.headers = {**(exc.headers or {}), **_AAUTH_CHALLENGE_HEADERS}
                 raise
+            # Since ent#679 the bearer-less 401 is a response the handler RETURNS
+            # (`_not_authenticated`, byte-identical to before) rather than one the
+            # dependency raises — the challenge rides on it the same way, and only
+            # while AAuth is live.
+            if (
+                getattr(response, "status_code", None) == 401
+                and "authorization" not in request.headers
+                and aauth_config.active_issuer()
+            ):
+                for name, value in _AAUTH_CHALLENGE_HEADERS.items():
+                    response.headers[name] = value
+            return response
 
         return route
 
@@ -130,28 +151,61 @@ class _A2AServerRoute(APIRoute):
 a2a_server_router = APIRouter(tags=["a2a-server"], route_class=_A2AServerRoute)
 
 
-def _base_url_from_request(request: Request) -> str:
-    """Compute the external base URL for card `url` construction.
+def _base_url_from_request(request: Request, *,
+                           configured_wins: bool = False) -> str:
+    """Compute the external base URL for the 402s (and, via `_card_base_url`,
+    for the card `url`).
 
-    Order of preference:
-      1. `PUBLIC_CHAT_URL` env if set — this is what external
-         consumers reach Trinity through (Cloudflare tunnel, etc.).
-      2. `FRONTEND_URL` env — second-best for self-hosted setups.
-      3. The request's own scheme + host — works fine for clients
-         that fetched the card from the same host they'll call.
+    Delegates to `utils.public_url.public_base_url` (#3215), which owns the
+    precedence: the operator's configured public origin when it is the host the
+    caller actually used, else the request host with an https upgrade taken from
+    the raw `X-Forwarded-Proto` header. ONE helper for the card and for both
+    payment doors — one parameter apart — because a second copy of the upgrade
+    logic is a second thing to get wrong.
 
-    Returns "" if none of the above resolve, signalling the card
-    generator to omit URL fields rather than emit a broken URL.
+    `configured_wins=True` is the card's precedence, and the card's alone (see
+    `_card_base_url`). The doors take the default: an x402 token is minted and
+    verified against `resource.url`, so the 402 must name the origin the caller
+    actually called.
+
+    The configured origin now comes from `settings_service.get_public_chat_url()`
+    — the Settings row THEN `PUBLIC_CHAT_URL` — rather than the env var alone, so
+    an operator who set it in the UI is honoured here as they already are for the
+    Telegram and WhatsApp webhook URLs.
+
+    Returns "" if nothing resolves, signalling the card generator to omit URL
+    fields rather than emit a broken URL.
     """
-    from config import FRONTEND_URL, PUBLIC_CHAT_URL  # local import: avoid circular at module load
+    from config import FRONTEND_URL  # local import: avoid circular at module load
+    from services.settings_service import settings_service
+    from utils.public_url import public_base_url
 
-    if PUBLIC_CHAT_URL:
-        return PUBLIC_CHAT_URL.rstrip("/")
-    if FRONTEND_URL:
-        return FRONTEND_URL.rstrip("/")
-    if request.url:
-        return f"{request.url.scheme}://{request.url.netloc}"
-    return ""
+    try:
+        configured = settings_service.get_public_chat_url()
+    except Exception:  # noqa: BLE001 — an unreadable setting falls back to env
+        from config import PUBLIC_CHAT_URL
+        configured = (PUBLIC_CHAT_URL or "").rstrip("/")
+    return public_base_url(request, configured=configured,
+                           frontend_url=FRONTEND_URL,
+                           configured_wins=configured_wins)
+
+
+def _card_base_url(request: Request) -> str:
+    """The origin the agent CARD advertises — configured-first (review I3).
+
+    The card is a discovery document, not a minted token: whoever fetched it
+    republishes it to buyers elsewhere, so a configured public origin wins over
+    the host it was read on. The `get_agent_a2a_card` MCP tool proxies the card
+    route from `backend:8000`, and before this split #3215 had the card
+    advertise that internal host to every external buyer — a regression on the
+    card's pre-#3215 behaviour.
+
+    Safe alongside the doors' same-host rule because a buyer that follows the
+    card arrives on the configured host, so the 402 it then meets is minted for
+    that very host: card and 402 still agree for every caller that followed the
+    card. With nothing configured the two are identical.
+    """
+    return _base_url_from_request(request, configured_wins=True)
 
 
 async def _fetch_template_data(agent_name: str, container) -> dict:
@@ -257,7 +311,31 @@ def _card_with_exposed_skills(
         ),
     )
     card["skills"] = a2a_gate.filter_exposed_skills(agent_name, card.get("skills") or [])
-    return card
+    return _priced(agent_name, card, base_url)
+
+
+def _priced(agent_name: str, card: dict, base_url: str) -> dict:
+    """Attach the ent#679 price block when this agent takes payment.
+
+    The config read lives here, not in `a2a_card_service`, so the card builder
+    stays pure (ent#180's rule for the skills provider, same reason). An
+    unpriced agent's card is returned unchanged by identity.
+
+    `get_nevermined_config` is the no-decrypt read: the card publishes plan
+    ids, never the API key. Fail-open and never 5xx — the card must still serve
+    when the payment config is unreadable, exactly as it serves when the agent
+    container is unreachable. The honest cost of failing open is that a priced
+    agent can briefly look free, which costs the operator nothing: the gate
+    itself reads the config independently and still answers 402.
+    """
+    try:
+        config = db.get_nevermined_config(agent_name)
+    except Exception as e:  # noqa: BLE001 — defensive: never 5xx the card
+        logger.warning(f"A2A card: payment config unreadable for {agent_name}: {e}")
+        return card
+    return with_payment_extension(
+        card, config, agent_name=agent_name, base_url=base_url
+    )
 
 
 @router.get("/{agent_name}/a2a/agent-card")
@@ -286,7 +364,7 @@ async def get_agent_card(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     template_data = await _fetch_template_data(agent_name, container)
-    base_url = _base_url_from_request(request)
+    base_url = _card_base_url_for(agent_name, request)  # ent#838: internal agents show their internal URL
     card = _card_with_exposed_skills(
         agent_name=agent_name,
         template_data=template_data,
@@ -322,6 +400,23 @@ _A2A_UNSUPPORTED = a2a_protocol.A2A_UNSUPPORTED
 # files.py (_DOWNLOAD_RATE_LIMIT), webhooks.py (#1424).
 A2A_CARD_RATE_LIMIT = 60      # max card fetches per IP
 A2A_CARD_RATE_WINDOW = 60     # per minute
+
+# trinity-enterprise#838: a keyless caller from a trusted internal network. It
+# holds no key, so its budget is the source address and the agent, like the
+# paying door's; generous, because it is our own fleet, but bounded, because a
+# compromised host on the network is still a caller.
+A2A_INTERNAL_SOURCE_RATE_LIMIT = 120   # per source address
+A2A_INTERNAL_AGENT_RATE_LIMIT = 300    # per agent, all trusted sources
+A2A_INTERNAL_RATE_WINDOW = 60          # per minute
+
+# The anonymous (paying) branch's budgets live in `services/a2a_payment_gate.py`
+# next to the reason they exist — each hit there can cost a 15-second
+# facilitator verify. Re-exported here so the limiter calls below read like the
+# card route's.
+A2A_PAY_RATE_LIMIT = a2a_payment_gate.A2A_PAY_RATE_LIMIT
+A2A_PAY_RATE_WINDOW = a2a_payment_gate.A2A_PAY_RATE_WINDOW
+A2A_PAY_AGENT_RATE_LIMIT = a2a_payment_gate.A2A_PAY_AGENT_RATE_LIMIT
+A2A_PAY_AGENT_RATE_WINDOW = a2a_payment_gate.A2A_PAY_AGENT_RATE_WINDOW
 
 # Cap the JSON-RPC body before parsing it (the #1424 / #1083 shape). nginx caps
 # at 25m, but :8000 may be reachable directly.
@@ -363,8 +458,25 @@ def _text_from_message(message: Dict[str, Any]) -> str:
 
 
 def _task_object(execution_id: str, state: str, *, text: Optional[str] = None,
-                 context_id: Optional[str] = None, error: Optional[str] = None) -> Dict[str, Any]:
-    """Build an A2A Task object. `state`: submitted|working|completed|failed|canceled."""
+                 context_id: Optional[str] = None, error: Optional[str] = None,
+                 metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Build an A2A Task object. `state`: submitted|working|completed|failed|canceled.
+
+    `metadata` (ent#679) rides on `status.message.metadata` — where the x402 A2A
+    extension puts payment state and where #3185's outbound client reads it
+    (`status.message.metadata`, falling back to `metadata`). A task carrying
+    metadata always gets a `status.message`, even with no error text, because
+    the metadata is the message's only reason to exist on a successful paid
+    turn: no message, nowhere for the receipt to go.
+
+    It is MIRRORED onto the top-level `Task.metadata` (#3215). The spec location
+    is still `status.message.metadata` and that is what the docs name, but a
+    typed client (`a2a-sdk`'s `Task.metadata: dict | None`) renders the Task we
+    returned as `metadata: null`, which reads as "nothing was charged". One
+    assignment, the SAME dict object, inside one `if metadata:` — the free path
+    emits no `metadata` key at all, so an unpaid Task's bytes and every
+    idempotency snapshot built from them are unchanged.
+    """
     task: Dict[str, Any] = {
         "id": execution_id,
         "contextId": context_id or execution_id,
@@ -376,13 +488,28 @@ def _task_object(execution_id: str, state: str, *, text: Optional[str] = None,
             "artifactId": uuid.uuid4().hex,
             "parts": [{"kind": "text", "text": text}],
         }]
-    if error is not None:
-        task["status"]["message"] = {
+    if error is not None or metadata:
+        message: Dict[str, Any] = {
             "role": "agent",
-            "parts": [{"kind": "text", "text": error}],
+            "parts": (
+                [{"kind": "text", "text": error}] if error is not None else []
+            ),
             "messageId": uuid.uuid4().hex,
         }
+        if metadata:
+            message["metadata"] = metadata
+            task["metadata"] = metadata
+        task["status"]["message"] = message
     return task
+
+
+def _gate_task(exc) -> Dict[str, Any]:
+    """trinity-enterprise#751: what an A2A caller is told when the request names
+    a gated skill. Pending → `input-required` keyed on the approval's request id
+    (a retried messageId replays it); a named refusal → `rejected`. Nothing ran."""
+    if isinstance(exc, SkillApprovalRequired):
+        return _task_object(exc.request_id, "input-required", text=exc.message)
+    return _task_object(uuid.uuid4().hex, "rejected", error=str(exc))
 
 
 def _a2a_state_for(status: str) -> str:
@@ -396,6 +523,7 @@ def _a2a_state_for(status: str) -> str:
 
 
 def _a2a_idem_scope(agent_name: str, current_user: Optional[User],
+                    source_host: Optional[str] = None,
                     aauth: Optional["aauth_verifier.VerifiedAgent"] = None) -> str:
     """Dedup scope for an inbound A2A `messageId`: per (agent, caller principal).
 
@@ -415,12 +543,61 @@ def _a2a_idem_scope(agent_name: str, current_user: Optional[User],
     if aauth is not None:
         # ent#623: an AAuth caller's namespace is its verified agent identity.
         return f"a2a:{agent_name}:aauth|{aauth.identity}"
+    if source_host:
+        # trinity-enterprise#838: a keyless trusted caller's namespace is its
+        # address, so two hosts never share a messageId space.
+        return f"a2a:{agent_name}:host:{source_host}"
     principal = (
         getattr(current_user, "mcp_key_id", None)
         or getattr(current_user, "username", None)
         or "anonymous"
     )
     return f"a2a:{agent_name}:{principal}"
+
+
+class _InternalGate:
+    """trinity-enterprise#838 — what an agent's A2A scope says about THIS request.
+
+    * ``refuse`` — the agent is exposed with ``internal`` scope and the request
+      did not come from a trusted network (or came through the public tunnel):
+      answer exactly as for an unexposed agent.
+    * ``caller_source`` — internal scope, a trusted source, and the agent's
+      keyless switch on: the caller may run a task without a key, attributed to
+      this address.
+    * ``internal`` — the agent is internal-scope (whatever the source).
+    """
+
+    __slots__ = ("refuse", "caller_source", "internal")
+
+    def __init__(self, refuse=False, caller_source=None, internal=False):
+        self.refuse = refuse
+        self.caller_source = caller_source
+        self.internal = internal
+
+
+_UNSET = object()
+
+
+def _internal_gate(agent_name: str, request: Request, source=_UNSET) -> _InternalGate:
+    if not db.get_a2a_exposed(agent_name):
+        return _InternalGate()
+    scope = db.get_a2a_scope(agent_name)
+    if scope.get("scope") != "internal":
+        return _InternalGate()
+    if source is _UNSET:
+        source = a2a_trusted_networks.internal_source(request)
+    if source is None:
+        return _InternalGate(refuse=True, internal=True)
+    return _InternalGate(caller_source=source if scope.get("keyless") else None, internal=True)
+
+
+def _card_base_url_for(agent_name: str, request: Request) -> str:
+    """The card's origin: an internal-scope agent advertises the admin-set
+    internal base URL (trinity-enterprise#838), never the public one; with none
+    set it falls back to the host the card was read on."""
+    if db.get_a2a_scope(agent_name).get("scope") == "internal":
+        return a2a_trusted_networks.internal_base_url() or _base_url_from_request(request)
+    return _card_base_url(request)
 
 
 async def _serve_card(agent_name: str, request: Request) -> Optional[Dict[str, Any]]:
@@ -433,6 +610,8 @@ async def _serve_card(agent_name: str, request: Request) -> Optional[Dict[str, A
     """
     if not db.get_a2a_exposed(agent_name):
         return None
+    if _internal_gate(agent_name, request).refuse:
+        return None  # ent#838: an internal agent is unexposed to anyone else
     container = get_agent_container(agent_name)
     if not container:
         return None
@@ -440,7 +619,7 @@ async def _serve_card(agent_name: str, request: Request) -> Optional[Dict[str, A
     return _card_with_exposed_skills(
         agent_name=agent_name,
         template_data=template_data,
-        base_url=_base_url_from_request(request),
+        base_url=_card_base_url_for(agent_name, request),
     )
 
 
@@ -468,20 +647,59 @@ async def a2a_well_known_card(agent_name: str, request: Request):
     return card
 
 
+async def _parse_rpc_envelope(request: Request, *, raw: Optional[bytes] = None):
+    """Cap, parse and validate the JSON-RPC envelope → (method, params, rpc_id).
+
+    Returns a `JSONResponse` instead when the envelope is unusable. Shared by
+    the principal and the anonymous (paying) paths so a malformed request gets
+    the SAME bytes on both — a stranger must not be able to tell the two paths
+    apart from a parse error, and a second copy of these four refusals is how
+    that difference appears later.
+
+    The body cap runs BEFORE the parse (the #1424 / #1083 shape): an uncapped
+    `await request.json()` lets one caller pin memory. nginx caps at 25m, but
+    :8000 may be reachable directly. On the paying path it also runs before any
+    token extraction, so an oversized body never reaches the facilitator.
+
+    `raw` (ent#623): the AAuth door has already consumed the stream — reading
+    and digest-checking the body before anything is parsed — and hands the
+    exact bytes in; the same cap and the same four refusals apply to them.
+    """
+    if raw is None:
+        raw = await request.body()
+    if len(raw) > _MAX_RPC_BODY_BYTES:
+        return _rpc_error(None, _RPC_INVALID_REQUEST, "Request body too large")
+    try:
+        body = json.loads(raw)
+    except Exception:
+        return _rpc_error(None, _RPC_PARSE_ERROR, "Parse error: body is not valid JSON")
+
+    if not isinstance(body, dict) or body.get("jsonrpc") != "2.0" or not isinstance(body.get("method"), str):
+        return _rpc_error(body.get("id") if isinstance(body, dict) else None,
+                          _RPC_INVALID_REQUEST, "Invalid JSON-RPC 2.0 request")
+
+    params = body.get("params") or {}
+    rpc_id = body.get("id")
+    if not isinstance(params, dict):
+        return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params must be an object")
+    return body["method"], params, rpc_id
+
+
 def _authorize_inbound(current_user: User, agent_name: str) -> None:
     """Exposure + access + allow-list gate for an inbound A2A task. Raises
     HTTPException(404) for non-exposed/inaccessible (uniform — no enumeration),
     HTTPException(403) when the caller is off the per-agent allow-list."""
     if not db.get_a2a_exposed(agent_name):
         raise HTTPException(status_code=404, detail="Not found")
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=404, detail="Not found")
     caller_identity = getattr(current_user, "email", None) or current_user.username
     if not a2a_gate.check_inbound_allowed(agent_name, caller_identity):
         raise HTTPException(status_code=403, detail="Caller not on the agent's A2A inbound allow-list")
 
 
-async def _run_a2a_task(agent_name: str, text: str, current_user: User):
+async def _run_a2a_task(agent_name: str, text: str, current_user: Optional[User],
+                        *, source_host: Optional[str] = None):
     """Bridge one inbound A2A message into the Trinity execution stack.
 
     #2524: goes through `dispatch_and_await_terminal`, not `execute_task`
@@ -502,27 +720,538 @@ async def _run_a2a_task(agent_name: str, text: str, current_user: User):
         source_user_id=getattr(current_user, "id", None),
         source_user_email=getattr(current_user, "email", None),
         source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+        source_host=source_host,
     )
+
+
+# ===========================================================================
+# ent#679 — the x402 payment path (a caller with no Trinity credential)
+# ===========================================================================
+
+
+async def _run_a2a_paid_execution(agent_name: str, text: str):
+    """The execution bridge for a PAYING caller: no Trinity principal.
+
+    `source_user_*` are all None — there is no Trinity identity to attribute
+    this to, and inventing one would put a stranger's turn on a real user's
+    name in the execution row and every analytics surface downstream. The
+    attribution that does exist is the payer wallet on the payment log rows and
+    the audit row (T4).
+
+    `triggered_by` stays `"a2a"` (T6) rather than borrowing `"paid"`: an A2A
+    paid call IS an A2A call, and relabelling it would hide it from the a2a
+    bucket and the `?triggered_by=a2a` filter while making it look like a REST
+    paid chat.
+
+    The two public-channel settings the paid door applies are applied here for
+    the same reason it applies them: a paying stranger is a public caller, not
+    a tenant (#1205 caller prompt, #894 per-agent model override).
+    """
+    return await dispatch_and_await_terminal(
+        agent_name=agent_name,
+        message=text,
+        triggered_by="a2a",
+        source_user_id=None,
+        source_user_email=None,
+        source_mcp_key_id=None,
+        system_prompt=build_public_channel_caller_prompt(agent_name),
+        model=db.get_public_channel_model(agent_name),
+    )
+
+
+def _not_authenticated() -> JSONResponse:
+    """Today's 401, byte-identical.
+
+    What a stranger gets for any agent that is not both exposed AND priced —
+    which is every agent in an OSS build, and every non-priced agent in an
+    entitled one. The bytes matter: this is the answer the route has always
+    given, so the gate adds no new signal for an attacker mapping the fleet.
+    """
+    return JSONResponse(
+        status_code=401,
+        content={"detail": "Not authenticated"},
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+async def _payer_for_task(
+    agent_name: str, exec_id: str, priced, access_token: Optional[str], base_url: str
+) -> bool:
+    """May this token's payer see/cancel `exec_id`? (T5)
+
+    The binding with no new schema: the payment log rows already carry both
+    `execution_id` and `subscriber_address`, so "did this wallet pay for this
+    task" is a query, not a column. Verifying on each poll costs one facilitator
+    call, which is why the per-IP and per-agent limiters are upstream of here.
+
+    EVERY failure — no token, a token that does not verify, a wallet with no
+    row for this execution, a row belonging to another agent — returns False,
+    and the caller then gets the SAME `-32001 Task not found` an unknown id
+    gets. That uniformity is the point: a differential answer would turn this
+    into an oracle for "which execution ids exist", and an anonymous caller is
+    exactly who must not have one.
+
+    Bound as soon as the turn has a RESULT, not only once a settle row lands
+    (I4): `run_paid_turn` writes a `verify` row carrying the execution id when
+    `execute()` returns, before the settle starts. The settle rows used to be
+    the only writers of the pair, so a payer was locked out of a finished task
+    for as long as the settle ran (three 30-second attempts), and for good when
+    a concurrent settle wrote no row of its own (`settle_in_progress`).
+
+    NOT bound mid-turn, stated: `execute()` is `dispatch_and_await_terminal`,
+    which returns at the terminal on push and pull alike, so the execution id
+    does not exist in `run_paid_turn` while the turn is running. A poll during
+    the turn reads as not-found, and a payer's `tasks/cancel` can only answer
+    "already in a terminal state" — the paying caller holds no task id until
+    the turn ends anyway. Binding earlier needs the execution id minted before
+    dispatch; that is a change to the dispatch contract, not to this function.
+
+    Residual, stated: a consumer that timed out never received the task id in
+    the first place, so polling is only available to a client that HAS one. The
+    payer's own retry of the original `message/send` is what recovers the
+    artifact in that case — it replays the completed snapshot without
+    re-executing or re-charging.
+    """
+    if not access_token:
+        return False
+    try:
+        verify = await get_nevermined_payment_service().verify_payment(
+            nvm_api_key=priced.nvm_api_key,
+            nvm_environment=priced.config.nvm_environment,
+            config=priced.config,
+            access_token=access_token,
+            base_url=base_url,
+            endpoint=f"{base_url}/a2a/{agent_name}",
+        )
+    except Exception:  # noqa: BLE001 — a verify that blew up is not an entitlement
+        logger.warning("a2a: verify raised while binding a payer to a task", exc_info=True)
+        return False
+    if not verify.success or not verify.payer:
+        return False
+    return bool(db.nevermined_payer_owns_execution(agent_name, exec_id, verify.payer))
+
+
+async def _anonymous_jsonrpc(agent_name: str, request: Request, *, unexposed: bool = False):
+    """The JSON-RPC door for a caller holding no Trinity credential (ent#679).
+
+    Order is load-bearing and each step is cheaper than the next:
+
+    1. **Rate limit, per IP and per agent**, before any DB read or SDK call.
+       One unauthenticated hit on the paying path can cost a 15-second
+       facilitator verify, so this is the step that keeps a flood from
+       converting into an agent's whole facilitator quota. The per-agent bucket
+       exists because a distributed flood passes every per-IP bucket.
+    2. **Exposed and priced?** No → today's 401. The gate is invisible to
+       anyone who could not already read the agent off its published card.
+    3. **SDK present?** No → 501, the paid door's answer. Honest rather than
+       401: the door exists and cannot take payment right now, and no
+       credential the caller could obtain would change that.
+    4. **Envelope**, capped and parsed — the principal path's exact refusals.
+    5. **Token**, in-band first. Absent → 402 with the paid door's bytes.
+    """
+    rate_limiter.enforce(
+        f"a2a_pay_ip:{_get_client_ip(request)}",
+        A2A_PAY_RATE_LIMIT,
+        A2A_PAY_RATE_WINDOW,
+        detail="Too many unauthenticated A2A requests from this address.",
+    )
+    rate_limiter.enforce(
+        f"a2a_pay_agent:{agent_name}",
+        A2A_PAY_AGENT_RATE_LIMIT,
+        A2A_PAY_AGENT_RATE_WINDOW,
+        detail="Too many unauthenticated A2A requests for this agent.",
+    )
+
+    # ent#838: an internal-scope agent takes no payment and, to anyone outside
+    # its trusted networks, answers as an unexposed agent does. Decided AFTER
+    # the limiter, like every other read on this door.
+    if unexposed or _internal_gate(agent_name, request, source=None).internal:
+        return _not_authenticated()
+    priced = a2a_payment_gate.is_priced(agent_name, db=db)
+    if priced is None:
+        return _not_authenticated()
+    if not NEVERMINED_AVAILABLE:
+        return JSONResponse(
+            status_code=501,
+            content={"detail": "Nevermined payment integration is not available"},
+        )
+
+    parsed = await _parse_rpc_envelope(request)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    method, params, rpc_id = parsed
+
+    # The origin the CALLER used (#3215, review I3), not `request.base_url` and
+    # not the card's declared origin: the 402's `resource.url` is what the
+    # buyer's token is minted and facilitator-verified against.
+    base_url = _base_url_from_request(request)
+    caller_ip = request.client.host if request.client else None
+    payment_service = get_nevermined_payment_service()
+
+    if method in ("message/send", "message/stream"):
+        message = params.get("message")
+        if not isinstance(message, dict):
+            return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params.message is required")
+        text = _text_from_message(message)
+        if not text:
+            return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "message has no text parts")
+
+        access_token = a2a_payment_gate.extract_token(message, request.headers)
+        if not access_token:
+            # The plan's own scheme (#3215), resolved here because the builder
+            # stays synchronous — the lookup is an outbound HTTP call.
+            plan_scheme = await payment_service.resolve_plan_scheme(
+                nvm_api_key=priced.nvm_api_key,
+                nvm_environment=priced.config.nvm_environment,
+                config=priced.config,
+            )
+            status_code, body, headers = a2a_payment_gate.payment_required_response(
+                agent_name, priced.config,
+                payment_service=payment_service, base_url=base_url,
+                plan_scheme=plan_scheme,
+            )
+            return JSONResponse(status_code=status_code, content=body, headers=headers)
+
+        if method == "message/stream":
+            return await _stream_paid_task(
+                agent_name, text, priced, access_token, base_url, rpc_id, caller_ip,
+            )
+        return await _send_paid_task(
+            agent_name, text, priced, access_token, base_url, rpc_id, caller_ip, request,
+        )
+
+    if method in ("tasks/get", "tasks/cancel"):
+        exec_id = params.get("id")
+        if not isinstance(exec_id, str) or not exec_id:
+            return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params.id is required")
+        access_token = a2a_payment_gate.extract_token(params.get("message"), request.headers)
+        allowed = await _payer_for_task(agent_name, exec_id, priced, access_token, base_url)
+        if not allowed:
+            # Byte-identical to an unknown task id (T5) — no existence oracle.
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
+        return await _bound_task_rpc(agent_name, method, exec_id, rpc_id, caller_ip)
+
+    if method == "tasks/resubscribe":
+        return _rpc_error(rpc_id, _A2A_UNSUPPORTED,
+                          "tasks/resubscribe is not yet supported on this server")
+    return _rpc_error(rpc_id, _RPC_METHOD_NOT_FOUND, f"Method not found: {method}")
+
+
+class _PaidRefusal(NamedTuple):
+    """A refusing `PaidTurnOutcome`, classified once for BOTH paid doors.
+
+    `http` is `(status, body)` where the refusal IS an HTTP status on
+    `message/send` — the paid door's 403 bytes (T3) and the allow-list /
+    sentinel abort. `message/stream` cannot use it: the status line is long gone
+    by the time the body generator runs, so the stream renders `code`/`message`/
+    `data` instead. One classification, two renderers — the alternative was a
+    second table in `_stream_paid_task`, which is how it came to answer `-32001`
+    (A2A **TaskNotFound**) for a payment refusal and to flatten "not allowed"
+    and "retry" into one `-32603 Task execution failed`.
+    """
+    code: int
+    message: str
+    data: Optional[dict]
+    http: Optional[tuple] = None
+
+
+def _classify_paid_refusal(outcome) -> Optional[_PaidRefusal]:
+    """None when the outcome IS a task state; the refusal otherwise.
+
+    `data.code` is the discriminator a caller needs: "buy a token", "not
+    allowed", "retry — we were busy" and "retry — your own duplicate is still
+    running" are four different instructions, and `data.retryable` says which
+    of them are worth repeating with the SAME token.
+    """
+    kind = outcome.kind
+    if kind == paid_turn_service.VERIFY_FAILED:
+        if getattr(outcome.verify, "retryable", False):
+            # OUR side could not decide — facilitator timeout, SDK error, or a
+            # saturated concurrency gate (E7). A 403 here would tell #3209's
+            # client `payment_rejected`, i.e. stop retrying and go buy another
+            # token, for what is us being busy. Never a 403, and never -32001:
+            # this is not a task condition either.
+            return _PaidRefusal(
+                _RPC_INTERNAL_ERROR,
+                "Payment verification could not be completed",
+                {"code": "verify_unavailable", "retryable": True},
+            )
+        # A real rejection. The paid door's 403 bytes: #3185's client maps a 403
+        # carrying `credential_kind=payment_token` to `payment_rejected`, which
+        # is what tells a remote Trinity to stop retrying and go buy a token.
+        return _PaidRefusal(
+            _RPC_INTERNAL_ERROR,
+            "Payment verification failed",
+            {"code": "payment_rejected", "retryable": False},
+            http=(403, outcome.payload),
+        )
+    if kind == paid_turn_service.ABORTED:
+        return _PaidRefusal(
+            _RPC_INTERNAL_ERROR,
+            outcome.payload.get("detail") or "Request refused",
+            {"code": "not_allowed", "retryable": False},
+            http=(outcome.status_code, outcome.payload),
+        )
+    if kind == paid_turn_service.IN_FLIGHT:
+        return _PaidRefusal(
+            _RPC_INTERNAL_ERROR,
+            "A duplicate paid request is still being processed",
+            {"code": "in_flight", "retryable": True},
+        )
+    if kind == paid_turn_service.EXECUTION_ERROR:
+        return _PaidRefusal(
+            _RPC_INTERNAL_ERROR,
+            "Task execution failed",
+            {"code": "execution_error", "retryable": False},
+        )
+    return None
+
+
+def _paid_outcome_refusal(outcome, rpc_id: Any):
+    """A `PaidTurnOutcome` → the `message/send` answer, or None for "render a Task"."""
+    refusal = _classify_paid_refusal(outcome)
+    if refusal is None:
+        return None
+    if refusal.http is not None:
+        status, body = refusal.http
+        return JSONResponse(status_code=status, content=body)
+    return _rpc_error(rpc_id, refusal.code, refusal.message, data=refusal.data)
+
+
+async def _send_paid_task(agent_name: str, text: str, priced, access_token: str,
+                          base_url: str, rpc_id: Any, caller_ip: Optional[str],
+                          request: Request):
+    """`message/send` on the payment path: verify → dedup → execute → settle → Task."""
+    try:
+        outcome = await a2a_payment_gate.run_a2a_paid_turn(
+            agent_name=agent_name,
+            priced=priced,
+            access_token=access_token,
+            text=text,
+            base_url=base_url,
+            execute=lambda: _run_a2a_paid_execution(agent_name, text),
+            payment_service=get_nevermined_payment_service(),
+            idem=idempotency_service,
+            db=db,
+        )
+    except Exception as exc:  # noqa: BLE001 — never 5xx; A2A wants a JSON-RPC error
+        logger.warning("a2a paid message/send failed for %s: %s", agent_name, exc)
+        return _rpc_error(rpc_id, _RPC_INTERNAL_ERROR, "Task execution failed")
+
+    refusal = _paid_outcome_refusal(outcome, rpc_id)
+    if refusal is not None:
+        return refusal
+
+    task = a2a_payment_gate.task_from_paid_payload(outcome, task_builder=_task_object)
+    await platform_audit_service.log(
+        event_type=AuditEventType.EXECUTION, event_action="a2a_task", source="a2a",
+        # No actor_user: there is no Trinity identity behind a paying stranger.
+        # The payer wallet is the identity, and it goes in the details (T4).
+        actor_user=None, actor_ip=caller_ip,
+        target_type="agent", target_id=agent_name,
+        endpoint=request.scope["path"],
+        details={
+            "execution_id": outcome.execution_id,
+            "state": (task or {}).get("status", {}).get("state"),
+            "payer": getattr(outcome.verify, "payer", None),
+            "settled": outcome.settled,
+        },
+    )
+    headers = {"X-Idempotent-Replay": "true"} if outcome.replayed else None
+    return JSONResponse(
+        {"jsonrpc": "2.0", "id": rpc_id, "result": task}, headers=headers,
+    )
+
+
+async def _stream_paid_task(agent_name: str, text: str, priced, access_token: str,
+                            base_url: str, rpc_id: Any, caller_ip: Optional[str]):
+    """`message/stream` on the payment path.
+
+    Non-incremental like the principal path (the agent turn is atomic), but
+    spec-shaped: a `working` status event, then the terminal task carrying the
+    payment metadata. A refusal that is an HTTP status (402 handled upstream,
+    403 here) cannot be expressed mid-stream, so it is emitted as a JSON-RPC
+    error event — a streaming client has an event-stream parser attached and a
+    bare JSON body would break it.
+
+    `run_paid_turn` owns the cancellation bookkeeping (#679 E5): a client that
+    disconnects mid-turn has its claim released before a result exists, and
+    after one exists the settle is shielded and the claim is completed as
+    unsettled, so a retry replays the work instead of paying for it twice.
+    """
+    async def _gen():
+        working = {"jsonrpc": "2.0", "id": rpc_id, "result": {
+            "kind": "status-update",
+            "status": {"state": "working"},
+            "final": False,
+        }}
+        yield f"data: {json.dumps(working)}\n\n"
+        try:
+            outcome = await a2a_payment_gate.run_a2a_paid_turn(
+                agent_name=agent_name,
+                priced=priced,
+                access_token=access_token,
+                text=text,
+                base_url=base_url,
+                execute=lambda: _run_a2a_paid_execution(agent_name, text),
+                payment_service=get_nevermined_payment_service(),
+                idem=idempotency_service,
+                db=db,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("a2a paid message/stream failed for %s: %s", agent_name, exc)
+            err = {"jsonrpc": "2.0", "id": rpc_id, "error": {
+                "code": _RPC_INTERNAL_ERROR, "message": "Task execution failed"}}
+            yield f"data: {json.dumps(err)}\n\n"
+            return
+
+        refusal = _classify_paid_refusal(outcome)
+        task = (
+            None if refusal is not None
+            else a2a_payment_gate.task_from_paid_payload(outcome, task_builder=_task_object)
+        )
+        if task is None:
+            # A payment refusal is not a task state, and the HTTP-shaped ones
+            # (the 403, the abort) cannot be expressed mid-stream — so every one
+            # of them goes out as the SAME classified JSON-RPC error
+            # `message/send` uses, carrying `data.code` + `data.retryable`.
+            # Deliberately never `-32001`: that is A2A TaskNotFound, and telling
+            # a client its task vanished when the truth is "pay" / "not allowed"
+            # / "retry" is a wrong answer it cannot recover from.
+            err = {"jsonrpc": "2.0", "id": rpc_id, "error": (
+                {"code": refusal.code, "message": refusal.message,
+                 "data": refusal.data}
+                if refusal is not None
+                # Defensive: an outcome kind that is neither a refusal nor a
+                # task. Still not -32001.
+                else {"code": _RPC_INTERNAL_ERROR, "message": "Task execution failed"}
+            )}
+            yield f"data: {json.dumps(err)}\n\n"
+            return
+
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION, event_action="a2a_task_stream", source="a2a",
+            actor_user=None, actor_ip=caller_ip,
+            target_type="agent", target_id=agent_name,
+            details={
+                "execution_id": outcome.execution_id,
+                "payer": getattr(outcome.verify, "payer", None),
+                "settled": outcome.settled,
+            },
+        )
+        final = {"jsonrpc": "2.0", "id": rpc_id, "result": {**task, "final": True}}
+        yield f"data: {json.dumps(final)}\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
+
+
+async def _bound_task_rpc(agent_name: str, method: str, exec_id: str,
+                          rpc_id: Any, caller_ip: Optional[str]):
+    """`tasks/get` / `tasks/cancel` for a payer already bound to `exec_id` (T5).
+
+    Reads and cancels exactly as the principal path does — the authorization
+    happened upstream in `_payer_for_task`, and the behaviour a caller gets
+    after it must not be a second, divergent implementation of the same two
+    methods.
+    """
+    row = db.get_execution(exec_id)
+    if not row or _exec_field(row, "agent_name") != agent_name:
+        return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
+    status = _exec_field(row, "status")
+
+    if method == "tasks/get":
+        a2a_state = {
+            "success": "completed", "failed": "failed", "cancelled": "canceled",
+            "running": "working", "queued": "submitted",
+        }.get(status, "working")
+        return _rpc_result(rpc_id, _task_object(
+            exec_id, a2a_state,
+            text=_exec_field(row, "response") if a2a_state == "completed" else None,
+            error=_exec_field(row, "error") if a2a_state == "failed" else None,
+        ))
+
+    if status in ("success", "failed", "cancelled"):
+        return _rpc_error(rpc_id, _A2A_TASK_NOT_CANCELABLE,
+                          "Task is already in a terminal state")
+    if status == "queued":
+        cancelled = bool(db.cancel_queued_execution(
+            exec_id, reason="Cancelled by A2A caller"))
+    else:
+        cancelled = bool(await terminate_execution_on_agent(agent_name, exec_id))
+    if not cancelled:
+        return _rpc_error(rpc_id, _A2A_TASK_NOT_CANCELABLE, "Task could not be canceled")
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.EXECUTION, event_action="a2a_cancel", source="a2a",
+        actor_user=None, actor_ip=caller_ip,
+        target_type="agent", target_id=agent_name, details={"execution_id": exec_id},
+    )
+    return _rpc_result(rpc_id, _task_object(exec_id, "canceled"))
 
 
 @a2a_server_router.post(_A2A_RPC_PATH)
 async def a2a_jsonrpc(
     agent_name: str,
     request: Request,
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_user_or_anonymous),
 ):
-    """A2A JSON-RPC 2.0 task endpoint. Bearer = a Trinity MCP API key (validated
-    by `get_current_user` — fail-closed 401). Methods: message/send,
-    message/stream (SSE), tasks/get, tasks/cancel.
+    """A2A JSON-RPC 2.0 task endpoint. Two credentials, one door.
+
+    * **A Trinity MCP API key** → the principal path, unchanged: owner/shared
+      access + the enterprise allow-list, and the task runs for free. This is
+      internal fleet traffic and subscription tenants, and nothing below
+      touches it (AC4).
+    * **No recognised Trinity credential** → the x402 payment path
+      (abilityai/trinity-enterprise#679), but ONLY when the agent is both
+      A2A-exposed and priced. Otherwise the caller gets today's 401 bytes, so
+      the gate never makes exposure or pricing observable to a stranger who
+      could not already read it off the published well-known card.
+
+    `get_user_or_anonymous` degrades to `None` on a 401 only. A 403 — a
+    connector key outside its scope, a fenced ephemeral key — is re-raised, so
+    a credential Trinity recognised and then REFUSED can never slide onto the
+    payment path and buy its way in.
 
     An AAuth-signed request (ent#623) never reaches this function — see
-    `_A2AServerRoute` and `_a2a_aauth_jsonrpc`; both share `_dispatch_jsonrpc`."""
-    _authorize_inbound(current_user, agent_name)
+    `_A2AServerRoute` and `_a2a_aauth_jsonrpc`; all three doors share the
+    JSON-RPC method table in `_dispatch_jsonrpc`.
+    """
+    # ent#838: an internal-scope agent answers only a trusted network, and
+    # anyone else — key or no key — gets the unexposed agent's answer.
+    caller_source: Optional[str] = None
+    if current_user is None:
+        # No DB read before a limiter (ent#679's ordering): the source check
+        # reads only the cached trusted list, and an untrusted caller goes
+        # straight to the anonymous door, whose limiter runs first.
+        source = a2a_trusted_networks.internal_source(request)
+        if source is None:
+            return await _anonymous_jsonrpc(agent_name, request)
+        rate_limiter.enforce(
+            f"a2a_internal_src:{source}",
+            A2A_INTERNAL_SOURCE_RATE_LIMIT, A2A_INTERNAL_RATE_WINDOW,
+            detail="Too many A2A requests from this address.",
+        )
+        rate_limiter.enforce(
+            f"a2a_internal_agent:{agent_name}",
+            A2A_INTERNAL_AGENT_RATE_LIMIT, A2A_INTERNAL_RATE_WINDOW,
+            detail="Too many A2A requests for this agent.",
+        )
+        gate = _internal_gate(agent_name, request, source=source)
+        if not gate.caller_source:
+            return await _anonymous_jsonrpc(agent_name, request, unexposed=gate.internal)
+        caller_source = gate.caller_source
+    else:
+        if _internal_gate(agent_name, request).refuse:
+            raise HTTPException(status_code=404, detail="Not found")
+        _authorize_inbound(current_user, agent_name)
 
-    # Cap before parsing — an uncapped await request.json() lets one caller pin
-    # memory. nginx caps at 25m, but :8000 may be reachable directly.
-    raw = await request.body()
-    return await _dispatch_jsonrpc(agent_name, request, raw, current_user=current_user)
+    parsed = await _parse_rpc_envelope(request)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    return await _dispatch_jsonrpc(agent_name, request, parsed,
+                                   current_user=current_user, caller_source=caller_source)
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +1332,11 @@ async def _a2a_aauth_jsonrpc(request: Request, issuer: str):
                             headers=exc.headers)
     if not db.get_a2a_exposed(agent_name):
         return JSONResponse(status_code=404, content={"detail": "Not found"})
+    # trinity-enterprise#838: an internal-scope agent answers only a trusted
+    # network — an AAuth caller from anywhere else gets the unexposed answer,
+    # exactly as a bearer caller does.
+    if _internal_gate(agent_name, request).refuse:
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
 
     identities = a2a_gate.explicit_inbound_identities(agent_name)
 
@@ -654,7 +1388,11 @@ async def _a2a_aauth_jsonrpc(request: Request, issuer: str):
         return JSONResponse(status_code=403,
                             content={"detail": "Caller not on the agent's A2A inbound allow-list"})
 
-    return await _dispatch_jsonrpc(agent_name, request, raw, current_user=None, aauth=verified)
+    # The body was read (and its digest verified) above — parse those exact bytes.
+    parsed = await _parse_rpc_envelope(request, raw=raw)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    return await _dispatch_jsonrpc(agent_name, request, parsed, current_user=None, aauth=verified)
 
 
 def _audit_actor(current_user: Optional[User], aauth) -> Dict[str, Any]:
@@ -666,35 +1404,23 @@ def _audit_actor(current_user: Optional[User], aauth) -> Dict[str, Any]:
 async def _dispatch_jsonrpc(
     agent_name: str,
     request: Request,
-    raw: bytes,
+    parsed,
     *,
     current_user: Optional[User],
     aauth: Optional["aauth_verifier.VerifiedAgent"] = None,
+    caller_source: Optional[str] = None,
 ):
-    """The JSON-RPC method table, shared by the bearer and AAuth entry points.
+    """The JSON-RPC method table, shared by every door onto `POST /a2a/{name}`.
 
-    Exactly one of `current_user` (bearer) / `aauth` (verified agent identity)
-    is set. With `aauth` unset every line below behaves as it did before
-    ent#623.
+    `parsed` is `_parse_rpc_envelope`'s `(method, params, rpc_id)`. The caller
+    is exactly one of: a bearer principal (`current_user`), a keyless trusted
+    source (`caller_source`, trinity-enterprise#838) or a verified AAuth agent
+    identity (`aauth`, ent#623). With `aauth` unset every line below behaves as
+    it did before ent#623.
     """
-    if len(raw) > _MAX_RPC_BODY_BYTES:
-        return _rpc_error(None, _RPC_INVALID_REQUEST, "Request body too large")
-    try:
-        body = json.loads(raw)
-    except Exception:
-        return _rpc_error(None, _RPC_PARSE_ERROR, "Parse error: body is not valid JSON")
+    method, params, rpc_id = parsed
 
-    if not isinstance(body, dict) or body.get("jsonrpc") != "2.0" or not isinstance(body.get("method"), str):
-        return _rpc_error(body.get("id") if isinstance(body, dict) else None,
-                          _RPC_INVALID_REQUEST, "Invalid JSON-RPC 2.0 request")
-
-    method = body["method"]
-    params = body.get("params") or {}
-    rpc_id = body.get("id")
-    if not isinstance(params, dict):
-        return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params must be an object")
-
-    caller_ip = request.client.host if request.client else None
+    caller_ip = caller_source or (request.client.host if request.client else None)
 
     # ---- message/send + message/stream ------------------------------------
     if method in ("message/send", "message/stream"):
@@ -709,7 +1435,9 @@ async def _dispatch_jsonrpc(
         # with the same messageId must not double-execute. messageId absent →
         # dedup disabled (fail-open).
         message_id = message.get("messageId")
-        decision = idempotency_service.begin(_a2a_idem_scope(agent_name, current_user, aauth), message_id)
+        decision = idempotency_service.begin(
+            _a2a_idem_scope(agent_name, current_user, source_host=caller_source, aauth=aauth),
+            message_id)
         if decision.replay and not decision.in_flight and decision.snapshot:
             # A streaming client can't parse a bare JSON body — replay in the
             # transport it asked for.
@@ -726,10 +1454,18 @@ async def _dispatch_jsonrpc(
                 idempotency_service.fail(decision)
                 return _rpc_error(rpc_id, _A2A_UNSUPPORTED,
                                   "message/stream is not supported for AAuth callers; use message/send")
-            return await _stream_task(agent_name, text, current_user, rpc_id, decision, caller_ip)
+            return await _stream_task(agent_name, text, current_user, rpc_id, decision, caller_ip,
+                                      source_host=caller_source)
 
         try:
-            result = await _run_a2a_task(agent_name, text, current_user)
+            result = await _run_a2a_task(agent_name, text, current_user, source_host=caller_source)
+        except SkillGateError as exc:
+            task = _gate_task(exc)
+            if isinstance(exc, SkillApprovalRequired):
+                idempotency_service.complete(decision, exc.request_id, task)
+            else:
+                idempotency_service.fail(decision)
+            return _rpc_result(rpc_id, task)
         except Exception as exc:  # noqa: BLE001 — never 5xx; A2A wants a JSON-RPC error
             idempotency_service.fail(decision)
             logger.warning("a2a message/send failed for %s: %s", agent_name, exc)
@@ -742,7 +1478,8 @@ async def _dispatch_jsonrpc(
             error=result.error if state == "failed" else None,
         )
         idempotency_service.complete(decision, result.execution_id, task)
-        details = {"execution_id": result.execution_id, "state": state}
+        details = {"execution_id": result.execution_id, "state": state,
+                   **({"source_host": caller_source} if caller_source else {})}
         if aauth is not None:
             aauth_inbound.remember_execution(result.execution_id, aauth.identity)
             details.update(aauth_inbound.audit_details(aauth, allowlist="allowed"))
@@ -755,7 +1492,7 @@ async def _dispatch_jsonrpc(
             event_type=AuditEventType.EXECUTION, event_action="a2a_task", source="a2a",
             **_audit_actor(current_user, aauth), actor_ip=caller_ip,
             target_type="agent", target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             details=details,
         )
         return _rpc_result(rpc_id, task)
@@ -770,7 +1507,8 @@ async def _dispatch_jsonrpc(
         row = db.get_execution(exec_id)
         # db.get_execution returns a ScheduleExecution object (not a dict) —
         # read via _exec_field so both the model and a dict work.
-        if not row or _exec_field(row, "agent_name") != agent_name:
+        if not row or _exec_field(row, "agent_name") != agent_name \
+                or not _keyless_owns(row, caller_source):
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
         status = _exec_field(row, "status")
         a2a_state = {
@@ -791,7 +1529,8 @@ async def _dispatch_jsonrpc(
         if aauth is not None and not aauth_inbound.execution_owned_by(exec_id, aauth.identity):
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
         row = db.get_execution(exec_id)
-        if not row or _exec_field(row, "agent_name") != agent_name:
+        if not row or _exec_field(row, "agent_name") != agent_name \
+                or not _keyless_owns(row, caller_source):
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
 
         # Report what actually happened. Telling a caller "canceled" while the
@@ -815,14 +1554,16 @@ async def _dispatch_jsonrpc(
             return _rpc_error(rpc_id, _A2A_TASK_NOT_CANCELABLE,
                               "Task could not be canceled")
 
-        cancel_details = {"execution_id": exec_id}
+        cancel_details = {"execution_id": exec_id,
+                          **({"source_host": caller_source} if caller_source else {})}
         if aauth is not None:
             cancel_details.update(aauth_inbound.audit_details(aauth, allowlist="allowed"))
         await platform_audit_service.log(
             event_type=AuditEventType.EXECUTION, event_action="a2a_cancel", source="a2a",
             **_audit_actor(current_user, aauth), actor_ip=caller_ip,
             target_type="agent", target_id=agent_name,
-            endpoint=str(request.url.path), details=cancel_details,
+            endpoint=request.scope["path"],
+            details=cancel_details,
         )
         return _rpc_result(rpc_id, _task_object(exec_id, "canceled"))
 
@@ -832,6 +1573,16 @@ async def _dispatch_jsonrpc(
                           "tasks/resubscribe is not yet supported on this server")
 
     return _rpc_error(rpc_id, _RPC_METHOD_NOT_FOUND, f"Method not found: {method}")
+
+
+def _keyless_owns(row, caller_source: Optional[str]) -> bool:
+    """A keyless trusted caller reads and cancels only the tasks IT started —
+    the ones stamped with its own address (trinity-enterprise#838). A keyed
+    caller is unaffected (owner/shared access already decided it)."""
+    if not caller_source:
+        return True
+    return (_exec_field(row, "triggered_by") == "a2a"
+            and _exec_field(row, "source_host") == caller_source)
 
 
 def _replay_stream(rpc_id: Any, task: Dict[str, Any]) -> StreamingResponse:
@@ -847,8 +1598,9 @@ def _replay_stream(rpc_id: Any, task: Dict[str, Any]) -> StreamingResponse:
     return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
-async def _stream_task(agent_name: str, text: str, current_user: User,
-                       rpc_id: Any, decision, caller_ip: Optional[str]) -> StreamingResponse:
+async def _stream_task(agent_name: str, text: str, current_user: Optional[User],
+                       rpc_id: Any, decision, caller_ip: Optional[str],
+                       *, source_host: Optional[str] = None) -> StreamingResponse:
     """message/stream via SSE. Emits a `working` status event, runs the task,
     then a terminal task event. Non-incremental (the agent turn is atomic), but
     spec-shaped so a streaming A2A client attaches and receives the result."""
@@ -861,7 +1613,7 @@ async def _stream_task(agent_name: str, text: str, current_user: User,
         }}
         yield f"data: {json.dumps(working)}\n\n"
         try:
-            result = await _run_a2a_task(agent_name, text, current_user)
+            result = await _run_a2a_task(agent_name, text, current_user, source_host=source_host)
         except asyncio.CancelledError:
             # A client disconnect cancels the generator, and CancelledError is a
             # BaseException (3.8+) — the `except Exception` below never sees it.
@@ -870,6 +1622,14 @@ async def _stream_task(agent_name: str, text: str, current_user: User,
             # progress" for the full 24h TTL.
             idempotency_service.fail(decision)
             raise
+        except SkillGateError as exc:
+            task = _gate_task(exc)
+            if isinstance(exc, SkillApprovalRequired):
+                idempotency_service.complete(decision, exc.request_id, task)
+            else:
+                idempotency_service.fail(decision)
+            yield f"data: {json.dumps({'jsonrpc': '2.0', 'id': rpc_id, 'result': {**task, 'final': True}})}\n\n"
+            return
         except Exception as exc:  # noqa: BLE001
             idempotency_service.fail(decision)
             logger.warning("a2a message/stream failed for %s: %s", agent_name, exc)
@@ -887,7 +1647,9 @@ async def _stream_task(agent_name: str, text: str, current_user: User,
         await platform_audit_service.log(
             event_type=AuditEventType.EXECUTION, event_action="a2a_task_stream", source="a2a",
             actor_user=current_user, actor_ip=caller_ip,
-            target_type="agent", target_id=agent_name, details={"execution_id": result.execution_id},
+            target_type="agent", target_id=agent_name,
+            details={"execution_id": result.execution_id,
+                     **({"source_host": source_host} if source_host else {})},
         )
         final = {"jsonrpc": "2.0", "id": rpc_id, "result": {**task, "final": True}}
         yield f"data: {json.dumps(final)}\n\n"
@@ -917,6 +1679,12 @@ _A2A_CLIENT_ERROR_STATUS = {
     "endpoint_invalid": 400,
     "message_too_long": 422,
     "timeout": 504,
+    # #3185. The honest status for "the peer will answer once you pay", and the
+    # one the MCP mapper and the add flow branch on. `payment_rejected` and
+    # `rpc_forbidden` deliberately stay on the 502 default: a remote 403 must
+    # not be echoed as this route's OWN 403, which means "an agent tried to
+    # call as a neighbour". `detail.remote_status` carries the peer's.
+    "payment_required": 402,
 }
 
 
@@ -933,6 +1701,16 @@ def _map_call_error(exc: A2ACallError) -> HTTPException:
     detail = {"reason": exc.reason, "message": exc.detail}
     if exc.remote_code is not None:
         detail["remote_code"] = exc.remote_code
+    if exc.remote_status is not None:
+        detail["remote_status"] = exc.remote_status
+    if exc.payment is not None:
+        # Already bounded, allowlisted and credential-scrubbed by the client
+        # (`_bounded_payment_block`) — the router adds no second shape and does
+        # no second sanitisation, so there is one place that decides what peer
+        # text an agent may see.
+        detail["payment"] = exc.payment
+    if exc.task_id is not None:
+        detail["task_id"] = exc.task_id
     return HTTPException(status_code=status_code, detail=detail)
 
 
@@ -1029,6 +1807,9 @@ async def call_a2a_agent(
                 ),
             },
         )
+    except EffectUnguardedError as exc:
+        # #2392: pull-mode agent, no usable execution id — refused, not retryable.
+        raise HTTPException(status_code=422, detail={"reason": "effect_unguarded", "message": str(exc)})
     except EffectInProgressError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except A2AAAuthRefused as exc:
@@ -1045,7 +1826,7 @@ async def call_a2a_agent(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details=a2a_outbound_service.audit_details(outcome),
     )

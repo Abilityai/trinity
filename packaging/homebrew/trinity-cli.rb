@@ -1,7 +1,7 @@
 class TrinityCli < Formula
   include Language::Python::Virtualenv
 
-  desc "CLI for the Trinity Autonomous Agent Orchestration Platform"
+  desc "CLI for Trinity, the operating system for the AI-native company"
   homepage "https://github.com/abilityai/trinity"
   url "https://files.pythonhosted.org/packages/source/t/trinity-cli/trinity_cli-0.2.0.tar.gz"
   sha256 "c5232321bd6cd64815706e0e5f15da13a252026a4aa5d050ae4702013b366d59"

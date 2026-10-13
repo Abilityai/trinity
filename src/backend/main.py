@@ -26,7 +26,7 @@ import httpx
 
 from config import CORS_ORIGINS, VOICE_ENABLED
 from models import User
-from dependencies import get_current_user, scope_may_open_event_stream
+from dependencies import get_current_user, owner_is_workspace_only, scope_may_open_event_stream, workspace_route
 from services.docker_service import docker_client, list_all_agents_fast
 from utils.helpers import utc_now_iso
 
@@ -47,6 +47,7 @@ from routers.agents import router as agents_router, set_websocket_manager as set
 from routers.agent_config import router as agent_config_router
 from routers.agent_data import router as agent_data_router
 from routers.agent_files import router as agent_files_router
+from routers.metric_points import router as metric_points_router
 from routers.agent_brain_orb import router as agent_brain_orb_router  # #58 Brain Orb proxy
 from routers.agent_rename import router as agent_rename_router, set_websocket_manager as set_agent_rename_ws_manager, set_filtered_websocket_manager as set_agent_rename_filtered_ws_manager
 from routers.agent_ssh import router as agent_ssh_router
@@ -67,7 +68,6 @@ from routers.analytics import router as analytics_router  # #1107 — Agent Over
 from routers.activities import router as activities_router
 from routers.settings import router as settings_router
 from routers.systems import router as systems_router
-from routers.observability import router as observability_router
 from routers.system_agent import router as system_agent_router
 from routers.ops import router as ops_router
 from routers.public_links import router as public_links_router, set_websocket_manager as set_public_links_ws_manager
@@ -81,6 +81,8 @@ from routers.audit_log import router as audit_log_router  # SEC-001 / Issue #20
 from routers.canary import router as canary_router  # CANARY-001 / Issue #411
 from routers.compatibility import router as compatibility_router  # #668 agent compatibility
 from routers.skills import router as skills_router
+from routers.skill_gate import router as skill_gate_router  # trinity-enterprise#752 in-container hook check
+from routers.skill_gate import agent_router as skill_gate_agent_router  # trinity-enterprise#753 gate map
 from routers.internal import router as internal_router, pull_router as internal_pull_router
 from routers.tags import router as tags_router, set_websocket_manager as set_tags_ws_manager
 from services.skill_service import set_websocket_manager as set_skills_ws_manager
@@ -105,7 +107,8 @@ from routers.paid import router as paid_router
 from routers.nevermined import router as nevermined_router
 from routers.image_generation import router as image_generation_router
 from routers.avatar import router as avatar_router
-from routers.operator_queue import router as operator_queue_router, set_websocket_manager as set_operator_queue_ws_manager
+from routers.operator_queue import router as operator_queue_router, agent_router as operator_queue_agent_router, set_websocket_manager as set_operator_queue_ws_manager
+from services.ask_service import set_websocket_manager as set_ask_service_ws_manager  # trinity-enterprise#611
 from routers.voice import router as voice_router
 from routers.voip import public_router as voip_public_router, auth_router as voip_auth_router
 from routers.event_subscriptions import router as event_subscriptions_router, set_websocket_manager as set_event_subs_ws_manager, set_filtered_websocket_manager as set_event_subs_filtered_ws_manager
@@ -117,6 +120,7 @@ from routers.aauth import router as aauth_router  # ent#623 AAuth discovery docu
 from routers.admin_recovery import router as admin_recovery_router  # #834 Phase 1c
 from routers.messages import router as messages_router  # Proactive Messaging (#321)
 from routers.public_memory import router as public_memory_router  # MEM-001 write path (#888)
+from routers.seat_decisions import router as seat_decisions_router  # ent#638 seat decision record
 from routers.loops import (
     agent_router as loops_agent_router,
     loop_router as loops_loop_router,
@@ -130,7 +134,9 @@ from services.ws_identity_service import accessible_agents_for, resolve_ws_ident
 # wholesale from the submodule, and keeping the vertical slice intact
 # keeps the move reviewable as a move.
 from client_portal.asks.router import router as portal_asks_router
+from client_portal.mentions.router import router as portal_mentions_router
 from client_portal.work.router import router as portal_work_router
+from client_portal.suggestions.router import router as portal_suggestions_router
 from client_portal.router import router as client_portal_router
 from shared_sessions.router import budget_router as room_budget_router
 from shared_sessions.router import router as rooms_router
@@ -204,6 +210,8 @@ class ConnectionManager:
         email: str = "",
         is_admin: bool = False,
         accessible_agents: Optional[List[str]] = None,
+        allowed_types: Optional[frozenset] = frozenset(),
+        allowed_fields: Optional[frozenset] = frozenset(),
     ) -> None:
         """Accept a ``/ws`` client and register it with its agent scope.
 
@@ -212,7 +220,13 @@ class ConnectionManager:
         forgets them registers a slot that sees only agent-less events rather
         than the whole fleet — the fail-closed direction for a delivery
         surface. ``/ws`` itself resolves them before calling and refuses the
-        connection when it cannot."""
+        connection when it cannot.
+
+        trinity-enterprise#837: ``allowed_types`` is the event-kind allowlist and
+        ``allowed_fields`` the fields each event is cut to (``None`` = all).
+        Both default to the empty set, so a caller that forgets them registers
+        a socket that receives nothing usable — noticed at once — rather than
+        everything for a Workspace-only account."""
         await websocket.accept()
         async def _send(payload: dict) -> None:
             await websocket.send_text(json.dumps(payload))
@@ -223,6 +237,8 @@ class ConnectionManager:
             is_admin=is_admin,
             accessible_agents=accessible_agents or [],
             email=email,
+            allowed_types=allowed_types,
+            allowed_fields=allowed_fields,
             last_event_id=last_event_id,
         )
         self._client_ids[websocket] = client_id
@@ -309,6 +325,7 @@ set_reports_filtered_ws_manager(filtered_manager)
 set_monitoring_ws_manager(manager)
 set_monitoring_filtered_ws_manager(filtered_manager)
 set_operator_queue_ws_manager(manager)
+set_ask_service_ws_manager(manager)  # trinity-enterprise#611: the ask sink's thin triggers
 set_opqueue_sync_ws_manager(manager)
 set_event_subs_ws_manager(manager)
 set_event_subs_filtered_ws_manager(filtered_manager)
@@ -583,6 +600,14 @@ async def _start_maintenance_services() -> None:
         logger.info("Operator queue sync service started")
     except Exception as e:
         logger.error(f"Error starting operator queue sync service: {e}")
+
+    # trinity-enterprise#751: an approval can be answered on any worker, so every
+    # worker observes ask endings; the poll cycle's sweep catches what it misses.
+    try:
+        from services import skill_gate_service
+        skill_gate_service.register_ending_observer()
+    except Exception as e:
+        logger.error(f"Error registering the skill gate ending observer: {e}")
 
 
 async def _schedule_staggered_services() -> None:
@@ -1164,6 +1189,11 @@ async def lifespan(app: FastAPI):
     A thin orchestrator over the phase helpers above (#1028). Read the phase
     list as the boot sequence; each name links to the block it used to inline.
     """
+    # #3246: background work spawned from a thread anyio does not own
+    # (`asyncio.to_thread` — the headroom sweep, the skills reconcile) hops back
+    # to THIS loop; capture it before any phase can spawn from a thread.
+    from services import operator_resume_service as _ors
+    _ors.remember_host_loop()
     await _init_logging_and_first_run_notice()
     await _start_event_bus()
     await _log_startup_environment()
@@ -1208,6 +1238,26 @@ from fastapi.exceptions import RequestValidationError as _RequestValidationError
 from error_handlers import validation_error_without_input as _validation_error_without_input
 
 app.add_exception_handler(_RequestValidationError, _validation_error_without_input)
+
+# #2973: routes that let a chain-depth refusal propagate get the #2806 named 403.
+from services.chat_signals import InterAgentDepthExceeded as _InterAgentDepthExceeded
+from error_handlers import inter_agent_depth_exceeded as _inter_agent_depth_exceeded
+
+app.add_exception_handler(_InterAgentDepthExceeded, _inter_agent_depth_exceeded)
+
+# trinity-enterprise#751: a request naming a gated skill is not dispatched — 202
+# pending_approval, or a named refusal — wherever in the stack the gate fired.
+from services.skill_gate_errors import SkillGateError as _SkillGateError
+from error_handlers import skill_gate_error as _skill_gate_error
+
+app.add_exception_handler(_SkillGateError, _skill_gate_error)
+
+# #3325: a credential setting whose VALUE cannot be stored is a named 422, not a
+# 500 telling a configured install to add CREDENTIAL_ENCRYPTION_KEY.
+from services.secret_settings import SecretSettingValueError as _SecretSettingValueError
+from error_handlers import secret_setting_value_error as _secret_setting_value_error
+
+app.add_exception_handler(_SecretSettingValueError, _secret_setting_value_error)
 
 # Add CORS middleware
 app.add_middleware(
@@ -1280,12 +1330,24 @@ async def add_security_headers(request: Request, call_next):
     return response
 
 
+# #3102 — reject a Host header that would shift the Host-built request URL.
+# Registered LAST so it runs FIRST (add_middleware prepends); keep every other
+# middleware above this line. Pure ASGI, so WebSocket handshakes are covered too.
+from utils.host_header import HostHeaderGuard
+
+app.add_middleware(HostHeaderGuard)
+
+
 # Include all routers
 app.include_router(auth_router)
 app.include_router(agents_router)
 app.include_router(agent_config_router)
 app.include_router(agent_data_router)  # #1169: data export/import
 app.include_router(agent_files_router)
+# trinity-enterprise#478. Registered beside agent_files_router and ahead of the
+# agents router's single-segment `/{name}` routes (Invariant #4) — a static
+# path under /api/agents must be declared before anything that could shadow it.
+app.include_router(metric_points_router)
 app.include_router(agent_brain_orb_router)  # #58: Brain Orb read-only data proxy
 app.include_router(agent_rename_router)
 app.include_router(agent_ssh_router)
@@ -1304,7 +1366,6 @@ app.include_router(executions_router)  # EXEC-022 / Issue #18 — Unified Execut
 app.include_router(analytics_router)  # #1107 — Agent Detail Overview analytics
 app.include_router(settings_router)
 app.include_router(systems_router)
-app.include_router(observability_router)
 app.include_router(system_agent_router)
 app.include_router(ops_router)
 app.include_router(public_links_router)
@@ -1318,7 +1379,7 @@ app.include_router(audit_log_router)  # SEC-001 / #20: Platform audit log (Phase
 app.include_router(canary_router)  # CANARY-001 / #411: Invariant violations
 app.include_router(compatibility_router)  # #668: Agent compatibility validation
 app.include_router(skills_router) # Skills Management System
-app.include_router(internal_router)  # Internal agent-to-backend endpoints (no auth)
+app.include_router(internal_router)  # Internal agent-to-backend endpoints (verify_internal_secret: X-Internal-Secret, not a user principal)
 app.include_router(internal_pull_router)  # #1081 pull seams — dual auth: internal secret OR agent's own scoped MCP key
 app.include_router(tags_router)  # Agent Tags (ORG-001)
 app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)
@@ -1337,6 +1398,7 @@ app.include_router(mcp_auth_router)  # MCP inline email auth (#848) — internal
 app.include_router(agent_mcp_key_router)  # Per-agent Trinity MCP key: read/verify/rotate (#1854)
 app.include_router(messages_router)  # Proactive Messaging (#321)
 app.include_router(public_memory_router)  # MEM-001 write path (#888)
+app.include_router(seat_decisions_router)  # ent#638 seat decision record
 app.include_router(subscriptions_router)  # Subscription Management (SUB-001)
 app.include_router(monitoring_router)  # Agent Monitoring (MON-001)
 app.include_router(slack_public_router)  # Slack Integration Public (SLACK-001)
@@ -1350,6 +1412,9 @@ app.include_router(nevermined_router)  # Nevermined Admin Config (NVM-001)
 app.include_router(image_generation_router)  # Image Generation (IMG-001)
 app.include_router(avatar_router)  # Agent Avatars (AVATAR-001)
 app.include_router(operator_queue_router)  # Operator Queue (OPS-001)
+app.include_router(operator_queue_agent_router)  # an agent's own ask readback (trinity-enterprise#611)
+app.include_router(skill_gate_router)  # the in-container skill-gate hook's check (trinity-enterprise#752)
+app.include_router(skill_gate_agent_router)  # the per-agent skill gate map (trinity-enterprise#753)
 app.include_router(voice_router)  # Voice Chat (VOICE-001)
 app.include_router(voip_public_router)  # VoIP Telephony Media Streams WS (VOIP-001)
 app.include_router(voip_auth_router)  # VoIP Telephony binding + trigger (VOIP-001)
@@ -1376,10 +1441,15 @@ app.include_router(room_budget_router)
 # on an install whose submodule still registers the old gated module, the
 # ungated OSS routes win the match order (the ent#443 transition rule).
 app.include_router(portal_asks_router)
+# trinity-enterprise#631 — person tags: the tagged person's Inbox door. Same
+# prefix and transition rule as the asks router above.
+app.include_router(portal_mentions_router)
 # Workspace work — the live execution card + the rail's Work tab
 # (trinity-enterprise#525, the visual half of ent#457). Same prefix, same
 # transition rule as the asks router above; platform-door only inside.
 app.include_router(portal_work_router)
+# trinity-enterprise#465 — Workspace suggestions: per-viewer, per-agent, platform door only.
+app.include_router(portal_suggestions_router)
 
 
 # #847 Phase 0 — Enterprise modules (closed-source companion submodule
@@ -1524,6 +1594,8 @@ async def websocket_endpoint(
         email=identity["email"],
         is_admin=identity["is_admin"],
         accessible_agents=identity["accessible_agents"],
+        allowed_types=identity["allowed_types"],  # trinity-enterprise#837
+        allowed_fields=identity["allowed_fields"],
     )
 
     try:
@@ -1603,6 +1675,13 @@ async def websocket_events_endpoint(
     user_email = key_info.get("user_email")
     # Determine if admin by checking user role
     user_data = db.get_user_by_username(key_info.get("user_id"))  # user_id is actually username
+    # ent#837 — the event stream is an operator surface, and this handler never
+    # runs `get_current_user`, so the operator floor is applied here: a key whose
+    # owner is Workspace-only (including one minted before the upgrade) does not
+    # open it. An owner that cannot be resolved is refused the same way.
+    if owner_is_workspace_only(user_data):
+        await websocket.close(code=4003, reason="This account works in the Workspace")
+        return
     is_admin = user_data and user_data.get("role") == "admin"
 
     # Get list of accessible agents for this user
@@ -1817,7 +1896,8 @@ async def get_version(current_user: User = Depends(get_current_user)):
     modules listed in `enterprise_features`. See docs/ENTERPRISE.md.
 
     `install_source` (#2380) is how this instance was installed —
-    `do-marketplace` / `vultr-marketplace` / `script` / `unknown` — recorded
+    `do-marketplace` / `vultr-marketplace` / `aws-marketplace` / `do-script` /
+    `aws-script` / `script` / `unknown` — recorded
     once at first boot and surfaced here so an operator can answer "what kind
     of install is this?" from a support surface they already read.
     """
@@ -1842,6 +1922,7 @@ async def get_version(current_user: User = Depends(get_current_user)):
 
 # User info endpoint
 @app.get("/api/users/me")
+@workspace_route("the SPA reads the role to decide where a signed-in person lands")
 async def get_current_user_info(current_user: User = Depends(get_current_user)):
     """Get current user information."""
     from database import db

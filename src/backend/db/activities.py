@@ -18,7 +18,7 @@ from sqlalchemy import select, insert, update, and_, case
 
 from .engine import get_engine
 from .query_helpers import latest_per_group
-from .tables import agent_activities
+from .tables import agent_activities, schedule_executions
 # ActivityCloseOutcome is defined in `models` (not here) on purpose — it is a
 # contract type shared with the service layer and compared by identity; `models`
 # is the leaf that survives a test harness evicting `db.*` from sys.modules.
@@ -27,6 +27,7 @@ from models import ActivityState, ActivityType, ActivityCloseOutcome
 from utils.helpers import (
     duration_ms_between,
     parse_iso_timestamp,
+    terminal_completed_at,
     to_utc_iso,
     utc_now_iso,
 )
@@ -41,6 +42,29 @@ _DISPATCH_ACTIVITY_TYPES = (
     ActivityType.CHAT_START.value,
     ActivityType.SCHEDULE_START.value,
 )
+
+def queued_activity_ids(backlog_metadata: Optional[str]) -> List[str]:
+    """Activity ids a queued `/task` row names in its ``backlog_metadata``:
+    the collaboration activity and, for a self-task, the self-task activity.
+
+    #2329: these are opened by the producer, not by the dispatch, so the
+    related-execution lookup never finds them. The push drain closes them in
+    ``run_async_task``; every other terminal writer (pull sink, lease-reaper
+    park, watchdog) reaches them only through this, by exact id. Backlog
+    expiry (``expire_stale_queued``) calls no closer; the 120-minute sweep
+    covers it.
+    """
+    try:
+        meta = json.loads(backlog_metadata or "{}")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(meta, dict):
+        return []
+    ids = [meta.get("collaboration_activity_id")]
+    if meta.get("is_self_task"):
+        ids.append(meta.get("self_task_activity_id"))
+    return [i for i in ids if isinstance(i, str) and i]
+
 
 # #1804: chunk size for the bulk close's `IN (...)`. SQLite caps host params at
 # SQLITE_MAX_VARIABLE_NUMBER (999 before 3.32); keep a safe margin. Module
@@ -207,8 +231,16 @@ class ActivityOperations:
 
     def complete_activity(self, activity_id: str, status: str = ActivityState.COMPLETED,
                           details: Optional[Dict] = None,
-                          error: Optional[str] = None) -> "ActivityCloseOutcome":
+                          error: Optional[str] = None,
+                          *, completed_at: Optional[datetime] = None) -> "ActivityCloseOutcome":
         """Close an activity: state, completion time, duration.
+
+        ``completed_at`` (#3589): the instant the producer says the work ended,
+        when the closer has one — the #2944 watchdog claim passes the agent's
+        ``retained_at``, minutes before this write. ``None`` (every closer that
+        runs as the work ends) stamps now. Same rules as the execution writer
+        (``utils.helpers.terminal_completed_at``): naive → UTC, never in the
+        future.
 
         #1804: this is now a **compare-and-set**, not an unconditional UPDATE.
         Every CAS-won terminal writer closes the paired activity, so a second
@@ -233,7 +265,7 @@ class ActivityOperations:
 
             # Use parse_iso_timestamp to handle both 'Z' and non-'Z' timestamps
             started_at = parse_iso_timestamp(row["started_at"])
-            completed_at = parse_iso_timestamp(utc_now_iso())
+            completed_at = terminal_completed_at(completed_at)
             # #2434: `completed_at` here IS when the work stopped, so this is a
             # real measurement — but an activity with no owning closer can sit
             # `started` arbitrarily long (#1804's class), and past the int4
@@ -311,7 +343,7 @@ class ActivityOperations:
         with get_engine().begin() as conn:
             for start in range(0, len(ids), _SQLITE_MAX_IN_VARS):
                 chunk = ids[start:start + _SQLITE_MAX_IN_VARS]
-                rows = conn.execute(
+                rows = list(conn.execute(
                     select(agent_activities.c.id, agent_activities.c.started_at)
                     .where(
                         and_(
@@ -320,7 +352,30 @@ class ActivityOperations:
                             _close_predicate(status),
                         )
                     )
-                ).mappings().all()
+                ).mappings().all())
+                # #2329: plus the collaboration / self-task activities the
+                # queued rows name, by exact id, chunked like the execution ids.
+                queued_ids = [
+                    aid
+                    for meta in conn.execute(
+                        select(schedule_executions.c.backlog_metadata).where(
+                            schedule_executions.c.id.in_(chunk)
+                        )
+                    ).scalars()
+                    for aid in queued_activity_ids(meta)
+                ]
+                for q in range(0, len(queued_ids), _SQLITE_MAX_IN_VARS):
+                    rows += conn.execute(
+                        select(agent_activities.c.id, agent_activities.c.started_at)
+                        .where(
+                            and_(
+                                agent_activities.c.id.in_(
+                                    queued_ids[q:q + _SQLITE_MAX_IN_VARS]
+                                ),
+                                _close_predicate(status),
+                            )
+                        )
+                    ).mappings().all()
 
                 for row in rows:
                     result = conn.execute(

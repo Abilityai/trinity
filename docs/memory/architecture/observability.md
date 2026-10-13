@@ -33,6 +33,33 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   `ReportCreate`. Create is rate-limited per agent (`REPORT_RATE_LIMIT`/30 per 60s, shared
   `services/rate_limiter.py`, fail-open) so a runaway agent can't flood the table between
   retention sweeps → 429.
+- **Where an addressed report lands (ent#365, ent#610)**: the chat is resolved server-side
+  at publish by `services/report_service.resolve_report_session(execution_id, agent_name,
+  audience, agent_publish=...)` — never from the request. With no `audience`, or when the
+  agent is not publishing as itself (`agent_publish = current_user.agent_name == name`), it is
+  NULL (operator-only). Otherwise the in-flight portal session of the publishing turn is kept **only if it belongs to
+  the addressee** (`client_portal.db.get_portal_session(sid, agent, audience)`); otherwise —
+  no execution, a non-portal turn, or another person's chat — the report is
+  stamped to the addressee's **Main** (`client_portal.service.ensure_main_session`, race-safe by the
+  partial unique index) and — only after the report row is written
+  (`report_service.touch_report_session`, so a failed insert never lists an empty Main) —
+  that Main is touched with `added=0`. Why: without a chat the
+  report has no inline card, no anchor and no unread count (the ent#610 Inbox counts
+  deliverables stamped to the viewer's own sessions), and a report addressed to X during
+  Y's turn used to be stamped into Y's chat, where neither person's reader showed it. The
+  touch keeps a report-only Main visible to the sidebar (`is_main && !last_message_at` is
+  hidden) and moves it in the list; `added=0` because a report is not a message, so Reset's
+  "untouched Main" test (`message_count == 0`) still holds. Fails soft to NULL with a
+  WARNING; a card placement never fails a publish. The precedent is
+  `schedule_workspace_delivery.resolve_and_stamp`. The addressee is roster-validated with
+  `include_owned=False` above it, so this is a bounded push channel to people the agent is
+  shared with (30/min per agent, one Main per pair), never to an arbitrary email. **The
+  channel is the agent's, not its sharers'** (/cso, ent#610): the route is gated by
+  `AuthorizedAgent`, so every human the agent is shared with can publish as it; a human
+  publish places no card at all, so one sharer cannot mint or touch another person's Main,
+  nor quote their LIVE turn (which `GET /api/agents/{a}/executions` lists to any sharer) to
+  plant a card — now an unread Inbox arrival — in the chat they are in (/cso round 3).
+  `agent_publish` has no default — every call site states it.
 - **Thin WS trigger**: `/ws` is `SCOPE_ALL`, and until ent#467 it was unfiltered, so the `agent_report` broadcast
   carries only `{agent_name, report_id, report_type, created_at}` — never `title`/`payload`
   (which can be sensitive). The frontend store refetches via the access-controlled REST

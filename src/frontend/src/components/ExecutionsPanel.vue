@@ -224,16 +224,16 @@
 
       <!-- Empty — no executions ever -->
       <div v-else-if="store.rows.length === 0 && !store.hasActiveFilters" class="text-center py-12">
-        <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
         </svg>
         <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">No executions yet</p>
-        <p class="text-xs text-gray-400 dark:text-gray-500">Run a task or wait for a schedule to fire.</p>
+        <p class="text-xs text-gray-500 dark:text-gray-400">Run a task or wait for a schedule to fire.</p>
       </div>
 
       <!-- Empty — filters returned nothing -->
       <div v-else-if="store.rows.length === 0 && store.hasActiveFilters" class="text-center py-12">
-        <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2a1 1 0 01-.293.707L13 13.414V19a1 1 0 01-.553.894l-4 2A1 1 0 017 21v-7.586L3.293 6.707A1 1 0 013 6V4z" />
         </svg>
         <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">No matching executions</p>
@@ -271,15 +271,15 @@
                 <span class="px-1.5 py-0.5 rounded text-xs" :class="triggerLabelClass(row.triggered_by)">
                   {{ row.triggered_by }}
                 </span>
-                <span class="text-xs text-gray-400 dark:text-gray-500">{{ timeAgo(row.started_at) }}</span>
-                <span class="font-mono text-xs text-gray-400 dark:text-gray-500 hidden sm:inline">{{ truncId(row.id) }}</span>
+                <span class="text-xs text-gray-500 dark:text-gray-400">{{ timeAgo(row.started_at) }}</span>
+                <span class="font-mono text-xs text-gray-500 dark:text-gray-400 hidden sm:inline">{{ truncId(row.id) }}</span>
               </div>
 
               <!-- Message -->
               <p class="text-sm text-gray-700 dark:text-gray-300 truncate">{{ row.message }}</p>
 
               <!-- Meta row -->
-              <div class="mt-1 flex flex-wrap items-center gap-3 text-xs text-gray-400 dark:text-gray-500">
+              <div class="mt-1 flex flex-wrap items-center gap-3 text-xs text-gray-500 dark:text-gray-400">
                 <span v-if="row.duration_ms">{{ formatDuration(row.duration_ms) }}</span>
                 <span v-if="row.cost != null">{{ formatCost(row.cost) }}</span>
                 <span v-if="row.context_used">{{ formatTokens(row.context_used) }}</span>
@@ -356,9 +356,9 @@ const wsTooltip = computed(() =>
 const successRateClass = computed(() => {
   const r = store.stats?.success_rate
   if (r == null) return 'text-gray-900 dark:text-white'
-  if (r >= 90) return 'text-status-success-600 dark:text-status-success-400'
-  if (r >= 75) return 'text-status-warning-600 dark:text-status-warning-400'
-  if (r >= 50) return 'text-status-urgent-600 dark:text-status-urgent-400'
+  if (r >= 90) return 'text-status-success-700 dark:text-status-success-400'
+  if (r >= 75) return 'text-status-warning-700 dark:text-status-warning-400'
+  if (r >= 50) return 'text-status-urgent-700 dark:text-status-urgent-400'
   return 'text-status-danger-600 dark:text-status-danger-400'
 })
 

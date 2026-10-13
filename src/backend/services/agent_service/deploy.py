@@ -35,7 +35,7 @@ from services.template_service import (
     collect_mcp_credential_warnings,
 )
 from services.docker_service import get_agent_container
-from services.docker_utils import container_stop, container_start
+from services.docker_utils import container_stop, container_start, agent_volume_labels
 from utils.helpers import sanitize_agent_name
 from services.settings_service import get_agent_quota_for_role
 from redis_breaker_util import SingleFlightLock  # #1920 shared single-flight lock
@@ -544,10 +544,7 @@ def _ensure_fresh_workspace_volume(client, workspace_vol: str, version_name: str
 
     client.volumes.create(
         name=workspace_vol,
-        labels={
-            "trinity.platform": "agent-workspace",
-            "trinity.agent-name": version_name,
-        },
+        labels=agent_volume_labels(version_name, "agent-workspace"),
     )
 
 

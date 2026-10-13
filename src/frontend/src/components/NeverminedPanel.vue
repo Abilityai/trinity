@@ -139,7 +139,7 @@
               <input
                 v-model.number="form.credits_per_request"
                 type="number"
-                min="1"
+                min="0"
                 :disabled="!canEdit"
                 :class="['w-32 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm focus:ring-action-primary-500 focus:border-action-primary-500', canEdit ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 cursor-not-allowed']"
               />
@@ -184,6 +184,11 @@
           No payment activity yet
         </div>
 
+        <!-- #1925 triage — NOT a tab strip: a bounded wide table. Horizontal scroll
+             INSIDE the container is the correct treatment for unbounded column width
+             (design-system principle 7); collapsing columns into a "More" menu would
+             hide data, not navigation. Left as-is deliberately so a later audit does
+             not re-flag it. -->
         <div v-else class="overflow-x-auto">
           <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
             <thead class="bg-gray-50 dark:bg-gray-900/50">
@@ -208,7 +213,7 @@
                 <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-300">{{ entry.credits_amount ?? '-' }}</td>
                 <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-300 font-mono">{{ truncateHash(entry.tx_hash) }}</td>
                 <td class="px-4 py-2">
-                  <span v-if="entry.success" class="text-status-success-600 dark:text-status-success-400 text-sm">OK</span>
+                  <span v-if="entry.success" class="text-status-success-700 dark:text-status-success-400 text-sm">OK</span>
                   <span v-else class="text-status-danger-600 dark:text-status-danger-400 text-sm" :title="entry.error">Failed</span>
                 </td>
               </tr>
@@ -266,7 +271,7 @@ const isFormValid = computed(() => {
     form.value.nvm_environment &&
     form.value.nvm_agent_id &&
     form.value.nvm_plan_id &&
-    form.value.credits_per_request >= 1
+    Number.isFinite(form.value.credits_per_request) && form.value.credits_per_request >= 0
 })
 
 // Methods

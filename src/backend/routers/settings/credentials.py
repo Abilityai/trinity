@@ -44,6 +44,7 @@ from database import db, SystemSetting, SystemSettingUpdate
 from dependencies import get_current_user, assert_admin
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import operator_intake_service, platform_keys_service, telemetry_sharing_service
+from services.secret_settings import SecretSettingValueError
 
 from services.subscription_service import (
     connect_agents_to_first_credential,
@@ -219,7 +220,7 @@ async def update_anthropic_key(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"setting": "anthropic_api_key", "action": "update"},
         )
@@ -231,7 +232,7 @@ async def update_anthropic_key(
             # one (int; running ones restart in the background).
             "connected_agents": connected,
         }
-    except HTTPException:
+    except (HTTPException, SecretSettingValueError):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update API key: {str(e)}")
@@ -286,7 +287,7 @@ async def _adopt_after_instance_key_removed(current_user: User, request: Request
         await adopt_for_credentialless_agents(
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             trigger=TRIGGER_INSTANCE_KEY_DELETED,
         )
@@ -320,7 +321,7 @@ async def delete_anthropic_key(
                 source="api",
                 actor_user=current_user,
                 actor_ip=request.client.host if request.client else None,
-                endpoint=str(request.url.path),
+                endpoint=request.scope["path"],
                 request_id=getattr(request.state, "request_id", None),
                 details={"setting": "anthropic_api_key", "action": "delete"},
             )
@@ -446,7 +447,7 @@ async def update_github_pat(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"setting": "github_pat", "action": "update"},
         )
@@ -456,7 +457,7 @@ async def update_github_pat(
             "masked": mask_api_key(key),
             "propagation": propagation_payload,
         }
-    except HTTPException:
+    except (HTTPException, SecretSettingValueError):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update GitHub PAT: {str(e)}")
@@ -485,7 +486,7 @@ async def delete_github_pat(
                 source="api",
                 actor_user=current_user,
                 actor_ip=request.client.host if request.client else None,
-                endpoint=str(request.url.path),
+                endpoint=request.scope["path"],
                 request_id=getattr(request.state, "request_id", None),
                 details={"setting": "github_pat", "action": "delete"},
             )
@@ -684,6 +685,8 @@ async def update_slack_settings(
             "success": True,
             "updated": updated
         }
+    except SecretSettingValueError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update Slack settings: {str(e)}")
 

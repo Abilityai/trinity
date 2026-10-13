@@ -44,13 +44,15 @@
     <!-- Agent Not Running State -->
     <div v-else-if="agentStatus !== 'running'" class="text-center py-8">
       <div class="mx-auto w-16 h-16 bg-gray-100 dark:bg-gray-700 rounded-full flex items-center justify-center mb-4">
-        <svg class="w-8 h-8 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg class="w-8 h-8 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
         </svg>
       </div>
       <h3 class="text-lg font-medium text-gray-900 dark:text-white">Agent Not Running</h3>
-      <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
-        Start the agent to view its dashboard.
+      <p class="mt-2 text-sm text-gray-500 dark:text-gray-400" data-testid="not-running-copy">
+        Start the agent to view its dashboard.<template v-if="hasDeclaredMetrics">
+          Its recorded metrics above are read from the platform store and do not
+          need the agent running.</template>
       </p>
     </div>
 
@@ -70,16 +72,22 @@
     <!-- No Dashboard Defined State -->
     <div v-else-if="!dashboardData?.has_dashboard" class="text-center py-8">
       <div class="mx-auto w-16 h-16 bg-gray-100 dark:bg-gray-700 rounded-full flex items-center justify-center mb-4">
-        <svg class="w-8 h-8 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg class="w-8 h-8 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
         </svg>
       </div>
       <h3 class="text-lg font-medium text-gray-900 dark:text-white">No Dashboard Defined</h3>
-      <p class="mt-2 text-sm text-gray-500 dark:text-gray-400 max-w-sm mx-auto">
-        This agent does not have a dashboard.yaml file.
+      <p class="mt-2 text-sm text-gray-500 dark:text-gray-400 max-w-sm mx-auto" data-testid="no-dashboard-copy">
+        <template v-if="hasDeclaredMetrics">
+          The declared metrics above are this agent's numbers. A dashboard.yaml
+          adds tables, lists and links around them.
+        </template>
+        <template v-else>
+          This agent does not have a dashboard.yaml file.
+        </template>
       </p>
-      <div class="mt-4 text-xs text-gray-400 dark:text-gray-500">
-        Create <code class="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded">~/dashboard.yaml</code> to define a custom dashboard.
+      <div class="mt-4 text-xs text-gray-500 dark:text-gray-400">
+        Create <code class="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded">~/dashboard.yaml</code> to define a custom dashboard<template v-if="hasDeclaredMetrics">, and bind a widget to a declared metric with a <span class="font-mono">metric:</span> key</template>.
       </div>
     </div>
 
@@ -138,7 +146,7 @@
             @click="triggerUpdateDashboard"
             :disabled="updatingDashboard"
             class="inline-flex items-center px-2.5 py-1.5 text-xs font-medium rounded bg-action-primary-50 text-action-primary-700 hover:bg-action-primary-100 dark:bg-action-primary-900/50 dark:text-action-primary-300 dark:hover:bg-action-primary-900/70 disabled:opacity-50"
-            title="Run /update-dashboard playbook"
+            title="Run the /update-dashboard skill"
           >
             <svg v-if="updatingDashboard" class="w-3.5 h-3.5 mr-1 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -200,9 +208,9 @@
               <div class="flex items-baseline justify-between">
                 <div class="text-3xl font-bold text-gray-900 dark:text-white">
                   {{ formatValue(widget.value) }}
-                  <span v-if="widget.unit" class="text-lg text-gray-400 dark:text-gray-500">{{ widget.unit }}</span>
+                  <span v-if="widget.unit" class="text-lg text-gray-500 dark:text-gray-400">{{ widget.unit }}</span>
                 </div>
-                <div v-if="widget.trend || widget.history?.trend" class="flex items-center text-sm" :class="getTrendColor(widget.trend || widget.history?.trend)">
+                <div v-if="widget.trend || widget.history?.trend" class="flex items-center text-sm" :class="getTrendColor(widget.trend || widget.history?.trend, widget)" data-testid="widget-trend">
                   <svg v-if="(widget.trend || widget.history?.trend) === 'up'" class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                     <path fill-rule="evenodd" d="M5.293 9.707a1 1 0 010-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 01-1.414 1.414L11 7.414V15a1 1 0 11-2 0V7.414L6.707 9.707a1 1 0 01-1.414 0z" clip-rule="evenodd" />
                   </svg>
@@ -215,7 +223,7 @@
                 </div>
               </div>
               <div class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ widget.label }}</div>
-              <div v-if="widget.description" class="mt-1 text-xs text-gray-400 dark:text-gray-500">{{ widget.description }}</div>
+              <div v-if="widget.description" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ widget.description }}</div>
               <!-- Sparkline -->
               <SparklineChart
                 v-if="widget.history?.values?.length > 1"
@@ -226,6 +234,7 @@
                 :height="24"
                 class="mt-2"
               />
+              <BoundMetricMark :widget="widget" />
             </div>
 
             <!-- Status Widget -->
@@ -238,10 +247,11 @@
                 class="inline-flex items-center px-2.5 py-1 text-sm font-medium rounded-full"
                 :class="getStatusColors(widget.color)"
               >
-                {{ widget.value }}
+                {{ widget.value ?? '—' }}
               </span>
               <div class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ widget.label }}</div>
-              <div v-if="widget.description" class="mt-1 text-xs text-gray-400 dark:text-gray-500">{{ widget.description }}</div>
+              <div v-if="widget.description" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ widget.description }}</div>
+              <BoundMetricMark :widget="widget" />
             </div>
 
             <!-- Progress Widget -->
@@ -252,9 +262,10 @@
             >
               <div class="flex items-baseline justify-between">
                 <span class="text-2xl font-bold text-gray-900 dark:text-white">
-                  {{ widget.value }}%
+                  <template v-if="widget.value === null || widget.value === undefined">—</template>
+                  <template v-else>{{ widget.value }}%</template>
                 </span>
-                <div v-if="widget.history?.trend" class="flex items-center text-sm" :class="getTrendColor(widget.history.trend)">
+                <div v-if="widget.history?.trend" class="flex items-center text-sm" :class="getTrendColor(widget.history.trend, widget)" data-testid="widget-trend">
                   <svg v-if="widget.history.trend === 'up'" class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                     <path fill-rule="evenodd" d="M5.293 9.707a1 1 0 010-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 01-1.414 1.414L11 7.414V15a1 1 0 11-2 0V7.414L6.707 9.707a1 1 0 01-1.414 0z" clip-rule="evenodd" />
                   </svg>
@@ -282,6 +293,7 @@
                 :height="24"
                 class="mt-2"
               />
+              <BoundMetricMark :widget="widget" />
             </div>
 
             <!-- Text Widget -->
@@ -316,6 +328,11 @@
               <div v-if="widget.title" class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
                 <h4 class="text-sm font-medium text-gray-900 dark:text-white">{{ widget.title }}</h4>
               </div>
+              <!-- #1925 triage — NOT a tab strip: a bounded wide table. Horizontal scroll
+                   INSIDE the container is the correct treatment for unbounded column width
+                   (design-system principle 7); collapsing columns into a "More" menu would
+                   hide data, not navigation. Left as-is deliberately so a later audit does
+                   not re-flag it. -->
               <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                   <thead class="bg-gray-50 dark:bg-gray-900">
@@ -429,10 +446,14 @@ import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
 import axios from 'axios'
 import SparklineChart from './SparklineChart.vue'
+import BoundMetricMark from './BoundMetricMark.vue'
+import { trendClasses, sparklineColor } from '../utils/metricFormat'
 import ScanlineReveal from './ScanlineReveal.vue'
 import LoadFailed from './LoadFailed.vue'
 import InlineError from './InlineError.vue'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
+import { apiErrorMessage } from '../utils/apiError'
+import { isGateRefusal, pendingApprovalMessage, PENDING_NOTICE_TOAST } from '../utils/skillGate'
 
 const props = defineProps({
   agentName: {
@@ -442,7 +463,17 @@ const props = defineProps({
   agentStatus: {
     type: String,
     default: 'stopped'
-  }
+  },
+  // ent#479: `DeclaredMetricsTiles` is mounted as this panel's SIBLING and is
+  // already showing the agent's numbers. When it is, "No Dashboard Defined"
+  // stops being the whole story — the copy below says what a `dashboard.yaml`
+  // would ADD rather than implying the agent has nothing to show.
+  hasDeclaredMetrics: {
+    type: Boolean,
+    default: false
+  },
+  // AgentDetail's toast host (`useNotification`), as A2aPanel takes it.
+  notify: { type: Function, default: null }
 })
 
 const agentsStore = useAgentsStore()
@@ -523,11 +554,18 @@ const checkUpdateDashboardPlaybook = async () => {
 const triggerUpdateDashboard = async () => {
   updatingDashboard.value = true
   try {
-    await axios.post(`/api/agents/${props.agentName}/task`, {
+    const response = await axios.post(`/api/agents/${props.agentName}/task`, {
       message: '/update-dashboard'
     }, {
       headers: authStore.authHeader
     })
+    // trinity#3274: a gated playbook — nothing ran, so there is nothing to wait for.
+    const held = pendingApprovalMessage(response)
+    if (held) {
+      if (props.notify) props.notify(held, 'info', PENDING_NOTICE_TOAST)
+      updatingDashboard.value = false
+      return
+    }
     // Wait a bit then refresh the dashboard to show updated data
     setTimeout(() => {
       loadDashboard()
@@ -535,6 +573,7 @@ const triggerUpdateDashboard = async () => {
     }, 5000)
   } catch (error) {
     console.error('Failed to trigger update-dashboard:', error)
+    if (isGateRefusal(error) && props.notify) props.notify(apiErrorMessage(error), 'error')
     updatingDashboard.value = false
   }
 }
@@ -562,8 +601,16 @@ const formatRelativeTime = (isoString) => {
 
 // renderMarkdown imported from utils/markdown
 
+// A widget bound to a declared metric (ent#730) colours its trend by the
+// registry's `direction`, through the same rule as the declared-metric tiles,
+// so rising `down_good` spend is red and a `neutral` metric is not judged.
+// Truthy `metric` AND `bound === true`: the backend never touches a widget
+// without `metric:`, so `bound` there is whatever the author typed.
+const isBoundToMetric = (widget) => Boolean(widget?.metric) && widget.bound === true
+
 // Get trend color
-const getTrendColor = (trend) => {
+const getTrendColor = (trend, widget) => {
+  if (isBoundToMetric(widget)) return trendClasses(trend, widget.direction)
   if (trend === 'up') return 'text-status-success-600'
   if (trend === 'down') return 'text-status-danger-600'
   return 'text-gray-500'
@@ -571,6 +618,7 @@ const getTrendColor = (trend) => {
 
 // Get sparkline color based on trend
 const getSparklineColor = (widget) => {
+  if (isBoundToMetric(widget)) return sparklineColor(widget.history?.trend, widget.direction)
   const trend = widget.history?.trend
   if (trend === 'up') return '#10b981'  // green-500
   if (trend === 'down') return '#ef4444'  // red-500

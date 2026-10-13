@@ -1,0 +1,158 @@
+{
+  "version": "1.1",
+  "date": "2026-09-16",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/2807-audit-denied-calls -> dev (merge-base 9ab04e7be)",
+  "issue": "abilityai/trinity#2807",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "changed_files": 23,
+    "new_endpoints": 0,
+    "new_mcp_tools": 0,
+    "surfaces_touched": [
+      "src/mcp-server (15 files: audit wrapper, access helper, 10 tool modules, server option, types, tests)",
+      "tests/journeys (J10 xfail flipped)",
+      "tests/registry.json",
+      "docs/memory (5 files)"
+    ],
+    "unchanged": [
+      "backend routers/services",
+      "docker/compose",
+      "CI workflows",
+      ".env*",
+      "package.json / lockfile",
+      "MCP tool descriptions and visibility"
+    ],
+    "trust_boundary": "an MCP principal's tool call, refused by the tool-surface gate, and the admin-only audit row the MCP server posts for it through POST /api/internal/audit (X-Internal-Secret)",
+    "mechanism": "access.ts::accessDenied stamps context.outcome on the per-call tool context; audit.ts::withAudit reads it after execute and labels the row success:false, denied:true, error:<reason>; a thrown backend 403 is labelled denied too; createServer injects the audit URL + secret (configureAudit)"
+  },
+  "findings": [],
+  "appendix": [
+    {
+      "id": "A1",
+      "severity": "HIGH",
+      "confidence": 9,
+      "status": "PRE-EXISTING, TRACKED",
+      "category": "Broken Access Control (A01)",
+      "title": "Backend REST routes are owner-equivalent for an agent-scoped key; 53 MCP tools carry a `baselined` policy row for the same reason",
+      "where": "src/backend/dependencies.py (Invariant #8); src/mcp-server/src/access.ts TOOL_ACCESS_POLICY `baselined` rows",
+      "note": "Untouched by this diff. The diff labels the refusals the MCP gate DOES make; it changes nothing about which calls the backend admits.",
+      "tracking": "abilityai/trinity-enterprise#629"
+    },
+    {
+      "id": "A2",
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "status": "RESOLVED (labelling half) / TRACKED (attribution half)",
+      "category": "Security Logging and Monitoring (A09) / Repudiation",
+      "title": "Returned denials audited as successful calls; loop-id rows carry no target",
+      "where": "src/mcp-server/src/audit.ts withAudit; src/mcp-server/src/access.ts accessDenied",
+      "note": "RESOLVED by this diff for every returned denial on the surface (29 deny branches in 10 modules, guarded by audit-denial.test.ts; live: the refused chat_with_agent row now reads success:false/denied:true; J10 xfail flipped). RESIDUAL: id-addressed tools (get_loop_status, stop_loop, get_report, get_operator_queue_item, respond_to_operator_queue) still leave target_id empty — registered as debt:2026-09-16-mcp-id-addressed-tools-leave-target-id-empty.",
+      "tracking": "abilityai/trinity#2807 (this PR); trinity-dev DEBT_INBOX debt:2026-09-16-mcp-id-addressed-tools-leave-target-id-empty"
+    },
+    {
+      "id": "A3",
+      "severity": "LOW",
+      "confidence": 8,
+      "status": "PRE-EXISTING, DOCUMENTED",
+      "category": "Design",
+      "title": "`none` shape check does not treat `name` as an agent target (agents.ts convention); a row is still mandatory",
+      "where": "src/mcp-server/src/access.ts AGENT_TARGET_PARAMS",
+      "note": "Untouched.",
+      "tracking": "documented in access.ts"
+    },
+    {
+      "id": "A4",
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "status": "PRE-EXISTING, TRACKED",
+      "category": "Security Logging and Monitoring (A09) / Repudiation",
+      "title": "A tool that catches a backend error and RETURNS `{error}` is still audited `success: true` (git.ts run catch, a2a.ts, connector.ts, ~60 `success:false` returns)",
+      "where": "src/mcp-server/src/tools/git.ts ~L110; tools/a2a.ts ~L62; tools/connector.ts L200/L247/L275",
+      "note": "Same throw/no-throw class as #2807, for failures rather than refusals; out of #2807's scope by decision at the plan gate. The `outcome` stamp was shaped so this adds a kind, not a second field. Stated in the PR.",
+      "tracking": "trinity-dev DEBT_INBOX debt:2026-09-16-mcp-returned-failures-audited-as-success"
+    },
+    {
+      "id": "A5",
+      "severity": "LOW",
+      "confidence": 9,
+      "status": "PRE-EXISTING, TRACKED",
+      "category": "Security Logging and Monitoring (A09)",
+      "title": "Refusals are visible per audit row but not listable: /api/audit-log filters neither details.* nor event_action",
+      "where": "src/backend/routers/audit_log.py list_audit_log; src/backend/db/audit.py _filter_conditions",
+      "note": "AC's letter met (the operator can see that a call was refused); fleet-wide 'who was refused' needs a filter. event_action deliberately stays tool_call (a new event TYPE 400s at internal.py::log_audit_entry).",
+      "tracking": "trinity-dev DEBT_INBOX debt:2026-09-16-audit-log-refusals-not-listable"
+    },
+    {
+      "id": "A6",
+      "severity": "MEDIUM",
+      "confidence": 8,
+      "status": "PRE-EXISTING, TRACKED",
+      "category": "Insecure Design (A04)",
+      "title": "No chain-depth guard on agent-to-agent chat chains",
+      "where": "src/backend/services/agent_call_limiter.py; src/mcp-server/src/tools/chat.ts",
+      "note": "Untouched; J10 strict xfail remains.",
+      "tracking": "abilityai/trinity#2806"
+    }
+  ],
+  "supply_chain_summary": {
+    "python": "n/a (no backend change)",
+    "node": "package.json and package-lock.json unchanged in the diff; audit not re-run — prior: 1 moderate pre-existing (hono <=4.13.4), fix in flight as dependabot PR #2673",
+    "install_scripts": "no dependency delta"
+  },
+  "filter_stats": {
+    "candidates": 16,
+    "reported": 0,
+    "refuted_or_appendix": 16,
+    "detail": [
+      "1x A tool RESULT could relabel its own audit row. Refuted: the stamp is written by server code (access.ts::accessDenied → context.outcome) and withAudit never inspects the returned string; audit-denial.test.ts 'a permitted call carries no marker' pins it.",
+      "2x A stale stamp could survive to the next call (pooled context). Refuted for FastMCP 4.16.13: one `tool.execute(args, {...})` inline literal per call (chunk-CFPNOSVW.js:1487), both transports; guarded by the deny→allow-on-one-session cases in access-wiring.test.ts and audit-denial.test.ts.",
+      "3x The stamp could land on the session object shared by every call (`context.session` is `this.#auth`). Refuted: accessDenied writes only `context.outcome`; the unit case asserts `session.outcome === undefined` after a refusal.",
+      "4x `auditReason` (the internal, agent-naming reason for loop/report/queue denials) could reach a non-admin. Refuted: the caller's envelope is byte-identical (tests); the only reader of the row is /api/audit-log, every route `Depends(require_admin)` (routers/audit_log.py L50-L208 incl. list_audit_log).",
+      "5x Reasons could carry secret material into the row. Refuted: every reason is server-composed from agent names, loop ids, 'Report not found' or the #186 uniform string; no credential enters; log redaction unchanged.",
+      "6x configureAudit could be reached at runtime to redirect audit posts. Refuted: exported for createServer only (server.ts:432 is the sole non-test call site); no tool or route exposes it.",
+      "7x The injected internalApiSecret could leak through logs. Refuted: used only in the X-Internal-Secret header (audit.ts postAudit); on failure only status/statusText are logged; index.ts passes nothing (env default, unchanged behaviour).",
+      "8x Marking a thrown backend 403 as `denied` could let a caller forge refusal rows. Excluded: a backend 403 IS an authorization refusal; labelling it is the honest state (Product Quality Bar #4).",
+      "9x Additive `denied`/`error` keys could break hash-chain verification of prior rows. Refuted: _compute_hash (platform_audit_service.py:367-386) normalises the stored details at write time; existing rows keep their hashes; new rows hash their own keys.",
+      "10x Enumeration (#186) via the row's reason. Refuted: user-scope denials keep the uniform reason; agent-scope reasons name the target the caller itself supplied; only the admin-only row gains a loop's owning agent (see 4).",
+      "11x Secret patterns in the diff + new test file. 0 hits (AKIA / sk- / ghp_ / gho_ / github_pat_ / xox / PEM); the only secret-shaped strings are the placeholders 'test-secret', 'test-internal-secret', 'trinity_mcp_test…' in tests; 0 emails/IPs in added lines.",
+      "12x Enterprise paid-feature disclosure in the 5 changed docs. Replayed the enterprise-docs-guard PATTERN (228 chars) with Python `re` (BSD grep has no -P): 0 hits.",
+      "13x Supply chain / CI / Docker / env. Unchanged in the diff (no package*, .github/, docker*, .env* paths).",
+      "14x withAudit now hands `execute` `{}` instead of `undefined` — could a tool treat 'no context' as elevated? Refuted: the only object-level check in the tree is a debug log field (agents.ts:338 `hasContext: !!context`); every auth read is `context?.session`, identical for `{}` and `undefined`.",
+      "15x The guard test reads the source tree. Test-time only (node:test), not a runtime surface.",
+      "16x One more audit POST per refusal (amplification). Unchanged: the wrapper already posted one row per call; only the row's content changed."
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior": "docs/security-reports/cso-diff-2026-09-15-628-loop-permission-gate.json",
+    "resolved": 1,
+    "persistent": 3,
+    "new": 0,
+    "direction": "improving",
+    "note": "0 findings introduced (tenth consecutive clean diff audit). RESOLVED: prior appendix A2's labelling half (abilityai/trinity#2807 — returned denials audited as success) — closed for every returned denial on the surface with a stamping helper, a decision-based guard, a real-transport proof and the flipped J10 journey; the attribution half (id-addressed rows carry no target) is split out and registered. PERSISTENT: A1 ent#629 owner-equivalence (53 baselined rows), A3 `none`/`name` shape limit, A6 #2806 chain depth. Newly REGISTERED residuals (pre-existing, not introduced): A4 returned non-denial failures still `success:true`, A5 refusals not listable through the audit-log filters."
+  }
+}

@@ -14,6 +14,7 @@
     <div
       v-for="d in items"
       :key="d.id"
+      :data-report-id="d.id"
       class="mb-2 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900"
     >
       <button
@@ -93,7 +94,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, watch } from 'vue'
+import { nextTick, ref, reactive, watch } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import ReportRenderer from '@/components/reports/ReportRenderer.vue'
 import ReportSummary from '@/components/reports/ReportSummary.vue'
@@ -111,6 +112,12 @@ const props = defineProps({
   refreshKey: { type: Number, default: 0 },
 })
 
+// trinity-enterprise#610 (D11): `loaded` fires once each list read settles,
+// with the chat it was for and the ids it rendered. The conversation's one-shot
+// `d:<reportId>` anchor waits for it — this section fetches after the history,
+// so an anchor resolved on history alone would never find its card.
+const emit = defineEmits(['loaded'])
+
 const store = useClientPortalStore()
 const items = ref([])
 const open = ref(null)
@@ -122,10 +129,16 @@ const kindLabel = deliverableKindLabel
 const relative = relativeTime
 
 async function load() {
-  if (!props.sessionId) { items.value = []; return }
-  // The store action is fail-soft: a chat that cannot list its deliverables is
-  // still a working chat, so this never surfaces an error of its own.
-  items.value = await store.fetchSessionDeliverables(props.agentName, props.sessionId)
+  const sessionId = props.sessionId
+  if (!sessionId) { items.value = [] } else {
+    // The store action is fail-soft: a chat that cannot list its deliverables is
+    // still a working chat, so this never surfaces an error of its own.
+    items.value = await store.fetchSessionDeliverables(props.agentName, props.sessionId)
+  }
+  // A stale read (the chat switched while it was in flight) does not announce.
+  if (sessionId !== props.sessionId) return
+  await nextTick()
+  emit('loaded', { sessionId, ids: items.value.map((d) => d.id) })
 }
 
 // Review finding: this called `fetchAgentReport` with no options, so

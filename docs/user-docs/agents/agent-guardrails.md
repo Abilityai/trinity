@@ -1,6 +1,6 @@
 # Agent Guardrails
 
-Deterministic safety enforcement for autonomous agent execution. Prevents destructive commands, credential leaks, and runaway loops through infrastructure-level controls that agents cannot bypass.
+Deterministic safety enforcement inside the agent's container. Catches destructive commands, credential leaks, and runaway loops before they happen. These hooks are defence in depth against accidents, not the security boundary: the agent user has passwordless `sudo` in its own container, so a determined agent could get around them. The boundary that holds is outside the container: the credentials the agent was given, the platform calls its key may make, and the settings only a person can change. See [How Trinity Keeps Agents in Bounds](../guides/keeping-agents-in-bounds.md).
 
 ## Concepts
 
@@ -28,19 +28,25 @@ The `PreToolUse` hook on `Bash` matches commands against a deny-list of dangerou
 | `kill -9 1` | `kill -9 1` | Killing the init process |
 | Fork bombs | `:(){ :\|:& };:` | Process explosion |
 | `shutdown`, `reboot` | `shutdown -h now` | Host shutdown |
+| Writing `.trinity/read-only-config.json` | `echo '{}' > ~/.trinity/read-only-config.json` | Changing read-only mode's configuration |
+| `sudo` naming `/etc/claude-code`, `/opt/trinity`, `/etc/sudoers`; `visudo` | `sudo tee /etc/claude-code/managed-settings.json` | Rewriting the guardrail registration, hooks or sudoers |
+| Root shells | `sudo -i`, `sudo su`, `su -` | Interactive root shell |
 
 When a command is blocked, the agent sees a clear denial message with the reason. The event is logged to `/logs/guardrails.jsonl`.
 
 ### 2. Credential File Protection
 
-The `PreToolUse` hook on `Edit`, `Write`, and `NotebookEdit` blocks modifications to sensitive paths:
+The `PreToolUse` hook on `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` blocks modifications to sensitive paths:
 
 - `.env`, `.env.*` -- Environment files with secrets
 - `.mcp.json` -- MCP server configuration
 - `.credentials.enc` -- Encrypted credential backups
 - `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*` -- Cloud and SSH credentials
 - `~/.claude/settings.json`, `~/.claude/settings.local.json` -- Claude Code user settings
-- `~/.trinity/read-only-config.json` -- Read-only mode configuration
+- `~/.claude.json`, `~/.claude/.credentials.json` -- Claude Code's configuration and login
+- `~/.gemini/settings.json` -- Gemini runtime configuration
+- `~/.tmp/codex/*` -- Codex runtime login and MCP configuration
+- `~/.trinity/read-only-config.json` -- Read-only mode configuration fallback, used while the root-owned copy under `/opt/trinity/` is missing
 - `/opt/trinity/*` -- Platform guardrail hook scripts
 - `/etc/claude-code/*` -- The managed settings that register the hooks
 
@@ -50,7 +56,7 @@ The `PostToolUse` hook on `Bash` scans command output for leaked credentials:
 
 | Pattern | Example |
 |---------|---------|
-| Anthropic API keys | `sk-ant-...` |
+| Anthropic API keys and OAuth tokens | `sk-ant-...`, `sk-ant-oat01-...` |
 | OpenAI API keys | `sk-proj-...` |
 | GitHub PATs | `ghp_...`, `github_pat_...` |
 | AWS access keys | `AKIA...` |
@@ -61,7 +67,7 @@ Matches are logged (pattern name only, not the actual value) for security review
 
 ### 4. Turn Limits
 
-Every Claude Code invocation enforces a maximum turn count via `--max-turns`:
+Every Claude Code invocation enforces a maximum turn count via `--max-turns`. Gemini CLI and Codex have no turn cap, so on those runtimes the limit is logged and the execution timeout bounds the run:
 
 | Mode | Default | Range |
 |------|---------|-------|
@@ -69,6 +75,12 @@ Every Claude Code invocation enforces a maximum turn count via `--max-turns`:
 | Task/Headless | 50 turns | 1-500 |
 
 This prevents runaway loops that burn through API credits.
+
+### How the Hooks Run
+
+Each hook runs as a fixed command, not through a shell. It starts with an empty environment under an isolated Python interpreter that ignores user site-packages. A shell prefix or a startup file the agent sets therefore cannot run code ahead of the hook. The image build runs every registered hook exactly as it is registered, so a broken hook fails the build instead of every tool call.
+
+The hooks are Claude Code hooks. Codex enforces read-only mode through its own sandbox, and Gemini CLI turns do not pass through these hooks — see [Agent Runtimes](agent-runtimes.md).
 
 ## Per-Agent Configuration
 
@@ -129,7 +141,7 @@ Headless runs (tasks, schedules, loops, MCP calls) also withhold a fixed family 
 Guardrails are enforced at the infrastructure layer. Agents cannot:
 
 - Modify hook scripts (`/opt/trinity/hooks/` is root-owned)
-- Change which hooks run — registration lives in Claude Code's admin-controlled managed settings (`/etc/claude-code/managed-settings.json`, root-owned and read-only), which take precedence over user and project settings and sit outside the git-synced working tree. Neither an edit inside the container nor a push to the agent's repository can remove them. On every boot the container checks that the registration is present and unwritable and logs `GUARDRAILS: ERROR` if not.
+- Change which hooks run — registration lives in Claude Code's admin-controlled managed settings (`/etc/claude-code/managed-settings.json`, root-owned and read-only), which take precedence over user and project settings and sit outside the git-synced working tree. Neither an edit inside the container nor a push to the agent's repository can remove them. The agent user has passwordless `sudo`, so a determined agent can still rewrite the file; the Bash deny-list refuses the obvious `sudo` commands against it. On every boot the container checks that the registration is present and unwritable and logs `GUARDRAILS: ERROR` if not, and the agent's `/health` reports `guardrails_registration` on every request.
 - Bypass `--max-turns` limits
 - Disable `--dangerously-skip-permissions` protections (hooks still fire)
 
@@ -158,6 +170,7 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 - **Baseline cannot be relaxed** -- Per-agent overrides only add restrictions, never remove them.
 - **Restart required** -- Guardrail changes require stopping and starting the agent.
 - **Pattern matching** -- Bash deny-list uses regex patterns; creative command reformulation may evade detection.
+- **Claude Code only** -- The hooks and the turn limit apply to Claude Code. Codex honours read-only mode through its sandbox; Gemini CLI turns are not covered.
 - **Partial UI coverage** -- The Settings tab manages turn limits; deny lists, disallowed tools, and the execution timeout override are configured via the API.
 
 ## See Also
@@ -165,3 +178,5 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 - [Agent Configuration](agent-configuration.md) -- Other per-agent settings
 - [Managing Agents](managing-agents.md) -- Start/stop to apply changes
 - [Monitoring](../operations/monitoring.md) -- View guardrail events in logs
+- [How Trinity Keeps Agents in Bounds](../guides/keeping-agents-in-bounds.md) -- The guardrails approach: where the real boundary sits, and what is available now
+- [Recommended Trinity Prompt](recommended-fleet-prompt.md) -- Fleet rules for behaviour that guardrails can't block

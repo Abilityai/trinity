@@ -1,4 +1,4 @@
-# mcp: none — sync-audit rollup for the dashboard (#390); per-agent git state is get_git_sync_state
+# mcp: monitoring.ts (get_fleet_sync_audit)
 """
 Fleet-level endpoints (#390 / S6).
 
@@ -8,7 +8,11 @@ sync state across the fleet for bulk health checks and operator tooling
 
 Access control follows the monitoring-router pattern: admins see every
 git-enabled agent; non-admins see only the agents they own or have shared
-with them.
+with them. An agent-scoped MCP key resolves to its owner and sees the
+owner's set (trinity-enterprise#707, decision D12): an orchestrator's fleet
+sweep runs as an agent. The payload carries no raw git error text.
+
+Exposed over MCP as `get_fleet_sync_audit` (trinity-enterprise#707).
 """
 from fastapi import APIRouter, Depends
 

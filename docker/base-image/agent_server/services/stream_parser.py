@@ -32,12 +32,12 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from ..model_context import pick_context_window
 from ..models import CompactEvent, ExecutionLogEntry, ExecutionMetadata
 from .activity_tracking import complete_tool_execution, start_tool_execution
-from .error_classifier import _is_rate_limit_message
+from .error_classifier import _NO_ERROR_DETAIL, _is_rate_limit_message
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +49,6 @@ logger = logging.getLogger(__name__)
 # Reading ``errors[0]`` surfaced the marker as the cause and dropped the real
 # errors at ``errors[1..]``. Upstream: anthropics/claude-code#82235.
 _EDE_DIAGNOSTIC_PREFIX = "[ede_diagnostic]"
-
-# Surfaced when a result is flagged is_error but carries no reportable cause.
-# Deliberately NOT the bare "Execution error": ``headless_executor`` renders the
-# detail as f"Execution error: {…}", which would read "Execution error:
-# Execution error". Word choice is load-bearing — it must trip none of
-# is_auth_failure / _is_resume_not_found / _is_rate_limit_message. Pinned by
-# tests/unit/test_1849_ede_diagnostic_filtered.py.
-_NO_ERROR_DETAIL = "Claude Code reported no error detail"
 
 # Bound the diagnostic tail so a chatty future variant cannot eat the 300-char
 # budget headless_executor applies to the whole message.
@@ -314,10 +306,15 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
 
 
 def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metadata: ExecutionMetadata,
-                         tool_start_times: Dict[str, datetime], response_parts: List[str]) -> None:
+                         tool_start_times: Dict[str, datetime], response_parts: List[str],
+                         execution_id: Optional[str] = None) -> None:
     """
     Process a single line of stream-json output in real-time.
     Updates session activity, execution_log, metadata, and response_parts in place.
+
+    `execution_id` (trinity-enterprise#620) keys the per-execution activity
+    slot the heartbeat reports, so concurrent runs on one agent do not share
+    the single `active_tool`. Optional: the batch parser has no execution.
     """
     if not line.strip():
         return
@@ -524,7 +521,7 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
                 ))
 
                 # Update session activity in real-time
-                start_tool_execution(tool_id, tool_name, tool_input)
+                start_tool_execution(tool_id, tool_name, tool_input, execution_id=execution_id)
                 logger.debug(f"Tool started: {tool_name} ({tool_id})")
 
             elif block_type == "tool_result":

@@ -1,20 +1,10 @@
 # Deploying Trinity
 
-Trinity runs your agents 24/7 with scheduling, monitoring, and multi-agent coordination. Choose cloud-hosted for simplicity or self-hosted for complete control.
+Trinity is the operating system for the AI-native company — open source, self-hosted, that you own. It deploys, orchestrates, and governs fleets of AI agents on your own hardware, and it is model-agnostic: each agent runs on Claude Code, Gemini CLI or OpenAI Codex. You run it yourself, on your own machine or server, so your agents and their data stay inside your own perimeter. Setup takes about two minutes with prebuilt images, or up to 15 minutes when you build from source.
 
 > 📺 **Watch:** [I Built a DevOps Agent That Deploys Other Agents](https://youtu.be/8RozanPd14Y) *(Apr 2026)* · [Control My DGX Spark From Anywhere](https://youtu.be/epDBrEtg4nE) *(Jan 2026)* · [all videos](../videos.md)
 
-## Cloud vs Self-Hosted
-
-| | Cloud Hosted (ability.ai) | Self Hosted |
-|---|---|---|
-| **Infrastructure** | Zero to manage | You manage |
-| **Setup time** | 30 seconds | 2 minutes (prebuilt images) to 15 minutes (build from source) |
-| **Data location** | ability.ai servers | Your perimeter |
-| **Pricing** | Pay-per-agent | Free forever |
-| **Best for** | Teams focused on building | Enterprises with compliance requirements |
-
-### Self-hosted install paths
+## Install Paths
 
 | Path | Command | Best for | Guide |
 |---|---|---|---|
@@ -22,37 +12,13 @@ Trinity runs your agents 24/7 with scheduling, monitoring, and multi-agent coord
 | **Server, prebuilt images** | `./scripts/deploy/start.sh --hosted` | Any Linux VM — serving in about two minutes, no on-box builds | [Single Server → Prebuilt images](deploying/single-server.md#option-a-prebuilt-images-recommended) |
 | **Server, build from source** | `docker compose -f docker-compose.prod.yml up -d` | Servers that build their own images (custom patches, enterprise overlay) | [Single Server → Build from source](deploying/single-server.md#option-b-build-from-source) |
 | **DigitalOcean Marketplace 1-Click** | Create a Droplet from the Trinity image | HTTPS at the Droplet's IP with zero input; claim the admin account in the browser; upgrade to a domain later | [Single Server → DigitalOcean 1-Click](deploying/single-server.md#digitalocean-marketplace-1-click) |
-| **DigitalOcean, from your terminal** | `scripts/deploy/trinity-do-create.sh` (needs `doctl`) | Same result as the 1-Click, but you choose the admin password and paste a Claude subscription token before the Droplet exists | [Single Server → DigitalOcean installer](deploying/single-server.md#digitalocean-installer-script) |
+| **DigitalOcean, from your terminal** | `scripts/deploy/trinity-do-create.sh` (needs `doctl`) | Same result as the 1-Click, but you choose the admin password before the Droplet exists | [Deploy on DigitalOcean](deploying/digitalocean.md) |
+| **AWS EC2** | `start.sh --provision --cloud aws --hosted --unattended` on your own Ubuntu 24.04 instance | HTTPS at the instance's IP; you claim the admin account with the EC2 instance ID. A CloudFormation template and a Marketplace listing are on the way | [Deploy on AWS](deploying/aws.md) |
+| **Vultr** | `start.sh --provision --cloud vultr --hosted --unattended` on your own Ubuntu 24.04 instance | The same provisioned install on a Vultr instance | [Single Server → Vultr](deploying/single-server.md#vultr) |
 
-All five paths share one installer (`scripts/deploy/start.sh`), one `.env` contract, and one set of day-two procedures ([Upgrading](deploying/upgrading.md), [Backup and Restore](deploying/backup-and-restore.md), [Monitoring](deploying/monitoring.md)).
+All seven paths share one installer (`scripts/deploy/start.sh`), one `.env` contract, and one set of day-two procedures ([Upgrading](deploying/upgrading.md), [Backup and Restore](deploying/backup-and-restore.md), [Monitoring](deploying/monitoring.md)). Fresh server installs from prebuilt images run on a bundled PostgreSQL database; SQLite reached end-of-support on September 1, 2026 (see [Single Server → Database backend](deploying/single-server.md#database-backend)).
 
-## Option A: Cloud Hosted (ability.ai)
-
-### Step 1: Create an account
-
-Sign up at [ability.ai](https://ability.ai).
-
-### Step 2: Get your MCP connection URL
-
-After signup, go to **Settings > API Keys** and copy your MCP server URL.
-
-### Step 3: Connect from Claude Code
-
-```bash
-/trinity:connect
-```
-
-The skill asks for your connection URL and saves it to your config.
-
-### Step 4: Deploy your first agent
-
-```bash
-/trinity:onboard
-```
-
-Done. Your agent is now running on ability.ai.
-
-## Option B: Self Hosted (local, from source)
+## Option A: Local, from Source
 
 > **Tip:** the install runs one-shot with `./scripts/deploy/start.sh --unattended` (generates and prints the admin password), or is driven end to end by an AI coding agent via the runbook at [`docs/AGENT_INSTALL_GUIDE.md`](../../AGENT_INSTALL_GUIDE.md). `./quickstart.sh` is an alias for `start.sh` (`--defaults` means `--unattended`).
 
@@ -127,28 +93,42 @@ Alternatively, for email-verified login: when prompted, enter your email and fol
 /trinity:onboard
 ```
 
-## Option C: Server with Prebuilt Images
+## Option B: Server with Prebuilt Images
 
 On a server, pull-only is the path you want: every platform image and the agent base image are published to GHCR on each release, so nothing is compiled on the box.
 
 ```bash
 git clone https://github.com/abilityai/trinity.git && cd trinity
 cp .env.example .env                    # set ADMIN_PASSWORD, ANTHROPIC_API_KEY, ...
-echo 'TRINITY_IMAGE_TAG=v0.9.0' >> .env  # pin a release; `latest` moves on every release
+echo 'TRINITY_IMAGE_TAG=v0.9.5' >> .env  # pin a release; `latest` moves on every release
 ./scripts/deploy/start.sh --hosted --unattended
 ```
 
-The repository checkout must stay beside the compose file (it mounts `./config/*`), and upgrades are a re-run of `start.sh --hosted` with a new `TRINITY_IMAGE_TAG` — not a bare `docker compose pull`. Full details, the tunnel and TLS choices, and the "which compose files go together" table: [Single Server → Prebuilt images](deploying/single-server.md#option-a-prebuilt-images-recommended).
+A fresh hosted install starts on the PostgreSQL service bundled in the hosted compose file; `start.sh` generates its password. The repository checkout must stay beside the compose file (it mounts `./config/*`), and upgrades are a re-run of `start.sh --hosted` with a new `TRINITY_IMAGE_TAG` — not a bare `docker compose pull`. Full details, the tunnel and TLS choices, and the "which compose files go together" table: [Single Server → Prebuilt images](deploying/single-server.md#option-a-prebuilt-images-recommended).
 
-## Option D: DigitalOcean Marketplace 1-Click
+## Option C: DigitalOcean Marketplace 1-Click
 
-Create a Droplet from the Trinity image (4 GB RAM minimum, 8 GB recommended). First boot obtains a Let's Encrypt certificate for the Droplet's own IP and runs `start.sh --hosted --unattended` from the images baked into the snapshot — Trinity is serving over HTTPS about ninety seconds later with no input from you. **No admin account exists yet:** open `https://<droplet-ip>` and the first visitor creates it (email + password) at `/setup`, logged straight in. Do that right after creating the Droplet — until then, anyone who finds the IP can claim it. No terminal is needed and no password is ever printed. To choose the password before first boot instead, supply it as cloud-init user-data (or use the installer script below).
+Trinity is listed on the [DigitalOcean Marketplace](https://marketplace.digitalocean.com/apps/trinity). Create a Droplet from the Trinity image there, or search **Trinity** under **Marketplace** when you create a Droplet in the control panel (4 GB RAM minimum, 8 GB recommended). First boot obtains a Let's Encrypt certificate for the Droplet's own IP and runs `start.sh --hosted --unattended` from the images baked into the snapshot — Trinity is serving over HTTPS about ninety seconds later with no input from you. **No admin account exists yet:** open `https://<droplet-ip>` and the first visitor creates it (email + password) at `/setup`, logged straight in. Do that right after creating the Droplet — until then, anyone who finds the IP can claim it. No terminal is needed and no password is ever printed. To choose the password before first boot instead, supply it as cloud-init user-data (or use the installer script below).
 
 After the first login, the first-run setup opens with a **Secure this instance** step that walks you through adding a real domain and, optionally, a Cloudflare Tunnel. Details: [Single Server → DigitalOcean 1-Click](deploying/single-server.md#digitalocean-marketplace-1-click).
 
-## Option E: DigitalOcean from your terminal
+## Option D: DigitalOcean from your terminal
 
-`scripts/deploy/trinity-do-create.sh` runs on your own machine with `doctl` signed in. It asks for the admin password and a Claude subscription token, creates a stock Ubuntu Droplet whose first boot runs the same provisioning as the 1-Click, and prints the HTTPS address when it answers. Because you chose the password up front, the admin is provisioned at boot and there is no claim window. Details: [Single Server → DigitalOcean installer](deploying/single-server.md#digitalocean-installer-script).
+`scripts/deploy/trinity-do-create.sh` runs on your own machine with `doctl` signed in. It asks for the admin password, creates a stock Ubuntu Droplet whose first boot runs the same provisioning as the 1-Click, and prints the HTTPS address when it answers. Because you chose the password up front, the admin is provisioned at boot and there is no claim window. You connect Claude on first sign-in, in the setup that opens.
+
+Step by step, from installing `doctl` to adding a domain: [Deploy on DigitalOcean](deploying/digitalocean.md). Reference summary beside the 1-Click: [Single Server → DigitalOcean installer](deploying/single-server.md#digitalocean-installer-script).
+
+## Option E: AWS
+
+On your own EC2 instance (x86_64, 8 GiB, Ubuntu 24.04, public IPv4, security group open on 80 and 443), as root:
+
+```bash
+git clone --depth 1 --branch <release-tag> https://github.com/abilityai/trinity.git /opt/trinity
+cd /opt/trinity
+./scripts/deploy/start.sh --provision --cloud aws --hosted --unattended
+```
+
+It installs Docker, Caddy with a certificate for the instance's IP, and the host firewall, then Trinity. With no admin password supplied, the setup page asks for the **EC2 instance ID** before it creates the admin, so someone who finds the IP cannot claim it. A timer follows a changed public IP after a stop/start. Full procedure, the CloudFormation template, and recovery: [Deploy on AWS](deploying/aws.md).
 
 ## Key URLs (Self-Hosted)
 
@@ -185,7 +165,8 @@ Full procedure with pre-flight, verification and rollback: [Upgrading](deploying
 **Source install**
 
 ```bash
-# 1. Back up the database first (the platform also takes a pre-migration copy at boot)
+# 1. Back up the database first (dev volume shown — server paths and PostgreSQL:
+#    see Backup and Restore; the platform also takes a pre-migration copy at boot)
 docker run --rm \
   -v trinity_trinity-data:/data \
   -v ~/backups:/backup \
@@ -294,7 +275,7 @@ claude  # launch the ops agent
 | `/status` | Health check — backend, containers, Redis, version |
 | `/logs <service>` | View logs for any service or agent |
 | `/restart [service\|all]` | Restart services with health verification |
-| `/update` | Pull latest, rebuild, restart, verify (source-built installs; hosted installs upgrade with `start.sh --hosted`) |
+| `/update` | Back up, pull latest, rebuild, restart, verify — on a hosted install (`COMPOSE_FILE=docker-compose.hosted.yml`) it runs `start.sh --hosted` instead of building |
 | `/diagnose` | Full error scan — logs, restarts, disk, DB integrity |
 | `/rollback` | Rollback to previous commit + optional DB restore |
 | `/cleanup` | Prune Docker images, build cache, old backups |
@@ -308,7 +289,9 @@ Step-by-step guides for each deployment scenario:
 | Guide | What it covers |
 |---|---|
 | [Local Development](deploying/local-development.md) | Docker Desktop, dev compose, hot reload, what `start.sh` generates |
-| [Single Server](deploying/single-server.md) | Linux VPS: prebuilt images (`--hosted`) or build from source, the DigitalOcean 1-Click and installer script, every `.env` key and which compose forwards it, Redis dual-password setup, which compose files go together |
+| [Deploy on DigitalOcean](deploying/digitalocean.md) | One command from your terminal to an HTTPS Droplet: `doctl` and an optional domain; you connect Claude on first sign-in |
+| [Deploy on AWS](deploying/aws.md) | Script install on your own EC2 instance, the instance-ID admin claim, the IP-refresh timer, the CloudFormation template |
+| [Single Server](deploying/single-server.md) | Linux VPS: prebuilt images (`--hosted`) or build from source, the DigitalOcean 1-Click and installer script, Vultr, the database backend, every `.env` key and which compose forwards it, Redis dual-password setup, which compose files go together |
 | [Public Access](deploying/public-access.md) | Cloudflare Tunnel, TLS postures, webhook surface, Slack/Telegram/WhatsApp integrations, `/mcp` through the tunnel |
 | [Hardening a Marketplace Install](deploying/hardening.md) | Bare IP → domain → tunnel or private network, and how to verify each stage |
 | [Upgrading](deploying/upgrading.md) | Pre-flight → backup → rebuild or re-pull → restart → verify → rollback |

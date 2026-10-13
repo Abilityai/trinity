@@ -14,9 +14,10 @@ The Agent Detail page has a **Settings** tab (visible to owners only) -- a secti
 - **Parallel Capacity** — below
 - **Expose via MCP** — publish the agent as a dedicated MCP tool; see [MCP Server](../integrations/mcp-server.md#dedicated-agent-tools-expose-via-mcp)
 - **Trinity access key** — the agent-scoped key the agent uses to call Trinity's own MCP tools, with health status and a **Regenerate** action (the running container is replaced to pick the new key up)
-- **Reliability** — the dispatch circuit breaker (below) and **Wake this agent when an operator answers** (below)
+- **Reliability** — the dispatch circuit breaker (below) and **Wake this agent when an ask it raised ends** (below)
+- **Git sync** — **Auto-sync to GitHub every 15 minutes**, **Pull changes from GitHub on every sync cycle**, and **Pause schedules while sync is failing**. Each applies on the next cycle with no restart. An agent with no GitHub repository shows a note pointing to the **Git** tab. See [GitHub Sync](../integrations/github-sync.md)
 - **Voice** — let the agent reply with spoken voice notes on messaging channels; see [Voice Replies](../advanced/voice-replies.md)
-- **Cross-model validation** — appears only on entitled installations
+- Further sections can appear on installations with an enterprise entitlement
 
 The remaining settings below are managed from the agent header controls, the Running/Autonomy toggles on the Dashboard, or the API.
 
@@ -42,8 +43,10 @@ Master gate for the agent's scheduled operations.
 Prevents modification of source files (`*.py`, `*.js`, etc.) inside the agent container.
 
 - Toggle in the Agent Header
-- Uses `PreToolUse` hooks to intercept `Write`, `Edit`, and `NotebookEdit` tool calls
-- Allowed patterns: `output/*`, `content/*` (generated files are permitted)
+- Uses a `PreToolUse` hook to intercept `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` tool calls. Codex agents enforce it through the Codex sandbox instead
+- Blocked by default: source and config files (`*.py`, `*.js`, `*.ts`, `*.sh`, `*.yaml`, `*.json`, `CLAUDE.md`, `.claude/*`, `.env`, and similar)
+- Allowed by default: `content/*`, `output/*`, `reports/*`, `exports/*`, `*.log`, `*.txt` (generated files are permitted)
+- The backend writes the mode's configuration to a root-owned file in the container (`/opt/trinity/read-only-config.json`), which the agent cannot edit. A copy under `~/.trinity/` decides only while the root-owned file is missing
 - API: `GET /api/agents/{name}/read-only` and `PUT /api/agents/{name}/read-only`
 
 ### Resource Allocation
@@ -53,6 +56,7 @@ Per-agent memory and CPU limits, enforced at the container level (Linux cgroups)
 - Open the resource modal from the agent header (gear button, "Configure resources"). Each limit can also be left as "Inherit default".
 - Memory options: 1g, 2g, 4g, 8g, 16g, 32g, 64g. CPU options: 1, 2, 4, 8, 16 cores.
 - Changes take effect on the next agent restart.
+- **CPU is capped at the host's CPU count.** Docker refuses a CPU limit above the number of CPUs on the host. If you choose more cores than the host has, the container gets the host's CPU count instead and a warning is logged. The setting keeps the value you chose, so the agent is not recreated on every start.
 - API: `GET /api/agents/{name}/resources` and `PUT /api/agents/{name}/resources`
 - **Full capabilities mode**: grants containers system-level access (Docker socket, network tools) when needed
 
@@ -90,12 +94,15 @@ When a breaker is open, the agent header and the agent's Dashboard tile show a "
 | `/api/agents/{name}/circuit-breaker` | PUT | Enable or disable the per-agent breaker (`{"enabled": true}`, owner-only) |
 | `/api/agents/{name}/circuit-breaker/reset` | POST | Force both breakers closed without waiting for cooldown (admin-only) |
 
-### Wake on Operator Answer
+### Wake When an Ask Ends
 
-An answer to one of the agent's parked requests (an approval, a question) always reaches the agent, but by default it is only read on the agent's *next* turn. An agent with no schedule has no next turn, so an approved action would wait indefinitely. Turn on **Wake this agent when an operator answers** in **Settings → Reliability** and answering starts one turn so the agent acts on it right away. Off by default.
+How one of the agent's parked requests (an approval, a question) ended always reaches the agent, but by default it is only read on the agent's *next* turn. An agent with no schedule has no next turn, so an approved action would wait indefinitely. Turn on **Wake this agent when an ask it raised ends** in **Settings → Reliability** and the agent is woken for one turn when a person answers (trigger `operator_response`) — and also when an ask is cancelled or expires, so it stops waiting for an answer that will not come (trigger `operator_ending`, one turn per agent per cancellation sweep or expiry). Off by default.
 
+- Each wake-up is one turn the owner pays for: one per answer, one per cancellation or expiry event. A stopped agent is not woken.
+
+- Only the owner or an admin can change it, and never with an agent's key: an agent's own key is refused with `403` even though it acts for the owner. Each wake is a turn the owner pays for, so an agent cannot switch on its own wake-ups. An agent can still read the setting.
 - API: `GET /api/agents/{name}/operator-resume` and `PUT /api/agents/{name}/operator-resume` (`{"enabled": true}`)
-- See [Approvals](../automation/approvals.md) for the operator side.
+- See [Approvals](../automation/approvals.md) for the operator side, and for how an agent reads an ending back (`get_my_ask`).
 
 ### Per-Agent API Key
 
@@ -108,8 +115,9 @@ Controls which API key the agent uses for Claude.
 
 Choose the Claude model used for tasks and scheduled executions.
 
-- Available models lead with the current generation: **Opus 5**, **Fable 5.1** (most capable, best for the longest tasks) and **Sonnet 5** (fast and smart, with a 1M-token context window), followed by the prior Opus, Sonnet and Haiku generations. Fable 5 is still offered and still supported; it is simply no longer the latest in its tier.
+- Available models lead with the current generation: **Opus 5.5** (the most capable Opus, marked *(latest)*), **Fable 5.1** (most capable, best for the longest tasks) and **Sonnet 5** (fast and smart, with a 1M-token context window), followed by the prior Opus, Sonnet and Haiku generations. **Opus 5** and **Fable 5** are still offered and still supported; they are simply no longer the latest in their tiers.
 - Custom model input is supported.
+- If Claude Code refuses the model — an id it does not know, or one newer than the agent's Claude Code version — the run fails with error code `model_unsupported` (HTTP `400`) and the API's own message. It is not treated as an authentication failure, so the agent is not switched to another subscription or to the platform API key. Pick a supported model, or rebuild the base image so the agent runs a newer Claude Code.
 - Selection is persisted to `localStorage`; `model_used` is recorded in the execution audit trail.
 - **Platform default**: when an agent has no model override, executions use the platform default model configured in Settings → Platform. The UI now surfaces this fallback so empty selections aren't mistaken for failures.
 

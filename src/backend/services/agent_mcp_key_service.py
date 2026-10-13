@@ -226,12 +226,6 @@ def _mint_and_build_env(agent_name: str, description: str):
     return env, new_key
 
 
-def build_mcp_key_env_overrides(agent_name: str, *, description: str) -> Dict[str, str]:
-    """:func:`_mint_and_build_env` for callers that want only the env payload."""
-    env, _key = _mint_and_build_env(agent_name, description)
-    return env
-
-
 # --------------------------------------------------------------------------- #
 # Self-heal (called from start_agent_internal on drift)
 # --------------------------------------------------------------------------- #

@@ -42,8 +42,8 @@
                 :class="[
                   'inline-flex items-center justify-center w-8 h-8 rounded-full',
                   file.exists
-                    ? 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-600 dark:text-status-success-400'
-                    : 'bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500'
+                    ? 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-400'
+                    : 'bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400'
                 ]"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -56,7 +56,7 @@
                 <p v-if="file.exists" class="text-xs text-gray-500 dark:text-gray-400">
                   {{ formatFileSize(file.size) }} &middot; Modified {{ formatDate(file.modified) }}
                 </p>
-                <p v-else class="text-xs text-gray-400 dark:text-gray-500">
+                <p v-else class="text-xs text-gray-500 dark:text-gray-400">
                   Not present
                 </p>
               </div>
@@ -79,6 +79,11 @@
               </button>
             </div>
           </div>
+        </div>
+
+        <!-- ent#819: a refused read (credential files are owner-tier) names why -->
+        <div v-if="fileReadError" class="px-4 pb-3">
+          <InlineError :message="fileReadError" @dismiss="fileReadError = null" />
         </div>
 
         <!-- Export/Import Buttons -->
@@ -114,10 +119,10 @@
             </button>
           </div>
           <p class="text-xs text-gray-500 dark:text-gray-400">
-            <span v-if="hasEncryptedFile" class="text-status-success-600 dark:text-status-success-400">
+            <span v-if="hasEncryptedFile" class="text-status-success-700 dark:text-status-success-400">
               .credentials.enc exists
             </span>
-            <span v-else class="text-gray-400 dark:text-gray-500">
+            <span v-else class="text-gray-500 dark:text-gray-400">
               No encrypted backup
             </span>
           </p>
@@ -293,6 +298,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import { useNotification } from '../composables'
 import CredentialSetupChecklist from './CredentialSetupChecklist.vue'
+import InlineError from './InlineError.vue'
 
 const props = defineProps({
   agentName: {
@@ -332,6 +338,7 @@ const uploadResult = ref(null)
 const editingFile = ref(null)
 const editingContent = ref('')
 const savingFile = ref(false)
+const fileReadError = ref(null)
 
 // Computed
 const credentialFiles = computed(() => {
@@ -489,6 +496,10 @@ const readExistingEnv = async () => {
     return parseEnvText(content)
   } catch (err) {
     if (err.response?.status === 404) return {}
+    // ent#819: a refusal names its cause (e.g. owner-tier); say that, not "unreachable"
+    if (err.response?.status === 403 && err.response?.data?.code) {
+      throw new Error(err.response.data.detail)
+    }
     throw new Error(
       "Couldn't read this agent's current credentials, so nothing was written " +
       '(writing now would overwrite the credentials already configured). ' +
@@ -662,28 +673,37 @@ const importFromGit = async () => {
   }
 }
 
+const readFailureMessage = (err) => err.response?.data?.detail || 'Failed to read file'
+
 const viewFile = async (filename) => {
+  fileReadError.value = null
   try {
     const content = await agentsStore.downloadAgentFile(props.agentName, `/home/developer/${filename}`)
     editingFile.value = filename
     editingContent.value = content
   } catch (err) {
     console.error('Failed to read file:', err)
-    if (showNotification) {
-      showNotification('Failed to read file', 'error')
-    }
+    fileReadError.value = readFailureMessage(err)
   }
 }
 
+// ent#819: read first, open the editor only on content or a confirmed 404 (the
+// file does not exist yet). Any other failure keeps the editor closed: an empty
+// editor over a file that could not be read would save over it.
 const editFile = async (filename) => {
-  editingFile.value = filename
+  fileReadError.value = null
+  let content
   try {
-    const content = await agentsStore.downloadAgentFile(props.agentName, `/home/developer/${filename}`)
-    editingContent.value = content
+    content = await agentsStore.downloadAgentFile(props.agentName, `/home/developer/${filename}`)
   } catch (err) {
-    // File doesn't exist, start with empty content or placeholder
-    editingContent.value = ''
+    if (err.response?.status !== 404) {
+      fileReadError.value = readFailureMessage(err)
+      return
+    }
+    content = ''
   }
+  editingFile.value = filename
+  editingContent.value = content
 }
 
 const saveFile = async () => {

@@ -1,0 +1,7 @@
+{"version":"1.2.3","date":"2026-10-05","mode":"diff-daily","scope":"diff","issue":"abilityai/trinity#2329",
+ "phases_run":[0,1,2,6,7,9,10,12,13,14],
+ "stack_cve_quicklist":[],"attack_surface":{"new_endpoints":0,"changed_routes":["POST /api/internal/tasks/{execution_id}/result"]},
+ "findings":[],"hypotheses":[],
+ "coverage_gaps":["phase3-no-diff-scope","phase4-no-diff-scope","phase5-no-diff-scope","phase8-no-diff-scope","docker-pass-not-run"],
+ "supply_chain_summary":{"scanner":"n/a (no dependency change)"},"filter_stats":{"candidates":1,"dropped":1},
+ "totals":{"critical":0,"high":0,"medium":0,"low":0},"trend":"n/a (diff run)"}

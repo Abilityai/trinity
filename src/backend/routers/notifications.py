@@ -210,7 +210,7 @@ async def dismiss_all_notifications(
             actor_ip=request.client.host if request.client else None,
             target_type="notification",
             target_id=body.agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             details={"dismissed": dismissed, "agent_name": body.agent_name},
         )
         if _websocket_manager:

@@ -50,7 +50,7 @@ sqlite3 ~/backups/trinity-<timestamp>.db ".tables"
 # Expected: a list of table names, no errors
 ```
 
-> **PostgreSQL deployments** (instances running with `DATABASE_URL` set): back up with `pg_dump` instead of copying `trinity.db` — see [Backup and Restore](backup-and-restore.md). PostgreSQL schema migrations run automatically on backend boot, same as SQLite.
+> **PostgreSQL deployments** (a `postgresql://` `DATABASE_URL` — every hosted install that started fresh on the bundled database): back up with `pg_dump` instead of copying `trinity.db`, for example `docker exec trinity-postgres pg_dump -U trinity -Fc trinity > ~/backups/trinity-pg-$(date +%Y%m%d-%H%M%S).dump` — see [Backup and Restore](backup-and-restore.md). PostgreSQL schema migrations run automatically on backend boot, same as SQLite.
 
 ### Step 2: Pull Latest Changes
 
@@ -103,6 +103,8 @@ There is nothing to build. One command re-pulls the four platform images **and**
 ```
 
 Do not substitute a bare `docker compose -f docker-compose.hosted.yml pull`: the agent base image is not a compose service, so that pull skips it and leaves every agent on the old runtime. `start.sh --hosted` also performs Step 4 for you — `docker compose up -d` recreates only the containers whose image changed and leaves the agent network in place — so continue at [Step 5](#step-5-verify).
+
+**Upgrading a hosted install that runs on SQLite.** The first run on a release that bundles PostgreSQL generates `POSTGRES_PASSWORD`, sees your existing `trinity.db`, and writes `DATABASE_URL=` (empty) to `.env` — so the install **stays on SQLite** and nothing is migrated. It prints a warning that SQLite reached end-of-support, with a pointer to `docs/migrations/SQLITE_TO_POSTGRES.md`, on every run until you move. An idle `trinity-postgres` container starts beside it. Moving is a separate, deliberate step: the Ops Agent's `/migrate-to-postgres` skill, or the manual guide. See [Single Server → Database backend](single-server.md#database-backend).
 
 On a Marketplace Droplet whose admin was created in the browser, `.env` carries a blank `ADMIN_PASSWORD` with `ADMIN_PASSWORD_SOURCE=browser`; the re-run honours that marker and never generates a password over the one you chose. Setting a real `ADMIN_PASSWORD` in `.env` before the re-run is the deliberate way to reset it.
 
@@ -212,6 +214,19 @@ done
 ```
 
 Use `unless-stopped`, never `always`: Trinity stops an agent through Docker's manual stop, which `unless-stopped` honours, so a quarantined or deliberately stopped agent stays down across a reboot. On the dev compose the `backend`, `frontend` and `redis` services adopt the same policy on the next `docker compose up` (which `start.sh` performs). Two consequences worth knowing: "restarting frequently" alerts for agents now fire (they never could before), and a `docker compose down` leaves every agent in a restart loop rather than merely orphaned — see [Monitoring → Recovery Patterns](monitoring.md#recovery-patterns). Full runbook: [`docs/migrations/AGENT_RESTART_POLICY_2026-09.md`](../../../migrations/AGENT_RESTART_POLICY_2026-09.md).
+
+---
+
+## GitHub token out of agent remotes (automatic, then rotate)
+
+Agents' git remotes no longer carry the GitHub token. Git asks a credential helper for it instead (see [GitHub PAT Setup → How git gets the token](../../integrations/github-pat-setup.md#how-git-gets-the-token)). Existing agents need no manual step:
+
+- About 20 seconds after the backend starts, Trinity cleans the remotes of every running agent once. It cleans each agent again every time that agent starts.
+- Each pass installs the helper (including into agents on an older base image), checks that a token still resolves, and only then removes the token from the URL.
+- An agent whose only token was inside its remote URL gets that token moved to a private file the helper reads. If Trinity cannot place a replacement, it leaves the URL alone and files an operator-queue alert, *A git remote still carries an embedded credential*. Give that agent its own token on its **Git** tab and the next start finishes the job.
+- A pass that cannot read an agent's workspace — expected when the agent runs without full capabilities — files a separate alert, *Trinity could not check this agent's git remotes*. Check that agent's remotes by hand.
+
+Then rotate the platform GitHub token. Backups, log archives, and container logs from before the upgrade can still contain it. Rotation is mandatory if the cleanup reports a token in a committed `.gitmodules` file, because that token is already in the repository's history. Full runbook, including how to verify an agent: [`docs/migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md`](../../../migrations/GIT_REMOTE_TOKEN_SCRUB_2026-09.md).
 
 ---
 

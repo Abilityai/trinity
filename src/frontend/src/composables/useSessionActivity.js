@@ -1,4 +1,5 @@
 import { ref, computed, onUnmounted } from 'vue'
+import { activityLine } from '../utils/workActivity'
 
 /**
  * Composable for session info and activity polling
@@ -79,9 +80,14 @@ export function useSessionActivity(agentRef, agentsStore) {
 
   let activityRefreshInterval = null
 
+  // trinity-enterprise#620: the same words the Workspace card and the Chat
+  // tab use, from the same two facts (`active_tool.name` is the agent's
+  // display tool name, `input_summary` its bounded input summary).
   const currentToolDisplay = computed(() => {
-    if (sessionActivity.value?.active_tool) {
-      return `${sessionActivity.value.active_tool.name}...`
+    const active = sessionActivity.value?.active_tool
+    if (active) {
+      const line = activityLine({ tool: active.name, summary: active.input_summary })
+      return line ? `${line.text}...` : `${active.name}...`
     }
     return 'Processing...'
   })

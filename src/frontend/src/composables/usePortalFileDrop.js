@@ -225,12 +225,19 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
     if (!files.length) return []
 
     batchNotice.value = ''
+    // #3265: the bound is per MESSAGE, not per gesture. Chips pile up across
+    // drops and pastes, and the message carries every one of them, so a second
+    // drop of eleven onto eleven would build a message the server caps. The
+    // difference is stated here, where the person can still see it.
+    const room = Math.max(0, MAX_BATCH_FILES - entries.value.length)
     let batch = files
-    if (files.length > MAX_BATCH_FILES) {
-      batch = files.slice(0, MAX_BATCH_FILES)
-      batchNotice.value =
-        `Only the first ${MAX_BATCH_FILES} of ${files.length} files were added.`
+    if (files.length > room) {
+      batch = files.slice(0, room)
+      batchNotice.value = room
+        ? `Only the first ${room} of ${files.length} files were added — a message carries up to ${MAX_BATCH_FILES}.`
+        : `A message carries up to ${MAX_BATCH_FILES} files. None of these ${files.length} were added.`
     }
+    if (!batch.length) return []
 
     const mine = batch.map((file) => {
       const rejection = rejectionFor(file)
@@ -269,7 +276,10 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
       for (const { file, entry, rejection } of mine) {
         if (rejection) continue
         try {
-          await upload(file)
+          const res = await upload(file)
+          // #3265: the name the server stored the file under (it sanitises),
+          // which is what a sent message names it by.
+          entry.serverName = (res && typeof res.filename === 'string' && res.filename) || file.name
           entry.done = true
         } catch (err) {
           entry.error = uploadFailureReason(err)

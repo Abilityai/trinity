@@ -304,7 +304,7 @@ watch(
               </template>
             </p>
 
-            <p v-if="row.source" class="text-[11px] text-gray-400 dark:text-gray-500 font-mono">{{ row.source }}</p>
+            <p v-if="row.source" class="text-[11px] text-gray-500 dark:text-gray-400 font-mono">{{ row.source }}</p>
 
             <div class="flex items-center gap-2">
               <input
@@ -334,7 +334,7 @@ watch(
         <p
           v-if="saveResult"
           class="text-sm mb-2"
-          :class="saveResult.success ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'"
+          :class="saveResult.success ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'"
         >{{ saveResult.message }}</p>
         <div class="flex items-center justify-between gap-3">
           <span class="text-xs text-gray-500 dark:text-gray-400">

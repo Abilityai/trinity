@@ -2187,28 +2187,6 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
     return (True, None, template_data)
 
 
-def get_name_from_template(path: Path) -> Optional[str]:
-    """
-    Extract agent name from template.yaml.
-
-    Args:
-        path: Path to the agent directory
-
-    Returns:
-        Agent name from template.yaml, or None if not found
-    """
-    template_path = path / "template.yaml"
-    if not template_path.exists():
-        return None
-
-    try:
-        with open(template_path) as f:
-            template_data = parse_template_yaml(f.read())  # ent#314
-            return template_data.get("name") if template_data else None
-    except Exception:
-        return None
-
-
 # Platform-injected environment variables — credentials/config Trinity sets on
 # the agent container itself at create time, so a template's MCP config that
 # references one of these does NOT need the operator to supply a matching
@@ -2235,6 +2213,16 @@ def _is_platform_injected(var: str) -> bool:
     if var in _PLATFORM_INJECTED_EXACT:
         return True
     return any(var.startswith(prefix) for prefix in _PLATFORM_INJECTED_PREFIXES)
+
+
+# The MCP servers Trinity writes into the agent's own `.mcp.json` at boot —
+# the server-level twin of `_PLATFORM_INJECTED_EXACT` above. A template that
+# declares one of these in `template.yaml mcp_servers[]` is CORRECT to leave it
+# out of `.mcp.json.template`: the entry is materialised inside the container by
+# `docker/base-image/agent_server/services/trinity_mcp.py`, which the backend
+# structurally cannot import (separate image, Invariant #5). A static mirror,
+# for the same reason the env-var list above is one (#2899).
+PLATFORM_INJECTED_MCP_SERVERS = frozenset({"trinity"})
 
 
 def _sanitize_for_warning(text: str, max_len: int = 80) -> str:

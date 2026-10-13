@@ -147,6 +147,29 @@ def read_cgroup_procs(path: Path = _CGROUP_PROCS_PATH) -> Optional[list[int]]:
     return pids
 
 
+def cgroup_is_container_root(cgroup_pids: Iterable[int]) -> bool:
+    """True only when the `cgroup.procs` just read is a CONTAINER's root.
+
+    Inside an agent container (private cgroup namespace, the Docker default
+    on cgroup v2) `/sys/fs/cgroup/cgroup.procs` lists every process in the
+    container, PID 1 (startup.sh / the agent server) included. On a host or a
+    CI runner the same path is the MACHINE's root cgroup: systemd moves
+    itself into `init.scope` and every user process into a slice, so PID 1 is
+    never listed there — and the pids that ARE listed belong to whatever the
+    host left at the root. Sweeping that list is not "cleanup", it is killing
+    unrelated processes: run outside a container, this sweep SIGKILLed a
+    developer's `systemd --user` (whole desktop session gone, twice in one
+    afternoon) and the GitHub Actions runner on every CI shard ("The runner
+    has received a shutdown signal"). The test that reached it was a unit
+    test whose monkeypatch landed on the wrong module copy
+    (trinity-enterprise#620 / #728 class) — the tests are fixed, but a fence
+    that depends on every future test being written correctly is not a
+    fence. PID 1 in the list is the one fact that separates the two
+    environments and is free to check.
+    """
+    return 1 in set(cgroup_pids)
+
+
 def kill_cgroup_orphans(
     *,
     extra_pids: Iterable[int] = (),
@@ -180,6 +203,16 @@ def kill_cgroup_orphans(
     if cgroup_pids is None:
         # cgroup v1 or read error — sweep is unavailable. Log was
         # already emitted by read_cgroup_procs.
+        return 0
+
+    if not cgroup_is_container_root(cgroup_pids):
+        # Fence, not a heuristic: the sweep is only correct where the root
+        # `cgroup.procs` it just read IS this container. See the helper.
+        logger.warning(
+            "[OrphanSweep] %s does not list PID 1 — not a container root "
+            "cgroup (host or CI runner?); refusing to sweep %d pid(s)",
+            _CGROUP_PROCS_PATH, len(cgroup_pids),
+        )
         return 0
 
     allowlist = resolve_allowlist(sweep_pid, extra_pids=extra_pids)

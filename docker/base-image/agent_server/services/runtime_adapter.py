@@ -45,6 +45,12 @@ class AgentRuntime(ABC):
     - is_available(): Check if runtime is installed
     """
 
+    # #3470: whether `execute`/`execute_headless` accept a per-spawn
+    # `auth_override` (a Claude subscription token or the platform API key).
+    # Only the Claude runtime does — the others authenticate from their own
+    # `.env` and must never receive a Claude credential (#1187 decision 7).
+    supports_auth_override: bool = False
+
     @abstractmethod
     async def execute(
         self,
@@ -53,10 +59,15 @@ class AgentRuntime(ABC):
         continue_session: bool = False,
         stream: bool = False,
         system_prompt: Optional[str] = None,
-        execution_id: Optional[str] = None
+        execution_id: Optional[str] = None,
+        isolated_session: bool = False,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
         """
         Execute agent with the given prompt.
+
+        `isolated_session` (trinity-enterprise#752): run the turn in a fresh
+        session that is not kept as the chat's own. Only the Claude Code
+        runtime has the gated-skill hook it exists for; others ignore it.
 
         Args:
             prompt: User message or task to execute

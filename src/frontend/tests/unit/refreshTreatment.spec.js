@@ -12,109 +12,20 @@
  *
  * #2492: `MetricsPanel.vue` and `ObservabilityPanel.vue` were deleted as
  * unreferenced (no importer anywhere in the tree) — their source assertions
- * left with them. `DashboardPanel` is the live surface this spec still pins,
- * and the store half stays: `stores/observability.js` is where the honesty of
- * `hasLoaded` / `available` was fixed.
+ * left with them. #3434 removed `stores/observability.js` for the same reason:
+ * nothing imported it, so its store-level tests left with it too.
+ * `DashboardPanel` is the live surface this spec still pins.
  *
- * The store half is exercised for real (Pinia + a mocked transport), because
- * the store is where the honesty of `hasLoaded` / `available` is decided and a
- * source regex cannot prove a branch. The component half is source-asserted:
- * `vitest.config.js` is `environment: 'node'` with no mount harness, so a rule
- * living in a template has no other guard.
+ * The component half is source-asserted: `vitest.config.js` is
+ * `environment: 'node'` with no mount harness, so a rule living in a template
+ * has no other guard.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { setActivePinia, createPinia } from 'pinia'
-
-vi.mock('axios', () => {
-  const inst = { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() }
-  return { default: inst }
-})
-
-import axios from 'axios'
-import { useObservabilityStore } from '@/stores/observability'
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
 const dashboard = read('../../src/components/DashboardPanel.vue')
-
-// Shaped like the real payload (`stores/observability.js` state defaults), so
-// the assertions below are about behaviour rather than about a fixture nothing
-// resembles.
-const GOOD = {
-  data: {
-    enabled: true,
-    available: true,
-    metrics: { cost_by_model: { sonnet: 1.25 }, sessions: 3, commits: 2 },
-    totals: { total_cost: 1.25, total_tokens: 4200, sessions: 3 },
-  },
-}
-
-describe('observability store — a failed refresh does not retract the data', () => {
-  beforeEach(() => {
-    setActivePinia(createPinia())
-    vi.clearAllMocks()
-  })
-
-  it('records that a fetch has succeeded, so the UI can gate on "no data yet"', async () => {
-    const store = useObservabilityStore()
-    expect(store.hasLoaded).toBe(false)
-    axios.get.mockResolvedValueOnce(GOOD)
-    await store.fetchMetrics()
-    expect(store.hasLoaded).toBe(true)
-    expect(store.refreshError).toBeNull()
-    expect(store.loading).toBe(false)
-  })
-
-  it('keeps metrics, totals and availability when a LATER fetch fails', async () => {
-    const store = useObservabilityStore()
-    axios.get.mockResolvedValueOnce(GOOD)
-    await store.fetchMetrics()
-
-    axios.get.mockRejectedValueOnce(new Error('network down'))
-    await store.fetchMetrics()
-
-    // The numbers the collector last reported are still the last thing it
-    // reported — a dropped GET does not unsay them.
-    expect(store.metrics).toEqual(GOOD.data.metrics)
-    expect(store.totals).toEqual(GOOD.data.totals)
-    // And a transport failure is not the collector declaring itself down.
-    expect(store.available).toBe(true)
-    expect(store.hasLoaded).toBe(true)
-    // But it IS reported, so nothing presents the stale reading as live.
-    expect(store.refreshError).toBeTruthy()
-  })
-
-  it('separates a transport failure from the collector’s own message', async () => {
-    const store = useObservabilityStore()
-    axios.get.mockResolvedValueOnce({ data: { enabled: true, available: true, error: 'collector says: degraded', metrics: [], totals: {} } })
-    await store.fetchMetrics()
-    expect(store.error).toBe('collector says: degraded')
-    expect(store.refreshError).toBeNull()
-  })
-
-  it('still fails honestly when the FIRST fetch fails — nothing to protect', async () => {
-    const store = useObservabilityStore()
-    axios.get.mockRejectedValueOnce(new Error('boom'))
-    await store.fetchMetrics()
-    expect(store.hasLoaded).toBe(false)
-    expect(store.available).toBe(false)
-    expect(store.error).toBeTruthy()
-    expect(store.refreshError).toBeTruthy()
-  })
-
-  it('clears the stale flag once a refresh succeeds again', async () => {
-    const store = useObservabilityStore()
-    axios.get.mockResolvedValueOnce(GOOD)
-    await store.fetchMetrics()
-    axios.get.mockRejectedValueOnce(new Error('blip'))
-    await store.fetchMetrics()
-    expect(store.refreshError).toBeTruthy()
-    axios.get.mockResolvedValueOnce(GOOD)
-    await store.fetchMetrics()
-    expect(store.refreshError).toBeNull()
-  })
-})
 
 describe('the fixed surfaces (what only source can answer)', () => {
   it('no longer gates rendered content on the in-flight flag', () => {
@@ -231,7 +142,6 @@ describe('the fixed surfaces (what only source can answer)', () => {
 
 describe('ent#253 re-review — an error must not outlive its request', () => {
   const dash = read('../../src/components/DashboardPanel.vue')
-    const store = read('../../src/stores/observability.js')
 
   it.each([['DashboardPanel', dash]])(
     '%s drops a failure that landed after the agent stopped', (_name, sfc) => {
@@ -241,14 +151,4 @@ describe('ent#253 re-review — an error must not outlive its request', () => {
       // ordering alone, on exactly the wedged-agent case an operator hits.
       expect(sfc).toMatch(/catch \(error\) \{[\s\S]{0,1200}?agentStatus !== 'running'\) return[\s\S]{0,400}?loadError\.value = error/)
     })
-
-  it('keeps hasLoaded monotonic, so the placeholder cannot re-arm each poll', () => {
-    // `firstLoad` is `loading && !hasLoaded`. A flag derived from the payload
-    // goes false again on every no-data poll, re-arming the first-load
-    // placeholder every 60s — the "disturbs on every tick" gate this branch
-    // deletes. The stale banner is guarded by `hasData` in the panel instead,
-    // which is where the claim about data is actually made.
-    expect(store).toMatch(/this\.hasLoaded = true/)
-    expect(store).not.toMatch(/this\.hasLoaded = this\.hasData/)
-  })
 })

@@ -43,6 +43,8 @@ def _make_adapter(channel: str = "telegram") -> MagicMock:
     a.resolve_verified_email = AsyncMock(return_value=None)
     a.record_inbound_activity = AsyncMock(return_value=None)  # #1533 roster counter
     a.is_group_verified = AsyncMock(return_value=False)
+    a.group_context_enabled = AsyncMock(return_value=True)  # ent#600 group-context hooks
+    a.note_untagged_seen = AsyncMock()
     a.set_group_verified = AsyncMock()
     a.prompt_group_auth = AsyncMock()
     a.prompt_auth = AsyncMock()
@@ -76,6 +78,7 @@ def _env(policy: dict, rate_ok: bool = True, container_status: str = "running"):
     the agent container state (e.g. "stopped" for the availability gate).
     """
     db = MagicMock()
+    db.is_email_account_suspended.return_value = False  # ent#720: an active account
     db.get_access_policy.return_value = policy
     db.email_has_agent_access.return_value = False
     db.get_or_create_public_chat_session.return_value = {"id": "s1"}
@@ -136,6 +139,19 @@ def test_dm_verified_with_access_executes():
         _run(router, adapter, message)
     service.execute_task.assert_awaited_once()
     db.email_has_agent_access.assert_called()
+
+
+def test_dm_verified_but_suspended_is_denied_even_on_open_access():
+    """ent#720: an email verified BEFORE its account was suspended is still on
+    the channel link; the per-message gate refuses it, open_access included."""
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message()
+    adapter.resolve_verified_email = AsyncMock(return_value="a@b.com")
+    with _env({"require_email": False, "open_access": True, "group_auth_mode": "none"}) as (db, service):
+        db.is_email_account_suspended.return_value = True
+        db.email_has_agent_access.return_value = True
+        _run(router, adapter, message)
+    service.execute_task.assert_not_awaited()
+    db.upsert_access_request.assert_not_called()
 
 
 def test_dm_verified_no_access_records_pending_request():

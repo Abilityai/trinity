@@ -1,5 +1,22 @@
 // Shared helpers for the client-portal chat shell (#138).
 
+// ent#784: the landing rule's drafts arm reads the drafts module's predicate
+// rather than a second copy of it. `portalDrafts.js` imports nothing, so this
+// edge adds no cycle — and it must stay that way: `portalInbox.js` already
+// imports THIS file, so an import of `portalInbox` from either of these two
+// would close one.
+import { draftedLandingFor } from './portalDrafts'
+import { capCount } from '@/utils/tabTitle'
+
+// ent#621: the key map is the single declaration of every Workspace chord, so
+// the two hotkey helpers below delegate to it rather than keeping a second
+// definition of "⌘J". That closes a cycle with `portalKeymap.js` (which reuses
+// `isMacLike` and `nextActiveIndex` from here) — benign, and it must STAY
+// benign: neither module may touch an import of the other at module-evaluation
+// time. Both init orders are exercised, by `workspaceKeymap.spec.js` (map
+// first) and `portalChatTabsAndTitles.spec.js` (utils first).
+import { resolveWorkspaceKey, findBinding, chordLabel } from './portalKeymap'
+
 // Deterministic per-agent color — used for the avatar tint and the small thread
 // color dots in the sidebar so a thread visually ties to its agent.
 export function agentColor(name) {
@@ -97,20 +114,33 @@ export function askBadgeTitle(count) {
   return `${n} ${n === 1 ? 'ask is' : 'asks are'} waiting on your answer`
 }
 
+// trinity-enterprise#610 (D3/D13): the unread badge's accessible name. The
+// count is arrivals (agent messages AND deliverables addressed to you), so the
+// noun is "new" — "replies" was true only while messages were the one arm.
+export function unreadBadgeTitle(count) {
+  const n = Number(count) || 0
+  if (n <= 0) return ''
+  return `${n} new you haven't read`
+}
+
 // The agent row's accessible name.
 //
 // #2424: this composed unread replies and the availability chip and never
 // mentioned asks, so a blocked agent's title was the bare "Open ws-sage" — the
 // pending decision was unreachable for a screen-reader user as well as
 // invisible. Asks lead: a decision outranks unread chatter.
-export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle = '' } = {}) {
+export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle = '', hasDraft = false } = {}) {
   const who = label && label !== name ? `${label} (${name})` : (label || name || '')
   const asks = Number(askCount) || 0
   const reads = Number(unread) || 0
 
   const parts = []
   if (asks > 0) parts.push(`${asks} ${asks === 1 ? 'ask' : 'asks'} waiting on you`)
-  if (reads > 0) parts.push(`${reads} unread ${reads === 1 ? 'reply' : 'replies'}`)
+  // trinity-enterprise#610 (D3): the count is ARRIVALS — agent messages and
+  // deliverables addressed to you — so it says "new", not "replies".
+  if (reads > 0) parts.push(`${reads} new`)
+  // trinity-enterprise#657: the Draft mark beside the name, in words too.
+  if (hasDraft) parts.push('an unsent draft')
 
   const base = parts.length ? `${who} — ${parts.join(', ')}` : `Open ${who}`
   return chipTitle ? `${base} — ${chipTitle}` : base
@@ -128,14 +158,28 @@ export function agentRowTitle({ label, name, unread = 0, askCount = 0, chipTitle
 // exactly where they were and the visible list simply grows.
 export const AGENT_COLLAPSE_LIMIT = 5
 
-export function visibleAgentRows(roster, { expanded = false, askCounts = {}, limit = AGENT_COLLAPSE_LIMIT } = {}) {
+//
+// trinity-enterprise#657: an agent holding an UNSENT DRAFT is lifted the same
+// way — "a Draft mark visible without opening the chat" is false for a row
+// hidden under "N more". Same append-not-float rule, same reason.
+//
+// ent#621: `keep` is one more member of the same family — the agent you are
+// LOOKING AT is never collapsed out. It is the belt rather than the braces: the
+// sidebar auto-expands when a key walk lands beyond the fold (Decision 27/37),
+// and this is what holds the active row visible in a list the person collapsed
+// by hand.
+export function visibleAgentRows(roster, {
+  expanded = false, askCounts = {}, draftAgents = null, limit = AGENT_COLLAPSE_LIMIT, keep = null,
+} = {}) {
   const list = Array.isArray(roster) ? roster : []
   if (expanded) return list
 
   const head = list.slice(0, limit)
   const shown = new Set(head.map((a) => a?.name))
   const counts = askCounts || {}
-  const waiting = list.filter((a) => a?.name && !shown.has(a.name) && (Number(counts[a.name]) || 0) > 0)
+  const drafted = draftAgents instanceof Set ? draftAgents : new Set()
+  const waiting = list.filter((a) => a?.name && !shown.has(a.name)
+    && ((Number(counts[a.name]) || 0) > 0 || drafted.has(a.name) || a.name === keep))
   return waiting.length ? [...head, ...waiting] : head
 }
 
@@ -258,6 +302,13 @@ export function threadTitle(t) {
   return (t.title || '').trim() || 'New chat'
 }
 
+// A chat's name in a chat list. Main is named by its role (ent#523), as its tab,
+// the header and the Inbox name it; its stored title is whatever the generator
+// made of its first message.
+export function chatRowTitle(t) {
+  return t?.is_main ? MAIN_TAB_LABEL : threadTitle(t)
+}
+
 // --- Chat titles (ent#473) --------------------------------------------------
 // The client-side mirror of `services/chat_title.py::normalize_chat_title`,
 // so a person is told BEFORE the request; the server stays the authority and
@@ -333,20 +384,38 @@ export const NEW_CHAT_TAB_LABEL = 'New chat'
 // whose title is literally "Main" would otherwise be indistinguishable from it.
 export const MAIN_TAB_LABEL = 'Main'
 
-export function agentChatTabs(threads, agentName, { activeId = null, draft = false } = {}) {
+// trinity-enterprise#657: `draftKeys` is the drafts store's key set. A tab
+// whose thread holds unsent text carries `hasDraft` (keyed on the TAB id, not
+// the thread row — the born-here provisional tab has no row yet), and an
+// unsaved chat with a `new:<agent>` draft is listed as the provisional tab
+// even while another chat is open, so the place the person left their words
+// stays reachable: the agent row lands on Main, and this tab is the only door.
+// The unread fields one chat tab carries (see `agentChatTabs`).
+function tabUnread(t, activeId) {
+  const id = t.id || t.session_id
+  const n = id === activeId ? 0 : Number(t.unread) || 0
+  return {
+    badge: n > 0 ? capCount(n) : null,
+    badgeVariant: 'primary',
+    badgeLabel: n > 0 ? `${t.is_main ? MAIN_TAB_LABEL : threadTitle(t)}${t.starred ? ', starred' : ''}, ${n} unread` : '',
+  }
+}
+
+export function agentChatTabs(threads, agentName, { activeId = null, draft = false, draftKeys = null } = {}) {
   if (!agentName) return []
+  const holds = (key) => !!(key && draftKeys && typeof draftKeys.has === 'function' && draftKeys.has(key))
   const mine = (Array.isArray(threads) ? threads : [])
     .filter((t) => t && !t.is_room && t.agent_name === agentName)
-    // ent#523: an archived chat IS a tab. The operator ruled it explicitly —
-    // "one system line in Main names the archived chat, which becomes the
-    // newest tab" (2026-09-06) — and it is right: an archive is an ordinary
-    // past chat, and hiding the thing the system line just pointed at is the
-    // one place the person is most likely to look next.
+    // ent#841 (operator ruling 2026-10-08): an archived chat is NOT a tab. Closing
+    // a chat with its × archives it, and a tab that came straight back would be
+    // a close that did nothing. One rule covers both ways a chat gets archived:
+    // Reset's retired Main leaves the strip too (this reverses the ent#523
+    // 2026-09-06 ruling that it "becomes the newest tab"), and is found, with
+    // every other closed chat, in the sidebar's Archived group.
     //
-    // An earlier draft filtered these out, reasoning that Reset would grow the
-    // strip by one permanent entry per use. That was solving a problem
-    // `OverflowTabs` already solves: the strip renders what fits and counts the
-    // rest under "N more", so growth costs nothing visually.
+    // The one exception is the chat ON SCREEN: a deep link to an archived chat
+    // still draws its tab, so the strip never has a selection it cannot show.
+    .filter((t) => !t.archived_at || (activeId && (t.id || t.session_id) === activeId))
   const ts = (t) => {
     const iso = t.last_message_at || t.created_at
     const n = iso ? new Date(iso).getTime() : 0
@@ -369,21 +438,41 @@ export function agentChatTabs(threads, agentName, { activeId = null, draft = fal
       // so in the strip rather than only in its position.
       pinned: !!t.is_main,
       thread: t,
+      hasDraft: holds(`thread:${t.id || t.session_id}`),
+      // ent#841: every chat but Main closes from its tab (Reset is Main's
+      // retire action), and so does nothing already archived.
+      closable: !t.is_main && !t.archived_at,
+      // The star, on the tab: the same per-viewer state the sidebar row and the
+      // header draw, so the strip says which of these chats you pinned.
+      starred: !!t.starred,
+      // Unread replies in a chat that is not on screen — the sidebar row's own
+      // count, in the same solid blue (`primary`), so the tab says WHERE the
+      // new message is. The strip is `fixed-width`, so the count appearing
+      // shortens this tab's label and moves nothing beside it — no reserved
+      // slot needed, which would cost every label its room. The open chat is
+      // read by definition and never carries one.
+      ...tabUnread(t, activeId),
     }))
   // #2579: the provisional tab. Only on an explicit draft, and only while no
   // real row already carries the active id — once the list catches up with the
   // adopted thread the real tab takes over in the same slot.
-  if (draft && !tabs.some((t) => t.id === activeId)) {
+  //
+  // trinity-enterprise#657: ALSO listed, inactive, while a `new:<agent>` draft
+  // exists. Decided up front and inserted once — both cases share the slot.
+  const activeIsProvisional = draft && !tabs.some((t) => t.id === activeId)
+  const newChatDraft = holds(`new:${agentName}`)
+  if (activeIsProvisional || newChatDraft) {
     const after = tabs.length && tabs[0].pinned ? 1 : 0
     tabs.splice(after, 0, {
       // Keyed to the adopted id when there is one, so the tab the person is
       // looking at keeps its identity across the gap between "the thread now
       // exists" and "the list says so".
-      id: activeId || NEW_CHAT_TAB_ID,
+      id: activeIsProvisional ? (activeId || NEW_CHAT_TAB_ID) : NEW_CHAT_TAB_ID,
       label: NEW_CHAT_TAB_LABEL,
       provisional: true,
       pinned: false,
       thread: null,
+      hasDraft: activeIsProvisional && activeId ? holds(`thread:${activeId}`) : newChatDraft,
     })
   }
   return tabs
@@ -396,6 +485,48 @@ export function agentHasMain(threads, agentName) {
   if (!agentName) return false
   return (Array.isArray(threads) ? threads : [])
     .some((t) => t && !t.is_room && t.agent_name === agentName && !!t.is_main)
+}
+
+/**
+ * ent#784 arm 4 — has this agent an EMPTY chat already? Its id, or null.
+ *
+ * The operator's 2026-10-05 ruling: opening an agent must not create a new
+ * chat every time, so an empty one is REUSED and at most one exists per agent
+ * at any moment. "Empty" is the same "unused" test ent#523 applied to an
+ * unused Main, widened to any row that fits it: an unarchived, non-room thread
+ * of this agent with no message sent — no `last_message_at`, and
+ * `message_count` 0 or absent. Both halves are required, because the two
+ * fields come from different reads: the cross-agent batch omits
+ * `message_count` entirely, so counting an absent count as "used" would make
+ * every row non-empty there, and treating a present count of 2 as empty
+ * because `last_message_at` is missing would land the person in a used chat.
+ *
+ * Deterministic when legacy data holds several: **Main first**, then the newest
+ * `created_at`, then the id — so the answer never depends on list order. Main
+ * first is not a tiebreak detail: it is the row the tab strip pins and the one
+ * every post-ent#523 pair already has, so reusing anything else would leave an
+ * unused Main sitting beside the chat being typed in.
+ *
+ * Pure, like the rest of the rule: it reads the list it is handed and mints
+ * nothing. The matching promise on the WRITE side is `Portal.vue`'s
+ * `ensureMainListed`, which must not add a Main to an agent that already has
+ * an empty chat.
+ */
+export function agentEmptyChat(threads, agentName) {
+  if (!agentName) return null
+  const empty = (Array.isArray(threads) ? threads : []).filter((t) => t
+    && !t.is_room && t.agent_name === agentName && !t.archived_at
+    && !t.last_message_at && !Number(t.message_count || 0))
+  if (!empty.length) return null
+  const ts = (t) => {
+    const n = Date.parse(t.created_at || '')
+    return Number.isFinite(n) ? n : 0
+  }
+  const id = (t) => t.id || t.session_id || ''
+  empty.sort((a, b) => (b.is_main ? 1 : 0) - (a.is_main ? 1 : 0)
+    || ts(b) - ts(a)
+    || String(id(a)).localeCompare(String(id(b))))
+  return id(empty[0]) || null
 }
 
 // #2579: is this thread inside the window where a generated title may still
@@ -440,14 +571,16 @@ export function moreTabsLabel(n) {
   return `${n} more`
 }
 
-// --- New chat hotkey (ent#451) ----------------------------------------------
+// --- New chat hotkey (ent#451, now one entry in the ent#621 map) ------------
 // ⌘J on Mac, Ctrl+J elsewhere — ruled 2026-09-06 (⌘N is the browser's, ⌘⇧O
 // declined). Plain modifier only: Shift/Alt variants are someone else's.
+//
+// The predicate is kept (its callers and its truth table are the contract) but
+// the RULE now lives in `portalKeymap.js` with the other eight chords, so
+// "what ⌘J means" has one answer. The map adds the physical `KeyJ` arm, which
+// only widens the set: a layout whose `key` is not `j` now works too.
 export function isNewChatHotkey(e) {
-  if (!e || typeof e.key !== 'string') return false
-  if (e.key.toLowerCase() !== 'j') return false
-  if (e.shiftKey || e.altKey) return false
-  return !!(e.metaKey || e.ctrlKey) && !(e.metaKey && e.ctrlKey)
+  return resolveWorkspaceKey(e) === 'new-chat'
 }
 
 export function isMacLike(platform) {
@@ -482,7 +615,7 @@ export function titleGenerationNotice(health) {
 }
 
 export function newChatHotkeyLabel(platform) {
-  return isMacLike(platform) ? '⌘J' : 'Ctrl+J'
+  return chordLabel(findBinding('new-chat').chord, platform)
 }
 
 // #2101: bounded briefing hint grid. Order deterministically — a card with a
@@ -532,21 +665,18 @@ function isTransportError(err) {
     || code === 'ECONNABORTED' || code === 'ERR_NETWORK' || code === 'ETIMEDOUT'
 }
 
-export function resolveAgentLanding({ agent, forceNew = false, agents = [], threads = [] } = {}) {
+export function resolveAgentLanding({ agent, forceNew = false, agents = [], threads = [], drafts = null } = {}) {
   if (!agent || typeof agent !== 'string') return null
   if (!Array.isArray(agents) || !agents.some((a) => a && a.name === agent)) return null
+  // ent#784: the same rule the sidebar's agent row uses (`agentLanding`), not a
+  // second one — a deep link and a sidebar click must land in the same place.
+  // `forceNew` is the one way past the whole precedence: `?new=1` says "a fresh
+  // chat" in so many words, so it outranks a waiting draft and an empty chat
+  // alike. Without it this door passes no `lastOpenSessionId` (a deep link
+  // carries no session memory) but DOES pass the drafts map, so a deep link and
+  // a sidebar click land on the same words.
   if (forceNew) return { agentName: agent, sessionId: null }
-
-  // ent#523: the same rule the sidebar's agent row uses (`landingThread`), not
-  // a second one. This used to take the first row of an already-sorted list,
-  // which agreed with "most recent" by accident; once Main exists, an unused
-  // Main sorts last on recency and "first row" would skip it, so a deep link
-  // and a sidebar click could land a first-time visitor in different places.
-  const latest = landingThread(threads, agent)
-  return {
-    agentName: agent,
-    sessionId: latest ? (latest.id || latest.session_id || null) : null,
-  }
+  return agentLanding({ agentName: agent, threads, drafts })
 }
 
 // ent#358: the Workspace is now the ONLY continuous-conversation surface, so a
@@ -637,6 +767,32 @@ export const STAGE_QUERY_KEYS = ['agent', 'new', 'voice']
 // this surface exists for, and a dead affordance is one of the two failures
 // the brand corner must not have (the other being an unlabelled one).
 export const WORKSPACE_ROOT = '/workspace'
+
+// trinity-enterprise#610 (D9): the Inbox — the Workspace's landing and the brand
+// mark's target. A NEW constant on purpose: `WORKSPACE_ROOT` is also
+// `shouldEscapeStage`'s root and the sign-out destination, and bare `/workspace`
+// keeps its meaning (the new-chat stage). Being a path that is not the root, the
+// Inbox is a stage `shouldEscapeStage` leaves — the fail-closed rule holds.
+export const WORKSPACE_INBOX = '/workspace/inbox'
+
+// trinity-enterprise#610 (the 09-30 ruling, item 2): an agent's asks home, on
+// every door and for platform users and clients alike — the Inbox's Action tab
+// narrowed to that agent (§3g C2 `?from=`), or the whole tab when no one agent.
+export function asksHomeRoute(agentName = null) {
+  const query = { tab: 'action' }
+  if (agentName) query.from = agentName
+  return { path: WORKSPACE_INBOX, query }
+}
+// The "Open in Inbox" link, wherever a surface draws one (the asks-waiting line
+// on Work and Info; a project's Needs you row, #3574): a 44px target on a touch
+// screen and the design-system ring (A2 round 1's rule; round 2: keyed on the
+// pointer, not the width — a tablet is touch too).
+export const INBOX_LINK_CLASS = 'inline-flex items-center max-sm:min-h-11 [@media(pointer:coarse)]:min-h-11 text-action-primary-600 dark:text-action-primary-400 hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40'
+
+export function asksWaitingLabel(n) {
+  const k = Number(n) || 0
+  return k > 0 ? `${k} ${k === 1 ? 'ask' : 'asks'} waiting on you` : ''
+}
 
 export function shouldEscapeStage(path, query) {
   if (path && path.replace(/\/+$/, '') !== WORKSPACE_ROOT) return true
@@ -904,40 +1060,7 @@ export function availabilityChip(agent, { detailed = false } = {}) {
     }
 }
 
-/**
- * #2641 — does THIS list of rows need the availability slot reserved at all?
- *
- * The slot's fixed footprint exists so a row does not reflow when an agent
- * starts or stops between refreshes (#2196), and that is worth keeping. What
- * was wrong is paying for it on every row unconditionally: `availabilityChip`
- * returns null for every state except `stopped` and `unavailable`, so on a
- * fleet where everything is running — the normal case — the strip is empty on
- * EVERY row. That produced both halves of the reported defect at once: the
- * dates stopped 72px short of the right edge, and 72px per row came out of the
- * only element that wanted it, the name.
- *
- * The reservation is now a property of the LIST, not of a row: reserve on every
- * row iff any row can actually show a chip. Uniform down the list, so #2580's
- * identical truncation point survives, and free when there is nothing to hold
- * space for.
- *
- * Takes the ROWS BEING RENDERED, not the whole roster — a stopped agent hidden
- * by search or by the collapse limit would otherwise reserve width on a list
- * that shows no chip, which is the original bug with extra steps.
- *
- * Residual, stated rather than discovered: the 0→1 transition (the first agent
- * in view stops) reflows the whole list once, where before it reflowed nothing.
- * That is the honest cost of not charging every row for the empty case, and it
- * is the trade the issue delegates. Within a populated list nothing moves: a
- * second agent stopping, or the first one restarting while another is still
- * stopped, changes only that row's chip.
- */
-export function reservesAvailabilitySlot(rows, opts = {}) {
-  if (!Array.isArray(rows)) return false
-  return rows.some((a) => availabilityChip(a, opts) !== null)
-}
-
-export const EMPTY_REASON_NO_PLAYBOOKS = 'No playbooks are available for this agent right now.'
+export const EMPTY_REASON_NO_PLAYBOOKS = 'No skills are available for this agent right now.'
 export const EMPTY_REASON_NO_PEERS = 'No other agents are shared with you.'
 export const EMPTY_REASON_NO_MENTIONABLE_PEERS =
   "The other agents shared with you can't be @mentioned — their names aren't valid mention handles."
@@ -1082,11 +1205,15 @@ export const SEARCH_PLACEHOLDER = 'Search agents and chats…'
  */
 export function searchAgents(roster, query, {
   askCounts = {},
+  draftAgents = null,
   expanded = false,
   limit = SIDEBAR_AGENT_RESULT_LIMIT,
+  // ent#621: the active agent is held in its own result list for the same
+  // reason #2424 holds an asked one — see `visibleAgentRows`.
+  keep = null,
 } = {}) {
   const { items } = filterAgentCandidates(roster, query, { requireMentionable: false })
-  const visible = visibleAgentRows(items, { expanded, askCounts, limit })
+  const visible = visibleAgentRows(items, { expanded, askCounts, draftAgents, limit, keep })
   return {
     items,
     visible,
@@ -1233,25 +1360,37 @@ export function roomMentionSource(participantNames, roster) {
  * to 500 characters over the message), while an accidental send is the thing the
  * user was reaching for anyway. Tab still accepts the top row, and nobody
  * presses Tab to send.
+ *
+ * trinity-enterprise#738: Escape drops a "replying to" chip — innermost first.
+ * An open popup takes the first Escape (`dismiss`), the chip the next one, and
+ * only then does Escape reach the turn (the caller `preventDefault`s
+ * `drop-reply`, which is what makes the turn-cancel listener yield).
  */
 export function resolveComposerKey({
   key, shiftKey = false, ctrlKey = false, metaKey = false, altKey = false,
   isComposing = false, keyCode = 0,
-  open = false, hasActive = false, hasCandidates = false,
+  open = false, hasActive = false, hasCandidates = false, hasReply = false,
 } = {}) {
   if (isComposing || keyCode === 229) return 'pass'
   // A faithful reproduction of Vue's `.exact`: any modifier falls through
   // unprevented and inserts a newline, exactly as today.
   const plainEnter = key === 'Enter' && !shiftKey && !ctrlKey && !metaKey && !altKey
+  // ent#621 (Decision 36): the popup owns BARE arrows only. Claiming `⌥↓` —
+  // and `preventDefault`ing it, which is what the caller does with `move-down`
+  // — was a handler claiming a chord it never declared, so the Workspace's
+  // switch-chat key died over an open @-popup. A modified arrow now falls
+  // through to `pass`, where the shell's declared binding can have it.
+  const bareArrow = !shiftKey && !ctrlKey && !metaKey && !altKey
 
   if (open) {
     if (key === 'Escape') return 'dismiss'
-    if (key === 'ArrowDown') return hasCandidates ? 'move-down' : 'close'
-    if (key === 'ArrowUp') return hasCandidates ? 'move-up' : 'close'
+    if (key === 'ArrowDown' && bareArrow) return hasCandidates ? 'move-down' : 'close'
+    if (key === 'ArrowUp' && bareArrow) return hasCandidates ? 'move-up' : 'close'
     if (key === 'Tab' && !shiftKey) return hasCandidates ? 'accept' : 'pass'
     if (plainEnter && hasCandidates && hasActive) return 'accept'
     if (CARET_KEYS.has(key)) return 'close'
   }
+  if (key === 'Escape' && hasReply) return 'drop-reply'
   if (plainEnter) return 'send'
   return 'pass'
 }
@@ -1615,13 +1754,19 @@ export function expiredLabel(expiresAt, now = Date.now()) {
  * findable, not to restrict where it may be answered — and an ask the reader
  * can see but not reach is the failure this closes, not one it should create.
  */
+//
+// trinity-enterprise#610 (the 09-30 ruling, amended): only for an ask a chat
+// TURN raised (ent#734's `raised_in_turn`, the literal true). A background
+// ask's `chat_id` is Main only as the reply target — it is not drawn there, so
+// a link would send the reader to a chat where the ask is not. Its home is the
+// Inbox.
 export function askThreadLink(ask, currentSessionId = null) {
+  if (ask?.raised_in_turn !== true) return null
   const target = ask?.chat_id
   if (!target) return null
   if (currentSessionId && target === currentSessionId) return null
   return target
 }
-
 
 // ---- ent#365: deliverables ------------------------------------------------
 
@@ -1715,32 +1860,57 @@ export function feedbackAcknowledgement(captureFeedback) {
   return FEEDBACK_REACHED_AGENT.has(captureFeedback) ? FEEDBACK_SENT_TEXT : FEEDBACK_RECORDED_TEXT
 }
 
-// --- Agents at the centre (ent#523) ------------------------------------------
+// --- Agents at the centre (ent#523, landing rule replaced by ent#784) --------
 
-// Which chat opening an agent lands you in. Most recently ACTIVE wins, and Main
-// is the floor — never a blank stage, and never "the oldest thread happened to
-// sort first". Returns null only when the caller has no chats with this agent at
-// all, which the caller reads as "open Main once the list arrives".
+// Where opening an agent lands you. ONE rule, called by every door that has to
+// RESOLVE a landing: the sidebar/rail row via `landOnAgent`, the `?agent=` deep
+// link via `resolveAgentLanding`, and — since ent#621 — the switch-agent KEYS,
+// which call `landOnAgent` with the `lastOpenSessionId` arm 2 reads. The gesture
+// doors still do not call this, because they already mean "fresh": New chat, the
+// agent picker, and ⌘J.
 //
-// Deliberately NOT `agentChatTabs()[0]`: that pins Main to the front, so it
-// would land you in Main every time regardless of where you were last — the
-// exact behaviour AC 1 replaced.
-export function landingThread(threads, agentName) {
-  if (!agentName) return null
-  const mine = (Array.isArray(threads) ? threads : [])
-    .filter((t) => t && !t.is_room && t.agent_name === agentName && !t.archived_at)
-  if (!mine.length) return null
-  const ts = (t) => {
-    const iso = t.last_message_at || t.created_at
-    const n = iso ? new Date(iso).getTime() : 0
-    return Number.isNaN(n) ? 0 : n
+// ent#784 reverses ent#523's rule: the default is a NEW, empty chat
+// (`sessionId: null`), because most visits to an agent start new work and
+// resuming cost two actions every time.
+//
+// The operator's 2026-10-05 ruling on ent#784 settles the precedence, and
+// these are the arms, in order:
+//
+//   1. a link that names a CHAT opens that chat — not this function's job, and
+//      unchanged (the `/workspace/c/:id` route never reaches here);
+//   2. `lastOpenSessionId`, the seam ent#621's agent-switch keys pass. Honoured
+//      only when it still names a live, unarchived chat of THIS agent in
+//      `threads` — the principal's own list — so a stale or forged id falls
+//      through rather than landing somewhere it should not (the #3140 class);
+//   3. the agent's chat holding an unsent DRAFT, newest edit first
+//      (`draftedLandingFor`). A draft mark on the agent's row has to mean
+//      "click here to continue", so this and the mark share one predicate
+//      rather than two rules that agree today;
+//   4. the agent's existing EMPTY chat, reused rather than adding another one;
+//   5. a new chat.
+//
+// Arms 3 and 5 mint nothing server-side: a drafted `new:` chat and a fresh one
+// are both `sessionId: null`, and the row is born on the first send
+// (`newThread`, ent#451). Arm 4 opens a row that already exists. So landing
+// repeatedly, however often, accumulates no empty chats.
+//
+// `drafts` is the drafts store's map (`{ key: { text, updatedAt } }`) passed in
+// by the caller, never read from the store here: this stays a pure function
+// every door can test without mounting the shell. Omitting it simply disables
+// arm 3 — the old behaviour — rather than throwing.
+export function agentLanding({ agentName, threads = [], lastOpenSessionId = null, drafts = null } = {}) {
+  if (!agentName || typeof agentName !== 'string') return null
+  if (lastOpenSessionId) {
+    const row = (Array.isArray(threads) ? threads : []).find((t) => t && !t.is_room
+      && t.agent_name === agentName && !t.archived_at
+      && (t.id || t.session_id) === lastOpenSessionId)
+    if (row) return { agentName, sessionId: lastOpenSessionId }
   }
-  // An unused Main has no `last_message_at` and would sort last on recency
-  // alone, so a first-time visitor would land on nothing. Falling back to it
-  // explicitly is cheaper to read than a comparator that special-cases zero.
-  const used = mine.filter((t) => t.last_message_at)
-  if (used.length) return used.slice().sort((a, b) => ts(b) - ts(a))[0]
-  return mine.find((t) => t.is_main) || mine[0]
+  const drafted = draftedLandingFor({ agentName, threads, drafts })
+  if (drafted) return { agentName, sessionId: drafted.sessionId }
+  const empty = agentEmptyChat(threads, agentName)
+  if (empty) return { agentName, sessionId: empty }
+  return { agentName, sessionId: null }
 }
 
 // The sidebar's agent order (ent#523 AC 6).
@@ -1962,8 +2132,24 @@ export function agentRowTime(threads, agentName, now = Date.now()) {
 // `id` defaults to `null`, never `undefined`: the consumer's gate is a
 // truthiness test either way, but a row whose id is explicitly null says "this
 // was built without one" where a missing key says nothing at all.
+/**
+ * trinity-enterprise#754: the two "ran without approval" facts of a reply that
+ * just landed, in the shape `assistantRow` takes, from either shape the reply
+ * arrives in: the streaming path's row (`gateSelfApproved`, mapped by
+ * `replyFromHistory`) or the synchronous fallback's raw `POST …/chat` body
+ * (`gate_self_approved`). True only when the server said true.
+ */
+export function turnGateFlags(data) {
+  return {
+    gate_self_approved: (data?.gateSelfApproved ?? data?.gate_self_approved) === true,
+    gate_self_approved_by_viewer: (data?.gateSelfApprovedByViewer ?? data?.gate_self_approved_by_viewer) === true,
+  }
+}
+
 export function assistantRow({ content = '', id = null, my_rating = null,
-                               source = null, voice_call_id = null } = {}) {
+                               source = null, voice_call_id = null,
+                               execution_id = null, gate_self_approved = false,
+                               gate_self_approved_by_viewer = false } = {}) {
   return {
     role: 'assistant',
     content,
@@ -1971,6 +2157,12 @@ export function assistantRow({ content = '', id = null, my_rating = null,
     myRating: my_rating || null,
     source: source || null,
     voiceCallId: voice_call_id || null,
+    // #3166: the turn that wrote the row.
+    executionId: execution_id || null,
+    // trinity-enterprise#754: the turn went through without approval because
+    // the asker is the approver, and whether the viewer is that person.
+    selfApproved: gate_self_approved === true,
+    selfApprovedByViewer: gate_self_approved_by_viewer === true,
   }
 }
 
@@ -2028,8 +2220,24 @@ export async function readReplyBaseline(fetchHistory, sessionId) {
   }
 }
 
-export function replyFromHistory(messages, baseline) {
-  const last = latestTypedReply(messages)
+// #3166: `executionId` is the turn this caller is waiting on. Once the server
+// sends `execution_id` on its rows, only the row carrying that id is this
+// turn's reply: another turn on the same thread (the chat open in two tabs) can
+// land its reply first, and a row with no id (a completion report) belongs to
+// no turn. Without the field (an older backend) or without an id, the identity
+// and count rules below still apply.
+export function replyFromHistory(messages, baseline, executionId = null) {
+  const rows = Array.isArray(messages) ? messages : []
+  if (executionId && rows.some((m) => m && 'execution_id' in m)) {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const m = rows[i]
+      if (m && m.role === 'assistant' && m.source !== 'voice' && m.execution_id === executionId) {
+        return replyFields(m)
+      }
+    }
+    return null
+  }
+  const last = latestTypedReply(rows)
   if (!last) return null
   const base = baseline && typeof baseline === 'object'
     ? baseline
@@ -2038,10 +2246,135 @@ export function replyFromHistory(messages, baseline) {
     ? last.id !== base.id
     : typedReplyCount(messages) > (Number(base.count) || 0)
   if (!isNew) return null
+  return replyFields(last)
+}
+
+function replyFields(row) {
   return {
-    response: last.content,
-    cost: last.cost ?? null,
-    id: last.id || null,
-    myRating: last.my_rating || null,
+    response: row.content,
+    id: row.id || null,
+    myRating: row.my_rating || null,
+    // trinity-enterprise#610: the stored time, which places a chat-turn ask
+    // before this reply without the browser's clock (`placeAsksInThread`).
+    at: row.created_at || null,
+    // trinity-enterprise#754: a just-landed reply shows "ran without
+    // approval" without waiting for a reload.
+    gateSelfApproved: row.gate_self_approved === true,
+    gateSelfApprovedByViewer: row.gate_self_approved_by_viewer === true,
   }
+}
+
+// #3166: history is stored in save order, so two turns that overlap on one
+// thread read Q_A, Q_B, R_A, R_B after a reload. Each typed reply that names
+// its turn is moved to directly after the question of the same turn (and that
+// turn's earlier replies). A reply stays where it is when its question is not
+// in the window or carries no id, or when the move would cross a voice call's
+// rows, whose folding depends on their position.
+export function pairRepliesWithQuestions(messages) {
+  const out = []
+  for (const m of Array.isArray(messages) ? messages : []) {
+    const eid = m && m.role === 'assistant' && !m.source ? m.execution_id : null
+    if (eid) {
+      const qi = out.findIndex((x) => x && x.role === 'user' && !x.source && x.execution_id === eid)
+      if (qi !== -1) {
+        let at = qi + 1
+        while (at < out.length && out[at]?.execution_id === eid) at += 1
+        if (at < out.length && out.slice(at).every((x) => !x?.source)) {
+          out.splice(at, 0, m)
+          continue
+        }
+      }
+    }
+    out.push(m)
+  }
+  return out
+}
+
+// trinity-enterprise#610 §3g S4 — the read's optimistic zero, and its rollback.
+// `optimisticRead` zeroes a chat's unread and returns the ENTRY it wrote;
+// `rollbackRead` restores the count only while that very entry is still in
+// the state. Identity, not value: a refresh that replaced the state (the server
+// has spoken since) is left alone, so a late failure never resurrects a count
+// the server already settled. Known limit (round-3 review F6): a second read of
+// an entry that is ALREADY zero writes nothing, so if the first write then
+// fails its rollback restores the count although the second write succeeded —
+// wrong until the next poll (≤20 s), never persisted.
+export function optimisticRead(state, key) {
+  const before = state && state[key]
+  if (!before || !(Number(before.unread) > 0)) return { state, written: null }
+  const entry = { ...before, unread: 0 }
+  return { state: { ...state, [key]: entry }, written: { entry, before } }
+}
+
+export function rollbackRead(state, key, written) {
+  if (!written || !state || state[key] !== written.entry) return state
+  return { ...state, [key]: written.before }
+}
+
+// abilityai/trinity#3356 — a star click must survive a chat-state read that was
+// already in flight when it happened.
+//
+// The defect: `refreshThreads` replaces the whole chat-state map with what
+// `GET /chat-state` returned. A read that LEFT before the star's PUT landed (the
+// 20 s poll, a turn finishing, a thread opening) answers with the pre-click
+// state and overwrites the optimistic star — the server has the star, the
+// screen does not, and the second click "works" only because it re-sends the
+// same PUT after the stale read has gone by.
+//
+// The guard keeps each local write as an override until a read that STARTED
+// after the write SETTLED has come back — only that read is evidence of the
+// server's state. One logical clock orders the three events; a later write to
+// the same key replaces the earlier one, so a stale settle or failure from a
+// double click cannot touch the newer intent. Generic over the value, because
+// ent#841's tab close (an `archived_at` on the thread list) has the same race
+// against the same refresh.
+export function createWriteGuard() {
+  let clock = 0
+  const pending = new Map() // key → { value, settledAt }
+  return {
+    begin(key, value) {
+      const w = { value, settledAt: null }
+      clock += 1
+      pending.set(key, w)
+      return w
+    },
+    // `ok` false drops the override (the caller reverts the screen). Returns
+    // whether `w` was still the live write for `key` — a superseded write's
+    // outcome changes nothing.
+    settle(key, w, ok) {
+      if (pending.get(key) !== w) return false
+      if (ok) { clock += 1; w.settledAt = clock } else pending.delete(key)
+      return true
+    },
+    // Call when a read is ISSUED; pass the token to `live` with its result.
+    readStarted() {
+      clock += 1
+      return clock
+    },
+    // The overrides a read issued at `token` cannot have seen, as key → value.
+    // Overrides that read DID see are retired here: the server has spoken.
+    live(token) {
+      const out = new Map()
+      for (const [key, w] of [...pending]) {
+        if (w.settledAt !== null && token > w.settledAt) pending.delete(key)
+        else out.set(key, w.value)
+      }
+      return out
+    },
+    get size() { return pending.size },
+  }
+}
+
+// The chat-state map with the live star overrides laid over it. Returns the
+// same object when nothing differs, so an idle refresh costs no copy.
+export function applyStarOverrides(state, live) {
+  let out = state || {}
+  for (const [key, starred] of live) {
+    const cur = out[key]
+    if (!!cur?.starred === starred) continue
+    if (out === state) out = { ...state }
+    const i = key.indexOf(':')
+    out[key] = { ...(cur || { kind: key.slice(0, i), id: key.slice(i + 1) }), starred }
+  }
+  return out
 }

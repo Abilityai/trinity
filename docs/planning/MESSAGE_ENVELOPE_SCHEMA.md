@@ -67,7 +67,7 @@ Message kinds specified here:
 | 5 | `reply` payload (typed terminal-reason) | result / join | [§2.4](#24-kind-reply--the-typed-terminal-reason) |
 | 6 | **Claim response** — `GET /api/internal/next-task` body | backend → worker | [§3.1](#31-claim-response-get-apiinternalnext-task) |
 | 7 | **Result POST** — `POST /api/internal/tasks/{id}/result` body | worker → backend | [§3.3](#33-result-post-post-apiinternaltasksidresult) |
-| 8 | **Lease renewal / heartbeat** (control) | worker → backend | [§3.5](#35-lease-renewal--heartbeat-control) — **OPEN** |
+| 8 | **Lease renewal / heartbeat** (control) | worker → backend | [§3.5](#35-lease-renewal--heartbeat-control) — **not needed** (#2846) |
 
 Side-effect idempotency (`effect_guard` / native provider tokens, #1084 →
 v2 #1401/#1402) is **not** carried in the envelope. Per `TARGET_ARCHITECTURE.md`
@@ -280,7 +280,7 @@ claimed **envelope frame** (§1) plus claim metadata:
 |-------|------|------|-------|
 | `envelope` | object (§1) | **required** | The claimed message, frame + `payload`. |
 | `execution_id` | string | **required** | `schedule_executions.id` the terminal POST addresses. Distinct from the message `id`; stable across re-delivery. |
-| `lease_expires_at` | string (ISO 8601 UTC) | **required** | `deadline + grace`. A heartbeat (§3.5) renews it; the lease-reaper re-queues on expiry. |
+| `lease_expires_at` | string (ISO 8601 UTC) | **required** | `deadline + grace`. Never renewed (§3.5); the lease-reaper re-queues on expiry. |
 | `claimed_by_worker` | string | **required** | Opaque worker identity (`{agent}#{worker}` or a replica-scoped id) for lease attribution across replica groups. |
 | `redelivery_count` | int | **required** | 0 on first delivery; incremented per lease-expiry re-queue. Bounds the `MAX_REDELIVERY` poison-park (#1402). Distinct from the existing `retry_count` column (#678 reader-race). |
 | `prior_trace` | object \| null | optional | **(v2 #1401)** The structured, three-state (`done`/`not-done`/`unknown`) recovery trace of the prior failed attempt, injected so the retried turn recovers from hindsight. `null` on first delivery. **Internal structure is owned by #1401 — [OPEN-6](#6-open--needs-decision-session); this schema reserves the field name and nullability only.** |
@@ -339,17 +339,13 @@ Backend ack. Mirrors the live #1083 callback response semantics.
 
 ### 3.5 Lease renewal / heartbeat (control)
 
-A worker running a legitimately long turn **renews** its lease so the reaper does
-not re-queue it (`TARGET_ARCHITECTURE.md` §"Recovery: Lease-Expiry
-Re-Delivery": "A heartbeat from the worker *renews* the lease"). The message that
-carries this renewal — its endpoint, cadence, and payload (worker id? progress
-marker? new `lease_expires_at` echoed back?) — is **not specified** in the
-postcard or `TARGET_ARCHITECTURE.md`. **[OPEN-4](#6-open--needs-decision-session).**
-Reserved shape only:
-
-```json
-{ "claimed_by_worker": "agent-beta#w2" }   // → renews lease for exec {id}; fields OPEN
-```
+**Not needed — no renewal message exists (#2846).** A turn can outlive its lease
+only if its turn limit exceeds the lease window, so the claim closes that instead:
+`claim_next_task` sizes the lease from the agent's `execution_timeout_seconds`
+and clamps `task_overrides.timeout_seconds` to the same value (absent → that
+value). The turn therefore always ends inside `lease_expires_at`, and an expired
+lease means the worker died or its own kill failed. A heartbeat would add nothing for a healthy turn and
+would keep a hung one's lease alive forever.
 
 ---
 
@@ -461,9 +457,8 @@ resolved here** — a separate human-interactive design session owns these.
   the canonical correlation with `execution_id` demoted? The relationship between
   message `id`, `execution_id`, and `in_reply_to` on the pull path is unpinned.
 
-- **OPEN-4 — lease-renewal / heartbeat message.** The renewal that keeps a long
-  turn's lease alive (§3.5) has no specified endpoint, cadence, or payload. Only
-  its existence is pinned (`TARGET_ARCHITECTURE.md` §"Recovery").
+- **OPEN-4 — lease-renewal / heartbeat message. Resolved (#2846): not built.**
+  The claim clamps the turn limit to the lease's own timeout (§3.5).
 
 - **OPEN-5 — `terminal_reason` contractual status.** The live wire carries a
   finer-grained `terminal_reason` beyond `status` + `error_code`. Is it part of

@@ -31,7 +31,7 @@
       <div>
         <div class="flex items-center justify-between text-[11px] text-gray-500 dark:text-gray-400 mb-1">
           <span>Messages</span>
-          <span :class="msgNearLimit ? 'text-status-warning-600 dark:text-status-warning-400 font-medium' : ''">{{ messageCount }} / {{ maxMessages }}</span>
+          <span :class="msgNearLimit ? 'text-status-warning-700 dark:text-status-warning-400 font-medium' : ''">{{ messageCount }} / {{ maxMessages }}</span>
         </div>
         <div class="h-1.5 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
           <div class="h-full rounded-full transition-all" :class="msgNearLimit ? 'bg-status-warning-500' : 'bg-action-primary-500'" :style="{ width: msgPct + '%' }"></div>
@@ -41,7 +41,7 @@
       <div v-if="maxCost">
         <div class="flex items-center justify-between text-[11px] text-gray-500 dark:text-gray-400 mb-1">
           <span>Cost</span>
-          <span :class="costNearLimit ? 'text-status-warning-600 dark:text-status-warning-400 font-medium' : ''">${{ cost.toFixed(3) }} / ${{ maxCost.toFixed(2) }}</span>
+          <span :class="costNearLimit ? 'text-status-warning-700 dark:text-status-warning-400 font-medium' : ''">${{ cost.toFixed(3) }} / ${{ maxCost.toFixed(2) }}</span>
         </div>
         <div class="h-1.5 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
           <div class="h-full rounded-full transition-all" :class="costNearLimit ? 'bg-status-warning-500' : 'bg-action-primary-500'" :style="{ width: costPct + '%' }"></div>

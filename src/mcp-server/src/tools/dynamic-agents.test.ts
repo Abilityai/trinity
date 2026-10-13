@@ -149,6 +149,7 @@ function baseOpts(server: FakeServer, fetchImpl: any) {
     client: makeFakeClient([]),
     requireApiKey: false,
     agentChatPullEnabled: false,
+    reportBackEnabled: true,
     registerDynamicTool: server.registerDynamicTool,
     unregisterDynamicTool: server.unregisterDynamicTool,
     operatorOnly: (_auth: any) => true,

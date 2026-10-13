@@ -241,8 +241,15 @@ describe('what only source can answer — PortalSidebar.vue', () => {
     expect(shown).toBeTruthy()
     expect(shown[0]).toMatch(/isSearching/)
     // The steady state still goes through the #2424 rule directly — over the
-    // ent#523 ordered roster, which is the same list one transform earlier.
-    expect(SIDEBAR).toMatch(/visibleAgentRows\(orderedRoster\.value/)
+    // ent#523 ordered roster, which since ent#621 T6 arrives already sorted as
+    // the `roster` prop (the shell sorts once for both sidebar instances, so
+    // the switch-agent keys walk the order the eye reads). Bounding still
+    // happens AFTER ordering, which is the point of #2424.
+    expect(SIDEBAR).toMatch(/visibleAgentRows\(props\.roster/)
+    // ...and the sidebar does not re-sort what it was handed: a second order
+    // here is the drift T6 removed (the one remaining call site is pinned in
+    // portalSidebarRecency.spec.js).
+    expect(SIDEBAR).not.toMatch(/orderRosterAgents\(/)
   })
 
   it('writes the agent row exactly ONCE, so badges cannot drift by mode', () => {

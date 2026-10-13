@@ -194,7 +194,7 @@ function statusLabel (s) {
 function statusClass (s) {
   if (s.last_sync_status === 'success') return 'text-gray-500 dark:text-gray-400'
   if (s.last_sync_status === 'failed') return 'text-status-danger-600 dark:text-status-danger-400'
-  return 'text-gray-400 dark:text-gray-500'
+  return 'text-gray-500 dark:text-gray-400'
 }
 
 function cancelAdd () {

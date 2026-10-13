@@ -112,7 +112,7 @@ instead of staying green while every Copy button disappears from the UI.
 | Unit | Owns |
 |---|---|
 | `PortalMarkdown.vue` | the ONE `v-html`, the ONE `.prose-portal` stylesheet, the delegated `[data-copy-code]` handler, the `aria-live` region |
-| `PortalAgentBubble.vue` | the bubble shape, the action row, **Copy message**, and a `<slot/>` |
+| `PortalAgentBubble.vue` | the bubble shape, the action row, **Copy message**, an optional **Reply** (ent#738 — `replyLabel`, `replyDisabled`, emits `reply`; the host owns what it does), and a `<slot/>` |
 | `PortalConversation.vue` / `PortalRoom.vue` | mount the bubble; the room keeps its sender label above it |
 
 The split is the point. Before this, `prose-portal` was **applied** in both
@@ -126,6 +126,12 @@ style and copy as a unit.
 `PortalRating` (ent#366) stays in the parent, passed through the bubble's slot,
 so the thumbs land in the same action row as Copy message — one line of controls
 under the answer they are about.
+
+The row's order is Copy · Reply · (copy feedback) · slot (ent#738). Reply sits
+before the transient "Copied" and before the rating, so neither moves it. Copy and
+Reply share one class recipe (`ACTION_BUTTON`) at the thumbs' ink, gray-500 light /
+gray-400 dark; Copy's former light gray-400 was 2.54:1 on white. All three
+controls are 22px. The 44px touch floor is the row's, as one change (trinity#3056).
 
 ## The copy handler
 

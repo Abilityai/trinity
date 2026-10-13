@@ -19,9 +19,12 @@
              `bottom-24` clears the global HelpChatWidget FAB (bottom-6 + h-14 = 80px),
              which is why this is not the `bottom-4 right-4` used elsewhere. -->
         <div v-if="notification"
+          :role="notification.type === 'error' ? 'alert' : 'status'"
           :class="[
             'fixed bottom-24 right-6 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
-            notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
+            notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300'
+              : notification.type === 'info' ? 'bg-status-info-100 dark:bg-status-info-900/50 border border-status-info-400 dark:border-status-info-700 text-status-info-700 dark:text-status-info-300'
+              : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
           ]"
         >
           <span>{{ notification.message }}</span>
@@ -38,7 +41,7 @@
              exists — the backend's 404 is uniform for missing vs. inaccessible
              (Invariant #8 / #186) and this copy must not undo that. -->
         <div v-if="notFound && !loading" data-testid="agent-not-found" class="max-w-lg mx-auto text-center py-16">
-          <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
             <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           <h2 class="mt-4 text-lg font-semibold text-gray-900 dark:text-gray-100">Agent not found</h2>
@@ -148,7 +151,7 @@
             <div v-show="activeTab === 'chat'" class="flex-1 overflow-hidden flex flex-col">
               <div class="flex items-center justify-end gap-2 px-3 py-1.5 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40">
                 <span class="text-xs text-gray-500 dark:text-gray-400">
-                  Stateless chat — each message starts fresh.
+                  Each message runs as a new agent session; the last 20 messages are included for context.
                 </span>
                 <!-- ent#456: opens a new tab, so the agent page you were on is
                      still here when you come back. The ?tab=session REDIRECT
@@ -176,8 +179,24 @@
             </div>
 
             <!-- Dashboard Tab Content -->
-            <div v-if="activeTab === 'dashboard'" class="p-6">
-              <DashboardPanel :agent-name="agent.name" :agent-status="agent.status" />
+            <div v-if="activeTab === 'dashboard'" class="p-6 space-y-8">
+              <!-- ent#479: the declared-metric tiles are a SIBLING of the
+                   dashboard panel, not an arm inside it. The panel's state
+                   machine ends in "Agent Not Running" / "No Dashboard Defined";
+                   the tiles are store-backed and answer for a stopped agent
+                   with no `dashboard.yaml`, which is precisely the agent this
+                   surface exists for. Mounted first so the declared numbers
+                   lead. -->
+              <DeclaredMetricsTiles
+                v-if="hasDeclaredMetrics"
+                :agent-name="agent.name"
+              />
+              <DashboardPanel
+                :agent-name="agent.name"
+                :agent-status="agent.status"
+                :has-declared-metrics="hasDeclaredMetrics"
+                :notify="showNotification"
+              />
             </div>
 
             <!-- DEPRECATED: Terminal tab hidden for all users (candidate for removal) -->
@@ -205,7 +224,7 @@
             <!-- Sharing Tab Content -->
             <!-- Access Tab Content (#17 — Trinity operators) -->
             <div v-if="activeTab === 'access' && agent.can_share">
-              <AccessPanel :agent-name="agent.name" />
+              <AccessPanel :agent-name="agent.name" :agent-owner="agent.owner" />
             </div>
 
             <div v-if="activeTab === 'sharing' && agent.can_share">
@@ -246,11 +265,16 @@
               <LoopsPanel :agent-name="agent.name" :agent-status="agent.status" />
             </div>
 
-            <!-- Playbooks Tab Content -->
-            <div v-if="activeTab === 'playbooks'" class="p-6">
-              <PlaybooksPanel
+            <!-- Skills Tab Content (trinity-enterprise#754: own + shared skills,
+                 Run, Requires approval — it absorbed the Playbooks tab) -->
+            <div v-if="activeTab === 'skills'" class="p-6">
+              <SkillsTab
                 :agent-name="agent.name"
                 :agent-status="agent.status"
+                :can-manage="!!agent.can_share"
+                :is-system="!!agent.is_system"
+                :is-ephemeral="!!agent.ephemeral"
+                :notify="showNotification"
                 @run-with-instructions="handlePlaybookRunWithInstructions"
               />
             </div>
@@ -263,15 +287,6 @@
             <!-- Files Tab Content -->
             <div v-if="activeTab === 'files'">
               <FilesPanel :agent-name="agent.name" :agent-status="agent.status" />
-            </div>
-
-            <!-- Skills Tab Content -->
-            <div v-if="activeTab === 'skills'" class="p-6">
-              <SkillsPanel
-                :agent-name="agent.name"
-                :can-manage="!!agent.can_share"
-                :agent-running="agent.status === 'running'"
-              />
             </div>
 
             <!-- Shared Folders Tab Content -->
@@ -345,6 +360,7 @@ import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
 import { useSessionsStore } from '../stores/sessions'  // SESSION_TAB_2026-04 Phase 3
 import { emotionCacheVersion, emotionAvatarUrl as buildEmotionUrl } from '../utils/avatarEmotion'
+import { buildTabs, TAB_ALIASES } from '../utils/agentTabs'
 import NavBar from '../components/NavBar.vue'
 
 // Component name for KeepAlive matching
@@ -366,6 +382,7 @@ import TasksPanel from '../components/TasksPanel.vue'
 import GitPanel from '../components/GitPanel.vue'
 import InfoPanel from '../components/InfoPanel.vue'
 import DashboardPanel from '../components/DashboardPanel.vue'
+import DeclaredMetricsTiles from '../components/DeclaredMetricsTiles.vue'
 import FoldersPanel from '../components/FoldersPanel.vue'
 import SettingsPanel from '../components/settings/SettingsPanel.vue'
 import CrossModelValidationPanel from '../components/CrossModelValidationPanel.vue'
@@ -382,8 +399,7 @@ import AccessPanel from '../components/AccessPanel.vue'
 import PermissionsPanel from '../components/PermissionsPanel.vue'
 import FilesPanel from '../components/FilesPanel.vue'
 import TerminalPanelContent from '../components/TerminalPanelContent.vue'
-import SkillsPanel from '../components/SkillsPanel.vue'
-import PlaybooksPanel from '../components/PlaybooksPanel.vue'
+import SkillsTab from '../components/skills/SkillsTab.vue'  // trinity-enterprise#754
 import ChatPanel from '../components/ChatPanel.vue'
 import NeverminedPanel from '../components/NeverminedPanel.vue'
 import A2aPanel from '../components/A2aPanel.vue'  // trinity-enterprise#158: A2A config tab
@@ -397,6 +413,7 @@ import { useAgentTerminal } from '../composables/useAgentTerminal'
 import { useGitSync } from '../composables/useGitSync'
 import { useAgentSettings } from '../composables/useAgentSettings'
 import { useSessionActivity } from '../composables/useSessionActivity'
+import { useTabRoute } from '../composables/useTabRoute'
 
 // Setup
 const route = useRoute()
@@ -416,17 +433,32 @@ const activeTab = ref('overview')  // #1107: Overview is the default landing tab
 // #2153: resolved against every id the page can render (see ALL_TAB_IDS, which
 // the tab builder derives), not a hand-maintained subset. The old list omitted
 // a2a, loops, playbooks, access and nevermined, so those links died silently.
-// Legacy ?tab= ids that moved/renamed — keep old deep-links working (#1108).
-// ent#358: `session` is no longer an alias — it REDIRECTS (see below). The
-// surface it named lives in the Workspace now, so resolving it to a local tab
-// would silently land the user on stateless chat while their link asked for a
-// continuous conversation.
-const TAB_ALIASES = { guardrails: 'settings' }
+// Legacy ?tab= ids that moved/renamed — keep old deep-links working (#1108):
+// `TAB_ALIASES` (utils/agentTabs.js; trinity-enterprise#754 added
+// `playbooks → skills`). ent#358: `session` is no longer an alias — it
+// REDIRECTS (see below). The surface it named lives in the Workspace now, so
+// resolving it to a local tab would silently land the user on stateless chat
+// while their link asked for a continuous conversation.
 // Resolve a ?tab= value to a live tab id (applying aliases), or null if unknown.
 function resolveDeepLinkTab(requested) {
   const resolved = TAB_ALIASES[requested] || requested
   return ALL_TAB_IDS.includes(resolved) ? resolved : null
 }
+
+// #2900: the tab is in the URL. A change to `activeTab` (a tab click, or any
+// handler below that assigns it) pushes `?tab=`, so Back steps through tabs and
+// a reload keeps the one showing; a Back/Forward step on this page writes the
+// ref. `selectTab(…, { replace: true })` and `syncTabUrl()` are for the
+// normalising writes, which must not add a history entry. See the composable
+// for why this does not reopen #2130.
+const { selectTab, syncUrl: syncTabUrl } = useTabRoute({
+  activeTab,
+  route,
+  router,
+  routeName: 'AgentDetail',
+  defaultTab: 'overview',
+  resolveTab: resolveDeepLinkTab,
+})
 
 // What the deep link selected, so visibility can be reconciled once the agent
 // loads. Null once reconciled or once the user has moved.
@@ -460,9 +492,11 @@ let skipNextActivation = false
 // two hooks can't drift again.
 //
 function applyDeepLinkRouting() {
-  if (!route.query.tab) return
-  const resolvedTab = resolveDeepLinkTab(route.query.tab)
-  if (!resolvedTab) return
+  const resolvedTab = route.query.tab ? resolveDeepLinkTab(route.query.tab) : null
+  // #2900: no tab named (or one that names nothing). The view is KeepAlive-
+  // cached, so it may be showing a tab remembered from the last visit — make
+  // the URL say so, or a reload would land somewhere else.
+  if (!resolvedTab) { syncTabUrl(); return }
   // `brain` is the one id that NAVIGATES when selected (a watcher pushes
   // /agents/:name/brain). Applying it before the agent loads would bounce a
   // caller off the page and back when the capability turns out to be absent, so
@@ -489,7 +523,10 @@ function reconcileDeepLinkVisibility() {
     return
   }
   // Not visible to this viewer — fall back, but never over a later choice.
-  if (activeTab.value === requested) activeTab.value = 'overview'
+  // #2900: by `replace`, so Back does not return to a tab that is not there.
+  if (activeTab.value === requested) selectTab('overview', { replace: true })
+  // The deferred `brain` link never became the tab; stop the URL claiming it.
+  else syncTabUrl()
 }
 
 // ent#358: a `?tab=session` link (or any older session deep link) asked for the
@@ -527,6 +564,10 @@ const emotionCycleTimer = ref(null)
 const taskPrefillMessage = ref('')
 const schedulePrefillMessage = ref('')
 const hasDashboard = ref(false)
+// ent#479 — the other half of the Dashboard tab's gate. Declared metrics render
+// as tiles with no `dashboard.yaml` at all, and both flags arrive from the same
+// DB-only /exists probe, so this is never a second request.
+const hasDeclaredMetrics = ref(false)
 // #58 (trinity-enterprise) — Brain Orb: per-agent half of the gate. True when the
 // agent's template.yaml declares the generalizable `brain-orb` capability token.
 const hasBrainOrb = ref(false)
@@ -864,107 +905,15 @@ const {
   resetSessionActivity
 } = useSessionActivity(agent, agentsStore)
 
-// Computed tabs based on agent permissions and system agent status
-// Tab order optimized for workflow: primary actions first, configuration/reference last
-// #2153: a PURE builder, so "which tabs exist" has exactly one definition.
-//
-// `?tab=` used to resolve against a hand-maintained `DEEP_LINK_TABS` list that
-// omitted a2a, loops, playbooks, access and nevermined — real tabs whose deep
-// links silently landed on Overview. Two sources of truth for the same fact,
-// and only one of them was updated when a tab was added.
-//
-// Taking the flags as arguments lets the deep-link resolver ask the same
-// function for the SUPERSET (every flag permissive) without a second list, so a
-// tab added below is deep-linkable the moment it appears.
-function buildTabs({
-  isSystem = false, hasDashboardFlag = false, brainOrbVisible = false,
-  canShare = false, a2aVisible = false, gitSync = false,
-} = {}) {
-
-  // Primary tabs - most frequently used. Overview leads (#1107).
-  const tabs = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'tasks', label: 'Tasks' },
-    { id: 'chat', label: 'Chat' }
-  ]
-
-  // #1112 collapsed the Session tab into the Chat tab above; ent#358 retired
-  // the surface entirely — continuous conversation is the Workspace's job now.
-  // The Chat tab keeps stateless per-turn chat and links across.
-
-  // Dashboard tab - only show if agent has a dashboard.yaml file (insert after Tasks)
-  if (hasDashboardFlag) {
-    tabs.push({ id: 'dashboard', label: 'Dashboard' })
-  }
-
-  // Brain Orb tab (#58) — platform flag AND per-agent capability. Selecting it
-  // navigates to the dedicated /agents/:name/brain route (handled by a watcher).
-  if (brainOrbVisible) {
-    tabs.push({ id: 'brain', label: 'Brain' })
-  }
-
-  tabs.push(
-    { id: 'reports', label: 'Reports' },  // #918 agent-published reports
-    // ent#438 — the canvas is Reports' living sibling: same agent output,
-    // one surface kept current instead of a record that accumulates. Next
-    // to it deliberately, so the choice is visible where it is made.
-    { id: 'canvas', label: 'Canvas' },
-    { id: 'schedules', label: 'Schedules' },
-    { id: 'loops', label: 'Loops' },
-    { id: 'playbooks', label: 'Playbooks' },
-    { id: 'credentials', label: 'Credentials' },
-    { id: 'nevermined', label: 'Payments' }
-  )
-
-  // Access control tabs - hide for system agent (system agent has full access)
-  if (canShare && !isSystem) {
-    tabs.push({ id: 'access', label: 'Access' })  // #17 operators (Trinity users)
-    tabs.push({ id: 'sharing', label: 'Sharing' })
-    tabs.push({ id: 'permissions', label: 'Permissions' })
-  }
-
-  // A2A tab (trinity-enterprise#158) — owner-only, non-system, and only when the
-  // enterprise A2A module is entitled (never a blank tab in OSS/unentitled).
-  if (a2aVisible && canShare && !isSystem) {
-    tabs.push({ id: 'a2a', label: 'A2A' })
-  }
-
-  // Git and Files tabs together
-  if (gitSync) {
-    tabs.push({ id: 'git', label: 'Git' })
-  }
-  // DEPRECATED: Terminal tab hidden for all users (candidate for removal)
-  // tabs.push({ id: 'terminal', label: 'Terminal' })
-  tabs.push({ id: 'files', label: 'Files' })
-
-  // Folders - hide for system agent
-  if (canShare && !isSystem) {
-    tabs.push({ id: 'folders', label: 'Folders' })
-  }
-
-  // Skills (#235) — unhidden. Was kept out of `visibleTabs` per requirements
-  // §22.2 ("component preserved for potential admin-only access") while
-  // assignment stayed REST/MCP-only, so the #182/#183 machinery had no product
-  // surface at all. Owner/admin and non-system, matching the other management
-  // tabs; OverflowTabs absorbs the extra entry.
-  if (canShare && !isSystem) {
-    tabs.push({ id: 'skills', label: 'Skills' })
-  }
-
-  // Settings - owner-only (#1108); sectioned config home, Guardrails is section #1
-  if (canShare && !isSystem) {
-    tabs.push({ id: 'settings', label: 'Settings' })
-  }
-
-  // Info at the end (reference/metadata)
-  tabs.push({ id: 'info', label: 'Info' })
-
-  return tabs
-}
+// Tab visibility + order live in `utils/agentTabs.js` (ent#479) — a pure,
+// importable module so the spec executes the shipped predicate instead of
+// re-parsing this file (#2918). `hasDeclaredMetrics` joins `hasDashboardFlag`
+// there: the Dashboard tab appears for EITHER.
 
 const visibleTabs = computed(() => buildTabs({
   isSystem: agent.value?.is_system,
   hasDashboardFlag: hasDashboard.value,
+  hasDeclaredMetrics: hasDeclaredMetrics.value,
   brainOrbVisible: sessionsStore.brainOrbAvailable && hasBrainOrb.value,
   canShare: agent.value?.can_share,
   a2aVisible: sessionsStore.a2aAvailable,
@@ -976,7 +925,8 @@ const visibleTabs = computed(() => buildTabs({
 // loads (#2130 requires the landing to apply before the first await, so nothing
 // permission-dependent is known yet); visibility is reconciled once it does.
 const ALL_TAB_IDS = buildTabs({
-  isSystem: false, hasDashboardFlag: true, brainOrbVisible: true,
+  isSystem: false, hasDashboardFlag: true, hasDeclaredMetrics: true,
+  brainOrbVisible: true,
   canShare: true, a2aVisible: true, gitSync: true,
 }).map((t) => t.id)
 
@@ -1218,9 +1168,15 @@ function checkDashboardExists() {
 
 async function runDashboardProbe() {
   // Fast path: check DB cache (no agent container call)
+  //
+  // ent#479: the probe answers TWO flags now. `has_declared_metrics` is
+  // registry-backed and DB-only, so it is settled here for good — the boot
+  // retry ladder below exists for a `dashboard.yaml` the agent has not served
+  // yet, and a template.yaml `metrics:` block does not need the container.
   try {
     const exists = await agentsStore.checkDashboardExists(agent.value.name)
-    if (exists) {
+    hasDeclaredMetrics.value = exists.hasDeclaredMetrics === true
+    if (exists.hasDashboard) {
       hasDashboard.value = true
       return
     }
@@ -1355,6 +1311,7 @@ watch(() => route.params.name, async (newName, oldName) => {
     stopAllPolling()
     // Reset dashboard state for new agent
     hasDashboard.value = false
+    hasDeclaredMetrics.value = false
     // #2198: and drop A's in-flight probe, so B does not join it and inherit
     // A's answer.
     resetDashboardProbe()
@@ -1377,16 +1334,18 @@ watch(() => route.params.name, async (newName, oldName) => {
     await loadTokenStats()
     // Load avatar identity for new agent (AVATAR-001)
     await loadAvatarIdentity()
-    // Check if new agent has dashboard (only when running)
-    if (agent.value?.status === 'running') {
-      await checkDashboardExists()
-    }
+    // Probe the Dashboard tab's two gates. ent#479 dropped the running-only
+    // condition: `has_declared_metrics` is registry-backed and DB-only, and a
+    // stopped agent's recorded numbers are exactly what an operator wants to
+    // see. The ladder inside still early-returns on a stopped agent, so this
+    // costs one cached request, not a container round trip.
+    await checkDashboardExists()
     // Reset activeTab if current tab is not valid for new agent
     // Must use nextTick to ensure visibleTabs has recomputed
     nextTick(() => {
       const validTabIds = visibleTabs.value.map(t => t.id)
       if (!validTabIds.includes(activeTab.value)) {
-        activeTab.value = 'overview'
+        selectTab('overview', { replace: true })  // #2900: a correction, not a step
       }
     })
     startAllPolling()
@@ -1496,7 +1455,11 @@ onMounted(async () => {
     loadAvailableSubscriptions(),
     sessionsStore.loadFeatureFlags(),  // SESSION_TAB_2026-04 Phase 3
     loadTokenStats(),
-    ...(agent.value?.status === 'running' ? [checkDashboardExists(), checkBrainOrbCapability()] : [])
+    // ent#479: the dashboard probe is DB-only on its fast path and carries the
+    // declared-metrics flag, so it runs for a stopped agent too. The brain-orb
+    // capability read does hit the container and stays gated.
+    checkDashboardExists(),
+    ...(agent.value?.status === 'running' ? [checkBrainOrbCapability()] : [])
   ])
   // #2153: only now is it known which tabs this viewer can see. Drops a deep
   // link to one they cannot — and does nothing if they have already clicked.
@@ -1550,9 +1513,10 @@ onActivated(async () => {
   // Reload emotions and restart cycling (AVATAR-002)
   await loadAvailableEmotions()
   startEmotionCycling()
-  // Re-check for dashboard + brain-orb capability if agent is running
+  // Re-check the Dashboard gates (DB-only on the fast path, so unconditional —
+  // ent#479) and the brain-orb capability (a container read, still gated).
+  await checkDashboardExists()
   if (agent.value?.status === 'running') {
-    await checkDashboardExists()
     await checkBrainOrbCapability()
   }
   // #2153: same reconcile as onMounted — this hook is the KeepAlive path, and
@@ -1591,8 +1555,9 @@ const handleOverviewNavigate = (tabId) => {
 }
 
 const handleOpenTask = (executionId) => {
-  activeTab.value = 'tasks'
-  router.replace({ query: { ...route.query, execution: executionId } })
+  // #2900: one navigation for both keys — a tab write and a separate
+  // `execution` write would cancel each other.
+  selectTab('tasks', { query: { execution: executionId } })
 }
 
 // Handle item click from Info tab - switch to Tasks tab with prefilled message
@@ -1621,15 +1586,15 @@ const handleCreateSchedule = (message) => {
   })
 }
 
-// Handle run-with-instructions from Playbooks tab
+// Handle run-with-instructions from the Skills tab (Run / Edit & Run)
 const handlePlaybookRunWithInstructions = (prefillText) => {
   // Check if this is a navigation request (one-click run completed)
   if (prefillText.startsWith('__NAVIGATE_TASKS__:')) {
     const executionId = prefillText.replace('__NAVIGATE_TASKS__:', '')
     // Navigate to Tasks tab with execution highlighted via query param
-    activeTab.value = 'tasks'
     // The TasksPanel will pick up the execution via the highlight-execution-id prop
-    router.replace({ query: { ...route.query, execution: executionId } })
+    // (#2900: tab and execution in one navigation, as in handleOpenTask).
+    selectTab('tasks', { query: { execution: executionId } })
     return
   }
 

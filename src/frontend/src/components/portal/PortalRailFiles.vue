@@ -60,7 +60,7 @@
         <input type="file" multiple class="hidden" :disabled="uploading" @change="onPick" />
       </label>
       <InlineError v-if="uploadError" :message="uploadError" @dismiss="uploadError = ''" />
-      <p v-else-if="uploadOk" class="mt-2 text-xs text-status-success-600 dark:text-status-success-400" role="status">{{ uploadOk }}</p>
+      <p v-else-if="uploadOk" class="mt-2 text-xs text-status-success-700 dark:text-status-success-400" role="status">{{ uploadOk }}</p>
     </div>
 
     <!-- Lists -->

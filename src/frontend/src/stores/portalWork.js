@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useClientPortalStore } from './clientPortal'
 import { WORK_POLL_MS, liveItems } from '../components/portal/portalWork'
+import { ACTIVITY_POLL_MS } from '../utils/workActivity'
 
 /**
  * The Workspace rail's Work feed (trinity-enterprise#525): what a chat's
@@ -39,10 +40,19 @@ export const usePortalWorkStore = defineStore('portalWork', () => {
   const fetchedAt = ref(null)     // ms — the instant `elapsed_seconds` was true
   const stoppingIds = ref([])
   const version = ref(0)
+  // trinity-enterprise#620: the live activity lines by execution id, from the
+  // cheap `/work/activity` read, polled every ACTIVITY_POLL_MS while a card is
+  // live. A full `refresh` also carries `item.activity`; this map is the
+  // fresher of the two and `activityFor(item)` picks it. `activityFetchedAt`
+  // lets the card age a line the agent stopped renewing.
+  const activity = ref({})
+  const activityFetchedAt = ref(null)
 
   let _fetchToken = 0
   let _debounceTimer = null
   let _pollTimer = null
+  let _activityTimer = null
+  let _activityToken = 0
 
   const live = computed(() => liveItems(now.value))
   const hasLive = computed(() => live.value.length > 0)
@@ -54,6 +64,10 @@ export const usePortalWorkStore = defineStore('portalWork', () => {
   function _ensurePolling() {
     if (hasLive.value) {
       if (!_pollTimer) _pollTimer = setInterval(() => { refresh() }, WORK_POLL_MS)
+      if (!_activityTimer) {
+        _activityTimer = setInterval(() => { refreshActivity() }, ACTIVITY_POLL_MS)
+        refreshActivity()
+      }
     } else {
       stopPolling()
     }
@@ -61,6 +75,37 @@ export const usePortalWorkStore = defineStore('portalWork', () => {
 
   function stopPolling() {
     if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null }
+    if (_activityTimer) { clearInterval(_activityTimer); _activityTimer = null }
+    activity.value = {}
+    activityFetchedAt.value = null
+  }
+
+  /** The cheap read (#620): live lines only; never throws, never touches `now`. */
+  async function refreshActivity() {
+    const names = participants.value
+    if (!names.length || !hasLive.value) return
+    const portal = useClientPortalStore()
+    const token = ++_activityToken
+    try {
+      const data = await portal.fetchWorkActivity(names)
+      if (token !== _activityToken) return
+      activity.value = data && typeof data.items === 'object' && data.items ? data.items : {}
+      activityFetchedAt.value = Date.now()
+    } catch {
+      // A missed poll keeps the last lines; the card ages them out on its own
+      // (ACTIVITY_MAX_AGE_S) so a dead poll cannot leave a line stuck.
+    }
+  }
+
+  /**
+   * The activity facts for an item: the fast map when it has this id, else
+   * what the last full read folded onto the row. Null = no live signal.
+   */
+  function activityFor(item) {
+    if (!item || !item.id) return null
+    const fast = activity.value[item.id]
+    if (fast) return { ...fast, fetchedAtMs: activityFetchedAt.value }
+    return item.activity ? { ...item.activity, fetchedAtMs: fetchedAt.value } : null
   }
 
   /** Scope to a chat: its participants and, in a 1:1, the open thread. */
@@ -180,12 +225,14 @@ export const usePortalWorkStore = defineStore('portalWork', () => {
     fetchedAt.value = null
     stoppingIds.value = []
     _fetchToken++
+    _activityToken++
   }
 
   return {
     participants, chatId, now, earlier, earlierTotal, earlierLimit, windowDays,
     hasLoaded, loading, error, fetchedAt, stoppingIds, version,
+    activity, activityFetchedAt,
     live, hasLive,
-    setScope, refresh, scheduleRefresh, stopItem, handleWebSocketEvent, stopPolling, clear,
+    setScope, refresh, refreshActivity, activityFor, scheduleRefresh, stopItem, handleWebSocketEvent, stopPolling, clear,
   }
 })

@@ -16,9 +16,12 @@
                     capability Trinity does not have (#919)
 
   Three sentences for steps, never two (ruling 2, reviewed): the stages when
-  the agent publishes them, "doesn't report steps" when it reachably does not,
+  the agent publishes them, nothing when it reachably does not (#3001),
   "could not be read right now" when nobody can tell — a stopped agent must
   never be described as one that doesn't report.
+
+  The chat's card reserves its steps row and Stop's slot from first paint
+  (`reserveLiveRows`, #2964), so the feed's read never grows it mid-turn.
 
   Presentational: every decision is `portalWork.js`. Two clocks meet here and
   one rule settles them — while the stream is live its last line is the
@@ -41,12 +44,47 @@
       <BaseBadge variant="neutral" class="ml-auto shrink-0">{{ kindWord }}</BaseBadge>
     </div>
 
-    <p class="mt-1.5 text-gray-800 dark:text-gray-100 line-clamp-2 break-words" data-testid="portal-work-title">{{ item.title }}</p>
+    <!-- The title clamps to two lines; when it is actually clipped, a toggle
+         reads the whole sentence in place (trinity#3520: platform notices are
+         one long sentence, and the clamp hid what they said). The toggle sits
+         under the text, so the text opens downward and the control stays put. -->
+    <p
+      :id="titleId"
+      ref="titleEl"
+      class="mt-1.5 text-gray-800 dark:text-gray-100 break-words"
+      :class="titleOpen ? '' : 'line-clamp-2'"
+      data-testid="portal-work-title"
+    >{{ item.title }}</p>
+    <BaseButton
+      v-if="titleClipped || titleOpen"
+      variant="ghost"
+      size="sm"
+      class="-ml-2.5 mt-0.5"
+      :aria-expanded="titleOpen ? 'true' : 'false'"
+      :aria-controls="titleId"
+      data-testid="portal-work-title-toggle"
+      @click="titleOpen = !titleOpen"
+    >{{ titleOpen ? 'Show less' : 'Show more' }}</BaseButton>
     <p v-if="showAgent && item.agent_name" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400 truncate">{{ item.agent_name }}</p>
     <p v-else-if="showAgent && !item.agent_name" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">another agent</p>
 
-    <!-- What it is doing right now: the stream's last line wins while live. -->
-    <p v-if="live && liveStep" class="mt-1.5 text-xs text-gray-600 dark:text-gray-300 truncate" data-testid="portal-work-step">{{ liveStep }}</p>
+    <!-- What it is doing right now (trinity-enterprise#620): ONE row of fixed
+         height, reserved for the whole live life of the card, so a line
+         arriving or changing never grows the card or shifts what is below.
+         A new line slides up over the previous one (a swap under
+         reduced motion); the row is keyed on the line's queue key, so an
+         identical line never re-animates. Empty = no live signal — the card
+         says nothing rather than something invented (AC #3). -->
+    <div v-if="live" class="mt-1.5 relative h-4 overflow-hidden" data-testid="portal-work-activity" aria-live="polite">
+      <Transition name="portal-activity">
+        <p
+          v-if="shownStep"
+          :key="shownStep.key"
+          class="absolute inset-x-0 top-0 h-4 leading-4 text-xs text-gray-600 dark:text-gray-300 truncate"
+          data-testid="portal-work-step"
+        >{{ shownStep.text }}</p>
+      </Transition>
+    </div>
 
     <!-- Steps: the stages, or the honest sentence. -->
     <template v-if="live">
@@ -57,7 +95,26 @@
           <span v-if="holderOf(s)" class="ml-auto shrink-0 text-gray-500 dark:text-gray-400">{{ holderOf(s) }}</span>
         </li>
       </ol>
-      <p v-else-if="steps.kind !== 'pending'" class="mt-1.5 text-xs text-gray-500 dark:text-gray-400" :data-testid="`portal-work-steps-${steps.kind}`">{{ steps.text }}</p>
+      <!-- #2964: in the chat's card (`reserveLiveRows`) the row exists from
+           first paint — blank and aria-hidden while the feed has not read the
+           turn — and holds ONE line, so `pending → none | unknown` swaps the
+           text in place.
+           `w-0 min-w-full`: the row takes the card's width and never sets it,
+           so the sentence cannot widen the card when it lands. -->
+      <!-- #3001: `none` (no stages published) is silent like `pending` — no
+           sentence at all; in the chat's card the reserved row stays, blank,
+           so the card never moves. -->
+      <p
+        v-else-if="!stepsSilent || reserveLiveRows"
+        class="mt-1.5 text-xs text-gray-500 dark:text-gray-400"
+        :class="reserveLiveRows ? 'h-4 leading-4 flex w-0 min-w-full whitespace-nowrap' : ''"
+        :aria-hidden="stepsSilent ? 'true' : undefined"
+        :title="reserveLiveRows && steps.text ? steps.text : undefined"
+        :data-testid="stepsSilent ? 'portal-work-reserved-steps' : `portal-work-steps-${steps.kind}`"
+      >
+        <span v-if="reserveLiveRows" class="truncate">{{ steps.text }}</span>
+        <template v-else>{{ steps.text }}</template>
+      </p>
     </template>
 
     <!-- Delegated work this turn handed on: who holds it now. -->
@@ -74,12 +131,19 @@
     <p v-if="!live && item.outcome === 'lost'" class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">Nothing is watching this any more — it may still finish, but it can't be followed from here.</p>
 
     <div v-if="hasActions" class="mt-2.5 flex flex-wrap items-center gap-2">
+      <!-- #2964: the chat's card holds Stop's slot from first paint — invisible,
+           disabled, aria-hidden and out of the tab order until the 202's id
+           makes a stop possible (ent#155), then the SAME button turns usable,
+           so Open in Work never moves. Other hosts render Stop only when it can be used. -->
       <BaseButton
-        v-if="live && canStop"
+        v-if="live && (canStop || reserveLiveRows)"
         size="sm"
         variant="secondary"
-        :disabled="stopping"
-        :data-testid="`portal-work-stop-${item.id}`"
+        :disabled="stopping || !canStop"
+        :class="canStop ? '' : 'invisible'"
+        :aria-hidden="canStop ? undefined : 'true'"
+        :tabindex="canStop ? undefined : -1"
+        :data-testid="canStop ? `portal-work-stop-${item.id}` : 'portal-work-stop-reserved'"
         @click="$emit('stop', item)"
       >{{ stopping ? 'Stopping…' : 'Stop' }}</BaseButton>
       <BaseButton
@@ -101,8 +165,9 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
+import { createActivityLineQueue } from '@/utils/workActivity'
 import BaseButton from '@/components/base/BaseButton.vue'
 import {
   formatElapsed, holderLine, isHonestTerminal, isLive, kindLabel, stageRows, stepsLine,
@@ -111,7 +176,10 @@ import {
 
 const props = defineProps({
   item: { type: Object, required: true },
-  // The stream's last line (chat only, while streaming).
+  // The activity line's TEXT (#620) — composed by the host through
+  // `resolveActivityText` from the stream (own turn) or the Work read
+  // (every other run). The card owns the motion: minimum display time,
+  // no re-animation on an identical line, the row's fixed height.
   liveStep: { type: String, default: null },
   // Seconds elapsed, driven by the host's clock — see `liveElapsedSeconds`.
   elapsedSeconds: { type: Number, default: null },
@@ -126,17 +194,73 @@ const props = defineProps({
   compact: { type: Boolean, default: false },
   // A room / the tab names the agent; a 1:1 already has its avatar.
   showAgent: { type: Boolean, default: false },
+  // #2964: the chat's live card only. Reserves two rows from first paint so
+  // the card keeps one shape while the turn runs: the steps sentence
+  // (`pending → none | unknown` swaps text in place) and Stop's slot (no id
+  // → id). It does NOT cover `stages ↔ unknown` when a second in-flight row
+  // appears, nor a feed row going stale mid-turn — those are other jumps,
+  // not a reason to widen this flag. Every other host keeps the default.
+  reserveLiveRows: { type: Boolean, default: false },
 })
 defineEmits(['stop', 'open-work', 'ask-about-it'])
 
 const live = computed(() => isLive(props.item))
+
+// ---- the title's fold (trinity#3520) -------------------------------------------
+// Offered only when the two-line clamp actually hides text — measured, and
+// re-measured when the card's width or the title changes. Open survives a
+// refresh of the same item (principle 5) and resets for a different one.
+const titleEl = ref(null)
+const titleOpen = ref(false)
+const titleClipped = ref(false)
+const titleId = computed(() => `portal-work-title-${props.item.id}`)
+function measureTitle() {
+  const el = titleEl.value
+  if (!el || titleOpen.value) return   // open: the toggle stays, so "Show less" is reachable
+  titleClipped.value = el.scrollHeight > el.clientHeight + 1
+}
+let _titleObserver = null
+onMounted(() => {
+  measureTitle()
+  if (typeof ResizeObserver !== 'undefined' && titleEl.value) {
+    _titleObserver = new ResizeObserver(() => measureTitle())
+    _titleObserver.observe(titleEl.value)
+  }
+})
+watch(() => props.item.title, () => nextTick(measureTitle))
+watch(() => props.item.id, () => { titleOpen.value = false; nextTick(measureTitle) })
+watch(titleOpen, (open) => { if (!open) nextTick(measureTitle) })
+onBeforeUnmount(() => { if (_titleObserver) _titleObserver.disconnect() })
+
+// ---- the activity row's motion (#620) ------------------------------------------
+// A burst of tool calls becomes a calm sequence: each line holds for
+// ACTIVITY_MIN_DISPLAY_MS, only the latest pending line is kept, and the
+// queue's key changes only when the TEXT changes. `shownStep` is what the
+// row renders; a 250 ms tick promotes a pending line once the minimum passed.
+const queue = createActivityLineQueue()
+const shownStep = ref(null)
+let _tick = null
+function _sync(next) { shownStep.value = next ? { text: next.text, key: next.key } : null }
+watch(() => (live.value ? props.liveStep : null), (text) => { _sync(queue.offer(text ?? null)) }, { immediate: true })
+watch(live, (isLive) => {
+  if (isLive) {
+    if (!_tick) _tick = setInterval(() => { _sync(queue.tick()) }, 250)
+  } else {
+    if (_tick) { clearInterval(_tick); _tick = null }
+    queue.clear(); _sync(null)   // the line is gone at terminal (AC #8)
+  }
+}, { immediate: true })
+onBeforeUnmount(() => { if (_tick) clearInterval(_tick) })
 const statusWord = computed(() => workStatusLabel(props.item))
 const kindWord = computed(() => kindLabel(props.item.kind))
 const clock = computed(() => (live.value ? formatElapsed(props.elapsedSeconds) : null))
-const steps = computed(() => stepsLine(props.item.steps, props.item.agent_name))
+// #3357: the live activity line and "could not be read" never share a card.
+const steps = computed(() => stepsLine(props.item.steps, { liveSignal: !!shownStep.value }))
+// #3001: `pending` and `none` say nothing — only stages or "could not be read".
+const stepsSilent = computed(() => steps.value.kind === 'pending' || steps.value.kind === 'none')
 const stages = computed(() => stageRows(props.item.steps))
 const askable = computed(() => !live.value && isHonestTerminal(props.item.outcome))
-const hasActions = computed(() => (live.value && props.canStop) || askable.value || props.showOpenInWork)
+const hasActions = computed(() => (live.value && (props.canStop || props.reserveLiveRows)) || askable.value || props.showOpenInWork)
 
 // A stage's holder is the executing agent unless the definition names one;
 // the server masks an off-roster name to null, so null here means "another
@@ -153,8 +277,8 @@ const TERMINAL_DOT = 'block w-2 h-2 rounded-full shrink-0'
 const toneText = computed(() => {
   switch (workTone(props.item)) {
     case 'active': return 'text-action-primary-600 dark:text-action-primary-400'
-    case 'ok': return 'text-status-success-600 dark:text-status-success-400'
-    case 'warn': return 'text-status-warning-600 dark:text-status-warning-400'
+    case 'ok': return 'text-status-success-700 dark:text-status-success-400'
+    case 'warn': return 'text-status-warning-700 dark:text-status-warning-400'
     case 'danger': return 'text-status-danger-600 dark:text-status-danger-400'
     default: return 'text-gray-600 dark:text-gray-300'
   }
@@ -168,8 +292,32 @@ const toneDot = computed(() => {
   }
 })
 function stageGlyph(state) {
-  if (state === 'done') return 'text-status-success-600 dark:text-status-success-400 shrink-0'
+  if (state === 'done') return 'text-status-success-700 dark:text-status-success-400 shrink-0'
   if (state === 'current') return 'text-action-primary-600 dark:text-action-primary-400 shrink-0'
   return 'text-gray-400 shrink-0'
 }
 </script>
+
+<style scoped>
+/* trinity-enterprise#620: the activity line slides up into its fixed row. Both
+   the leaving and the entering line are absolutely positioned inside the
+   `h-4 overflow-hidden` row, so nothing outside it moves. */
+.portal-activity-enter-active,
+.portal-activity-leave-active {
+  transition: transform 180ms ease-out, opacity 180ms ease-out;
+}
+.portal-activity-enter-from {
+  transform: translateY(100%);
+  opacity: 0;
+}
+.portal-activity-leave-to {
+  transform: translateY(-100%);
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .portal-activity-enter-active,
+  .portal-activity-leave-active {
+    transition: none;
+  }
+}
+</style>

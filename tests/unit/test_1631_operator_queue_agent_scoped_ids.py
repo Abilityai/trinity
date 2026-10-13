@@ -140,9 +140,13 @@ def test_mark_acknowledged_is_agent_scoped():
     id_a = db.create_operator_queue_item("agent-f-1631", _item(req_id))
     id_g = db.create_operator_queue_item("agent-g-1631", _item(req_id))
 
-    # Move both to 'responded' so acknowledgement has something to flip.
+    # Move both to 'responded' so acknowledgement has something to flip — and
+    # record the answers as delivered: since #2915 (PR #2989 review) an agent-side
+    # `acknowledged` flips the row only when our answer reached its entry.
     db.respond_to_operator_queue_item(id_a, "approve", None, "1", "op@example.com")
     db.respond_to_operator_queue_item(id_g, "approve", None, "1", "op@example.com")
+    for uid in (id_a, id_g):
+        db.set_operator_queue_delivery_state(uid, "delivered", None, "2026-09-24T09:00:00Z")
 
     # agent-g acknowledges ITS id — only agent-g's row flips. The return is the
     # row's platform uuid (not req_id), which the WS event + frontend key on.
@@ -192,6 +196,11 @@ def test_reserved_prefix_agent_ids_are_rejected_by_sync_loop(monkeypatch):
     db_mock.operator_queue_item_exists.return_value = False
     db_mock.get_operator_queue_responded_for_agent.return_value = []
     db_mock.get_operator_queue_terminal_for_agent.return_value = []
+    # trinity-enterprise#611: the poller creates through the outcome accessor.
+    # Route it through the plain create mock, so every assertion here still
+    # counts the poller's creates and a raising create still raises.
+    db_mock.create_operator_queue_item_with_outcome.side_effect = (
+        lambda agent, item, **kw: (db_mock.create_operator_queue_item(agent, item, **kw), True))
 
     reserved = _item("poison-hijack")
     benign = _item("req-legit")
@@ -222,6 +231,11 @@ def test_reserved_prefix_guard_folds_case_and_whitespace(monkeypatch):
     db_mock.operator_queue_item_exists.return_value = False
     db_mock.get_operator_queue_responded_for_agent.return_value = []
     db_mock.get_operator_queue_terminal_for_agent.return_value = []
+    # trinity-enterprise#611: the poller creates through the outcome accessor.
+    # Route it through the plain create mock, so every assertion here still
+    # counts the poller's creates and a raising create still raises.
+    db_mock.create_operator_queue_item_with_outcome.side_effect = (
+        lambda agent, item, **kw: (db_mock.create_operator_queue_item(agent, item, **kw), True))
 
     lookalikes = [_item(" Poison-x"), _item("SYNC-FAILING-x"), _item("\tgit-bloat-x")]
     svc = _wire_sync(monkeypatch, db_mock, lookalikes)

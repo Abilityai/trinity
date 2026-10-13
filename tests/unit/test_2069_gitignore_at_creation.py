@@ -681,6 +681,45 @@ class TestCreationSpawnWiring:
         spawn.assert_not_called()
 
 
+class TestCreationDbFlagMatchesPredicate:
+    """#3010: the DB `auto_sync_enabled` flag is the ONLY gate the agent's loop
+    obeys, so creation must write it for EXACTLY the `_git_auto_sync_baked`
+    set — ghosts included. The old `and not config.ephemeral` made env and DB
+    disagree at birth; with the OR retired it would silently stop a ghost's
+    auto-push."""
+
+    @pytest.mark.parametrize(
+        "cfg_kw, repo, fork, pat, expected",
+        [
+            (dict(source_mode=False), "o/r", None, "ghp_x", True),
+            (dict(source_mode=True), "o/r", "up/stream", "ghp_x", True),
+            (dict(source_mode=False, ephemeral=True), "o/r", None, "ghp_x", True),
+            (dict(source_mode=True), "o/r", None, "ghp_x", False),
+            (dict(source_mode=False), None, None, None, False),
+            (dict(source_mode=False), "o/r", None, None, False),
+            (dict(source_mode=True, ephemeral=True), "o/r", None, "ghp_x", False),
+        ],
+        ids=["non-source", "fork-to-own", "ghost-non-source", "source-mode",
+             "local", "no-pat", "ghost-source-mode"],
+    )
+    def test_db_flag_written_iff_predicate(self, crud_gs, monkeypatch, cfg_kw, repo, fork, pat, expected):
+        crud, gs = crud_gs
+        monkeypatch.setattr(gs, "materialize_persistent_state", AsyncMock())
+        monkeypatch.setattr(gs, "materialize_data_paths", AsyncMock())
+        monkeypatch.setattr(gs, "spawn_gitignore_merge_after_clone", MagicMock())
+        db = MagicMock()
+        monkeypatch.setattr(crud, "db", db)
+        config = _cfg("a", **cfg_kw)
+
+        _run(crud._materialize_agent_files(config, {}, repo, fork, pat, None, "owner"))
+
+        assert gs._git_auto_sync_baked(config, repo, pat, fork) is expected
+        if expected:
+            db.set_git_auto_sync_enabled.assert_called_once_with("a", True)
+        else:
+            db.set_git_auto_sync_enabled.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # 5. Start/recreate spawn wiring (T1) — AST structural guard
 # ---------------------------------------------------------------------------

@@ -159,9 +159,18 @@ RUN git config --system gc.auto 0 && \
 # `@google/gemini-cli` and `@openai/codex` below resolve their binaries through
 # the same optional-dependency mechanism and carry the same silent-failure risk,
 # and the Go tarball above is hardcoded to linux-amd64.
+#
+# Pinned, never `@latest` (#3012). Docker caches a RUN layer by its text, so
+# `@latest` is resolved once and then reused by every rebuild: an instance
+# rebuilt on 2026-09-24 still shipped 2.1.278, and `claude-opus-5-5` needs
+# >= 2.1.280. The ARG value is part of the layer's cache key, so bumping it is
+# what actually upgrades the CLI. `MODEL_CATALOG[*].min_claude_code`
+# (src/backend/services/model_catalog.py) must not exceed this value;
+# tests/unit/test_3012_claude_code_pin.py fails the build when it does.
+ARG CLAUDE_CODE_VERSION=2.1.281
 RUN set -eu; \
     npm install -g --include=optional --no-ignore-scripts --foreground-scripts \
-        @anthropic-ai/claude-code@latest; \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
     CC_DIR="$(npm root -g)/@anthropic-ai/claude-code"; \
     if ! claude --version >/dev/null 2>&1; then \
         echo "[base-image] claude did not run after npm install: the platform-native optionalDependency did not land. Re-installing it as a direct (non-optional) dependency."; \
@@ -174,8 +183,12 @@ RUN set -eu; \
     fi; \
     claude --version
 
-# Install Gemini CLI for multi-runtime support
-RUN npm install -g @google/gemini-cli
+# Install Gemini CLI for multi-runtime support.
+# Pinned (#2971): an unpinned install took 0.60.0, which rejected the flags the
+# runtime passed. Bump together with GEMINI_CLI_VERSION in
+# agent_server/services/gemini_cli_args.py; the build-time smoke below parses
+# the runtime's real argv against this binary.
+RUN npm install -g @google/gemini-cli@0.62.0
 
 # Install OpenAI Codex CLI for multi-runtime support (#1187).
 # Pinned (not @latest) so base-image rebuilds are reproducible and a
@@ -204,16 +217,13 @@ ENV USER=developer
 USER developer
 WORKDIR /home/developer
 
+# #3106: the build installs EXACT pins (reproducible rebuilds, no unvetted
+# upstream release); startup.sh's per-boot repair uses the floors in
+# agent-server-requirements.txt, so it never downgrades a template's packages.
+COPY --chown=root:root ./agent-image-requirements.txt /opt/trinity/agent-image-requirements.txt
+COPY --chown=root:root ./agent-server-requirements.txt /opt/trinity/agent-server-requirements.txt
 RUN python3 -m pip install --user --upgrade pip && \
-    python3 -m pip install --user \
-        fastapi \
-        uvicorn \
-        httpx \
-        pydantic \
-        python-multipart \
-        pyyaml \
-        rich \
-        cryptography
+    python3 -m pip install --user -r /opt/trinity/agent-image-requirements.txt
 
 RUN mkdir -p /home/developer/.claude-agent
 
@@ -227,7 +237,12 @@ COPY ./hooks/bash-guardrail.py /opt/trinity/hooks/bash-guardrail.py
 COPY ./hooks/file-guardrail.py /opt/trinity/hooks/file-guardrail.py
 COPY ./hooks/output-scanner.py /opt/trinity/hooks/output-scanner.py
 COPY ./hooks/read-only-guard.py /opt/trinity/hooks/read-only-guard.py
+# trinity-enterprise#752: the gated-skill hook (bootstrap + decision).
+COPY ./hooks/skill-gate.py /opt/trinity/hooks/skill-gate.py
+COPY ./hooks/_skill_gate.py /opt/trinity/hooks/_skill_gate.py
 COPY ./hooks/write-runtime-config.py /opt/trinity/hooks/write-runtime-config.py
+# trinity-enterprise#787: build-time smoke for the GUARD-002 registration.
+COPY ./hooks/guard002-smoke.py /opt/trinity/hooks/guard002-smoke.py
 COPY ./hooks/guardrails-baseline.json /opt/trinity/guardrails-baseline.json
 RUN chmod 0555 /opt/trinity/hooks/*.py && \
     chmod 0444 /opt/trinity/guardrails-baseline.json && \
@@ -261,6 +276,24 @@ COPY ./hooks/managed-settings.json /etc/claude-code/managed-settings.json
 RUN chown -R root:root /etc/claude-code && \
     chmod 0755 /etc/claude-code && \
     chmod 0444 /etc/claude-code/managed-settings.json
+
+# trinity-enterprise#752 — the gated-skill hook registers in its OWN drop-in.
+# The CLI validates each `managed-settings.d` file on its own and voids only the
+# file an entry fails in, so a rejected skill-gate entry can never take the
+# GUARD-002 hooks in `managed-settings.json` with it. Same ownership rules as
+# the main file: root:root 0444 in a root-owned 0755 directory.
+#
+# trinity-enterprise#787 — the GUARD-002 hooks in `managed-settings.json` run
+# the same way: exec form (`command` + `args`, so no shell and no
+# `CLAUDE_CODE_SHELL_PREFIX`) under `/usr/bin/env -i HOME=/home/developer
+# /usr/local/bin/python3 -I -S` (no inherited PYTHON*/LD_* variables, no user
+# site), and the file's policy `env` pins `CLAUDE_CODE_SHELL_PREFIX` empty for
+# everything still in shell form.
+RUN mkdir -p /etc/claude-code/managed-settings.d
+COPY ./hooks/managed-settings.d/50-skill-gate.json /etc/claude-code/managed-settings.d/50-skill-gate.json
+RUN chown -R root:root /etc/claude-code/managed-settings.d && \
+    chmod 0755 /etc/claude-code/managed-settings.d && \
+    chmod 0444 /etc/claude-code/managed-settings.d/50-skill-gate.json
 
 # `~/.claude` still belongs to the agent — Claude Code writes its own state there
 # (`.claude/projects/`, plugin cache). What is NO LONGER shipped is a
@@ -321,6 +354,12 @@ COPY --chown=developer:developer ./agent-server.py /app/agent-server.py
 COPY --chown=developer:developer ./agent_server /app/agent_server
 COPY --chown=developer:developer ./startup.sh /app/startup.sh
 RUN chmod +x /app/startup.sh /app/agent-server.py
+# #2971: fail the build if the pinned gemini-cli rejects any argv the runtime builds.
+RUN python3 /app/agent_server/services/gemini_cli_args.py --smoke
+# trinity-enterprise#752: fail the build unless the skill-gate hook imports and
+# decides under the exact interpreter and flags it is registered with — a hook
+# that cannot run lets every gated skill through.
+RUN /usr/local/bin/python3 -I -S /opt/trinity/hooks/skill-gate.py --self-test
 
 # Add /app to Python path so agent_server module can be imported
 ENV PYTHONPATH="/app:${PYTHONPATH}"
@@ -328,6 +367,11 @@ ENV PYTHONPATH="/app:${PYTHONPATH}"
 EXPOSE 22 8000
 
 USER root
+
+# trinity-enterprise#787: fail the build unless every GUARD-002 hook, run exactly
+# as the shipped managed file registers it, denies and allows what it should.
+# Runs before /logs is created for the agent user and removes what it writes.
+RUN /usr/local/bin/python3 -I -S /opt/trinity/hooks/guard002-smoke.py
 
 RUN mkdir -p /workspace /data /logs && \
     chown -R developer:developer /workspace /data /logs && \

@@ -57,6 +57,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from db.write_params import ExecutionResult
 
 # ---------------------------------------------------------------------------
 # Bootstrap: mirror test_1832_duration_clamp.py so `src/backend` imports resolve.
@@ -386,7 +387,7 @@ def test_2434_terminal_write_succeeds_on_a_row_older_than_the_ceiling(ops):
     end — ``max(0, 2_850_000_000)`` is still 2.85 bn."""
     eid = _seed_execution("e2434-terminal", started_at=_ago(days=_OVERFLOW_DAYS))
 
-    assert ops.update_execution_status(eid, "success", response="ok") is True
+    assert ops.update_execution_status(eid, "success", result=ExecutionResult(response="ok")) is True
 
     assert _exec_row(eid) == ("success", None)
 
@@ -395,7 +396,7 @@ def test_2434_terminal_write_still_records_a_real_duration(ops):
     """The ceiling must not flatten measurements — only unrepresentable ones."""
     eid = _seed_execution("e2434-real", started_at=_ago(seconds=5))
 
-    assert ops.update_execution_status(eid, "success", response="ok") is True
+    assert ops.update_execution_status(eid, "success", result=ExecutionResult(response="ok")) is True
 
     status, duration = _exec_row(eid)
     assert status == "success"

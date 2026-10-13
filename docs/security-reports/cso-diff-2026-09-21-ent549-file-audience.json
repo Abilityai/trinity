@@ -1,0 +1,93 @@
+{
+  "version": "1.1",
+  "date": "2026-09-21",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/549-file-audience -> dev",
+  "issue": "abilityai/trinity-enterprise#549",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_tools": 0,
+    "websocket": 0,
+    "docker": "unchanged",
+    "dependencies": "unchanged",
+    "ci": "unchanged",
+    "migrations": 1,
+    "changed_response_surface": "owner shared-files list gains addressed_to / addressed_to_channel (withheld from key-authenticated callers) + audience_source; share_file gains audience_email and returns visible_to_requester / visibility_note"
+  },
+  "findings": [],
+  "fixed_during_audit": [
+    {
+      "severity": "MEDIUM",
+      "title": "channel group turn addressed to the group's unlocker",
+      "found_by": "this audit",
+      "status": "fixed, regression test red under mutation"
+    },
+    {
+      "severity": "MEDIUM",
+      "title": "same-agent delegated child treated as a person's direct turn",
+      "found_by": "independent review",
+      "status": "fixed, regression test red under mutation"
+    },
+    {
+      "severity": "LOW",
+      "title": "zombie running row believed in a multi-human conversation",
+      "found_by": "independent review",
+      "status": "fixed, regression test red under mutation"
+    }
+  ],
+  "appendix": [
+    "bearer download link unchanged by design (AC8)",
+    "override reach and roster oracle identical to the report tool",
+    "residual: a session carrying another conversation's history; closed by a platform-injected execution id (#2392)"
+  ],
+  "supply_chain_summary": {
+    "python": "unchanged",
+    "node": "unchanged"
+  },
+  "filter_stats": {
+    "candidates": 14,
+    "refuted": 8,
+    "excluded_by_rule": 3,
+    "detail": [
+      "rate limiting on the share route — excluded (rule 1)",
+      "roster membership oracle — by design, same as report",
+      "pre-existing: owner list returns signed URLs to an owner-equivalent agent key — not introduced by this diff"
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "mutations": {
+    "total": 33,
+    "killed": 33,
+    "where": "isolated scratch copies"
+  },
+  "trend": {
+    "prior": "cso-diff-2026-09-18-2889-503-skip-laundering",
+    "prior_findings": 0,
+    "this_findings": 0,
+    "direction": "stable"
+  }
+}

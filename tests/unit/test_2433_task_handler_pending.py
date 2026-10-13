@@ -175,7 +175,8 @@ def test_chat_registers_pending_before_lock_wait_and_discards_after():
         session_total_output_tokens=0, session_context_tokens=0, session_context_window=200000,
     )
     request = SimpleNamespace(
-        message="hello", model=None, stream=False, system_prompt=None, execution_id="exec-chat-1"
+        message="hello", model=None, stream=False, system_prompt=None, execution_id="exec-chat-1",
+        isolated_session=False,
     )
     with (
         patch.object(chat_mod, "get_execution_lock", return_value=_Lock()),

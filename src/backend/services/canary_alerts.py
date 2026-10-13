@@ -120,7 +120,8 @@ class CanaryAlerts:
         "G-04": "Credential pattern in backlog metadata",
         "L-03": "Delete cascades",
         "B-01": "Queue accessor drift",
-        "B-02": "Stalled backlog drain",
+        "B-02": "Queued work not picked up",
+        "B-08": "Pull workers not alive",
         "R-01": "Zombie Claude process",
         "H-01": "Canary is blind (collector sees no fleet)",
     }
@@ -223,10 +224,24 @@ class CanaryAlerts:
             "for a cache layer or status-filter regression."
         ),
         "B-02": (
-            "Agent has queued work, free slots, and the drain heartbeat is stale. "
-            "`CapacityManager.run_maintenance()` either stopped firing or stopped "
-            "writing its `canary:drain_tick_at` heartbeat. Check backend logs "
-            "for `[Capacity] maintenance tick failed`."
+            "Push agents (`mode=push`): queued work, free slots, and a stale drain "
+            "heartbeat — `CapacityManager.run_maintenance()` stopped firing or "
+            "stopped writing `canary:drain_tick_at`; check backend logs for "
+            "`[Capacity] maintenance tick failed`. Pull pilots (`mode=pull`, "
+            "#2840): `queued_not_claimed` means a worker sat idle while a row "
+            "waited over 120s — check the agent log for claim errors and whether "
+            "B-08 is also red."
+        ),
+        "B-08": (
+            "A pull pilot's worker pool cannot claim work (#2840). "
+            "`pilot_stopped`: the agent is stopped while work queues for it — "
+            "start it, or remove it from `PULL_MODE_PILOT_AGENTS`. "
+            "`workers_missing`: the container predates the pilot flag (no "
+            "`TRINITY_PULL_MODE=true`) — recreate the agent. `workers_silent`: "
+            "a worker is idle but has not called `/api/internal/next-task` for "
+            "5 minutes — check the agent log for `pull pool started`, "
+            "`pull mode OFF`, and claim errors (a 403 means the agent's MCP key "
+            "no longer matches)."
         ),
         "R-01": (
             "Agent container has a zombie `claude` process that has PERSISTED "
@@ -604,12 +619,46 @@ class CanaryAlerts:
                 obs = v.observed_state or {}
                 agent = _mrkdwn_safe(obs.get("agent_name"))
                 q = obs.get("queued_count", "?")
+                if obs.get("mode") == "pull":
+                    oldest = obs.get("oldest_queued_age_seconds")
+                    oldest_str = "?" if oldest is None else f"{oldest}s"
+                    lines.append(
+                        f"  • *{agent}* (pull, {obs.get('kind', '?')}): queued={q}, "
+                        f"oldest {oldest_str}, idle workers "
+                        f"{obs.get('idle_workers', '?')}/{obs.get('pool_size', '?')}"
+                    )
+                    continue
                 free = obs.get("free_slots", "?")
                 age = obs.get("drain_tick_age_seconds")
                 age_str = "never" if age is None else f"{age}s ago"
                 lines.append(
                     f"  • *{agent}*: queued={q}, free_slots={free}, "
                     f"last drain tick {age_str}"
+                )
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "B-08":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = _mrkdwn_safe(obs.get("agent_name"))
+                if obs.get("kind") == "pilot_stopped":
+                    oldest = obs.get("oldest_queued_age_seconds")
+                    lines.append(
+                        f"  • *{agent}*: stopped, queued={obs.get('queued_count', '?')}, "
+                        f"oldest {'?' if oldest is None else f'{oldest}s'}"
+                    )
+                    continue
+                if obs.get("kind") == "workers_missing":
+                    detail = "container not in pull mode (recreate needed)"
+                else:
+                    silence = obs.get("poll_silence_seconds")
+                    detail = f"no claim attempt for {'?' if silence is None else f'{silence}s'}"
+                lines.append(
+                    f"  • *{agent}*: {detail}, idle workers "
+                    f"{obs.get('idle_workers', '?')}/{obs.get('pool_size', '?')}"
                 )
             if len(violations) > 5:
                 lines.append(f"  • _… +{len(violations) - 5} more_")
@@ -892,9 +941,20 @@ class CanaryAlerts:
             )
         if invariant_id == "B-02":
             agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
+            if all((v.observed_state or {}).get("mode") != "pull" for v in violations):
+                return (
+                    f"{len(agents)} agent(s) have queued work with free slots "
+                    f"and a stale drain tick: {', '.join(agents)[:160]}."
+                )
             return (
-                f"{len(agents)} agent(s) have queued work with free slots "
-                f"and a stale drain tick: {', '.join(agents)[:160]}."
+                f"{len(agents)} agent(s) have queued work that nothing is "
+                f"picking up: {', '.join(agents)[:160]}."
+            )
+        if invariant_id == "B-08":
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
+            return (
+                f"{len(agents)} pull pilot(s) have a worker pool that is not "
+                f"claiming: {', '.join(agents)[:160]}."
             )
         if invariant_id == "R-01":
             agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})

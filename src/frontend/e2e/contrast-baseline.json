@@ -1,0 +1,12 @@
+{
+  "light:dashboard": 13,
+  "light:operations": 3,
+  "light:settings": 6,
+  "light:library": 5,
+  "light:workspace": 9,
+  "dark:dashboard": 4,
+  "dark:operations": 1,
+  "dark:settings": 2,
+  "dark:library": 1,
+  "dark:workspace": 2
+}

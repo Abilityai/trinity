@@ -906,7 +906,7 @@ def _fake_request():
     return types.SimpleNamespace(
         client=types.SimpleNamespace(host="127.0.0.1"),
         headers={},
-        url=types.SimpleNamespace(path="/api/agents/alpha/git/sync"),
+        scope={"path": "/api/agents/alpha/git/sync"},
     )
 
 

@@ -510,6 +510,40 @@ the `fork_to_own` fail-closed fix.
 
 ---
 
+## Retention tab (#1039, trinity-enterprise#671)
+
+Admin-only tab. **Read:** `GET /api/settings/retention` (every edition) — the
+effective `windows` + per-window `sources`, the `quotas` block
+(`metrics_daily_point_cap` → `{value, source}`; a write budget, not a window),
+the #1709 pending approvals and the #2216 `backup` block.
+**Write:** only in an edition whose response says `edition: "enterprise"`, through
+the entitlement-gated managed retention endpoint; Community renders the windows
+read-only under an upgrade hint, and `PUT /api/settings/ops/config` stays the OSS
+write path.
+
+**Field model — `src/frontend/src/utils/retentionFields.js`.** One list drives
+rendering and saving: the six sibling windows, then **Metric points**
+(`metrics_retention_days`, days) and **Metric point quota**
+(`metrics_daily_point_cap`, points / agent / day, "0 = unlimited"), both
+enterprise-only and both env-backed. The view calls four helpers:
+
+| Helper | Rule |
+|---|---|
+| `visibleRetentionFields(retention)` | enterprise-only rows render only when the SAME response says `edition: "enterprise"` — nothing pops in after a second async load |
+| `isEnvSourced(retention, field)` | an env-backed field whose source is `env` renders read-only with a `BaseBadge` "env" naming the variable and what unsetting it does |
+| `retentionFormFromStatus(retention)` | pre-fills the form and is the snapshot Save diffs against |
+| `retentionSaveBody(fields, form, loaded, retention)` | only changed fields; never an env-sourced one; the number as typed (never `parseInt`, which turns `1e22` into `1`) |
+
+Save is disabled until something changed, and the first new edit clears "Saved". A rejected save (a named 422 such as an
+out-of-bounds quota) renders in an `InlineError` beside Save and leaves the form in
+place — it used to replace the whole panel. Tests:
+`src/frontend/tests/unit/retentionFields.spec.js`,
+`tests/unit/test_ent671_retention_metric_rows.py`,
+`src/frontend/e2e/settings-retention-metric-rows.spec.js` (route-mocked, `@smoke`).
+The knobs themselves: [agent-custom-metrics.md](agent-custom-metrics.md).
+
+---
+
 ## Related Flows
 
 - **Downstream**: [template-registry.md](template-registry.md) - Remote registry for the GitHub half of the catalog (TMPL-002)
@@ -606,6 +640,7 @@ the `fork_to_own` fail-closed fix.
 
 | Date | Change |
 |------|--------|
+| 2026-09-29 | **Retention tab (trinity-enterprise#671)**: new section — the `quotas` block, the metric-point rows, the `utils/retentionFields.js` field model (changed-fields-only Save, env-sourced rows read-only, edition-gated rows) and the inline save error. |
 | 2026-08-04 | **TMPL-002 Remote Template Registry (trinity-enterprise#14)**: new section + endpoint table for `GET/PUT/DELETE /api/settings/template-registry`; the TMPL-001 section's *"ent#14 will repoint this seam"* sentence is now past tense and names the constant as the fail-open floor. Full vertical in the new [template-registry.md](template-registry.md). |
 | 2026-03-08 | **AVATAR-003 Default Avatars**: Added Default Avatars card documentation. New UI section (lines 1054-1092), state refs, generateDefaultAvatars() method, test case. Backend endpoint documented in agent-avatars.md. |
 | 2026-03-04 | **TMPL-001 GitHub Templates Configuration**: Added admin UI and API endpoints for configuring which GitHub repos appear as agent templates. New section with data flow, endpoints, service layer, and storage details. Updated overview, entry points, related flows. |

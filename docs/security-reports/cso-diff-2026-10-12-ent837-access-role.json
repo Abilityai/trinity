@@ -1,0 +1,115 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-12",
+  "mode": "daily",
+  "scope": "diff",
+  "base": "origin/dev@411e1d01a",
+  "issue": "abilityai/trinity-enterprise#837",
+  "counts_as_full_run": false,
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_not_applicable_in_diff": [
+    3,
+    4,
+    5,
+    6,
+    8
+  ],
+  "stack_cve_quicklist": [
+    {
+      "component": "all rows",
+      "verdict": "coverage_gap",
+      "reason": "diff changes no dependency, image or workflow; rows not re-assessed"
+    }
+  ],
+  "attack_surface": {
+    "new_oss_endpoints": 0,
+    "changed_oss_endpoints": [
+      "PUT /api/users/{username}/role (now interactive-only, audited)"
+    ],
+    "private_module_endpoints": "reviewed with the private change; not described here",
+    "new_ws_channels": 0,
+    "new_agent_context_ingress": 0,
+    "frontend_surfaces": [
+      "Agent Detail > Access: platform-role select, Give a platform account",
+      "People this agent serves: role labels, share after assign"
+    ]
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "high",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "fixed_in_pr": true,
+      "phase": 7,
+      "category": "authz-admin-gate-machine-keys",
+      "owasp_2025": "A01",
+      "asi": "ASI03",
+      "llm": null,
+      "file": "src/backend/routers/users.py",
+      "title": "Role route admitted trinity-system's key and an admin's user-scoped key",
+      "description": "require_admin alone admits mcp_scope in {None, user, system}; either key could promote any account to admin.",
+      "exploit": "A prompt-injected trinity-system or a leaked admin user-scoped key calls PUT /api/users/<any>/role {role: admin}.",
+      "fix": "reject_non_interactive_principal(current_user) as the first statement; test_837_role_change_audit.py::TestOnlyAPersonChangesARole, mutation-proved."
+    },
+    {
+      "id": 2,
+      "severity": "medium",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "fixed_in_pr": true,
+      "phase": 9,
+      "category": "authz-stale-whitelist-role",
+      "owasp_2025": "A01",
+      "asi": null,
+      "llm": null,
+      "file": "src/backend/routers/users.py",
+      "title": "A demotion could be undone through the whitelist row's stale role",
+      "description": "A role change updated only users.role; the whitelist row kept the old role, which an account created for the address gets again after a re-bind.",
+      "exploit": "A demoted person re-binds the account to another mailbox and signs in with the old address as a new account at the old role.",
+      "fix": "db.cap_whitelist_default_role before every role write: the row is lowered, never raised; TestTheWhitelistRowFollowsTheRole (both directions, write-failure order), mutation-proved."
+    }
+  ],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "Phase 3/4/5 scanners and the Docker pass: the diff changes no dependency, image or workflow",
+    "OSS route census does not walk private-module routes; the private endpoint's gate is pinned by its own suite"
+  ],
+  "out_of_diff_observations": {
+    "count": 1,
+    "routed": "private tracker, for triage (not described here)"
+  },
+  "supply_chain_summary": {
+    "scanner": "none (no dependency changes in the diff)"
+  },
+  "filter_stats": {
+    "candidates": 7,
+    "below_gate_or_excluded": 5,
+    "reported": 2
+  },
+  "totals": {
+    "critical": 0,
+    "high": 1,
+    "medium": 1,
+    "low": 0
+  },
+  "trend": {
+    "previous": "cso-diff-2026-10-09-ent837-workspace-only-role",
+    "resolved": 0,
+    "persistent": 0,
+    "new": 2
+  }
+}

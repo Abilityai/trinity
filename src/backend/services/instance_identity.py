@@ -172,3 +172,29 @@ def get_instance_label() -> Optional[str]:
         return derived
 
     return _label_from_installation_id()
+
+
+def get_instance_id() -> Optional[str]:
+    """This install's durable, unambiguous identity — the full ``installation_id``
+    UUID — or ``None`` when it cannot be read. Never raises.
+
+    The machine counterpart of :func:`get_instance_label` (#3214): the label is
+    a human name that may be absent or shared by two stacks, which is fine for
+    attributing an alert and unsafe for deciding whose data a volume holds. The
+    #1581 orphan sweep stamps this on every agent data volume and reclaims only
+    volumes carrying it, so a second stack on a shared Docker daemon can never
+    read another stack's volumes as its own orphans.
+
+    One source, not a second notion: it is the same id the label's last tier
+    abbreviates, read through the same write-once accessor (ent#545), so two
+    workers resolve the same value. Like that tier it can MINT the id on an
+    install that has none yet; a ``None`` here makes every caller fail closed
+    (no label written, nothing reclaimed).
+    """
+    try:
+        from services.operator_intake_service import get_or_create_installation_id
+        installation_id = (get_or_create_installation_id() or "").strip()
+    except Exception:  # noqa: BLE001 — unresolvable is "no identity", never a raise
+        logger.debug("instance id: installation_id unavailable", exc_info=True)
+        return None
+    return installation_id or None

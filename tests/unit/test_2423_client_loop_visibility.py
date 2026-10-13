@@ -68,7 +68,8 @@ def _sql_like(rows, limit, exclude_triggers):
 def stub_db(monkeypatch, page):
     class _Db:
         def get_agent_executions_summary(self, agent_name, limit=None,
-                                         *, exclude_triggers=None):
+                                         *, exclude_triggers=None, scope_to_viewer=False,
+                                         viewer_email=None):
             return _sql_like(_rows(), limit, exclude_triggers)
 
     monkeypatch.setattr(page, "db", _Db(), raising=False)
@@ -139,7 +140,8 @@ def test_a_loop_heavy_agent_still_shows_its_other_work(page, monkeypatch):
 
     class _Db:
         def get_agent_executions_summary(self, agent_name, limit=None,
-                                         *, exclude_triggers=None):
+                                         *, exclude_triggers=None, scope_to_viewer=False,
+                                         viewer_email=None):
             asked["limit"] = limit
             asked["exclude"] = exclude_triggers
             return _sql_like(loops + chats, limit, exclude_triggers)
@@ -166,7 +168,8 @@ def test_the_client_page_does_not_over_fetch_either(page, monkeypatch):
 
     class _Db:
         def get_agent_executions_summary(self, agent_name, limit=None,
-                                         *, exclude_triggers=None):
+                                         *, exclude_triggers=None, scope_to_viewer=False,
+                                         viewer_email=None):
             asked["limit"] = limit
             return []
 
@@ -188,7 +191,8 @@ def test_last_active_is_scoped_to_what_the_viewer_can_see(page, monkeypatch):
 
     class _Db:
         def get_agent_executions_summary(self, agent_name, limit=None,
-                                         *, exclude_triggers=None):
+                                         *, exclude_triggers=None, scope_to_viewer=False,
+                                         viewer_email=None):
             return _sql_like(rows, limit, exclude_triggers)
 
     monkeypatch.setattr(page, "db", _Db(), raising=False)
@@ -201,7 +205,8 @@ def test_the_client_list_is_still_bounded(page, monkeypatch):
     not disappear."""
     class _Db:
         def get_agent_executions_summary(self, agent_name, limit=None,
-                                         *, exclude_triggers=None):
+                                         *, exclude_triggers=None, scope_to_viewer=False,
+                                         viewer_email=None):
             rows = [{"id": f"c{i}", "status": "success", "triggered_by": "chat",
                      "started_at": f"u{i}", "completed_at": None, "duration_ms": 10,
                      "schedule_id": None} for i in range(200)]
@@ -218,7 +223,8 @@ def test_the_operator_side_asks_for_no_exclusion(page, monkeypatch):
 
     class _Db:
         def get_agent_executions_summary(self, agent_name, limit=None,
-                                         *, exclude_triggers=None):
+                                         *, exclude_triggers=None, scope_to_viewer=False,
+                                         viewer_email=None):
             asked["limit"] = limit
             asked["exclude"] = exclude_triggers
             return []
@@ -257,12 +263,12 @@ def _analytics():
 @pytest.fixture()
 def stub_stats(monkeypatch, page):
     class _Db:
-        def get_agent_analytics(self, agent_name, hours):
+        def get_agent_analytics(self, agent_name, hours, **_scope):
             return _analytics()
 
     monkeypatch.setattr(page, "db", _Db(), raising=False)
     monkeypatch.setattr(page, "portal_db",
-                        type("P", (), {"first_try_stats": staticmethod(lambda a, h: {})})(),
+                        type("P", (), {"first_try_stats": staticmethod(lambda a, h, **_scope: {})})(),
                         raising=False)
 
 
@@ -304,7 +310,7 @@ def test_an_operator_keeps_the_whole_chart(page, stub_stats):
 def test_stats_failure_still_degrades_the_same_way(page, monkeypatch):
     """The unavailable path predates this and must not acquire a new shape."""
     class _Boom:
-        def get_agent_analytics(self, agent_name, hours):
+        def get_agent_analytics(self, agent_name, hours, **_scope):
             raise RuntimeError("analytics down")
 
     monkeypatch.setattr(page, "db", _Boom(), raising=False)
@@ -322,8 +328,8 @@ def test_build_page_threads_the_principal(page):
     import inspect
     src = inspect.getsource(page.build_page)
     assert "is_platform" in inspect.signature(page.build_page).parameters
-    assert "_recent_work(agent_name, is_platform=is_platform)" in src
-    assert "_stats(agent_name, window, is_platform=is_platform)" in src
+    assert "_recent_work(agent_name, is_platform=is_platform, viewer_email=email)" in src
+    assert "_stats(agent_name, window, is_platform=is_platform, viewer_email=email)" in src
 
 
 def test_the_route_passes_who_is_looking(page):
@@ -349,7 +355,7 @@ def test_rates_are_withheld_when_every_row_was_hidden(page, monkeypatch):
     visible work to be broad ABOUT; at exactly zero it stops being broad and
     becomes a contradiction the client cannot resolve.
     """
-    monkeypatch.setattr(page.db, "get_agent_analytics", lambda a, h: {
+    monkeypatch.setattr(page.db, "get_agent_analytics", lambda a, h, **_scope: {
         "window_hours": h, "total_executions": 12, "success_rate": 89.0,
         "timeline": [{"date": "2026-08-30", "total": 12,
                       "by_type": {"Loops": 12}}],
@@ -357,7 +363,7 @@ def test_rates_are_withheld_when_every_row_was_hidden(page, monkeypatch):
         "buckets": ["Loops"],
     }, raising=False)
     monkeypatch.setattr(page.portal_db, "first_try_stats",
-                        lambda a, h: {"terminal": 37, "first_try": 33, "rate": 89.2},
+                        lambda a, h, **_scope: {"terminal": 37, "first_try": 33, "rate": 89.2},
                         raising=False)
 
     out = page._stats("a", page.DEFAULT_WINDOW, is_platform=False)
@@ -374,7 +380,7 @@ def test_rates_are_withheld_when_every_row_was_hidden(page, monkeypatch):
 def test_rates_survive_when_any_visible_work_remains(page, monkeypatch):
     """The suppression is exactly at zero — one surviving row keeps the figures,
     broad as they are."""
-    monkeypatch.setattr(page.db, "get_agent_analytics", lambda a, h: {
+    monkeypatch.setattr(page.db, "get_agent_analytics", lambda a, h, **_scope: {
         "window_hours": h, "total_executions": 13, "success_rate": 89.0,
         "timeline": [{"date": "2026-08-30", "total": 13,
                       "by_type": {"Loops": 12, "Chat": 1}}],
@@ -382,7 +388,7 @@ def test_rates_survive_when_any_visible_work_remains(page, monkeypatch):
         "buckets": ["Loops", "Chat"],
     }, raising=False)
     monkeypatch.setattr(page.portal_db, "first_try_stats",
-                        lambda a, h: {"terminal": 37, "first_try": 33, "rate": 89.2},
+                        lambda a, h, **_scope: {"terminal": 37, "first_try": 33, "rate": 89.2},
                         raising=False)
 
     out = page._stats("a", page.DEFAULT_WINDOW, is_platform=False)
@@ -393,13 +399,13 @@ def test_rates_survive_when_any_visible_work_remains(page, monkeypatch):
 
 def test_an_operator_never_has_rates_withheld(page, monkeypatch):
     """Nothing is hidden from them, so a zero total is a real zero."""
-    monkeypatch.setattr(page.db, "get_agent_analytics", lambda a, h: {
+    monkeypatch.setattr(page.db, "get_agent_analytics", lambda a, h, **_scope: {
         "window_hours": h, "total_executions": 12, "success_rate": 89.0,
         "timeline": [], "by_type": [{"bucket": "Loops", "total": 12}],
         "buckets": ["Loops"],
     }, raising=False)
     monkeypatch.setattr(page.portal_db, "first_try_stats",
-                        lambda a, h: {"terminal": 37, "first_try": 33, "rate": 89.2},
+                        lambda a, h, **_scope: {"terminal": 37, "first_try": 33, "rate": 89.2},
                         raising=False)
     out = page._stats("a", page.DEFAULT_WINDOW, is_platform=True)
     assert out["total_executions"] == 12 and out["success_rate"] == 89.0

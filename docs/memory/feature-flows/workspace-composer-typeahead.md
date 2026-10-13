@@ -211,8 +211,10 @@ boundCandidates(items, 8) → {visible, overflow}                       ← pure
         └─ visible empty AND query !== ''    → popup CLOSES (AC#6)
         │
         ▼
-resolveComposerKey({key, modifiers, isComposing, open, hasActive, …})  ← pure
+resolveComposerKey({key, modifiers, isComposing, open, hasActive, hasReply, …})  ← pure
         │  'move-down' | 'move-up' | 'accept' | 'dismiss' | 'close' | 'send' | 'pass'
+        │  | 'drop-reply' (ent#738: Escape with a "replying to" chip on screen and the
+        │    popup closed — the popup takes the first Escape, the chip the next)
         ▼
 accept → applyTypeaheadInsert(input, trigger, insert)                 ← pure
              insert = '/' ? starterFor(row) : buildMentionToken(row.name)
@@ -247,6 +249,15 @@ on mobile landscape with the keyboard up a flat `max-h-56` clips against a
 composer sitting at ~y=250. Eight rows render, with a counted
 `N more — keep typing to filter` footer (principle 28: bounded viewport, stated
 total).
+
+**Copy says "skills" (trinity-enterprise#754).** The `/` popup's heading reads **Skills**
+(`PortalTypeahead.vue:104`); the screen-reader count says "N further skill(s) are not
+listed and must be asked for by name." (`:110`); the source-empty line is
+`EMPTY_REASON_NO_PLAYBOOKS` = "No skills are available for this agent right now."
+(`portalUtils.js:1057`); the composer placeholder reads `Message <agent>…  ·  / for skills`
+(`PortalConversation.vue:1879`). Data and API names (`agent.playbooks`,
+`filterPlaybookCandidates`) are unchanged. The agent page's own tab is
+[skills-tab.md](skills-tab.md).
 
 `z-30` is the same tier as this component's own agent-picker dropdown and
 strictly below the two `z-40` overlays (mobile nav, files panel) that must cover
@@ -304,7 +315,7 @@ The one genuine *contract* — the mention grammar — is single-sourced by
 | 6 | `filterAgentCandidates` | slug **and** label; substring for shared deployment prefixes; case-insensitivity; self excluded; un-mentionable excluded; `enabled:false → []` (the #2128 gate, tested not grepped) |
 | 7 | `filterPlaybookCandidates` | word-start ranking beating source order; no substring free-for-all; source-empty vs filter-empty |
 | 8 | `typeaheadEmptyMessage` | three distinct statements; room wording; silence without the capability; copy asserts nothing about operator configuration |
-| 9 | `resolveComposerKey` | all 16 Enter modifier combinations (the `.exact` table), open × hasActive × hasCandidates, IME, Tab/Shift+Tab, Escape, caret keys |
+| 9 | `resolveComposerKey` | all 16 Enter modifier combinations (the `.exact` table), open × hasActive × hasCandidates, IME, Tab/Shift+Tab, Escape, caret keys; ent#738 `hasReply` → `drop-reply` only with the popup closed and never under IME |
 | 10 | dismissal | Esc-then-keep-typing stays closed; retype re-arms; a cleared sentinel re-opens (the session-long-dead-feature guard) |
 | 10b | post-pick settle | a mid-sentence pick leaves a re-detectable trigger at the new caret; `dismissAfterInsert` suppresses exactly it; nothing to settle when a separator was appended; editing the name back re-arms |
 | 11 | active index | wrap both ends; no-op on empty; a stale index is **dropped**, not clamped |

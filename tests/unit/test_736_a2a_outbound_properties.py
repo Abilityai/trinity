@@ -528,3 +528,82 @@ def test_P9_an_all_public_answer_is_accepted_and_every_address_is_returned(publi
     assert len(validated.addresses) == len(publics)
     for addr in validated.addresses:
         assert not uv._is_internal_address(ipaddress.ip_address(addr))
+
+
+# =========================================================================== #
+# P10 — the bounded `payment` block is total, bounded and leak-free (#3185)
+#
+# The example-based cases live in `test_3185_a2a_payment_outcome.py`. What a
+# property adds here is coverage of the shapes nobody thinks to write: a
+# requirements object whose `accepts` is a string, whose `resource` is a float,
+# nested to the depth limit, with the credential hidden at an arbitrary leaf.
+# Every one of those arrives from a peer, and all three claims must hold for
+# ALL of them or the block is not a boundary.
+# =========================================================================== #
+@given(requirements=JSON, credential=CREDENTIAL)
+@example(requirements={"accepts": "not-a-list"}, credential="A" * 20)
+@example(requirements={"resource": 1.5}, credential="A" * 20)
+@example(requirements="pay me", credential="A" * 20)
+@example(requirements=None, credential="A" * 20)
+def test_P10_the_payment_block_is_total_bounded_and_never_echoes_the_credential(
+    requirements, credential
+):
+    import json
+
+    # The credential, planted at the one place a hostile peer would put it: in
+    # its own description of what it wants.
+    hostile = requirements
+    if isinstance(hostile, dict):
+        hostile = {**hostile, "error": f"token {credential} is spent",
+                   "resource": {"description": credential}}
+
+    block = a2a_client._bounded_payment_block(
+        hostile, secrets=a2a_client._payment_secrets(credential, None)
+    )
+
+    # Total: never raises, always the same three keys.
+    assert set(block) == {"summary", "x402", "truncated"}
+    assert isinstance(block["truncated"], bool)
+
+    rendered = json.dumps(block)
+    # Bounded: the agent's context cannot be filled by a peer's refusal.
+    assert len(rendered) <= a2a_client.A2A_PAYMENT_BLOCK_MAX_BYTES
+    # Leak-free: in NEITHER encoding, at any depth.
+    assert credential not in rendered
+    # Allowlisted: no peer-chosen top-level key survives.
+    assert set(block["x402"]) <= set(a2a_client._X402_TOP_LEVEL_KEYS)
+
+
+@given(result=JSON, credential=CREDENTIAL)
+@example(result={"status": {"message": {"metadata": {"x402.payment.status": "payment-required"}}}},
+         credential="A" * 20)
+@example(result={"metadata": {"x402.payment.status": 7}}, credential="A" * 20)
+def test_P11_the_in_band_payment_check_is_total_over_any_peer_result(result, credential):
+    """`_raise_for_payment_state` runs on EVERY successful response, before the
+    task parser. A shape it cannot handle would turn a peer's answer into a
+    peer-triggerable 500 — the same class `_parse_task`'s tolerance exists for."""
+    secrets = a2a_client._payment_secrets(credential, None)
+    try:
+        out = a2a_client._raise_for_payment_state(result, secrets)
+    except A2ACallError as exc:
+        # The only permitted escape, and it must still carry a usable outcome.
+        assert exc.reason in {"payment_required", "payment_rejected"}
+        assert credential not in (exc.detail or "")
+        return
+    assert out is None or out == "payment-completed"
+
+
+@given(credential=CREDENTIAL)
+def test_P12_an_arbitrary_header_safe_credential_never_decodes_into_an_in_band_payment(
+    credential,
+):
+    """Decision 29 in property form: only a PaymentPayload-shaped object is
+    announced in-band. A random header-safe credential — which is what the store
+    accepts — must not be, because that would publish an API key as a payment.
+
+    A draw that genuinely IS base64-JSON with `x402Version` + `payload` would be
+    a legitimate token, so the claim is conditional on the shape, not absolute."""
+    decoded = a2a_client._decode_payment_token(credential)
+    if decoded is not None:
+        assert isinstance(decoded.get("x402Version"), int)
+        assert "payload" in decoded

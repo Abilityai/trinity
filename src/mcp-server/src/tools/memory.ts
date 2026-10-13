@@ -40,8 +40,11 @@ export function createMemoryTools(client: TrinityClient, requireApiKey: boolean)
         "record — you never touch email addresses directly.\n\n" +
         "**Write the complete blob**: Read the current memory from the 'What you know about this user' " +
         "block (if present), incorporate the new fact, and write everything back.\n\n" +
-        "**Only works in user-facing sessions** (public link, Slack, Telegram, WhatsApp). " +
-        "Returns an error if called from a scheduled task or agent-to-agent execution.",
+        "**Works in user-facing sessions** (public link, Slack, Telegram, WhatsApp) **and in a " +
+        "scheduled run addressed to one person** (a schedule with `deliver_to_workspace_email` — " +
+        "that person is the seat the run serves, and their memory block is in your prompt). " +
+        "Returns an error from a scheduled run that names no one, or from an agent-to-agent execution. " +
+        "Every write is recorded and the person can see and undo it.",
       parameters: z.object({
         execution_id: z
           .string()

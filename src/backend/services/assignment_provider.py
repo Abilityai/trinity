@@ -51,7 +51,7 @@ produces the *wrong* answer without raising.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Mapping, Optional, Protocol
+from typing import Any, Dict, List, Mapping, Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,41 @@ class AssignmentProvider(Protocol):
         self, agent_name: str, triggered_by: Optional[str]
     ) -> Optional[dict]:
         ...
+
+    # OPTIONAL (ent#638): what ``reader_email`` holds on ``agent_name`` — the
+    # seat decision record's reader gate reads it through ``getattr`` so a
+    # provider that predates it is simply "no answer". Shaped as
+    # ``{"kind": "primary"|"approver"|"collaborator"|"viewer", "role_id": str|None}``
+    # or ``None``; anything else, or a raise, is treated as ``None`` by the
+    # consumer (``services/seat_decision_service.reader_kind``) — never a
+    # wider read. Per-agent in v1: a kind on the agent reads every seat.
+    # def kinds_for(self, agent_name: str, reader_email: str) -> Optional[dict]: ...
+
+    # OPTIONAL (trinity-enterprise#611): the people who fill ``role`` for
+    # ``agent_name`` — how an agent-raised ask addressed ``to:`` a role reaches a
+    # person. Read through ``getattr``: a provider that predates it (or answers
+    # ``None``) leaves the core defaults in force (primary → the agent's owner,
+    # operator → the operators, anything else refused). Shaped as
+    # ``{"emails": [str, ...]}``; unlike ``assignment_for`` these ARE emails —
+    # the value addresses a person, it is never rendered into a prompt.
+    # def people_for(self, agent_name: str, role: str) -> Optional[dict]: ...
+
+    # OPTIONAL (trinity-enterprise#811): which seat ``agent_name`` HOLDS itself or
+    # SERVES through its primary, asked with no triggering user — the readiness
+    # gate, the role card and the objective join ask on their own. Shaped as
+    # ``{"case": "holds"|"serves"|"none", "role_id": str|None, "seats": [str]}``;
+    # seat ids only, never a person. Read through ``getattr`` by
+    # :func:`resolve_seat`, which answers "no seat" for every degraded case.
+    # def seat_for(self, agent_name: str) -> Optional[dict]: ...
+
+    # OPTIONAL (trinity-enterprise#814): the seat a run serves when it is
+    # addressed to ``person_email`` — a shared companion serves several people
+    # and each run serves the one it is for. Shaped as
+    # ``{"role_id": str|None, "source": "holds"|"person"|"primary"|"none"}``;
+    # a seat id, never a person. Read through ``getattr`` by
+    # :func:`resolve_served_seat`, which falls back to :func:`resolve_seat`
+    # (the primary's seat) for a provider that predates it.
+    # def served_seat_for(self, agent_name: str, person_email: str) -> Optional[dict]: ...
 
 
 _provider: Optional[AssignmentProvider] = None
@@ -127,7 +162,19 @@ def _validated(answer: Any, agent_name: str) -> Optional[Dict[str, Any]]:
                 continue
             out[key] = [str(v) for v in value]
         elif key == "proactive_consent":
-            out[key] = bool(value)
+            # A permission statement: only a real bool counts. ``bool("false")``
+            # is True, so coercion turned "not permitted" into "permitted".
+            # Anything else is unresolved, and the renderer fails closed on it.
+            if not isinstance(value, bool):
+                logger.warning(
+                    "[assignment_provider] provider returned %s for "
+                    "'proactive_consent' (expected bool/None); treating as "
+                    "unresolved for %s",
+                    type(value).__name__,
+                    agent_name,
+                )
+                continue
+            out[key] = value
         else:
             if not isinstance(value, str):
                 logger.warning(
@@ -140,6 +187,46 @@ def _validated(answer: Any, agent_name: str) -> Optional[Dict[str, Any]]:
                 continue
             out[key] = value
     return out or None
+
+
+def resolve_role_people(agent_name: str, role: str) -> Optional[List[str]]:
+    """The emails a registered provider says fill ``role`` on ``agent_name``, or
+    ``None`` for no answer (trinity-enterprise#611).
+
+    ``None`` covers every degraded case alike — no provider, a provider without
+    the optional ``people_for`` method, an answer of ``None``, a raise, or a
+    malformed shape — because the caller's fallback is the same for all of them:
+    the core defaults. An empty list is a real answer ("nobody fills it").
+    Addresses are lower-cased, de-duplicated in order, and must look like one.
+    """
+    provider = _provider
+    people_for = getattr(provider, "people_for", None) if provider is not None else None
+    if people_for is None:
+        return None
+    try:
+        answer = people_for(agent_name, role)
+    except Exception:  # noqa: BLE001 — a provider bug must not break a create
+        logger.warning(
+            "[assignment_provider] provider.people_for failed for %s/%s; "
+            "using the core defaults", agent_name, role, exc_info=True,
+        )
+        return None
+    if answer is None:
+        return None
+    emails = answer.get("emails") if isinstance(answer, Mapping) else None
+    if not isinstance(emails, (list, tuple)):
+        logger.warning(
+            "[assignment_provider] provider.people_for returned %s for %s/%s "
+            "(expected {'emails': [...]}); using the core defaults",
+            type(answer).__name__, agent_name, role,
+        )
+        return None
+    out: List[str] = []
+    for value in emails:
+        email = value.strip().lower() if isinstance(value, str) else ""
+        if "@" in email and email not in out:
+            out.append(email)
+    return out
 
 
 def resolve_assignment(
@@ -168,3 +255,101 @@ def resolve_assignment(
         )
         return None
     return _validated(answer, agent_name)
+
+
+#: The answer :func:`resolve_seat` gives when nothing better is known.
+SEAT_CASES = ("holds", "serves", "none")
+
+
+def _no_seat(reason: str) -> Dict[str, Any]:
+    return {"case": "none", "role_id": None, "seats": [], "reason": reason}
+
+
+def resolve_seat(agent_name: Optional[str]) -> Dict[str, Any]:
+    """Which seat ``agent_name`` holds or serves (trinity-enterprise#811).
+
+    Always a dict, never ``None`` and never a raise: the callers (the readiness
+    gate above all) must treat ambiguity as "no seat", and a caller that had to
+    tell ``None`` from a dict would be one more place to get that wrong.
+
+    ``{"case", "role_id", "seats", "reason"}``. ``reason`` is ``"provider"`` when
+    a registered provider answered, else why the answer is "no seat":
+    ``no_agent`` / ``no_provider`` / ``unsupported`` (a provider without
+    ``seat_for``) / ``no_answer`` / ``error`` / ``malformed``.
+    """
+    if not agent_name:
+        return _no_seat("no_agent")
+    provider = _provider
+    if provider is None:
+        return _no_seat("no_provider")
+    seat_for = getattr(provider, "seat_for", None)
+    if seat_for is None:
+        return _no_seat("unsupported")
+    try:
+        answer = seat_for(agent_name)
+    except Exception:  # noqa: BLE001 — a provider bug must never break a gate
+        logger.warning("[assignment_provider] provider.seat_for failed for %s; "
+                       "answering no seat", agent_name, exc_info=True)
+        return _no_seat("error")
+    if answer is None:
+        return _no_seat("no_answer")
+    if not isinstance(answer, Mapping):
+        return _no_seat("malformed")
+    case = answer.get("case")
+    role_id = answer.get("role_id")
+    seats = answer.get("seats")
+    if (case not in SEAT_CASES
+            or (role_id is not None and not isinstance(role_id, str))
+            or (case != "none" and not role_id)
+            or not isinstance(seats, (list, tuple))
+            or not all(isinstance(v, str) for v in seats)):
+        logger.warning("[assignment_provider] provider.seat_for returned a malformed "
+                       "answer for %s; answering no seat", agent_name)
+        return _no_seat("malformed")
+    if case == "none":
+        role_id = None
+    return {"case": case, "role_id": role_id, "seats": list(seats), "reason": "provider"}
+
+
+#: Where a served seat came from (trinity-enterprise#814).
+SERVED_SOURCES = ("holds", "person", "primary", "none")
+
+
+def resolve_served_seat(agent_name: Optional[str], person_email: Optional[str]) -> Dict[str, Any]:
+    """The seat a run addressed to ``person_email`` serves (trinity-enterprise#814).
+
+    Always ``{"role_id", "source"}``, never a raise. The person's own
+    assignment row decides; the agent's own seat (``holds``) wins over it, and
+    the primary's seat is the fallback — which is also the whole answer when
+    no person is known or the provider predates ``served_seat_for``.
+    """
+    def _fallback() -> Dict[str, Any]:
+        seat = resolve_seat(agent_name)
+        if seat["case"] == "holds":
+            return {"role_id": seat["role_id"], "source": "holds"}
+        if seat["case"] == "serves":
+            return {"role_id": seat["role_id"], "source": "primary"}
+        return {"role_id": None, "source": "none"}
+
+    email = (person_email or "").strip().lower()
+    provider = _provider
+    fn = getattr(provider, "served_seat_for", None) if provider is not None else None
+    if not agent_name or not email or fn is None:
+        return _fallback()
+    try:
+        answer = fn(agent_name, email)
+    except Exception:  # noqa: BLE001 — a provider bug must never break a turn
+        logger.warning("[assignment_provider] provider.served_seat_for failed for %s; "
+                       "falling back to the primary's seat", agent_name, exc_info=True)
+        return _fallback()
+    if answer is None:
+        return _fallback()
+    if (not isinstance(answer, Mapping)
+            or answer.get("source") not in SERVED_SOURCES
+            or (answer.get("role_id") is not None and not isinstance(answer.get("role_id"), str))
+            or (answer.get("source") != "none" and not answer.get("role_id"))):
+        logger.warning("[assignment_provider] provider.served_seat_for returned a malformed "
+                       "answer for %s; falling back to the primary's seat", agent_name)
+        return _fallback()
+    source = answer["source"]
+    return {"role_id": answer.get("role_id") if source != "none" else None, "source": source}

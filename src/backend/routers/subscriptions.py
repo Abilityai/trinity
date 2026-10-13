@@ -139,7 +139,7 @@ async def register_subscription(
             await adopt_for_credentialless_agents(
                 actor_user=current_user,
                 actor_ip=http_request.client.host if http_request.client else None,
-                endpoint=str(http_request.url.path),
+                endpoint=http_request.scope["path"],
                 request_id=getattr(http_request.state, "request_id", None),
             )
         except Exception as e:
@@ -505,7 +505,7 @@ async def _log_subscription_assignment(
         actor_ip=request.client.host if request is not None and request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path) if request is not None else None,
+        endpoint=request.scope["path"] if request is not None else None,
         request_id=getattr(request.state, "request_id", None) if request is not None else None,
         details=details,
     )

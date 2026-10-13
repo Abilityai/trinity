@@ -19,6 +19,7 @@
  *     spawn a tab would leave the original tab on a URL nobody asked for.
  */
 import { describe, it, expect } from 'vitest'
+import { buildNavLinks } from '../../src/utils/navLinks.js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
@@ -41,14 +42,43 @@ function linkAt(source, marker) {
 }
 
 describe('the NavBar Workspace entry', () => {
-  const link = linkAt(NAVBAR, 'to="/workspace"')
+  // #1925 turned the nav row into a priority+ strip, so the same link is
+  // rendered three times (inline, overflow menu, hidden mirror) from one data
+  // source. The attributes moved out of the template with it — pinning them
+  // against the SFC's text now would pin whichever of the three copies happened
+  // to be matched first, so they are read from the source of truth instead.
+  const link = buildNavLinks({ path: '/' }).find((l) => l.id === 'workspace')
+
+  it('exists', () => {
+    expect(link).toBeTruthy()
+    expect(link.to).toBe('/workspace')
+  })
 
   it('opens a new tab', () => {
-    expect(link).toMatch(/target="_blank"/)
+    expect(link.target).toBe('_blank')
   })
 
   it('carries rel="noopener"', () => {
-    expect(link).toMatch(/rel="[^"]*noopener/)
+    expect(link.rel).toMatch(/noopener/)
+  })
+
+  it('is the ONLY nav entry that leaves the console tab', () => {
+    const blank = buildNavLinks({ path: '/', hasAnyEnterprise: true })
+      .filter((l) => l.target === '_blank')
+      .map((l) => l.id)
+    expect(blank).toEqual(['workspace'])
+  })
+
+  it('and the strip actually binds those fields onto its links', () => {
+    // The half a data-driven refactor can get wrong: correct data that never
+    // reaches the DOM. Every row that renders a link must bind both.
+    const rows = NAVBAR.match(/<router-link[\s\S]*?>/g) || []
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      if (!/v-for="link in/.test(row)) continue
+      expect(row).toMatch(/:target="link\.target"/)
+      expect(row).toMatch(/:rel="link\.rel"/)
+    }
   })
 })
 

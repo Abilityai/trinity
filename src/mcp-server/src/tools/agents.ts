@@ -5,9 +5,71 @@
  */
 
 import { z } from "zod";
-import { TrinityClient } from "../client.js";
-import type { McpAuthContext } from "../types.js";
+import { ApiError, TrinityClient } from "../client.js";
+import type { McpAuthContext, StartAgentResult } from "../types.js";
+import { accessDenied } from "../access.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
+
+/** Statuses of a start's skill delivery that need no follow-up line. */
+const QUIET_SKILL_STATUSES = new Set(["success", "skipped"]);
+/** Per-skill outcomes that mean the package is on the agent. */
+// `unassigned_meanwhile`: unassigned mid-start, correctly not installed — not a problem.
+const DELIVERED = new Set(["injected", "unchanged", "fallback", "unassigned_meanwhile"]);
+
+/**
+ * #2991: the skill-delivery part of a start, as text an agent can act on.
+ * Empty for a clean delivery or a no-op (no skills, or an already-running
+ * container) — the start message alone then says everything.
+ */
+export function skillsDeliveryLines(result: StartAgentResult): string[] {
+  const status = result.skills_injection ?? "unknown";
+  const detail = result.skills_result ?? { status };
+  const problems = Object.entries(detail.skills ?? {}).filter(([, s]) => !DELIVERED.has(s.status));
+  const conflicts = detail.conflicts ?? [];
+  if (QUIET_SKILL_STATUSES.has(status) && problems.length === 0 && conflicts.length === 0) return [];
+  const reason = detail.reason ? ` (${detail.reason})` : "";
+  const lines = [`Skills delivery: ${status}${reason}`];
+  for (const [skill, s] of problems) {
+    lines.push(`- ${skill}: ${s.status}${s.code ? ` (${s.code})` : ""}`);
+  }
+  for (const skill of conflicts) {
+    if (!problems.some(([n]) => n === skill)) lines.push(`- ${skill}: conflict`);
+  }
+  return lines;
+}
+
+/**
+ * #3435: the scopes that may see the three credential-portability tools. An
+ * ALLOW-list (#848 — a null or unknown scope fails closed), equal to what the
+ * backend admits: import/export take `get_owned_agent_by_name` +
+ * `reject_agent_principal`, the key takes `require_admin`; both refuse every
+ * agent-scoped key, so an agent session is never shown a tool it cannot call.
+ */
+const CREDENTIAL_TOOL_SCOPES: ReadonlySet<string> = new Set(["user", "system"]);
+const credentialToolAccess = (auth: any): boolean => CREDENTIAL_TOOL_SCOPES.has(auth?.scope ?? "");
+
+/**
+ * #3435: a backend 403 on a credential tool, as a typed envelope stamped
+ * `denied` on the audit row (#2807). Only the backend `detail` is copied — never
+ * a body: a 403 without a JSON `detail` (a proxy or WAF page) gets a fixed
+ * sentence. Every other failure (400/404/503, transport) is rethrown unchanged.
+ */
+function credentialRefusal(error: unknown, context: { session?: McpAuthContext } | undefined): string {
+  if (!(error instanceof ApiError) || error.status !== 403) throw error;
+  let detail = "Access denied (HTTP 403)";
+  try {
+    const parsed = JSON.parse(error.body);
+    if (typeof parsed?.detail === "string") detail = parsed.detail;
+  } catch {
+    // not JSON — keep the fixed sentence; the body is never echoed
+  }
+  const flag = /human-only/i.test(detail)
+    ? "human_only"
+    : /admin access required/i.test(detail)
+      ? "admin_only"
+      : "not_authorized";
+  return accessDenied(context, { success: false, error: detail, [flag]: true });
+}
 
 /**
  * Create agent management tools with the given client
@@ -128,11 +190,11 @@ export function createAgentTools(
 
             if (!permittedAgents.includes(name)) {
               console.log(`[get_agent_info] Agent '${callerAgentName}' denied access to '${name}' (not permitted)`);
-              return JSON.stringify({
+              return accessDenied(context, {
                 error: "Access denied",
                 reason: `Agent '${callerAgentName}' does not have permission to access '${name}'`,
                 hint: "Request permission from the agent owner or use the agent permissions API",
-              }, null, 2);
+              });
             }
           }
 
@@ -178,11 +240,11 @@ export function createAgentTools(
           if (agent_name !== callerAgentName) {
             const permittedAgents = await apiClient.getPermittedAgents(callerAgentName);
             if (!permittedAgents.includes(agent_name)) {
-              return JSON.stringify({
+              return accessDenied(context, {
                 success: false,
                 error: "Access denied",
                 reason: `Agent '${callerAgentName}' does not have permission to access '${agent_name}'`,
-              }, null, 2);
+              });
             }
           }
         }
@@ -208,6 +270,7 @@ export function createAgentTools(
       name: "create_agent",
       description:
         "Create a new agent in the Trinity platform. " +
+        "With an agent key, this needs the agent-management permission an instance admin grants (ephemeral helpers excepted); without it the call is refused with `agent_management_not_permitted`. " +
         "You can create agents from: (1) any GitHub repo using 'github:owner/repo' format (PAT must have access), " +
         "(2) pre-defined templates from list_templates, or (3) local templates. " +
         "The agent will be started automatically after creation.",
@@ -259,6 +322,17 @@ export function createAgentTools(
             "Branch to track for this agent. Default: 'main'. " +
             "Can also be specified in template URL as 'github:owner/repo@branch'."
           ),
+        kind: z
+          .enum(["agent", "deployment"])
+          .optional()
+          .describe(
+            "What is being created from a 'github:owner/repo' template (trinity-enterprise#705). " +
+            "'agent' (default when omitted): the repository IS the agent — it gets a working branch it " +
+            "alone writes, auto-sync on and schedules paused while sync fails, but only when the repo is owned by the " +
+            "creator's own GitHub account (not a catalog template) and their own token (not the platform-wide one) can push to it; " +
+            "otherwise it is created pull-only and the response's git_mode " +
+            "says why. 'deployment': a deployment of a codebase — pull-only, no auto-push."
+          ),
         import_intent: z
           .enum(["copy", "clone"])
           .optional()
@@ -309,6 +383,7 @@ export function createAgentTools(
           mcp_servers?: string[];
           custom_instructions?: string;
           source_branch?: string;
+          kind?: "agent" | "deployment";
           import_intent?: "copy" | "clone";
           ephemeral?: { max_executions?: number; ttl_seconds?: number };
         },
@@ -327,6 +402,7 @@ export function createAgentTools(
           mcp_servers: args.mcp_servers,
           custom_instructions: args.custom_instructions,
           source_branch: args.source_branch,
+          kind: args.kind,
           import_intent: args.import_intent,
           ephemeral: args.ephemeral,
         };
@@ -421,6 +497,7 @@ export function createAgentTools(
       name: "delete_agent",
       description:
         "Delete an agent from the Trinity platform (owner or admin). " +
+        "With an agent key, this needs the agent-management permission an instance admin grants (ephemeral helpers excepted); without it the call is refused with `agent_management_not_permitted`. " +
         "Durable agents are SOFT-deleted: the container is removed but data is " +
         "recoverable by an admin until the retention window (default 180d) expires. " +
         "Ephemeral 'ghost' agents are HARD-discarded immediately: container, storage, " +
@@ -458,7 +535,11 @@ export function createAgentTools(
       description:
         "Start a stopped agent. " +
         "Use this to restart an agent that was previously stopped. " +
-        "The agent must already exist in the platform.",
+        "The agent must already exist in the platform. " +
+        "The first line is the start message; when its assigned skills did not all land cleanly, the " +
+        "lines after it give the skills delivery status and one line per skill that was not delivered " +
+        "(`conflict` = the agent has its own skill of that name, which runs; the library copy was not " +
+        "installed). No extra lines means the skills landed or there was nothing to deliver.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to start"),
       }),
@@ -466,7 +547,7 @@ export function createAgentTools(
         const authContext = context?.session;
         const apiClient = getClient(authContext);
         const result = await apiClient.startAgent(name);
-        return result.message;
+        return [result.message, ...skillsDeliveryLines(result)].join("\n");
       },
     },
 
@@ -576,18 +657,26 @@ export function createAgentTools(
         "Reads .env and .mcp.json from the agent, encrypts them, and writes .credentials.enc " +
         "to the agent's workspace. This file can be committed to git for portable credential storage. " +
         "Requires CREDENTIAL_ENCRYPTION_KEY to be configured on the backend. " +
-        "The agent must be running.",
+        "The agent must be running. " +
+        "WHO MAY CALL: the agent's owner or an admin, with a user-scoped or system-scoped key, or a signed-in session; " +
+        "agent-scoped keys can never call it (human-only), so agent sessions are not shown it. " +
+        "A refusal returns {success:false, error, human_only|not_authorized}.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to export credentials from"),
       }),
+      canAccess: credentialToolAccess,
       execute: async ({ name }: { name: string }, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
 
         console.log(`[export_credentials] Exporting credentials from agent '${name}'`);
 
-        const result = await apiClient.exportCredentials(name);
-        return JSON.stringify(result, null, 2);
+        try {
+          const result = await apiClient.exportCredentials(name);
+          return JSON.stringify(result, null, 2);
+        } catch (error) {
+          return credentialRefusal(error, context);
+        }
       },
     },
 
@@ -601,19 +690,27 @@ export function createAgentTools(
         "Reads .credentials.enc from the agent's workspace, decrypts it, and writes " +
         "the credential files (.env, .mcp.json, etc.) to the workspace. " +
         "This is useful after cloning an agent's git repo. " +
-        "Requires CREDENTIAL_ENCRYPTION_KEY to be configured on the backend. " +
-        "The agent must be running.",
+        "Requires CREDENTIAL_ENCRYPTION_KEY to be configured on the backend (the same key " +
+        "that encrypted the file). The agent must be running. " +
+        "WHO MAY CALL: the agent's owner or an admin, with a user-scoped or system-scoped key, or a signed-in session; " +
+        "agent-scoped keys can never call it (human-only), so agent sessions are not shown it. " +
+        "A refusal returns {success:false, error, human_only|not_authorized}.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to import credentials into"),
       }),
+      canAccess: credentialToolAccess,
       execute: async ({ name }: { name: string }, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
 
         console.log(`[import_credentials] Importing credentials into agent '${name}'`);
 
-        const result = await apiClient.importCredentials(name);
-        return JSON.stringify(result, null, 2);
+        try {
+          const result = await apiClient.importCredentials(name);
+          return JSON.stringify(result, null, 2);
+        } catch (error) {
+          return credentialRefusal(error, context);
+        }
       },
     },
 
@@ -684,13 +781,21 @@ export function createAgentTools(
         "This allows local agents to encrypt/decrypt .credentials.enc files themselves, " +
         "enabling portable agents that work both locally and on Trinity. " +
         "Returns the key as a hex string (64 chars for AES-256). " +
-        "SECURITY: Store securely and never commit to git.",
+        "SECURITY: Store securely and never commit to git. " +
+        "WHO MAY CALL: an administrator only, with a user-scoped or system-scoped key, or a signed-in session; " +
+        "agent-scoped keys can never call it (human-only), so agent sessions are not shown it. " +
+        "A refusal returns {success:false, error, admin_only|human_only}.",
       parameters: z.object({}),
+      canAccess: credentialToolAccess,
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
-        const result = await apiClient.getEncryptionKey();
-        return JSON.stringify(result, null, 2);
+        try {
+          const result = await apiClient.getEncryptionKey();
+          return JSON.stringify(result, null, 2);
+        } catch (error) {
+          return credentialRefusal(error, context);
+        }
       },
     },
 
@@ -736,42 +841,47 @@ export function createAgentTools(
     // ========================================================================
     deployLocalAgent: {
       name: "deploy_local_agent",
+      // #3234: Claude Code shows a model only the first 2,048 characters of a
+      // tool description; parameter descriptions are not cut. The packaging
+      // recipe therefore lives on `archive`, and the rules come first here.
       description:
         "Deploy a Trinity-compatible local agent to the remote Trinity platform. " +
-        "IMPORTANT: the calling agent must package the directory locally AND embed an integrity manifest (#2060) before calling this tool. " +
-        "Steps for the calling agent: " +
-        "1. Write the manifest INTO the agent directory (it ships inside the archive) — run from the agent directory: " +
-        "`python3 -c \"import hashlib,json,os; ex={'.git','node_modules','__pycache__','.venv'}; es=[]\n" +
-        "for dp,dn,fn in os.walk('.'):\n" +
-        " dn[:]=[d for d in dn if d not in ex]\n" +
-        " for d in list(dn):\n" +
-        "  p=os.path.join(dp,d)\n" +
-        "  if os.path.islink(p): es.append({'path':os.path.relpath(p,'.'),'link_target':os.readlink(p)}); dn.remove(d)\n" +
-        " for f in fn:\n" +
-        "  p=os.path.join(dp,f); r=os.path.relpath(p,'.')\n" +
-        "  if r=='.trinity-manifest.json' or f.startswith('._'): continue\n" +
-        "  if os.path.islink(p): es.append({'path':r,'link_target':os.readlink(p)})\n" +
-        "  elif os.path.isfile(p): es.append({'path':r,'sha256':hashlib.sha256(open(p,'rb').read()).hexdigest()})\n" +
-        "json.dump(es,open('.trinity-manifest.json','w'))\"` " +
-        "(files carry sha256, symlinks carry link_target, dirs omitted; the manifest never lists itself). " +
-        "2. Create the archive with the SAME excludes: `COPYFILE_DISABLE=1 tar -czf agent.tar.gz --exclude='.git' --exclude='node_modules' --exclude='__pycache__' --exclude='.venv' -C /path/to agent-dir` " +
-        "(COPYFILE_DISABLE=1 prevents macOS '._*' AppleDouble pollution; such members are skipped server-side with a warning). " +
-        "3. Base64 encode: `base64 -i agent.tar.gz` (macOS) or `base64 agent.tar.gz` (Linux) " +
-        "4. Call this tool with the base64 archive. " +
+        "With an agent key, this needs the agent-management permission an instance admin grants (ephemeral helpers excepted); without it the call is refused with `agent_management_not_permitted`. " +
+        "IMPORTANT: package the directory locally AND embed an integrity manifest (.trinity-manifest.json, #2060) BEFORE calling — " +
+        "follow the exact four steps in the `archive` parameter (manifest script, COPYFILE_DISABLE=1 tar with the same excludes, base64, call). " +
         "The backend verifies the extracted tree against the embedded manifest and REFUSES drift (400 MANIFEST_DRIFT naming missing/altered/extra paths) — a pruned or mangled archive can never deploy silently; a missing manifest is refused (MANIFEST_REQUIRED). " +
-        "In-root symlinks are preserved end to end; symlinks escaping the archive root are refused. " +
-        "Caps: 50 MB compressed, 500 MB extracted, 10000 files. " +
         "HONEST CEILING: the archive rides this tool call's arguments, which are token-bound (~100-200 KB of base64 per turn in practice). Deploy LARGER agents from bash instead — `pip install trinity-cli && trinity deploy .` or curl POST /api/agents/deploy-local — same endpoint, same manifest verification, no token ceiling. " +
         "The archive must contain a template.yaml with 'name' and 'resources' fields. " +
         "Include .env and other credential files in the archive — they are deployed as-is. " +
+        "In-root symlinks are preserved end to end; symlinks escaping the archive root are refused. " +
+        "Caps: 50 MB compressed, 500 MB extracted, 10000 files. " +
         "If agent name exists, creates new version (my-agent-2) and stops old one. " +
         "Transport retries of the identical call are idempotent (an Idempotency-Key is derived from the arguments); re-running the packaging pipeline produces new bytes and deliberately deploys a new version.",
       parameters: z.object({
         archive: z
           .string()
           .describe(
-            "Base64-encoded tar.gz archive of the agent directory, with .trinity-manifest.json embedded (see tool description). " +
+            "Base64-encoded tar.gz archive of the agent directory, with .trinity-manifest.json embedded. " +
             "The archive should contain the agent files at the root level (template.yaml, CLAUDE.md, .env, etc.). " +
+            "Steps: " +
+            "1. Write the manifest INTO the agent directory (it ships inside the archive) — run from the agent directory: " +
+            "`python3 -c \"import hashlib,json,os; ex={'.git','node_modules','__pycache__','.venv'}; es=[]\n" +
+            "for dp,dn,fn in os.walk('.'):\n" +
+            " dn[:]=[d for d in dn if d not in ex]\n" +
+            " for d in list(dn):\n" +
+            "  p=os.path.join(dp,d)\n" +
+            "  if os.path.islink(p): es.append({'path':os.path.relpath(p,'.'),'link_target':os.readlink(p)}); dn.remove(d)\n" +
+            " for f in fn:\n" +
+            "  p=os.path.join(dp,f); r=os.path.relpath(p,'.')\n" +
+            "  if r=='.trinity-manifest.json' or f.startswith('._'): continue\n" +
+            "  if os.path.islink(p): es.append({'path':r,'link_target':os.readlink(p)})\n" +
+            "  elif os.path.isfile(p): es.append({'path':r,'sha256':hashlib.sha256(open(p,'rb').read()).hexdigest()})\n" +
+            "json.dump(es,open('.trinity-manifest.json','w'))\"` " +
+            "(files carry sha256, symlinks carry link_target, dirs omitted; the manifest never lists itself). " +
+            "2. Create the archive with the SAME excludes: `COPYFILE_DISABLE=1 tar -czf agent.tar.gz --exclude='.git' --exclude='node_modules' --exclude='__pycache__' --exclude='.venv' -C /path/to agent-dir` " +
+            "(COPYFILE_DISABLE=1 prevents macOS '._*' AppleDouble pollution; such members are skipped server-side with a warning). " +
+            "3. Base64 encode: `base64 -i agent.tar.gz` (macOS) or `base64 agent.tar.gz` (Linux). " +
+            "4. Pass the base64 string here. " +
             "Exclude .git, node_modules, __pycache__, and .venv from the archive."
           ),
         name: z

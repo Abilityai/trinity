@@ -48,14 +48,14 @@ After a scheduled task completes successfully (technical status), an optional va
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `validation_enabled` | bool | false | Enable post-execution validation |
-| `validation_prompt` | text | null | Custom auditor prompt (uses default if null) |
+| `validation_prompt` | text | null | Custom auditor instructions (uses default if null). Framed with the run's task + response unless it is a full template naming `{execution_response}` (#2959) |
 | `validation_timeout_seconds` | int | 120 | Timeout for validation execution |
 
 ### Execution Fields (validation tracking)
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `business_status` | enum | pending_validation, validated, failed_validation, skipped |
+| `business_status` | enum | pending_validation, validated, failed_validation, validation_unavailable, skipped |
 | `validated_at` | timestamp | When validation completed |
 | `validation_execution_id` | FK | Points to the validation execution record |
 | `validates_execution_id` | FK | Set on validation execution, points back to original |
@@ -68,6 +68,7 @@ class BusinessStatus(str, Enum):
     VALIDATED = "validated"                    # Validation passed
     FAILED_VALIDATION = "failed_validation"    # Validation failed
     SKIPPED = "skipped"                        # Validation not configured
+    VALIDATION_UNAVAILABLE = "validation_unavailable"  # Empty response — nothing to inspect (#2959)
 ```
 
 ## Key Files
@@ -116,6 +117,11 @@ the previous execution successfully completed its intended work.
 }
 ```
 
+### What the validator is shown (#2959)
+
+- **Response window**: up to 16,000 characters verbatim. A longer response keeps the first 4,000 and the **last 12,000** with an omission marker between them — a run's status line is its last line, so it must survive truncation (it used to be cut to the first 10,000).
+- **Custom `validation_prompt`**: treated as auditor *instructions*. Unless it names `{execution_response}`, it is wrapped in a frame carrying the original task and the response (`_CUSTOM_INSTRUCTIONS_FRAME`). Before #2959 a custom prompt replaced the whole template, so a prompt without the placeholder sent the validator nothing to inspect. A full template is still honoured; literal braces in it fall back to plain substitution instead of raising.
+
 ## Response Parsing
 
 The service parses validation responses with fallback:
@@ -130,6 +136,7 @@ The service parses validation responses with fallback:
 1. **Scheduler completes execution** successfully (status=completed)
 2. **Check `validation_enabled`** on schedule
 3. **Call backend** `POST /api/internal/validate-execution`
+   - **Empty response** (empty or whitespace-only): record `business_status = validation_unavailable` and stop — no referee, no validator execution, no operator-queue item. It is never a pass and never `failed_validation` (#2959, maintainer decision)
 4. **Backend creates** validation execution record (linked via `validates_execution_id`)
 5. **Build auditor prompt** with original message + execution response
 6. **Run validation** via TaskExecutionService (clean context)
@@ -139,7 +146,7 @@ The service parses validation responses with fallback:
 
 ## Operator Queue Integration
 
-When validation fails:
+When validation fails (FAIL or PARTIAL verdict; never for `validation_unavailable`):
 
 ```json
 {

@@ -1,0 +1,4 @@
+## 2026-09-27 — pitfall — a value kept on "unknown" must keep its companion values too
+
+**Context**: trinity-enterprise#706 review (#3035). `sync_health_service._sync_agent` decides `diverged_since` from the RAW payload, so an uncomputable working tuple (git timeout → `ahead_working: null`) correctly KEEPS the clock. The counts beside it still went through `_coerce_counter`, which reads null as 0, so the same row said "diverged for 25 h" and "0 behind / 0 ahead", and the freeze and its one operator-queue item carried that contradiction.
+**Lesson**: When one column follows keep-on-unknown and its siblings follow coerce-unknown-to-0, the row is only coherent while every value is known. Any column that explains another (counts beside a clock, a reason beside a status) must take the same keep-on-unknown path in the same write, and the test must drive the unknown poll AFTER a known one and read both columns back.

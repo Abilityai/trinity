@@ -68,7 +68,7 @@ def _http_request(path: str = "/api/subscriptions"):
     """The injected ``Request``, read only for audit context."""
     return types.SimpleNamespace(
         client=types.SimpleNamespace(host="10.0.0.9"),
-        url=types.SimpleNamespace(path=path),
+        scope={"path": path},
         state=types.SimpleNamespace(request_id="req-2572"),
     )
 

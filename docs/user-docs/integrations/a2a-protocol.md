@@ -7,7 +7,10 @@ This guide covers both directions:
 - **Inbound** — expose one of your agents so external clients can discover its Agent Card and task it.
 - **Outbound** — register external A2A endpoints your agent may call.
 
-> **Availability.** Exposing an agent over A2A requires the A2A capability to be enabled (entitled) for your instance. When it isn't, the **A2A** tab is hidden and the public routes return `404` — off and invisible by default. Everything below assumes it's enabled.
+> **Availability.** The two directions are not gated alike.
+>
+> - **Inbound** — exposing an agent over A2A requires the A2A capability to be enabled (entitled) for your instance. When it isn't, the **A2A** tab is hidden and the public routes return `404` — off and invisible by default. Parts 1 and 2 assume it's enabled.
+> - **Outbound** — calling an external A2A agent, and managing the registry of endpoints your agents may call, works on **every** edition. It has its own switch instead: outbound calling is off until an admin turns it on ([Part 3](#turn-it-on-admin-once)).
 
 ---
 
@@ -37,7 +40,7 @@ Open the agent's detail page and select the **A2A** tab.
    ![The Agent Card URL section — the public discovery URL with a one-click Copy button.](../../screenshots/a2a-card-url.png)
 3. **Review the advertised skills** — exactly what an external caller sees on the card (derived from the agent's `template.yaml` capabilities).
 4. **Manage the inbound allow-list** (optional) — add the account emails of callers that may task the agent. Leave it empty to allow any authenticated owner/shared caller.
-5. **Register outbound endpoints** (optional) — external A2A endpoints your agent may call, with credentials stored encrypted (never shown again).
+5. **Register outbound endpoints** (optional) — external A2A endpoints, with credentials stored encrypted (never shown again). Read the note under *[Outbound endpoints](#outbound-endpoints)* before you rely on this panel: it is a **separate, per-agent registry**, and in this build `call_a2a_agent` resolves the platform-wide list of [Part 3](#register-an-endpoint-admin-human-only) instead.
 
 ### Using MCP (drive it from an agent / automation)
 
@@ -49,27 +52,29 @@ The same controls are available as MCP tools, so you can expose and configure ag
 | `set_agent_a2a_exposure` | Toggle A2A exposure on/off |
 | `get_agent_a2a_card` | Fetch the served Agent Card JSON |
 | `set_a2a_inbound_allowlist` | Add/remove inbound identities |
-| `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint` | Manage the **per-agent** outbound endpoint list (see the note under *Outbound endpoints* for which list `call_a2a_agent` resolves against) |
+| `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint` | Manage the **platform-wide** outbound endpoint list — the one `call_a2a_agent` resolves against, and the same list the [Part 3](#register-an-endpoint-admin-human-only) routes manage. `agent_name` is accepted but ignored, because the list is not per-agent |
 
 Exposure and credential operations are **owner/admin and human-only** — an agent-scoped key can't flip its own exposure. Reads use the standard agent-access gate.
+
+The first four tools need the A2A capability enabled; the three outbound-registry tools do not, and work on every edition. Those three are **admin** and human-only — one tier up — because the list they write is platform-wide (see [Part 3](#register-an-endpoint-admin-human-only)).
 
 ---
 
 ## Part 2 — Consume an exposed agent (external orchestrator)
 
-Once an agent is exposed, an external A2A client discovers and tasks it in three steps. The examples below use `curl` against a local instance (front door on port `8001`); a real A2A SDK does the same automatically.
+Once an agent is exposed, an external A2A client discovers and tasks it in three steps. The examples below use `curl` against a local instance (the frontend's front door on port `80`); a real A2A SDK does the same automatically.
 
 ### 1. Discover — fetch the Agent Card
 
 ```bash
-curl -s http://localhost:8001/a2a/new_cool_agent/.well-known/agent-card.json | jq
+curl -s http://localhost/a2a/new_cool_agent/.well-known/agent-card.json | jq
 ```
 
 ```json
 {
   "protocolVersion": "0.3.0",
   "name": "new_cool_agent",
-  "url": "http://localhost:8001/a2a/new_cool_agent",
+  "url": "http://localhost/a2a/new_cool_agent",
   "preferredTransport": "JSONRPC",
   "capabilities": { "streaming": true },
   "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
@@ -88,7 +93,7 @@ Issue an MCP key from **Settings → MCP Keys** (or the API) and share it with t
 **Synchronous (`message/send`):**
 
 ```bash
-curl -s -X POST http://localhost:8001/a2a/new_cool_agent \
+curl -s -X POST http://localhost/a2a/new_cool_agent \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -128,11 +133,91 @@ By default, any caller authenticated as an owner/shared identity for the agent m
 
 ---
 
+## Charge for inbound A2A calls
+
+If an exposed agent has **Payments** configured (Agent → Payments tab, x402 via
+Nevermined), callers without a Trinity key pay to task it over A2A — the same
+paywall the paid chat endpoint has always had, now on the A2A door.
+
+**Who pays, and who doesn't:**
+
+| Caller | What happens |
+|---|---|
+| Another agent in your fleet, you, or anyone the agent is shared with (a valid Bearer MCP key) | Runs **free**, exactly as before. Nothing about your internal traffic changes. |
+| A subscription tenant | Unaffected. |
+| A stranger, on an agent with payments **off** | `401`, exactly as before. |
+| A stranger, on an exposed agent with payments **on** | `402 Payment Required` with what to pay; a valid token runs the task and settles. |
+
+**How an external client pays.** It reads the price off the discovery card, buys
+plan credits from Nevermined, and sends the payment in the A2A message's
+`metadata` under `x402.payment.payload`. The older `payment-signature` HTTP
+header still works as a fallback, and if a client sends both, the one in the
+message wins. The reply is a normal A2A Task carrying the payment status and a
+receipt: the primary location is **`status.message.metadata`**, which is where
+the x402 A2A extension puts it and where payment-aware SDKs read it. The same
+object is also mirrored onto the Task's own top-level `metadata`, so a strictly
+typed client sees the receipt rather than `metadata: null`. A **free** turn's
+Task carries no `metadata` key at all.
+
+**The card tells a client the price before it calls.** An exposed, priced agent's
+`/.well-known/agent-card.json` carries a payment entry under
+`capabilities.extensions` with the plan id, the credits per call, and a
+`paymentInfoUrl` pointing at `/api/paid/{agent}/info` — so a payment-aware client
+can pay on its **first** request instead of being refused once to learn the
+price. An agent with no payment config has a byte-identical card to before.
+
+> **A price on the card does not mean the door is open.** The card says what the
+> agent *costs*; A2A exposure is what makes the paid A2A door reachable. On a
+> build without the exposure feature, a configured price block points at a door
+> that answers `404` — turn exposure on for that agent to open it.
+
+Crypto and card (fiat) plans both work: Trinity advertises the x402 scheme that matches the agent's plan, and the 402's `resource.url` uses the public origin buyers reach you on. See [Nevermined Payments](nevermined-payments.md) for both.
+
+**Time-based (duration) plans.** Set **Credits per Request** to `0`. A duration
+plan charges by time, so Trinity sends no per-call amount and the plan decides
+what a call burns; `0` says that honestly rather than claiming a per-call price
+nothing will charge. The card then advertises the cost as plan-defined. (A
+negative number is rejected.)
+
+**Retrieving a paid result.** If you hold the task id, the payer can poll
+`tasks/get` with the same token — a task is bound to the wallet that paid for
+it, and any other caller gets the ordinary "task not found". If your HTTP client
+timed out before it read the task id, re-send the identical message with the
+same token: that replays the completed result instead of re-running (and
+re-charging) the work.
+
+**Refusals, and what they mean:**
+
+| Answer | Meaning |
+|---|---|
+| `401` | No price configured for this agent (or it isn't exposed) — authenticate with a Trinity key. |
+| `402` | Pay, then retry. The body and the `payment-required` header say what to buy. |
+| `403` | The token was rejected (or your wallet isn't on the agent's inbound allow-list). |
+| `429` | Rate limited. The paying path is capped per source address **and** per agent. |
+| `501` | Payments are configured but this Trinity install can't process one right now. |
+
+A refusal that is **our** side being busy rather than a verdict on your token —
+a payment checker that timed out, or too many payment checks in flight — is not
+a `403`. It comes back as a JSON-RPC error carrying `data.retryable: true`, with
+a `data.code` saying which case it is (`verify_unavailable` — we could not
+check; `in_flight` — your own identical request is still running). Retry those
+with the **same** token; never buy another. `payment_rejected` and `not_allowed`
+carry `retryable: false`. On `message/stream` the same classification arrives as
+an error event, because a status code cannot be sent once the stream has opened.
+
+> **Paid calls are logged as money.** Each settled call records the paying wallet,
+> the execution it paid for, and the source address. A delivered turn whose
+> settlement fails still returns your result and is reported as unsettled rather
+> than as a clean success — Trinity never claims it charged you when it didn't,
+> or that it delivered for free when it is still reconciling.
+
+---
+
 ## Outbound endpoints
 
 Register the external A2A endpoints your agent is allowed to call (name + URL + optional credential). Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one (`🔒 credentialed`).
 
-> **Which list does `call_a2a_agent` actually read?** Trinity resolves an outbound target through a provider seam, and in this build the resolver is the **platform-wide** list you manage in [Part 3](#register-an-endpoint-admin-human-only) — not this per-agent panel. If you register a target here and your agent answers `endpoint_not_found`, that is why: register it in Part 3. The per-agent panel becomes the resolver on a build that registers a provider for it, in which case it takes precedence.
+> **Which list does `call_a2a_agent` actually read?** Trinity resolves an outbound target through a provider seam, and in this build the resolver is the **platform-wide** list you manage in [Part 3](#register-an-endpoint-admin-human-only) — not this per-agent panel. If you register a target here and your agent answers `endpoint_not_found`, that is why: register it in Part 3 — either with the routes shown there or with `register_a2a_endpoint`, which address the same list. This per-agent panel is a separate registry; it becomes the resolver on a build that registers a provider for it, in which case it takes precedence.
 
 ---
 
@@ -182,6 +267,7 @@ Registry rules worth knowing before your first attempt:
 - **Upsert is by name.** Re-sending the same `name` updates that endpoint. Omitting `credentials` on an update **keeps** the stored secret; send `"clear_credentials": true` to remove it.
 - **Credentials must be printable ASCII with no whitespace or line breaks** (≤8192 chars). A token pasted with a trailing newline is rejected with `422` — that is the single most common first-try failure.
 - **Up to 50 endpoints**, and each URL is SSRF-validated when you register it *and* re-validated on every call.
+- **If the credential is a payment token, say so — or let Trinity notice.** `"credential_kind": "payment_token"` makes Trinity attach it as an x402 payment — the `x402.payment.payload` metadata plus the `payment-signature` header — **in addition to** the `Authorization: Bearer` header every credentialed call already carries, not instead of it. You can leave the field out: Trinity infers it from the value, so a token pasted straight from a paid provider works without you knowing the field exists. The response tells you which it concluded. Send `credential_kind` **alone** (no `credentials`) to re-label a secret you already stored, and note that it cannot be combined with `clear_credentials` — that pair is rejected with `422` rather than guessing which you meant.
 
 ```bash
 # List them (credentials are never returned — only whether one is set)
@@ -196,6 +282,59 @@ The URL must be **HTTPS** and must resolve to a public address; Trinity refuses 
 
 > **⚠ Registering an endpoint is a trust decision, not a configuration step.**
 > Trinity removes the literal credential from anything the remote sends back. It **cannot** stop a remote that base64-encodes, splits or otherwise transforms it — and an agent under prompt injection can be talked into asking for exactly that. **Registering an endpoint grants that endpoint the ability to exfiltrate its own credential.** Register peers you would trust with the token you are handing them.
+
+**Owning the agent is not enough.** This registry is **admin and human-only** on every edition. The list is platform-wide, so registering an endpoint hands a credentialed egress target to *every* agent on the instance — a fleet-wide grant rather than one agent's setting, and Trinity keeps grants human-only. An agent-scoped key is refused on all three operations.
+
+The same three operations are available over MCP, so this is not a `curl`-only surface:
+
+```
+register_a2a_endpoint(name        = "research-partner",
+                      url         = "https://partner.example.com/a2a/researcher",
+                      credentials = "their-api-token",
+                      # optional — inferred from the value when omitted;
+                      # "payment_token" for an x402 token bought after a 402
+                      credential_kind = "api_key")      # -> { endpoint, outbound_enabled }
+list_a2a_endpoints()                                    # -> { endpoints, outbound_enabled }
+remove_a2a_endpoint(endpoint_id = "research-partner")    # id or name; first match wins
+```
+
+They need an **admin** key held by a person, and they work whether or not the A2A capability is enabled. `register_a2a_endpoint` reports `outbound_enabled`: when it is `false`, the response also names the one admin step above that makes the endpoint callable — so a registration you cannot yet use says so instead of looking finished. `agent_name` is accepted and ignored.
+
+### When the remote charges for the call
+
+Some A2A agents are priced. Such a remote answers **402 Payment Required**, and Trinity passes that through as a 402 rather than as a generic failure:
+
+```json
+{
+  "detail": {
+    "reason": "payment_required",
+    "message": "This agent charges 1 credit per request.",
+    "payment": {
+      "summary": {"plan_id": "plan_42", "scheme": "exact",
+                  "network": "base-sepolia", "credits_per_request": 1,
+                  "resource_url": "https://partner.example.com/a2a/researcher"},
+      "x402": { "…the remote's own requirements object…" },
+      "truncated": false
+    },
+    "remote_status": 402,
+    "task_id": "task-abc"
+  }
+}
+```
+
+An agent sees `payment_required: true`, the same `payment` block, and `do_not_retry: true`. **Trinity never buys anything.** The sequence is:
+
+1. The agent relays the price to a person **once** and stops. Retrying cannot work, and calling a different endpoint is not a substitute.
+2. A person buys the access token from the provider.
+3. An admin stores it on the endpoint: `register_a2a_endpoint(name="research-partner", url=…, credentials="<the token>")` — the kind is inferred, or pass `credential_kind="payment_token"` explicitly.
+4. The agent calls again, passing the `task_id` the refusal returned, so the remote resumes the same task instead of starting a fresh charge.
+
+Two things worth knowing before you get there:
+
+- **402 means "buy this", 403 means something else.** A remote 403 comes back as a `502` with `reason: "rpc_forbidden"` — or `"payment_rejected"` when the stored credential is a payment token the remote refused (spent, expired, or out of credit). Both carry `remote_status`, so you can always tell the two apart.
+- **Some payment tokens are single-use.** An x402 v3 token authorises exactly one settlement. Trinity flags it (`credential_single_use: true`, plus a hint in the registration response) rather than refusing it: after one paid call you will need to store a fresh token.
+
+Trinity reads the price and attaches a token you stored. It does not negotiate, does not purchase, and does not show the agent payment receipts.
 
 ### Call it (from an agent)
 
@@ -238,6 +377,29 @@ A few behaviors that surprise people, all deliberate: the **calling agent's cont
 
 Register the remote instance's agent endpoint (`https://their-trinity.example.com/a2a/their-agent`) with a **Trinity MCP API key from that instance** as the credential. Both sides speak A2A v0.3, so it works with no extra configuration.
 
+### Between your own instances on a private network
+
+When your Trinity instances share a private network (a tailnet or a VPN), they can call each other's agents over it, without the public internet and without exchanging keys. It takes one step on each side, after an admin declares the network once.
+
+**1. Declare the network (admin, on both instances).** List the network's address range, the names your instances use on it, or both. Optionally set the address this instance has on that network, so internal agents advertise it on their card:
+
+```bash
+curl -X PUT http://localhost:8000/api/settings/a2a-trusted-networks \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"entries": ["100.64.0.0/10", "*.your-tailnet.ts.net"],
+       "internal_base_url": "http://this-instance.your-tailnet.ts.net"}'
+```
+
+The platform refuses entries that would trust its own Docker networks, loopback, link-local or reserved ranges, or anything broader than a /8.
+
+**2. Provider side:** in the agent's **A2A** settings, turn on **Expose over A2A** and choose **Our own networks only**. The agent now answers only callers whose address is in a declared range. Everyone else, including the public address, sees an unexposed agent. **No key needed on our networks** is on by default; turn it off to require a Trinity key even from the private network.
+
+**3. Caller side:** register `http://<provider-instance>.<your-network>/a2a/<agent>` as an outbound endpoint, with no credential. Plain `http://` and private addresses are accepted only because the host matches a declared entry. The check runs again on every call, so a name that later resolves outside the declared ranges is refused.
+
+Keyless calls are rate-limited and recorded with the caller's address. A keyless caller can read and cancel only the tasks it started.
+
+> **Pair it with a network rule.** "No key on our network" trusts every machine on that network. If the network also carries laptops or other people's devices, add a network ACL that admits A2A traffic only between your Trinity instances.
+
 ### Troubleshooting
 
 | Symptom | Cause |
@@ -250,6 +412,9 @@ Register the remote instance's agent endpoint (`https://their-trinity.example.co
 | `endpoint_dns_failure` (400) | The hostname does not resolve. Trinity treats a DNS failure as fatal rather than retrying blindly |
 | `card_url_ambiguous` (502) | The remote's card declares a URL that doesn't unambiguously match what you registered. Register the origin, or a URL matching the card's declared `url` exactly |
 | `unsupported_protocol_version` (502) | The remote speaks A2A `1.x`, which Trinity deliberately refuses — there is no peer to verify that dialect against |
+| `payment_required` (402) | The remote charges for this call. `detail.payment` carries its price and plan — relay it to a person once and stop; nothing an agent can do changes the answer |
+| `payment_rejected` (502) | A payment token you stored was refused by the remote (spent, expired, or out of credit). Store a fresh one |
+| `rpc_forbidden` (502) | The remote answered 403 for a reason of its own — check the credential and your access with that provider. Never Trinity's own 403 |
 | `message_too_long` (422) | The message exceeds 100,000 characters |
 | `timeout` (504) | The remote took too long. If it accepted a task, poll with `get_a2a_task` |
 | 409 | The same labelled call is already in flight — use a distinct `dedup_label` |
@@ -266,13 +431,15 @@ That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: 
 ## Behavior & security notes
 
 - **Safe by default** — exposure is OFF for every agent until you turn it on; a non-exposed or non-existent agent returns a uniform `404` (no way to enumerate which agents exist).
-- **Auth is fail-closed** — every task call validates the Bearer MCP key; a bad/missing token is `401`.
+- **Auth is fail-closed** — every task call validates the Bearer MCP key; a bad/missing token is `401`. The one exception is an exposed agent with **payments on**, where a caller with no Trinity key gets `402` instead so it can pay (see [Charge for inbound A2A calls](#charge-for-inbound-a2a-calls)). A credential Trinity recognises and then refuses — a connector-scoped or ephemeral key — stays refused and never falls through to the paying path.
 - **The front door must reach it** — external clients hit your public URL, not the backend port directly. Trinity proxies `/a2a/` to the backend (nginx in production, the dev proxy locally). Set `PUBLIC_CHAT_URL` so the card's published `url` is reachable from outside your network.
 - **Stopped agents** still serve a card (from container labels); tasking a stopped/unreachable agent returns a structured JSON-RPC error, never a 5xx.
 - **Every inbound task is audit-logged** (`source=a2a`, with the caller identity).
 - **Outbound is off by default too**, and an agent can only reach endpoints an administrator registered by name — it can never supply a URL of its own, so a prompt injection cannot aim Trinity at an address of the attacker's choosing.
 - **An agent may only call as itself.** Sharing an agent lets someone reach it; it does not let one agent spend another agent's registered endpoint credential.
-- **Outbound calls are audit-logged** with the endpoint name and the remote **host** — never the full URL, the message, or the credential.
+- **Outbound calls are audit-logged** with the endpoint name and the remote **host** — never the full URL, the message, or the credential. For a payment token the audit row records the *kind*, never the value, and a completed payment is recorded so you can see money leaving.
+- **A priced remote is never paid automatically.** Trinity reads a 402 and can attach a token an administrator stored; it never purchases, never retries a priced call, and never replays a stored "payment required" answer after you have paid.
+- **What a remote sends back is treated as untrusted text, including its price.** The payment details that reach an agent are a fixed, size-capped shape with the credential scrubbed out — a remote cannot smuggle extra instructions or your own token back through the price it quotes.
 
 ---
 
@@ -283,7 +450,7 @@ That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | GET | `/a2a/{agent}/.well-known/agent-card.json` | none | Discovery card |
-| POST | `/a2a/{agent}` | Bearer MCP key | JSON-RPC task endpoint |
+| POST | `/a2a/{agent}` | Bearer MCP key **or** an x402 payment (when the agent is priced) | JSON-RPC task endpoint |
 
 ### Outbound routes (calling out)
 
@@ -294,9 +461,9 @@ That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: 
 | GET/PUT | `/api/settings/a2a-endpoints` | admin, human-only | List / register endpoints |
 | DELETE | `/api/settings/a2a-endpoints/{ref}` | admin, human-only | Remove an endpoint — `ref` is its id **or** its name |
 
-The two agent routes return `404` while outbound calling is off. The three settings routes are **not** gated by the flag: an admin can register endpoints before switching the feature on, which is the intended order.
+The two agent routes return `404` while outbound calling is off. The three settings routes are **not** gated by the flag: an admin can register endpoints before switching the feature on, which is the intended order. They are also the routes behind `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint`, so the MCP tools and these routes cannot disagree.
 
-`GET /api/settings/a2a-endpoints` answers `{"endpoints": [{"id": …, "name": …, "url": …, "has_credentials": true}], "enabled": false}` — credentials are write-only and never echoed back, and `enabled` is a second way to confirm the flag.
+`GET /api/settings/a2a-endpoints` answers `{"endpoints": [{"id": …, "name": …, "url": …, "has_credentials": true, "credential_kind": "api_key"}], "enabled": false}` — credentials are write-only and never echoed back, and `enabled` is a second way to confirm the flag. `credential_kind` appears only where a credential is stored (`api_key` or `payment_token`), with `credential_single_use: true` alongside it when the stored payment token is good for one settlement.
 
 ### JSON-RPC methods
 
@@ -317,7 +484,7 @@ The two agent routes return `404` while outbound calling is off. The three setti
 | `-32602` | Invalid params (e.g. no message text) |
 | `-32001` | Task not found |
 
-Auth failures are transport-level `401`; exposure/allow-list failures are `404`/`403`.
+Auth failures are transport-level `401`; exposure/allow-list failures are `404`/`403`. On a priced agent, an unpaid call is `402` and a rejected payment token is `403`.
 
 ---
 
@@ -327,6 +494,7 @@ Auth failures are transport-level `401`; exposure/allow-list failures are `404`/
 
 - [MCP Server](mcp-server.md) — Trinity's own inter-agent protocol, and where the Bearer key comes from
 - [Agent Network](../collaboration/agent-network.md) — agent-to-agent calls inside one Trinity instance
+- [Nevermined Payments](nevermined-payments.md) — configuring the price an inbound A2A caller pays
 
 **External references:**
 

@@ -61,8 +61,11 @@ mounted panels therefore leave N−1 stuck in a **permanent loading skeleton** �
 absence, because it claims to be fetching something it has already abandoned. Keying that
 store per agent unblocks the grouping; it is a store change, not a rail change.
 
-**The third registry shape: a STATIC tab.** Info declares `signal: RAIL_SIGNAL_NONE` and
-`empty: null`. Both absences are declared rather than filled, because an agent always has
+**The third registry shape: a STATIC tab** (ent#547 — **amended by ent#465**: Info now
+declares `signal: RAIL_SIGNAL_UPDATED`, lit by the shell with a `note` — "N suggestions" —
+while suggestions wait in it; see `workspace-suggestions.md`. `empty: null` stands, and
+`RAIL_SIGNAL_NONE` remains the shape for a tab with neither.) As first shipped, Info declared
+`signal: RAIL_SIGNAL_NONE` and `empty: null`. Both absences are declared rather than filled, because an agent always has
 a name, a health state and a chat list — the body always renders, so the rail's generic
 empty branch is unreachable — and nothing ever writes an `info` signal, so a borrowed
 `updated` would light no dot while documenting a rule that does not exist, diluting the
@@ -385,7 +388,7 @@ opened during a voice call also ends the call.
 | Agent-shared, I am the owner **in a platform session** | both, "Delete for everyone" offered | `db.revoke_agent_shared_file` (soft; the sweeper reclaims bytes) |
 
 **The matrix is session-type dependent, and the copy says so.**
-`PortalPrincipal` is `(email, is_platform)` and carries no role, so
+`PortalPrincipal` is `(email, is_platform, is_person)` and carries no role, so
 `include_owned` is `principal.is_platform` everywhere (ent#358). A **non-owner
 admin is a viewer** in the Workspace — stricter than the platform surface, and
 correct — and an **owner on a magic-link portal token gets the viewer
@@ -393,10 +396,13 @@ affordance too**. `portal_owns_agent` is the *same* membership the roster card
 renders, so the UI and the enforcement cannot disagree; the affordance is not
 offered rather than offered-and-refused.
 
-"Unshare" needed new storage: `agent_shared_files` has no audience column
-(`portal_documents` lists every active share of the agent, for every rostered
-client), and the one generic per-user preference store is FK'd to `users.id`,
-which a portal principal has no row in. `portal_file_dismissals` is that
+"Unshare" needed new storage: the one generic per-user preference store is
+FK'd to `users.id`, which a portal principal has no row in. (When this slice
+shipped `agent_shared_files` had no audience at all and `portal_documents`
+listed every active share of the agent to every rostered client;
+trinity-enterprise#549 gave a share ONE addressee — `file-sharing-outbound.md`
+→ *Who a file is for* — so the tab now lists the viewer's own files and a
+dismissal is a preference over those.) `portal_file_dismissals` is that
 storage — server-side, auditable, and it survives a device change, which a
 `localStorage` "hidden on this device" would not. It carries `agent_name` so it
 follows the agent's lifecycle (and so it does not sidestep the cleanup parity
@@ -511,6 +517,68 @@ their scrollbars natively and are left native. The global dark rule in
 transcript (`PortalConversation.vue` `scrollEl`) are a follow-up if the feel
 lands, not this change. Guard: `portalRail.spec.js` pins the body's class
 string with `rail-scroll` on it.
+
+## The Asks tab — a door into the Inbox (trinity-enterprise#836)
+
+The sidebar said an agent was waiting on you, but the agent's own page gave you
+nothing to click: since the 2026-09-30 ruling an agent's asks live in the Inbox
+filtered to it, a background ask shows **only** there, and since ent#784 opening an
+agent starts a new chat, so even a mid-chat ask sits in a chat you are not looking
+at. The rail gains an **Asks** tab that lists the agent's open asks, one line each,
+and opens the clicked one in the Inbox. The ruling stands: **answering happens in
+the Inbox** — the tab is a door, not a second answer surface (it mounts no answer
+control at all).
+
+```
+Portal.vue
+├─ railAskCounts = asksByAgent(store.openAsks)        ← the sidebar mark's own projection, ONE feed
+├─ railTabs      = visibleTabs(RAIL_TABS, { …, askCounts: railAskCounts })
+│     portalRail.js: the `asks` entry — door AGENT + `presence: asksTabPresent` (a participant with a
+│     count > 0), checked inside `tabPassesDoor`, so "not shown" is also "not mounted"; LAST in
+│     RAIL_TAB_ORDER; signal UPDATED; empty: null (presence makes an empty body unreachable)
+├─ railSignals.asks = asksSignalFrom(railAskCounts, railParticipants)
+│     { updated: true, agents, note: "2 asks", count: 2 } — `signalFor` now carries `count`
+│     collapsed strip: the dot + "Asks · 2 asks" · mobile strip: the same words
+│     open strip: OverflowTabs badge `urgent-outline` ("2", aria-label "Asks, 2 asks"), the dot dropped
+└─ #tab-asks (column AND sheet) → PortalRailAsks :participants
+      PortalAsksWaitingLine  "2 asks waiting on you · Open in Inbox"  (asksHomeRoute → ?tab=action&from=)
+      rows = railAskItems(openAsks, participants) = actionItems(openAsks) filtered to the participants
+             — the Inbox's own builder, so a 1:1 is exactly `filterByAgent(actionItems, agent)`:
+             same items, same urgency order, nothing re-sorted
+      row  = <router-link :to="askInboxRoute(it)">  /workspace/inbox?tab=action&from=<agent>&item=ask:<id>
+             kind icon by shape (askKindIcon, spoken) · the start of the ask · relative time (absolute on hover)
+      room = one group per participant, in order, "nothing waiting" when it has none (absence visible)
+      sheet: @open → railSheetOpen = false (the navigation closes it)
+```
+
+**Why a presence rule on the registry rather than a conditional slot.** The door
+gate is the one place the rail can refuse a tab, and the per-door test is that a
+refused tab is never mounted. A tab that exists only while it has something is a
+third kind of refusal, so it lives beside `capability` in `tabPassesDoor` — and
+because `feedsFor` reads specific ids, its coming and going never re-fires the
+feed watcher. It is **last** in the fixed order on purpose: it is the one tab
+driven by data, and a tab appearing at the top of the collapsed strip would push
+every other icon down under the pointer; last, nothing moves when it arrives or
+leaves. Stated consequence: with the Asks tab remembered as active and its last ask
+answered, the rail shows the first visible tab (`activeTabFor`'s fallback) without
+rewriting the remembered one, so a new ask brings Asks back on its own.
+
+**The count is the mark.** Both read `asksByAgent(openAsks)`; there is no second
+query. The agent row's mark is now an **unfilled orange ring** (`ring-1 ring-inset
+ring-status-urgent-600 text-status-urgent-700`, 400/400 in dark — the AA tier for
+status text), not the filled 700 pill; the unread pill beside it stays filled, so
+the two obligations still differ by shape. The rail's open-strip badge is the same
+recipe (`OverflowTabs` `urgent-outline`, additive). The pinned Inbox row and the
+Inbox's Action counter keep their filled 700 pills — only the agent rows calmed.
+
+Tests: `tests/unit/portalRailAsks.spec.js` (registry shape, presence, parity with
+`filterByAgent(actionItems)`, the link, the signal, `⌥.` reaching it) and
+`portalRailAsks.mount.spec.js` (rows and hrefs on the DOM, `open` on click, the
+feed-driven leave, room grouping, the ring on the sidebar mark with its title and
+spoken name, the open strip's badge equal to the row's number, the collapsed
+button). Verified on the Docker frontend: light and dark, the overflow menu, the
+row landing on `/workspace/inbox?tab=action&from=acme-scout&item=ask:…` with the
+ask selected, the 390px strip and sheet; no console errors.
 
 ## Residuals (stated)
 

@@ -11,7 +11,7 @@
             class="w-16 h-16 rounded-full object-cover border-2 border-gray-300 dark:border-gray-600"
             alt="Reference"
           />
-          <span class="text-[10px] text-gray-400 dark:text-gray-500 mt-1 block">Reference</span>
+          <span class="text-[10px] text-gray-500 dark:text-gray-400 mt-1 block">Reference</span>
         </div>
         <div v-if="hasReference" class="text-gray-300 dark:text-gray-600">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -20,7 +20,7 @@
         </div>
         <div class="text-center">
           <AgentAvatar :name="agentName" :avatar-url="currentAvatarUrl" size="xl" />
-          <span v-if="hasReference" class="text-[10px] text-gray-400 dark:text-gray-500 mt-1 block">Current</span>
+          <span v-if="hasReference" class="text-[10px] text-gray-500 dark:text-gray-400 mt-1 block">Current</span>
         </div>
       </div>
 
@@ -36,7 +36,7 @@
         class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-action-primary-500 focus:border-action-primary-500 resize-none"
         :disabled="generating"
       ></textarea>
-      <div class="text-xs text-gray-400 dark:text-gray-500 mt-1 text-right">{{ identityPrompt.length }}/500</div>
+      <div class="text-xs text-gray-500 dark:text-gray-400 mt-1 text-right">{{ identityPrompt.length }}/500</div>
 
       <!-- Error message -->
       <p v-if="error" class="text-sm text-status-danger-500 mt-2">{{ error }}</p>

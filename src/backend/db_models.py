@@ -58,6 +58,9 @@ class AgentShare(BaseModel):
     shared_by_email: str  # Email or username of who shared it
     created_at: datetime
     allow_proactive: bool = False  # Can agent send proactive messages to this user
+    # trinity-enterprise#817: consented | declined | not_asked — `allow_proactive`
+    # alone cannot tell "never asked" from "said no".
+    proactive_consent: str = "not_asked"
 
 
 class AgentOperatorAccess(BaseModel):
@@ -74,6 +77,7 @@ class AgentOperatorAccess(BaseModel):
     last_active: Optional[str] = None  # ISO-Z last_login; None until first login
     status: str                        # 'active' | 'pending'
     allow_proactive: bool = False
+    proactive_consent: str = "not_asked"  # ent#817: consented | declined | not_asked
 
 
 class AgentShareRequest(BaseModel):
@@ -276,7 +280,7 @@ class ScheduleExecution(BaseModel):
     retry_of_execution_id: Optional[str] = None  # Links retry to original execution
     retry_scheduled_at: Optional[datetime] = None  # When retry is scheduled (for restart recovery)
     # Validation tracking (VALIDATE-001)
-    business_status: Optional[str] = None       # pending_validation, validated, failed_validation, skipped
+    business_status: Optional[str] = None       # pending_validation, validated, failed_validation, validation_unavailable, skipped
     validated_at: Optional[datetime] = None     # When validation completed
     validation_execution_id: Optional[str] = None  # FK to the validation execution record
     validates_execution_id: Optional[str] = None   # FK to execution being validated (for validation records)
@@ -304,9 +308,12 @@ class ScheduleExecution(BaseModel):
     # executing agent.
     source_channel_agent: Optional[str] = None
     source_channel_client: Optional[str] = None
+    source_host: Optional[str] = None  # trinity-enterprise#838
     # ent#555 — the canvas the user had open for this turn. Context about what
     # is being discussed; never authority over what may be read or written.
     open_canvas_id: Optional[str] = None
+    # #2806 — agent-to-agent hops from a non-agent root (NULL/None = root).
+    chain_depth: Optional[int] = None
 
 
 # =========================================================================
@@ -330,6 +337,7 @@ class AgentGitConfig(BaseModel):
     # #389 sync health observability
     auto_sync_enabled: bool = False
     freeze_schedules_if_sync_failing: bool = False
+    pull_sync_enabled: bool = False  # trinity-enterprise#703: the container's pull cycle
 
 
 class GitSyncResult(BaseModel):
@@ -683,11 +691,55 @@ class EmailWhitelistEntry(BaseModel):
     default_role: str = "user"  # Role assigned on first email login (#314)
 
 
+# RFC 5321 §4.5.3.1.3: a forward-path is at most 256 octets including its angle
+# brackets, so an address is at most 254.
+WHITELIST_EMAIL_MAX_LENGTH = 254
+
+
 class EmailWhitelistAdd(BaseModel):
     """Request to add an email to the whitelist."""
     email: str
     source: str = "manual"
     default_role: str = "user"  # Role assigned on first email login (#314)
+
+    @field_validator("email")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        """Trim and lower-case the entry, and refuse what cannot be one address (#3455).
+
+        The whitelist is matched by exact, lower-cased address
+        (`db/email_auth.py::is_email_whitelisted`) — there is no domain or
+        wildcard entry form — so a value that is not one address is a row that
+        can never match a login. The route used to store whatever it was sent:
+        `a@`, `@b.com`, and a 10 000-character string that stretched the
+        Settings table to ~75 000px.
+
+        The shape check is deliberately the minimal one `ScheduleCreate` uses
+        (exactly one `@` with something on both sides, no whitespace, no control
+        characters, bounded length): a self-hosted install whitelists intranet
+        addresses (`user@localhost`) and internationalised ones, which a
+        stricter grammar would refuse. Each refusal names its reason and never
+        echoes the value — the reason is rendered beside the field, and an
+        echoed 10 000 characters would reproduce the overflow there.
+        """
+        s = v.strip().lower()
+        if not s:
+            raise ValueError("email is required, for example user@example.com")
+        if len(s) > WHITELIST_EMAIL_MAX_LENGTH:
+            raise ValueError(
+                f"email is too long ({len(s)} characters; "
+                f"the limit is {WHITELIST_EMAIL_MAX_LENGTH})"
+            )
+        if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in s):
+            raise ValueError(
+                "email must not contain whitespace or control characters"
+            )
+        if s.count("@") != 1 or s.startswith("@") or s.endswith("@"):
+            raise ValueError(
+                "email must be a single address in the form name@domain, "
+                "for example user@example.com"
+            )
+        return s
 
 
 class EmailLoginRequest(BaseModel):
@@ -723,6 +775,19 @@ class AgentSkill(BaseModel):
     # None = assigned before multi-source, or the source row is gone. Recorded
     # so a later cross-source swap under the same bare name is detectable.
     source_id: Optional[str] = None
+    # #2914: the durable verdict of the last injection that looked at this
+    # name. `conflict` = an agent-authored `.claude/skills/<name>/` blocks the
+    # library package (the agent's own copy is what runs); None = no standing
+    # conflict. Written and cleared by the inject path only.
+    delivery_status: Optional[str] = None
+    # ent#596 (Tandem R29): the agent that made the assignment, when the writer
+    # was an agent principal; None for a human. `assigned_by` stays the owner's
+    # username, so "the agent did it" is distinguishable from "the person did it".
+    assigned_by_agent: Optional[str] = None
+    # ent#530: False = present only because an assigned skill SET names it;
+    # `via_sets` names those sets (filled by the router from the current catalogs).
+    individual: bool = True
+    via_sets: List[str] = []
 
 
 class SkillSource(BaseModel):
@@ -780,11 +845,24 @@ class SkillInfo(BaseModel):
     # version of this skill than a given source intended — AC#4 requires that be
     # visible, never a silent overwrite.
     shadowed_by: List[Dict[str, str]] = Field(default_factory=list)
+    # trinity-enterprise#672 lifecycle. A deprecated skill stays listed and
+    # assignable — flagged, never hidden. `superseded_by` is the library
+    # author's text (one printable line, <= 200 chars), NOT a resolved skill
+    # name, and is None unless `deprecated` is true.
+    deprecated: bool = False
+    superseded_by: Optional[str] = None
+    # trinity-enterprise#753: `recommended` — the skill is gated by default on
+    # every agent it is assigned to (the owner can clear it). None otherwise.
+    approval: Optional[str] = None
 
 
 class AgentSkillsUpdate(BaseModel):
     """Request model for bulk updating agent skills."""
     skills: List[str]  # List of skill names to assign
+    # ent#530: the agent's skill SETS. None = leave sets untouched, so a client
+    # that only knows skills can never drop a set; a list replaces the sets.
+    # `set:<name>` entries in `skills` are accepted too and treated as sets.
+    sets: Optional[List[str]] = None
 
 
 class SkillsLibraryStatus(BaseModel):
@@ -1107,6 +1185,42 @@ class AgentHealthDetail(BaseModel):
     # #526: unified breaker block — {dispatch:{...}, transport:{...}, open: bool,
     # config:{enabled}}. Same shape as GET /api/agents/{name}/circuit-breaker.
     circuit_breaker: Optional[dict] = None
+    # ent#479: INFORMATIONAL declared-metric freshness — counts and names, no
+    # values. It never feeds `aggregate_status` or `issues`: a business metric
+    # going stale is the operator's news, not a platform health failure, and a
+    # store read failure leaves this `None` rather than failing the check.
+    metrics: Optional[dict] = None
+
+
+class AgentSyncHealth(BaseModel):
+    """One agent's git sync health on the fleet surfaces (trinity-enterprise#707).
+
+    Read from `agent_sync_state` through the shared reader and the one policy
+    (`services/sync_health_view.py`); the counts are None until the poller has
+    observed the agent. `reason` never carries the agent-written git error.
+    """
+    binding: str  # "agent" | "deployment"
+    auto_sync_enabled: bool = False
+    ahead: Optional[int] = None  # origin on the agent's own branch (#2105)
+    behind: Optional[int] = None
+    dirty_files: Optional[int] = None
+    last_successful_push_at: Optional[str] = None
+    divergence_age_s: Optional[int] = None
+    state: str  # green | yellow | red | unknown
+    reason: str
+    recommendation: Optional[str] = None
+    frozen: bool = False
+
+
+class FleetSyncSummary(BaseModel):
+    """Fleet totals over the git-bound agents the caller can see (trinity-enterprise#707)."""
+    git_bound: int = 0
+    diverged: int = 0
+    frozen: int = 0
+    auto_sync_off: int = 0
+    dirty: int = 0
+    red: int = 0
+    yellow: int = 0
 
 
 class AgentHealthSummary(BaseModel):
@@ -1127,6 +1241,10 @@ class AgentHealthSummary(BaseModel):
     heartbeat_active_executions: Optional[int] = None
     heartbeat_memory_mb: Optional[float] = None
     heartbeat_state: Optional[str] = None
+    # trinity-enterprise#707: git sync health, an annotation like the heartbeat
+    # layer — it never changes `status`. None = no git binding (or the sync
+    # read degraded).
+    sync: Optional[AgentSyncHealth] = None
 
 
 class FleetHealthSummary(BaseModel):
@@ -1146,6 +1264,7 @@ class FleetHealthStatus(BaseModel):
     summary: FleetHealthSummary
     agents: List[AgentHealthSummary] = []
     circuit_breakers: Optional[Dict[str, Any]] = None
+    sync_summary: Optional[FleetSyncSummary] = None  # trinity-enterprise#707
 
 
 class MonitoringConfig(BaseModel):
@@ -1380,8 +1499,15 @@ class NeverminedConfigCreate(BaseModel):
     @field_validator('credits_per_request')
     @classmethod
     def validate_credits(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError("credits_per_request must be >= 1")
+        # ent#679 T9: 0 is legal. A Nevermined *duration* plan charges by time,
+        # not per call, so Trinity sends no amount to the facilitator and the
+        # burn is whatever the plan defines; `credits_per_request` is display +
+        # `credits_amount` logging only. The old `>= 1` floor made such a plan
+        # impossible to configure honestly — the operator had to claim a
+        # per-call credit price that nothing would ever charge. A NEGATIVE
+        # amount is still a named 422: it is not a plan shape, it is a typo.
+        if v < 0:
+            raise ValueError("credits_per_request must be >= 0")
         return v
 
 
@@ -1407,6 +1533,14 @@ class NeverminedPaymentResult(BaseModel):
     remaining_balance: Optional[str] = None
     tx_hash: Optional[str] = None
     error: Optional[str] = None
+    #: Is this failure OURS rather than the token's (ent#679 E7)? A facilitator
+    #: timeout, an SDK error or a saturated concurrency gate means we could not
+    #: decide; a facilitator that answered "invalid" means the token is bad.
+    #: Only the second should tell a caller to go buy a new one. Defaulted so a
+    #: stored settle snapshot written before this field replays unchanged
+    #: (`NeverminedPaymentResult(**snapshot)`), and deliberately NOT part of
+    #: `_settle_snapshot` — it is about one attempt, not about the receipt.
+    retryable: bool = False
 
 
 class NeverminedPaymentLog(BaseModel):

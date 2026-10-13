@@ -238,7 +238,7 @@ onBeforeUnmount(() => { clearTimeout(announceTimer) })
 }
 /* Feedback in colour AND in the word the button now carries. */
 .prose-portal :deep(.code-block-copy[data-state="ok"]) {
-  @apply text-status-success-600 dark:text-status-success-400;
+  @apply text-status-success-700 dark:text-status-success-400;
 }
 .prose-portal :deep(.code-block-copy[data-state="error"]) {
   @apply text-status-danger-600 dark:text-status-danger-400;

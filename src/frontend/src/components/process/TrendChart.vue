@@ -80,7 +80,7 @@
       <!-- Empty state -->
       <div
         v-if="chartData.length === 0"
-        class="absolute inset-0 flex items-center justify-center text-gray-400 dark:text-gray-500"
+        class="absolute inset-0 flex items-center justify-center text-gray-500 dark:text-gray-400"
       >
         No data available
       </div>

@@ -1,0 +1,122 @@
+{
+  "version": "1.1",
+  "date": "2026-09-29",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/715-queue-person-emails",
+  "issue": "abilityai/trinity-enterprise#715",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": [
+      "GET /api/operator-queue (machine principals: allowlist projection, rows about a person skipped)",
+      "GET /api/operator-queue/{item_id} (machine principals: allowlist projection; 404 for a row about a person)",
+      "GET /api/operator-queue/agents/{agent_name} (machine principals: allowlist projection, rows about a person skipped)"
+    ],
+    "changed_ws_payloads": [
+      "operator_queue_cleared (router copy): drops cleared_by"
+    ],
+    "changed_agent_sinks": [
+      "file write-back drops responded_by (delivery + reconstruction)",
+      "portal-inbox-collision- reserved: platform alarm for write-back, resume, sync exclusions, ended-asks line"
+    ],
+    "mcp_tools_changed": 0,
+    "migrations": 0
+  },
+  "findings": [],
+  "fixed_during_audit": [],
+  "appendix": [
+    {
+      "status": "excluded",
+      "note": "get_queue_item pre-existing 404-then-403 split; ids are uuid4 hex, nothing enumerable; not introduced by the diff"
+    },
+    {
+      "status": "registered",
+      "note": "old responded_by values in existing agent files: never scrubbed by ruling; cross-agent file reach is trinity-enterprise#719"
+    },
+    {
+      "status": "registered",
+      "note": "execution rows' source_user_email readable by machine keys (debt:2026-09-29-executions-api-returns-person-emails-to-machine-keys)"
+    },
+    {
+      "status": "registered",
+      "note": "notifications_cleared.cleared_by on /ws (debt:2026-09-29-notifications-cleared-trigger-carries-operator-email)"
+    },
+    {
+      "status": "accepted",
+      "note": "operator-typed response_text / disposition_reason may name a person; by design the agent reads its answer"
+    }
+  ],
+  "supply_chain_summary": "no dependency changes",
+  "filter_stats": {
+    "candidates": 5,
+    "dropped_hard_exclusion": 1,
+    "registered_residual": 3,
+    "accepted_by_design": 1,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "mutations": [
+    {
+      "mutation": "responded_by_email back on the machine allowlist",
+      "result": "42 red"
+    },
+    {
+      "mutation": "about-a-person row filter removed",
+      "result": "3 red"
+    },
+    {
+      "mutation": "item-route 404 for a hidden row removed",
+      "result": "3 red"
+    },
+    {
+      "mutation": "responded_by restored in _deliver_into",
+      "result": "1 red"
+    },
+    {
+      "mutation": "responded_by restored in the reconstruction",
+      "result": "1 red"
+    },
+    {
+      "mutation": "portal-inbox-collision- un-reserved",
+      "result": "2 red"
+    },
+    {
+      "mutation": "cleared_by restored on the /ws trigger",
+      "result": "1 red"
+    },
+    {
+      "mutation": "responded_by restored in the prompt",
+      "result": "1 red"
+    },
+    {
+      "mutation": "a new unclassified column on the row",
+      "result": "6 red (person-side classification test)"
+    }
+  ],
+  "live_verification": "operator eyeball on localhost at the branch commit: agent key list 0 alerts, no person-field keys, 0 example.com hits; item 404 for the agent key, 200 for JWT; /ws Clear All frame is scope + count only",
+  "trend": {
+    "note": "resolves the residual registered by cso-diff-2026-09-25-ent611-native-ask (file-row addressee to machine keys); no new findings"
+  }
+}

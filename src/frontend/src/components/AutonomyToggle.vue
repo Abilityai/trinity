@@ -5,7 +5,7 @@
       class="font-medium whitespace-nowrap min-w-[3rem] text-right"
       :class="[
         labelSizeClass,
-        modelValue ? 'text-state-autonomous-600 dark:text-state-autonomous-400' : 'text-gray-500 dark:text-gray-400'
+        modelValue ? 'text-state-autonomous-700 dark:text-state-autonomous-400' : 'text-gray-500 dark:text-gray-400'
       ]"
     >
       {{ modelValue ? 'AUTO' : 'Manual' }}

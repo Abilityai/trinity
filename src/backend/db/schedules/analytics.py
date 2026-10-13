@@ -10,6 +10,7 @@ from typing import Optional, List, Dict
 from sqlalchemy import select, and_, func, text, case
 
 from ..engine import get_engine
+from ..query_helpers import viewer_scope
 from ..tables import (
     agent_schedules,
     schedule_executions,
@@ -39,12 +40,19 @@ _TRIGGER_BUCKETS = {
     "telegram": "Channels", "slack": "Channels", "whatsapp": "Channels",
     "public": "Public", "paid": "Public",
     "schedule": "Scheduled", "webhook": "Scheduled",
+    "retry": "Scheduled",  # #2845: RETRY-001's next attempt at a scheduled run
     "loop": "Loops",  # #1150: first-class bucket so loop bursts don't read as cron load
     "reminder": "Reminders",  # #1296: agent self-direction, not operator cron
     # ent#329: an operator answer waking a parked agent. Bucketed with the
     # queue it came from rather than with cron: it is human-initiated and its
     # spend is driven by how often operators answer, not by a schedule.
     "operator_response": "Operator queue",
+    # trinity-enterprise#611: the same wake for an ask that was cancelled or
+    # expired instead of answered — same queue, same human-driven spend shape.
+    "operator_ending": "Operator queue",
+    # trinity-enterprise#751: the notice that wakes an agent whose gated request
+    # was decided — driven by the approver's decision, like the two above.
+    "skill_gate": "Operator queue",
     # ent#220: a room turn is an agent woken by an @mention in a shared room.
     # It was unmapped, so every one landed in `Other` — the catch-all that is
     # supposed to mean "a trigger nobody has classified yet", quietly turned
@@ -446,7 +454,9 @@ class ScheduleAnalyticsMixin:
             "schedules": schedules,
         }
 
-    def get_agent_analytics(self, agent_name: str, hours: int) -> Dict:
+    def get_agent_analytics(self, agent_name: str, hours: int, *,
+                            scope_to_viewer: bool = False,
+                            viewer_email: Optional[str] = None) -> Dict:
         """Compute agent-scoped execution analytics over a rolling window (#1107).
 
         Generalises `get_schedule_analytics` to agent scope with a
@@ -469,6 +479,10 @@ class ScheduleAnalyticsMixin:
             gap, not a false 0%.
           - Bucketing is UTC-day; unmapped triggers → "Other".
 
+        `scope_to_viewer` (#3139) narrows EVERY query below to what a Workspace
+        client can account for (`query_helpers.viewer_scope`), so a client's
+        counts, rates and averages are over exactly the rows their list shows.
+
         Always returns an envelope (zeros / empty when the agent has no
         executions). Access is gated by `AuthorizedAgent` at the router and
         the window is validated there, so there is no None/404 path here.
@@ -485,6 +499,8 @@ class ScheduleAnalyticsMixin:
             schedule_executions.c.agent_name == agent_name,
             schedule_executions.c.started_at > cutoff,
         )
+        if scope_to_viewer:
+            base_where = and_(base_where, viewer_scope(schedule_executions, viewer_email))
         dur_avg_expr = func.avg(
             case((schedule_executions.c.status == "success", schedule_executions.c.duration_ms))
         ).label("dur_avg")
@@ -516,8 +532,7 @@ class ScheduleAnalyticsMixin:
             select(schedule_executions.c.duration_ms)
             .where(
                 and_(
-                    schedule_executions.c.agent_name == agent_name,
-                    schedule_executions.c.started_at > cutoff,
+                    base_where,
                     schedule_executions.c.status == "success",
                     schedule_executions.c.duration_ms.isnot(None),
                 )

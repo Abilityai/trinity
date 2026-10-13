@@ -14,6 +14,30 @@ import api from '../api'
 // clobbers this full-fleet list) plus the utils/websocket.js handlers that
 // merge agent_created / agent_label_changed rows in. The sort comparator
 // itself lives in utils/agentSort.js (pure function — no store access).
+// trinity-enterprise#819: the file routes answer a refusal with a structured
+// `detail` ({code, message, path}). The download and preview calls read the
+// body as text and as a blob, so turn it back into `{detail: <message>, code,
+// path}` — every consumer renders `err.response.data.detail` as a string. A
+// string detail stays a string; an unparseable body is left alone.
+export async function normalizeFileErrorBody (err) {
+  const res = err?.response
+  if (!res || res.data == null) return err
+  let body = res.data
+  try {
+    if (typeof Blob !== 'undefined' && body instanceof Blob) body = await body.text()
+    if (typeof body === 'string') body = JSON.parse(body)
+  } catch {
+    return err
+  }
+  const detail = body?.detail
+  if (detail && typeof detail === 'object') {
+    res.data = { detail: detail.message, code: detail.code, path: detail.path }
+  } else if (typeof detail === 'string') {
+    res.data = { detail }
+  }
+  return err
+}
+
 export const useAgentsStore = defineStore('agents', {
   state: () => ({
     agents: [],
@@ -677,6 +701,60 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // Git sync settings (#3010) — the owner's auto-sync flag (the agent's loop
+    // reads it every cycle) and the schedule-freeze-when-sync-failing flag.
+    async getGitAutoSync(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/git/auto-sync`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setGitAutoSync(name, enabled) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/git/auto-sync`,
+        { enabled },
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
+    // trinity-enterprise#703: the container's pull cycle.
+    async getGitPullSync(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/git/pull-sync`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setGitPullSync(name, enabled) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/git/pull-sync`,
+        { enabled },
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
+    async getGitFreezeSchedules(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/git/freeze-schedules-if-failing`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setGitFreezeSchedules(name, enabled) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/git/freeze-schedules-if-failing`,
+        { enabled },
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
     // Per-agent GitHub PAT methods (#347)
     async getGitHubPATStatus(name) {
       const authStore = useAuthStore()
@@ -713,12 +791,16 @@ export const useAgentsStore = defineStore('agents', {
 
     async downloadAgentFile(name, filePath) {
       const authStore = useAuthStore()
-      const response = await axios.get(`/api/agents/${name}/files/download`, {
-        params: { path: filePath },
-        headers: authStore.authHeader,
-        responseType: 'text'
-      })
-      return response.data
+      try {
+        const response = await axios.get(`/api/agents/${name}/files/download`, {
+          params: { path: filePath },
+          headers: authStore.authHeader,
+          responseType: 'text'
+        })
+        return response.data
+      } catch (err) {
+        throw await normalizeFileErrorBody(err)
+      }
     },
 
     async deleteAgentFile(name, filePath) {
@@ -753,11 +835,16 @@ export const useAgentsStore = defineStore('agents', {
 
     async getFilePreviewBlob(name, filePath) {
       const authStore = useAuthStore()
-      const response = await axios.get(`/api/agents/${name}/files/preview`, {
-        params: { path: filePath },
-        headers: authStore.authHeader,
-        responseType: 'blob'
-      })
+      let response
+      try {
+        response = await axios.get(`/api/agents/${name}/files/preview`, {
+          params: { path: filePath },
+          headers: authStore.authHeader,
+          responseType: 'blob'
+        })
+      } catch (err) {
+        throw await normalizeFileErrorBody(err)
+      }
       // Return blob URL for media elements
       return {
         url: URL.createObjectURL(response.data),
@@ -766,13 +853,25 @@ export const useAgentsStore = defineStore('agents', {
       }
     },
 
-    // Custom Metrics Actions (Phase 9.9)
-    async getAgentMetrics(name) {
-      const authStore = useAuthStore()
-      const response = await axios.get(`/api/agents/${name}/metrics`, {
-        headers: authStore.authHeader
+    // Declared business metrics + freshness (ent#479).
+    //
+    // Same URL the `metrics.json` proxy used, re-backed by the ent#478 point
+    // store: declared definitions joined to their recorded points, with the
+    // platform's one stale rule applied server-side. Store-only on the
+    // backend, so this answers for a STOPPED agent — the caller must not gate
+    // it on status.
+    //
+    // Deduped on (name, window): the tiles poll on their own interval and a
+    // second mount of the same tab must not double the read.
+    async getAgentMetrics(name, { window = 'auto' } = {}) {
+      return dedupe(`agentMetrics:${name}:${window}`, async () => {
+        const authStore = useAuthStore()
+        const response = await axios.get(`/api/agents/${name}/metrics`, {
+          headers: authStore.authHeader,
+          params: { window }
+        })
+        return response.data
       })
-      return response.data
     },
 
     // Agent Dashboard Actions
@@ -789,13 +888,24 @@ export const useAgentsStore = defineStore('agents', {
     // NOTE: this is the STORE-level probe. `AgentDetail.vue` has a
     // same-named local function that wraps it with the boot retry ladder —
     // they are different functions (#2198 E13).
+    // ent#479: TWO flags, one request. The Dashboard tab appears for an agent
+    // with declared metrics and no `dashboard.yaml`, and both halves are
+    // DB-only, so asking twice would be two requests for one decision.
+    //
+    // The return shape changed from a bare boolean to an object — a caller
+    // that kept the old `if (exists)` test would read `{...}` as truthy and
+    // show the tab for every agent, so both call sites were updated with it
+    // (`AgentDetail.vue`'s probe is the only one).
     async checkDashboardExists(name) {
       return dedupe(`dashboardExists:${name}`, async () => {
         const authStore = useAuthStore()
         const response = await axios.get(`/api/agent-dashboard/${name}/exists`, {
           headers: authStore.authHeader
         })
-        return response.data?.has_dashboard === true
+        return {
+          hasDashboard: response.data?.has_dashboard === true,
+          hasDeclaredMetrics: response.data?.has_declared_metrics === true
+        }
       })
     },
 
@@ -906,9 +1016,11 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
-    async setA2aExposure(name, enabled) {
+    // ent#838: `extra` may carry `scope` ('public' | 'internal') and `keyless`;
+    // omitted, each keeps its current value on the server.
+    async setA2aExposure(name, enabled, extra = {}) {
       const authStore = useAuthStore()
-      const response = await axios.put(`/api/enterprise/a2a/${name}/exposure`, { enabled }, {
+      const response = await axios.put(`/api/enterprise/a2a/${name}/exposure`, { enabled, ...extra }, {
         headers: authStore.authHeader
       })
       return response.data

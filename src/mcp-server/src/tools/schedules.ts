@@ -5,8 +5,9 @@
  */
 
 import { z } from "zod";
-import { ApiError, TrinityClient } from "../client.js";
+import { ApiError, TrinityClient, depthRefusalFromError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { accessDenied } from "../access.js";
 
 /**
  * Create schedule management tools with the given client
@@ -109,10 +110,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[list_agent_schedules] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const schedules = await apiClient.listAgentSchedules(agent_name);
@@ -134,6 +135,7 @@ export function createScheduleTools(
       name: "create_agent_schedule",
       description:
         "Create a new cron-based schedule for an agent. " +
+        "With an agent key, changing ANOTHER agent's schedule needs the schedule-management permission an instance admin grants; without it the call is refused with `schedule_management_not_permitted`. " +
         "The schedule will automatically trigger the agent with the specified message at the configured times. " +
         "Cron format: minute hour day-of-month month day-of-week (5 fields). " +
         "Examples: '0 9 * * *' (daily 9am), '0 9 * * 1-5' (weekdays 9am), '*/30 * * * *' (every 30 min). " +
@@ -200,12 +202,18 @@ export function createScheduleTools(
             "admitted through the normal capacity path. On FAIL or PARTIAL the platform records " +
             "business_status = failed_validation on the parent execution and raises one " +
             "high-priority operator alert; it does NOT retry, because retries key on technical " +
-            "failure and validation only runs after technical success."
+            "failure and validation only runs after technical success. A run with an empty " +
+            "response is not validated: it records business_status = validation_unavailable, " +
+            "raises no alert, and never counts as a pass."
           ),
         validation_prompt: z
           .string()
           .optional()
-          .describe("Custom auditor instructions for the validation pass. If omitted, the default prompt is used."),
+          .describe(
+            "Custom auditor instructions for the validation pass. If omitted, the default prompt is used. " +
+            "The run's task and response are always attached; to place them yourself, write a full " +
+            "template using {original_message} and {execution_response}."
+          ),
         validation_timeout_seconds: z
           .number()
           .int()
@@ -252,11 +260,11 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, args.agent_name, "write");
         if (!accessCheck.allowed) {
           console.log(`[create_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
             hint: "Agents can only create schedules on themselves, not other agents.",
-          }, null, 2);
+          });
         }
 
         const schedule = await apiClient.createAgentSchedule(args.agent_name, {
@@ -318,10 +326,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[get_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const schedule = await apiClient.getAgentSchedule(agent_name, schedule_id);
@@ -339,6 +347,7 @@ export function createScheduleTools(
       name: "update_agent_schedule",
       description:
         "Update an existing schedule's configuration. Only specified fields will be updated. " +
+        "With an agent key, changing ANOTHER agent's schedule needs the schedule-management permission an instance admin grants; without it the call is refused with `schedule_management_not_permitted`. " +
         "Access control: agents can only update their own schedules.",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),
@@ -389,12 +398,16 @@ export function createScheduleTools(
             "Turn the post-execution validation pass on or off. If omitted, keeps current value. " +
             "Enabling it adds ONE extra execution on the same agent after each technically-successful " +
             "run; a FAIL or PARTIAL verdict records business_status = failed_validation on the parent " +
-            "and raises one operator alert, and does NOT trigger a retry."
+            "and raises one operator alert, and does NOT trigger a retry. A run with an empty response " +
+            "records business_status = validation_unavailable instead, with no alert."
           ),
         validation_prompt: z
           .string()
           .optional()
-          .describe("New custom auditor instructions. If omitted, keeps current value."),
+          .describe(
+            "New custom auditor instructions. If omitted, keeps current value. The run's task and " +
+            "response are always attached unless the text is a full template using {execution_response}."
+          ),
         validation_timeout_seconds: z
           .number()
           .int()
@@ -440,11 +453,11 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, args.agent_name, "write");
         if (!accessCheck.allowed) {
           console.log(`[update_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
             hint: "Agents can only update their own schedules.",
-          }, null, 2);
+          });
         }
 
         // Build updates object (exclude undefined fields)
@@ -497,6 +510,7 @@ export function createScheduleTools(
       name: "delete_agent_schedule",
       description:
         "Permanently delete a schedule and its execution history. This action cannot be undone. " +
+        "With an agent key, changing ANOTHER agent's schedule needs the schedule-management permission an instance admin grants; without it the call is refused with `schedule_management_not_permitted`. " +
         "Access control: agents can only delete their own schedules.",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),
@@ -513,11 +527,11 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "write");
         if (!accessCheck.allowed) {
           console.log(`[delete_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
             hint: "Agents can only delete their own schedules.",
-          }, null, 2);
+          });
         }
 
         // Get schedule name before deletion for response
@@ -548,6 +562,7 @@ export function createScheduleTools(
       name: "toggle_agent_schedule",
       description:
         "Enable or disable a schedule without deleting it. Disabled schedules won't run but preserve their configuration. " +
+        "With an agent key, changing ANOTHER agent's schedule needs the schedule-management permission an instance admin grants; without it the call is refused with `schedule_management_not_permitted`. " +
         "Access control: agents can toggle schedules on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),
@@ -565,10 +580,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[toggle_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         const result = enabled
@@ -610,10 +625,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[trigger_agent_schedule] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         // #1970: carry the caller identity through so the resulting execution
@@ -650,6 +665,9 @@ export function createScheduleTools(
                 "Poll list_recent_executions for the run in flight.",
             }, null, 2);
           }
+          // #2973: a chain-depth refusal is a result to stop on, not an error.
+          const refusal = depthRefusalFromError(error, agent_name);
+          if (refusal) return JSON.stringify(refusal, null, 2);
           throw error;
         }
 
@@ -711,10 +729,10 @@ export function createScheduleTools(
         const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name, "read");
         if (!accessCheck.allowed) {
           console.log(`[get_schedule_executions] Access denied: ${accessCheck.reason}`);
-          return JSON.stringify({
+          return accessDenied(context, {
             error: "Access denied",
             reason: accessCheck.reason,
-          }, null, 2);
+          });
         }
 
         // Clamp limit to max 100

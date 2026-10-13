@@ -9,6 +9,12 @@
 > wiring only. Code excerpts below predate ent#183 where they show the old
 > single-file `write_file` loop.
 
+> **Skill gates (trinity-enterprise#753, 2026-10-07)**: `inject_assigned_skills` now calls
+> `skill_gate_map_service.reconcile_library_gates` right after the set reconcile (library
+> defaults applied BEFORE injection — the backfill for agents that already held a
+> newly recommended skill) and again after the prune (`drop_after_prune`: defaults of
+> unassigned skills go once their packages are gone). See [skill-gate.md](skill-gate.md) §6.
+
 ## Overview
 When an agent starts, Trinity automatically injects all assigned skills into the agent container as full skill-directory packages under `~/.claude/skills/{name}/`. This happens after container start, Trinity prompt injection, and credential injection, and is skipped entirely for an already-running container that needed no recreation (#421).
 

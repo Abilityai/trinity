@@ -3,20 +3,16 @@
  *
  * Maps Claude Code stream-json events to human-readable status labels
  * for the dynamic thinking status indicator in Chat.
+ *
+ * trinity-enterprise#620: the label is now COMPOSED by `utils/workActivity.js`
+ * — the one vocabulary the Workspace card and Agent Detail share — so
+ * "Reading `…/router.py`" reads the same in the operator Chat tab as on the
+ * Work card. This module keeps its API (the two chat surfaces consume it)
+ * and owns only the chat-specific framing: the `init` label, the trailing
+ * ellipsis the loading indicator has always carried, and the
+ * "Processing results…" beat after a tool result.
  */
-
-const TOOL_STATUS_MAP = {
-  Read: 'Reading file...',
-  Grep: 'Searching code...',
-  Glob: 'Finding files...',
-  Bash: 'Running command...',
-  Edit: 'Editing code...',
-  Write: 'Writing file...',
-  WebSearch: 'Searching web...',
-  WebFetch: 'Fetching page...',
-  Task: 'Delegating to agent...',
-  NotebookEdit: 'Editing notebook...',
-}
+import { activityFromStreamEvent, activityLine } from './workActivity'
 
 /**
  * Extract a human-readable status label from a stream-json event.
@@ -30,34 +26,20 @@ export function getStatusFromStreamEvent(event) {
   // Init event
   if (event.type === 'init') return 'Starting session...'
 
-  // Result event = done
-  if (event.type === 'result') return null
+  // Result / stream end / error = no status change here
+  if (event.type === 'result' || event.type === 'stream_end' || event.type === 'error') return null
 
-  // Stream end
-  if (event.type === 'stream_end') return null
-
-  // Error event
-  if (event.type === 'error') return null
-
-  // Content block events (assistant messages)
+  // A tool result is a beat of its own on this surface (the card says "Thinking").
   const content = event.message?.content || event.content || []
-  if (!Array.isArray(content)) return null
-
-  for (const block of content) {
-    if (block.type === 'thinking') return 'Thinking...'
-    if (block.type === 'text') return 'Responding...'
-    if (block.type === 'tool_use') {
-      const name = block.name || ''
-      if (name.startsWith('mcp__')) {
-        const server = name.split('__')[1] || 'tool'
-        return `Using ${server}...`
-      }
-      return TOOL_STATUS_MAP[name] || 'Working...'
-    }
-    if (block.type === 'tool_result') return 'Processing results...'
+  if (Array.isArray(content) && content.some((b) => b && b.type === 'tool_result')) {
+    return 'Processing results...'
   }
 
-  return null
+  const facts = activityFromStreamEvent(event)
+  if (!facts) return null
+  if (facts.tool === 'Reply') return 'Responding...'
+  const line = activityLine(facts)
+  return line ? `${line.text}...` : null
 }
 
 /**

@@ -43,6 +43,11 @@ ALLOWED_SKIP_REASONS: tuple[tuple[str, str], ...] = (
     # nightly; the per-PR gate runs the credential-free lifecycle journey, which
     # is where the 2026-08-14 regression actually was.
     ("journey needs a real provider key", "credential-bound journey; see #2336"),
+    # #2806: J10's bounce test needs B's model to CHOOSE to call A back. When a
+    # keyed model declines the instructed tool call no hop past the limit was
+    # made, so there is nothing to assert; the deterministic check is
+    # tests/unit/test_2806_inter_agent_depth.py.
+    ("model did not attempt the call back", "keyed journey whose model declined the tool call; see #2806"),
     ("openai", "needs a real OpenAI key (billable)"),
     ("nevermined", "needs the Nevermined testnet + a funded wallet"),
     # Platform/interpreter conditionals that are correct, not missing coverage.

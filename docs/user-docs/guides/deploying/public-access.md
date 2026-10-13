@@ -12,17 +12,16 @@ Trinity serves plain HTTP; no compose file carries an HTTPS listener or a certif
 | **Private network** (Tailscale / WireGuard / VPC) | Encrypted transport; the instance is not on the public internet | Teams and webhook sources that can all reach the VPN. Inbound integrations (Telegram, WhatsApp, VoIP, webhook triggers) do not work without a public hostname. |
 | **Reverse proxy you run** (Caddy / nginx + Let's Encrypt) | HTTPS at your own domain | You already operate a proxy. |
 
-Plain HTTP on a public IP with none of the above is the one combination to avoid. A provisioned DigitalOcean Droplet (the 1-Click or the installer script) ships its own Caddy with a short-lived certificate for the Droplet's IP, and the **Secure this instance** step of its first-run setup presents the tunnel below as the second hardening stage, after a domain — see [Single Server → DigitalOcean 1-Click](single-server.md#digitalocean-marketplace-1-click).
+Plain HTTP on a public IP with none of the above is the one combination to avoid. An instance prepared by `start.sh --provision` (the DigitalOcean 1-Click or installer script, an AWS or Vultr install) ships its own Caddy with a short-lived certificate for the instance's IP, and on the DigitalOcean and AWS paths the **Secure this instance** step of the first-run setup presents the tunnel below as the second hardening stage, after a domain — see [Single Server → DigitalOcean 1-Click](single-server.md#digitalocean-marketplace-1-click).
 
 ## What Public Access Enables
 
 | Feature | Requires public access |
 |---|---|
-| Slack channel adapter (OAuth callback + event webhooks) | Yes |
+| Slack: the one-time OAuth install callback, and event delivery in webhook mode (the default Socket Mode connects outward and needs none) | Yes |
 | Telegram bot webhooks | Yes |
 | WhatsApp (Twilio) webhooks | Yes |
 | Public chat links (`/chat/*`) | Yes |
-| Agent website proxy (`/site/<token>/`) | Yes |
 | Nevermined paid chat (`/api/paid/*/chat`) | Yes |
 | Web UI access for team members off-VPN | Yes |
 | MCP access for Claude Code clients off-VPN (`/mcp`) | Yes |
@@ -45,7 +44,7 @@ In the Cloudflare dashboard, add a public hostname for your tunnel under the **P
 
 **Simplest: one catch-all rule** — route the whole hostname to the frontend, `http://trinity-frontend:8080`. The production frontend's nginx already proxies `/api/`, `/a2a/`, `/mcp`, `/ws` and `/health` to the right upstream, so a single rule serves the web UI, every webhook, and MCP. (The frontend container listens on **8080** inside the network; `FRONTEND_PORT` only changes the host-side mapping.)
 
-**Narrower: path-split rules** — if you want to publish only the webhook surface rather than the whole UI:
+**Narrower: path-split rules** — if you want to publish only the webhook surface rather than the whole UI. **Anchor the A2A rules.** An unanchored `/a2a/*` also matches `/api/agents/{name}/a2a/call` — Trinity's *outbound* A2A caller, an authenticated internal endpoint that has no business on a public hostname — so use the two anchored rules below rather than a prefix.
 
 | Path prefix | Routes to | Purpose |
 |---|---|---|
@@ -53,14 +52,15 @@ In the Cloudflare dashboard, add a public hostname for your tunnel under the **P
 | `/api/telegram/webhook/*` | `http://trinity-backend:8000` | Telegram bot webhooks |
 | `/api/whatsapp/*` | `http://trinity-backend:8000` | WhatsApp/Twilio webhooks |
 | `/api/paid/*` | `http://trinity-backend:8000` | Nevermined paid chat |
+| `^/a2a/[^/]+$` | `http://trinity-backend:8000` | A2A inbound JSON-RPC door (paid or authenticated) |
+| `^/a2a/[^/]+/\.well-known/agent-card\.json$` | `http://trinity-backend:8000` | A2A discovery card |
 | `/api/webhooks/*` | `http://trinity-backend:8000` | Schedule webhook triggers |
 | `/api/voip/*` | `http://trinity-backend:8000` | VoIP media streams (WebSocket) |
 | `/mcp` | `http://trinity-frontend:8080` | MCP server, proxied by the frontend |
 | `/chat/*` | `http://trinity-frontend:8080` | Public chat UI |
-| `/site/*` | `http://trinity-backend:8000` | Agent website proxy |
 | `/assets/*` | `http://trinity-frontend:8080` | Static assets |
 
-These rules publish the webhook surface and not the web interface. To publish the interface as well, add a `/` catch-all routing to `http://trinity-frontend:8080`. To keep it private, leave that out and reach it over a private network — [Hardening → Step 2c](hardening.md#step-2c-both-the-tunnel-carries-the-callbacks-the-tailnet-carries-you).
+These rules publish the webhook surface and not the web interface. To publish the interface as well, add a `/` catch-all routing to `http://trinity-frontend:8080`. To keep it private, leave that out and reach it over a private network — [Hardening → Step 2c](hardening.md#step-2c-both--the-tunnel-carries-the-callbacks-the-tailnet-carries-you).
 
 Add the matching rule whenever you connect a new channel. A path you have not published stops delivering, with no error on this end.
 
@@ -81,7 +81,7 @@ Both variables are forwarded by `docker-compose.prod.yml` and `docker-compose.ho
 | Variable | Example value | Notes |
 |---|---|---|
 | `TUNNEL_TOKEN` | `eyJhIjoiY...` | The token from the Cloudflare Zero Trust dashboard. Required for the `cloudflared` container to authenticate. |
-| `PUBLIC_CHAT_URL` | `https://public.your-domain.com` | The externally reachable base URL. Used to construct webhook URLs, public chat links, and agent website proxy URLs. Must match the public hostname you configured in Cloudflare. Also settable after login as the **Public URL** under **Settings → General**. |
+| `PUBLIC_CHAT_URL` | `https://public.your-domain.com` | The externally reachable base URL. Used to construct webhook URLs and public chat links. Must match the public hostname you configured in Cloudflare. Also settable after login as the **Public URL** under **Settings → General**. |
 
 Set both in `.env`:
 
@@ -150,8 +150,7 @@ MCP clients off-VPN connect to `{PUBLIC_CHAT_URL}/mcp` with an MCP API key (**Se
 - The Cloudflare Tunnel does **not** require opening any inbound firewall ports — the `cloudflared` container initiates an outbound connection to Cloudflare's edge.
 - `TUNNEL_TOKEN` is a long-lived credential. Store it only in `.env` (gitignored). Do not commit it.
 - Path prefixes not listed in your ingress rules return 404 at Cloudflare's edge before reaching your server.
-- The agent website proxy (`/site/<token>/`) strips `authorization`, `cookie`, and `x-internal-secret` headers before forwarding to agent containers.
-- Rate limits apply to the public endpoints (120 req/min per IP for `/site/`, 10 req/60s per token for schedule webhooks).
+- Rate limits apply to the public endpoints — schedule webhooks, for example, accept 10 triggers per token per 60 s (`WEBHOOK_RATE_LIMIT`) and 60 requests per IP per 60 s before authentication (`WEBHOOK_IP_RATE_LIMIT`).
 - MCP over the tunnel is protected by the MCP API key on every request. Leave `MCP_INLINE_AUTH_ENABLED` at its default (`false`) unless you intend keyless email-code sign-in over MCP, and then only over TLS.
 
 ## See Also

@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from unit._write_params import flat_kwargs
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
@@ -86,11 +87,11 @@ class TestApplyResultHonorsStatus:
         )
         result, (mdb, mact, mcap, mrec) = _run_apply(env)
 
-        assert mdb.update_execution_status.call_args.kwargs["status"] == TaskExecutionStatus.CANCELLED
+        assert flat_kwargs(mdb.update_execution_status.call_args)["status"] == TaskExecutionStatus.CANCELLED
         assert result.status == TaskExecutionStatus.CANCELLED
         assert result.error == "Execution cancelled by user"
         # cost salvaged from metadata so the cancelled row records real spend.
-        assert mdb.update_execution_status.call_args.kwargs["cost"] == 0.05
+        assert flat_kwargs(mdb.update_execution_status.call_args)["cost"] == 0.05
         # #1332: the dispatch activity closes as CANCELLED (not FAILED) so a
         # user-cancel doesn't pollute activity-derived views. A cancel is not an
         # AUTH failure → no breaker outcome recorded.
@@ -110,7 +111,7 @@ class TestApplyResultHonorsStatus:
             metadata={"cost_usd": 0.02},
         )
         result, (mdb, *_rest) = _run_apply(env)
-        assert mdb.update_execution_status.call_args.kwargs["status"] == TaskExecutionStatus.FAILED
+        assert flat_kwargs(mdb.update_execution_status.call_args)["status"] == TaskExecutionStatus.FAILED
         assert result.status == TaskExecutionStatus.FAILED
 
     def test_cancelled_release_slot_gated_on_cas(self):
@@ -199,7 +200,7 @@ class TestSyncCrossValidation:
             "execution_log": [],
         })
         assert result.status == TaskExecutionStatus.CANCELLED
-        assert mock_db.update_execution_status.call_args.kwargs["status"] == TaskExecutionStatus.CANCELLED
+        assert flat_kwargs(mock_db.update_execution_status.call_args)["status"] == TaskExecutionStatus.CANCELLED
 
     def test_200_without_status_unchanged_success(self):
         """Backward-compat: an old agent image omits `status` → SUCCESS path."""
@@ -212,7 +213,7 @@ class TestSyncCrossValidation:
             "execution_log": [],
         })
         assert result.status == TaskExecutionStatus.SUCCESS
-        assert mock_db.update_execution_status.call_args.kwargs["status"] == TaskExecutionStatus.SUCCESS
+        assert flat_kwargs(mock_db.update_execution_status.call_args)["status"] == TaskExecutionStatus.SUCCESS
 
     def test_200_status_success_explicit_is_success(self):
         from services.task_execution_service import TaskExecutionStatus

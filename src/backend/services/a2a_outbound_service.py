@@ -153,7 +153,8 @@ def _enforce_bounds(agent_name: str) -> None:
 
 async def _record_activity(agent_name: str, endpoint_name: str, host: str,
                            state: str, error: Optional[str] = None,
-                           auth_scheme: str = "bearer") -> None:
+                           auth_scheme: str = "bearer",
+                           payment_status: Optional[str] = None) -> None:
     """One `agent_activities` row per outbound call (F12).
 
     The audit log is admin-gated and unwatched; `agent_activities` is the stream
@@ -180,6 +181,7 @@ async def _record_activity(agent_name: str, endpoint_name: str, host: str,
                 "host": host,
                 "state": state,
                 **({"auth": "aauth"} if auth_scheme == "aauth" else {}),
+                **({"payment_status": payment_status} if payment_status else {}),
             },
         )
         await activity_service.complete_activity(
@@ -266,6 +268,7 @@ async def call_agent(
             result = await a2a_client.call_endpoint(
                 endpoint_url=endpoint.url,
                 credential=endpoint.credential,
+                credential_kind=endpoint.credential_kind,
                 message=message,
                 context_id=context_id,
                 task_id=task_id,
@@ -289,7 +292,8 @@ async def call_agent(
         raise
 
     await _record_activity(agent_name, endpoint.name, result.host, result.state,
-                           auth_scheme=endpoint.auth_scheme)
+                           auth_scheme=endpoint.auth_scheme,
+                           payment_status=result.payment_status)
     return OutboundOutcome(
         result=result, endpoint_id=endpoint.id, endpoint_name=endpoint.name,
         auth_scheme=endpoint.auth_scheme,
@@ -327,6 +331,7 @@ async def poll_task(
     result = await a2a_client.get_task(
         endpoint_url=endpoint.url,
         credential=endpoint.credential,
+        credential_kind=endpoint.credential_kind,
         task_id=task_id,
         validated=validated,
         **({"signer": signer} if signer is not None else {}),
@@ -353,6 +358,11 @@ def audit_details(outcome: OutboundOutcome, *, extra: Optional[Dict[str, Any]] =
     }
     if outcome.result.task_id:
         details["remote_task_id"] = outcome.result.task_id
+    if outcome.result.payment_status:
+        # #3185 decision 31: money leaving is otherwise invisible. The peer's
+        # own `x402.payment.status` — a short enum value, never a receipt and
+        # never the token — so the operator can see that a call was PAID for.
+        details["payment_status"] = outcome.result.payment_status
     if outcome.replayed:
         details["replayed"] = True
     if outcome.auth_scheme == "aauth":

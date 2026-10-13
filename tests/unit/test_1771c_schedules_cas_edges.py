@@ -42,6 +42,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from db.write_params import ExecutionResult
 
 # ---------------------------------------------------------------------------
 # Bootstrap: make src/backend importable. pytest auto-adds `tests/` to
@@ -224,7 +225,7 @@ def test_a1b_success_wins_over_non_cancelled_prior(ops, prior_status):
     """
     eid = insert_execution(f"a1b-{prior_status}", status=prior_status)
 
-    assert ops.update_execution_status(eid, "success", response="done") is True
+    assert ops.update_execution_status(eid, "success", result=ExecutionResult(response="done")) is True
     assert status_of(eid) == "success"
     assert column_of(eid, "response") == "done"
 
@@ -237,7 +238,7 @@ def test_a2_success_blocked_by_cancelled_only(ops):
     """
     eid = insert_execution("a2-cancelled", status="cancelled")
 
-    assert ops.update_execution_status(eid, "success", response="late") is False
+    assert ops.update_execution_status(eid, "success", result=ExecutionResult(response="late")) is False
     assert status_of(eid) == "cancelled"
     assert column_of(eid, "response") is None
 
@@ -265,8 +266,8 @@ def test_a3_success_over_success_wins_again_unspecified(ops):
     """
     eid = insert_execution("a3-replay", status="running")
 
-    assert ops.update_execution_status(eid, "success", response="first") is True
-    assert ops.update_execution_status(eid, "success", response="second") is True
+    assert ops.update_execution_status(eid, "success", result=ExecutionResult(response="first")) is True
+    assert ops.update_execution_status(eid, "success", result=ExecutionResult(response="second")) is True
     assert status_of(eid) == "success"
     assert column_of(eid, "response") == "second"
 
@@ -344,7 +345,7 @@ def test_a5b_malformed_started_at_raises_before_the_cas(
     )
 
     with pytest.raises(ValueError):
-        ops.update_execution_status(eid, "success", response="x")
+        ops.update_execution_status(eid, "success", result=ExecutionResult(response="x"))
 
     # The row is untouched — the raise precedes the UPDATE entirely.
     assert status_of(eid) == prior_status
@@ -379,7 +380,7 @@ def test_a6_clock_skew_must_not_persist_negative_duration(ops):
     future = _iso(datetime.now(timezone.utc) + timedelta(seconds=300))
     eid = insert_execution("a6-skew", status="running", started_at=future)
 
-    assert ops.update_execution_status(eid, "success", response="ok") is True
+    assert ops.update_execution_status(eid, "success", result=ExecutionResult(response="ok")) is True
 
     duration = column_of(eid, "duration_ms")
     assert duration >= 0, f"negative duration_ms persisted: {duration}"
@@ -470,7 +471,7 @@ def test_a8_retry_count_none_preserves_prior_value(ops, retry_count, expected):
     """
     eid = insert_execution(f"a8-{retry_count}", status="running", retry_count=7)
 
-    assert ops.update_execution_status(eid, "success", retry_count=retry_count) is True
+    assert ops.update_execution_status(eid, "success", result=ExecutionResult(retry_count=retry_count)) is True
     assert column_of(eid, "retry_count") == expected
 
 

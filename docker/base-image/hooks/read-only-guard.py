@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """PreToolUse hook for Write/Edit/NotebookEdit/MultiEdit tools.
 
-Enforces per-agent read-only mode by checking ~/.trinity/read-only-config.json.
+Enforces per-agent read-only mode by checking /opt/trinity/read-only-config.json
+(or, while that is missing, ~/.trinity/read-only-config.json).
 Exits 0 (allow) when read-only mode is disabled or the path is on the allow list.
 Exits 2 (deny) when read-only mode is enabled and the path matches a blocked pattern.
 
@@ -23,19 +24,27 @@ from lib import (  # noqa: E402
     run_hook,
 )
 
-_CONFIG_PATH = os.path.expanduser("~/.trinity/read-only-config.json")
+# ent#787: root-owned and written by the backend as root. While it exists it
+# decides, whatever the agent-owned `~/.trinity/read-only-config.json` says (the
+# agent can delete or rewrite that file without `sudo`). The home copy decides
+# only while the root file is missing: after a recreate drops the container's
+# writable layer and before the start-time sync rewrites it, or under a backend
+# that predates ent#787.
+_CONFIG_PATH = "/opt/trinity/read-only-config.json"
+_LEGACY_CONFIG_PATH = "/home/developer/.trinity/read-only-config.json"
 
 
 def _load_read_only_config() -> dict | None:
     """Return the read-only config dict if enabled, None if disabled or absent."""
     import json
-    if not os.path.exists(_CONFIG_PATH):
+    path = _CONFIG_PATH if os.path.exists(_CONFIG_PATH) else _LEGACY_CONFIG_PATH
+    if not os.path.exists(path):
         return None
     try:
-        with open(_CONFIG_PATH) as f:
+        with open(path) as f:
             cfg = json.load(f)
     except (json.JSONDecodeError, IOError) as e:
-        log_event("read_only_config_load_error", path=_CONFIG_PATH, error=str(e))
+        log_event("read_only_config_load_error", path=path, error=str(e))
         return None
     if not cfg.get("enabled", False):
         return None
@@ -49,7 +58,10 @@ def _normalise(path: str) -> str:
     expanded = os.path.expanduser(path)
     if not os.path.isabs(expanded):
         expanded = os.path.join("/home/developer", expanded)
-    return os.path.normpath(expanded)
+    # normpath keeps exactly two leading slashes (POSIX leaves `//` implementation-
+    # defined); the filesystem reads them as one, so `//home/developer/...` must
+    # match the same patterns (trinity-enterprise#792).
+    return os.path.normpath("/" + expanded.lstrip("/"))
 
 
 def _matches_any(path: str, patterns: list) -> str:

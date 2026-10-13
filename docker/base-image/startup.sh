@@ -43,15 +43,23 @@ fi
 # control, and a live #2036 leak candidate (it registers absolute /opt/trinity
 # paths, so a clone made outside the container has every Bash/Edit refused).
 #
-# Removed ONLY on an exact content match against the file we now ship. An
-# agent-authored settings.json — or one an operator edited on purpose — differs and
-# is left completely alone. `cmp -s` is the whole gate: no parsing, no heuristics,
-# no "looks like ours".
+# Removed ONLY on an exact content match against a version the image shipped
+# there: the SHA-256 of every `hooks/claude-settings.json` ever COPYed to that
+# path (GUARD-001, then #887 onward). An agent-authored settings.json, or one an
+# operator edited on purpose, differs and is left completely alone. The digest
+# list is the whole gate: no parsing, no heuristics, no "looks like ours", and
+# it does not move when the managed registration changes (ent#787).
 LEGACY_SETTINGS=/home/developer/.claude/settings.json
-if [ -f "$LEGACY_SETTINGS" ] && [ -f "$GUARDRAIL_SETTINGS" ] \
-   && cmp -s "$LEGACY_SETTINGS" "$GUARDRAIL_SETTINGS"; then
-    rm -f "$LEGACY_SETTINGS" && \
-        echo "GUARDRAILS: removed the legacy in-tree registration at $LEGACY_SETTINGS (identical to the managed copy; ent#345)"
+LEGACY_SETTINGS_SHA256="abb03a5eb55d268f1cca99372697844294cf601cd1decefb611b8729735cc09c d00df36d494cb68f013b86c2051b952226e95777331a5a108ee14aa55976041f"
+if [ -f "$LEGACY_SETTINGS" ]; then
+    _legacy_sum=$(sha256sum "$LEGACY_SETTINGS" 2>/dev/null | cut -d' ' -f1)
+    case " $LEGACY_SETTINGS_SHA256 " in
+        *" ${_legacy_sum:-none} "*)
+            rm -f "$LEGACY_SETTINGS" && \
+                echo "GUARDRAILS: removed the legacy in-tree registration at $LEGACY_SETTINGS (a version the image shipped; ent#345)"
+            ;;
+    esac
+    unset _legacy_sum
 fi
 
 # === Scratch space: ensure TMPDIR exists on the home volume (#1098) ===
@@ -607,15 +615,13 @@ if [ "${AGENT_RUNTIME}" = "codex" ]; then
 fi
 
 # Ensure core agent-server dependencies are installed correctly
-# This prevents template repos from breaking the agent server with incompatible packages
+# This prevents template repos from breaking the agent server with incompatible packages.
+# #3106: floors for the server's own packages, never `--upgrade` — an unpinned
+# upgrade here took whatever PyPI published last on every boot, and FastAPI
+# 0.142 then stopped every OTEL-enabled agent's server from starting. Installs
+# what is missing or too old; leaves a newer version a template brought alone.
 echo "Verifying agent-server dependencies..."
-python3 -m pip install --user --quiet --upgrade \
-    fastapi \
-    uvicorn \
-    httpx \
-    pydantic \
-    python-multipart \
-    pyyaml
+python3 -m pip install --user --quiet -r /opt/trinity/agent-server-requirements.txt
 
 # Start SSH if enabled
 if [ "${ENABLE_SSH}" = "true" ]; then

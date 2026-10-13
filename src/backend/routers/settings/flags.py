@@ -235,7 +235,8 @@ async def get_public_feature_flags(
         "canvas_max_per_agent": CANVAS_MAX_PER_AGENT,
         # Install provenance (#2380). A STRING, not a boolean — `platform_default_model`
         # above is the precedent for a non-boolean on this surface. One of
-        # do-marketplace / vultr-marketplace / script / unknown, recorded once at
+        # do-marketplace / vultr-marketplace / aws-marketplace / do-script /
+        # aws-script / script / unknown, recorded once at
         # first boot from TRINITY_INSTALL_SOURCE and read from `system_settings`
         # thereafter. Surfaced HERE rather than on a new route because this is the
         # established home for UI-gating flags and the browser already awaits it.

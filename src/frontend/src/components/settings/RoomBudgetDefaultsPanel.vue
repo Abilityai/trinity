@@ -61,7 +61,7 @@
                 data-testid="rbd-max-messages"
                 :class="SETTINGS_NUMBER_INPUT_CLASS"
               />
-              <span class="text-xs text-gray-400 dark:text-gray-500">{{ sourceLabel('room_default_max_messages') }}</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">{{ sourceLabel('room_default_max_messages') }}</span>
             </div>
           </div>
 
@@ -77,9 +77,9 @@
                 data-testid="rbd-max-cost"
                 :class="SETTINGS_NUMBER_INPUT_CLASS"
               />
-              <span class="text-xs text-gray-400 dark:text-gray-500">{{ sourceLabel('room_default_max_cost_usd') }}</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">{{ sourceLabel('room_default_max_cost_usd') }}</span>
             </div>
-            <p class="mt-1 text-xs text-gray-400 dark:text-gray-500">Empty means no cap.</p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Empty means no cap.</p>
           </div>
 
           <div>
@@ -94,9 +94,9 @@
                 :class="SETTINGS_NUMBER_INPUT_CLASS"
               />
               <span class="text-sm text-gray-500 dark:text-gray-400">hours</span>
-              <span class="text-xs text-gray-400 dark:text-gray-500">{{ sourceLabel('room_default_ttl_hours') }}</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">{{ sourceLabel('room_default_ttl_hours') }}</span>
             </div>
-            <p class="mt-1 text-xs text-gray-400 dark:text-gray-500">0 means no expiry.</p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">0 means no expiry.</p>
           </div>
         </div>
 
@@ -114,7 +114,7 @@
             class="text-sm text-gray-500 dark:text-gray-400 underline"
             @click="reset"
           >Reset</button>
-          <span v-if="saved" class="text-sm text-status-success-600 dark:text-status-success-400">Saved</span>
+          <span v-if="saved" class="text-sm text-status-success-700 dark:text-status-success-400">Saved</span>
         </div>
 
         <p v-if="saveError" class="text-sm text-red-600 dark:text-red-400">{{ saveError }}</p>

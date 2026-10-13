@@ -62,6 +62,13 @@ docker exec trinity-vector wget -q -O - http://localhost:8686/health
 
 > The scheduler's port 8001 is not published to the host by any compose file, so run probe 2 from inside its container: `docker exec trinity-scheduler curl -sf http://localhost:8001/health`. `./scripts/deploy/verify-platform.sh` runs the same checks (plus the base-image and `.env` checks) and treats a failed scheduler probe as a warning for this reason. A `503` from the backend with a `migrations` block is a pending or failed schema migration, not a dead backend.
 
+On a hosted install, also check the bundled database (it has no host port; `verify-platform.sh` does not probe it):
+
+```bash
+docker exec trinity-postgres pg_isready -h 127.0.0.1 -U trinity -d trinity
+# Expected: 127.0.0.1:5432 - accepting connections
+```
+
 ### Step 2: Check Resource Thresholds
 
 | Metric | Warning | Critical | Action |
@@ -107,6 +114,9 @@ docker run --rm -v trinity_trinity-data:/data alpine ls -lh /data/trinity.db
 
 # Production / hosted (bind mount)
 ls -lh /srv/trinity-data/trinity.db
+
+# PostgreSQL (bundled hosted database)
+docker exec trinity-postgres psql -U trinity -d trinity -tc "SELECT pg_size_pretty(pg_database_size('trinity'))"
 ```
 
 #### Backups and retention
@@ -265,15 +275,17 @@ If Redis passwords changed after the `redis-data` volume was already populated, 
 ### Disk full — Docker cleanup
 
 ```bash
-# Remove unused images, containers, networks (safe to run)
-docker system prune -f
-
-# Remove dangling images only
+# Remove dangling images and the build cache (safe while Trinity runs)
 docker image prune -f
+docker builder prune -f
 
 # Check size recovered
 docker system df
 ```
+
+Be careful with `docker system prune`: it also removes **every stopped container**, and a stopped agent's container is how Trinity knows that agent exists. Its workspace volume survives, but the agent drops out of the roster until it is recreated. Run it only when every agent you want to keep is running, and never add `--volumes`, which deletes agent workspaces.
+
+Trinity removes an agent's volumes itself when the agent is purged after its soft-delete retention window. Every agent volume carries a label naming the Trinity installation that created it, and the orphan-volume sweep only reclaims volumes carrying this installation's label, so two installations sharing one Docker daemon never delete each other's volumes. Volumes created before that label existed are never reclaimed automatically; the backend log names any that are unattached and unowned, at `WARNING`, for you to review.
 
 ---
 

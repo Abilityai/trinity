@@ -1,7 +1,7 @@
 # Trinity Agent Platform - Architecture Diagrams
 
 > **Last Updated**: 2026-01-22
-> **Platform Version**: Autonomous Agent Orchestration and Infrastructure Platform
+> **Platform**: The operating system for the AI-native company — open source, self-hosted, that you own
 
 ## 1. High-Level Platform Architecture
 
@@ -567,7 +567,7 @@ graph TB
 
 ## Key Architecture Principles
 
-### 1. Autonomous Agent Orchestration
+### 1. Agent Orchestration
 - Agents are autonomous units with planning, memory, and delegation capabilities
 - System Agent (`trinity-system`) provides platform-level orchestration
 - Process Engine enables complex multi-agent workflows

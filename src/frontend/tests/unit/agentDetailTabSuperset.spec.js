@@ -10,40 +10,28 @@
  * The fix deletes the list: `buildTabs()` is pure and takes the gating flags as
  * arguments, so the deep-link resolver asks it for the superset.
  *
- * That purity is what lets this be a REAL test rather than another
- * source-structure guard (this project has no @vue/test-utils, so the sibling
- * #2130 spec has to scan text). The function is extracted from the SFC and
- * executed, so what is asserted here is the behaviour that actually ships — add
- * a tab, and these tests see it.
+ * ent#479 moved `buildTabs` into `utils/agentTabs.js` and this spec IMPORTS it
+ * rather than brace-matching it out of the SFC and `new Function`-ing the text.
+ * Same executed behaviour, one less parser. The gate's own cases live in
+ * `agentTabs.spec.js`; what stays here is the deep-link WIRING, which is a
+ * property of `AgentDetail.vue` and still read from its source.
+ *
+ * @source-text-pin: the remaining reads assert how AgentDetail.vue WIRES the
+ * resolver (that `ALL_TAB_IDS` is derived from the builder rather than
+ * restated, that the late reconcile guards itself, that it runs in both
+ * lifecycle hooks). Those are call-site shape, not rendered behaviour: a mount
+ * that lands on the right tab passes identically whether the superset came
+ * from the builder or from a freshly re-typed literal, which is the #2153
+ * regression itself.
  */
 import { describe, it, expect } from 'vitest'
+import { buildTabs, TAB_ALIASES } from '../../src/utils/agentTabs'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 
 const SRC = fileURLToPath(new URL('../../src/views/AgentDetail.vue', import.meta.url))
 const source = readFileSync(SRC, 'utf8')
 
-/** Pull `function buildTabs(...) { ... }` out of the SFC by brace matching. */
-function extractBuildTabs() {
-  const start = source.indexOf('function buildTabs(')
-  expect(start, 'buildTabs() not found — did it get inlined back into the computed?')
-    .toBeGreaterThan(-1)
-  const open = source.indexOf('{', source.indexOf(')', start))
-  let depth = 0
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === '{') depth++
-    else if (source[i] === '}') {
-      depth--
-      if (depth === 0) {
-        // eslint-disable-next-line no-new-func
-        return new Function(`${source.slice(start, i + 1)}; return buildTabs`)()
-      }
-    }
-  }
-  throw new Error('unterminated buildTabs()')
-}
-
-const buildTabs = extractBuildTabs()
 const idsFor = (flags) => buildTabs(flags).map((t) => t.id)
 
 const OWNER = {
@@ -53,7 +41,9 @@ const OWNER = {
 const NON_OWNER = { ...OWNER, canShare: false }
 
 // The five the old list forgot. Named individually so a regression says which.
-const PREVIOUSLY_UNREACHABLE = ['a2a', 'loops', 'playbooks', 'access', 'nevermined']
+// trinity-enterprise#754 retired the fifth, `playbooks`: it merged into Skills
+// and is now an alias (asserted below), never a tab of its own.
+const PREVIOUSLY_UNREACHABLE = ['a2a', 'loops', 'access', 'nevermined']
 
 describe('#2153 the deep-link superset', () => {
   for (const id of PREVIOUSLY_UNREACHABLE) {
@@ -72,13 +62,23 @@ describe('#2153 the deep-link superset', () => {
   it('derives the superset from the builder rather than restating it', () => {
     expect(source).toMatch(/const ALL_TAB_IDS = buildTabs\(/)
   })
+
+  it("an old ?tab=playbooks link lands on Skills (trinity-enterprise#754)", () => {
+    expect(TAB_ALIASES.playbooks).toBe('skills')
+    expect(idsFor(OWNER)).toContain('skills')
+    expect(idsFor(OWNER)).not.toContain('playbooks')
+    // Every alias resolves to a tab that exists for someone.
+    for (const target of Object.values(TAB_ALIASES)) expect(idsFor(OWNER)).toContain(target)
+  })
 })
 
 describe('#2153 a non-owner still cannot reach owner-only tabs', () => {
   // The question #2130 deferred as "needs a non-owner blank-panel decision".
   // Resolving against what the viewer can see answers it without one: the
   // fallback for a non-owner is unchanged, and no blank panel is ever rendered.
-  const ownerOnly = ['access', 'sharing', 'permissions', 'a2a', 'folders', 'skills', 'settings']
+  // trinity-enterprise#754: `skills` left this list — the merged tab is for
+  // everyone with access; its management controls are role-gated inside it.
+  const ownerOnly = ['access', 'sharing', 'permissions', 'a2a', 'folders', 'settings']
 
   for (const id of ownerOnly) {
     it(`omits '${id}' when can_share is false`, () => {
@@ -88,7 +88,7 @@ describe('#2153 a non-owner still cannot reach owner-only tabs', () => {
 
   it('still offers the shared tabs to a non-owner', () => {
     const ids = idsFor(NON_OWNER)
-    for (const id of ['overview', 'tasks', 'chat', 'reports', 'schedules', 'loops', 'info']) {
+    for (const id of ['overview', 'tasks', 'chat', 'reports', 'schedules', 'loops', 'skills', 'info']) {
       expect(ids).toContain(id)
     }
   })
@@ -97,6 +97,7 @@ describe('#2153 a non-owner still cannot reach owner-only tabs', () => {
     const ids = idsFor({ ...OWNER, isSystem: true })
     expect(ids).not.toContain('sharing')
     expect(ids).not.toContain('permissions')
+    expect(ids).toContain('skills')     // its Run surface, as the Playbooks tab had
   })
 })
 

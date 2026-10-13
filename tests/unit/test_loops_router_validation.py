@@ -43,6 +43,9 @@ def _user():
     u = MagicMock()
     u.id = 1
     u.email = "u@example.com"
+    # #2973: a human principal — the start route now runs the chain-depth
+    # guard, which reads `agent_name` to decide whether the caller is an agent.
+    u.agent_name = None
     return u
 
 

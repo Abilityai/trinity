@@ -97,7 +97,7 @@ lg row anatomy (#2358) — ONE sizing context:
          │     9 row-1 cells (same data-col hooks as the header)
          │     + secondary line  lg:row-start-2 lg:col-start-4 lg:col-end-10
          │           flex-nowrap min-w-0 overflow-hidden, meta ink on the container
-         │           slug(code, select-all, truncate max-w-1/2) · pressure · runtime · tags · +N
+         │           slug(code, select-all, truncate max-w-1/2) · pressure · readiness · runtime · tags · +N
          │     + CapacityMeter  lg:col-start-10 lg:row-start-1 lg:row-span-2 lg:mr-4
          ├─ md layout   (display:none at lg — never a grid item)
          └─ base layout (display:none at lg)
@@ -222,10 +222,17 @@ NavBar: Agents entry removed; Dashboard active on '/' || isAgentSection
   entirely and on a mixed fleet it marks the exceptions. The rule is
   platform-anchored in a pure util rather than derived from fleet majority,
   which would silently flip badges as the fleet changes. **Secondary-line
-  contract** (`lg`/`md`): fixed order `slug · pressure · runtime · tags · +N`;
+  contract** (`lg`/`md`): fixed order `slug · pressure · readiness · runtime · tags · +N`;
   `flex-nowrap min-w-0 overflow-hidden`; slug `truncate max-w-[50%]`; badges
   `flex-shrink-0`; tags keep their counted `+N`. A future badge goes here in
-  that order or it does not go in the row.
+  that order or it does not go in the row. The **readiness** badge
+  (trinity-enterprise#527 rider) renders only for a stamped role companion —
+  `utils/readinessBadge.js`, the one predicate the grid tile shares — and its
+  calibrating tooltip says the scheduled brief is paused only when the row's
+  `brief_held` is true (the role card's rule: an enabled seat-delivery
+  schedule and autonomy on). The 30 s agent poll patches `readiness` /
+  `brief_held` in place on rows already present, so a flip reaches an open
+  dashboard without a reload.
 
 ## Teardown state loss (by design)
 

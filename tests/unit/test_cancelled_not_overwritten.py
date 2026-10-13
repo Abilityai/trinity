@@ -40,6 +40,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from db.write_params import ExecutionResult
 
 # ---------------------------------------------------------------------------
 # Bootstrap — same shadow-handling as test_schedule_status_observability.py
@@ -129,7 +130,9 @@ class TestSuccessDoesNotOverwriteCancelled:
         cancelled_ok = schedule_ops.update_execution_status(
             execution_id="exec-671",
             status=TaskExecutionStatus.CANCELLED,
-            error="Execution terminated by user",
+            result=ExecutionResult(
+                error="Execution terminated by user",
+            ),
         )
         assert cancelled_ok is True
         assert _get_status(tmp_db, "exec-671") == TaskExecutionStatus.CANCELLED
@@ -138,8 +141,10 @@ class TestSuccessDoesNotOverwriteCancelled:
         success_attempted = schedule_ops.update_execution_status(
             execution_id="exec-671",
             status=TaskExecutionStatus.SUCCESS,
-            response="Final agent message that should NOT count as deliverable",
-            cost=1.30,
+            result=ExecutionResult(
+                response="Final agent message that should NOT count as deliverable",
+                cost=1.30,
+            ),
         )
 
         # The whole point of the fix.
@@ -159,7 +164,9 @@ class TestSuccessDoesNotOverwriteCancelled:
         ok = schedule_ops.update_execution_status(
             execution_id="exec-happy",
             status=TaskExecutionStatus.SUCCESS,
-            response="ok",
+            result=ExecutionResult(
+                response="ok",
+            ),
         )
         assert ok is True
         assert _get_status(tmp_db, "exec-happy") == TaskExecutionStatus.SUCCESS
@@ -182,7 +189,9 @@ class TestSuccessDoesNotOverwriteCancelled:
         ok = schedule_ops.update_execution_status(
             execution_id="exec-phantom",
             status=TaskExecutionStatus.SUCCESS,
-            response="real result that arrived after cleanup misfired",
+            result=ExecutionResult(
+                response="real result that arrived after cleanup misfired",
+            ),
         )
         assert ok is True
         assert _get_status(tmp_db, "exec-phantom") == TaskExecutionStatus.SUCCESS
@@ -195,13 +204,17 @@ class TestSuccessDoesNotOverwriteCancelled:
         schedule_ops.update_execution_status(
             execution_id="exec-twf",
             status=TaskExecutionStatus.CANCELLED,
-            error="user cancel",
+            result=ExecutionResult(
+                error="user cancel",
+            ),
         )
         # Cleanup service trying to mark the row FAILED later must be blocked.
         blocked = schedule_ops.update_execution_status(
             execution_id="exec-twf",
             status=TaskExecutionStatus.FAILED,
-            error="watchdog timeout",
+            result=ExecutionResult(
+                error="watchdog timeout",
+            ),
         )
         assert blocked is False
         assert _get_status(tmp_db, "exec-twf") == TaskExecutionStatus.CANCELLED
@@ -219,7 +232,9 @@ class TestSuccessDoesNotOverwriteCancelled:
             schedule_ops.update_execution_status(
                 execution_id="exec-sym",
                 status=TaskExecutionStatus.SUCCESS,
-                response="late",
+                result=ExecutionResult(
+                    response="late",
+                ),
             )
             is False
         )
@@ -228,7 +243,9 @@ class TestSuccessDoesNotOverwriteCancelled:
             schedule_ops.update_execution_status(
                 execution_id="exec-sym",
                 status=TaskExecutionStatus.CANCELLED,
-                error="duplicate cancel",
+                result=ExecutionResult(
+                    error="duplicate cancel",
+                ),
             )
             is False
         )

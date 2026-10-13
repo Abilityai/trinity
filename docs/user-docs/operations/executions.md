@@ -12,6 +12,7 @@ View, monitor, and manage task executions across all agents. Executions are crea
 |---------|--------|
 | `manual` | Tasks tab in agent detail |
 | `schedule` | Cron-based schedule |
+| `retry` | An automatic retry of a failed run (charted under **Scheduled**) |
 | `chat` | Chat tab in agent detail |
 | `session` | A resumable conversation turn (the Workspace) |
 | `agent` | Agent-to-agent call |
@@ -23,7 +24,10 @@ View, monitor, and manage task executions across all agents. Executions are crea
 | `reminder` | An agent's own deferred self-trigger |
 | `room` | A turn inside a shared multi-agent room |
 | `a2a` | A task sent in by an external A2A orchestrator |
-| `operator_response` | An answer to a parked request waking the agent, on an agent with wake-on-answer turned on (see [Approvals](../automation/approvals.md)) |
+| `operator_response` | An answer to a parked request waking the agent, on an agent with the ask-ending wake turned on (see [Approvals](../automation/approvals.md)) |
+| `operator_ending` | A parked request that was cancelled or expired waking the agent — one turn per agent per sweep or expiry, same switch |
+| `validation` | The audit run that follows a scheduled run with post-run validation on (see [Scheduling](../automation/scheduling.md#post-run-validation)). Recorded and shown on the row, but not accepted as a `triggered_by` filter |
+| `skill_gate` | A request for a gated skill that waited for an operator's approval, run once it was approved (see [Approvals](../automation/approvals.md)) |
 
 Channel and voice triggers (`telegram`, `slack`, `whatsapp`, `voip`, `voice`, `paid`) are recorded too and are folded into the **Channels**, **Voice**, and **Public** groups on the analytics charts. Rooms and operator answers get their own **Rooms** and **Operator queue** groups, beside **Loops** and **Reminders**.
 
@@ -37,6 +41,8 @@ Channel and voice triggers (`telegram`, `slack`, `whatsapp`, `voip`, `voice`, `p
 
 **Turn integrity** -- A turn that ends while a background command it started is still running has that command killed a few seconds later, so its announced result may describe work that never happened. Such a run is not recorded as a clean success: the stored response opens with a visible notice (*⚠️ Background work lost: N background task(s) … were still running when this turn ended and were killed at CLI exit*), and the row carries a structured `turn_integrity` record on the API. An empty record means "no evidence", never "verified healthy".
 
+A chat turn the runtime itself reports as an error is recorded as `failed`, with the runtime's error as the cause — even when the turn had already printed some text (an `API Error: …` line, say). The one exception: when the agent's own transcript proves the turn finished, the finished answer is kept and opens with a recovery notice.
+
 ## How It Works
 
 ### Executions Tab (Operations Page)
@@ -47,7 +53,7 @@ The fleet execution list lives on the **Executions** tab of the [Operations page
 
 1. Lists all executions across the fleet. Admins see every agent; other users see only agents they own or that are shared with them.
 2. Stat cards show Total, **Completion**, Failed, and Cost for the selected time window. Running and queued counts are always live, regardless of the window.
-3. Filter by agent, status, trigger type, time range (1h to 30d, or all time), and free-text search over task messages.
+3. Filter by agent, status, trigger type, time range (1h to 30d, or all time), and free-text search over task messages. The trigger drop-down offers the common triggers (schedule, manual, chat, session, agent, mcp, public, webhook, fan_out, loop); the API accepts the others too.
 4. The list loads 50 rows at a time; **Load more** appends the next page.
 5. A "N running now" strip appears whenever executions are in flight.
 6. A status dot shows **Live** when WebSocket updates are connected, or **Polling** (every 30s) as fallback.
@@ -92,17 +98,16 @@ Durations are always non-negative, and a run that ends through a recovery path (
 
 ### Work in the Workspace
 
-Platform users see their executions inside the [Workspace](../sharing-and-access/workspace.md) too, in the vocabulary of the chat rather than the ledger. An external client sees none of this.
+Platform users see their executions inside the [Workspace](../sharing-and-access/workspace.md) too, in the vocabulary of the chat rather than the ledger. An external client sees only the live card under their own message, never the Work tab.
 
-**The live card.** When a message starts a longer job, a card under it shows the status word, how long it has been going, what the agent is doing right now, and — where the agent publishes a pipeline — the steps with the agent holding each one. Its controls are only those the platform can honour: **Stop** (where a stop would be accepted — your own turn or a job it handed on), **Open in Work** (the rail, on this tab), and after a job that failed, timed out, was stopped or was lost, **Ask about it**, which pre-fills the composer with a question naming the job and how it ended and never sends on its own. A card for a finished job survives a reload; a reply that lands replaces it.
+**The live card.** When a message starts a longer job, a card under it shows the status word, how long it has been going, what the agent is doing right now, and — where the agent publishes a pipeline — the steps with the agent holding each one. Its controls are only those the platform can honour: **Stop** (where a stop would be accepted — your own turn, a job it handed on, or a room turn your message started), **Open in Work** (the rail, on this tab), and after a job that failed, timed out, was stopped or was lost, **Ask about it**, which pre-fills the composer with a question naming the job and how it ended and never sends on its own. A card for a finished job survives a reload; a reply that lands replaces it.
 
-Steps are one of three sentences, never two: the stages themselves, *{agent} doesn't report steps.* when a reachable agent publishes none, or *Steps could not be read right now.* when nobody can tell (a stopped or unreachable agent, or two runs on the same agent).
+Steps show as the stages themselves when the agent publishes them. An agent that publishes none shows no steps line; the card shows what it is doing right now instead. When nobody can tell (a stopped or unreachable agent, or two runs on the same agent), the card says *Steps could not be read right now.*
 
-**The Work tab** in the rail has three sections:
+**The Work tab** in the rail has two sections, plus one line — *N asks waiting on you · Open in Inbox* — while something waits on you (questions are answered in the Inbox, see [Approvals](../automation/approvals.md)):
 
 | Section | Holds |
 |---------|-------|
-| **Waiting on you** | Open asks from this chat's participants, answerable in place — see [Approvals](../automation/approvals.md) |
 | **Now** | A live card per job in flight; *Nothing running right now.* otherwise |
 | **Earlier** | The last 30 days: *N in the last 30 days · latest 3 shown*, with **Show all N** / **Show fewer** |
 
@@ -114,7 +119,7 @@ Each row is labelled by kind — **You asked**, **Handed on** (a job the agent d
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/executions` | GET | Fleet execution list. Filters: `status`, `triggered_by`, `hours` (0 = all-time), `agent`, `search`; `limit` (max 200, default 50), `offset` |
+| `/api/executions` | GET | Fleet execution list. Filters: `status`, `triggered_by`, `hours` (default 24; 0 = all-time), `agent`, `search`; `limit` (max 200, default 50), `offset`. An unrecognised `status` or `triggered_by` is ignored rather than rejected — the list comes back unfiltered, not empty — and an unrecognised `hours` falls back to 24 |
 | `/api/executions/stats` | GET | Fleet stat cards: total, success/failed counts, total cost for the `hours` window; running and queued counts always live |
 | `/api/executions/timeline` | GET | Bucketed fleet rollups for charts. `group_by` = `hour`\|`day`\|`trigger`\|`agent` (default `day`); `hours` ∈ {0, 1, 6, 24, 168, 720} (default 168); optional `agent`. Each bucket carries total, success, failed, cost, and context use. `split=trigger` (with a time grouping) folds a per-trigger breakdown into each bucket and returns the `trigger_order` to draw it in |
 | `/api/agents/{name}/executions` | GET | List executions for an agent |
@@ -135,8 +140,9 @@ Full API reference: http://localhost:8000/docs
 | Tool | Description |
 |------|-------------|
 | `list_recent_executions(name)` | List recent executions for an agent |
-| `get_execution_result(id)` | Get the result of a specific execution |
+| `get_execution_result(agent_name, execution_id)` | Get the result of a specific execution |
 | `get_agent_activity_summary(name)` | Get activity summary including execution stats |
+| `search_executions(query, ...)` | Search execution messages, responses, and errors across the agents you can access. Offered only to user- and system-scoped keys, never to agent keys. It needs a matching entitlement; where the search is not available it answers `available: false` rather than "no results" |
 
 ## See Also
 

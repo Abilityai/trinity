@@ -35,7 +35,7 @@ from utils.helpers import parse_iso_timestamp
 
 from .. import db as portal_db
 from ..service import roster_agent_names
-from .models import PortalWork, WorkItem, WorkKind, WorkOutcome, WorkSteps
+from .models import PortalWork, PortalWorkActivity, WorkActivity, WorkItem, WorkKind, WorkOutcome, WorkSteps
 from . import pipeline_state
 
 logger = logging.getLogger(__name__)
@@ -93,10 +93,28 @@ def work_kind(row: dict) -> WorkKind:
     return "other"
 
 
+def awaits_claim(row: dict) -> bool:
+    """A pull pilot's ``running`` row that no worker holds yet (#3114).
+
+    A Workspace turn's row is pre-created ``running`` and enqueued a moment
+    later (after the conversation's resume lock). On a pilot every such turn
+    reaches the agent only through a worker claim, and a claim writes a lease,
+    so an un-leased running row is still waiting for a slot.
+    """
+    from services.pull_pilot import pull_owns_dispatch
+    return (
+        (row.get("status") or "").strip().lower() == "running"
+        and not row.get("lease_expires_at")
+        and pull_owns_dispatch(row.get("agent_name") or "", row.get("triggered_by"))
+    )
+
+
 def work_outcome(row: dict, *, stale: bool = False) -> WorkOutcome:
     """The honest word: `timeout` is a failure whose error says so; `lost` is a
     running row nothing is watching any more."""
     status = (row.get("status") or "").strip().lower()
+    if awaits_claim(row):
+        return "lost" if stale else "queued"
     if status in ("running", "pending_retry"):
         return "lost" if stale else "running"
     if status == "queued":
@@ -130,6 +148,70 @@ def clean_error(error_summary: Optional[str]) -> Optional[str]:
     if not text:
         return None
     return text if len(text) <= ERROR_MAX else text[: ERROR_MAX - 1].rstrip() + "…"
+
+
+# ----------------------------------------------------------- activity (#620)
+
+# A live line older than this is a line the agent stopped renewing — the
+# heartbeat's own TTL is 15 s, so this only matters if a reader holds a
+# payload across a beat; the client applies the same ceiling to the value.
+ACTIVITY_MAX_AGE_S = 30
+ACTIVITY_SUMMARY_MAX = TITLE_MAX
+_DELEGATION_TARGET_RE = re.compile(r"^(agent_name|agent|target|name):\s*([A-Za-z0-9._-]+)(.*)$")
+
+
+def clean_activity(entry: Optional[dict], roster: Iterable[str], *, now: datetime) -> Optional[WorkActivity]:
+    """The agent's `{tool, summary, since, ts}` → what the caller may see.
+
+    Same sanitiser as titles (`sanitize_text` — a path or a command can carry
+    a token as easily as a message can), same bound, and a delegation whose
+    summary names an off-roster agent is masked to "another agent" (the
+    `mask` rule for every name on this surface). Nothing else the heartbeat
+    carries reaches the payload: no pid, no raw input.
+    """
+    if not isinstance(entry, dict):
+        return None
+    ts = entry.get("ts")
+    age: Optional[int] = None
+    if isinstance(ts, (int, float)):
+        age = max(0, int(now.timestamp() - float(ts)))
+        if age > ACTIVITY_MAX_AGE_S:
+            return None
+    tool = entry.get("tool")
+    tool = tool if isinstance(tool, str) and tool.strip() else None
+    summary = entry.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        from utils.credential_sanitizer import sanitize_text
+        summary = _WS_RE.sub(" ", sanitize_text(summary)).strip()
+        m = _DELEGATION_TARGET_RE.match(summary)
+        if m and (tool or "").startswith("mcp:"):
+            target = m.group(2)
+            if target not in set(roster):
+                summary = f"{m.group(1)}: another agent{m.group(3)}"
+        if len(summary) > ACTIVITY_SUMMARY_MAX:
+            summary = summary[: ACTIVITY_SUMMARY_MAX - 1].rstrip() + "…"
+    else:
+        summary = None
+    since = entry.get("since")
+    return WorkActivity(
+        tool=tool[:64] if tool else None,
+        summary=summary,
+        since=since if isinstance(since, str) else None,
+        age_seconds=age,
+    )
+
+
+def _activity_by_agent(agent_names: Iterable[str]) -> Dict[str, Dict[str, dict]]:
+    """One Redis read per agent; never raises (a missing beat is an empty map)."""
+    from services import heartbeat_service
+    out: Dict[str, Dict[str, dict]] = {}
+    for agent in agent_names:
+        try:
+            out[agent] = heartbeat_service.read_execution_activity(agent)
+        except Exception:  # noqa: BLE001
+            logger.debug("work: activity read failed for %s", agent, exc_info=True)
+            out[agent] = {}
+    return out
 
 
 def _ts(value: Optional[str]) -> Optional[datetime]:
@@ -338,9 +420,10 @@ async def get_work(email: str, names: List[str], chat_id: Optional[str] = None) 
             inflight_in_window += 1
     earlier_total = max(len(earlier_items), total - inflight_in_window)
 
-    # Steps: the #919 read, only for a rostered agent with exactly ONE in-flight
-    # row — an agent-written `updated_at` cannot say which of two runs an
-    # instance belongs to (review), so two running rows read `unknown`.
+    # Steps: the #919 read. With exactly ONE fresh in-flight row it is that
+    # run's steps. With several, an agent-written `updated_at` cannot say which
+    # run an instance belongs to (review), so reported stages read `unknown` —
+    # but an agent that publishes nothing reads `none` for all of them (#3357).
     by_agent: Dict[str, List[WorkItem]] = {}
     for it in now_items:
         if it.agent_name:
@@ -349,19 +432,68 @@ async def get_work(email: str, names: List[str], chat_id: Optional[str] = None) 
     async def steps_for(agent: str, item: WorkItem) -> None:
         item.steps = await pipeline_state.read_pipeline_steps(agent, item.started_at, roster)
 
+    async def steps_for_several(agent: str, items: List[WorkItem]) -> None:
+        # #3357: two live runs cannot be told apart by an agent-written
+        # `updated_at`, so REPORTED stages stay `unknown` — but most agents
+        # publish no pipeline at all, and that answer is the same for every
+        # run. Setting `unknown` without reading made a second run turn every
+        # card's steps into "could not be read" for an agent that never had
+        # steps to read. Read once, from the oldest run's start.
+        oldest = min((it.started_at for it in items if it.started_at), default=None)
+        result = await pipeline_state.read_pipeline_steps(agent, oldest, roster)
+        verdict = WorkSteps(state="none") if result.state == "none" else WorkSteps(state="unknown")
+        for it in items:
+            it.steps = verdict
+
     jobs = []
     for agent, items in by_agent.items():
-        if len(items) == 1 and not items[0].stale:
-            jobs.append(steps_for(agent, items[0]))
-        else:
-            for it in items:
+        fresh = [it for it in items if not it.stale]
+        for it in items:
+            if it.stale:
                 it.steps = WorkSteps(state="unknown")
+        if len(fresh) == 1:
+            jobs.append(steps_for(agent, fresh[0]))
+        elif fresh:
+            jobs.append(steps_for_several(agent, fresh))
     if jobs:
         await asyncio.gather(*jobs, return_exceptions=True)
     for it in now_items:
         if it.steps is None:
             it.steps = WorkSteps(state="unknown")
 
+    # Activity (#620): the agent's last beat, folded onto its live rows. Only
+    # a rostered agent (an unnamed child's agent is not the caller's to read),
+    # only a non-stale in-flight row, and only what `clean_activity` admits.
+    activity = _activity_by_agent(by_agent.keys())
+    for it in now_items:
+        if it.agent_name and not it.stale and it.status in IN_FLIGHT:
+            it.activity = clean_activity(activity.get(it.agent_name, {}).get(it.id), roster, now=now)
+
     return PortalWork(agents=agents, now=now_items, earlier=earlier_items,
                       earlier_total=earlier_total, window_days=WINDOW_DAYS,
                       earlier_limit=EARLIER_LIMIT)
+
+
+async def get_work_activity(email: str, names: List[str]) -> PortalWorkActivity:
+    """The live lines alone (trinity-enterprise#620): every execution the
+    named rostered agents reported in their last heartbeat, cleaned the same
+    way `get_work` cleans them. Redis only — no ledger read, no pipeline
+    files — so the Work tab can poll it every few seconds while a card is
+    live without moving the full read off its 12 s cadence.
+
+    Same gate as `get_work`: set-membership against the caller's roster, an
+    off-roster name dropped never answered. The execution ids it returns are
+    the agent's own running set; a row the ledger no longer calls in-flight
+    is dropped client-side by joining onto `now`, and an agent's beat expires
+    in 15 s regardless.
+    """
+    roster = roster_agent_names(email, include_owned=True)
+    agents = [n for n in names if n in roster]
+    now = datetime.now(timezone.utc)
+    items: Dict[str, WorkActivity] = {}
+    for agent, by_id in _activity_by_agent(agents).items():
+        for eid, entry in by_id.items():
+            cleaned = clean_activity(entry, roster, now=now)
+            if cleaned is not None:
+                items[str(eid)] = cleaned
+    return PortalWorkActivity(agents=agents, items=items)

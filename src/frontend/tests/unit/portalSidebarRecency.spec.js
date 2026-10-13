@@ -112,11 +112,22 @@ describe('the primary-companion seam stays a seam', () => {
     expect(names(orderRosterAgents(AGENTS, threads, 'alpha'))[0]).toBe('alpha')
   })
 
-  it('the sidebar passes null, because ent#500 does not exist yet', () => {
+  it('the one sidebar-order call site passes null, because ent#500 does not exist yet', () => {
     // Guessing a primary would be worse than the seam: nothing server-side can
     // say who it is, so any guess would be a confident wrong answer.
-    const src = read('../../src/components/portal/PortalSidebar.vue')
-    expect(src).toMatch(/orderRosterAgents\(\s*props\.roster,\s*props\.threads,\s*null,/)
+    //
+    // ent#621 T6 moved the SORT out of `PortalSidebar` and up into the shell —
+    // one computation handed to both sidebar instances, so the switch-agent
+    // keys walk exactly the order the eye reads. The rule is unchanged and so
+    // is what this asserts; only the file holding the single call site moved.
+    // It stays a call-site pin rather than a mount: "the primary argument is
+    // null" is an argument-position fact that no rendered order can show,
+    // because with ent#500 absent a named primary and null agree on screen.
+    // (That there is no SECOND sort underneath it — the defect T6 removed — is
+    // pinned on the sidebar's own source in portalSidebarSearch.spec.js, which
+    // already holds that file.)
+    const src = read('../../src/views/Portal.vue')
+    expect(src).toMatch(/orderRosterAgents\(\s*store\.agents,\s*sidebarThreads\.value,\s*null,/)
   })
 })
 

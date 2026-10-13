@@ -11,6 +11,7 @@
 import { marked } from './markedConfig'
 import { decorateCodeBlocks, stripCodeBlockMarkers } from './codeBlocks'
 import { hardenMediaAttributes, restrictToCanvasKit } from './sanitizeHooks'
+import { parseInlineMarkdown, INLINE_SANITIZE_CONFIG } from './inlineMarkdown'
 import DOMPurify from 'dompurify'
 
 /**
@@ -88,6 +89,24 @@ export function renderMarkdown(content) {
   if (!content) return ''
   const html = marked(content)
   return DOMPurify.sanitize(html, BASE_CONFIG)
+}
+
+/**
+ * Render ONE table cell's inline markdown (#2771).
+ *
+ * The same DOMPurify instance and hooks as every other surface — so a link in a
+ * cell gets the `target="_blank"` / `rel="noopener noreferrer"` hardening from
+ * the hook above for free — under a tighter element policy: inline tags only
+ * (`utils/inlineMarkdown.js`). A block element in a cell would break the
+ * row/column layout the #2583 gallery pins, so it degrades to its own text,
+ * which is what DOMPurify's default `KEEP_CONTENT` does with a dropped tag.
+ *
+ * Not an option on `renderMarkdown`: that emits block markup by design and has
+ * twelve consumers. This is a different policy, so it is a different name.
+ */
+export function renderInlineMarkdown(content) {
+  if (content === null || content === undefined || content === '') return ''
+  return DOMPurify.sanitize(parseInlineMarkdown(content), INLINE_SANITIZE_CONFIG)
 }
 
 /**

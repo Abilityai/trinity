@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from client_portal.portal_auth import PortalPrincipal, get_portal_principal
 
 from . import service
-from .models import PortalWork
+from .models import PortalWork, PortalWorkActivity
 from .service import MAX_AGENTS, WorkError, parse_agents
 
 router = APIRouter(
@@ -56,5 +56,30 @@ async def get_work(
 
     try:
         return await service.get_work(principal.email, names, chat_id)
+    except WorkError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.get("/activity", response_model=PortalWorkActivity)
+async def get_work_activity(
+    agents: str = Query(..., description="Comma-separated participant names"),
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """The live activity lines alone (trinity-enterprise#620) — what each
+    running execution of the named agents is doing right now, from the
+    agents' last heartbeats. Polled by the Work tab every few seconds only
+    while a card is live. Same gates as the full read: platform-only,
+    roster set-membership, bounded agent count, per-viewer rate limit.
+    """
+    if not principal.is_platform:
+        raise HTTPException(status_code=404, detail="Not found")
+    names = parse_agents(agents)
+    if len(names) > MAX_AGENTS:
+        raise HTTPException(status_code=422, detail=f"agents: at most {MAX_AGENTS} names per request")
+    from services import rate_limiter
+    # 2.5 s poll while live → 24/min; the ceiling leaves room for a second tab.
+    rate_limiter.enforce(f"portal_work_activity:{principal.email}", 120, 60)
+    try:
+        return await service.get_work_activity(principal.email, names)
     except WorkError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)

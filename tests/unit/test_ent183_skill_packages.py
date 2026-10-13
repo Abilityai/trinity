@@ -115,6 +115,40 @@ class TestFrontmatterParse:
         contract, _ = pkg.extract_contract(fm)
         assert contract["automation"] == "autonomous"
 
+    # trinity#3134: Claude Code and the libraries write `user-invocable`; the
+    # platform read only `user_invocable`, so a library skill marked
+    # `user-invocable: false` was reported invocable. Both spellings are read
+    # per source — a `trinity:` block wins whichever spelling either level
+    # uses, the hyphen wins inside one source, and a null masks nothing.
+    @pytest.mark.parametrize("frontmatter, expected", [
+        # 1. the hyphenated (Claude Code) spelling is read
+        ("user-invocable: false\n", False),
+        # 2. the underscore spelling still is
+        ("user_invocable: false\n", False),
+        # 3. a trinity: block wins across spellings (the merged-scope form loses this)
+        ("user-invocable: true\ntrinity:\n  user_invocable: false\n", False),
+        # 4. ... in the other direction too
+        ("user_invocable: false\ntrinity:\n  user-invocable: true\n", True),
+        # 5. both flat spellings, disagreeing: the hyphen wins
+        ("user-invocable: false\nuser_invocable: true\n", False),
+        # 6. a null hyphen does not mask the underscore
+        ("user-invocable:\nuser_invocable: false\n", False),
+        # 7. a non-bool still reads as invocable (strict bool, unchanged)
+        ("user-invocable: \"no\"\n", True),
+        # 8. the hyphen wins inside the trinity: block as well
+        ("trinity:\n  user-invocable: false\n  user_invocable: true\n", False),
+    ], ids=[
+        "hyphen", "underscore", "trinity-underscore-beats-flat-hyphen",
+        "trinity-hyphen-beats-flat-underscore", "flat-hyphen-beats-underscore",
+        "null-hyphen-does-not-mask", "non-bool-is-invocable", "hyphen-wins-in-trinity",
+    ])
+    def test_user_invocable_both_spellings(self, frontmatter, expected):
+        fm, warning = pkg.parse_frontmatter(f"---\n{frontmatter}---\nbody\n")
+        assert warning is None
+        contract, warnings = pkg.extract_contract(fm)
+        assert warnings == []
+        assert contract["user_invocable"] is expected
+
     def test_missing_frontmatter_is_not_a_warning(self):
         fm, warning = pkg.parse_frontmatter("# Just a doc\n")
         assert fm is None and warning is None
@@ -375,7 +409,11 @@ def _reject_embedded_credentials_stub(url: str) -> None:
     """
     from urllib.parse import urlparse
 
-    parsed = urlparse(url if "://" in url else f"https://{url}")
+    # Same `had_authority` rule as the real function (#3323): a protocol-relative
+    # `//tok@host` must not get an assumed scheme, or its token parses as a path.
+    text = url.strip()
+    had_authority = "://" in text or text.startswith("//")
+    parsed = urlparse(text if had_authority else f"https://{text}")
     if parsed.username or parsed.password:
         raise ValueError("Repository URL must not embed a token or password.")
 
@@ -709,15 +747,20 @@ class TestInjectOrchestration:
         deleted = [c.args[1] for c in service._delete_agent_file.await_args_list]
         assert deleted == [".claude/skills/demo/scripts/removed.py"]
 
-    def test_unmanaged_dir_is_overwritten_but_never_pruned(self, service):
+    def test_unmanaged_dir_is_refused_as_a_conflict(self, service):
+        # #2914: this used to assert the overwrite (+ a post-hoc
+        # `unmanaged_dir_overwritten` warning). An agent-authored dir under
+        # the same name is now a named `conflict` — nothing written, nothing
+        # pruned. The full contract lives in test_2914_skill_name_conflict.py.
         _write_skill(service, "demo", {"SKILL.md": "# demo\n"})
         metas = {"demo": {"exists": True, "meta": None}}  # agent-authored dir
         client = _wire(service, metas=metas, restore=_restore_ok_for(None))
         with patch.object(skill_service_module, "get_agent_client", return_value=client):
             result = _run(service.inject_skills("agent-x", ["demo"], force=True))
         demo = result["results"]["demo"]
-        assert demo["status"] == "injected"
-        assert "unmanaged_dir_overwritten" in demo["warnings"]
+        assert demo["status"] == "conflict"
+        assert "unmanaged_dir_overwritten" not in demo["warnings"]
+        service._post_restore.assert_not_awaited()
         service._delete_agent_file.assert_not_awaited()
 
     def test_missing_skill_and_invalid_name(self, service):

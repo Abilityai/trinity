@@ -209,53 +209,55 @@ def is_circuit_failure(exc: BaseException) -> bool:
 
 
 def _emit_dormant_alert(agent_name: str) -> None:
-    """Insert a circuit_breaker_dormant operator-queue entry.
+    """Report the circuit_breaker_dormant condition through the platform
+    alert seam (#3246): one pending row per agent, ended by the platform when
+    the circuit closes again (`_clear_dormant_alert`).
 
     Called from CircuitState.record_failure on the closed/open → dormant
     transition. The Lua atomicity of _RECORD_FAILURE_LUA guarantees exactly
-    one worker observes the transition, so this fires at most once per
-    distinct dormant entry — no de-dupe layer required.
+    one worker observes the transition; the seam keeps it one row anyway.
     """
     try:
-        from database import db
-        from utils.helpers import utc_now_iso
-        now = utc_now_iso()
-        # Use the generic 'alert' type so the existing Operating Room UI
-        # (QueueCard.vue / QueueItemDetail.vue branch on 'approval|question|alert')
-        # renders an Acknowledge control. The narrower discriminator goes in
-        # context.alert_type for callers that want to filter — same pattern
-        # the existing `sync_failing` work should adopt when its UI is touched.
-        item = {
-            "id": f"cb-dormant-{agent_name}-{now}",
-            "agent_name": agent_name,
-            "type": "alert",
-            "status": "pending",
-            "priority": "high",
-            "title": "Agent circuit breaker DORMANT",
-            "question": (
+        from services import platform_alerts
+        # The seam files type 'alert', so the Operating Room UI (QueueCard.vue /
+        # QueueItemDetail.vue branch on 'approval|question|alert') renders an
+        # Acknowledge control. The narrower discriminator goes in
+        # context.alert_type for callers that want to filter.
+        outcome = platform_alerts.observe(
+            agent_name, "circuit_dormant", agent_name,
+            priority="high",
+            title="Agent circuit breaker DORMANT",
+            question=(
                 f"{agent_name}'s circuit breaker entered DORMANT after "
                 f"{CIRCUIT_DORMANT_AFTER_OPEN_PROBES} consecutive failed probes. "
                 f"Scheduled tasks fast-fail until the agent recovers via the "
                 f"~{int(CIRCUIT_DORMANT_COOLDOWN_SECONDS / 60)} min cooldown "
                 f"probe or an admin reset."
             ),
-            "context": {
+            context={
                 "agent_name": agent_name,
                 "alert_type": "circuit_breaker_dormant",
                 "transition": "dormant",
                 "dormant_after_open_probes": CIRCUIT_DORMANT_AFTER_OPEN_PROBES,
                 "dormant_cooldown_seconds": CIRCUIT_DORMANT_COOLDOWN_SECONDS,
             },
-            "created_at": now,
-        }
-        db.create_operator_queue_item(agent_name, item)
+        )
         logger.warning(
-            "[CB] circuit_breaker_dormant operator-queue entry emitted for %s",
-            agent_name,
+            "[CB] circuit_breaker_dormant operator-queue entry for %s: %s",
+            agent_name, outcome,
         )
     except Exception:
         # Don't let alert-delivery failure mask the breaker transition.
         logger.exception("[CB] failed to emit dormant alert for %s", agent_name)
+
+
+def _clear_dormant_alert(agent_name: str) -> None:
+    """The circuit closed: the platform ends the dormant alert (#3246)."""
+    try:
+        from services import platform_alerts
+        platform_alerts.clear(agent_name, "circuit_dormant", agent_name)
+    except Exception:
+        logger.exception("[CB] failed to clear dormant alert for %s", agent_name)
 
 
 class CircuitState:
@@ -362,6 +364,8 @@ class CircuitState:
                     "Circuit CLOSED for agent %s (recovered from %s)",
                     self.agent_name, prior,
                 )
+                if prior == "dormant":
+                    _clear_dormant_alert(self.agent_name)
         except Exception as e:
             logger.warning("Circuit record_success swallowed (%s)", e)
             _reset_circuit_redis_client()
@@ -486,5 +490,7 @@ def reset_circuit(agent_name: str) -> None:
         logger.info("Circuit reset to CLOSED for %s", agent_name)
     except Exception as e:
         logger.warning("reset_circuit(%s) swallowed: %s", agent_name, e)
+        return
+    _clear_dormant_alert(agent_name)
 
 

@@ -266,7 +266,7 @@ describe('#2794 the 1:1 hands the attachments over', () => {
     // the floor: message gone, no error, no composer to recover it from.
     const start = CONVERSATION.indexOf('async function send()')
     const send = CONVERSATION.slice(start, CONVERSATION.indexOf('async function submitUserText', start))
-    expect(send).toMatch(/if \(!text \|\| sending\.value \|\| escalatingNow\.value\) return/)
+    expect(send).toMatch(/if \(!text \|\| sending\.value \|\| escalatingNow\.value( \|\| settlingUploads\.value)?\) return/)
     expect(send).toMatch(/escalatingNow\.value = true/)
     // Released on BOTH paths: a flag left set would outlive a failed
     // escalation and leave the composer the shell just restored dead.
@@ -280,11 +280,12 @@ describe('#2794 the 1:1 hands the attachments over', () => {
   it('does NOT clear them — that IS the failed-escalation recovery', () => {
     // On success this component unmounts as the room opens; on failure the
     // shell gives the text back and the chips are still standing beside it.
-    // The send() body ONLY: `clearAttachments()` legitimately lives in
-    // `deliver()`, which is where an ordinary turn clears its chips, and a
-    // whole-file scan would read that one.
+    // The escalation branch of send() ONLY: `clearAttachments()` legitimately
+    // lives in `deliver()` and, since #3265, in send()'s ordinary-send tail
+    // (the message carries the files, so the composer lets go). Both run only
+    // after this branch has returned, so the slice ends where that tail starts.
     const start = CONVERSATION.indexOf('async function send()')
-    const escalation = CONVERSATION.slice(start, CONVERSATION.indexOf('async function submitUserText', start))
+    const escalation = CONVERSATION.slice(start, CONVERSATION.indexOf('const reply = replyTo.value', start))
     expect(escalation).toMatch(/emit\('escalate-to-room'/)
     expect(escalation).not.toMatch(/clearAttachments\(\)/)
   })

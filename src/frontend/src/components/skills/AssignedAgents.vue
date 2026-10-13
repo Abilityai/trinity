@@ -122,6 +122,14 @@
             ? 'text-status-warning-700 dark:text-status-warning-300'
             : 'text-status-success-700 dark:text-status-success-300'"
       >{{ deliveryNote.agent }}: {{ deliveryNote.text }}</p>
+      <!-- ent#672: the assign went through, and the skill is deprecated. Its
+           own line rather than a clause in the delivery note — delivery and
+           lifecycle are two facts, and a clean delivery stays green. -->
+      <p
+        v-if="!writeError && deprecationNote"
+        data-testid="skill-deprecation-note"
+        class="mt-1 text-[11px] text-status-warning-700 dark:text-status-warning-400"
+      >{{ deprecationNote }}</p>
     </template>
   </div>
 </template>
@@ -143,7 +151,7 @@
  */
 import { computed, ref } from 'vue'
 import { useSkillsLibraryStore } from '../../stores/skillsLibrary'
-import { deliveryText } from '../../utils/skillDelivery'
+import { deliveryText, deprecationText } from '../../utils/skillDelivery'
 
 const props = defineProps({
   skillName: { type: String, required: true },
@@ -172,6 +180,9 @@ const deliveryNote = computed(() => {
   const v = deliveryText(d.report, { saved: false })
   return { ...v, agent: d.agent }
 })
+
+// ent#672 — read off the same report; null for a live skill.
+const deprecationNote = computed(() => deprecationText(store.deliveries[props.skillName]?.report))
 
 async function onAssign() {
   if (!picked.value) return

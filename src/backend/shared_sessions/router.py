@@ -19,17 +19,19 @@ from __future__ import annotations
 import logging
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 
 from dependencies import (
-    get_current_user,
+    WORKSPACE_ONLY_DETAIL,
+    is_workspace_only_role,
     oauth2_scheme,
     reject_agent_principal,
     require_admin,
+    resolve_platform_user_unfloored,
 )
-from models import User
+from models import TaggablePerson, User
 
 from . import service
 from .models import (
@@ -85,9 +87,19 @@ async def get_room_principal(
     uniform 404. A portal token still cannot touch any other platform endpoint.
     """
     try:
-        return await get_current_user(request, token)
+        # Rooms are a Workspace surface, so a Workspace-only member resolves
+        # here as the `User` it is, past the operator floor (ent#837).
+        user = await resolve_platform_user_unfloored(request, token)
     except HTTPException:
-        pass
+        user = None
+    if user is not None:
+        # ...but an agent of a Workspace-only owner keeps only its own runtime
+        # routes: rooming with its owner's agents, and waking them, is the
+        # agent-to-agent chat the floor refuses everywhere else. Room wakes run
+        # in-process, never on the agent's key, so agents still take part.
+        if user.agent_name and is_workspace_only_role(user.role):
+            raise HTTPException(status_code=403, detail=dict(WORKSPACE_ONLY_DETAIL))
+        return user
 
     # The portal resolver owns the blocked-client check and the ent#375 sliding
     # renewal, so it is called rather than re-implemented — and it raises 401
@@ -215,14 +227,19 @@ async def post_message(room_id: str, body: RoomMessageCreate,
     from services import idempotency_service
 
     decision = idempotency_service.begin(f"room:{room_id}", idempotency_key)
+    # begin() reports an in-flight claim as replay=True too, so this check
+    # must come first or it never runs (#3320). Same detail shape as /chat.
+    if decision.in_flight:
+        raise HTTPException(status_code=409, detail={
+            "error": "request_in_progress",
+            "message": "A post with this Idempotency-Key is still being processed.",
+            "execution_id": decision.execution_id,
+        })
     if decision.replay:
         return {**(decision.snapshot or {}), "replayed": True}
-    if decision.in_flight:
-        raise HTTPException(status_code=409,
-                            detail={"code": "in_flight",
-                                    "message": "An identical post is already in flight"})
     try:
-        result = await service.post_message(current_user, room_id, body.content)
+        result = await service.post_message(current_user, room_id, body.content,
+                                            tags=body.tags)
     except RoomError as e:
         idempotency_service.fail(decision)
         _raise(e)
@@ -231,6 +248,26 @@ async def post_message(room_id: str, body: RoomMessageCreate,
         raise
     idempotency_service.complete(decision, None, result)
     return result
+
+
+@router.get("/{room_id}/people", response_model=List[TaggablePerson])
+async def room_people(room_id: str,
+                      q: str = Query(default="", max_length=64),
+                      current_user=Depends(get_room_principal)):
+    """People who can be TAGGED in this room (trinity-enterprise#631): accounts
+    on this instance that can already reach one of its agents, matching `q`.
+
+    The ent#450 shape: membership-scoped (uniform 404 for a non-member), a query
+    is required (an empty one lists no one), capped, and rate-limited per
+    caller — a picker, never a directory. Refused by name for a caller who may
+    not tag (an agent key, an external Workspace client)."""
+    from services import rate_limiter
+    who = getattr(current_user, "email", None) or getattr(current_user, "username", "") or "?"
+    rate_limiter.enforce(f"room_people:{who}", 120, 60)
+    try:
+        return service.room_people(current_user, room_id, q)
+    except RoomError as e:
+        _raise(e)
 
 
 @router.patch("/{room_id}")

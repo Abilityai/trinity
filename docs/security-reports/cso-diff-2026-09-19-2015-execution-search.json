@@ -1,0 +1,109 @@
+{
+  "version": "1.1",
+  "date": "2026-09-19",
+  "mode": "daily",
+  "scope": "diff",
+  "confidence_gate": 8,
+  "branch": "feature/653-execution-search (public → dev; private submodule → main)",
+  "pr": null,
+  "issue": "abilityai/trinity-enterprise#653",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": [
+      "GET /api/enterprise/execution-search (entitlement-gated; JWT humans, user-scoped and system-scoped keys; agent/connector/ops/portal-delegate/ephemeral keys refused)"
+    ],
+    "new_mcp_tools": [
+      "search_executions (per-tool canAccess allow-list {system,user}; in-tool refusal; proxies the enterprise route)"
+    ],
+    "changed_oss_backend": [
+      "src/backend/routers/executions.py — one comment line (# mcp: header); no behaviour change"
+    ],
+    "dependencies_changed": [],
+    "workflows_changed": [],
+    "docker_changed": [],
+    "schema_changed": []
+  },
+  "findings": [],
+  "appendix": [
+    {
+      "id": "A1",
+      "severity": "LOW",
+      "confidence": 6,
+      "status": "TENTATIVE",
+      "category": "Information disclosure",
+      "title": "Search query travels in the URL and lands in access logs",
+      "note": "A user who searches for a secret value writes it into the backend access log via ?q=. Same property as the pre-existing OSS /api/executions?search=. The MCP tool logs only the hit count and the query string at console level. Below the daily gate; recommendation: drop the query text from the tool's console.log."
+    },
+    {
+      "id": "A2",
+      "severity": "INFO",
+      "confidence": 9,
+      "status": "ACCEPTED",
+      "category": "Information disclosure",
+      "title": "Human users sharing an agent can grep each other's chat responses on it",
+      "note": "Amplification only — the per-id execution route already returns full bodies to the same principals. Ruled a separate issue by the operator at the plan gate (2026-09-19)."
+    },
+    {
+      "id": "A3",
+      "severity": "INFO",
+      "confidence": 9,
+      "status": "PRE-EXISTING",
+      "category": "Fingerprinting",
+      "title": "Unauthenticated probe distinguishes OSS build (404) / OSS_ONLY (403) / entitled (401)",
+      "note": "Router-level entitlement dependency resolves before get_current_user. Shared by every enterprise router; not introduced here."
+    }
+  ],
+  "verification": {
+    "adversarial_subagent": "fresh-context refuter over six angles (scope walk-through, SQL/LIKE injection, cross-user agent read, raw-body leak, MCP advertisement/execution incl. dev mode, entitlement bypass) — none exploitable; every angle closed at a cited line",
+    "hardening_applied_post_audit": [
+      "route fence is now an allow-list over mcp_scope (ADMIN_GATE_SCOPES) layered on reject_agent_principal, with fail-closed attribute access; 4 tests",
+      "single `agent` param stripped like `agents`"
+    ],
+    "mechanical": [
+      "secrets scan over the full diff: clean",
+      "enterprise-docs-guard pattern over changed public docs + router header + registry + learnings: clean",
+      "private suite 39/39 for the feature; MCP suite 438/438; tsc clean"
+    ]
+  },
+  "supply_chain_summary": {
+    "python": "no dependency changes",
+    "node": "no dependency changes",
+    "lockfiles": "unchanged"
+  },
+  "filter_stats": {
+    "candidates": 4,
+    "hard_excluded": 0,
+    "below_gate": 1,
+    "accepted_or_preexisting": 2,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior_report": "cso-diff-2026-09-17-2419-utilization-fraction",
+    "resolved": 0,
+    "persistent": 0,
+    "new": 0,
+    "direction": "flat"
+  }
+}

@@ -93,28 +93,48 @@ class ModelEntry:
     recommended: bool
     workspace: bool = False
     workspace_tier: str = ""
+    # #3012: the oldest Claude Code that accepts this id. An older CLI refuses it
+    # with `[claude-code:unrecognized_model]` before any token is spent.
+    # tests/unit/test_3012_claude_code_pin.py fails when this exceeds the
+    # base image's pinned `CLAUDE_CODE_VERSION`, so adding a model that needs a
+    # newer CLI forces the pin bump into the same PR. Empty = no known minimum.
+    min_claude_code: str = ""
 
 
 # The ordered catalog. Order is preserved into the picker and the admin dropdown.
 # Model ids verified against the ``claude-api`` skill (do not state ids from
-# memory): ``claude-opus-5`` is the current Opus tier; the ``-5`` family and
-# ``claude-sonnet-4-6`` are current; ``opus-4-8/4-7/4-6`` are the prior Opus
-# generation (legacy). The date-suffixed ids are kept verbatim.
+# memory): ``claude-opus-5-5`` is the current Opus tier and ``claude-opus-5`` the
+# prior point release within it (still served, still selectable); the ``-5``
+# family and ``claude-sonnet-4-6`` are current; ``opus-4-8/4-7/4-6`` are the
+# prior Opus generation (legacy). The date-suffixed ids are kept verbatim.
 #
 # Canonical lineup (keep this comment as the bump-anchor):
 #     https://platform.claude.com/docs/en/about-claude/models/overview
-# Last synced: 2026-09-12 (#2726 — Claude Fable 5.1)
+# Last synced: 2026-09-23 (#2987 — Claude Opus 5.5)
 MODEL_CATALOG: tuple[ModelEntry, ...] = (
     # Current generation.
     ModelEntry(
-        "claude-opus-5",
-        "Claude Opus 5",
+        "claude-opus-5-5",
+        "Claude Opus 5.5",
         "Most capable Opus (latest)",
         True,
         True,
         False,
         workspace=True,
         workspace_tier="Most capable",
+        min_claude_code="2.1.280",
+    ),
+    # The prior point release in the SAME tier — still served and still
+    # selectable, so it keeps public-channel and admin-default. It loses only the
+    # two things that are now false: the "(latest)" marker and the Workspace
+    # "Most capable" slot, which is one option, not a list (ent#403).
+    ModelEntry(
+        "claude-opus-5",
+        "Claude Opus 5",
+        "Most capable Opus (prior point release)",
+        True,
+        True,
+        False,
     ),
     ModelEntry(
         "claude-fable-5-1",

@@ -91,7 +91,11 @@ def shares_db(tmp_path, monkeypatch):
                 stored_filename=f"{fid}.bin", size_bytes=10, mime_type="application/pdf",
                 download_token=f"tok-{fid}", created_by=agent, created_at="t",
                 expires_at="2099-01-01T00:00:00Z", revoked_at=None,
-                one_time=0, consumed_at=None, download_count=0, last_downloaded_at=None))
+                one_time=0, consumed_at=None, download_count=0, last_downloaded_at=None,
+                # ent#549: a share has an addressee, and an unaddressed one is
+                # the owner's only. atlas's two are bob's — which is what these
+                # tests always meant by "bob sees f1 and f2".
+                addressed_to_email="bob@example.com" if agent == "atlas" else None))
 
     yield get_engine()
 
@@ -260,11 +264,16 @@ def test_a_dismissal_hides_the_file_from_that_viewer_only(shares_db, monkeypatch
     after = service.portal_documents("atlas", BOB)
     assert {d["id"] for d in after["documents"]} == {"f2"}
 
-    # The share itself is untouched, and another viewer still sees it.
+    # The share itself is untouched, and the owner still has it. This half used
+    # to read "another viewer still sees it" through the owner's Workspace tab;
+    # since ent#549 a file has ONE addressee, so there is no other viewer to ask
+    # (onward sharing is ent#633) and the owner's view of everything the agent
+    # has out is the operator list.
     from database import db as core_db
     assert core_db.get_agent_shared_file("f1")["revoked_at"] is None
-    other = service.portal_documents("atlas", ALICE, include_owned=True)
-    assert {d["id"] for d in other["documents"]} == {"f1", "f2"}
+    assert {r["id"] for r in core_db.list_active_shared_files_for_agent("atlas")} == {"f1", "f2"}
+    # …and a file that is somebody else's is not in the owner's Workspace tab.
+    assert service.portal_documents("atlas", ALICE, include_owned=True)["documents"] == []
 
 
 def test_a_dismissal_is_idempotent(shares_db):

@@ -26,6 +26,23 @@ export function deps(s) {
 }
 
 /**
+ * ent#672 — "Superseded by …" for a deprecated skill that declares a
+ * successor, else null (`superseded_by` is null unless the skill is
+ * deprecated — the parser's rule). One helper so the three surfaces that list a library
+ * skill (Library card, Skills tab assigned row, Skills tab picker) cannot
+ * disagree about when the line shows. The successor is the library AUTHOR's
+ * text — a skill name by convention, sometimes a sentence — so callers
+ * interpolate it and never bind it to an `:href` or `v-html`.
+ */
+export function supersededLine(s) {
+  return s?.superseded_by ? `Superseded by ${s.superseded_by}` : null
+}
+
+/** Hover text for the `deprecated` badge — what it means for someone holding the skill. */
+export const DEPRECATED_TITLE =
+  'The library is retiring this skill. It still works and can still be assigned; a later library release removes it.'
+
+/**
  * Strip embedded credentials from a library repo URL before display — the
  * clone path accepts and stores `https://user:token@host/...` verbatim, so a
  * rendered URL must never carry the userinfo through to the screen.

@@ -29,6 +29,15 @@ def asks():
     return m
 
 
+def _stub_db(monkeypatch, asks, fake):
+    """trinity-enterprise#611: `answer_ask` reads through its own `db` and ends
+    the ask through the ask sink, which writes and reads the opt-in through ITS
+    `db` — one stub for both, or the answer lands in the real unit DB."""
+    import services.ask_service as sink
+    monkeypatch.setattr(asks, "db", fake, raising=False)
+    monkeypatch.setattr(sink, "db", fake)
+
+
 ITEM = {
     "id": "q1",
     "agent_name": "agent-a",
@@ -54,7 +63,7 @@ def wired(monkeypatch, asks):
         def get_operator_resume_enabled(self, agent_name):
             return True
 
-    monkeypatch.setattr(asks, "db", _Db(), raising=False)
+    _stub_db(monkeypatch, asks, _Db())
     monkeypatch.setattr(asks, "_on_roster", lambda *a, **k: True, raising=False)
 
     import services.operator_resume_service as ors
@@ -109,7 +118,7 @@ def test_a_lost_race_dispatches_nothing(asks, monkeypatch):
         def get_operator_resume_enabled(self, agent_name):
             return True
 
-    monkeypatch.setattr(asks, "db", _Db(), raising=False)
+    _stub_db(monkeypatch, asks, _Db())
     monkeypatch.setattr(asks, "_on_roster", lambda *a, **k: True, raising=False)
     import services.operator_resume_service as ors
     monkeypatch.setattr(ors, "spawn_resume_dispatch",
@@ -145,7 +154,7 @@ def test_a_dispatch_failure_never_loses_the_answer(asks, monkeypatch):
         def get_operator_resume_enabled(self, agent_name):
             return True
 
-    monkeypatch.setattr(asks, "db", _Db(), raising=False)
+    _stub_db(monkeypatch, asks, _Db())
     monkeypatch.setattr(asks, "_on_roster", lambda *a, **k: True, raising=False)
     import services.operator_resume_service as ors
 
@@ -191,7 +200,7 @@ def test_resume_requested_is_false_when_the_agent_has_not_opted_in(asks, monkeyp
         def get_operator_resume_enabled(self, agent_name):
             return False
 
-    monkeypatch.setattr(asks, "db", _Db(), raising=False)
+    _stub_db(monkeypatch, asks, _Db())
     monkeypatch.setattr(asks, "_on_roster", lambda *a, **k: True, raising=False)
     out = asks.answer_ask("q1", "x@example.com", False, response="Ship it", response_text=None)
     assert out.resume_requested is False
@@ -210,7 +219,7 @@ def test_resume_requested_fails_closed(asks, monkeypatch):
         def get_operator_resume_enabled(self, agent_name):
             raise RuntimeError("db down")
 
-    monkeypatch.setattr(asks, "db", _Db(), raising=False)
+    _stub_db(monkeypatch, asks, _Db())
     monkeypatch.setattr(asks, "_on_roster", lambda *a, **k: True, raising=False)
     import services.operator_resume_service as ors
     monkeypatch.setattr(ors, "spawn_resume_dispatch", lambda *a, **k: None, raising=False)
@@ -245,25 +254,30 @@ def test_no_workspace_specific_execution_path(asks):
 
     Calling `execute_task` here would answer the cost, trigger-label and
     loop-prevention questions a second time and differently — which is the one
-    thing ent#430's body rules out.
+    thing ent#430's body rules out. Since trinity-enterprise#611 the dispatch is
+    reached through the ask sink, whose default observer is the ONE site that
+    spawns it.
     """
     src = _code_only(inspect.getsource(asks.answer_ask))
-    assert "spawn_resume_dispatch" in src
-    for forbidden in ("execute_task", "create_task_execution", "maybe_dispatch_resume"):
+    assert "ask_service.answer(" in src
+    for forbidden in ("execute_task", "create_task_execution", "maybe_dispatch_resume",
+                      "spawn_resume_dispatch"):
         assert forbidden not in src, (
             f"answer_ask reaches {forbidden} directly; the whole point is that it "
-            "goes through spawn_resume_dispatch like the operator route does"
+            "goes through the ask sink like the operator route does"
         )
 
 
 def test_both_answer_routes_use_the_same_dispatch(asks):
-    """Operator and client answers must not drift apart."""
+    """Operator and client answers must not drift apart: both end the ask
+    through the ask sink, and neither spawns a dispatch of its own."""
     from routers import operator_queue as opq
 
-    operator_src = inspect.getsource(opq)
-    client_src = inspect.getsource(asks)
-    assert "spawn_resume_dispatch" in operator_src
-    assert "spawn_resume_dispatch" in client_src
+    operator_src = _code_only(inspect.getsource(opq.respond_to_queue_item))
+    client_src = _code_only(inspect.getsource(asks.answer_ask))
+    for src in (operator_src, client_src):
+        assert "ask_service.answer(" in src
+        assert "spawn_resume_dispatch" not in src
 
 
 # ---------------------------------------------------------------------------

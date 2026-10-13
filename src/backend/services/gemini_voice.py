@@ -1471,6 +1471,18 @@ class GeminiVoiceService:
             return "No prompt provided."
 
         logger.info(f"Voice tool call: agent={agent_name} tool={tool_name} prompt={prompt[:80]!r}")
+        # trinity-enterprise#751: this path reaches the agent without
+        # `execute_task` (no row, no requester identity), so a gated skill is
+        # refused here rather than put up for approval. The model voices it.
+        from services import skill_gate_service
+        try:
+            await skill_gate_service.enforce(
+                agent_name, request_text=prompt,
+                requester=skill_gate_service.Requester(kind=skill_gate_service.KIND_OTHER,
+                                                       key="voice-tool", label="A voice call"),
+                triggered_by="voice", refuse_only=True)
+        except skill_gate_service.SkillGateError as e:
+            return str(e)
         try:
             client = get_agent_client(agent_name)
             response = await client.task(prompt, timeout=28.0)

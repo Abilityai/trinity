@@ -22,7 +22,7 @@ from fastapi.responses import RedirectResponse
 from database import db
 from dependencies import get_current_user, reject_agent_principal, assert_agent_access, assert_agent_owner
 from models import SlackChannelMessageRequest, SlackChannelProactiveRequest, SlackEventResponse, User
-from services import channel_history, rate_limiter
+from services import channel_history, idempotency_service, rate_limiter
 from services.slack_service import slack_service
 from db_models import SlackConnectionStatus
 from services.settings_service import get_slack_signing_secret, get_proactive_rate_limit
@@ -731,69 +731,97 @@ async def send_agent_slack_channel_message(
             },
         )
 
-    # Rate limit: per-channel then per-agent, caps sourced from settings (#1609;
-    # 0 = unlimited → skip). Fail-open inside the limiter.
-    per_channel = get_proactive_rate_limit("slack_proactive_per_channel")
-    per_agent = get_proactive_rate_limit("slack_proactive_per_agent")
-    if per_channel > 0:
-        rate_limiter.enforce(
-            f"slack_proactive:{name}:{channel_id}",
-            per_channel, _SLACK_PROACTIVE_WINDOW,
-            detail=f"Too many messages to this channel (cap {per_channel}/hour).",
-        )
-    if per_agent > 0:
-        rate_limiter.enforce(
-            f"slack_proactive:{name}",
-            per_agent, _SLACK_PROACTIVE_WINDOW,
-            detail=f"Too many proactive messages from this agent (cap {per_agent}/hour).",
-        )
+    # ent#665: caller-declared idempotency key — after the binding and consent
+    # checks, before the rate limit (a suppressed send costs no budget).
+    try:
+        async with idempotency_service.intent_guard(
+            "group_message",
+            agent_name=name,
+            target=f"slack:{target['team_id']}:{channel_id}",
+            idempotency_key=request.idempotency_key,
+            ttl_seconds=request.idempotency_ttl,
+            execution_id=request.execution_id,
+        ) as intent:
+            if intent.suppressed:
+                await channel_history.record_group_suppression(
+                    name, "slack", channel_id, intent, request.idempotency_key)
+                return {
+                    "channel_type": "slack",
+                    "channel_id": channel_id,
+                    "channel_name": target.get("slack_channel_name"),
+                    "thread_ts": request.thread_ts,
+                    **intent.result_fields(),
+                }
 
-    bot_token = db.get_slack_workspace_bot_token(target["team_id"])
-    if not bot_token:
-        raise HTTPException(status_code=500, detail="Failed to retrieve Slack bot token")
+            # Rate limit: per-channel then per-agent, caps sourced from settings (#1609;
+            # 0 = unlimited → skip). Fail-open inside the limiter.
+            per_channel = get_proactive_rate_limit("slack_proactive_per_channel")
+            per_agent = get_proactive_rate_limit("slack_proactive_per_agent")
+            if per_channel > 0:
+                rate_limiter.enforce(
+                    f"slack_proactive:{name}:{channel_id}",
+                    per_channel, _SLACK_PROACTIVE_WINDOW,
+                    detail=f"Too many messages to this channel (cap {per_channel}/hour).",
+                )
+            if per_agent > 0:
+                rate_limiter.enforce(
+                    f"slack_proactive:{name}",
+                    per_agent, _SLACK_PROACTIVE_WINDOW,
+                    detail=f"Too many proactive messages from this agent (cap {per_agent}/hour).",
+                )
 
-    # #1649: `_detailed` to capture the posted message's ts — see below.
-    ok, error, posted_ts = await slack_service.send_message_detailed(
-        bot_token=bot_token,
-        channel=channel_id,
-        text=text,
-        username=name,  # per-message agent identity (chat:write.customize)
-        thread_ts=request.thread_ts,
-    )
-    if not ok:
-        raise HTTPException(status_code=502, detail=f"Slack send failed: {error}")
+            bot_token = db.get_slack_workspace_bot_token(target["team_id"])
+            if not bot_token:
+                raise HTTPException(status_code=500, detail="Failed to retrieve Slack bot token")
 
-    # #1649: record the broadcast in the channel session an inbound reply will
-    # resolve to. Slack channel sessions are thread-scoped (`team:channel:thread`,
-    # #903), and a reply carries thread_ts = the PARENT's ts. So:
-    #   - replying into an existing thread -> that thread's ts
-    #   - a new top-level post            -> the post's OWN ts, which is exactly
-    #     the key an in-thread reply to it will carry
-    # Either way this lands in the session the conversation continues in, so the
-    # agent DOES recall its broadcast — unlike the Telegram group case, whose
-    # per-(sender, chat) sessions have no shared key to write to.
-    #
-    # Caveat: a reply posted top-level in the channel (not in the thread) starts
-    # its own session and won't see this message. That is inherent to Slack's
-    # thread-scoped session model (#903), not something this fix can change.
-    thread_key = request.thread_ts or posted_ts
-    channel_history.persist_outbound_group_message(
-        agent_name=name,
-        channel="slack",
-        session_identifier=(
-            channel_history.session_key_for_slack_channel(
-                team_id=target["team_id"], channel_id=channel_id, thread_ts=thread_key
+            # #1649: `_detailed` to capture the posted message's ts — see below.
+            ok, error, posted_ts = await slack_service.send_message_detailed(
+                bot_token=bot_token,
+                channel=channel_id,
+                text=text,
+                username=name,  # per-message agent identity (chat:write.customize)
+                thread_ts=request.thread_ts,
             )
-            if thread_key
-            else None  # no ts (older/odd Slack response) -> log + skip, never crash
-        ),
-        text=text,
-    )
+            if not ok:
+                raise HTTPException(status_code=502, detail=f"Slack send failed: {error}")
 
-    return {
-        "sent": True,
-        "channel_type": "slack",
-        "channel_id": channel_id,
-        "channel_name": target.get("slack_channel_name"),
-        "thread_ts": request.thread_ts,
-    }
+            # #1649: record the broadcast in the channel session an inbound reply will
+            # resolve to. Slack channel sessions are thread-scoped (`team:channel:thread`,
+            # #903), and a reply carries thread_ts = the PARENT's ts. So:
+            #   - replying into an existing thread -> that thread's ts
+            #   - a new top-level post            -> the post's OWN ts, which is exactly
+            #     the key an in-thread reply to it will carry
+            # Either way this lands in the session the conversation continues in, so the
+            # agent DOES recall its broadcast — unlike the Telegram group case, whose
+            # per-(sender, chat) sessions have no shared key to write to.
+            #
+            # Caveat: a reply posted top-level in the channel (not in the thread) starts
+            # its own session and won't see this message. That is inherent to Slack's
+            # thread-scoped session model (#903), not something this fix can change.
+            thread_key = request.thread_ts or posted_ts
+            session_identifier = (
+                channel_history.session_key_for_slack_channel(
+                    team_id=target["team_id"], channel_id=channel_id, thread_ts=thread_key
+                )
+                if thread_key
+                else None  # no ts (older/odd Slack response) -> log + skip, never crash
+            )
+            intent.record = {"session_identifier": session_identifier}
+            channel_history.persist_outbound_group_message(
+                agent_name=name,
+                channel="slack",
+                session_identifier=session_identifier,
+                text=text,
+            )
+
+            return {
+                "sent": True,
+                "channel_type": "slack",
+                "channel_id": channel_id,
+                "channel_name": target.get("slack_channel_name"),
+                "thread_ts": request.thread_ts,
+                **intent.result_fields(),
+            }
+    except idempotency_service.EffectInProgressError as e:
+        # ent#665: another run is sending under this key right now — retryable.
+        raise HTTPException(status_code=409, detail=str(e))

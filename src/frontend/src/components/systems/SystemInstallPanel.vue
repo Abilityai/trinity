@@ -6,6 +6,7 @@
         :result="store.deployResult"
         @view-fleet="goToFleet"
         @install-another="startOver"
+        @remove-system="$emit('remove-system', $event)"
       />
     </div>
 
@@ -261,6 +262,11 @@ import { useSystemsStore } from '../../stores/systems'
 import ManifestPreview from './ManifestPreview.vue'
 import DeployResult from './DeployResult.vue'
 import BaseTextarea from '../base/BaseTextarea.vue'
+
+// ent#454: forwarded from DeployResult so the page can prefill the teardown
+// panel with the system just deployed. Declared, not implicit — an undeclared
+// emit falls through to the root element as a native DOM attribute.
+defineEmits(['remove-system'])
 
 // Mirrors the server-side byte cap on SystemDeployRequest.manifest. `file.size`
 // is in bytes and so is the server's validator, so the two agree exactly.

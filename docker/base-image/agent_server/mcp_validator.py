@@ -87,6 +87,10 @@ RESERVED_SERVER_NAMES = frozenset({"trinity"})
 # documented default for fresh installs.
 _TRINITY_DEFAULT_URL = "http://mcp-server:8080/mcp"
 _TRINITY_BEARER_RE = re.compile(r"^Bearer\s+trinity_mcp_[A-Za-z0-9_-]{1,200}$")
+# #2392: the injected entry also carries the spawning execution's id, expanded
+# by Claude Code from its process env. Only this exact literal is canonical.
+_TRINITY_EXEC_ID_HEADER = "X-Trinity-Execution-Id"
+_TRINITY_EXEC_ID_VALUE = "${TRINITY_EXECUTION_ID:-manual}"
 
 
 def _is_canonical_trinity_entry(server: dict) -> bool:
@@ -94,7 +98,8 @@ def _is_canonical_trinity_entry(server: dict) -> bool:
     entry: only ``type``, ``url``, ``headers`` keys; ``type=http``; ``url``
     matches the configured Trinity MCP URL; ``headers`` contains only
     ``Authorization`` with a ``Bearer trinity_mcp_…`` token of the right
-    shape.
+    shape, optionally plus ``X-Trinity-Execution-Id`` whose value is exactly
+    ``${TRINITY_EXECUTION_ID:-manual}`` (#2392).
 
     Strict allowlist — any extra key, any wrong value, any extra header,
     any non-bearer auth scheme is rejected. Owners who want to redefine
@@ -114,7 +119,12 @@ def _is_canonical_trinity_entry(server: dict) -> bool:
         return False
 
     headers = server.get("headers")
-    if not isinstance(headers, dict) or list(headers.keys()) != ["Authorization"]:
+    if not isinstance(headers, dict):
+        return False
+    if set(headers.keys()) == {"Authorization", _TRINITY_EXEC_ID_HEADER}:
+        if headers[_TRINITY_EXEC_ID_HEADER] != _TRINITY_EXEC_ID_VALUE:
+            return False
+    elif list(headers.keys()) != ["Authorization"]:
         return False
     auth = headers.get("Authorization")
     if not isinstance(auth, str) or not _TRINITY_BEARER_RE.match(auth):

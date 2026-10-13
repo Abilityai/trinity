@@ -15,7 +15,11 @@ from datetime import datetime
 from typing import Optional, List
 
 from .config import config
-from .models import Schedule, ScheduleExecution, ExecutionStatus, ProcessSchedule, ProcessScheduleExecution, Reminder
+from .models import Schedule, ScheduleExecution, ExecutionStatus, Reminder
+# #389/#1808: consecutive failed syncs before a freeze-enabled agent stops
+# firing. ONE number: it lives in the sync policy, which this package vendors
+# byte-identically from the backend (trinity-enterprise#706).
+from .sync_freeze_policy import SYNC_FAILURE_FREEZE_THRESHOLD, classify  # noqa: F401 (re-exported)
 from .utils import (
     duration_ms_between,
     parse_scheduler_ts,
@@ -24,11 +28,6 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
-
-# #389/#1808: consecutive failed syncs before a freeze-enabled agent stops
-# firing. Mirrors the threshold in the backend's
-# routers/internal.py::internal_agent_sync_health — keep the two in step.
-SYNC_FAILURE_FREEZE_THRESHOLD = 3
 
 
 def _scheduler_pg_url() -> Optional[str]:
@@ -45,15 +44,6 @@ def _scheduler_pg_url() -> Optional[str]:
     if url and not url.startswith("sqlite"):
         return url
     return None
-
-
-# IntegrityError across both backends (psycopg2 only importable in PG deploys).
-_INTEGRITY_ERRORS: tuple = (sqlite3.IntegrityError,)
-try:  # pragma: no cover - depends on deployment
-    import psycopg2 as _psycopg2
-    _INTEGRITY_ERRORS = (sqlite3.IntegrityError, _psycopg2.IntegrityError)
-except Exception:
-    pass
 
 
 class _PgCursor:
@@ -227,6 +217,7 @@ class SchedulerDatabase:
             source_agent_name=row["source_agent_name"] if "source_agent_name" in row_keys else None,
             source_mcp_key_id=row["source_mcp_key_id"] if "source_mcp_key_id" in row_keys else None,
             source_mcp_key_name=row["source_mcp_key_name"] if "source_mcp_key_name" in row_keys else None,
+            chain_depth=row["chain_depth"] if "chain_depth" in row_keys else None,
             # Retry tracking (RETRY-001)
             attempt_number=row["attempt_number"] if "attempt_number" in row_keys and row["attempt_number"] else 1,
             retry_of_execution_id=row["retry_of_execution_id"] if "retry_of_execution_id" in row_keys else None,
@@ -394,7 +385,8 @@ class SchedulerDatabase:
         source_user_email: Optional[str] = None,
         source_agent_name: Optional[str] = None,
         source_mcp_key_id: Optional[str] = None,
-        source_mcp_key_name: Optional[str] = None
+        source_mcp_key_name: Optional[str] = None,
+        chain_depth: Optional[int] = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record.
 
@@ -428,8 +420,8 @@ class SchedulerDatabase:
                     id, schedule_id, agent_name, status, started_at, message, triggered_by,
                     model_used, attempt_number, retry_of_execution_id,
                     source_user_id, source_user_email, source_agent_name,
-                    source_mcp_key_id, source_mcp_key_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_mcp_key_id, source_mcp_key_name, chain_depth
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 execution_id,
                 schedule_id,
@@ -445,7 +437,8 @@ class SchedulerDatabase:
                 source_user_email,
                 source_agent_name,
                 source_mcp_key_id,
-                source_mcp_key_name
+                source_mcp_key_name,
+                chain_depth,
             ))
             conn.commit()
 
@@ -462,24 +455,32 @@ class SchedulerDatabase:
                 source_agent_name=source_agent_name,
                 source_mcp_key_id=source_mcp_key_id,
                 source_mcp_key_name=source_mcp_key_name,
+                chain_depth=chain_depth,
                 attempt_number=attempt_number,
                 retry_of_execution_id=retry_of_execution_id
             )
 
-    def should_freeze_schedules(self, agent_name: str) -> bool:
-        """Is this agent's cron firing frozen by a failing git sync? (#389/#1808)
+    def sync_freeze_reason(self, agent_name: str) -> Optional[str]:
+        """Why this agent's cron firing is frozen, or None when it may fire.
 
         True only when the owner opted in (`freeze_schedules_if_sync_failing`)
-        AND sync is actually failing. Mirrors the predicate the backend already
-        exposes at `/api/internal/agents/{name}/sync-health-status`; read
-        directly here because the scheduler talks to the same database for
-        every other gate (autonomy, enabled, reminders) and an extra HTTP hop
-        would add a failure mode to the fire path for no benefit.
+        AND either sync is failing (#1808, any binding) or a WORK agent has
+        been diverged from origin for more than 24 h on a fresh observation
+        (trinity-enterprise#706). The rule is `sync_freeze_policy.classify`,
+        vendored byte-identically from the backend, so the dashboard and this
+        gate cannot disagree. Read directly here because the scheduler talks to
+        the same database for every other gate (autonomy, enabled, reminders)
+        and an extra HTTP hop would add a failure mode to the fire path for no
+        benefit.
 
-        FAIL-OPEN: any error (missing table on an older DB, read failure)
-        returns False and the schedule fires. A freeze-on-error would silently
-        stop the whole fleet the moment this query broke — the opposite of the
-        bug this closes.
+        Returns a reason string rather than a tuple on purpose: a
+        `(False, None)` tuple is truthy, so a caller that kept the old
+        `if db.should_freeze_...(...)` shape would freeze the whole fleet.
+
+        FAIL-OPEN: any error (missing table or column on an older DB, read
+        failure) returns None and the schedule fires. A freeze-on-error would
+        silently stop the whole fleet the moment this query broke — the
+        opposite of the bug this closes.
         """
         try:
             with self.get_connection() as conn:
@@ -487,8 +488,16 @@ class SchedulerDatabase:
                 cursor.execute(
                     """
                     SELECT gc.freeze_schedules_if_sync_failing,
+                           gc.source_mode,
+                           gc.auto_sync_enabled,
                            ss.last_sync_status,
-                           ss.consecutive_failures
+                           ss.consecutive_failures,
+                           ss.ahead_main,
+                           ss.behind_main,
+                           ss.ahead_working,
+                           ss.behind_working,
+                           ss.diverged_since,
+                           ss.last_check_at
                     FROM agent_git_config gc
                     LEFT JOIN agent_sync_state ss ON ss.agent_name = gc.agent_name
                     WHERE gc.agent_name = ?
@@ -497,23 +506,40 @@ class SchedulerDatabase:
                 )
                 row = cursor.fetchone()
                 if not row:
-                    return False
+                    return None
                 # Named access only: the PG path (#300) yields RealDictCursor
                 # mapping rows with no positional indexing — row[0] would
                 # KeyError and silently fail-open on every PostgreSQL deploy.
-                freeze_enabled = bool(row["freeze_schedules_if_sync_failing"])
-                if not freeze_enabled:
-                    return False
-                failing = (
-                    row["last_sync_status"] == "failed"
-                    and (row["consecutive_failures"] or 0) >= SYNC_FAILURE_FREEZE_THRESHOLD
+                if not bool(row["freeze_schedules_if_sync_failing"]):
+                    return None
+                verdict = classify(
+                    {
+                        key: row[key]
+                        for key in (
+                            "last_sync_status",
+                            "consecutive_failures",
+                            "ahead_main",
+                            "behind_main",
+                            "ahead_working",
+                            "behind_working",
+                            "diverged_since",
+                            "last_check_at",
+                        )
+                    },
+                    {
+                        "source_mode": row["source_mode"],
+                        "auto_sync_enabled": row["auto_sync_enabled"],
+                        "freeze_schedules_if_sync_failing": row[
+                            "freeze_schedules_if_sync_failing"
+                        ],
+                    },
                 )
-                return bool(failing)
+                return verdict["freeze_reason"] if verdict["freeze"] else None
         except Exception as e:
             logger.warning(
                 f"Sync-freeze check failed for {agent_name} ({e}); firing anyway"
             )
-            return False
+            return None
 
     def create_skipped_execution(
         self,
@@ -590,6 +616,7 @@ class SchedulerDatabase:
         execution_log: str = None,
         claude_session_id: str = None,  # Claude Code session ID for --resume (EXEC-023)
         expected_status: str = None,
+        require_unclaimed: bool = False,
     ) -> bool:
         """Update execution status when completed.
 
@@ -604,6 +631,9 @@ class SchedulerDatabase:
                 argue it is safe today (it is — the abandon gates all run
                 before dispatch, so no competing writer exists), the caller
                 passes the precondition and it is safe by construction.
+            require_unclaimed: also require ``claim_token IS NULL`` (#2514). A
+                claimed row belongs to the pull worker that holds the token;
+                writing a terminal under it makes the worker's result CAS lose.
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -639,7 +669,8 @@ class SchedulerDatabase:
                     context_used = ?, context_max = ?, cost = ?, tool_calls = ?, execution_log = ?,
                     claude_session_id = ?
                 WHERE id = ?
-            """ + (" AND status = ?" if expected_status else ""), (
+            """ + (" AND status = ?" if expected_status else "")
+              + (" AND claim_token IS NULL" if require_unclaimed else ""), (
                 status,
                 to_utc_iso(completed_at),
                 duration_ms,
@@ -663,17 +694,6 @@ class SchedulerDatabase:
             cursor.execute("SELECT * FROM schedule_executions WHERE id = ?", (execution_id,))
             row = cursor.fetchone()
             return self._row_to_execution(row) if row else None
-
-    def get_recent_executions(self, limit: int = 50) -> List[ScheduleExecution]:
-        """Get recent executions across all schedules."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM schedule_executions
-                ORDER BY started_at DESC
-                LIMIT ?
-            """, (limit,))
-            return [self._row_to_execution(row) for row in cursor.fetchall()]
 
     # =========================================================================
     # Retry Operations (RETRY-001)
@@ -929,396 +949,5 @@ class SchedulerDatabase:
                 "UPDATE agent_reminders SET execution_id = ? WHERE id = ?",
                 (execution_id, reminder_id),
             )
-            conn.commit()
-            return cursor.rowcount > 0
-
-    # =========================================================================
-    # Process Schedule Operations
-    # =========================================================================
-
-    def ensure_process_schedules_table(self) -> None:
-        """Create process_schedules table if it doesn't exist."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS process_schedules (
-                    id TEXT PRIMARY KEY,
-                    process_id TEXT NOT NULL,
-                    process_name TEXT NOT NULL,
-                    trigger_id TEXT NOT NULL,
-                    cron_expression TEXT NOT NULL,
-                    enabled INTEGER DEFAULT 1,
-                    timezone TEXT DEFAULT 'UTC',
-                    description TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    last_run_at TEXT,
-                    next_run_at TEXT,
-                    UNIQUE(process_id, trigger_id)
-                )
-            """)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS process_schedule_executions (
-                    id TEXT PRIMARY KEY,
-                    schedule_id TEXT NOT NULL,
-                    process_id TEXT NOT NULL,
-                    process_name TEXT NOT NULL,
-                    execution_id TEXT,
-                    status TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    completed_at TEXT,
-                    duration_ms INTEGER,
-                    triggered_by TEXT NOT NULL,
-                    error TEXT,
-                    FOREIGN KEY (schedule_id) REFERENCES process_schedules(id)
-                )
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_process_schedules_process
-                ON process_schedules(process_id)
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_process_schedules_enabled
-                ON process_schedules(enabled)
-            """)
-            conn.commit()
-            logger.info("Process schedules tables ensured")
-
-    @staticmethod
-    def _row_to_process_schedule(row: sqlite3.Row) -> ProcessSchedule:
-        """Convert a database row to a ProcessSchedule model."""
-        return ProcessSchedule(
-            id=row["id"],
-            process_id=row["process_id"],
-            process_name=row["process_name"],
-            trigger_id=row["trigger_id"],
-            cron_expression=row["cron_expression"],
-            enabled=bool(row["enabled"]),
-            timezone=row["timezone"],
-            description=row["description"],
-            created_at=parse_scheduler_ts(row["created_at"]),
-            updated_at=parse_scheduler_ts(row["updated_at"]),
-            last_run_at=parse_scheduler_ts(row["last_run_at"]) if row["last_run_at"] else None,
-            next_run_at=parse_scheduler_ts(row["next_run_at"]) if row["next_run_at"] else None
-        )
-
-    @staticmethod
-    def _row_to_process_schedule_execution(row: sqlite3.Row) -> ProcessScheduleExecution:
-        """Convert a database row to a ProcessScheduleExecution model."""
-        return ProcessScheduleExecution(
-            id=row["id"],
-            schedule_id=row["schedule_id"],
-            process_id=row["process_id"],
-            process_name=row["process_name"],
-            execution_id=row["execution_id"],
-            status=row["status"],
-            started_at=parse_scheduler_ts(row["started_at"]),
-            completed_at=parse_scheduler_ts(row["completed_at"]) if row["completed_at"] else None,
-            duration_ms=row["duration_ms"],
-            triggered_by=row["triggered_by"],
-            error=row["error"]
-        )
-
-    def get_process_schedule(self, schedule_id: str) -> Optional[ProcessSchedule]:
-        """Get a process schedule by ID."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM process_schedules WHERE id = ?", (schedule_id,))
-            row = cursor.fetchone()
-            return self._row_to_process_schedule(row) if row else None
-
-    def get_process_schedule_by_trigger(self, process_id: str, trigger_id: str) -> Optional[ProcessSchedule]:
-        """Get a process schedule by process ID and trigger ID."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM process_schedules WHERE process_id = ? AND trigger_id = ?",
-                (process_id, trigger_id)
-            )
-            row = cursor.fetchone()
-            return self._row_to_process_schedule(row) if row else None
-
-    def list_all_enabled_process_schedules(self) -> List[ProcessSchedule]:
-        """List all enabled process schedules."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM process_schedules WHERE enabled = 1
-                ORDER BY process_name, trigger_id
-            """)
-            return [self._row_to_process_schedule(row) for row in cursor.fetchall()]
-
-    def list_all_process_schedules(self) -> List[ProcessSchedule]:
-        """List all process schedules (enabled and disabled) for sync detection."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM process_schedules
-                ORDER BY process_name, trigger_id
-            """)
-            return [self._row_to_process_schedule(row) for row in cursor.fetchall()]
-
-    def list_process_schedules(self, process_id: str) -> List[ProcessSchedule]:
-        """List all schedules for a specific process."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM process_schedules WHERE process_id = ?
-                ORDER BY trigger_id
-            """, (process_id,))
-            return [self._row_to_process_schedule(row) for row in cursor.fetchall()]
-
-    def create_process_schedule(
-        self,
-        process_id: str,
-        process_name: str,
-        trigger_id: str,
-        cron_expression: str,
-        timezone: str = "UTC",
-        description: str = "",
-        enabled: bool = True
-    ) -> Optional[ProcessSchedule]:
-        """Create a new process schedule."""
-        schedule_id = self._generate_id()
-        now = utc_now_iso()
-
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute("""
-                    INSERT INTO process_schedules (
-                        id, process_id, process_name, trigger_id, cron_expression,
-                        enabled, timezone, description, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    schedule_id,
-                    process_id,
-                    process_name,
-                    trigger_id,
-                    cron_expression,
-                    1 if enabled else 0,
-                    timezone,
-                    description,
-                    now,
-                    now
-                ))
-                conn.commit()
-
-                return ProcessSchedule(
-                    id=schedule_id,
-                    process_id=process_id,
-                    process_name=process_name,
-                    trigger_id=trigger_id,
-                    cron_expression=cron_expression,
-                    enabled=enabled,
-                    timezone=timezone,
-                    description=description,
-                    created_at=parse_scheduler_ts(now),
-                    updated_at=parse_scheduler_ts(now)
-                )
-            except _INTEGRITY_ERRORS:
-                logger.warning(f"Process schedule already exists: {process_id}/{trigger_id}")
-                return None
-
-    def update_process_schedule_run_times(
-        self,
-        schedule_id: str,
-        last_run_at: datetime = None,
-        next_run_at: datetime = None
-    ) -> bool:
-        """Update process schedule run timestamps.
-
-        Does NOT bump ``updated_at`` — same rationale as
-        :meth:`update_schedule_run_times` (Issue #420).
-        """
-        if last_run_at is None and next_run_at is None:
-            return False
-
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            updates = []
-            params = []
-
-            if last_run_at:
-                updates.append("last_run_at = ?")
-                params.append(to_utc_iso(last_run_at))
-            if next_run_at:
-                updates.append("next_run_at = ?")
-                params.append(to_utc_iso(next_run_at))
-
-            params.append(schedule_id)
-            cursor.execute(f"""
-                UPDATE process_schedules SET {", ".join(updates)} WHERE id = ?
-            """, params)
-            conn.commit()
-            return cursor.rowcount > 0
-
-    def delete_process_schedule(self, schedule_id: str) -> bool:
-        """Delete a process schedule."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM process_schedules WHERE id = ?", (schedule_id,))
-            conn.commit()
-            return cursor.rowcount > 0
-
-    def delete_process_schedules_for_process(self, process_id: str) -> int:
-        """Delete all schedules for a process. Returns count deleted."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM process_schedules WHERE process_id = ?", (process_id,))
-            conn.commit()
-            return cursor.rowcount
-
-    def create_process_schedule_execution(
-        self,
-        schedule_id: str,
-        process_id: str,
-        process_name: str,
-        triggered_by: str = "schedule"
-    ) -> Optional[ProcessScheduleExecution]:
-        """Create a new process schedule execution record."""
-        execution_id = self._generate_id()
-        now = utc_now_iso()
-
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO process_schedule_executions (
-                    id, schedule_id, process_id, process_name, status, started_at, triggered_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                execution_id,
-                schedule_id,
-                process_id,
-                process_name,
-                ExecutionStatus.RUNNING,
-                now,
-                triggered_by
-            ))
-            conn.commit()
-
-            return ProcessScheduleExecution(
-                id=execution_id,
-                schedule_id=schedule_id,
-                process_id=process_id,
-                process_name=process_name,
-                execution_id=None,
-                status=ExecutionStatus.RUNNING,
-                started_at=parse_scheduler_ts(now),
-                triggered_by=triggered_by
-            )
-
-    def create_skipped_process_schedule_execution(
-        self,
-        schedule_id: str,
-        process_id: str,
-        process_name: str,
-        triggered_by: str = "schedule",
-        skip_reason: str = None
-    ) -> Optional[ProcessScheduleExecution]:
-        """
-        Create an execution record for a skipped process schedule.
-
-        This is called when APScheduler fires EVENT_JOB_MAX_INSTANCES,
-        indicating that a scheduled process was dropped because the previous
-        execution is still running.
-
-        Args:
-            schedule_id: ID of the process schedule that was skipped
-            process_id: ID of the process definition
-            process_name: Name of the process
-            triggered_by: Source of the trigger (always "schedule" for skipped)
-            skip_reason: Human-readable reason for the skip
-
-        Returns:
-            ProcessScheduleExecution with status='skipped', or None on failure
-        """
-        execution_id = self._generate_id()
-        now = utc_now_iso()
-
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO process_schedule_executions (
-                    id, schedule_id, process_id, process_name, status,
-                    started_at, completed_at, duration_ms, triggered_by, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                execution_id,
-                schedule_id,
-                process_id,
-                process_name,
-                ExecutionStatus.SKIPPED,
-                now,
-                now,  # completed_at = started_at for skipped
-                0,    # duration_ms = 0 for skipped
-                triggered_by,
-                skip_reason
-            ))
-            conn.commit()
-
-            return ProcessScheduleExecution(
-                id=execution_id,
-                schedule_id=schedule_id,
-                process_id=process_id,
-                process_name=process_name,
-                execution_id=None,
-                status=ExecutionStatus.SKIPPED,
-                started_at=parse_scheduler_ts(now),
-                completed_at=parse_scheduler_ts(now),
-                duration_ms=0,
-                triggered_by=triggered_by,
-                error=skip_reason
-            )
-
-    def update_process_schedule_execution(
-        self,
-        execution_id: str,
-        status: str,
-        process_execution_id: str = None,
-        error: str = None
-    ) -> bool:
-        """Update process schedule execution status."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-
-            # Get started_at for duration calculation
-            cursor.execute(
-                "SELECT started_at FROM process_schedule_executions WHERE id = ?",
-                (execution_id,)
-            )
-            row = cursor.fetchone()
-            if not row:
-                return False
-
-            started_at = parse_scheduler_ts(row["started_at"])
-            completed_at = datetime.utcnow()
-            # Both ends guarded at the write (#1832 low, #2434 high). This is
-            # the ONLY mitigation process_schedule_executions.duration_ms will
-            # get: that table exists in neither db/schema.py, db/tables.py, nor
-            # any Alembic revision, so no column-widening migration can reach it.
-            duration_ms = duration_ms_between(started_at, completed_at)
-            if duration_ms is None:
-                logger.warning(
-                    "[Scheduler] #2434 unrepresentable duration for process "
-                    "execution %s: started_at=%s is %.1f days before "
-                    "completion — recording NULL.",
-                    execution_id,
-                    row["started_at"],
-                    (completed_at - started_at).total_seconds() / 86400,
-                )
-
-            cursor.execute("""
-                UPDATE process_schedule_executions
-                SET status = ?, completed_at = ?, duration_ms = ?, execution_id = ?, error = ?
-                WHERE id = ?
-            """, (
-                status,
-                to_utc_iso(completed_at),
-                duration_ms,
-                process_execution_id,
-                error,
-                execution_id
-            ))
             conn.commit()
             return cursor.rowcount > 0

@@ -448,10 +448,12 @@ def test_reaper_keep_set_covers_workspace_threads(monkeypatch):
     )
     removed = []
 
-    async def _fake_exec(container, cmd, timeout=30):
+    async def _fake_exec(container, cmd, timeout=30, **_kw):
         if cmd.startswith("rm -f"):
             removed.append(cmd)
             return {"exit_code": 0, "output": ""}
+        if "chat-session.json" in cmd:  # #2958: this agent has no /api/chat session
+            return {"exit_code": 0, "output": "__NO_CHAT_SESSION__\n"}
         return {"exit_code": 0, "output": listing}
 
     monkeypatch.setattr(cleanup, "execute_command_in_container", _fake_exec)
@@ -485,7 +487,7 @@ def test_reaper_skips_the_sweep_when_the_workspace_keep_set_cannot_load(monkeypa
 
     reached = {"container": False}
 
-    async def _fake_exec(container, cmd, timeout=30):
+    async def _fake_exec(container, cmd, timeout=30, **_kw):
         reached["container"] = True
         return {"exit_code": 0, "output": ""}
 
@@ -644,7 +646,7 @@ def test_a_turn_that_never_started_gets_a_terminal(portal, monkeypatch):
 
     calls = []
     monkeypatch.setattr(core_db, "update_execution_status",
-                        lambda eid, status, **kw: calls.append((eid, status, kw.get("error"))))
+                        lambda eid, status, result=None, **kw: calls.append((eid, status, result and result.error)))
 
     svc._fail_unstarted_execution("exec-1", "This conversation is already handling a message.")
 

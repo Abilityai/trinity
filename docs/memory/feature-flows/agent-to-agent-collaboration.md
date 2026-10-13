@@ -3,7 +3,7 @@
 **Status**: Implemented
 **Date**: 2025-11-29
 **Priority**: High
-**Last Updated**: 2026-06-21 (Pull-pilot routing #946 added)
+**Last Updated**: 2026-09-30 (Chain depth carried through loops, schedule triggers and events #2973)
 
 ---
 
@@ -205,15 +205,27 @@ async chat(name: string, message: string, sourceAgent?: string): Promise<ChatRes
 
 ---
 
+## Agent-to-agent `/chat` on a pull pilot (#3127)
+
+When the TARGET is in `PULL_MODE_PILOT_AGENTS`, the backend queues the `/chat` turn (trigger `agent`) through
+`run_resumable_turn`. The trigger is autonomous, but the caller is blocked on the reply, so:
+
+- `run_resumable_turn` calls `dispatch_and_await_terminal(caller_waiting=True)`: the turn waits for a claim for at most
+  one agent timeout and then answers FAILED/`CAPACITY` (429) instead of running later for nobody.
+- Its `conversation_key` starts with `pull_pilot.WAITING_CONVERSATION_PREFIX` (`session:`), and the pull claim orders
+  those rows with `INTERACTIVE_TRIGGERS`, ahead of batch work.
+- The collaboration activity id rides the queue payload (`backlog_metadata.collaboration_activity_id`), and the pull
+  sink closes it on its CAS-won terminal, so a turn whose caller got the 504 receipt still closes it.
+
 ## Pull-Pilot Routing (#946)
 
 **Phase 2 PoC for pull / work-stealing coordination** (Epic #1045, umbrella #1081 — see `docs/planning/TARGET_ARCHITECTURE.md`). A flag-gated routing fork on the EXISTING sequential agent→agent `chat_with_agent` path described above.
 
 ### What it does
 
-When `MCP_AGENT_CHAT_PULL_ENABLED` is ON, a **sequential** (`parallel=false`) agent→agent (`scope='agent'`, non-self) `chat_with_agent` call is routed by the MCP server through the durable async `/task` path (`apiClient.task(..., {async_mode: true})`) **instead of** the synchronous held `/chat` call. The caller gets an immediate `{status: "accepted" | "queued", execution_id, agent_name, ...}` receipt and **polls `get_execution_result(execution_id)`** for the result.
+When `MCP_AGENT_CHAT_PULL_ENABLED` is ON, a **sequential** (`parallel=false`) agent→agent (`scope='agent'`, non-self) `chat_with_agent` call is routed by the MCP server through the durable async `/task` path (`apiClient.task(..., {async_mode: true})`) **instead of** the synchronous held `/chat` call. The caller gets an immediate `{status: "accepted" | "queued", execution_id, agent_name, ...}` receipt and **polls `get_execution_result(agent_name, execution_id)`** for the result.
 
-- **Polling is the contract** — the backend emits no completion event for this path; the caller must poll.
+- **The receipt is the contract** — read the outcome with `get_execution_result`, or subscribe to the target's `agent.task.completed` / `agent.task.failed`: this path runs through the task service, which emits them (#1578). (The synchronous `/chat` path it replaces emits none.) The receipt's `message` is the MCP server's (ent#568), not the backend's REST "Poll GET …" line.
 - **Default OFF.** Rollback is a flag flip + MCP routing revert (no schema, no data migration).
 
 ### What stays UNCHANGED (deliberate exclusions)
@@ -239,7 +251,8 @@ When `MCP_AGENT_CHAT_PULL_ENABLED` is ON, a **sequential** (`parallel=false`) ag
     authContext?.scope === "agent" &&
     !isSelfTask;
   ```
-- **Pull branch** — chat.ts:391-402: calls `apiClient.task(agent_name, message, { async_mode: true }, sourceAgent, mcpKeyInfo, idempotencyKey)` and returns the receipt JSON. Only `async_mode` is forwarded; `model`/`allowed_tools`/`system_prompt` are parallel-only and were never applied in sequential mode, so omitting them preserves sequential semantics (agent defaults).
+- **Pull branch** — chat.ts:391-402: calls `apiClient.task(agent_name, message, { async_mode: true }, sourceAgent, mcpKeyInfo, idempotencyKey)` and returns the receipt JSON (a replayed one carries `idempotent_replay: true`, #3245). If that run ends `failed` or `cancelled`, an identical re-send dispatches a new run under the same key (#3245) — for a `lease_expired` failure only after its hold window (agent timeout + 5 min after the failure); until then the original receipt comes back. Only `async_mode` is forwarded; `model`/`allowed_tools`/`system_prompt` are parallel-only and were never applied in sequential mode, so omitting them preserves sequential semantics (agent defaults).
+- **Pull branch** — `chat.ts::runAgentChat`, the `if (usePullRouting)` branch: calls `apiClient.task(agent_name, message, { async_mode: true, parent_execution_id }, sourceAgent, mcpKeyInfo, idempotencyKey, callerTurn)` and returns the receipt JSON. Only `async_mode` and the parent are forwarded (#3232: the pull-routed call is an async receipt, so it carries the caller's turn by default — see [channel-completion-report.md](channel-completion-report.md#how-an-mcp-delegation-carries-the-parent-3232)); `model`/`allowed_tools`/`system_prompt` are parallel-only and were never applied in sequential mode, so omitting them preserves sequential semantics (agent defaults).
 
 ### D8 — Route is part of the idempotency identity
 
@@ -296,6 +309,29 @@ This mirrors the existing `/chat` (chat.py:242) and `CapacityFull` (chat.py:1577
 
 - `docs/planning/ACTOR_MODEL_POSTCARD.md`, `docs/planning/TARGET_ARCHITECTURE.md` — pull-coordination direction (Epic #1045 / #1081)
 - `mcp-orchestration.md`, `task-execution-service.md`, `idempotency-keys.md`, `dispatch-circuit-breaker.md`
+
+---
+
+## Chain-Depth Guard (#2806)
+
+Stops a call bouncing A→B→A→B… forever. Every agent-to-agent path goes through one helper, `dispatch_admission_service.enforce_inter_agent_depth()`:
+
+| Path | Call site | Runs before |
+|------|-----------|-------------|
+| `/chat` (sequential, every `chat_with_<slug>`) | first line of `admit_chat_request()` | idempotency `begin`, breaker read, `capacity.acquire` |
+| `/task` (parallel, self-task, #946 pull-routed) | `dispatch_parallel_task()` right after `derive_source_and_trigger()` | `begin_task_idempotency`, uploads, row insert, capacity |
+| `/fan-out` | `routers/fan_out.fan_out()` after the target check | `idempotency_service.begin`, `FanOutService.execute` |
+
+1. **Caller** = `current_user.agent_name`, or `trinity-system` for a `scope=system` key. Any other principal is a root → returns `None`, no DB read, child row `chain_depth` NULL. The `X-Source-Agent` header and the typed `parent_execution_id` are never consulted.
+2. **Limit** = `settings_service.get_ops_setting("inter_agent_max_chain_depth", int)` (row → env `INTER_AGENT_MAX_CHAIN_DEPTH` → default 8), clamped to 1–32; a read error falls back to 8.
+3. **Depth** = `1 + db.get_max_running_chain_depth(caller)` — `MAX(chain_depth)` over the caller's `status='running'` rows (`db/schedules/executions.py`).
+4. **Admitted** → depth is stamped on the child row: `ChatAdmission.chain_depth` → `prepare_chat_execution(chain_depth=)`; `create_task_execution_and_activities(chain_depth=)`; `FanOutService.execute(chain_depth=)` → every subtask insert.
+5. **Refused** (`depth > max`) → an `inter_agent_depth_exceeded` audit row and a FAILED `agent_collaboration` activity on the caller (both best-effort), then `InterAgentDepthExceeded` → router → **403** `{"detail": {"error": "inter_agent_depth_exceeded", depth, max_depth, caller, target, message}}` + `X-Trinity-Error-Code`. No execution row, no idempotency claim, no slot.
+6. **MCP** → `client.ts::parseDepthRefusal` turns that 403 into a `DepthRefusal` result; `runAgentChat` returns `{status: "inter_agent_depth_exceeded", retryable: false, ...}` to the calling model.
+
+7. **New roots (#2973)** → the same helper runs on `POST /api/agents/{name}/sessions/{id}/message` (depth passed to `execute_task(chain_depth=)`), `POST /api/agents/{name}/loops` (depth persisted on `agent_loops.chain_depth`, stamped on every iteration by `loop_service._dispatch_run`), `POST /api/agents/{name}/schedules/{id}/trigger` (depth forwarded to the scheduler in the trigger body; a retry keeps it), and both event-emit routes when at least one subscription matches (depth signed into the EVT-001 loopback JWT as `chain_depth` → `User.loopback_chain_depth`, read by the helper before its root early-return; `_chain_caller` also falls back to `vouched_source_agent`). These routes let the refusal propagate to the app-level handler `error_handlers.inter_agent_depth_exceeded` (same 403 body and header). `agent.task.*` terminal events carry the finished row's depth + 1.
+
+Access (`get_authorized_agent`, uniform 404) resolves before the helper, so a depth 403 never discloses whether a target exists. Residuals and deferrals (non-agent keys held by agents, calls with no running row, webhook/cron/reminder roots #3116): `requirements/core-agent.md` §9.1.1. Tests: `tests/unit/test_2806_inter_agent_depth.py`, `tests/unit/test_2973_depth_new_roots.py`, `src/mcp-server/src/chat-depth.test.ts`, `src/mcp-server/src/tools/depth-refusal.test.ts`, J10 `test_two_agents_cannot_bounce_a_call_between_each_other_forever`.
 
 ---
 
@@ -589,6 +625,8 @@ class ActivityType(str, Enum):
 | Timeout | 504 | Task execution timed out |
 | Connection error | 503 | Failed to communicate with agent |
 
+Since #2889 every sync `/chat`/`/task` failure the backend classifies also carries `X-Trinity-Error-Code` (`auth` / `billing` / `network` / `agent_error` / `capacity` / `timeout`) — `network` is the only value that means the agent server was never reached; the body is unchanged. A queue-full 429 (either admission refusal) carries `capacity` since #2919.
+
 *Note: MCP tools return errors in JSON response body, not HTTP status codes.
 
 ---
@@ -605,7 +643,7 @@ class ActivityType(str, Enum):
 
 ## Testing
 
-**Journey J10 — "My agents can call each other, and I can see what they said"** (`tests/journeys/test_j10_agent_calls_agent_journey.py`, #2349; record in `tests/journeys/catalog.yaml`). Two ephemeral agents; every call is made through the MCP server with the caller's own agent-scoped key, read from its container, so the `checkAgentAccess` gate above is what the harness crosses. Credential-free on every PR (`journey-smoke.yml`): the permitted call lands on the callee attributed to the caller (IA-01) with an `agent_collaboration` activity on the caller (AC-01); a call with no edge is refused with a reason naming both agents and nothing runs on the callee (P-02); a stopped callee answers `503 Agent is not running` within seconds and leaves no row (IA-03); a fan-out is capped at 50 and lands as one batch on the callee (IA-02); a loop stops at its budget; deleting the callee leaves no dangling edge (L-03). On a keyed stack the callee's real answer is read back from its execution record. Two `strict=True` xfails carry open findings: no chain-depth guard (#2806) and refusals audited as successful tool calls (#2807). The third — `run_agent_loop` skipping the permission gate (trinity-enterprise#628) — is closed and asserted: a loop without an edge is refused with the same reason as a chat, and a loop-id read or stop after the edge is removed is refused without naming the loop's agent (`src/mcp-server/src/access.ts`, `TOOL_ACCESS_POLICY`). The backend REST routes do not consult `agent_permissions` for agent principals (Invariant #8); that ruling is trinity-enterprise#629.
+**Journey J10 — "My agents can call each other, and I can see what they said"** (`tests/journeys/test_j10_agent_calls_agent_journey.py`, #2349; record in `tests/journeys/catalog.yaml`). Two ephemeral agents; every call is made through the MCP server with the caller's own agent-scoped key, read from its container, so the `checkAgentAccess` gate above is what the harness crosses. Credential-free on every PR (`journey-smoke.yml`): the permitted call lands on the callee attributed to the caller (IA-01) with an `agent_collaboration` activity on the caller (AC-01); a call with no edge is refused with a reason naming both agents and nothing runs on the callee (P-02); a stopped callee answers `503 Agent is not running` within seconds and leaves no row (IA-03); a fan-out is capped at 50 and lands as one batch on the callee (IA-02); a loop stops at its budget; deleting the callee leaves no dangling edge (L-03). On a keyed stack the callee's real answer is read back from its execution record. One `strict=True` xfail carries an open finding: no chain-depth guard (#2806). Refusals audited as successful tool calls (#2807) is closed and asserted: the refused call's audit row reads `success: false`, `denied: true` (the deny sites stamp the call context through `src/mcp-server/src/access.ts::accessDenied`; `audit.ts::withAudit` reads it). Also closed and asserted — `run_agent_loop` skipping the permission gate (trinity-enterprise#628): a loop without an edge is refused with the same reason as a chat, and a loop-id read or stop after the edge is removed is refused without naming the loop's agent (`src/mcp-server/src/access.ts`, `TOOL_ACCESS_POLICY`). The backend REST routes do not consult `agent_permissions` for agent principals (Invariant #8); that ruling is trinity-enterprise#629.
 
 Run it locally (creates and deletes `pytest-ephemeral-journey-*` agents only; needs the Docker socket of the host running the stack):
 
@@ -664,12 +702,12 @@ See `scheduling.md` and `mcp-orchestration.md` for full details on schedule mana
 
 ## Design Limitation: 60-Second MCP Call Timeout
 
-Claude Code enforces a hardcoded 60-second timeout on all MCP HTTP tool calls. This means any synchronous `chat_with_agent` call that takes longer than 60 seconds will fail — the calling agent's MCP client drops the connection regardless of the `timeout_seconds` parameter passed to Trinity.
+An MCP client gives up on a tool call at its own ceiling (30–60 seconds is typical). Trinity's MCP server stops waiting first — at `MCP_CHAT_TIMEOUT_MS`, 25 seconds by default — and answers a synchronous `chat_with_agent` with a `queued_timeout` receipt carrying the `execution_id`, while the target keeps running (#914, #2661; details in [mcp-orchestration.md](mcp-orchestration.md) → "Gateway-Timeout Receipt").
 
-**Impact**: The `timeout_seconds` parameter controls the backend execution timeout (how long Trinity waits for the target agent), but Claude Code kills the HTTP connection after 60s on the client side.
+**Impact**: The `timeout_seconds` parameter controls the backend execution timeout (how long Trinity waits for the target agent), not how long the call waits. A long synchronous call no longer just fails — when the server can match it to its execution it answers with a receipt (otherwise the error names `list_recent_executions`) — but the caller has to know a receipt means "running". Every agent is taught that as the delegation contract (ent#568) in its platform prompt's §Agent Collaboration, and the `chat_with_agent` description carries the same text.
 
 **Workarounds**:
-1. Design tasks to complete within 60 seconds
+1. Treat a receipt as running: read it with `get_execution_result`, never re-send — unless the outcome is a confirmed `failed` or `cancelled`, which a word-for-word re-send retries (#3245)
 2. Use `async=true` with `parallel=true` for long-running tasks (returns `execution_id` immediately)
 3. Use shared folders for result exchange instead of synchronous return values
 
@@ -716,8 +754,8 @@ result = mcp__trinity__chat_with_agent(
 )
 # Returns: { "status": "accepted", "execution_id": "abc123", ... }
 
-# Poll later for results
-# GET /api/agents/analysis-agent/executions/abc123
+# Read later — never re-send to "check":
+# get_execution_result(agent_name="analysis-agent", execution_id="abc123")
 ```
 
 **When to use async mode**:
@@ -725,6 +763,14 @@ result = mcp__trinity__chat_with_agent(
 - Background jobs that run independently
 - Long-running analysis that doesn't need immediate response
 - Load distribution across multiple agents
+
+**Report-back to the conversation (#3232)**: when the calling turn serves a
+Slack, Telegram or Workspace conversation, an async delegation carries that
+turn as `parent_execution_id` by default, so the delegated run posts its
+outcome there when it ends (the receipt says `report_back: "requested"`).
+Pass `execution_id="manual"` to keep a call quiet; a `parallel=true` sync call opts in by
+passing your own `execution_id`. Rules and debugging:
+[channel-completion-report.md](channel-completion-report.md#how-an-mcp-delegation-carries-the-parent-3232).
 
 See [Parallel Headless Execution](parallel-headless-execution.md) for complete async mode documentation.
 
@@ -743,3 +789,4 @@ See [Parallel Headless Execution](parallel-headless-execution.md) for complete a
 | 2026-01-29 | **MCP Schedule Management (MCP-SCHED-001)**: Added System Agent Schedule Management section - system-scoped agents can now manage schedules across all agents via 8 new MCP schedule tools. Updated Related Flows to reference scheduling.md |
 | 2026-01-30 | **Async Mode**: Added async mode (fire-and-forget) section to Parallel Delegation Mode. When `async=true` with `parallel=true`, orchestrator receives `execution_id` immediately and can poll for results later. |
 | 2026-06-21 | **Pull-Pilot Routing (#946)**: Added Pull-Pilot Routing section (Phase 2 PoC, Epic #1045/#1081). Flag-gated (`MCP_AGENT_CHAT_PULL_ENABLED`, default OFF) MCP routing fork — sequential agent→agent (`scope='agent'`, non-self) `chat_with_agent` routed through async `/task` with a poll-for-result receipt. Documents the D8 idempotency route token, flag plumbing, feature-flag exposure, and the T5 `/task` deny-path claim release. |
+| 2026-10-06 | **Report-back from MCP delegation (#3232)**: the pull branch forwards `parent_execution_id`; async delegations report back into the caller's conversation by default (`execution_id="manual"` opts out). |

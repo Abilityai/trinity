@@ -85,12 +85,16 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from database import db
+from db.skill_gate_requests import RAN_STATES
 from models import TaskExecutionStatus
 from services.sync_waiter import (
     signal_fan_out_batch,
     wait_for_fan_out_batch,
 )
 from services.task_execution_service import get_task_execution_service
+from services import skill_gate_service
+from services.skill_gate_errors import SkillGateError
+from db.write_params import ExecutionResult, TaskExecutionFields
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +137,7 @@ class FanOutTaskInput:
 class FanOutTaskResult:
     """Result of a single fan-out subtask."""
     id: str
-    status: str           # "completed" | "failed" | "running"
+    status: str           # "completed" | "failed" | "running" | "pending_approval" | "approved"
     response: Optional[str] = None
     error: Optional[str] = None
     error_code: Optional[str] = None
@@ -141,6 +145,8 @@ class FanOutTaskResult:
     cost: Optional[float] = None
     context_used: Optional[int] = None
     duration_ms: Optional[int] = None
+    # trinity-enterprise#751: the approval a gated subtask is waiting on.
+    request_id: Optional[str] = None
 
 
 @dataclass
@@ -152,6 +158,8 @@ class FanOutResult:
     completed: int
     failed: int
     results: List[FanOutTaskResult]
+    # trinity-enterprise#751: subtasks held by the skill gate — neither run nor failed.
+    pending_approval: int = 0
 
 
 # Row statuses that mean the subtask has not finished. Mirrors
@@ -193,12 +201,23 @@ def build_aggregate(
     """
     error_codes = error_codes or {}
     by_task: Dict[str, FanOutTaskResult] = {}
-    for row in db.get_fan_out_executions(agent_name, fan_out_id):
+    rows = db.get_fan_out_executions(agent_name, fan_out_id)
+    # trinity-enterprise#751: a SKIPPED row the skill gate closed is waiting for
+    # an approval, not failed — read from the gate's own record, never the text.
+    skipped = [r.get("id") for r in rows if _row_status(r.get("status")) == TaskExecutionStatus.SKIPPED]
+    held = db.get_gate_requests_by_origin_executions(skipped) if skipped else {}
+    for row in rows:
         row_status = _row_status(row.get("status"))
         if row_status == TaskExecutionStatus.SUCCESS:
             task_status = "completed"
         elif row_status in _OPEN_STATUSES:
             task_status = "running"
+        elif row.get("id") in held and held[row["id"]].get("state") in ("pending", "dispatching"):
+            task_status = "pending_approval"
+        elif row.get("id") in held and held[row["id"]].get("state") in RAN_STATES:
+            # It ran later, as its own execution — and stays "approved" once
+            # that run ends (`succeeded` / `failed`, trinity#3520).
+            task_status = "approved"
         else:
             task_status = "failed"
         task_id = row.get("fan_out_task_id") or row.get("id")
@@ -212,6 +231,7 @@ def build_aggregate(
             cost=row.get("cost"),
             context_used=row.get("context_used"),
             duration_ms=row.get("duration_ms"),
+            request_id=(held.get(row.get("id")) or {}).get("request_id"),
         )
 
     def _missing(task_id: str) -> FanOutTaskResult:
@@ -234,6 +254,7 @@ def build_aggregate(
         completed=sum(1 for r in ordered if r.status == "completed"),
         failed=sum(1 for r in ordered if r.status == "failed"),
         results=ordered,
+        pending_approval=sum(1 for r in ordered if r.status == "pending_approval"),
     )
 
 
@@ -292,6 +313,9 @@ class FanOutService:
         source_mcp_key_name: Optional[str] = None,
         # #2670: called once with the batch id, before the first dispatch.
         on_started: Optional[Callable[[str], None]] = None,
+        # #2806: stamped on every subtask row; captured by the router at
+        # request time. None for a non-agent principal (a root).
+        chain_depth: Optional[int] = None,
     ) -> FanOutResult:
         """Dispatch tasks in parallel and (unless *async_mode*) collect results.
 
@@ -354,6 +378,7 @@ class FanOutService:
             source_agent_name=source_agent_name or agent_name,
             source_mcp_key_id=source_mcp_key_id,
             source_mcp_key_name=source_mcp_key_name,
+            chain_depth=chain_depth,
         ))
 
         if async_mode:
@@ -446,6 +471,7 @@ class FanOutService:
         source_agent_name: Optional[str],
         source_mcp_key_id: Optional[str],
         source_mcp_key_name: Optional[str],
+        chain_depth: Optional[int] = None,
     ) -> None:
         """Dispatch every subtask, paced by the semaphore. The batch's outcome
         is read from the rows, not from here — this only records the
@@ -467,15 +493,18 @@ class FanOutService:
                     agent_name=agent_name,
                     message=task.message,
                     triggered_by="fan_out",
-                    source_user_id=source_user_id,
-                    source_user_email=source_user_email,
-                    source_agent_name=source_agent_name,
-                    source_mcp_key_id=source_mcp_key_id,
-                    source_mcp_key_name=source_mcp_key_name,
-                    model_used=model,
-                    fan_out_id=fan_out_id,
-                    fan_out_task_id=task.id,
-                    subscription_id=subscription_id,
+                    fields=TaskExecutionFields(
+                        source_user_id=source_user_id,
+                        source_user_email=source_user_email,
+                        source_agent_name=source_agent_name,
+                        source_mcp_key_id=source_mcp_key_id,
+                        source_mcp_key_name=source_mcp_key_name,
+                        model_used=model,
+                        fan_out_id=fan_out_id,
+                        fan_out_task_id=task.id,
+                        subscription_id=subscription_id,
+                        chain_depth=chain_depth,
+                    ),
                 )
                 if execution is None:
                     logger.error(
@@ -492,6 +521,12 @@ class FanOutService:
                     result = await task_service.execute_task(
                         agent_name=agent_name,
                         message=task.message,
+                        # trinity-enterprise#751: the batch's caller-supplied
+                        # system_prompt reaches this subtask's executor too, so
+                        # the skill gate reads it with the subtask's message.
+                        request_text="\n".join(t for t in (task.message, system_prompt) if t),
+                        # trinity#3274: an approved subtask is sent the two apart.
+                        gate_replay=skill_gate_service.frozen_replay(task.message, system_prompt),
                         triggered_by="fan_out",
                         source_user_id=source_user_id,
                         source_user_email=source_user_email,
@@ -506,6 +541,12 @@ class FanOutService:
                         fan_out_id=fan_out_id,
                         subscription_id=subscription_id,
                     )
+                except SkillGateError:
+                    # trinity-enterprise#751: the subtask names a gated skill; the
+                    # backstop closed its row SKIPPED and raised its own approval
+                    # (one per subtask). Nudge the join; it is idempotent.
+                    await join_fan_out_on_terminal(execution.id)
+                    return
                 except Exception as exc:  # noqa: BLE001 — must not strand the batch
                     logger.error(
                         f"[FanOut] {fan_out_id} subtask '{task.id}' raised: {exc}"
@@ -548,7 +589,9 @@ class FanOutService:
             won = db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=error_text,
+                result=ExecutionResult(
+                    error=error_text,
+                ),
             )
             if won:
                 # #1804: a terminal writer owns closing the paired dispatch activity.

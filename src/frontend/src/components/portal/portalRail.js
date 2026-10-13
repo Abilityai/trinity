@@ -93,7 +93,11 @@ export const RAIL_DEFAULT_TAB = 'work'
  * docks later, per #472. Loops, Canvas and Files are slice 2 — they are named
  * here so the order is a contract and not a side effect of registration order.
  */
-export const RAIL_TAB_ORDER = Object.freeze(['work', 'loops', 'canvas', 'files', 'info'])
+// ent#836 — Asks is LAST on purpose: it is the one tab that comes and goes
+// with data (a presence rule, below), and a tab that appears at the top of the
+// collapsed strip pushes every other icon down under the pointer. Last, nothing
+// else moves when it arrives or leaves.
+export const RAIL_TAB_ORDER = Object.freeze(['work', 'loops', 'canvas', 'files', 'projects', 'info', 'asks'])
 
 /**
  * The registry. Slice 1 (ent#474) docked ONE tab — Work (#457's Activity),
@@ -199,21 +203,80 @@ export const RAIL_TABS = Object.freeze([
   //     rail's column; false once it IS the column's content. Collapsing the
   //     rail dismisses it, and the rail already remembers the tab you left.
   //
-  // A STATIC tab — the third registry shape. No signal (nothing about an agent's
-  // context is an event) and no empty state (an agent always has a name, a
-  // health state and a chat list, so the body always renders and the rail's
-  // generic empty branch is unreachable). Both are declared as absent rather
-  // than filled with a plausible value; see RAIL_SIGNAL_NONE.
+  // No empty state (an agent always has a name, a health state and a chat
+  // list, so the body always renders and the rail's generic empty branch is
+  // unreachable) — declared absent rather than filled with a plausible value.
+  //
+  // ent#465 amends ent#547's "static tab": Info now carries the `updated` dot
+  // while suggestions are waiting for you in it (the shell writes an `info`
+  // entry with a `note`, "2 suggestions", which the tooltip and the mobile
+  // strip read instead of "updated"). The dot is the rail's own vocabulary —
+  // one shape, one hue (principle 24) — rather than a numeric badge the design
+  // pass never defined. A signalling tab without an empty state is therefore a
+  // legal registry shape; `RAIL_SIGNAL_NONE` stays for a tab with neither.
+  // ent#661 — Projects: the projects the current agent can work on, a filter
+  // of the person's Projects list. AUDIENCE door AND a roster capability
+  // (`capability`, checked fail-closed in `tabPassesDoor`). The capability is
+  // what decides who: a platform user on an entitled build, or an outside
+  // client INVITED to a project (v2.4) — the server narrows what a guest sees.
+  // A session without it never gets a tab whose body would 404. No registry
+  // empty state — the body states its own (it needs the store's verdict).
+  Object.freeze({
+    id: 'projects',
+    label: 'Projects',
+    door: RAIL_DOORS.AUDIENCE,
+    capability: 'projects',
+    scope: RAIL_SCOPE_PARTICIPANTS,
+    signal: RAIL_SIGNAL_NONE,
+    icon: 'folder',
+    empty: null,
+  }),
   Object.freeze({
     id: 'info',
     label: 'Info',
     door: RAIL_DOORS.SOLO_AGENT,
     scope: RAIL_SCOPE_PARTICIPANTS,
-    signal: RAIL_SIGNAL_NONE,
+    signal: RAIL_SIGNAL_UPDATED,
     icon: 'info',
     empty: null,
   }),
+  // ent#836 — Asks: a door from the agent's page into the Inbox. Since the
+  // 2026-09-30 ruling on ent#610 an agent's asks live in the Inbox filtered to
+  // it, and a background ask shows ONLY there — so from the chat there was
+  // nothing to click. This tab lists the agent's open asks, one line each, in
+  // exactly the Inbox's Action order narrowed to the participants, and each
+  // row opens that ask in the Inbox. It answers nothing: the Inbox is the one
+  // answer surface.
+  //
+  // AGENT door (asks are addressed to clients and platform users alike) plus a
+  // PRESENCE rule: the tab exists only while a participant has an open ask,
+  // read off the same per-agent counts the sidebar's "needs you" mark reads
+  // (`asksByAgent(openAsks)`, handed in as `session.askCounts`). An answered
+  // or expired ask leaves the tab the moment it leaves Action — and with the
+  // last one gone the tab is not rendered at all, so there is no empty state
+  // to declare (`empty: null`, the ent#547/ent#465 shape). The signal is the
+  // "updated" dot with a note AND a count ("2 asks"), which the open strip
+  // draws as the same unfilled mark the agent row wears.
+  Object.freeze({
+    id: 'asks',
+    label: 'Asks',
+    door: RAIL_DOORS.AGENT,
+    presence: asksTabPresent,
+    scope: RAIL_SCOPE_PARTICIPANTS,
+    signal: RAIL_SIGNAL_UPDATED,
+    icon: 'asks',
+    empty: null,
+  }),
 ])
+
+/**
+ * ent#836 — does a participant have an open ask? The presence rule for the
+ * Asks tab. Strict integers: a count that is not a number is no count.
+ */
+export function asksTabPresent(session = {}) {
+  const counts = session && session.askCounts && typeof session.askCounts === 'object' ? session.askCounts : {}
+  return participantList(session.participants).some((p) => Number.isInteger(counts[p]) && counts[p] > 0)
+}
 
 /** "scout" in a 1:1, "an agent in this room" otherwise — one rule for every empty copy. */
 function whoIs(participants) {
@@ -232,6 +295,12 @@ function whoIs(participants) {
  */
 export function tabPassesDoor(tab, session = {}) {
   const participants = participantList(session.participants)
+  // ent#661 — a tab that needs a capability shows only when the session was
+  // told it has it (the roster's strict `=== true`); absent means no.
+  if (tab && tab.capability && (session.capabilities || {})[tab.capability] !== true) return false
+  // ent#836 — a tab with a presence rule exists only while it has something:
+  // checked HERE, on the one gate, so "not shown" is also "not mounted".
+  if (tab && typeof tab.presence === 'function' && tab.presence(session) !== true) return false
   switch (tab && tab.door) {
     case RAIL_DOORS.PLATFORM: return session.isPlatform === true
     case RAIL_DOORS.AUDIENCE: return true
@@ -348,7 +417,15 @@ export function signalFor(signals, tab) {
   if (!raw || typeof raw !== 'object') return emptySignal()
   const live = Number.isInteger(raw.live) && raw.live > 0 ? raw.live : 0
   const agents = participantList(raw.agents)
-  return { live, updated: raw.updated === true, agents }
+  const out = { live, updated: raw.updated === true, agents }
+  // ent#465: an optional short phrase that replaces "updated" in words
+  // ("2 suggestions"). Carried only when present, so every existing signal
+  // keeps its exact shape.
+  if (typeof raw.note === 'string' && raw.note) out.note = raw.note
+  // ent#836: an optional COUNT the open strip draws as a badge (the Asks
+  // tab's "2"). Positive integers only; carried only when present, like `note`.
+  if (Number.isInteger(raw.count) && raw.count > 0) out.count = raw.count
+  return out
 }
 
 /** Which shape the tab wears: live outranks updated; null = no dot. */
@@ -364,7 +441,7 @@ export function railTitle(tab, sig) {
   const label = tab && tab.label ? tab.label : ''
   const shape = signalShape(sig)
   if (shape === RAIL_SIGNAL_LIVE) return `${label} · ${sig.live} running`
-  if (shape === RAIL_SIGNAL_UPDATED) return `${label} · updated`
+  if (shape === RAIL_SIGNAL_UPDATED) return `${label} · ${sig.note || 'updated'}`
   return label
 }
 
@@ -383,6 +460,7 @@ export function collapsedSignals(signals, visible) {
       live: sig.live,
       updated: sig.updated,
       agents: sig.agents,
+      note: sig.note,
       shape: signalShape(sig),
       title: railTitle(tab, sig),
     }
@@ -405,7 +483,9 @@ export function stripSegments(signals, visible) {
     return signalled.map((s) => ({
       id: s.id,
       shape: s.shape,
-      text: s.shape === RAIL_SIGNAL_LIVE ? `${s.label} · ${s.live} running` : `${s.label} updated`,
+      text: s.shape === RAIL_SIGNAL_LIVE
+        ? `${s.label} · ${s.live} running`
+        : (s.note ? `${s.label} · ${s.note}` : `${s.label} updated`),
     }))
   }
   return (Array.isArray(visible) ? visible : []).map((t) => ({ id: t.id, shape: null, text: t.label }))
@@ -482,9 +562,11 @@ export function railEmptyCopy(tab, participants) {
 // ---------------------------------------------------------------- shell placement
 
 /**
- * Whom the rail is scoped to. The agent page is a destination of its own with
- * no conversation beside it, so it has no rail (#474: the rail renders beside
- * `PortalConversation` and `PortalRoom`). A room's participants arrive with
+ * Whom the rail is scoped to. `agentPage` is a stage with no conversation
+ * beside it, so it has no rail (#474: the rail renders beside
+ * `PortalConversation` and `PortalRoom`) — since ent#784 that is an agent URL
+ * which has not LANDED yet, never one a new chat is resting on (the shell
+ * decides which, `Portal.vue::unlandedAgentPage`). A room's participants arrive with
  * the room's own fetch, so this can legitimately be empty for a beat — the
  * rail stays mounted on the ROUTE fact (`railVisibleFor`) and its tabs show
  * their empty states rather than the rail flickering in and out.
@@ -505,7 +587,9 @@ export function railParticipantsFor({
  * synchronous (the route) or verdicts (the stage state), never on data that is
  * still arriving — so a live update can never remount it.
  *
- *   agentPage     `/workspace/a/:name` — a page, not a conversation
+ *   agentPage     a stage with no conversation: `/workspace/a/:name` before it
+ *                 has landed, or the Projects pages. NOT a landed agent URL —
+ *                 that is a new chat, and has the rail every chat has (ent#784)
  *   stageState    `stageZone(...).state`: only a `ready` stage holds a
  *                 conversation; loading / failed / empty stages show no rail
  *   roomId        `/workspace/r/:id` — the rail follows the room only where
@@ -526,6 +610,62 @@ export function railVisibleFor({
   if (stageState !== 'ready') return false
   if (roomId) return roomsAvailable === true
   return Boolean(activeAgent) && !unreachable
+}
+
+/**
+ * Should the rail's COLUMN be held open while the stage is still loading (#2711)?
+ *
+ * `railVisibleFor` answers "may the rail render", and it is false for every
+ * non-ready stage — correctly, since the rail's tabs need the roster. But the
+ * column's WIDTH does not: it comes from the persisted rail state and is known
+ * synchronously at first paint. Without this the conversation column rendered
+ * full width and then lost the rail's width the moment the roster landed,
+ * shifting the composer, the thread and the header left — animated since #2676,
+ * which made it a 300ms slide rather than a jump, but still a shift. The
+ * contract's layout-stability rule is that loading and loaded share ONE
+ * footprint.
+ *
+ * Deliberately narrower than `railVisibleFor`'s route set:
+ *
+ *   - a Projects page never carries a rail, so reserving there would invent a
+ *     gap (an agent URL DOES reserve: since ent#784 it is a 1:1 route itself);
+ *   - a ROOM route is excluded even though a ready room usually has a rail,
+ *     because that depends on `roomsAvailable`, which arrives ON the roster
+ *     payload (#2128) — reserving on a capability we have not been told about
+ *     yet would trade this shift for the opposite one on any install without it.
+ *
+ * So this reserves for exactly the case the bug is about: a 1:1 conversation
+ * route, mid-load. If the rail then turns out not to render (an unreachable deep
+ * link), the column leaves through the same width transition rather than
+ * vanishing — a shrink, not a jump.
+ */
+export function railColumnReservedFor({
+  agentPage = null,
+  stageState = 'loading',
+  roomId = null,
+} = {}) {
+  if (agentPage) return false
+  if (roomId) return false
+  return stageState === 'loading'
+}
+
+/**
+ * Should the rail COLUMN be sized open (#3060)?
+ *
+ * `useColumnResize` sizes the column from this: the rail's open width when true,
+ * the 48px collapsed strip when false. It used to be `open && visible`, and the
+ * rail is never visible while the stage loads (`railVisibleFor`), so the column
+ * `railColumnReservedFor` holds open during the load was sized COLLAPSED even
+ * for a rail the person left open — 48px reserved, then the open width the
+ * moment the stage was ready, which jumped the conversation's right edge by the
+ * difference (336px at the default width) in one frame. The reservation's whole
+ * point is that loading and loaded share one footprint; it has to reserve the
+ * width the rail will actually take.
+ *
+ * Strict booleans, like `normalizeRailState`: a truthy non-boolean is not open.
+ */
+export function railSizedOpen({ open = false, visible = false, reserved = false } = {}) {
+  return open === true && (visible === true || reserved === true)
 }
 
 // ---------------------------------------------------------------- slice 2 (ent#475): feeds, seen markers, openers
@@ -741,4 +881,15 @@ function participantList(value) {
   return (Array.isArray(value) ? value : [])
     .filter((v) => typeof v === 'string' && v.trim().length > 0)
     .map((v) => v.trim())
+}
+
+// Sign-off round 5: Info's dot. The "answer what this agent asked you"
+// suggestion is left out — Work and the Inbox own the asks, and a third pointer
+// at them read as an unexplained dot. What remains is a real suggestion.
+export const INFO_OMITTED_SOURCES = Object.freeze(['asks'])
+export function infoSignalFrom(suggestions) {
+  const list = Array.isArray(suggestions?.suggestions) ? suggestions.suggestions : []
+  const omitted = list.filter((s) => INFO_OMITTED_SOURCES.includes(s.source)).length
+  const n = Math.max(0, (suggestions?.total || 0) - omitted)
+  return n > 0 ? { updated: true, note: n === 1 ? '1 suggestion' : `${n} suggestions` } : null
 }

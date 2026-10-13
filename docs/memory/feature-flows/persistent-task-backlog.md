@@ -35,7 +35,7 @@ behind when a release callback couldn't fire (e.g. process crash).
 
 Before BACKLOG-001 (#260), `async_mode=true` requests at capacity were dropped
 on the floor with a 429 response. Bursty MCP fan-out scenarios (agents
-orchestrating other agents via `chat_with_agent(async=true)`) routinely hit
+orchestrating other agents via `chat_with_agent(parallel=true, async=true)`) routinely hit
 the 3-slot default cap and lost work. Clients had to implement their own
 retry-with-backoff logic, and there was no first-class backpressure signal.
 
@@ -192,6 +192,52 @@ The partial index is the key to cheap FIFO claim — only queued rows are
 indexed. `claim_next_queued` reads at most one row via the subquery,
 making the operation O(log n) on backlog size.
 
+**Pull claim order (#2842, #2843).** The backend drain above claims oldest
+first. A pull pilot's worker claims through the same method with two extra
+rules: rows whose `triggered_by` is in `pull_pilot.INTERACTIVE_TRIGGERS` go
+first (strict precedence, no anti-starvation rule), and a row whose
+`conversation_key` already has a `running` row is skipped. The partial unique
+index below stops two workers running one conversation at once:
+
+```sql
+CREATE UNIQUE INDEX idx_executions_one_running_turn
+ON schedule_executions(agent_name, conversation_key)
+WHERE status = 'running' AND conversation_key IS NOT NULL;
+```
+
+`backlog_service.enqueue` stamps `conversation_key` on pilot agents only: the
+explicit key `execute_task` was given (`session:<key>`, `public:<id>`,
+`channel:<id>`, `room:<id>`, `paid:<id>`, #3114; `session:chat:<id>` for
+`POST /chat`, #3127), else `chat_session_id`, else
+`resume_session_id`. The ordering expression cannot use
+`idx_executions_queued`; per-agent queues are small.
+
+**Interactive turns on a pilot (#3114, #3127).** `pull_pilot.pull_owns_dispatch`
+covers every interactive trigger plus `validation`. `POST /chat` skips the
+admission acquire on a pilot and runs `chat_execution_service.run_pulled_chat_turn`
+through the resumable-turn engine, one Claude conversation per chat session. Their sync callers go through
+`task_execution_service.dispatch_and_await_terminal`: phase 1 polls the row
+while it is `queued`, for at most one agent execution timeout, and on expiry
+cancels it (`cancel_queued_execution`) and returns FAILED/`CAPACITY`; a cancel
+that loses to a claim falls through to phase 2, the terminal wait (agent
+timeout + 120s from the claim). The pull sink signals the in-process waiter
+when its CAS write wins.
+
+**Post-turn delivery on pull (#2329).** A queued `/task` row's delivery
+settings (`save_to_session`, `chat_session_id`, `user_message`,
+`create_new_session`, `inject_result`, collaboration / self-task activity ids)
+are applied by both paths through one helper,
+`chat_execution_service.run_post_turn_delivery`, with the request rebuilt by
+`backlog_service.request_from_metadata`. The push drain calls it from
+`run_async_task`; the pull sink spawns it on its CAS-won branch when the
+metadata asks for delivery, then signals the waiter with the chat session id
+(signalled at once when there is nothing to deliver). A token-gated SUCCESS
+write refuses a row already SUCCESS or SKIPPED, so a worker's retried result
+POST cannot run delivery twice. The live-stream proxies (`routers/chat.py`,
+`routers/public.py`, `client_portal/router.py`) hold the SSE connection with
+`: queued` comments while the row is queued (`sync_waiter.wait_while_queued`),
+then retry an agent 404 briefly while the claimed row is `running`.
+
 ### backlog_metadata JSON Shape
 
 Captured at enqueue time, replayed on drain. No credential values, only
@@ -220,9 +266,19 @@ identity and request parameters:
   "triggered_by": "manual",
   "collaboration_activity_id": null,
   "is_self_task": false,
-  "self_task_activity_id": null
+  "self_task_activity_id": null,
+  "persist_session": false,
+  "schedule_context": null,
+  "attempt": null,
+  "images": null
 }
 ```
+
+`persist_session`, `schedule_context`, `attempt` and `images` (#3114) are read
+by the pull claim only: the envelope hands `persist_session` and `images`
+(base64 vision input) to the worker, and the claim-time prompt uses
+`schedule_context` and `attempt`. Canary G-04 skips `images` when scanning for
+credentials.
 
 ## Lifecycle
 
@@ -246,8 +302,7 @@ queued ──(drain)──▶ running ──(success)──▶ success
 
 ```python
 if not slot_acquired:
-    from services.backlog_service import get_backlog_service
-    backlog = get_backlog_service()
+    backlog = BacklogService()  # live: CapacityManager owns its instance (capacity_manager.py)
     enqueued = await backlog.enqueue(
         agent_name=name,
         execution_id=execution_id,
@@ -286,7 +341,7 @@ if _exec_row and _exec_row.status == TaskExecutionStatus.QUEUED:
 | Method | Purpose |
 |---|---|
 | `enqueue(...)` | Check depth, persist `backlog_metadata`, flip row to QUEUED. Returns False if at cap. |
-| `drain_next(agent_name)` | Acquire sentinel slot → atomically claim row → swap to real execution_id slot → reconstruct `ParallelTaskRequest` (including `inject_result`) → spawn `_run_async_task_with_persistence` (#496: was `_execute_task_background`, deleted by #95). |
+| `drain_next(agent_name)` | Acquire sentinel slot → atomically claim row → swap to real execution_id slot → reconstruct `ParallelTaskRequest` via `request_from_metadata` (including `inject_result`) → spawn `_run_async_task_with_persistence` (#496: was `_execute_task_background`, deleted by #95). |
 | `on_slot_released(agent_name)` | Callback registered with SlotService. Tries `drain_next` once per release. |
 | `expire_stale(max_age_hours=24)` | Maintenance: mark old queued rows as FAILED. |
 | `drain_orphans_all()` | Maintenance: iterate agents with queued work, drain one item each. |
@@ -333,8 +388,8 @@ work on the next tick).
 
 ```python
 from services.slot_service import get_slot_service
-from services.backlog_service import get_backlog_service
-_backlog = get_backlog_service()
+from services.backlog_service import BacklogService
+_backlog = BacklogService()  # live: CapacityManager constructs and wires it
 get_slot_service().register_on_release(_backlog.on_slot_released)
 
 async def _backlog_maintenance_loop():
@@ -522,7 +577,7 @@ All nine acceptance criteria from issue #260 are met:
 
 ## What Doesn't Change
 
-- MCP tool signatures — `chat_with_agent(async=true)` automatically gains
+- MCP tool signatures — `chat_with_agent(parallel=true, async=true)` automatically gains
   backlog behaviour.
 - Frontend routing — the Tasks tab and execution detail views render
   queued rows via the existing list endpoints; only the status badge

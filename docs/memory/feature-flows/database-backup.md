@@ -25,7 +25,7 @@ As a self-hosting operator, when something corrupts or deletes the platform DB, 
 
 ## Frontend Layer
 
-None (v1). The status block is consumable by the existing Settings retention panel; no UI change ships with #2216.
+Read-only (#3454; #2216 itself shipped no UI). `components/settings/BackupStatusPanel.vue` renders the status block on Settings → Retention from the response `Settings.vue::loadRetention` already fetches — no second request. It shows one state badge (Healthy / Stale / Last backup failed / Skipped — not enough disk space / No backup yet / Off), the last successful backup (relative, absolute on hover), recovery-point count + total size + newest artifact, the directory with the same-disk boundary, the schedule and the retention window. A failed or skipped attempt outranks an older success, a response with no `backup` key reads "does not report backup status", and `{"error": "unavailable"}` reads as unavailable — never as healthy or as "no backups". Loading is keyed on "no response yet" (`utils/loadingState.js::viewState`) with the rows reserved. Pinned by `tests/unit/backupStatusPanel.spec.js`.
 
 ## Backend Layer
 

@@ -258,7 +258,7 @@ async def bulk_delete_canvases(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         # Ids only. A canvas's blocks are agent-authored free-form content and
         # the audit log is broadly readable (the G-04 rule).
@@ -362,7 +362,7 @@ async def create_canvas_share(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         # No token: the audit log is broadly readable and the token IS the
         # capability (the G-04 rule).
@@ -394,7 +394,7 @@ async def revoke_canvas_share(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"share_id": share_id},
         )
@@ -528,7 +528,7 @@ async def pin_canvas(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"canvas_id": canvas_id, "pinned": bool(body.pinned),
                  "surface": "agent_detail"},
@@ -575,7 +575,7 @@ async def clear_canvas(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"canvas_id": canvas_id, "surface": "agent_detail"},
         )

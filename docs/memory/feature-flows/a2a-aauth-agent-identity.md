@@ -13,7 +13,7 @@ transport: the wire is still A2A JSON-RPC 2.0 over `POST /a2a/{name}`.
 
 > **Status:** prototype behind `aauth_prototype_enabled`, **OFF by default**.
 > With the flag off, inbound, outbound and the served card behave exactly as
-> they did before (§32.6 in `docs/memory/requirements/mcp.md`).
+> they did before (§32.8 in `docs/memory/requirements/mcp.md`).
 
 ## Why it exists
 
@@ -304,5 +304,5 @@ unaffected. With the flag off the card is byte-identical to before.
 
 - `feature-flows/a2a-inbound-server.md` — the serving half this extends (ent#157)
 - `feature-flows/a2a-outbound-call.md` — the calling half this extends (#736)
-- `docs/memory/requirements/mcp.md` §32.6 — the requirement, including out-of-scope
+- `docs/memory/requirements/mcp.md` §32.8 — the requirement, including out-of-scope
 - `docs/memory/learnings.md` (2026-09-17) — why a second instance needs its own Docker daemon

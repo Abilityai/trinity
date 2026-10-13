@@ -14,7 +14,8 @@ Safety parity with the Claude path (#1187 decision 8, Phase C):
   * **System prompt / identity** — the backend's effective ``system_prompt``
     is prepended to every turn (Codex ``exec`` has no ``--append-system-prompt``);
     persistent identity comes from ``AGENTS.md`` (startup copies ``CLAUDE.md``).
-  * **Read-only mode** — when ``~/.trinity/read-only-config.json`` is enabled,
+  * **Read-only mode** — when ``/opt/trinity/read-only-config.json`` (or, while
+    it is missing, the home copy) is enabled,
     Codex runs with ``--sandbox read-only`` (the Claude hook can't apply here).
   * **Guardrails** — read-only is honored via the sandbox; ``disallowed_tools``
     that have no Codex equivalent are SURFACED in the logs, never silently
@@ -336,7 +337,11 @@ def calculate_codex_cost(
 
 _API_KEY_VARS = ("OPENAI_API_KEY", "CODEX_API_KEY")
 _AGENT_HOME = "/home/developer"
-_READ_ONLY_CONFIG = Path(_AGENT_HOME) / ".trinity" / "read-only-config.json"
+# ent#787: root-owned, written by the backend as root; it decides while it
+# exists. The agent-owned home copy decides only while it is missing (same
+# precedence as `read-only-guard.py`).
+_READ_ONLY_CONFIG = Path("/opt/trinity/read-only-config.json")
+_LEGACY_READ_ONLY_CONFIG = Path(_AGENT_HOME) / ".trinity" / "read-only-config.json"
 
 
 def _parse_env_value(raw_value: str) -> str:
@@ -645,7 +650,8 @@ def _is_read_only() -> bool:
     """True when the backend has put this agent in read-only mode.
 
     The signal is the same JSON file the Claude read-only *hook* consumes
-    (``~/.trinity/read-only-config.json`` → ``enabled``). Codex can't run Claude
+    (``/opt/trinity/read-only-config.json`` → ``enabled``; the home copy
+    ``~/.trinity/read-only-config.json`` while the root file is missing). Codex can't run Claude
     hooks, so we read the file directly and translate it to ``--sandbox
     read-only`` (a sandbox-native, non-cooperative enforcement).
 
@@ -657,8 +663,9 @@ def _is_read_only() -> bool:
     platform wants fail-closed, change both loaders together in a dedicated
     issue.
     """
+    config = _READ_ONLY_CONFIG if _READ_ONLY_CONFIG.exists() else _LEGACY_READ_ONLY_CONFIG
     try:
-        raw = _READ_ONLY_CONFIG.read_text()
+        raw = config.read_text()
     except FileNotFoundError:
         return False
     except OSError as exc:
@@ -832,6 +839,9 @@ class _CodexParseState:
     response_parts: List[str]
     model: Optional[str] = None
     seen_tool_ids: set = field(default_factory=set)
+    # trinity-enterprise#620: keys the per-execution activity slot the
+    # heartbeat reports; None on the batch parse (no live execution).
+    execution_id: Optional[str] = None
 
 
 def _tool_display_name(item: dict, item_type: str) -> str:
@@ -879,7 +889,7 @@ def _record_tool_use(state: _CodexParseState, tool_id: str, item: dict, item_typ
         )
     )
     try:
-        start_tool_execution(tool_id, name, tool_input)
+        start_tool_execution(tool_id, name, tool_input, execution_id=state.execution_id)
     except Exception:  # noqa: BLE001 - activity tracking is best-effort
         logger.debug("[Codex] start_tool_execution failed for %s", tool_id, exc_info=True)
 
@@ -1017,7 +1027,15 @@ _AUTH_PATTERNS = (
     re.compile(r"\bnot\s+authenticated\b", re.IGNORECASE),
     re.compile(r"\bauthentication\s+(?:failed|error)\b", re.IGNORECASE),
 )
-_RATE_MARKERS = ("429", "rate limit", "rate_limit", "quota", "too many requests")
+_RATE_MARKERS = ("rate limit", "rate_limit", "quota", "too many requests")
+# Numeric 429 needs status context; timestamps, process IDs and ports can
+# contain the same digits without reporting a provider rate limit.
+# One `\s*` per side of the separator: `\s*[:=]?\s*` lets two adjacent
+# `\s*` split a run of spaces every way, quadratic on unbounded stderr.
+_RATE_STATUS_PATTERN = re.compile(
+    r"\b(?:HTTP(?:/\d(?:\.\d)?)?|status(?:[ _]code)?)\s*(?:[:=]\s*)?429\b",
+    re.IGNORECASE,
+)
 
 
 def _classify_codex_failure(
@@ -1032,7 +1050,9 @@ def _classify_codex_failure(
         s for s in (stderr or "", metadata.error_message or "") if s
     )
     haystack_lower = haystack.lower()
-    if any(marker in haystack_lower for marker in _RATE_MARKERS):
+    if _RATE_STATUS_PATTERN.search(haystack) or any(
+        marker in haystack_lower for marker in _RATE_MARKERS
+    ):
         return 429, f"Codex rate limit: {(stderr or metadata.error_message or '')[:300]}"
     if any(pattern.search(haystack) for pattern in _AUTH_PATTERNS):
         return 503, (
@@ -1221,6 +1241,7 @@ class CodexRuntime(AgentRuntime):
             metadata=metadata,
             response_parts=response_parts,
             model=model,
+            execution_id=execution_id,
         )
         stderr_lines: List[str] = []
 
@@ -1396,6 +1417,7 @@ class CodexRuntime(AgentRuntime):
         stream: bool = False,
         system_prompt: Optional[str] = None,
         execution_id: Optional[str] = None,
+        isolated_session: bool = False,  # trinity-enterprise#752: Claude Code only (D4); ignored
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
         if not self.is_available():
             raise HTTPException(

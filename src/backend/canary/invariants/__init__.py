@@ -23,7 +23,10 @@ Phase 3 (#882, same PR) adds three moderate-complexity checks — each
 brings one new piece of plumbing:
 
 - S-03: slot TTL ≥ execution timeout (per-slot Redis TTL lookup)
-- B-02: no queued without slots-full (`canary:drain_tick_at` heartbeat)
+- B-02: queued work is being picked up — push agents: slots full or a fresh
+  `canary:drain_tick_at`; pull pilots: an idle worker claims within 120s (#2840)
+- B-08: pull workers alive — a running pilot's pool is in pull mode and an
+  idle worker has polled within 300s (#2840)
 - R-01: no zombie claude processes (docker exec into agent containers)
 
 Phase 4 (#1077) adds pure single-table predicates over `schedule_executions`
@@ -67,6 +70,7 @@ from .h01_collector_blindness import check as h01_check
 from .l03_delete_cascades import check as l03_check
 from .b01_queue_status_coherence import check as b01_check
 from .b02_no_queued_without_slots_full import check as b02_check
+from .b08_pull_workers_alive import check as b08_check
 from .r01_no_zombie_claude import check as r01_check
 
 
@@ -88,6 +92,7 @@ INVARIANTS: Dict[str, Callable[[Snapshot], List[ViolationReport]]] = {
     "L-03": l03_check,
     "B-01": b01_check,
     "B-02": b02_check,
+    "B-08": b08_check,
     "R-01": r01_check,
 }
 

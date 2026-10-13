@@ -56,6 +56,7 @@ def wait_for_agent_ready(monkeypatch):
             container_reload=None, volume_get=None, volume_create=None,
             containers_run=None,
             image_get=None,  # added to lifecycle.py import (#1809)
+            agent_volume_labels=None,  # added to lifecycle.py import (#3214)
         ),
         "services.agent_service.helpers": types.SimpleNamespace(
             validate_base_image=None,

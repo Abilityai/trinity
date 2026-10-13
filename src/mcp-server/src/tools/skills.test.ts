@@ -80,3 +80,188 @@ describe("set_agent_skills (#2703)", () => {
     assert.deepEqual(out.removal, removal);
   });
 });
+
+// #2914 — a same-named agent-authored skill is a named `conflict`, never a
+// silent overwrite: assign passes it through, sync surfaces it on the success
+// branch (a conflict is not a failure), and the listing carries the durable
+// row verdict.
+describe("name conflicts (#2914)", () => {
+  it("assign passes a conflict delivery through and the description names it", async () => {
+    const calls: Recorded[] = [];
+    const delivery = {
+      status: "conflict", conflicts: ["backlog"],
+      skills: { backlog: { status: "conflict", error: "name_conflict: …" } },
+    };
+    const tools = makeTools(calls, { success: true, message: "Skill assigned", delivery });
+    const out = JSON.parse(
+      await tools.assignSkillToAgent.execute({ agent_name: "acme-bot", skill_name: "backlog" }, {}),
+    );
+    assert.deepEqual(out.delivery, delivery);
+    assert.ok(tools.assignSkillToAgent.description.includes("`conflict`"));
+  });
+
+  it("sync surfaces conflicts even though the run succeeded", async () => {
+    const tools = makeTools([], {
+      success: true, skills_injected: 1, skills_unchanged: 0, skills_failed: 0,
+      skills_conflict: 1, conflicts: ["backlog"],
+      results: {
+        research: { success: true, status: "injected", files_written: 2, warnings: [] },
+        backlog: { success: false, status: "conflict", files_written: 0,
+                   error: "name_conflict: …", warnings: [] },
+      },
+    });
+    const out = JSON.parse(await tools.syncAgentSkills.execute({ agent_name: "acme-bot" }, {}));
+    assert.equal(out.success, true);
+    assert.deepEqual(out.conflicts, ["backlog"]);
+    assert.equal(out.skills_conflict, 1);
+    assert.ok(out.message.includes("backlog"), "the message names the conflicted skill");
+  });
+
+  it("get_agent_skills carries delivery_status per row and lists the conflicts", async () => {
+    const tools = makeTools([], [
+      { id: 1, agent_name: "acme-bot", skill_name: "backlog", assigned_by: "alice",
+        assigned_at: "2026-09-21T00:00:00Z", delivery_status: "conflict" },
+      { id: 2, agent_name: "acme-bot", skill_name: "research", assigned_by: "alice",
+        assigned_at: "2026-09-21T00:00:00Z", delivery_status: null },
+    ]);
+    const out = JSON.parse(await tools.getAgentSkills.execute({ agent_name: "acme-bot" }, {}));
+    assert.deepEqual(out.conflicts, ["backlog"]);
+    assert.equal(out.skills[0].delivery_status, "conflict");
+    assert.equal(out.skills[1].delivery_status, null);
+  });
+});
+
+// ent#530 — `set:<name>` routes to the set routes (same ent#596 fence); the
+// listing says why each skill is present.
+function makeRoutedTools(calls: Recorded[], answers: Record<string, unknown>) {
+  const fake: Partial<TrinityClient> = {
+    getBaseUrl: () => "http://localhost:8000",
+    request: async (method: string, path: string, body?: unknown) => {
+      calls.push({ method, path, body });
+      if (!(path in answers)) throw new Error(`404 ${path}`);
+      return answers[path] as never;
+    },
+  };
+  return createSkillsTools(fake as TrinityClient, false);
+}
+
+describe("skill sets (ent#530)", () => {
+  it("assign_skill_to_agent routes set:<name> to the set route, never the skill route", async () => {
+    const calls: Recorded[] = [];
+    const tools = makeRoutedTools(calls, {
+      "/api/agents/acme-bot/skill-sets/dev-backlog": { success: true, set_name: "dev-backlog", members_added: ["groom"] },
+    });
+    const out = JSON.parse(
+      await tools.assignSkillToAgent.execute({ agent_name: "acme-bot", skill_name: "set:dev-backlog" }, {}),
+    );
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].method, "POST");
+    assert.equal(calls[0].path, "/api/agents/acme-bot/skill-sets/dev-backlog");
+    assert.deepEqual(out.members_added, ["groom"]);
+  });
+
+  it("a plain skill name still hits the skill route", async () => {
+    const calls: Recorded[] = [];
+    const tools = makeRoutedTools(calls, { "/api/agents/acme-bot/skills/research": { success: true } });
+    await tools.assignSkillToAgent.execute({ agent_name: "acme-bot", skill_name: "research" }, {});
+    assert.equal(calls[0].path, "/api/agents/acme-bot/skills/research");
+  });
+
+  it("set_agent_skills forwards set: entries to the PUT unchanged (the backend splits them)", async () => {
+    const calls: Recorded[] = [];
+    const tools = makeRoutedTools(calls, { "/api/agents/acme-bot/skills": { success: true, sets: ["dev-backlog"] } });
+    const out = JSON.parse(
+      await tools.setAgentSkills.execute({ agent_name: "acme-bot", skills: ["research", "set:dev-backlog"] }, {}),
+    );
+    assert.deepEqual(calls[0].body, { skills: ["research", "set:dev-backlog"] });
+    assert.deepEqual(out.sets, ["dev-backlog"]);
+  });
+
+  it("list_skill_sets GETs the library sets route", async () => {
+    const calls: Recorded[] = [];
+    const tools = makeRoutedTools(calls, {
+      "/api/skills/library/sets": [{ name: "dev-backlog", source_id: "default", status: "ok", members: [] }],
+    });
+    const out = JSON.parse(await tools.listSkillSets.execute({}, {}));
+    assert.equal(calls[0].method, "GET");
+    assert.equal(calls[0].path, "/api/skills/library/sets");
+    assert.equal(out[0].name, "dev-backlog");
+  });
+
+  it("unassign_skill_set DELETEs the set route, with or without the prefix", async () => {
+    for (const name of ["dev-backlog", "set:dev-backlog"]) {
+      const calls: Recorded[] = [];
+      const tools = makeRoutedTools(calls, {
+        "/api/agents/acme-bot/skill-sets/dev-backlog": { success: true, members_removed: ["groom"] },
+      });
+      const out = JSON.parse(await tools.unassignSkillSet.execute({ agent_name: "acme-bot", set_name: name }, {}));
+      assert.equal(calls[0].method, "DELETE");
+      assert.equal(calls[0].path, "/api/agents/acme-bot/skill-sets/dev-backlog");
+      assert.deepEqual(out.members_removed, ["groom"]);
+    }
+  });
+
+  it("get_agent_skills reports individual + via_sets per skill and the agent's sets", async () => {
+    const tools = makeRoutedTools([], {
+      "/api/agents/acme-bot/skills": [
+        { id: 1, agent_name: "acme-bot", skill_name: "groom", assigned_by: "alice",
+          assigned_at: "2026-09-24T00:00:00Z", individual: false, via_sets: ["dev-backlog"] },
+        { id: 2, agent_name: "acme-bot", skill_name: "research", assigned_by: "alice",
+          assigned_at: "2026-09-24T00:00:00Z" },
+      ],
+      "/api/agents/acme-bot/skill-sets": [{ name: "dev-backlog", status: "partial", members: [] }],
+    });
+    const out = JSON.parse(await tools.getAgentSkills.execute({ agent_name: "acme-bot" }, {}));
+    assert.deepEqual(out.skills[0].via_sets, ["dev-backlog"]);
+    assert.equal(out.skills[0].individual, false);
+    assert.equal(out.skills[1].individual, true);        // a legacy row reads as individual
+    assert.deepEqual(out.skills[1].via_sets, []);
+    assert.deepEqual(out.sets, [{ name: "dev-backlog", status: "partial" }]);
+  });
+
+  it("get_agent_skills still answers when the set list cannot be read", async () => {
+    const tools = makeRoutedTools([], {
+      "/api/agents/acme-bot/skills": [
+        { id: 1, agent_name: "acme-bot", skill_name: "research", assigned_by: "alice", assigned_at: "x" },
+      ],
+    });
+    const out = JSON.parse(await tools.getAgentSkills.execute({ agent_name: "acme-bot" }, {}));
+    assert.equal(out.skill_count, 1);
+    assert.equal(out.sets, undefined);
+  });
+});
+
+// trinity-enterprise#672 — the library's lifecycle keys reach an MCP reader.
+// `list_skills` maps the backend entry field by field, so a key it does not
+// name is invisible here even when REST carries it (Invariant #13).
+describe("deprecated skills (ent#672)", () => {
+  const entry = (extra: Record<string, unknown>) => ({
+    name: "add-backlog", description: "d", path: "skills/add-backlog/SKILL.md", ...extra,
+  });
+
+  it("list_skills carries deprecated and the author's successor text", async () => {
+    const tools = makeTools([], [
+      entry({ deprecated: true, superseded_by: "backlog" }),
+      entry({ name: "prose", deprecated: true, superseded_by: "other-skill — another catalog" }),
+    ]);
+    const out = JSON.parse(await tools.listSkills.execute({}, {}));
+    assert.equal(out.skills[0].deprecated, true);
+    assert.equal(out.skills[0].superseded_by, "backlog");
+    assert.equal(out.skills[1].superseded_by, "other-skill — another catalog");
+  });
+
+  it("a live skill, or a backend that predates the fields, reads not-deprecated", async () => {
+    const tools = makeTools([], [entry({})]);
+    const out = JSON.parse(await tools.listSkills.execute({}, {}));
+    assert.equal(out.skills[0].deprecated, false);
+    assert.equal(out.skills[0].superseded_by, null);
+  });
+
+  it("the descriptions tell an agent where the lifecycle facts are", () => {
+    const tools = makeTools([], {});
+    assert.ok(tools.listSkills.description.includes("deprecated"));
+    assert.ok(tools.listSkills.description.includes("superseded_by"));
+    assert.ok(tools.assignSkillToAgent.description.includes("deprecated:<successor>"));
+    assert.ok(tools.getAgentSkills.description.includes("list_skills"));
+  });
+});

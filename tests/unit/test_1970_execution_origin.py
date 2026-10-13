@@ -113,7 +113,8 @@ def _seed(db_path: Path) -> None:
             source_user_email TEXT,
             source_agent_name TEXT,
             source_mcp_key_id TEXT,
-            source_mcp_key_name TEXT
+            source_mcp_key_name TEXT,
+            chain_depth INTEGER
         )
         """
     )

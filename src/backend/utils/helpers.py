@@ -43,7 +43,7 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
 
-def iso_cutoff(hours: int = 0, *, minutes: int = 0) -> str:
+def iso_cutoff(hours: int = 0, *, minutes: int = 0, seconds: int = 0) -> str:
     """
     Compute a past-cutoff ISO timestamp in the same format as utc_now_iso().
 
@@ -68,12 +68,13 @@ def iso_cutoff(hours: int = 0, *, minutes: int = 0) -> str:
         minutes: Additional minutes in the past (positive, keyword-only).
             Combine with `hours` for arbitrary windows, or use alone for
             sub-hour windows.
+        seconds: Additional seconds in the past (positive, keyword-only).
 
     Returns:
         ISO timestamp matching the format of utc_now_iso().
     """
     return (
-        datetime.now(timezone.utc) - timedelta(hours=hours, minutes=minutes)
+        datetime.now(timezone.utc) - timedelta(hours=hours, minutes=minutes, seconds=seconds)
     ).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
 
@@ -163,6 +164,44 @@ def duration_ms_between(
     """
     ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
     return None if ms > _PG_INT4_MAX else ms
+
+
+def terminal_completed_at(given: Optional[datetime]) -> datetime:
+    """The instant a terminal write records as ``completed_at`` (#3589).
+
+    ``None`` — every writer that finalizes as the turn ends — is now. A value
+    is the moment the PRODUCER says the turn ended: the #2944 watchdog claim
+    passes the agent's ``retained_at``, which is ≥ 180 s (the claim grace) plus
+    up to one 300 s cleanup cycle before the write, and stamping "now" there
+    recorded a 64 s turn as 5 m 33 s — a fabricated duration on a recovery
+    path, the #45 / #767 / #1804 class.
+
+    Three rules, in ONE place so every producer of a terminal timestamp
+    inherits them (``update_execution_status`` and ``complete_activity`` both
+    call this):
+
+    * naive → UTC, the ``parse_iso_timestamp`` / ``to_utc_iso`` convention;
+    * never in the future: a producer clock ahead of ours is clamped to now and
+      logged, so a billed duration can never exceed the wall clock that has
+      actually elapsed;
+    * the low end (producer clock behind ours) stays the #1832 clamp in
+      ``duration_ms_between``.
+    """
+    now = utc_now()
+    if given is None:
+        return now
+    if given.tzinfo is None:
+        given = given.replace(tzinfo=timezone.utc)
+    if given > now:
+        import logging  # local: this module has no logger of its own
+
+        logging.getLogger(__name__).warning(
+            "[#3589] terminal completed_at %s is %.1fs in the future — clamping "
+            "to now (producer clock ahead of ours)",
+            given.isoformat(), (given - now).total_seconds(),
+        )
+        return now
+    return given
 
 
 def parse_env_content(content: str) -> List[Tuple[str, str]]:

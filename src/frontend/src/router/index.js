@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { setBaseTitle } from '@/utils/tabTitle'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { isWorkspaceOnlyRole, landingAfterSignIn, operatorRouteRedirect } from '../utils/workspaceOnly'
 import { useSessionsStore } from '../stores/sessions'
 import { useAgentsStore } from '../stores/agents'
 
@@ -70,7 +71,16 @@ export const routes = [
     component: () => import('../views/AgentDetail.vue'),
     // #1418 — the :name param IS the canonical agent identifier in Trinity.
     // #1643 — the rendered tab title resolves to the display name (slug fallback).
-    meta: { requiresAuth: true, title: (to) => agentTabTitle(to.params.name) }
+    // #3446 — hideHelpLauncherOnTabs: the floating help launcher sits in the
+    // Chat composer's corner and covered Send. Only that tab, and only the
+    // launcher: the rest of the page keeps help, and an open help conversation
+    // is not torn down by a tab click. Reads `?tab=`, which the page keeps
+    // current (#2900).
+    meta: {
+      requiresAuth: true,
+      title: (to) => agentTabTitle(to.params.name),
+      hideHelpLauncherOnTabs: ['chat'],
+    }
   },
   {
     // ent#438 — the per-agent workspace is retired. It was a voice orb beside a
@@ -253,6 +263,18 @@ export const routes = [
     meta: { title: 'Workspace', hideHelpWidget: true }
   },
   {
+    // trinity-enterprise#610: the Inbox — what needs you and what came back,
+    // across your agents. The same Portal.vue shell renders it as a stage
+    // branch; `bootstrap()` lands a bare `/workspace` here once (D9), while bare
+    // `/workspace` itself stays the new-chat stage. Declared before the
+    // parameterised Workspace routes by convention; it cannot collide with them
+    // (`/c/`, `/r/`, `/a/` are literal prefixes).
+    path: '/workspace/inbox',
+    name: 'WorkspaceInbox',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace · Inbox', hideHelpWidget: true }
+  },
+  {
     // #138: deep-linkable, refresh-safe conversation thread. The same shell as
     // /workspace (new-chat state); the :sessionId opens that thread. Back/forward
     // navigate between new-chat and threads.
@@ -288,6 +310,20 @@ export const routes = [
       hideHelpWidget: true,
     }
   },
+  {
+    // ent#661: Projects — the person's list across agents, and one project.
+    // Literal `projects` segment, safe beside `/c/`, `/r/`, `/a/` (ent#360).
+    path: '/workspace/projects',
+    name: 'WorkspaceProjects',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace · Projects', hideHelpWidget: true }
+  },
+  {
+    path: '/workspace/projects/:projectId',
+    name: 'WorkspaceProject',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace · Projects', hideHelpWidget: true }
+  },
   // ent#357 legacy paths. Function form so query AND hash survive the hop —
   // these URLs were handed to real clients by email, and a client landing on a
   // dead link has no way to report it. `/portal/c/:sessionId` keeps the thread.
@@ -308,7 +344,9 @@ export const routes = [
     path: '/m',
     name: 'MobileAdmin',
     component: () => import('../views/MobileAdmin.vue'),
-    meta: { requiresAuth: false, title: 'Mobile' }  // handles its own inline auth
+    // Handles its own inline auth, so not `requiresAuth` — but an operator
+    // surface all the same (trinity-enterprise#837): see the guard below.
+    meta: { requiresAuth: false, operatorSurface: true, title: 'Mobile' }
   },
   // Catch-all redirect to dashboard
   {
@@ -325,6 +363,11 @@ const router = createRouter({
 // Cache for setup status check (avoid repeated API calls)
 let setupStatusCache = null
 let setupStatusCacheTime = 0
+// #3004: what else the first admin must give ('instance-id' or null). Read by
+// SetupPassword.vue at mount — this guard fetched it before /setup rendered, so
+// the claim field is there on first paint instead of appearing afterwards.
+// `undefined` means unknown (no successful fetch yet); the page then asks itself.
+let setupClaimRequired = undefined
 const SETUP_CACHE_DURATION = 5000 // 5 seconds
 
 async function checkSetupStatus() {
@@ -338,13 +381,26 @@ async function checkSetupStatus() {
     const response = await fetch('/api/setup/status')
     const data = await response.json()
     setupStatusCache = data.setup_completed
+    setupClaimRequired = data.claim_required ?? null
     setupStatusCacheTime = now
     return setupStatusCache
   } catch (e) {
+    setupClaimRequired = undefined
     console.error('Failed to check setup status:', e)
     // Assume setup is completed if check fails (don't block access)
     return true
   }
+}
+
+// trinity-enterprise#837 — the role the guard routes on. The STORED role, never
+// the `role` getter (it reports 'user' while the profile loads); a stored `user`
+// is confirmed with the server first, so an account raised to `operator` since
+// its last sign-in is not bounced on a stale cache. Only that case waits.
+async function confirmedRole(authStore) {
+  if (isWorkspaceOnlyRole(authStore.user?.role) && !authStore.profileVerified) {
+    await authStore.fetchUserProfile()
+  }
+  return authStore.user?.role
 }
 
 // Navigation guard
@@ -383,9 +439,24 @@ router.beforeEach(async (to, from) => {
     }
   }
 
+  // trinity-enterprise#837 review: the mobile admin signs in by itself, outside
+  // `requiresAuth`, but every call it makes refuses a Workspace-only member —
+  // a signed-in member goes to the Workspace instead of a dead app.
+  if (to.meta.operatorSurface && authStore.isAuthenticated) {
+    const toWorkspace = operatorRouteRedirect(to, await confirmedRole(authStore))
+    if (toWorkspace) return toWorkspace
+  }
+
   // Check if route requires authentication
   if (to.meta.requiresAuth) {
     if (authStore.isAuthenticated) {
+      // trinity-enterprise#837 — the operator UI starts at `operator`. A
+      // Workspace-only member who opens an operator URL lands in the Workspace
+      // (an agent page opens that agent's conversation). The API refuses them
+      // regardless; this only spares them the wall.
+      const toWorkspace = operatorRouteRedirect(to, await confirmedRole(authStore))
+      if (toWorkspace) return toWorkspace
+
       // #847 — enterprise entitlement guard.
       // Two modes:
       //   * `meta.requiresEntitlement: '<id>'` — gate on the named
@@ -417,8 +488,8 @@ router.beforeEach(async (to, from) => {
     }
   } else if (to.path === '/login' && authStore.isAuthenticated) {
     // User is authenticated but trying to access login page
-    // Redirect to dashboard
-    return '/'
+    // Redirect to dashboard — the Workspace for a Workspace-only member (ent#837)
+    return landingAfterSignIn(undefined, await confirmedRole(authStore))
   } else {
     // Public route, allow access
     return true
@@ -443,6 +514,10 @@ router.afterEach((to) => {
   // string; this line still owns what the LABEL says.
   setBaseTitle(label ? `${BASE_TITLE} — ${label}` : `${BASE_TITLE} — Agent Orchestration`)
 })
+
+export function getSetupClaimRequired() {
+  return setupClaimRequired
+}
 
 // Clear setup cache on successful setup
 export function clearSetupCache() {

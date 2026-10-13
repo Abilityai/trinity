@@ -57,25 +57,40 @@ jobs:
           grace_deadline=$(( SECONDS + 300 ))    # 5 min for gating checks to appear
           hard_deadline=$(( SECONDS + 1800 ))    # 30 min overall ceiling
           while (( SECONDS < hard_deadline )); do
+            # `regression diff` is the unit verdict: `pytest (head)` runs with
+            # `|| true` and is green whatever the suite does (#2994).
             mapfile -t rows < <(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate \
-              --jq '.check_runs[] | select(.name | test("^build$|pytest")) | "\(.status)\t\(.conclusion)"')
+              --jq '.check_runs[] | select(.name | test("^build$|pytest|^regression diff$")) | "\(.name)\t\(.status)\t\(.conclusion)"')
             if (( ${#rows[@]} == 0 )); then
               if (( SECONDS < grace_deadline )); then sleep 20; continue; fi
               echo "No build/pytest checks for this PR (path-filtered) -- relying on required checks via --auto"
               exit 0
             fi
-            pending=0; failed=0
+            # `regression diff` needs the pytest jobs, so its check-run does not
+            # EXIST until `pytest (head)` finishes. Absent is pending, never
+            # green -- else the gate can pass in the window between the two.
+            pending=1; failed=0; succeeded=0
             for r in "${rows[@]}"; do
-              status="${r%%$'\t'*}"; conclusion="${r##*$'\t'}"
+              IFS=$'\t' read -r name status conclusion <<<"$r"
+              [[ "$name" == "regression diff" ]] && pending=0
+            done
+            for r in "${rows[@]}"; do
+              IFS=$'\t' read -r name status conclusion <<<"$r"
               [[ "$status" != "completed" ]] && pending=1
-              [[ "$status" == "completed" && "$conclusion" != "success" ]] && failed=1
+              [[ "$status" == "completed" && "$conclusion" == "success" ]] && succeeded=1
+              # `skipped` is not a failure: since the #2945 tiering every PR
+              # carries `pytest (base, inline fallback)` and `pytest (push,
+              # absolute failures)` as by-design skips, and counting them
+              # here blocked every Dependabot merge from mid-September on.
+              [[ "$status" == "completed" && "$conclusion" != "success" && "$conclusion" != "skipped" ]] && failed=1
             done
             if (( failed )); then
               echo "::error title=Auto-merge blocked::a gating check failed"
               printf '%s\n' "${rows[@]}"
               exit 1
             fi
-            if (( pending == 0 )); then echo "build + pytest green"; exit 0; fi
+            # All-skipped is not green: something must actually have passed.
+            if (( pending == 0 && succeeded )); then echo "build + pytest green"; exit 0; fi
             sleep 30
           done
           echo "::error title=Auto-merge blocked::timed out waiting for build/pytest"

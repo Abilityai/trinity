@@ -142,12 +142,24 @@ def _call_retention(
     )
     db.count_soft_deleted_agents_past_retention.return_value = agent_purge_count
     db.count_soft_deleted_schedules_past_retention.return_value = schedule_purge_count
+    # trinity-enterprise#478: a real int. A bare MagicMock is uninterpretable to
+    # the guard, which fail-closes and lands the metrics sweep in
+    # `blocked_sweeps` — noise in every assertion in this file.
+    db.count_metric_points_candidates.return_value = 0
     ent = MagicMock()
     ent.is_entitled.return_value = entitled
 
     full_env = {"LOG_RETENTION_DAYS": "5", "AUDIT_LOG_RETENTION_DAYS": "365"}
     full_env.update(env or {})
+    # trinity-enterprise#478 moved the window reader to
+    # `settings_service.resolve_ops_setting`, which binds `settings_service.db`,
+    # not `routers.settings.retention.db`. Both are patched: the route still
+    # reads `db` directly elsewhere, and without the second the ops windows
+    # would come from the real install's `system_settings`.
+    import services.settings_service as _SS
+
     with patch.object(_RS, "db", db), \
+         patch.object(_SS, "db", db), \
          patch.object(_ENT, "entitlement_service", ent), \
          patch.object(_RG, "is_acknowledged", return_value=acked), \
          patch.dict("os.environ", full_env, clear=False):
@@ -316,7 +328,7 @@ def test_acknowledge_endpoint_is_callable_and_records_the_ack():
     body = RetentionAcknowledge(key="agent_soft_delete_retention_days", window_days=180)
     req = MagicMock()
     req.client = None
-    req.url.path = "/api/settings/retention/acknowledge"
+    req.scope = {"path": "/api/settings/retention/acknowledge"}
     req.state.request_id = None
 
     db = MagicMock()
@@ -350,7 +362,7 @@ def test_acknowledge_rejects_a_window_mismatch_with_409():
 
     acknowledge = _RS.acknowledge_retention_prune
     body = RetentionAcknowledge(key="agent_soft_delete_retention_days", window_days=999)
-    req = MagicMock(); req.client = None; req.url.path = "/x"; req.state.request_id = None
+    req = MagicMock(); req.client = None; req.scope = {"path": "/x"}; req.state.request_id = None
     db = MagicMock()
     db.get_setting_value.side_effect = lambda key, default="0": "180"
 

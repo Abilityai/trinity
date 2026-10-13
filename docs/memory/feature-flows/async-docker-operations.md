@@ -253,7 +253,7 @@ from services.docker_utils import container_exec_run
 - `clear_container_password()` (line 213) - Locks account password via `passwd -l`
 - `remove_ssh_key()` (line 243) - Removes key from `authorized_keys` via `sed`
 - `cleanup_expired_credentials()` (line 368) - Periodic cleanup of expired credentials
-- `cleanup_agent_credentials()` (line 441) - Cleanup all credentials on agent stop/delete
+- `cleanup_agent_credentials()` (line 445) - Cleanup all credentials for one agent (no production caller: agent stop/delete does not invoke it today)
 - `revoke_key()` (line 420) - Immediate key revocation
 
 All methods use `await container_exec_run()` for container operations.
@@ -344,12 +344,18 @@ Two ent#615 additions, both load-bearing for credential handling:
   read `/proc/<pid>/environ` for the life of the exec, a different-uid one
   cannot. (`ssh_service.py` is the pre-existing root-exec precedent.)
 
-⚠️ **`timeout` is accepted and forwarded nowhere** — pre-existing, since
-`container_exec_run` has no timeout parameter and docker-py's exec has none
-either. A caller that can hang must bound **itself**, and the two bounds free
-different resources: `asyncio.wait_for` frees the caller, while an
-in-container `timeout N` prefix frees the `_docker_executor` pool thread,
-which `wait_for` alone does not. ent#615's fleet sweep uses both.
+**`timeout` is enforced** (#2969). docker-py's `exec_run` has no timeout, so
+the primitive applies two bounds that free different resources: the command
+is wrapped in an in-container `timeout -k EXEC_KILL_AFTER_S N` (SIGTERM at N,
+SIGKILL 5s later — ends the process, which frees the `_docker_executor` pool
+thread, even for a `kill -STOP`ped or TERM-ignoring process), and the call is
+wrapped in `asyncio.wait_for(N + 10)`, which frees the caller when the thread
+cannot be reclaimed (wedged daemon, escaped descendant holding the output
+pipe). The return gains `timed_out: bool`; a timeout is a non-zero
+`exit_code` (124, or 137 after the KILL escalation), so callers that check
+`exit_code != 0` degrade as before. `timeout` must be positive (`timeout 0`
+means "no timeout" to GNU coreutils) and the agent image must ship
+`timeout` (Debian coreutils in the base image).
 
 ### Git Service (`src/backend/services/git_service.py`)
 

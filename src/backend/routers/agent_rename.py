@@ -180,6 +180,17 @@ async def rename_agent_endpoint(
                 detail="Failed to update database. Agent name may already be taken."
             )
 
+        # trinity-enterprise#751: a gated request approved for the old name must
+        # not run under the new one. The rename re-keyed the records; cancel the
+        # pending ones and tell their requesters. Best effort.
+        try:
+            from services import skill_gate_service
+            await skill_gate_service.cancel_pending_for_agent(
+                sanitized_name, actor_email=current_user.email, actor_user=current_user,
+                reason="agent_renamed")
+        except Exception as e:
+            logger.warning(f"Failed to cancel gated requests after renaming {agent_name}: {e}")
+
         # #1560 / RELIABILITY-004 (#307): every per-agent Redis keyspace is keyed
         # by name, so a rename orphans all of them under the old name — the
         # heartbeat `seen` marker (no TTL), both circuit breakers, and the slot
@@ -241,7 +252,7 @@ async def rename_agent_endpoint(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=sanitized_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"old_name": agent_name, "new_name": sanitized_name},
         )

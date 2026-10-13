@@ -27,6 +27,7 @@ import logging
 from typing import Optional
 
 from services.agent_auth import agent_httpx_client
+from db.write_params import TaskExecutionFields
 
 logger = logging.getLogger(__name__)
 
@@ -130,8 +131,10 @@ async def dispatch_postprocess(
             agent_name=agent_name,
             message=message,
             triggered_by="voice",
-            source_user_id=source_user_id,
-            source_user_email=source_user_email,
+            fields=TaskExecutionFields(
+                source_user_id=source_user_id,
+                source_user_email=source_user_email,
+            ),
         )
         if not execution:
             return {"dispatched": False, "reason": "could not create execution record"}

@@ -78,12 +78,72 @@ def _count_active_executions() -> int:
         return 0
 
 
+# trinity-enterprise#620: the per-execution activity the Work card shows.
+# Bounded here AND re-validated by the backend model; the backend never trusts
+# these counts. 120 chars matches the Work read's title bound.
+ACTIVITY_MAX_EXECUTIONS = 20
+ACTIVITY_SUMMARY_MAX = 120
+# The backend's HeartbeatExecutionActivity.tool max_length. The name is not
+# bounded at its source (a codex MCP tool is `server.tool`, `Task:<type>` comes
+# from the model), and one over-long name would 422 the WHOLE beat.
+ACTIVITY_TOOL_MAX = 64
+
+
+def _executions_activity() -> list:
+    """One entry per RUNNING execution: `{execution_id, tool, summary, since}`.
+
+    `tool` is the display name (`Read`, `Bash`, `mcp:trinity`, `Task:explore`)
+    and `summary` the bounded human input summary the activity tracker
+    already builds (`get_input_summary`: `.../a/b`, `"pattern"`, `cmd[:50]…`).
+    `tool: None` means the run is between tools — the card says "Thinking".
+    The list is INTERSECTED with the process registry, so a finished run drops
+    out on the next beat by construction (never a stale line, AC #4), and the
+    tracker's slot for a run the registry no longer knows is pruned here.
+    """
+    try:
+        running = _list_running()
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        from .services.activity_tracking import execution_activity, forget_execution
+        from .state import agent_state
+        known = set(agent_state.session_activity.get("by_execution", {}).keys())
+    except Exception:  # noqa: BLE001
+        return []
+    # Prune against EVERY running id, not the capped slice: a 21st concurrent
+    # execution is still alive, and forgetting its slot here would reset it to
+    # "Thinking" on every beat for as long as the fleet stays that busy.
+    live_ids = [e.get("execution_id") for e in running if isinstance(e.get("execution_id"), str) and e.get("execution_id")]
+    out = []
+    for entry in running[:ACTIVITY_MAX_EXECUTIONS]:
+        eid = entry.get("execution_id")
+        if not isinstance(eid, str) or not eid:
+            continue
+        slot = execution_activity(eid) or {}
+        summary = slot.get("input_summary")
+        if isinstance(summary, str) and len(summary) > ACTIVITY_SUMMARY_MAX:
+            summary = summary[: ACTIVITY_SUMMARY_MAX - 1] + "…"
+        tool = slot.get("tool")
+        if isinstance(tool, str) and len(tool) > ACTIVITY_TOOL_MAX:
+            tool = tool[: ACTIVITY_TOOL_MAX - 1] + "…"
+        out.append({
+            "execution_id": eid,
+            "tool": tool if isinstance(tool, str) else None,
+            "summary": summary if isinstance(summary, str) else None,
+            "since": slot.get("since") or entry.get("started_at"),
+        })
+    for stale in known - set(live_ids):
+        forget_execution(stale)
+    return out
+
+
 def _build_payload() -> Dict:
     """Lightweight liveness payload. The backend stamps its own receive `ts`."""
     return {
         "memory_mb": _read_memory_mb(),
         "active_executions": _count_active_executions(),
         "uptime_s": time.monotonic() - _START_MONOTONIC,
+        "executions": _executions_activity(),
     }
 
 

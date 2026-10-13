@@ -12,6 +12,7 @@ import base64
 import re
 import json
 import logging
+from urllib.parse import parse_qs, urlsplit
 from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,31 @@ _secret_value_re = [re.compile(p) for p in SECRET_VALUE_PATTERNS]
 # cases it names (`!`*n, `!=`+`!=!`*n) are pinned as tests in
 # tests/unit/test_1661_sanitizer_linear.py and run in ~1ms at 64 KB. Do not
 # "simplify" the lookbehind away.
-_KV_LINE_RE = re.compile(r'(?<![^\s"\'=])([^\s"\'=]+)=(["\']?)([^\s"\']+)\2')
+_KV_LINE_RE = re.compile(r'(?<![^\s"\'=&;,])([^\s"\'=&;,]+)=')
+
+# --- #3311: a harmless pair must not swallow a sensitive one ------------------
+# #1670 matched the whole PAIR in one regex — key up to the first `=`, value up
+# to whitespace — and `.sub` never re-examines consumed text. So in
+# `user=a&password=X` the key was `user` (harmless) and `a&password=X` was
+# consumed as its value and returned verbatim: the sensitive pair was never
+# looked at. Same for `?client=me&access_token=X` and `--env=GITHUB_TOKEN=X`.
+# The pre-#1661 composed regex redacted all of these.
+#
+# Now `_KV_LINE_RE` above finds only `KEY=` (the key stops at `&`, `;`, `,` as
+# well as whitespace/quotes/`=`, and the lookbehind lets a key start after any
+# of them), and `_redact_kv_pairs` walks those keys: a harmless key consumes
+# NOTHING, so the next key in the chain is still examined; only a sensitive
+# key takes its value — and that value keeps the old shape (`_KV_PAIR_RE`, up
+# to whitespace), so a secret containing `&`/`;`/`,` is redacted whole, never
+# split and partly leaked. The cost of that choice is over-redaction of pairs
+# chained AFTER a sensitive one, which is the safe direction (and what keeps
+# the Google-consent exemption seeing the whole URL).
+#
+# Still linear: the key search only ever moves forward, a failed value match
+# backtracks at most to the next quote/whitespace, and the lookbehind still
+# pins each key to the start of its run. Cases in
+# tests/unit/test_1661_sanitizer_linear.py::TestChainedPairs.
+_KV_PAIR_RE = re.compile(r'([^\s"\'=&;,]+)=(["\']?)([^\s"\']+)\2')
 
 # A name pattern must match a SUFFIX of the key, not the whole key: the old
 # composed regex could start matching mid-token, so `DB_.*` redacted
@@ -104,7 +129,7 @@ _KV_LINE_RE = re.compile(r'(?<![^\s"\'=])([^\s"\'=]+)=(["\']?)([^\s"\']+)\2')
 #     sanitize_subprocess_line  ->  read_stdout  (headless_executor)
 #
 # The old docstring called `key` "a short KEY= name". It is not: the key is
-# whatever preceded an `=` in `_KV_LINE_RE`'s `([^\s"\'=]+)`, which is
+# whatever preceded an `=` in `_KV_LINE_RE`'s `([^\s"\'=&;,]+)`, which is
 # UNBOUNDED — and the stack above reaches here from stream-json tool RESULTS
 # via recursive `sanitize_dict`, so multi-KB "keys" are the normal case rather
 # than an adversarial one. That wrong assumption is what made a quadratic test
@@ -181,6 +206,112 @@ def _is_sensitive_kv_key(key: str) -> bool:
     return any(lit in upper for lit in _SENSITIVE_KEY_LITERALS)
 
 
+# --- #3311 (merge-train finding): harmless words in a CHAINED key ------------
+# Walking the chain put keys under the containment test above that `dev` never
+# examined at all (they sat inside a harmless pair's value). Containment is
+# deliberately broad, so everyday query parameters that merely CONTAIN a
+# sensitive word were redacted — `&author=bob` (AUTH), `&tokens_used=10`
+# (TOKEN), `&passwordless=true` (PASSWORD) — and since a sensitive value runs
+# to whitespace, each took the rest of the URL with it. AC1: harmless pairs
+# are kept.
+#
+# The narrowing is a CLOSED LIST OF WORDS, not a word-boundary rule. A boundary
+# rule ("the literal must end the word") is the obvious shape and leaks an open
+# class: `secretkey`, `authkey`, `tokenvalue`, `passwords`, `credentials`,
+# `authorization` are all a literal plus more letters. Here every key keeps the
+# containment verdict unless the ONLY thing that made it sensitive is one of
+# the words below — they are blanked out and the remainder is tested as before,
+# so `author_token` and `max_tokens_secret` still redact. What this can let
+# through is exactly what is listed, nothing adjacent to it.
+#
+#   AUTHOR…      author(s), authored, authority, coauthor — but NOT
+#                authoriz…/authoris… (`authorization` carries credentials)
+#   PASSWORDLESS, SECRETARY/-IES/-IAT, TOKENIZ…/TOKENIS… (tokenizer, tokenized)
+#   token COUNTS  max/total/input/output/prompt/completion_tokens and
+#                token(s)_used/_count/_limit/_usage — numbers, never secrets
+#
+# Applies ONLY to a key that sits inside what #1670 consumed as a harmless
+# pair's VALUE: glued after `=`, `&`, `;` or `,`, with nothing but value
+# characters back to the previous `KEY=` (`_KV_CHAIN_GAP_RE`, scanned over
+# exactly the gap between two keys, so the gaps are disjoint and the walk stays
+# linear). Every other key — one that starts its run (`author=bob`,
+# `page=2 tokens_used=10`), follows a bare word (`x,author=bob`) or follows a
+# redacted pair — was already under plain containment on `dev` and still is:
+# this restores AC1 for the keys this fix newly reaches, it does not
+# re-litigate the key rule. No quantifier beyond `S?` in the word list.
+_KV_CHAIN_SEPARATORS = "=&;,"
+_KV_CHAIN_GAP_RE = re.compile(r'["\']?[^\s"\']*')
+_CHAINED_HARMLESS_WORD_RE = re.compile(
+    r'AUTHOR(?!I[SZ])'
+    r'|PASSWORDLESS'
+    r'|SECRETAR(?:Y|IES|IAT)'
+    r'|TOKENI[SZ]'
+    r'|(?<![A-Z0-9])(?:MAX|TOTAL|INPUT|OUTPUT|PROMPT|COMPLETION)_TOKENS(?![A-Z0-9])'
+    r'|TOKENS?_(?:USED|COUNT|LIMIT|USAGE)(?![A-Z0-9])'
+)
+
+
+def _is_sensitive_chained_key(key: str) -> bool:
+    """`_is_sensitive_kv_key` for a key chained after another pair (#3311).
+
+    Same containment test, with the known-harmless words blanked out first.
+    """
+    upper = _CHAINED_HARMLESS_WORD_RE.sub(" ", key.upper())
+    return any(lit in upper for lit in _SENSITIVE_KEY_LITERALS)
+
+
+def _is_public_google_consent_match(match: "re.Match", credential_values=()) -> bool:
+    """Recognize supported consent links, never OAuth callbacks or tokens.
+
+    Shape validation is not recipient authorization. Opaque OAuth state still
+    belongs only in the intended recipient's consent flow, not a public feed.
+
+    A URL's `/auth` path can be misread as a sensitive KEY before its first
+    query `=`. Only exempt that shape, after exact-value and secret-pattern
+    redaction. A genuine `AUTH_SECRET=<url>` assignment must still redact.
+    """
+    start = match.group(1).find("https://accounts.google.com/")
+    if start < 0:
+        return False
+    candidate = match.group(0)[start:].rstrip(")>`")
+    if len(candidate) > 8192:
+        return False
+    try:
+        url = urlsplit(candidate)
+        if (url.scheme != "https" or url.netloc != "accounts.google.com" or
+                url.path not in ("/o/oauth2/auth", "/o/oauth2/v2/auth") or url.fragment):
+            return False
+        fields = parse_qs(url.query, keep_blank_values=True, strict_parsing=True, max_num_fields=8)
+        allowed = {"access_type", "client_id", "include_granted_scopes", "prompt",
+                   "redirect_uri", "response_type", "scope", "state"}
+        required = {"client_id", "redirect_uri", "response_type", "scope", "state"}
+        if not required <= fields.keys() <= allowed or any(len(values) != 1 for values in fields.values()):
+            return False
+        query = {key: values[0] for key, values in fields.items()}
+        # URL encoding must not hide secrets from the earlier raw-text passes.
+        if any(pattern.search(value) for value in query.values() for pattern in _secret_value_re):
+            return False
+        if any(secret in value for value in query.values() for secret in credential_values):
+            return False
+        if (query["response_type"] != "code" or
+                not re.fullmatch(r"[A-Za-z0-9_-]+\.apps\.googleusercontent\.com", query["client_id"]) or
+                not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", query["state"]) or
+                query.get("access_type", "offline") not in ("offline", "online") or
+                query.get("include_granted_scopes", "true") not in ("true", "false") or
+                query.get("prompt", "consent") not in ("consent", "select_account", "consent select_account", "none")):
+            return False
+        scope_pattern = r"(?:openid|email|profile|https://www\.googleapis\.com/auth/[A-Za-z0-9._/-]+|https://mail\.google\.com/)"
+        if not re.fullmatch(scope_pattern + r"(?: " + scope_pattern + r")*", query["scope"]):
+            return False
+        redirect = urlsplit(query["redirect_uri"])
+        return (redirect.scheme == "http" and redirect.hostname == "127.0.0.1" and
+                redirect.port is not None and redirect.port > 0 and
+                redirect.username is None and redirect.password is None and
+                redirect.path == "/oauth2/callback" and not redirect.query and not redirect.fragment)
+    except (ValueError, TypeError):
+        return False
+
+
 def _redact_kv_match(match: "re.Match") -> str:
     """Redact the value of a sensitive `key=value` pair, keep everything else.
 
@@ -189,9 +320,50 @@ def _redact_kv_match(match: "re.Match") -> str:
     around the pair is untouched.
     """
     key = match.group(1)
+    if _is_public_google_consent_match(match):
+        return match.group(0)
     if _is_sensitive_kv_key(key):
         return f"{key}={REDACTION_PLACEHOLDER}"
     return match.group(0)
+
+
+def _redact_kv_pairs(text: str) -> str:
+    """Redact every sensitive `key=value` in `text`, wherever it sits in a chain.
+
+    A harmless key consumes nothing, so a sensitive key glued after it
+    (`a=1&token=X`, `--env=GH_TOKEN=X`) is still found (#3311). See the note
+    at `_KV_PAIR_RE`.
+    """
+    out = []
+    kept = 0  # end of the text already copied to `out`
+    pos = 0   # where the next key search starts; only ever moves forward
+    prev = -1  # end of the previous harmless `KEY=`; -1 = none in this chain
+    while True:
+        key = _KV_LINE_RE.search(text, pos)
+        if key is None:
+            break
+        pos = key.end()
+        start = key.start()
+        # Chained = inside the value of the harmless pair before it (see
+        # `_CHAINED_HARMLESS_WORD_RE`). Anything else keeps the full rule.
+        chained = (
+            prev >= 0
+            and text[start - 1] in _KV_CHAIN_SEPARATORS
+            and _KV_CHAIN_GAP_RE.match(text, prev, start).end() == start
+        )
+        prev = pos
+        is_sensitive = _is_sensitive_chained_key if chained else _is_sensitive_kv_key
+        if not is_sensitive(key.group(1)):
+            continue
+        pair = _KV_PAIR_RE.match(text, key.start())
+        if pair is None:
+            continue
+        out.append(text[kept:pair.start()])
+        out.append(_redact_kv_match(pair))
+        kept = pos = pair.end()
+        prev = -1
+    out.append(text[kept:])
+    return "".join(out)
 
 
 
@@ -268,15 +440,19 @@ def sanitize_text(text: str) -> str:
     # Redact key=value pairs where key is sensitive.
     # #1661: ONE linear pass (see _KV_LINE_RE) — this used to compile a
     # line-scanning regex per key pattern, costing CPU-minutes on a large line.
-    result = _KV_LINE_RE.sub(_redact_kv_match, result)
+    result = _redact_kv_pairs(result)
 
     return result
 
 
 def sanitize_dict(data: Dict[str, Any], depth: int = 0, max_depth: int = 10) -> Dict[str, Any]:
-    """Recursively sanitize sensitive values in a dictionary."""
+    """Recursively sanitize sensitive values in a dictionary.
+
+    Past ``max_depth`` the subtree is replaced with ``REDACTION_PLACEHOLDER``,
+    not walked (fail closed, #3312) — the root itself is never cut.
+    """
     if depth > max_depth:
-        return data
+        return REDACTION_PLACEHOLDER
 
     result = {}
     for key, value in data.items():
@@ -292,9 +468,13 @@ def sanitize_dict(data: Dict[str, Any], depth: int = 0, max_depth: int = 10) -> 
 
 
 def sanitize_list(data: List[Any], depth: int = 0, max_depth: int = 10) -> List[Any]:
-    """Recursively sanitize sensitive values in a list."""
+    """Recursively sanitize sensitive values in a list.
+
+    Past ``max_depth`` the subtree is replaced with ``REDACTION_PLACEHOLDER``,
+    not walked (fail closed, #3312) — the root itself is never cut.
+    """
     if depth > max_depth:
-        return data
+        return REDACTION_PLACEHOLDER
 
     result = []
     for item in data:
@@ -331,8 +511,9 @@ def sanitize_json_string(json_str: str) -> str:
         else:
             return sanitize_text(json_str)
         return json.dumps(sanitized)
-    except json.JSONDecodeError:
-        # If not valid JSON, sanitize as plain text
+    except (json.JSONDecodeError, RecursionError):
+        # Not valid JSON, or nested too deep for json.loads (#3312):
+        # sanitize as plain text
         return sanitize_text(json_str)
 
 

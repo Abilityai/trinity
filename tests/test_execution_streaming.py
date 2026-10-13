@@ -12,6 +12,7 @@ communicated in-band via the stream.
 import pytest
 import httpx
 from testkit.api_client import TrinityApiClient, ApiConfig
+from testkit.readiness import require_agent_answer
 from testkit.assertions import (
     assert_status,
     assert_status_in,
@@ -171,6 +172,7 @@ class TestExecutionStreamingIntegration:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_start_execution_and_stream(
         self,
         api_client: TrinityApiClient,
@@ -184,8 +186,7 @@ class TestExecutionStreamingIntegration:
             timeout=30.0
         )
 
-        if chat_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(chat_response, what="POST /chat")
 
         if chat_response.status_code != 200:
             pytest.skip(f"Could not start execution: {chat_response.status_code}")

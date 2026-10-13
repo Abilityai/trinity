@@ -88,6 +88,18 @@ def test_unwritable_templates_dir_fails_fast(monkeypatch):
         "services.docker_utils",
         "services.settings_service",
     ):
+        # #3272: the re-import below rebinds the PARENT PACKAGE attribute
+        # (`services.docker_utils`, …) to the fresh module object, and
+        # `delitem`'s teardown restores only the `sys.modules` entry. Left
+        # alone, `from services import docker_utils` and
+        # `sys.modules["services.docker_utils"]` are two different objects for
+        # the rest of the session, so a later file that patches one while the
+        # code under test reads the other sees no patch. Registering the
+        # attribute's current value with monkeypatch restores it on teardown.
+        _pkg_name, _, _attr = _name.rpartition(".")
+        _pkg = sys.modules.get(_pkg_name)
+        if _pkg is not None and hasattr(_pkg, _attr):
+            monkeypatch.setattr(_pkg, _attr, getattr(_pkg, _attr))
         monkeypatch.delitem(sys.modules, _name, raising=False)
 
     deploy = importlib.import_module("services.agent_service.deploy")

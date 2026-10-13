@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {"type": "command", "command": "/usr/bin/python3 /opt/trinity/hooks/bash-guardrail.py"}
+        ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit|MultiEdit",
+        "hooks": [
+          {"type": "command", "command": "/usr/bin/python3 /opt/trinity/hooks/file-guardrail.py"}
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {"type": "command", "command": "/usr/bin/python3 /opt/trinity/hooks/output-scanner.py"}
+        ]
+      }
+    ]
+  }
+}

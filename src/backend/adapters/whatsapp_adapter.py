@@ -11,6 +11,7 @@ Twilio's WhatsApp API (see issue #299). Phase 2 (#467) adds /login, /logout,
 control system (#311).
 """
 
+import asyncio
 import base64
 import logging
 import re
@@ -29,6 +30,8 @@ from adapters.base import (
     OutboundFile,
 )
 from services.agent_shared_files_service import create_share_from_bytes
+from services.turn_audience import whatsapp_recipient
+from services import login_policy_gate
 from services.email_service import EmailService
 from services.settings_service import get_public_chat_url
 
@@ -231,6 +234,21 @@ def _is_twilio_media_source_url(url: str) -> bool:
     return _host_matches_suffixes(url, _TWILIO_MEDIA_SOURCE_HOST_SUFFIXES)
 
 
+# ent#849: strong refs so a detached code send is not garbage-collected mid-flight.
+_login_code_tasks: set = set()
+
+
+async def _send_login_code_if_allowed(email: str) -> None:
+    """Mint and send a /login code off the reply path (policy-refused mode)."""
+    try:
+        if not login_policy_gate.email_code_allowed_for(email):
+            return
+        code = db.create_login_code(email, expiry_minutes=10)["code"]
+        await EmailService().send_verification_code(email, code)
+    except Exception:
+        logger.exception("Failed to issue /login code")
+
+
 class WhatsAppAdapter(ChannelAdapter):
     """WhatsApp implementation of ChannelAdapter, backed by Twilio."""
 
@@ -397,7 +415,9 @@ class WhatsAppAdapter(ChannelAdapter):
             return
 
         # Persist + classify outbound files (per-file isolated; never raises).
-        media_urls, fallback_links = self._prepare_outbound_media(agent_name, response.files)
+        media_urls, fallback_links = self._prepare_outbound_media(
+            agent_name, response.files, recipient=channel_id, binding_id=binding.get("id"),
+        )
 
         # Voice replies v2 (ent#117): replies are TEXT by default. Voice is now a
         # per-message capability the agent opts into via the send_voice_reply MCP
@@ -453,10 +473,21 @@ class WhatsAppAdapter(ChannelAdapter):
     # OGG via create_share_from_bytes and sends it as a Twilio MediaUrl).
 
     def _prepare_outbound_media(
-        self, agent_name: str, files: List["OutboundFile"]
+        self,
+        agent_name: str,
+        files: List["OutboundFile"],
+        *,
+        recipient: Optional[str] = None,
+        binding_id: Optional[int] = None,
     ) -> tuple:
         """Persist each outbound file to FILES-001 storage and classify it for
         delivery.
+
+        ``recipient`` / ``binding_id`` (ent#549): the number this reply is going
+        to. The media is hosted in the same store the Workspace Files tab lists,
+        so it is addressed to that number — and to the email the binding
+        verified for it, if any — instead of landing in every rostered client's
+        tab. Omitted = the owner only.
 
         Returns ``(media_urls, fallback_links)`` where ``media_urls`` are absolute
         HTTPS ``?sig=`` URLs to send as Twilio ``MediaUrl`` and ``fallback_links``
@@ -481,6 +512,8 @@ class WhatsAppAdapter(ChannelAdapter):
             )
             return media_urls, fallback_links
 
+        addressed_email, addressed_channel = whatsapp_recipient(binding_id, recipient)
+
         for f in files:
             try:
                 share = create_share_from_bytes(
@@ -489,6 +522,8 @@ class WhatsAppAdapter(ChannelAdapter):
                     display_name=f.filename,
                     expires_in=_OUTBOUND_MEDIA_EXPIRES_IN,
                     created_by=agent_name,
+                    addressed_to_email=addressed_email,
+                    addressed_to_channel=addressed_channel,
                 )
             except HTTPException as e:
                 logger.warning(
@@ -651,9 +686,18 @@ class WhatsAppAdapter(ChannelAdapter):
                     "I don't have a pending login for you. Send "
                     "*/login your@email.com* first."
                 )
+            # ent#849: refused before redeeming, worded like a wrong code.
+            if not login_policy_gate.email_code_allowed_for(pending_email):
+                return "❌ Invalid or expired code. Try again or request a new one."
             result = db.verify_login_code(pending_email, arg)
             if not result:
                 return "❌ Invalid or expired code. Try again or request a new one."
+            # ent#720: a suspended account is refused here as on the web — the
+            # verified email is NOT recorded, so the open-access shortcut below
+            # and the per-message gate never see it.
+            if db.is_email_account_suspended(pending_email):
+                _clear_pending_login(binding["id"], message.sender_id)
+                return "❌ This account is suspended. Contact the agent's owner."
             db.set_whatsapp_verified_email(binding["id"], message.sender_id, pending_email)
             _clear_pending_login(binding["id"], message.sender_id)
 
@@ -683,6 +727,19 @@ class WhatsAppAdapter(ChannelAdapter):
         email = arg.lower()
         if "@" not in email or " " in email or len(email) > 254:
             return "That doesn't look like an email address. Try */login you@example.com*."
+
+        # ent#849: while the login policy refuses email codes, every address
+        # takes the same background path: members get no code, and neither the
+        # reply nor its timing tells a member from an outsider.
+        if not login_policy_gate.email_code_allowed():
+            _set_pending_login(binding["id"], message.sender_id, email)
+            task = asyncio.create_task(_send_login_code_if_allowed(email))
+            _login_code_tasks.add(task)
+            task.add_done_callback(_login_code_tasks.discard)
+            return (
+                f"📧 Sent a 6-digit code to `{email}`.\n"
+                "Reply with */login 123456* to finish verification."
+            )
 
         try:
             code_data = db.create_login_code(email, expiry_minutes=10)

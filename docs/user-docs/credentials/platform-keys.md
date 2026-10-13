@@ -46,11 +46,11 @@ The check reads your Resend account's domains and refuses an address whose domai
 
 A key saved here makes Resend the email provider, even if the server's `.env` says otherwise. **Remove** reverts email to the `.env` configuration.
 
-If you skip it, nobody can sign in with an email code — only the admin password works, and the codes are written to the server log instead of being sent.
+If you skip it, nobody can sign in with an email code — only the admin password works, and the codes are written to the server log instead of being sent. Confirming a new sign-in email needs a delivered code too: without a provider, only an admin can bind a sign-in email without one (audited as unverified), and anyone else is told email verification isn't available yet.
 
 ## Gemini
 
-Powers voice conversations with agents and Telegram voice-note transcription, and generates agent avatars. (Phone calls and the Brain Orb voice tile also use it, but each has its own feature switch as well.) An agent created on the Gemini runtime receives it as `GEMINI_API_KEY`. Create a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (it starts with `AIza` — a key without that prefix is refused).
+Powers voice conversations with agents and Telegram voice-note transcription, and generates agent avatars. (Phone calls and the Brain Orb voice tile also use it, but each has its own feature switch as well.) An agent created on the Gemini runtime receives it as `GEMINI_API_KEY`. Create a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (it starts with `AIza` or `AQ.` — a key without one of those prefixes is refused).
 
 If you skip it, voice is off and agents get no generated avatars — the starter fleet keeps the pictures it ships with; other agents show initials. Add the key later and voice switches on without a restart; generate avatars with **Generate Default Avatars** under **Settings → General**, or from each agent's avatar menu. See [Voice Chat](../advanced/voice-chat.md) and [Agent Avatars](../advanced/agent-avatars.md).
 

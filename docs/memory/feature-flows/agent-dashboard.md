@@ -1,6 +1,6 @@
 # Feature: Agent Dashboard
 
-> **Last Updated**: 2026-03-15 - Added stale dashboard cache (shows last valid dashboard when YAML breaks) and Update Dashboard button.
+> **Last Updated**: 2026-09-22 (ent#479) — widgets may bind a declared metric with `metric: <name>`; declared metrics render as tiles with no `dashboard.yaml` at all; the `/exists` probe answers two flags and is gated. Snapshotting an author-written `value:` is now the **deprecated** way to publish a business number.
 
 ## Overview
 
@@ -52,6 +52,25 @@ When `dashboardData.stale` is true, a yellow warning banner is shown above the d
 ```javascript
 hasDashboard.value = response?.has_dashboard === true || response?.stale === true
 ```
+
+**ent#479 — two gates, one probe.** `GET /api/agent-dashboard/{name}/exists` now
+answers `{has_dashboard, has_declared_metrics}`, and `buildTabs`
+(`utils/agentTabs.js`) shows the tab for **either**: an agent that declares
+`metrics:` in `template.yaml` has numbers to show and may have no dashboard file
+to show them in. Both halves are DB-only, so the probe no longer waits for the
+agent to be running — a stopped agent's recorded numbers are exactly what an
+operator wants to see.
+
+The probe is also **gated** now, with `AuthorizedAgentByName`. On a bare
+`get_current_user` it was a fleet-wide existence oracle for any logged-in
+principal (Invariant #8 / #186). The frontend already treated a throw as "no
+dashboard", so closing it changes nothing a legitimate caller sees.
+
+> A path-parameter trap worth knowing: `get_authorized_agent_by_name` declares
+> its `Path(...)` under the name `agent_name`. A route spelling it `{name}`
+> leaves the dependency with nothing to bind and answers **422 to every
+> caller** — including the owner. The URL is what callers see; the binding name
+> has to match the dependency.
 
 ## Update Dashboard Button (2026-03-15)
 
@@ -275,15 +294,123 @@ def get_dashboard_path() -> Path:
 - Validates required `type` field
 - Validates type is one of 11 valid types
 - Type-specific required field validation:
-  - `metric`: label, value
-  - `status`: label, value, color
-  - `progress`: label, value
+  - `metric`: label, value — **`value` is optional when `metric:` is set** (ent#479)
+  - `status`: label, value, color — **`value` and `color` optional when `metric:` is set**
+  - `progress`: label, value — **`value` optional when `metric:` is set**
   - `text`: content
   - `markdown`: content
   - `table`: columns, rows
   - `list`: items
   - `link`: label, url
   - `image`: src, alt
+
+## Binding a widget to a declared metric (ent#479)
+
+A `metric`, `status` or `progress` widget may name a declared metric instead of
+carrying a number:
+
+```yaml
+widgets:
+  - type: metric
+    label: "Monthly Revenue"
+    metric: revenue          # ← the template.yaml metrics: name
+```
+
+Trinity fills it on every read from the metric registry: `value`, `color` (the
+declared status `values[].color`, or the thresholds for a numeric type),
+`history`, `last_point_at`, `stale`, `freshness`, `bound: true`. `history` is
+built from the read's `chart` — the same fold `value` came from — so the
+widget's sparkline and trend arrow describe the number printed above them
+rather than one dimension of a total. The panel
+renders the metric name, the **point time** and a **stale** mark beneath the
+widget (`BoundMetricMark.vue`), because the panel's own header timestamp says
+when the *dashboard* was fetched, which for a bound number says nothing about
+the number.
+
+**Naming one series with `dims:` (ent#730).** A dimensioned metric (one series
+per channel, region, …) folds every series into one number. A widget that wants
+one series names it:
+
+```yaml
+widgets:
+  - type: metric
+    label: "Spend: Google"
+    metric: ad_spend
+    dims: {channel: google}  # every dimension the series was recorded with, exact match
+```
+
+`value`, `last_point_at`, `stale`, `freshness`, `color` and `history` then come
+from that one series, through the same single fill block the fold uses ("pick
+a source, fill once"), so the two paths cannot drift. The selector is validated
+by the write path's own leaf (`metric_points_service.validate_dims`, through
+`metric_read_service.parse_dims_selector`) and matched by `canonical_dims`, so
+key order never matters. `dims` absent, `null` or `{}` is no selector.
+
+**Every bound widget says what its number is.** The backend sends
+`bound_series` facts (`basis` `selected` / `series` / `folded`, `aggregation`,
+`series_count`, `dims`, `dimensions`, `stale_count`) and `BoundMetricMark.vue`
+writes the caption through `metricFormat.boundSeriesNote`: `channel=meta` for a
+selected series, `sum of 3 channel values` (`· 1 stale` when some are stale) for
+a fold, and `newest of 3: channel=meta` for a `last` metric with several series.
+A single unselected series gets no caption.
+
+**Verdict and trend colours.** A successful bind writes the registry's
+`direction` and, for a judgeable metric (not `status`, `up_good`/`down_good`,
+at least one threshold) with a numeric value, a typed `threshold_verdict`
+(`{level: critical | warning | ok, threshold}`) from the same rule that gives
+`color`. A bound `metric` tile shows it as a Critical / Warning `BaseBadge`
+whose footprint is reserved on `ok`, so a poll crossing a threshold swaps it in
+place. A bound widget's trend arrow and sparkline use the shared direction-aware
+`trendClasses` / `sparklineColor`: rising `down_good` spend is red, `neutral` is a
+grey arrow over a blue sparkline. A successful bind also pops an author-typed `trend`/`trend_value`, so an
+author arrow cannot contradict the computed sparkline.
+
+**Order, and why it matters:** cache → snapshot → **bind** → history-enrich, on
+both the live and the cached path. The snapshot writer and the history
+enrichment both **skip** bound widgets, through one shared `is_bound` predicate
+so the skip cannot mean two different things in two files. A bound number
+written into `agent_dashboard_values` would be a second source for a value the
+registry already owns, and the two would disagree the moment the dashboard poll
+and the recording cadence drift apart.
+
+**Failure modes, all per-widget.** Each carries a machine `binding_error_code`
+beside its sentence — the route's `{reason, message}` pair spelled for a widget,
+so a consumer telling one refusal from another never substring-matches English:
+
+| Situation | `binding_error_code` | What the widget shows |
+|---|---|---|
+| The name is not declared | `metric_undeclared` | `binding_error: "metric 'x' is not declared in template.yaml"`, and **no value** — a wrong number is worse than no number |
+| The name is **retired** | `metric_retired` | `binding_error: "metric 'x' was retired at T — …"` plus `retired_at`, and no value. TD-10 refuses `metric=<retired>` on the route so a retired metric never silently reads as current; a widget is that same read with nobody there to pass `include_retired`, so it refuses too |
+| The metric store is down | `metric_store_unavailable` | `binding_error: "metric store unavailable"`, and an author `value:` placeholder is dropped (it would read as a real 0, ent#730); unbound widgets render normally and the dashboard is never 5xx'd |
+| `metric:` is a truthy non-text value (a number, boolean, list or mapping) | `metric_name_invalid` | `binding_error` naming the type, no value; the rest of the dashboard renders. Before ent#730 a list or mapping raised out of the bind and failed the whole read, and a scalar such as `metric: 5` or `metric: true` read `metric_undeclared`. A falsy value (`0`, `false`, `[]`, `{}`) leaves the widget unbound, as before |
+| `dims:` is not a mapping, or a value is not non-empty text (or is over-long or holds a control character), or > 10 keys | `metric_dimension_invalid` | The sentence, plus a type hint for a non-text value (quote it / one value per tile / the value is missing), in warning ink |
+| `dims:` names a key the metric does not declare | `metric_dimension_undeclared` | The sentence lists the declared keys, in warning ink |
+| No recent series matches the selector (also on a metric with no points) | `metric_series_not_found` | A neutral footer row: chip, selector caption, "no recent data", and a hint built from `binding_detail` facts (a partial selector's real series, a casing mismatch, "no points yet", or the 90-day lookback). The selected series is read on its own, so a busy neighbour cannot crowd it out (#3293). **Never the fold** |
+| Declared, no points yet | — | "declared, no points yet" instead of a number |
+
+Compat **X-009** reports the `metric_name_invalid`, `metric_dimension_invalid`
+and `metric_dimension_undeclared` cases (and a `dims:` with no `metric:`) with
+the tile's own sentence, so an agent sees them in its compatibility report
+without opening the dashboard. It judges each widget as the tile receives it
+(the agent server returns the parsed YAML as JSON), so an unquoted YAML date
+in `dims:` arrives as ISO text and binds, while a number is still flagged.
+
+A resolved binding **clears** a previous refusal (both keys, and any `binding_detail`, are popped), so a
+retry after the store comes back cannot leave a widget bound and erroring at
+once.
+
+**Older base images.** The relaxed `validate_widget` ships in the agent image,
+so an author targeting an agent on an older image keeps a placeholder `value:`
+in the file to satisfy the strict rule. The backend **overwrites** it when the
+binding resolves, so the placeholder is never what an operator sees.
+
+### Deprecated: snapshotting an author-written `value:`
+
+An unbound widget still works exactly as before — its `value:` is read from the
+file and snapshotted into `agent_dashboard_values` for history. That path is
+**deprecated for business numbers**: it has no declaration, no validation, no
+cadence and therefore no answer to "is this still current". Declare the metric,
+record it with `record_metrics`, and bind the widget.
 
 ## Dashboard YAML Schema
 
@@ -542,12 +669,13 @@ const startRefresh = () => {
 
 - **Upstream**: Agent Lifecycle (agent must be running)
 - **Downstream**: None
-- **Similar**: Agent Custom Metrics (replaced by this feature)
+- **Similar**: [Agent Custom Metrics](agent-custom-metrics.md) — the declaration/record/read loop this binds to (ent#476 epic)
 
 ## Revision History
 
 | Date | Change |
 |------|--------|
+| 2026-09-22 | **ent#479**: widgets may bind a declared metric (`metric: <name>`), filled from the registry and skipped by the snapshot writer; the agent-server validator no longer demands a `value`/`color` for a bound widget; declared metrics render as tiles with no `dashboard.yaml`; `/exists` answers two flags and is gated with the uniform-404 dependency (it had been an ungated existence oracle, and its path parameter was mis-named so it 422'd everyone). Author-written `value:` snapshotting marked deprecated for business numbers. |
 | 2026-09-06 | **Widget-type closed set** pinned by a parity test (backend ≡ agent server ≡ renderer ≡ docs); D-002 now names the offending type (#2110). Refreshed stale Widget Renderers line numbers. |
 | 2026-03-15 | **Dashboard Resilience**: Added stale cache fallback - when YAML breaks, last valid dashboard shown with warning banner. Added "Update Dashboard" button that triggers `/update-dashboard` playbook if available. Tab visibility now considers stale responses. |
 | 2026-02-12 | **Conditional Tab Visibility**: Dashboard tab now hidden when agent doesn't have `dashboard.yaml`. |

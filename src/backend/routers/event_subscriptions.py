@@ -27,7 +27,7 @@ from db_models import (
     AgentEvent,
     AgentEventList,
 )
-from services import event_dispatch_service
+from services import dispatch_admission_service, event_dispatch_service
 from services.event_dispatch_service import RESERVED_EVENT_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,26 @@ def _reject_reserved_self_subscription(source_agent: str, subscriber_agent: str,
                 f"completion events instead."
             ),
         )
+
+
+async def _emit_chain_depth(current_user, matching_subs, endpoint: str):
+    """#2973: the chain depth an agent's emit hands its subscribers, or None.
+
+    An agent principal's emit that dispatches to at least one subscriber is a
+    hop (#2806): refused past the max (main.py maps the raise to the named
+    403) BEFORE the event is persisted, else the depth rides each loopback. An
+    emit nobody listens to dispatches nothing, so it is never refused.
+    """
+    if not matching_subs:
+        return None
+    return await dispatch_admission_service.enforce_inter_agent_depth(
+        current_user=current_user,
+        # The refusal is recorded as a collaboration edge, so name a real agent
+        # the event would have reached.
+        target=matching_subs[0].subscriber_agent,
+        endpoint=endpoint,
+        x_via_mcp=None,
+    )
 
 
 def _reject_reserved_emit(event_type: str):
@@ -341,6 +361,7 @@ async def emit_event(
 
     # Find matching subscriptions
     matching_subs = db.find_matching_event_subscriptions(source_agent, data.event_type)
+    chain_depth = await _emit_chain_depth(current_user, matching_subs, "/api/events")
 
     # Persist the event
     event = db.create_agent_event(
@@ -365,6 +386,7 @@ async def emit_event(
                 # agent-scoped key and the caller's USERNAME for a JWT human;
                 # only the former may be vouched to the subscriber.
                 agent_originated=bool(current_user.agent_name),
+                chain_depth=chain_depth,
             )
         )
 
@@ -397,6 +419,11 @@ async def emit_event_for_agent(
     _reject_reserved_emit(data.event_type)
 
     matching_subs = db.find_matching_event_subscriptions(name, data.event_type)
+    # #2973: the depth is the EMITTING principal's, whichever agent it names —
+    # a sibling emitting "for" another agent must not launder its own depth.
+    chain_depth = await _emit_chain_depth(
+        current_user, matching_subs, f"/api/agents/{name}/emit-event"
+    )
 
     event = db.create_agent_event(
         source_agent=name,
@@ -425,6 +452,7 @@ async def emit_event_for_agent(
                 # this issue removes, re-minted one level up and now signed by
                 # the backend. Vouch only when the emitter IS the agent.
                 agent_originated=current_user.agent_name == name,
+                chain_depth=chain_depth,
             )
         )
 
@@ -455,10 +483,30 @@ async def list_all_events(
     limit: int = Query(50, ge=1, le=500),
     current_user: User = Depends(get_current_user),
 ):
-    """List all events with optional filters."""
+    """List events the caller can access, with optional filters.
+
+    Scoped to the caller's accessible agents (trinity-enterprise#713): admins
+    are unrestricted; everyone else sees only events whose ``source_agent`` is
+    in their accessible roster (``db.get_accessible_agent_names``, the same
+    roster the ``/ws`` and ``/ws/events`` sockets filter ``agent_event`` with).
+    The roster is applied in SQL, so ``limit`` counts accessible events only.
+    A ``source_agent`` outside the caller's access returns one uniform 403.
+    """
+    # No email -> empty roster, never a lookup keyed on "" (same as /ws).
+    if current_user.role == "admin":
+        roster = None
+    elif current_user.email:
+        roster = db.get_accessible_agent_names(current_user.email, is_admin=False)
+    else:
+        roster = []
+    if source_agent:
+        assert_agent_access(current_user, source_agent)
+        if roster is not None and source_agent not in roster:
+            raise HTTPException(status_code=403, detail="Access denied")
     events = db.list_agent_events(
         source_agent=source_agent,
         event_type=event_type,
         limit=limit,
+        agent_names=roster,
     )
     return AgentEventList(count=len(events), events=events)

@@ -174,8 +174,11 @@ def test_a_revoked_share_stops_showing_an_already_raised_ask(asks_db, client_ema
     assert service.list_asks(client_email, is_platform=False) == []
 
 
-def test_an_unreadable_roster_hides_rather_than_shows(asks_db, client_email, monkeypatch):
-    """Fail closed: showing an ask we cannot justify is worse than hiding one."""
+def test_an_unreadable_roster_shows_nothing_and_says_so(asks_db, client_email, monkeypatch):
+    """Still fail closed — no ask we cannot justify is shown — but no longer
+    SILENTLY: trinity-enterprise#610 (PR A0) reversed the old `== []` pin. An
+    empty list is the claim "nothing needs you", and making it during a roster
+    outage is the #2915 class; the list raises and the route answers 503."""
     import client_portal.service as portal_service
     from client_portal.asks import service
     _raise_ask(addressed=client_email)
@@ -184,7 +187,8 @@ def test_an_unreadable_roster_hides_rather_than_shows(asks_db, client_email, mon
         raise RuntimeError("roster down")
 
     monkeypatch.setattr(portal_service, "agent_on_roster", boom)
-    assert service.list_asks(client_email, is_platform=False) == []
+    with pytest.raises(service.AsksUnavailable):
+        service.list_asks(client_email, is_platform=False)
 
 
 def test_a_client_read_never_unlocks_the_owned_agents_branch(asks_db, client_email, roster):

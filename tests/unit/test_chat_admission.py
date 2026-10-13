@@ -76,6 +76,8 @@ def _env(idem, breaker_state=None, acquire_exc=None):
     db = MagicMock()
     db.get_execution_timeout.return_value = 3600
     db.get_max_parallel_tasks.return_value = 3
+    # #2806: admission now reads the caller's running chain depth first.
+    db.get_max_running_chain_depth.return_value = 0
 
     breaker = MagicMock()
     breaker.to_dict.return_value = {"state": breaker_state or "closed", "retry_after_seconds": 5}

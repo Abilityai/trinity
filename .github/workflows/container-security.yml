@@ -244,6 +244,7 @@ jobs:
           export ADMIN_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=\n')Aa1!"
           export REDIS_PASSWORD="$(openssl rand -hex 24)"
           export REDIS_BACKEND_PASSWORD="$(openssl rand -hex 24)"
+          export POSTGRES_PASSWORD="$(openssl rand -hex 24)"  # hosted (#3159)
           status=0
           while IFS= read -r file_set; do
             [ -n "$file_set" ] || continue

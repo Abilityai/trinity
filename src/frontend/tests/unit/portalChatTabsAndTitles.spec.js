@@ -31,6 +31,7 @@ import {
   NEW_CHAT_TAB_ID, NEW_CHAT_TAB_LABEL, MAIN_TAB_LABEL,
   agentHasMain, titleSettling, shouldFetchTitleHealth, TITLE_SETTLE_DELAYS_MS,
 } from '../../src/components/portal/portalUtils'
+import { resolveWorkspaceKey } from '../../src/components/portal/portalKeymap'
 
 const src = (rel) => readFileSync(resolve(__dirname, '../../src', rel), 'utf8')
 
@@ -226,6 +227,26 @@ describe('the New chat hotkey', () => {
     expect(newChatHotkeyLabel('Linux x86_64')).toBe('Ctrl+J')
     expect(newChatHotkeyLabel(undefined)).toBe('Ctrl+J')
   })
+
+  // ent#621: the rule moved into the key map and this predicate delegates, so
+  // the truth table above is now also the map's. Asserting the EQUIVALENCE is
+  // what makes that safe: the day the two disagree, the hotkey every portal
+  // session has learned is the one that changed. This spec reaches both modules
+  // through `portalUtils` FIRST, which is the other half of the two modules'
+  // import-cycle check (`workspaceKeymap.spec.js` imports the map first).
+  it('is the map\'s new-chat entry, by construction (ent#621)', () => {
+    const cases = [
+      ev({ metaKey: true }), ev({ ctrlKey: true }), ev({ ctrlKey: true, key: 'J' }),
+      ev({}), ev({ metaKey: true, shiftKey: true }), ev({ ctrlKey: true, altKey: true }),
+      ev({ metaKey: true, ctrlKey: true }), ev({ metaKey: true, key: 'k' }),
+      ev({ metaKey: true, key: 'ArrowDown' }), ev({ altKey: true, key: 'ArrowDown' }),
+    ]
+    for (const e of cases) {
+      expect(isNewChatHotkey(e), JSON.stringify(e)).toBe(resolveWorkspaceKey(e) === 'new-chat')
+    }
+    // And it is still TRUE for the chord it has always been true for.
+    expect(isNewChatHotkey(ev({ metaKey: true }))).toBe(true)
+  })
 })
 
 describe('titleGenerationNotice', () => {
@@ -265,7 +286,7 @@ describe('the strip is the primitive, and the editor has one home', () => {
 
   // #2579 — fixed width. These are SOURCE pins, not behaviour: vitest runs
   // `environment: 'node'` with no mount harness, so nothing here can prove a
-  // tab is 160px. That is `e2e/workspace-chat-tabs.spec.js`'s job.
+  // tab is 192px. That is `e2e/workspace-chat-tabs.spec.js`'s job.
   //
   // The mirror-slice idiom (precedent: portalRail.spec.js) rather than a count:
   // "the class appears twice" is satisfied by putting it on the MIRROR's More
@@ -282,7 +303,7 @@ describe('the strip is the primitive, and the editor has one home', () => {
 
     it('declares the prop, default off, with one named width constant', () => {
       expect(s()).toMatch(/fixedWidth: \{ type: Boolean, default: false \}/)
-      expect(s()).toMatch(/export const FIXED_TAB_WIDTH = 'w-40'/)
+      expect(s()).toMatch(/export const FIXED_TAB_WIDTH = 'w-48'/)
     })
 
     it('puts the width on the tab button in BOTH rows — a mirror that measures narrower overflows too late', () => {
@@ -312,7 +333,10 @@ describe('the strip is the primitive, and the editor has one home', () => {
     it('the native tooltip and the menu clamp are GATED, so the other strips grow neither', () => {
       // Unconditional, AgentDetail / Library / PortalRail sprout tooltips on
       // "Overview" / "Tasks" / "Files" for nothing.
-      const titles = s().match(/:title="fixedWidth \? tab\.label : undefined"/g) || []
+      // ent#610 sign-off: the visible button also takes a tab's signal meaning
+      // (`signalTitle`) — present ONLY on a tab with a dot, so a strip with
+      // nothing to say still sprouts no tooltip.
+      const titles = s().match(/:title="(tab\.signalTitle \|\| \()?fixedWidth \? tab\.label : undefined\)?"/g) || []
       expect(titles).toHaveLength(2)   // the visible tab button and the menu row
       expect(s()).toMatch(/:class="fixedWidth \? 'max-w-\[20rem\] truncate' : ''"/)
     })
@@ -324,19 +348,27 @@ describe('the strip is the primitive, and the editor has one home', () => {
       }
     })
 
-    it('the strip refuses to emit a tab with no thread behind it', () => {
+    it('the strip never hands the shell a threadless tab as a thread', () => {
       // The provisional tab's "select" would hand the shell a null, and
-      // openThread reads `is_room` off it.
+      // openThread reads `is_room` off it. trinity-enterprise#657 gave that
+      // branch a second outcome — an INACTIVE provisional tab is the listed
+      // unsaved-chat draft, so it emits `new-chat` — and the behaviour of
+      // both arms is executed in `portalComposerDraft.spec.js` against a real
+      // mount. What stays here is the pair of source facts that spec cannot
+      // see: the draft INTENT is a prop threaded into the pure rule (never
+      // inferred from "the active id is not in the list"), and the shell
+      // supplies it.
       const s2 = src('components/portal/PortalChatTabs.vue')
-      expect(s2).toMatch(/if \(!tab\?\.thread\) return/)
-      // The draft intent is a prop, threaded into the pure rule — never
-      // inferred from "the active id is not in the list".
+      expect(s2).not.toMatch(/emit\('select', tab\)/)          // always `tab.thread`
       expect(s2).toMatch(/draft: \{ type: Boolean, default: false \}/)
       expect(s2).toMatch(/activeId: props\.activeId, draft: props\.draft/)
       expect(src('components/portal/PortalConversation.vue')).toMatch(/:draft="newChat \|\| bornHere"/)
       // ...and the provisional tab renders ACTIVE. Without the fallback the
-      // strip appears with nothing selected, which is its own dead state.
-      expect(s2).toMatch(/:model-value="activeId \|\| \(draft \? NEW_CHAT_TAB_ID : null\)"/)
+      // strip appears with nothing selected, which is its own dead state —
+      // now resolved in one place (`current`) because the click handler has
+      // to compare against the SAME value the strip is bound to.
+      expect(s2).toMatch(/const current = computed\(\(\) => props\.activeId \|\| \(props\.draft \? NEW_CHAT_TAB_ID : null\)\)/)
+      expect(s2).toMatch(/:model-value="current"/)
     })
   })
   it('the three rename homes all mount PortalEditableTitle', () => {

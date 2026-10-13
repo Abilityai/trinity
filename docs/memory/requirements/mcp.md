@@ -22,6 +22,7 @@
 - **GitHub Issue**: #19
 - **Description**: MCP tools for querying execution history, polling async results, and monitoring agent activity
 - **Key Features**: `list_recent_executions`, `get_execution_result`, `get_agent_activity_summary`; enables async polling pattern for agent-to-agent collaboration beyond 60s MCP timeout
+- **`search_executions`** (abilityai/trinity-enterprise#653, 2026-09-19): grep over the execution corpus (prompt/response/error) with bounded excerpts — `mode=substring` (default) or `mode=regex` (POSIX, PostgreSQL only; matched and excerpted by the database, never by Python `re`) — proxying the entitlement-gated enterprise execution-search route. Available to the system agent and user-scoped keys only — agent-scoped keys are refused at the backend and never see the tool (per-tool `canAccess` allow-list). Absent/unentitled module → `available:false`, never an empty result.
 - **Spec**: `docs/requirements/MCP_EXECUTION_QUERY_TOOLS.md`
 
 ### 7.4 Configurable MCP Server URL (MCP-URL-001)
@@ -323,6 +324,23 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
   allow-list, and registered outbound endpoints; toggle exposure; add
   and remove inbound identities. Mutating tools are owner-gated **and
   human-only** (`reject_agent_principal`) at the backend.
+- **Outbound control is not part of this plane (ent#761)**: the three
+  endpoint-registry tools (`register_a2a_endpoint` / `list_a2a_endpoints` /
+  `remove_a2a_endpoint`) address the **OSS** platform-wide outbound endpoint
+  store through `GET/PUT /api/settings/a2a-endpoints` and
+  `DELETE /api/settings/a2a-endpoints/{ref}` (§32.5 FR-2) — the only store
+  the runtime call resolves against on every build. They are available in
+  **every** edition, are **admin**-tier and human-only rather than
+  owner-tier (a platform-scope write grants a credentialed egress target to
+  every agent on the instance — Invariant #8's grant-vs-use line), and
+  carry a status-based error mapper on which `not_entitled` is structurally
+  unreachable: the previous body-text mapper inferred that flag from any 403
+  mentioning `a2a`, i.e. it told an operator to buy a licence for what was
+  really an auth refusal. `agent_name` is accepted and ignored on all three
+  (the store is not per-agent); keeping it required invited a caller to
+  register under one name, list under another, see the same rows and report
+  a cross-agent leak. The entitled management plane this section describes
+  is therefore exposure + card + inbound allow-list only.
 - **Agent-key gating — corrected (#736)**: an earlier revision of this
   section claimed the MCP layer applied "the same `{self} ∪ permitted`
   gate for agent-scoped keys as the rest of the tool surface". It did
@@ -334,7 +352,15 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
   #736 adds the `{self} ∪ permitted` gate to those two read tools, which
   is what this bullet now describes. The mutating tools need no such
   gate: `reject_agent_principal` at the backend already refuses every
-  agent principal outright.
+  agent principal outright. **Amended by ent#761** for
+  `list_a2a_endpoints` only: its route became the admin + human-only
+  settings read, so the MCP layer refuses an agent-scoped key outright
+  instead of running the `{self} ∪ permitted` lookup — against a
+  platform-scope list "sibling" has no meaning, and the narrower check
+  denied a strict subset of what the backend denies while costing a round
+  trip. An inert check is worse than none, because the next reader
+  believes it does something. `get_agent_a2a_config` keeps the gate
+  unchanged.
 - **Note on the runtime call**: `call_a2a_agent` / `get_a2a_task` are
   **not** part of this management plane — see §32.5. Their MCP-layer gate
   is deliberately **self-only**, not `{self} ∪ permitted`, because the
@@ -428,7 +454,16 @@ raises, and a provider that returns a malformed object all **refuse**.
   `system_settings`, each credential wrapped in an AES-256-GCM envelope —
   the location Invariant #12 already blesses for
   `elevenlabs_api_key_encrypted`. **No new table, no migration, no Alembic
-  revision.** Managed by one admin-only + human-only settings route.
+  revision.** Managed by one admin-only + human-only settings route, and
+  since ent#761 that route is also what the MCP control tools drive
+  (`register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint`,
+  §32.3) — one store per question, so the tool that registers a target and
+  the resolver the runtime uses can no longer disagree. The `PUT` response
+  reports the outbound switch state (`enabled`) the `GET` has always
+  carried, because the switch defaults OFF: an operator who registers an
+  endpoint on a fresh install would otherwise get a complete-looking
+  registration and a dead call path, and the tool layer turns that into the
+  one admin step that fixes it (FR-11 default unchanged).
 - **Enterprise provider (future)**: a private module may register a provider
   that takes precedence and scope endpoints per agent. OSS ships a working
   source rather than only the seam because a seam with no registered provider
@@ -436,6 +471,9 @@ raises, and a provider that returns a malformed object all **refuse**.
   install — which is not what "outbound = OSS" can mean.
 - Resolution is **platform-scope** in OSS: a named endpoint is available to
   every agent on the instance. Per-agent scoping is the enterprise delta.
+  Because of that scope the control tools accept `agent_name` and ignore it,
+  and the write tier is **admin** rather than owner: registering is a
+  fleet-wide grant of a credentialed egress target, not an agent setting.
 
 #### FR-3 — Every URL is SSRF-validated at CALL time, wherever it came from
 Registration validates a URL with `startswith("http://") or
@@ -727,8 +765,14 @@ sign.
 - `securitySchemes` **never** selects the credential. The card cannot cause a
   different credential to be chosen, nor a credential to be attached to an
   unregistered origin.
-- **Card-vs-RPC normalisation**: the card is always derived from
-  `{scheme}://{netloc}/.well-known/agent-card.json`. If the registered URL
+- **Card-vs-RPC normalisation** (discovery order revised by
+  trinity-enterprise#838): a registered URL that IS a card URL
+  (`…/.well-known/agent-card.json`) is fetched as given and its declared `url`
+  is the target. A registered URL with a path is an endpoint, and its own card,
+  `{path}/.well-known/agent-card.json`, is tried first: that is where a
+  per-agent server like Trinity publishes one, and Trinity serves nothing at
+  its origin. Then `{scheme}://{netloc}/.well-known/agent-card.json`. Only a 404
+  moves on; any other card failure is the answer. If the registered URL
   carries a path, it is accepted as the RPC target **only** when the card's
   declared `url` matches it exactly; ambiguity is refused with a named error.
 - An unreachable card therefore blocks the RPC (the same-origin pin depends on
@@ -738,9 +782,257 @@ sign.
   this), so the client parses the body for `error` even on 200 → **502**,
   `success: false`. A status-only check would read every remote failure as a
   success.
+#### FR-14 — A priced remote is a distinct, non-retryable outcome (#3185)
+`_read_capped` collapsed every HTTP ≥ 400 into `rpc_http_error` **without
+reading the body**, so a remote answering **402 Payment Required** was
+unreachable: the caller saw neither the price nor a way to attach a token. 402
+is now its own outcome, carrying what the remote asked for.
+
+- **Both rails are read**, because the two provider generations differ: the
+  HTTP **402** on the RPC POST (preferring the base64 `payment-required`
+  response header, falling back to the JSON body Trinity's own paid door emits,
+  then to the status alone), and an HTTP 200 Task whose
+  `status.message.metadata` carries `x402.payment.status = "payment-required"`.
+  The in-band check runs **before** the task is parsed, on the send **and** the
+  poll path — parsed as an ordinary task, a priced `input-required` reaches the
+  agent as a prompt it polls forever.
+- **Outcome vocabulary**: `payment_required` (402 at the route),
+  `payment_rejected` (the in-band `payment-failed`, or a 403 to an endpoint whose
+  credential kind is `payment_token`) and `rpc_forbidden` (any other 403), both
+  502 so a remote's 403 is never echoed as this route's own. Every `*_http_error`
+  now carries `remote_status`, so 402 ("buy this") is always distinguishable from
+  403 ("top up") — and any 4xx/5xx is diagnosable.
+- **402/403 are classified before the encoding and length guards.** A
+  CDN-gzipped or oversized "pay me" previously reported `rpc_encoding` /
+  `rpc_too_large` — an outage, for an endpoint working perfectly. The body is
+  still never decoded and is bounded by a ceiling 16× tighter than the answer
+  cap; when it cannot be read the outcome survives from the status alone, flagged
+  `truncated`. The **card** hop is untouched: it is uncredentialed by design
+  (FR-13), so a 402 there stays `card_http_error`.
+- **What the agent receives is an allowlist, like the success shape.** The route
+  answers 402 with `detail = {reason, message, payment, remote_status?,
+  task_id?}`, and `payment = {summary, x402, truncated}` — a flat Trinity-owned
+  summary plus the raw requirements object under a top-level-key allowlist, per
+  leaf 512 characters, `accepts` ≤ 8, 16 KiB ceiling. Every string passes the
+  credential scrubber, whose secret set is the token **and** its base64 forms
+  **and** the decoded payload's long string leaves: a remote echoing the decoded
+  signature back would otherwise walk past exact-value redaction of the base64
+  token. The **success** response allowlist does not grow; receipts
+  (`payment-completed`) are recorded on the activity row and audit details —
+  money leaving must be visible to an operator — and never surfaced to the agent.
+- **No automatic retry, no platform purchase.** A 402 releases the effect claim
+  and is never snapshotted: a stored 402 would replay "pay me" after the operator
+  paid. The MCP tools map it to `payment_required` + `payment` + `task_id` +
+  `do_not_retry` (a non-JSON 402 from a proxy still carries the flag — the status
+  is the fact, the body a courtesy), and the tool description names the actor,
+  because `do_not_retry` with no named actor produces an agent that tries a
+  different endpoint instead: relay it to a person once, then pass the returned
+  `task_id` when told to try again.
+
+#### FR-15 — The credential slot carries a KIND, inferred when omitted (#3185)
+Sending an x402 token as `Authorization: Bearer …` gets a second 402 and no
+explanation, so the stored record says what its credential **is**:
+`credential_kind ∈ {api_key, payment_token}`, **absent ⇒ `api_key`** — which is
+every record written before the field existed, and means today's bytes exactly.
+`payment_token` additionally rides the x402 metadata (`x402.payment.status` /
+`.payload`, the decoded token) **and** the deprecated `payment-signature` header
+on the **same** request: a fallback that waited for a 402 would be an automatic
+retry. An opaque (non-base64-JSON) token degrades to header-only rather than
+announcing undecodable bytes in-band. No new table, no migration, no Alembic
+revision — the kind is a label inside the existing envelope.
+
+- **A label on the existing slot, not a fourth write path.** Omitted with a new
+  credential the kind is **inferred** from the value (an x402 payload →
+  `payment_token`, anything else → `api_key`, fail-safe in that direction);
+  explicit wins; sent alone it **re-labels** the stored secret, so an operator who
+  pasted a token before the field existed need not re-type it; `clear_credentials`
+  drops the label with the value. A kind with no credential under it, and a kind
+  together with `clear_credentials`, are both refused with a named 422 that never
+  echoes the credential — either would report `credential_kind: payment_token`
+  for an endpoint that sends no payment at all, to exactly the person who has just
+  been handed a 402.
+- **One predicate, both sides.** The store infers with the same function the
+  client sends on (`a2a_protocol.decode_payment_token`). Two spellings would
+  produce a credential the store labels `payment_token` while the transport
+  declines to send it as one — a disagreement that reads as a platform bug rather
+  than as the remote's refusal.
+- **Honest status about a single-use token.** An x402 v3 token authorises ONE
+  settlement, so a `payload.authorization.nonce` is flagged
+  `credential_single_use` (on the record, the PUT response and the MCP
+  registration) rather than refused — a provider that issues only single-use
+  tokens must stay usable. The flag describes the stored value and cannot outlive
+  it.
+- **Reads show the label, never the value.** `GET /api/settings/a2a-endpoints`
+  and `list_a2a_endpoints` report `credential_kind` only where a credential
+  exists; the audit row records the label the store actually wrote (not the one
+  the request sent, which may have been omitted).
+- **Protocol-name evidence**: the x402 v2 names in use (`payment-signature` in,
+  base64 `payment-required` on 402, `x402Version: 2`) and the A2A metadata keys
+  were verified against the live provider SDK in trinity-enterprise#763; the
+  outbound path imports no payments SDK, the token codec being a stdlib
+  base64/JSON mirror. The x402 extension's **activation handshake is out of
+  scope** — only the metadata carriage is adopted.
+
 - **Flow**: `docs/memory/feature-flows/a2a-outbound-call.md`
 
-### 32.6 AAuth Agent Identity on the A2A Seam — prototype (ent#623)
+### 32.6 A2A Inbound Payment Gate — x402 on `POST /a2a/{name}` (ent#679)
+- **Status**: 🚧 In Progress
+- **Implements**: trinity-enterprise#679 (epic trinity-enterprise#156); stacks on
+  abilityai/trinity#3185 (the outbound consumer's 402 handling)
+- **Description**: §32.2 authenticated the inbound door with a Trinity MCP key
+  and nothing else, so a stranger — including a remote Trinity holding a valid
+  x402 payment token — got **401** and could never reach a 402, never pay, and
+  never be served. Meanwhile the paywall (`public-access.md` §23) lived only on
+  the bespoke `POST /api/paid/{name}/chat` door, and the card said nothing about
+  price. This puts the same paywall on the A2A door, in the A2A x402 message
+  vocabulary, and states the price on the card.
+- **FR-1 — One branch, decided by the principal**: the door resolves an
+  *optional* principal (`dependencies.get_user_or_anonymous`). A resolved
+  principal takes **today's path, unchanged**: the §32.2 gates, no payment, no
+  facilitator call, no payment-log row. Only an *anonymous* caller can reach the
+  payment path, and only for an agent that is BOTH A2A-exposed and
+  Nevermined-enabled; anything else answers today's 401 bytes. Internal fleet
+  traffic, owner/shared callers and subscription tenants are therefore
+  unaffected by construction, not by a carve-out.
+- **FR-2 — A refused credential is never downgraded into a payer**: the optional
+  dependency degrades to anonymous on a **401 only**. A **403** (the connector
+  and ephemeral-key fences) is re-raised. A credential Trinity recognised and
+  then fenced must not be able to buy the access it was just refused.
+- **FR-3 — "Takes payment" ≠ "can process one"**: the two facts get different
+  honest answers. No price configured ⇒ 401 (the stranger has no business
+  here). Priced but the payment SDK is absent ⇒ **501** (the door exists and is
+  broken). Fusing them would answer "authenticate" to a caller holding a valid
+  token for an agent whose card advertises a price — telling it to present a
+  credential that does not exist.
+- **FR-4 — 402 parity with the paid door**: a missing or unusable token answers
+  **HTTP 402** with the paid door's body (`detail`, `payment_required`,
+  `credits_per_request`) and base64 `payment-required` header, from the **one**
+  requirements builder both doors share — a 402 built differently from the later
+  verify is a rejection the caller cannot act on. `resource.url` names **this**
+  door (`/a2a/{name}`), not the paid one: an x402 token signs the resource URL,
+  so a token minted against the paid chat door cannot authorize an A2A call, and
+  its **origin** is the shared public origin (`utils/public_url.py`), not
+  `request.base_url` (#3215). `accepts[0].scheme` is the plan's own scheme, so a
+  card (fiat) plan is payable here too. A rejected token answers **403** with a
+  `reject` log row.
+- **FR-4a — The reply Task carries the receipt where a client looks (#3215)**:
+  the x402 metadata's primary location is **`status.message.metadata`** — the
+  spec location, which the provider SDK's own `X402A2AUtils` reads — and it is
+  **mirrored** onto the Task's top-level `metadata` from the same assignment (the
+  same dict object, so the two cannot drift). Without the mirror a strictly typed
+  client renders a settled, charged turn as `metadata: null`. A **free** turn
+  emits no `metadata` key at all, so unpaid Task bytes and the idempotency
+  snapshots built from them are unchanged.
+- **FR-5 — Metadata-first token carriage**: the token is read from the A2A
+  message metadata (`x402.payment.payload`) first and from the deprecated
+  `payment-signature` header only as a fallback, matching the provider SDK's own
+  precedence. When both are present the metadata wins, so a client migrating
+  between rails cannot have a stale header silently decide what it pays with.
+  Every malformed payload shape falls through to the 402 rather than raising —
+  all of it is caller-controlled input on a route reachable with no credential.
+  **No extension activation handshake** is implemented or advertised (§32.5's
+  standing scope line): Trinity speaks the vocabulary, it does not negotiate.
+- **FR-6 — One home for the money logic**: the settle/replay/honest-status
+  branches (`public-access.md` §23.3, #1018) are **not** duplicated. Both doors
+  call one orchestrator (`services/paid_turn_service.py`) that takes its
+  collaborators as parameters, so a delivered-but-unsettled turn is
+  `success_unsettled` on both rails, the dedup unit is the same
+  `(token ∥ message)` one, and a replayed unsettled snapshot re-settles and
+  converges identically. The paid door's behaviour is unchanged.
+- **FR-7 — The card states the price (AC2)**: a priced agent's card declares a
+  payment extension carrying `agentId`, `planId`, `credits`, `paymentType` and a
+  `paymentInfoUrl` pointing at the public `GET /api/paid/{name}/info` document,
+  so an x402-speaking client mints a token from the card alone and meets the
+  paywall on its **first** request. Both card surfaces carry it (§32.4 FR-3's
+  single producer). An unpriced or disabled agent's card is **byte-identical**
+  to before. An unreadable payment config fails open (card served, no price
+  block) — a card route has never 5xx'd, and the gate re-reads the config and
+  still answers 402.
+- **FR-8 — Attribution with no schema change**: a settled call is attributable
+  from rows that already exist — the payer wallet on the `settle` log row, the
+  execution row (`triggered_by="a2a"` + its principal fields), and the platform
+  audit row (source IP + payer). No new column, no migration.
+- **FR-9 — The paying path is rate limited before it costs anything**: per-IP
+  **and** per-agent budgets are enforced ahead of any DB read or facilitator
+  call. A distributed flood passes every per-IP bucket while still pinning one
+  agent's facilitator quota, which only the per-agent limit sees.
+- **FR-10 — A payer can retrieve what it paid for**: `tasks/get` and
+  `tasks/cancel` are allowed to a payer whose token verifies **and** whose
+  wallet matches that execution's payment-log rows. Every mismatch — including
+  payer A polling payer B's existing task — answers byte-identical "task not
+  found", so the binding is not an existence oracle.
+- **FR-11 — A duration plan is configurable honestly**: `credits_per_request`
+  accepts **0**. A Nevermined *duration* plan charges by time — Trinity sends no
+  amount to the facilitator and the plan defines the burn — so the old `>= 1`
+  floor forced an operator to claim a per-call price nothing would ever charge.
+  A negative amount is still a named 422. Such a plan's card declares
+  `paymentType: "dynamic"`, not the contradictory `fixed`/0 that reads as free.
+- **FR-12 — Open-core (mechanism in OSS)**: nothing here is edition-aware, the
+  same shape §23.3's paid door has always had. The path is reachable only when
+  the §32.2 exposure flag (settable only by the entitled provider) **and** the
+  OSS Nevermined config are both on, and the enterprise inbound allow-list is
+  consulted after verify as `x402:{payer}` — **fail-closed** on this path, the
+  opposite bias to §32.2's authenticated callers, because here the payment is
+  the authorization. **In an OSS-only build a configured price block on a card
+  points at a door that answers 404**, because exposure is off: the card says
+  what the agent costs, not that the door is open.
+- **Flow**: `docs/memory/feature-flows/a2a-inbound-server.md`,
+  `docs/memory/feature-flows/nevermined-payments.md`
+
+---
+
+### 32.7 A2A Trusted Internal Networks (trinity-enterprise#838)
+- **Status**: 🚧 In Progress
+- **Implements**: trinity-enterprise#838 (parent trinity-enterprise#421).
+  Builds on #736/#761 (outbound) and ent#157 (inbound).
+- **Problem**: instances on one private network (a tailnet, a VPN) could not
+  call each other's agents: outbound refused private/CGNAT addresses and
+  `http://`, and inbound required a key or a payment for every pair.
+- **Trusted networks** (OSS-core, admin and human only):
+  `GET/PUT /api/settings/a2a-trusted-networks`. Entries are CIDRs, exact host
+  names or `*.domain`. Refused by name: a CIDR overlapping the platform's own
+  Docker networks (agents and the public tunnel reach the backend from there),
+  loopback, link-local (cloud metadata), reserved and multicast ranges,
+  anything broader than /8 (IPv4) or /32 (IPv6), a one-label wildcard. The
+  generic `PUT /api/settings/{key}` refuses the key. Optional
+  `internal_base_url`: the origin an internal-scope agent's card advertises.
+- **Outbound**: an endpoint is trusted when its host matches a name entry or
+  every address it resolves to is public or inside a CIDR entry. When CIDR
+  entries exist, every non-public address must be inside one — a trusted name
+  that resolves outside them is refused. A trusted endpoint may be
+  private/CGNAT and `http://`; metadata, loopback and the platform networks are
+  refused whatever the entries say. Re-checked on every call, pinned as before.
+  Every other endpoint keeps the public-HTTPS rule unchanged.
+- **Inbound scope** (OSS columns `agent_ownership.a2a_scope` `public|internal`
+  and `a2a_keyless_internal`, written only by the entitled enterprise exposure
+  route): an internal-scope agent answers only requests from a trusted CIDR and
+  never through the public tunnel (cloudflared's `CF-Connecting-IP`/`Cf-Ray`).
+  To anyone else its card is 404, a keyed call 404 and an anonymous call the
+  401 an unexposed agent gives.
+- **Source**: the TCP peer, or `X-Real-IP` only when the peer is the platform's
+  own proxy, found by container name (`A2A_PROXY_HOSTS`, default
+  `trinity-frontend`). nginx and the Vite dev proxy both overwrite it, and an
+  agent on the bridge cannot name its own source. Host names never grant
+  inbound trust.
+- **Keyless** (default on for an internal-scope agent; switch per agent): a
+  trusted caller runs `message/send`/`message/stream` with no key,
+  rate-limited per source (120/min) and per agent (300/min), attributed in
+  `schedule_executions.source_host`. `tasks/get`/`tasks/cancel` see only tasks
+  stamped with the caller's own address. With keyless off, a trusted caller
+  needs a key. The inbound allow-list governs keyed callers only.
+- **Card**: an internal-scope agent advertises `internal_base_url`. Outbound
+  discovery tries the registered endpoint's own card before the origin's
+  (§32.5), without which one Trinity could not discover another's per-agent card.
+- **Unchanged**: public scope, key-authenticated calls and the x402 gate (#679).
+  The anonymous door still runs its limiter before any DB read; the trusted
+  list it consults first is cached per worker (5 s).
+- **Network boundary is an ops step**: pair keyless trust with a network ACL
+  that admits A2A traffic only between your own instances.
+- **Tests**: `tests/unit/test_ent838_a2a_trusted_networks.py`, enterprise
+  `tests/test_838_a2a_internal_scope.py`.
+- **Flow**: `docs/memory/feature-flows/a2a-inbound-server.md` → Trusted internal networks
+
+### 32.8 AAuth Agent Identity on the A2A Seam — prototype (ent#623)
 - **Status**: 🧪 Prototype on a branch, flag OFF by default — not a platform
   promise. Productization is decided after the 2026-09-18 call.
 - **Implements**: trinity-enterprise#623 (evaluation home: ent#558)
@@ -794,8 +1086,6 @@ sign.
   backend signs on the agent's behalf; inbound AAuth is inert without the
   private allow-list module.
 
----
-
 ## 45. Per-Agent MCP Exposure — Dedicated Dynamic Tools (#846)
 
 **Description**: A per-agent owner-toggled flag (`mcp_exposed`, default off) that publishes
@@ -804,7 +1094,9 @@ registers a dedicated `chat_with_<slug>` tool — functionally identical to `cha
 with the agent name pre-filled — so a curated, well-known agent surfaces as a named tool
 instead of requiring `list_agents` + `chat_with_agent`. Toggling adds/removes the tool at
 runtime with **no MCP-server restart**. The flag publishes a surface only; execution always
-runs the same access gate, so ownership/sharing is never bypassed.
+runs the same access gate, so ownership/sharing is never bypassed. Each dedicated tool's
+description also carries the delegation contract verbatim (abilityai/trinity-enterprise#568,
+[scheduling.md §37.5](scheduling.md#375-the-delegation-contract-taught-where-callers-read-abilityaitrinity-enterprise568)).
 
 - **FR-1 — Toggle**: `agent_ownership.mcp_exposed INTEGER DEFAULT 0`; owner-only `GET`/`PUT
   /api/agents/{name}/mcp-exposed`. PUT refuses the system agent (403). Getter/setter both guard
@@ -829,6 +1121,22 @@ runs the same access gate, so ownership/sharing is never bypassed.
   routing, parallel/self-task paths, idempotency tokens, #914 gateway-timeout recovery, access
   denial). Dedicated tools register with the `connectorDenied` visibility gate and bind their
   audit target (no `agent_name` param).
+- **FR-5a — Chain-depth refusal is a result, not an error (#2806)**: when the backend refuses a
+  hop with 403 `detail.error == "inter_agent_depth_exceeded"` (`core-agent.md` §9.1.1),
+  `client.chat` / `client.task` / `client.fanOut` return a typed refusal instead of throwing,
+  and `runAgentChat` (sequential, parallel, self-task and pull-routed branches) and `fan_out`
+  answer `{"status": "inter_agent_depth_exceeded", "agent", "depth", "max_depth",
+  "retryable": false, "message"}` so the calling model reads "stop, do not retry or re-route".
+  A 403 without that code (access denial, SELF-EXEC-001) still throws as before.
+  Since #2973 `run_agent_loop`, `trigger_agent_schedule` and `emit_event` return the same
+  refusal object (`client.ts::depthRefusalFromError`).
+- **FR-5b — `execution_id` parity (#3232)**: dedicated `chat_with_<slug>` tools declare and
+  forward `execution_id` with `chat_with_agent`'s semantics, including the async report-back
+  default and the `manual` opt-out ([public-access.md §15.1h](public-access.md), MCP caller
+  contract). The parameter must be **declared**: the zod schema drops an undeclared key before
+  `execute`, which is how the value used to vanish. Both tools publish the one
+  `EXECUTION_ID_PARAM_DESCRIPTION`, and the reconciler takes a required `reportBackEnabled`
+  so the `MCP_REPORT_BACK_ENABLED` kill switch reaches the dedicated tools too.
 - **FR-6 — Surfacing**: `mcp_exposed` is exposed on `GET /api/agents` / MCP `list_agents`. A
   Settings-tab toggle ("Expose via MCP") shows the computed tool name and up-to-poll-interval
   latency copy.
@@ -1103,3 +1411,38 @@ returns a sibling's plaintext to an agent principal. All three now run
 derived, and `User.mcp_scope` is a Pydantic field, not a column.
 
 **Flow**: `docs/memory/feature-flows/agent-mcp-key.md`
+
+## Self-Acting MCP Tools — identity from the key, including the orchestrator's (#2975)
+
+- **Status**: ✅ Implemented (2026-09-23)
+- **Requirement ID**: MCP-SELF-ACTING
+- **GitHub Issue**: #2975 (P1, reported by the operator via `trinity-system`)
+- **Description**: `report`, the four canvas tools and the four metrics tools declare **no**
+  agent-target parameter — they act AS the caller, so the publishing identity must come from
+  the credential. That identity is resolved in ONE place,
+  `src/mcp-server/src/access.ts::resolveActingAgent`, and the rule is an **allowlist** over
+  the free-text `mcp_api_keys.scope` column (#1854, #2323):
+  - `scope='agent'` with an `agent_name` → the calling agent (unchanged);
+  - `scope='system'` with an `agent_name` → that agent. This is the platform orchestrator:
+    `system_agent_service` mints `trinity-system`'s key agent-scoped and then flips the
+    scope (`_set_system_scope`), and #1816 makes that permanent — the orchestrator's key is
+    never re-minted as `agent`, so issuing it an agent-scoped key is not an available fix;
+  - everything else refused, **including `connector`**, which carries an `agent_name` (it is
+    bound to one agent) but is an END USER's consumption key — admitting it would let a
+    client publish as the agent serving them. A `system` key with no `agent_name` is refused
+    too: there is no identity to attribute the write to.
+- **The name always comes from the key row, never from a parameter**, so admitting a scope
+  widens identity by exactly zero — a system key already reaches every agent's data on the
+  read surfaces.
+- **The backend was never the refuser** and is unchanged: `POST /api/agents/{name}/reports`,
+  the canvas writes and `POST /api/agents/{name}/metrics/points` are `AuthorizedAgent` plus a
+  self-gate on `current_user.agent_name`, which `dependencies.py` sets only for
+  `scope == "agent"` — so for a system key the self-gate is a no-op and the write succeeds
+  (verified live against the instance before the tools were touched).
+- **Impact this closes**: the daily `/fleet-health` run and the weekly ops review on
+  `trinity-system` could read every surface and publish nothing; both fell back to
+  `~/reports/` and the operator queue.
+- **Tests**: `src/mcp-server/src/tools/self-acting-scope.test.ts` — every self-acting tool
+  admits the system key and acts as `trinity-system`, an agent key is unchanged, and seven
+  other credential shapes (user, connector, portal_delegate, ops, anonymous, a system key
+  naming no agent, an unknown future scope) are refused without reaching the network.

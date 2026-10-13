@@ -34,19 +34,23 @@ from dependencies import (
     oauth2_scheme,
     reject_agent_principal,
     require_admin,
+    resolve_platform_user_unfloored,
 )
 from models import (
     REPORT_ROWS_PAGE_MAX,
     CanvasBulkDelete,
     CanvasPinRequest,
+    TaggablePerson,
     User,
 )
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
+from services import sync_waiter
+from services.pull_pilot import pull_queue_allowance
 
 from database import db
-from . import agent_page, service
+from . import agent_page, chat_previews, role_card, seat_decisions, service
 from .models import (
     PortalSessionRename,
     PortalRatingRequest,
@@ -74,6 +78,15 @@ from .models import (
     PortalAllSessions,
     PortalSessions,
     PortalAgentPage,
+    PortalAgentMemory,
+    PortalMemoryUndo,
+    PortalRoleCard,
+    PortalRoleReadiness,
+    PortalRoleReadinessFlip,
+    PortalSeatDecisions,
+    PortalSeatDecisionRecord,
+    PortalSeatDecisionAction,
+    PortalSeatDecisionResult,
     PortalAgentReports,
     PortalChatState,
     PortalSessionSummary,
@@ -149,6 +162,24 @@ PORTAL_FILE_HOURLY_LIMIT = int(os.getenv("PORTAL_FILE_HOURLY_LIMIT", "100"))
 # `get_archive` is a tar of up to 25 MiB through that same shared pool. Metering
 # them together would price the cheap verb at the expensive one's rate.
 PORTAL_FILE_DELETE_BURST_LIMIT = int(os.getenv("PORTAL_FILE_DELETE_BURST_LIMIT", "60"))
+
+# ent#676 — the role card's objective read draws on the per-AGENT budget it
+# shares with `GET /api/agents/{name}/objectives`
+# (`services/objectives_read_budget`). A per-VIEWER cap is spent first, so one
+# Workspace viewer takes at most a third of that shared budget and cannot
+# refuse the operator's read or the agent's own `get_objectives` on their own.
+# It is DERIVED from the shared limit, never a second number: a fixed cap would
+# let one viewer empty the budget the day an operator lowered
+# OBJECTIVES_READ_RATE_LIMIT to it. At the default 60 it is 20 a minute, far
+# above a person's use (the card loads once per open).
+PORTAL_ROLE_OBJECTIVES_VIEWER_SHARE = 3
+
+
+def _role_objectives_viewer_limit() -> int:
+    """A third of the shared objectives budget, at least one read."""
+    from services import objectives_read_budget
+    return max(1, objectives_read_budget.OBJECTIVES_READ_RATE_LIMIT
+               // PORTAL_ROLE_OBJECTIVES_VIEWER_SHARE)
 
 _CHAT_LIMIT_DETAIL = "Too many messages to this agent."
 _UPLOAD_LIMIT_DETAIL = "Too many uploads."
@@ -340,7 +371,7 @@ async def portal_auth_exchange(
         actor_ip=request.client.host if request.client else None,
         target_type="portal_client",
         target_id=email or None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"granted": bool(token)},
     )
@@ -424,7 +455,7 @@ async def _audit_client_control(request: Request, current_user: User, action: st
         actor_ip=request.client.host if request.client else None,
         target_type="portal_client",
         target_id=email,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details=outcome,
     )
@@ -675,9 +706,19 @@ async def portal_briefings(
 # chat id in the install (OSS invariant #8). The service's row cap is what bounds
 # writing junk ids instead.
 
-@router.get("/chat-state", response_model=PortalChatState)
-def portal_chat_state(principal: PortalPrincipal = Depends(get_portal_principal)):
-    """Star + unread state for the signed-in viewer's chats, both kinds."""
+@router.get("/chat-state", response_model=PortalChatState,
+            response_model_exclude_none=True)
+def portal_chat_state(previews: bool = Query(False),
+                      principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Star + unread state for the signed-in viewer's chats, both kinds.
+
+    ``previews=true`` (ent#610, the Inbox) adds each unread thread's newest
+    arrival and first unread message id, read in the SAME statement as the
+    counts (`chat_previews`). Without it the payload is the ent#359 shape,
+    unchanged — None fields are dropped, and no entry carries them."""
+    if previews:
+        return chat_previews.get_chat_state_with_previews(
+            principal.email, principal.is_platform)
     return service.get_chat_state(principal.email)
 
 
@@ -753,6 +794,170 @@ async def portal_agent_page(
     )
 
 
+@router.get("/agents/{agent_name}/memory", response_model=PortalAgentMemory)
+def portal_agent_memory(
+    agent_name: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """What this agent remembers about YOU, and what changed it (ent#637).
+
+    A scheduled run addressed to the viewer may now write their memory; this is
+    where they see that it did — which run, when, what it left — and where Undo
+    lives. Roster-gated like every route here; the accessor is keyed on the
+    principal, so there is no way to ask for anyone else's.
+    """
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    return agent_page.memory(agent_name, email)
+
+
+@router.post("/agents/{agent_name}/memory/writes/{write_id}/undo",
+             response_model=PortalMemoryUndo)
+def portal_agent_memory_undo(
+    agent_name: str,
+    write_id: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Revert the viewer's notes to before one write (ent#637).
+
+    Latest-first: a NAMED 409 (`detail.code == "not_latest"` /
+    `"already_undone"`) rather than a silent revert that discards a later
+    change; an unknown id is the uniform 404.
+    """
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_memory_undo:{email}", 30, 60)
+    try:
+        return agent_page.undo_memory_write(agent_name, email, write_id)
+    except agent_page.MemoryUndoRefused as e:
+        raise HTTPException(status_code=e.status_code,
+                            detail={"code": e.code, "message": e.detail})
+
+
+@router.get("/agents/{agent_name}/role", response_model=PortalRoleCard)
+async def portal_agent_role(
+    agent_name: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """The role card (ent#527): a projection of the agent's own files — role,
+    objectives with metric freshness, readiness. `role: null` when the agent
+    carries no `x-role`. Roster-gated like every route here.
+
+    The objectives come from the one objective ↔ metric join (ent#666), which
+    fans out into the agent's container, so this door draws on the budget
+    `GET /api/agents/{name}/objectives` draws on (ent#676). Unlike that door it
+    never answers 429: the card also carries the role, the readiness stamp and
+    the owner's flip, and the agent itself can empty the shared bucket by
+    polling its own objectives. A refused read is a 200 without objectives
+    (`objectives_error: objectives_rate_limited`) and without a fan-out.
+
+    The budget is spent where the fan-out starts, not at this door: the
+    builder calls `admit_objectives` only after the role file has been read,
+    so opening the Info tab of an agent with no role, a stopped agent or a
+    broken role file costs nothing from either bucket.
+    """
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import objectives_read_budget, rate_limiter
+
+    def admit_objectives() -> bool:
+        # Order is load-bearing: the viewer's own cap first, so a viewer past
+        # it spends nothing from the budget the operator door and the agent
+        # share. Both keys are built after the roster gate, on the name it
+        # validated. Neither check raises.
+        return (
+            rate_limiter.check(
+                f"portal_role_objectives:{email}:{agent_name}",
+                _role_objectives_viewer_limit(),
+                objectives_read_budget.OBJECTIVES_READ_RATE_WINDOW,
+            ).allowed
+            and objectives_read_budget.admit(agent_name)
+        )
+
+    return await role_card.build_role_card(
+        agent_name, email, is_platform=principal.is_platform,
+        admit_objectives=admit_objectives)
+
+
+@router.get("/agents/{agent_name}/decisions", response_model=PortalSeatDecisions)
+def portal_seat_decisions(
+    agent_name: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """The seat decision record (ent#638, R25): why things were approved,
+    deferred or killed — own seat always, other seats per ownership or the
+    assignment provider's word. Roster-gated like every route here."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    return seat_decisions.page(agent_name, email, is_platform=principal.is_platform)
+
+
+@router.post("/agents/{agent_name}/decisions", response_model=PortalSeatDecisionResult)
+def portal_seat_decision_record(
+    agent_name: str,
+    body: PortalSeatDecisionRecord,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """The person records a decision for their seat (ent#638). Prose where a
+    field belongs is refused with a receipt naming each field (`decision_prose_only`);
+    no alternatives → `decision_is_a_note`; a direction decision is kept as `routed`
+    with the canon hint."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_seat_decision:{email}", 30, 60)
+    try:
+        return seat_decisions.record(agent_name, email, is_platform=principal.is_platform,
+                                     payload=body.model_dump())
+    except seat_decisions.svc.DecisionRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
+
+
+@router.post("/agents/{agent_name}/decisions/{decision_id}/actions",
+             response_model=PortalSeatDecisionResult)
+def portal_seat_decision_act(
+    agent_name: str,
+    decision_id: str,
+    body: PortalSeatDecisionAction,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """close / reverse / reconfirm / supersede (correct) an ACTIVE decision of
+    the caller's seat — or any seat, for the owner. A non-active target is a
+    NAMED 409 (`decision_not_active`); another seat's id is the uniform 404."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_seat_decision:{email}", 30, 60)
+    try:
+        return seat_decisions.act(agent_name, email, is_platform=principal.is_platform,
+                                  decision_id=decision_id, action=body.action, reason=body.reason,
+                                  review_by=body.review_by, fields=body.fields)
+    except seat_decisions.svc.DecisionRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
+
+
+@router.post("/agents/{agent_name}/role/readiness", response_model=PortalRoleReadiness)
+def portal_agent_role_readiness(
+    agent_name: str,
+    body: PortalRoleReadinessFlip,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """The owner flips a companion `calibrating` ⇄ `ready` (#663). Anyone
+    else — a shared user, an external client — gets a NAMED 403
+    (`readiness_owner_only`); the agent never reaches this door."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_role_readiness:{email}", 20, 60)
+    try:
+        return role_card.flip_readiness(agent_name, email, is_platform=principal.is_platform,
+                                        status=body.status)
+    except role_card.RoleCardRefused as e:
+        raise HTTPException(status_code=e.status_code,
+                            detail={"code": e.code, "message": e.detail})
+
+
 @router.get("/agents/{agent_name}/canvas")
 def portal_agent_canvases(
     agent_name: str,
@@ -771,8 +976,9 @@ def portal_agent_canvases(
     operator-only canvas stays invisible to a rostered client.
     """
     _require_roster(agent_name, principal.email, principal.is_platform)
-    # ent#534: a platform principal reads every audience (they already can on
-    # Agent Detail); an external client stays `roster`-only.
+    # ent#534: a platform principal reads every audience — an operator already
+    # can on Agent Detail, and a Workspace-only `user` keeps the team view by
+    # decision (#837); an external client stays `roster`-only.
     return {"agent_name": agent_name, "canvases": agent_page.canvases(
         agent_name, audience=agent_page.canvas_audience_for(principal.is_platform))}
 
@@ -886,7 +1092,7 @@ async def _audit_canvas_change(request: Request, principal: PortalPrincipal, *,
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details=details,
     )
@@ -1080,8 +1286,18 @@ async def portal_chat(
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
     try:
+        # ent#610 — resolved (and refused, loudly) BEFORE anything is written.
+        reply_context = service.reply_context(
+            agent_name, email, body.session_id, getattr(body, "reply_to_message_id", None))
+        # trinity-enterprise#631 — the people this turn tags, refused by name
+        # BEFORE anything is written (same rule on the streaming path below).
+        person_tags = service.resolve_chat_tags(principal, agent_name, getattr(body, "tags", None))
         result = await service.portal_chat(agent_name, body.message, email, session_id=body.session_id,
                                           include_owned=include_owned,
+                                          # #3265 — resolved against the caller's
+                                          # own uploads before anything is stored.
+                                          attachments=await service.resolve_turn_attachments(
+                                              agent_name, email, getattr(body, "attachments", None)),
                                           new_thread=body.new_thread,
                                           # ent#555 — validated HERE, before it is
                                           # stamped anywhere: the id is
@@ -1091,7 +1307,17 @@ async def portal_chat(
                                               agent_name,
                                               getattr(body, "open_canvas_id", None),
                                               is_platform=principal.is_platform),
-                                          model=requested_model)
+                                          model=requested_model,
+                                          reply_context=reply_context,
+                                          # trinity-enterprise#751: whether this
+                                          # route proved a person (self-approval);
+                                          # #3404: not `is_person` — a
+                                          # delegate-minted session is one, unproven.
+                                          gate_is_person=principal.self_approves,
+                                          gate_credential=principal.credential,
+                                          person_tags=person_tags)
+    except service.ChatTagError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
@@ -1263,7 +1489,7 @@ async def portal_voice_start(
     # The WebSocket's ownership gate (#600) is by platform user id, so the
     # session must carry it — resolved from the same token the principal came
     # from, the way `get_portal_principal` itself does.
-    user = await get_current_user(request, token)
+    user = await resolve_platform_user_unfloored(request, token)  # past the floor: a Workspace door (ent#837)
     from . import voice as workspace_voice
     try:
         result = await workspace_voice.start_workspace_voice(
@@ -1406,6 +1632,55 @@ def portal_rename_session(agent_name: str, session_id: str, body: PortalSessionR
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
+@router.put("/agents/{agent_name}/sessions/{session_id}/archive",
+            response_model=PortalSessionSummary)
+def portal_archive_session(agent_name: str, session_id: str,
+                           principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Close a chat (ent#841): archive it, never delete it. Idempotent."""
+    return _set_session_archived(agent_name, session_id, principal, True)
+
+
+@router.delete("/agents/{agent_name}/sessions/{session_id}/archive",
+               response_model=PortalSessionSummary)
+def portal_unarchive_session(agent_name: str, session_id: str,
+                             principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Reopen a closed chat (ent#841) — the Undo, and opening it from Archived."""
+    return _set_session_archived(agent_name, session_id, principal, False)
+
+
+def _set_session_archived(agent_name: str, session_id: str,
+                          principal: PortalPrincipal, archived: bool):
+    from services import rate_limiter
+
+    # A write, bounded per viewer like rename (one request per click).
+    rate_limiter.enforce(f"portal_archive:{principal.email}", 60, 60)
+    try:
+        return service.set_session_archived(
+            agent_name, principal.email, session_id, archived,
+            include_owned=principal.is_platform)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.get("/agents/{agent_name}/people", response_model=list[TaggablePerson])
+def portal_people(agent_name: str, q: str = Query("", max_length=64),
+                  principal: PortalPrincipal = Depends(get_portal_principal)):
+    """People who can be TAGGED in a chat with this agent (trinity-enterprise#631):
+    accounts on this instance that can already reach it, matching `q`.
+
+    The ent#450 shape: roster-scoped first (uniform 404), a query required,
+    capped, rate-limited — a picker, never a directory. A platform person only:
+    an external client is refused by name (the colleagues it would list are the
+    organisation's, an internal fact — #78)."""
+    from services import rate_limiter
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    rate_limiter.enforce(f"portal_people:{principal.email}", 120, 60)
+    try:
+        return service.chat_people(principal, agent_name, q)
+    except service.ChatTagError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
 @router.get("/agents/{agent_name}/history", response_model=PortalHistory)
 def portal_history(agent_name: str, session_id: str | None = None,
                    limit: int | None = Query(None, ge=1, le=50),
@@ -1428,7 +1703,8 @@ def portal_history(agent_name: str, session_id: str | None = None,
     include_owned = principal.is_platform
     try:
         return service.get_history(agent_name, email, session_id=session_id,
-                                   include_owned=include_owned, limit=limit)
+                                   include_owned=include_owned, limit=limit,
+                                   viewer_is_person=principal.is_person)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
@@ -1664,7 +1940,7 @@ async def _audit_file_event(request: Request, principal: PortalPrincipal,
             target_type="agent",
             target_id=agent_name,
             details=details,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
         )
     except Exception as e:  # noqa: BLE001 — audit is best-effort
@@ -1757,6 +2033,10 @@ async def portal_chat_stream(
         )
 
     try:
+        # ent#610 — same resolution on the streaming path (the ent#555 lesson).
+        reply_context = service.reply_context(
+            agent_name, email, body.session_id, getattr(body, "reply_to_message_id", None))
+        person_tags = service.resolve_chat_tags(principal, agent_name, getattr(body, "tags", None))
         started = await service.start_portal_turn(
             agent_name, body.message, email,
             session_id=body.session_id, include_owned=include_owned,
@@ -1770,7 +2050,17 @@ async def portal_chat_stream(
                 agent_name, getattr(body, "open_canvas_id", None),
                 is_platform=principal.is_platform),
             model=requested_model,   # ent#403, same rule as the flag above
+            reply_context=reply_context,
+            gate_is_person=principal.self_approves,   # trinity-enterprise#751, same rule
+            gate_credential=principal.credential,     # #3404, same rule
+            # #3265 — same resolution as the sync path above.
+            attachments=await service.resolve_turn_attachments(
+                agent_name, email, getattr(body, "attachments", None)),
+            person_tags=person_tags,   # trinity-enterprise#631, same rule
         )
+    except service.ChatTagError as e:
+        idempotency_service.fail(decision)
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
     except ClientPortalError as e:
         idempotency_service.fail(decision)
         raise HTTPException(status_code=e.status_code, detail=e.detail)
@@ -1874,8 +2164,15 @@ async def portal_stream_execution(
         # cleanly (never `error`) when it simply is not streamable. The client
         # reads the persisted reply on `stream_end` either way.
         agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
-        deadline = asyncio.get_event_loop().time() + _STREAM_ATTACH_TIMEOUT_S
         try:
+            # #3114: on a pull pilot the turn can wait on the durable queue
+            # until a worker claims it. Hold while the row is queued; the attach
+            # window below starts from the claim.
+            async for tick in sync_waiter.wait_while_queued(
+                execution_id, pull_queue_allowance(agent_name)
+            ):
+                yield tick
+            deadline = asyncio.get_event_loop().time() + _STREAM_ATTACH_TIMEOUT_S
             async with agent_httpx_client(agent_name, timeout=None) as client:
                 while True:
                     async with client.stream("GET", agent_url) as response:
