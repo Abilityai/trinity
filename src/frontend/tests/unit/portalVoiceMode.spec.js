@@ -489,7 +489,7 @@ describe('the shell: the canvas takes the right column, and navigation waits', (
     // guard (see "leaving the stage mid-call asks first"). Same protection, in
     // words, and nothing else may run before the guard.
     expect(SHELL_CODE).toMatch(/function newChatWithAgent\(name\) \{\s*if \(guardLeaveCall\(\(\) => newChatWithAgent\(name\)\)\) return/)
-    expect(SHELL_CODE).toMatch(/function openThread\(t\) \{\s*if \(guardLeaveCall\(\(\) => openThread\(t\)\)\) return/)
+    expect(SHELL_CODE).toMatch(/function openThread\(t, \{ replace = false \} = \{\}\) \{\s*if \(guardLeaveCall\(\(\) => openThread\(t, \{ replace \}\)\)\) return/)
     // (merge-train 2026-10-06) the continuation re-enters as the RESUMED pass,
     // after a tick — the same event, already `preventDefault`ed by the line
     // above it, must not read as "a nearer owner claimed it" on the way back,
@@ -827,7 +827,7 @@ describe('leaving the stage mid-call asks first', () => {
   })
 
   it('every exit from the stage routes through the one guard, and the guard ends the call through the conversation', () => {
-    for (const fn of ['function newChatWithAgent(name)', 'function openThread(t)', 'function newChat()', 'function openRoom(roomId)', 'function openAgentPage(name)']) {
+    for (const fn of ['function newChatWithAgent(name)', 'function openThread(t, ', 'function newChat()', 'function openRoom(roomId)', 'function openAgentPage(name)']) {
       const at = SHELL.indexOf(fn)
       expect(at, fn).toBeGreaterThan(-1)
       expect(SHELL.slice(at, at + 420), fn).toContain('guardLeaveCall(')

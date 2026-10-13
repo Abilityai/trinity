@@ -208,6 +208,7 @@
       :disabled="voiceCallActive"
       :draft="newChat || bornHere"
       :draft-keys="drafts.keys"
+      :order="tabOrder"
       :busy="sending"
       :close-error="closeError"
       @select="(t) => emit('open-thread', t)"
@@ -1031,6 +1032,9 @@ const props = defineProps({
   // (an ElevenLabs key resolves) — a different fact from `voice_available`,
   // which additionally needs an effective voice to speak WITH.
   agent: { type: Object, required: true },      // {name, owner, avatar_url, description, playbooks, voice_available, stt_available}
+  // trinity-enterprise#856: the shell's arrival snapshot `{ agent, ids }` —
+  // the strip and the chat keys both walk it, so neither re-sorts on a reply.
+  tabOrder: { type: Object, default: null },
   roster: { type: Array, default: () => [] },
   sessionId: { type: String, default: null },   // current thread, or null for a new chat
   // ent#451: a null `sessionId` alone cannot say WHICH kind of "no thread" this
@@ -3246,6 +3250,7 @@ function cycleChat(delta) {
     activeId: currentSessionId.value,
     draft: props.newChat || bornHere.value,
     draftKeys: drafts.keys,
+    order: props.tabOrder,
   })
   if (tabs.length < 2) return
   // The strip's EFFECTIVE selection, the same expression `PortalChatTabs` binds:

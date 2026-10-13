@@ -120,7 +120,7 @@
              its data lands (layout stability). Same box as PortalInboxList's. -->
         <p
           v-if="view.state !== 'ready'"
-          class="shrink-0 px-4 pt-3 pb-2 text-[11px] font-semibold uppercase tracking-wide"
+          class="shrink-0 h-11 px-4"
           aria-hidden="true"
           data-testid="inbox-list-total-reserve"
         >&nbsp;</p>
@@ -158,7 +158,24 @@
           :labels="labels"
           :label="`${tabLabel} items`"
           @open="open"
-        />
+        >
+          <!-- trinity-enterprise#856: Action's order — Newest by default,
+               Urgency on request. In the head line's reserved box; Action only
+               (Unread and All are recency already, T1). -->
+          <template v-if="sort" #head-end>
+            <BaseSelect
+              variant="ghost"
+              class="shrink-0"
+              :model-value="sort"
+              aria-label="Sort asks"
+              data-testid="inbox-sort"
+              @update:model-value="onSort"
+            >
+              <option value="newest">Newest</option>
+              <option value="urgency">Urgency</option>
+            </BaseSelect>
+          </template>
+        </PortalInboxList>
       </div>
 
       <!-- On a phone the columns follow the RESOLVED item, not the key: a key
@@ -199,6 +216,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import BaseButton from '@/components/base/BaseButton.vue'
+import BaseSelect from '@/components/base/BaseSelect.vue'
 import OverflowTabs from '@/components/OverflowTabs.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
@@ -215,7 +233,10 @@ import {
   stableRows, emptyVisit, isGhost, resolveItem, parseItemKey, listHeadLabel,
   markAllLabel, markAllConfirm, allFooterNotes, pageWindow, PAGE_SIZE, inboxLayout, listHeadExact,
   INBOX_TAB_SHELL, agentFacets, filterByAgent, activeAgentFilter, normalizeFrom, FROM_ALL,
+  inboxSortFor, normalizeInboxSort, loadInboxSort, saveInboxSort,
 } from './portalInbox'
+import { safeStorage } from '@/utils/safeStorage'
+import { resolveLayoutIdentity } from '@/composables/useColumnResize'
 import { askBadgeTitle, unreadBadgeTitle } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
 
@@ -325,7 +346,13 @@ const tabStrip = computed(() => [
 // §3g C2: `?from=` narrows Action to one agent. It holds while that agent has
 // asks, or while its just-ended ask is the one selected (read from the asks
 // list by key, so this never depends on the rows it filters).
-const actionBase = computed(() => actionItems(store.openAsks))
+// trinity-enterprise#856: Action's order. `?sort=` first, then this viewer's
+// remembered choice (bucketed like the column widths, so a shared browser does
+// not hand one person's choice to the next), then Newest. Null off Action.
+const sortViewer = resolveLayoutIdentity(safeStorage())
+const storedSort = ref(loadInboxSort(safeStorage(), sortViewer))
+const sort = computed(() => inboxSortFor(tab.value, route.query.sort, storedSort.value))
+const actionBase = computed(() => actionItems(store.openAsks, undefined, sort.value || undefined))
 const fromQuery = computed(() => (tab.value === 'action' ? normalizeFrom(route.query.from) : null))
 const selectedAsk = computed(() => {
   const p = parseItemKey(selectedKey.value)
@@ -413,9 +440,27 @@ watch(fromQuery, async (q) => {
 }, { immediate: true })
 // A2 r1 (QA N1): `?from=` narrows Action only — on another tab (a deep link,
 // a hand-edited URL) it is ignored, so it leaves the URL rather than lingering.
-watch(() => tab.value !== 'action' && route.query.from !== undefined, (stray) => {
-  if (stray) replaceQuery({ from: undefined })
+// trinity-enterprise#856: the same for `?sort=` — off Action, or a value that is
+// not one of the two orders. ONE watcher returns both stray keys, so one
+// replace clears both: two replaces in a tick each spread the same stale
+// query, and the second would put the first's key back.
+watch(() => {
+  const stray = []
+  if (tab.value !== 'action' && route.query.from !== undefined) stray.push('from')
+  if (route.query.sort !== undefined
+    && (tab.value !== 'action' || !normalizeInboxSort(route.query.sort))) stray.push('sort')
+  return stray.join(',')
+}, (stray) => {
+  if (stray) replaceQuery(Object.fromEntries(stray.split(',').map((k) => [k, undefined])))
 }, { immediate: true })
+// A change writes both the URL (replace — never a history entry) and the memory.
+function onSort(v) {
+  const next = normalizeInboxSort(v)
+  if (!next || next === sort.value) return
+  storedSort.value = next
+  saveInboxSort(safeStorage(), sortViewer, next)
+  replaceQuery({ sort: next })
+}
 onBeforeUnmount(() => emit('update:preview', null))
 
 // Principle 5 (§3g S1): the rows of one TAB VISIT keep their place — a row
@@ -430,7 +475,9 @@ onBeforeUnmount(() => emit('update:preview', null))
 let visit = { tab: null, ...emptyVisit() }
 const visitEpoch = ref(0)
 function newVisit() { visit = { tab: null, ...emptyVisit() }; visitEpoch.value++ }
-const visitKey = computed(() => `${tab.value}|${activeFrom.value || ''}`)
+// trinity-enterprise#856: and so is the sort (Action only — null elsewhere): a
+// sort change re-sorts the rows on the click, then they hold still again.
+const visitKey = computed(() => `${tab.value}|${activeFrom.value || ''}|${sort.value || ''}`)
 const live = {
   thread: (id) => props.threads.find((t) => (t.id || t.session_id) === id) || null,
   ask: (id) => store.asks.find((a) => a.id === id) || null,
@@ -649,7 +696,7 @@ function onTab(next) {
   droppedFrom.value = null
   keptFrom.value = null
   if (next === tab.value) { newVisit(); return }
-  replaceQuery({ tab: next, item: undefined, from: undefined })
+  replaceQuery({ tab: next, item: undefined, from: undefined, sort: undefined })
 }
 
 // Back (D12). Focus can only land once the list column is shown again: the

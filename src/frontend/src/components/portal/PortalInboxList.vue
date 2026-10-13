@@ -14,11 +14,18 @@
 -->
 <template>
   <div class="flex flex-col min-h-0 h-full">
-    <p
-      class="shrink-0 px-4 pt-3 pb-2 text-[11px] font-semibold uppercase tracking-wide tabular-nums text-gray-500 dark:text-gray-400"
-      :title="headExact || undefined"
-      data-testid="inbox-list-total"
-    ><span :aria-hidden="headExact ? 'true' : undefined">{{ head }}</span><span v-if="headExact" class="sr-only">{{ headExact }}</span></p>
+    <!-- trinity-enterprise#856: the head line is one fixed 44px box — the
+         ghost select's own height — so a control in `#head-end` (Action's sort)
+         fits inside it, and the line is the same box with or without one. The
+         Inbox's loading reserve draws the same box (PortalInbox.vue). -->
+    <div class="shrink-0 h-11 px-4 flex items-center justify-between gap-2" data-testid="inbox-list-head">
+      <p
+        class="min-w-0 truncate text-[11px] font-semibold uppercase tracking-wide tabular-nums text-gray-500 dark:text-gray-400"
+        :title="headExact || undefined"
+        data-testid="inbox-list-total"
+      ><span :aria-hidden="headExact ? 'true' : undefined">{{ head }}</span><span v-if="headExact" class="sr-only">{{ headExact }}</span></p>
+      <slot name="head-end" />
+    </div>
     <!-- `relative`: each ask row's spoken kind is `sr-only` (absolute). With no
          positioned ancestor it escaped this scroll box and stretched the PAGE
          to the list's full height, so the whole shell scrolled away (sign-off). -->
