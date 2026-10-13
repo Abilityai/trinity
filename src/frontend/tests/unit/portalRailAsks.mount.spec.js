@@ -124,6 +124,40 @@ describe('ent#892 — the Asks tab body with nothing waiting', () => {
   })
 })
 
+describe('the Asks tab body after a failed refresh', () => {
+  it('keeps the rows and raises the stale banner, with a retry', async () => {
+    store.asksFailed = true                                         // asksLoaded stays true
+    const fetchAsks = vi.spyOn(store, 'fetchAsks').mockResolvedValue([])
+    const w = mount(PortalRailAsks, { props: { participants: ['scout'] }, global: { plugins: [router] } })
+    await flushPromises()
+    const banner = w.find('[data-testid="portal-rail-asks-stale"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain("Couldn't refresh your asks")
+    expect(w.findAll('a[data-testid^="portal-rail-ask-"]')).toHaveLength(2)
+    expect(w.text()).not.toContain("Couldn't load asks")             // not the first-read LoadFailed
+    await banner.findAll('button').find((b) => b.text() === 'Try again').trigger('click')
+    expect(fetchAsks).toHaveBeenCalled()
+  })
+
+  it('over an empty list the banner sits above the empty state, and goes once a read succeeds', async () => {
+    store.asks = [ask('done', 'quiet', { status: 'answered' })]
+    store.asksFailed = true
+    const w = mount(PortalRailAsks, { props: { participants: ['quiet'] }, global: { plugins: [router] } })
+    await flushPromises()
+    expect(w.find('[data-testid="portal-rail-asks-stale"]').exists()).toBe(true)
+    expect(w.find('[data-testid="portal-rail-asks-empty"]').exists()).toBe(true)
+    store.asksFailed = false
+    await flushPromises()
+    expect(w.find('[data-testid="portal-rail-asks-stale"]').exists()).toBe(false)
+  })
+
+  it('no banner when the last read succeeded', async () => {
+    const w = mount(PortalRailAsks, { props: { participants: ['scout'] }, global: { plugins: [router] } })
+    await flushPromises()
+    expect(w.find('[data-testid="portal-rail-asks-stale"]').exists()).toBe(false)
+  })
+})
+
 describe('the Asks tab body', () => {
   it('lists the agent\'s open asks in Action order, each a link into the Inbox at that ask', async () => {
     const w = mount(PortalRailAsks, { props: { participants: ['scout'] }, global: { plugins: [router] } })

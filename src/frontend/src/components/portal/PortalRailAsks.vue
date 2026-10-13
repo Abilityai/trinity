@@ -31,8 +31,21 @@
       @retry="portal.fetchAsks()"
     />
 
+    <template v-else>
+    <!-- A failed REFRESH keeps what loaded and says so (#1926, ent#253) — the
+         rail's other feeds do the same (Canvas, Files, Loops). -->
+    <InlineError
+      v-if="view.stale && !staleDismissed"
+      class="mb-2"
+      :message="staleText"
+      retryable
+      data-testid="portal-rail-asks-stale"
+      @retry="portal.fetchAsks()"
+      @dismiss="staleDismissed = true"
+    />
+
     <!-- Empty state that teaches (principle 16): the agent's asks home. -->
-    <div v-else-if="view.state === 'empty'" class="py-8 text-center" data-testid="portal-rail-asks-empty">
+    <div v-if="view.state === 'empty'" class="py-8 text-center" data-testid="portal-rail-asks-empty">
       <p class="text-sm font-semibold">{{ empty.title }}</p>
       <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400 max-w-[36ch] mx-auto">{{ empty.body }}</p>
       <BaseButton size="sm" variant="secondary" class="mt-4" data-testid="portal-rail-asks-open-inbox" @click="openInbox">
@@ -72,26 +85,28 @@
       </ul>
     </template>
     </template>
+    </template>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import BaseButton from '@/components/base/BaseButton.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
+import InlineError from '@/components/InlineError.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import PortalAsksWaitingLine from './PortalAsksWaitingLine.vue'
 import { railAskItems, askInboxRoute, railAsksView, ASKS_TAB_ID } from './portalRailAsks'
 import { RAIL_TABS, railEmptyCopy } from './portalRail'
-import { asksHomeRoute } from './portalUtils'
+import { asksHomeRoute, relativeTime } from './portalUtils'
 import { agentLabels } from './portalInbox'
 import { askKindIcon } from './portalAskUrgency'
-import { relativeTime } from './portalUtils'
 import { queueTypeLabel } from '@/utils/operatorQueue'
 import { formatLocalDateTime } from '@/utils/timestamps'
+import { staleBannerMessage } from '@/utils/loadingState'
 
 const props = defineProps({
   participants: { type: Array, default: () => [] },
@@ -109,6 +124,11 @@ const view = computed(() => railAsksView({
   asksFailed: portal.asksFailed,
   count: items.value.length,
 }))
+// The stale banner: dismissible, back on the next failed refresh; a read that
+// succeeds clears it by itself (`asksFailed` drops, so `view.stale` does).
+const staleDismissed = ref(false)
+watch(() => portal.asksFailed, (failed) => { if (failed) staleDismissed.value = false })
+const staleText = computed(() => staleBannerMessage('your asks', portal.asksLoadedAt))
 const empty = computed(() => railEmptyCopy(RAIL_TABS.find((t) => t.id === ASKS_TAB_ID), props.participants))
 // A 1:1 opens the Inbox filtered to its agent; a room, the whole Action list.
 function openInbox() {
