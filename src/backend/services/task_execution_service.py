@@ -1486,6 +1486,9 @@ class TaskExecutionService:
         # splats straight into this signature — an unaccepted keyword here is a
         # TypeError on every Workspace turn, not a silently-dropped column.
         source_channel_client: Optional[str] = None,
+        # trinity#3653: the agent whose channel binding owns the context, for a
+        # row that is not that agent's direct turn (a gated request's wake-up).
+        source_channel_agent: Optional[str] = None,
         # trinity-enterprise#838: a keyless trusted-network A2A caller's address,
         # stamped on the row as its attribution.
         source_host: Optional[str] = None,
@@ -1606,6 +1609,7 @@ class TaskExecutionService:
                     # persisting it would leave `_resolve_portal` failing closed on
                     # every row this branch creates — the sync Workspace turn.
                     source_channel_client=source_channel_client,
+                    source_channel_agent=source_channel_agent,
                     source_host=source_host,
                     chain_depth=chain_depth,
                 ),

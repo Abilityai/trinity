@@ -277,7 +277,7 @@ async def enforce(
         requester_mcp_key_id=requester.mcp_key_id,
         origin_execution_id=origin_execution_id,
         triggered_by=triggered_by,
-        dispatch=dict(dispatch or {}),
+        dispatch={**dict(dispatch or {}), **_requester_chat(requester)},
     )
     if not created:   # a concurrent call for the same occurrence won
         raise _answer_for_record(record, role)
@@ -1250,6 +1250,9 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "source_channel_chat_id": FREEZE,
     "source_channel_thread": FREEZE,
     "source_channel_client": FREEZE,
+    # trinity#3653: set on a requester's wake-up only; an approved run is the
+    # requester's own request and never carries a binding agent of its own.
+    "source_channel_agent": DROP,
     # trinity-enterprise#838: a keyless trusted-network caller's address — the
     # run's attribution when there is no user or key, so an approved replay
     # stays attributed to the same host.
@@ -1295,6 +1298,43 @@ def frozen_dispatch(**fields: Any) -> Dict[str, Any]:
 # beside the frozen fields; a record without them replays `request_text`.
 REPLAY_MESSAGE = "replay_message"
 REPLAY_SYSTEM_PROMPT = "replay_system_prompt"
+
+
+# trinity#3653: the chat the requesting agent was answering when it asked, kept
+# in the record's `dispatch` beside the frozen fields and read only by the
+# requester's wake-up — never replayed to the approved run.
+REQUESTER_CHAT = "requester_chat"
+
+
+def _requester_chat(requester: Requester) -> Dict[str, Dict[str, str]]:
+    """The chat an agent requester's turn is answering, as `execute_task`
+    keywords under `REQUESTER_CHAT`; empty when there is none to trust.
+
+    Read NOW, while the turn runs, under the rule channel inheritance uses
+    (`chat_execution_service._inherited_channel_context`): the turn is the
+    agent's own and still `running`. An agent can cite any of its past turns as
+    its own, and a finished one would address the outcome to whoever that turn
+    was for. Never raises."""
+    if not (requester.agent_name and requester.execution_id):
+        return {}
+    try:
+        turn = db.get_execution(requester.execution_id)
+        if (turn is None or getattr(turn, "agent_name", None) != requester.agent_name
+                or str(getattr(turn, "status", "") or "").lower() != "running"
+                or not getattr(turn, "source_channel", None)
+                or not getattr(turn, "source_channel_chat_id", None)):
+            return {}
+        chat = {
+            "source_channel": turn.source_channel,
+            "source_channel_chat_id": turn.source_channel_chat_id,
+            "source_channel_thread": getattr(turn, "source_channel_thread", None),
+            "source_channel_client": getattr(turn, "source_channel_client", None),
+            "source_channel_agent": getattr(turn, "source_channel_agent", None)
+            or requester.agent_name,
+        }
+        return {REQUESTER_CHAT: {k: v for k, v in chat.items() if v is not None}}
+    except Exception:  # noqa: BLE001 — provenance never fails the gate
+        return {}
 
 
 def frozen_replay(message: Optional[str], system_prompt: Optional[str] = None) -> Dict[str, str]:
@@ -1909,8 +1949,11 @@ async def _notify(record: Dict[str, Any], outcome: str, *, decider: Optional[str
     try:
         if delivery == OUTCOME_DELIVERY_AGENT_TASK:
             # #715: an agent learns the outcome, never which person decided it.
+            # trinity#3653: "approved, now running" is not an ending, and a
+            # report in the person's chat reads as one.
             await _wake_requester_agent(record, outcome_text(
-                record, outcome, execution_id=execution_id, detail=detail, reason=reason))
+                record, outcome, execution_id=execution_id, detail=detail, reason=reason),
+                to_chat=outcome != "approved")
         elif asker and not (decided_own and outcome in _SELF_EVIDENT_OUTCOMES):
             _note_to_person(record, record["requester_email"], outcome, text)
         if notify_decider and decider and not decided_own:   # one notice per person
@@ -1971,11 +2014,16 @@ async def _audit_outcome(record: Dict[str, Any], outcome: str, *, decider: Optio
         logger.warning("[SkillGate] outcome audit failed for %s", record["request_id"], exc_info=True)
 
 
-async def _wake_requester_agent(record: Dict[str, Any], text: str) -> None:
+async def _wake_requester_agent(record: Dict[str, Any], text: str, *,
+                                to_chat: bool = True) -> None:
+    """Run the requesting agent on `text`. With `to_chat`, in the chat it was
+    answering when it asked (`REQUESTER_CHAT`), so its reply is reported there
+    like any background completion (trinity#3653)."""
     import asyncio
     from services.task_execution_service import get_task_execution_service
 
     frozen = record.get("dispatch") or {}
+    chat = (frozen.get(REQUESTER_CHAT) or {}) if to_chat else {}
 
     async def _run():
         try:
@@ -1984,6 +2032,7 @@ async def _wake_requester_agent(record: Dict[str, Any], text: str) -> None:
                 message=text,
                 triggered_by=SKILL_GATE_TRIGGER,
                 chain_depth=frozen.get("chain_depth"),
+                **chat,
             )
         except Exception:  # noqa: BLE001 — a stopped requester misses it; the record stands
             logger.info("[SkillGate] requester %s not woken for %s",

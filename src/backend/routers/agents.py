@@ -1515,7 +1515,8 @@ async def send_voice_reply_endpoint(
     # completion report (consent-gated, ent#224/ent#265) can find the way back.
     # It must not speak into that conversation itself — this route has no
     # proactive-consent check. `source_channel_agent` is set by inheritance and
-    # by nothing else (`turn_audience._is_delegated`), so non-NULL = inherited.
+    # by a gated request's wake-up (`turn_audience._is_delegated`), so non-NULL
+    # = inherited.
     if getattr(execution, "source_channel_agent", None):
         return {"delivered": False, "channel": channel, "reason": "delegated_turn"}
     if channel == app_config.PORTAL_SOURCE_CHANNEL:
