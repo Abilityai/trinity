@@ -94,6 +94,11 @@ def _response(status=200, text="FILE-BODY", json_body=None):
 def agent(monkeypatch):
     """Every gate's inputs stubbed; the agent answers 200 with FILE-BODY."""
     monkeypatch.setattr(files.db, "can_user_access_agent", lambda u, a: True)
+    # trinity-enterprise#629 (#3346): an agent key also needs reach to the agent.
+    # These tests are about the owner tier, so the "sibling" key holds a
+    # permission edge; reach refusal on the file routes is pinned in
+    # test_ent629_agent_reach.py.
+    monkeypatch.setattr(files, "agent_may_reach", lambda u, a, **kw: True)
     # role-aware: the admin bypass lives inside can_user_share_agent
     monkeypatch.setattr(
         files.db, "can_user_share_agent", lambda u, a: u in (OWNER, ADMIN)
