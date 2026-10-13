@@ -203,7 +203,10 @@ class TestTheMachineView:
         row = _read(_client(), route, uid)
         # #3242: plus the sink's own "decided by its options" predicate — a bare
         # boolean derived for the person's answer controls, never a column.
-        assert set(row) == MACHINE_ROW_KEYS | WITHHELD | {"decided_by_options"}
+        # trinity-enterprise#755: and `gate`, the gated-skill approval card's
+        # view, derived the same way (None on a row the gate did not raise).
+        assert set(row) == MACHINE_ROW_KEYS | WITHHELD | {"decided_by_options", "gate"}
+        assert row["gate"] is None
         assert (row["responded_by_email"], row["responded_by_id"], row["addressed_to_email"],
                 row["disposed_by_email"], row["resolved_to"]) == (
             OP_EMAIL, "7", FOR_EMAIL, OP_EMAIL, [RESOLVED_EMAIL])

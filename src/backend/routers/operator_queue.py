@@ -33,7 +33,7 @@ from dependencies import (
 from db_models import User
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.operator_queue_choices import ReservedAnswerError, ResponseNotOfferedError
-from services import ask_service, operator_queue_service
+from services import ask_service, operator_queue_service, skill_gate_service
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +168,13 @@ def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict
         # #3242: whether the reserved "(something else)" answer applies — the
         # sink's own predicate, so no operator surface offers a chip that 422s.
         # A bare boolean; the machine view never needs it (it cannot answer).
-        return [{**item, "decided_by_options": ask_service.decided_by_options(item)}
+        # trinity-enterprise#755: `gate` is the gated-skill approval card's
+        # platform view (None for every other row) — who asked, who it waits
+        # on, whether THIS person may decide, how it ended.
+        return [{**item, "decided_by_options": ask_service.decided_by_options(item),
+                 "gate": skill_gate_service.card_view(
+                     item, viewer_email=current_user.email, with_run_ids=True,
+                     name_approvers=True)}
                 for item in items]
     # #715: the platform's heads-ups ABOUT a person (a client's complaint, the
     # client addresses behind a shared inbox) are the operator's, not a machine's.

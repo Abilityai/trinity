@@ -127,7 +127,8 @@ Sign-in / reload on bare /workspace
               in flight is dropped; the pane passes show-urgency (priority + expiry
               badges in the card header, portalAskUrgency's row rule, 30 s clock) and
               agent-label ("<display name> recommends"); order inside the card: body
-              (PortalMarkdown) → QueueProposal → QueueBrief lead (Why now → "{agent}
+              (PortalMarkdown) → QueueProposal (a gated-skill approval: GatedSkillRequest,
+              ent#755, skill-gate.md §7) → QueueBrief lead (Why now → "{agent}
               recommends") → options (stacked with an impact hint when the brief has one)
               → answer row → QueueBrief fallback ("If you don't answer by …") — the brief
               is the E2 seam, fixture-tested; L8 supplies it
