@@ -31,10 +31,21 @@ _HOST_RE = re.compile(
 
 
 def is_enabled() -> bool:
-    """The prototype flag. Default OFF."""
+    """The prototype flag. Default OFF.
+
+    Fail-closed: a flag that cannot be read is OFF, the same direction
+    `get_issuer` takes on an unreadable issuer. The card builder (ent#180, the
+    one place every card is produced) and the bearer-less 401 both consult
+    this on dev's paths, and both must keep answering dev's bytes when the
+    AAuth configuration is unreadable rather than 5xx — AAuth is then inert,
+    never half-on (#3644).
+    """
     from services.settings_service import settings_service
 
-    return settings_service._resolve_bool_flag(FLAG_SETTING, FLAG_ENV, default=False)
+    try:
+        return bool(settings_service._resolve_bool_flag(FLAG_SETTING, FLAG_ENV, default=False))
+    except Exception:  # noqa: BLE001 — an unreadable flag means "not enabled"
+        return False
 
 
 def normalize_issuer(value: Optional[str]) -> Optional[str]:

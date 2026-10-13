@@ -691,6 +691,13 @@ async def fetch_card_for(
     so a 404-triggered fallback would never fire). Same pin, same caps, same
     uncredentialed fetch — only the path differs. Bearer endpoints keep the
     origin-only rule.
+
+    Overlap (#3644 review I2): since trinity-enterprise#838 `fetch_card`'s own
+    `_card_urls_for` already tries the own-path card before the origin, so for
+    an `aauth` endpoint this wrapper's fallback re-fetches the own-path URL once
+    more before the origin, and falls back on any `card_http_error` status where
+    `fetch_card` moves on only on 404. Left as is deliberately; collapsing it
+    onto `fetch_card` is a follow-up.
     """
     parts = urlsplit(validated.url)
     base_path = (parts.path or "").rstrip("/")
