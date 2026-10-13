@@ -1372,3 +1372,107 @@ describe('Action narrowed to one agent (§3g C2, ?from=)', () => {
     expect(facetsTabs(w).exists()).toBe(false)
   })
 })
+
+describe('trinity-enterprise#856 — Action\'s sort: Newest by default, Urgency on a switch', () => {
+  // Newest and Urgency disagree: the old ask is critical and expires today.
+  const OLD_URGENT = () => ask('old', { priority: 'critical', created_at: iso(300), expires_at: new Date(NOW + 2 * 3600_000).toISOString() })
+  const NEW_PLAIN = () => ask('new', { priority: 'medium', created_at: iso(2) })
+  const rows = (w) => w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))
+  const sortSelect = (w) => w.find('[data-testid="inbox-sort"]')
+  const KEY = 'trinity-workspace-inbox-sort:ada@example.com'
+  beforeEach(() => {
+    localStorage.setItem('auth0_user', JSON.stringify({ email: 'ada@example.com' }))
+    store.asks = [OLD_URGENT(), NEW_PLAIN()]
+    store.asksLoaded = true
+  })
+
+  it('opens Newest first, and the control names that order', async () => {
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    expect(rows(w)).toEqual(['ask:new', 'ask:old'])
+    expect(sortSelect(w).exists()).toBe(true)
+    expect(sortSelect(w).element.value).toBe('newest')
+    expect(sortSelect(w).attributes('aria-label')).toBe('Sort asks')
+    expect(sortSelect(w).findAll('option').map((o) => o.text())).toEqual(['Newest', 'Urgency'])
+  })
+
+  it('switching to Urgency re-sorts, writes ?sort= by replace, and remembers it for this viewer', async () => {
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    const push = vi.spyOn(router, 'push')
+    await sortSelect(w).setValue('urgency')
+    await flushPromises()
+    expect(router.currentRoute.value.query.sort).toBe('urgency')
+    expect(push).not.toHaveBeenCalled()
+    expect(localStorage.getItem(KEY)).toBe('urgency')
+    expect(rows(w)).toEqual(['ask:old', 'ask:new'])
+    expect(sortSelect(w).element.value).toBe('urgency')
+  })
+
+  it('?sort= in the URL wins over the memory; the memory wins over the default', async () => {
+    localStorage.setItem(KEY, 'urgency')
+    let w = await mountInbox({}, { query: { tab: 'action' } })
+    expect(rows(w)).toEqual(['ask:old', 'ask:new'])          // memory
+    w.unmount()
+    w = await mountInbox({}, { query: { tab: 'action', sort: 'newest' } })
+    expect(rows(w)).toEqual(['ask:new', 'ask:old'])          // URL
+    expect(localStorage.getItem(KEY)).toBe('urgency')         // a link does not overwrite the memory
+  })
+
+  it('another viewer on the same browser does not inherit the choice', async () => {
+    localStorage.setItem(KEY, 'urgency')
+    localStorage.setItem('auth0_user', JSON.stringify({ email: 'bob@example.com' }))
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    expect(rows(w)).toEqual(['ask:new', 'ask:old'])
+  })
+
+  it('an unknown ?sort= is ignored and leaves the URL', async () => {
+    const w = await mountInbox({}, { query: { tab: 'action', sort: 'loudest' } })
+    expect(rows(w)).toEqual(['ask:new', 'ask:old'])
+    expect(router.currentRoute.value.query.sort).toBeUndefined()
+  })
+
+  it('Unread and All have no sort control, and a stray ?sort= leaves the URL (T1)', async () => {
+    for (const tab of ['unread', 'all']) {
+      const w = await mountInbox({}, { query: { tab, sort: 'urgency' } })
+      expect(sortSelect(w).exists()).toBe(false)
+      expect(router.currentRoute.value.query.sort).toBeUndefined()
+      w.unmount()
+    }
+  })
+
+  it('a sort change is a new visit: held rows re-sort on the click, and only then', async () => {
+    store.asks = [ask('a1', { created_at: iso(30) }), ask('a2', { created_at: iso(5) })]
+    const w = await mountInbox({}, { query: { tab: 'action', sort: 'urgency' } })
+    expect(rows(w)).toEqual(['ask:a1', 'ask:a2'])            // equal priority: the longest-waiting first
+    // A poll raises a2 to critical: the visit holds still (principle 5).
+    store.asks = [ask('a1', { created_at: iso(30) }), ask('a2', { priority: 'critical', created_at: iso(5) })]
+    await flushPromises()
+    expect(rows(w)).toEqual(['ask:a1', 'ask:a2'])
+    await sortSelect(w).setValue('newest'); await flushPromises()
+    expect(rows(w)).toEqual(['ask:a2', 'ask:a1'])
+    await sortSelect(w).setValue('urgency'); await flushPromises()
+    expect(rows(w)).toEqual(['ask:a2', 'ask:a1'])            // a fresh visit sees the critical ask
+  })
+
+  it('the row marks that say WHY render in both orders (B7)', async () => {
+    for (const sort of ['newest', 'urgency']) {
+      const w = await mountInbox({}, { query: { tab: 'action', sort } })
+      const old = w.find('[data-testid="inbox-row-ask:old"]')
+      expect(old.find('[data-testid="inbox-row-badge-priority"]').exists()).toBe(true)
+      expect(old.find('[data-testid="inbox-row-badge-expiry"]').exists()).toBe(true)
+      w.unmount()
+    }
+  })
+
+  it('the head line keeps one box on every tab and in every state', async () => {
+    // The control lives inside the line's reserved 44px box, so switching tab
+    // (control on/off) or landing data (reserve → list) moves nothing.
+    store.asksLoaded = false
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    const box = (el) => el.classes().filter((c) => /^(h-|min-h-|py-|pt-|pb-)/.test(c)).sort()
+    const reserve = box(w.find('[data-testid="inbox-list-total-reserve"]'))
+    store.asksLoaded = true
+    await flushPromises()
+    expect(box(w.find('[data-testid="inbox-list-head"]'))).toEqual(reserve)
+    expect(reserve).toContain('h-11')
+  })
+})
