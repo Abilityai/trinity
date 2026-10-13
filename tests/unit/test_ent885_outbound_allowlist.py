@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -98,8 +99,8 @@ def test_a_host_on_the_list_is_registered_and_called(tailnet_dns, admin_list, en
         record = a2a_outbound.upsert_endpoint("tail-peer", PEER_URL, None)
     except a2a_outbound.EndpointValidationError as exc:
         pytest.fail(f"a listed host was refused at register time: {exc}")
-    assert "peer.tail1234.ts.net" in str(getattr(record, "url", record))
-    assert stored and any("peer.tail1234.ts.net" in str(r) for r in stored[-1])
+    assert urlsplit(record["url"]).hostname == "peer.tail1234.ts.net"
+    assert stored and any(urlsplit(r["url"]).hostname == "peer.tail1234.ts.net" for r in stored[-1])
     validated = _call_time(PEER_URL)
     assert validated.addresses == (PEER_ADDR,) and validated.port == 80
 
