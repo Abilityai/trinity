@@ -76,6 +76,8 @@ _NEXT_STEP = {
     "expired": "The interaction expired before it was approved. Call again without a handle to start over.",
     "gone": "This pending interaction is gone and must not be polled again. Start a fresh request if your owner wants to.",
     "slow_down": "The person server asked for a slower poll; wait `interaction.retry_after` seconds, then resume.",
+    "slow_down_new": ("The person server asked for a slower pace before any interaction was started; there is "
+                      "nothing to resume — wait a little, then call again WITHOUT a handle."),
     "pending_unknown": "No pending interaction under that handle (it may have expired). Call again without a handle.",
     "too_many_pending": "This agent already has the maximum number of open interactions; resume or let them expire first.",
     "signature_rejected": "The person server rejected this instance's signature; tell your operator (nothing you do will change it).",
@@ -89,7 +91,10 @@ def _next_step(outcome: pt.Outcome) -> str:
         return _NEXT_STEP["issued"]
     if isinstance(outcome, pt.PendingInteraction):
         return _NEXT_STEP["slow_down"] if outcome.status == "slow_down" else _NEXT_STEP["pending"]
-    return _NEXT_STEP.get(outcome.code, "The person server refused; tell your operator the reason and do not retry blindly.")
+    # A 429 on the initial POST is a refusal with no handle and no interaction,
+    # so it must not point at `interaction.retry_after` (review I1).
+    code = "slow_down_new" if outcome.code == "slow_down" else outcome.code
+    return _NEXT_STEP.get(code, "The person server refused; tell your operator the reason and do not retry blindly.")
 
 
 def _response(outcome: pt.Outcome) -> PersonTokenResponse:
@@ -111,6 +116,14 @@ def _response(outcome: pt.Outcome) -> PersonTokenResponse:
 
 
 def _require_live() -> None:
+    """Gate 1, as a DEPENDENCY so it runs before the body is validated.
+
+    FastAPI solves every `Depends` before it validates body params, so with the
+    flag off a malformed body answers the same uniform 404 as a good one — an
+    inline call in the handler would let a 422 reveal the route exists while
+    inert (review I4). It is declared after `get_current_user` in the
+    signature, so an unauthenticated caller still sees 401 first.
+    """
     if not aauth_config.active_issuer():
         raise HTTPException(status_code=404, detail="Not found")
 
@@ -135,9 +148,9 @@ async def request_person_token(
     body: PersonTokenRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    _live: None = Depends(_require_live),
 ):
     """Obtain a person token for `body.resource` as `agent_name`, or resume a pending binding."""
-    _require_live()
     _assert_own_key(current_user, agent_name)
 
     resuming = body.pending_handle is not None

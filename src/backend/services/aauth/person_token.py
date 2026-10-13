@@ -139,9 +139,9 @@ _held: Dict[Tuple[str, str, str, str], HeldPersonToken] = {}
 # Redis-backed pending records
 # --------------------------------------------------------------------------- #
 def _get_redis():
-    from services.rate_limiter import _get_redis as get
+    from services import rate_limiter
 
-    return get()
+    return rate_limiter.redis_client()
 
 
 def _h(text: str) -> str:
@@ -589,6 +589,9 @@ async def _resume_record(agent_name: str, handle: str, record: Dict[str, Any], *
             _save_record(redis, handle, record, now=now)
         except Exception:  # noqa: BLE001 — the record still stands until its TTL
             logger.warning("[aauth] could not refresh pending interaction for %s", agent_name, exc_info=True)
+            # The PS's interval was not persisted, so the early-poll guard will
+            # not hold the next resume back; tell the client to back off itself.
+            return _as_pending(handle, record, status="slow_down")
         return _as_pending(handle, record)
     refused = _refusal(resp, resource=resource, ps_issuer=ps_issuer)
     if refused.code == "slow_down":
@@ -597,8 +600,8 @@ async def _resume_record(agent_name: str, handle: str, record: Dict[str, Any], *
         record["next_poll_at"] = now + record["retry_after"]
         try:
             _save_record(redis, handle, record, now=now)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — the backed-off interval still reaches the client below
+            logger.warning("[aauth] could not persist the slow-down for %s", agent_name, exc_info=True)
         return _as_pending(handle, record, status="slow_down")
     if refused.code in TERMINAL_REFUSALS:
         _delete_record(redis, handle, record)

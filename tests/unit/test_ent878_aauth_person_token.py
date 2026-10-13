@@ -325,6 +325,29 @@ def test_min_remaining_keeps_a_chain_on_one_key(harness):
     assert signer.agent_token_info(AGENT, now=NOW + 3600).thumbprint != first.thumbprint
 
 
+def test_min_remaining_is_honoured_against_the_window_end_on_a_cache_hit(harness):
+    # Review F1: the cache is POPULATED with window N's key (minted mid-window
+    # by an earlier, unrelated call). A chain starting 600 s before the window
+    # ends and asking for 1200 s must not be handed it — it would retire at
+    # the boundary mid-chain — so it mints N+1 and every later step, on either
+    # side of the boundary, signs with that one key.
+    first = signer.agent_token_info(AGENT, now=NOW + 2500)
+    assert signer.current_agent_key(AGENT, now=NOW + 3000, min_remaining=500)[1] == first.thumbprint  # fits
+    _, t_chain = signer.current_agent_key(AGENT, now=NOW + 3000, min_remaining=1200)
+    assert t_chain != first.thumbprint
+    assert signer.key_window(NOW + 3000, 1200) == first.window + 1
+    assert signer.current_agent_key(AGENT, now=NOW + 3650)[1] == t_chain                      # the chain step
+    assert signer.current_agent_key(AGENT, now=NOW + 3650, min_remaining=1200)[1] == t_chain
+    signer.reset_cache()                                                                  # the other worker
+    assert signer.current_agent_key(AGENT, now=NOW + 3650)[1] == t_chain
+    # The boundary itself: the key retires AT window_end, so a chain that would
+    # end exactly there misses, one second shorter hits.
+    signer.reset_cache()
+    first = signer.agent_token_info(AGENT, now=NOW + 2500)
+    assert signer.current_agent_key(AGENT, now=NOW + 3000, min_remaining=599)[1] == first.thumbprint
+    assert signer.current_agent_key(AGENT, now=NOW + 3000, min_remaining=600)[1] != first.thumbprint
+
+
 def test_agent_token_tuple_api_and_refresh_margin_preserved(harness):
     t1, k1, ident = signer.agent_token(AGENT, now=NOW)
     assert ident == IDENTITY
@@ -593,6 +616,30 @@ def test_resume_429_backs_off_and_keeps_the_record(harness):
     assert resume(out.handle, now=NOW + 7).retry_after == 10 and len(ps.polls) == 1
 
 
+def test_unpersisted_refresh_tells_the_client_to_back_off(harness):
+    # Review I2: when the refreshed record (its next_poll_at) cannot be saved,
+    # the early-poll guard will not hold the next resume back — so the answer
+    # itself carries the back-off: status slow_down with the PS's interval.
+    ps = harness["ps_fake"]
+    out = _start_pending(harness)
+    redis = harness["redis"]
+    original_set = redis.set
+
+    def flaky_set(k, v, **kw):
+        if k.startswith("aauth:pt:handle:"):
+            raise RuntimeError("redis down")
+        return original_set(k, v, **kw)
+    redis.set = flaky_set
+    ps.poll_script.append(ps.pending("interacting", retry_after="7"))
+    got = resume(out.handle, now=NOW + 5)
+    assert isinstance(got, pt.PendingInteraction) and got.status == "slow_down" and got.retry_after == 7
+    ps.poll_script.append((429, {"retry-after": "4"}, json.dumps({"error": "slow_down"})))
+    got = resume(out.handle, now=NOW + 20)
+    # The un-persisted 7 is gone (the stored record still says 5): max(5, 4) + SLOW_DOWN_STEP.
+    assert got.status == "slow_down" and got.retry_after == 10
+    assert len(redis.handles()) == 1                                    # the record itself still stands
+
+
 def test_handle_is_scoped_to_the_agent_and_fails_closed(harness):
     out = _start_pending(harness)
     assert resume(out.handle, agent="sibling").code == "pending_unknown"
@@ -811,6 +858,13 @@ def test_route_is_a_uniform_404_when_aauth_is_inert(route):
     route.harness["issuer"] = None
     r = route.post({"resource": RES})
     assert r.status_code == 404 and route.ps.posts == [] and route.state["audit"] == []
+    # Review I4: the flag gate precedes body validation — a malformed body must
+    # not turn the uniform 404 into a 422 that reveals the route while inert.
+    for bad in ({}, {"resource": RES, "pending_handle": "short"}, {"resource": RES, "unknown": 1}, {"wait": 99}):
+        assert route.post(bad).status_code == 404, bad
+    route.harness["issuer"] = OUR
+    assert route.post({}).status_code == 422                            # live again: validation speaks
+    assert route.state["rate"] == [] and route.state["audit"] == []
 
 
 def test_route_admits_only_the_agents_own_key(route):
@@ -828,10 +882,18 @@ def test_route_names_configuration_refusals(route):
     route.harness["ps"] = PS
     r = route.post({"resource": "https://res.example/path"})
     assert r.status_code == 422 and r.json()["detail"]["reason"] == "invalid_resource"
+    # Review I1: a 429 on the initial POST has no handle to resume with, so its
+    # next_step must not point at `interaction.retry_after`.
+    route.ps.post_script.append((429, {"retry-after": "4"}, json.dumps({"error": "slow_down"})))
+    r = route.post({"resource": RES})
+    body = r.json()
+    assert r.status_code == 200 and body["outcome"] == "refused" and body["reason"] == "slow_down"
+    assert body.get("interaction") is None and "WITHOUT a handle" in body["next_step"]
+    assert "interaction.retry_after" not in body["next_step"]
     route.harness["no_redis"] = True
     r = route.post({"resource": RES})
     assert r.status_code == 503 and r.json()["detail"]["reason"] == "state_unavailable"
-    assert [a["event_action"] for a in route.state["audit"]] == ["aauth_person_token_refused"] * 3
+    assert [a["event_action"] for a in route.state["audit"]] == ["aauth_person_token_refused"] * 4
     assert route.post({"resource": RES, "pending_handle": "short"}).status_code == 422   # pydantic shape
     assert route.post({"resource": RES, "wait": 16}).status_code == 422
 

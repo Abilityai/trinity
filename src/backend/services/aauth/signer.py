@@ -7,8 +7,8 @@ instance derives the same key inside a window, so a person token obtained on
 one worker — whose ``cnf.jwk`` names this key — is presentable on the other,
 and a challenge chain (person token → resource token → auth token → call) that
 asks for ``min_remaining`` seconds of key life finishes on one key: the window
-is chosen so it has at least that long left, and the cached token is reused
-for as long as it covers the margin the caller asks for.
+is chosen so it has at least that long left, and a cached token is reused only
+while both its expiry and its key window cover the margin the caller asks for.
 
 Agent keys are never published ("Agent keys are not published" — bootstrap
 draft); the derivation input is the instance seed, which already signs every
@@ -109,7 +109,13 @@ def agent_token_info(agent_name: str, *, now: Optional[int] = None, min_remainin
     margin = max(REFRESH_MARGIN, int(min_remaining))
     cache_key = (issuer, instance.kid, agent_name)
     cached = _tokens.get(cache_key)
-    if cached and cached.exp - now > margin and now < window_end(cached.window):
+    # A hit must satisfy BOTH bounds a miss would: the token outlives the
+    # margin, and its key window still has `min_remaining` left — the same
+    # rule `key_window` applies when minting. A key cached from window N with
+    # 600 s of window left is NOT handed to a chain asking for 1200 s; it
+    # retires at the boundary mid-chain (the T6 ruling: one key per chain).
+    if (cached and cached.exp - now > margin
+            and now + max(0, int(min_remaining)) < window_end(cached.window)):
         return cached
 
     identity = config.agent_identity(agent_name, issuer)
