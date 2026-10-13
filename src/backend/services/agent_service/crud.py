@@ -39,6 +39,7 @@ from services.template_service import (
     credential_mcp_server_names,
     fetch_template_metadata_result_for_create,
     get_github_template,
+    is_catalog_github_template,
     metadata_reason_is_unreadable,
     generate_credential_files,
 )
@@ -1618,7 +1619,8 @@ async def _resolve_template(
             tr.git_mode_decision = await _apply_agent_kind_default(
                 config, tr.github_repo_for_agent, tr.github_pat_for_agent,
                 tr.fork_upstream_repo, github_pat_tier=tr.github_pat_tier,
-                catalog_template=bool(gh_template),
+                # #3545: `gh_template` is truthy for every `github:` repo.
+                catalog_template=is_catalog_github_template(repo_path),
             )
             logger.info(
                 f"[ent#705] git mode for {config.name}: "
