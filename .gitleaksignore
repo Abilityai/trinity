@@ -31,3 +31,5 @@
 # the CI range scan (gitleaks picks up the repo-root .gitleaksignore) — the
 # first load-bearing entry here.
 d70fd559b87c25c9e6d2c46bbc3f934e6aa13cf5:src/backend/services/aauth/keys.py:generic-api-key:43
+# Commit 391fef346's first version of this very comment quoted the pattern, and the range scan re-flags that commit too.
+391fef346478b23ed0d447175f3270c684ef3e8a:.gitleaksignore:generic-api-key:25
