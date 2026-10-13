@@ -526,6 +526,10 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
         "terminal result delivery; authenticates the agent's own key and path self-match (#1083)"),
     "routers/reports.py::create_report": (
         "POST /api/agents/{name}/reports", "structured output an agent publishes about itself (self-check)"),
+    "routers/aauth_person.py::request_person_token": (
+        "POST /api/agents/{agent_name}/aauth/person-token",
+        "a USE of the agent's AAuth identity (trinity-enterprise#878): the handler refuses every principal "
+        "but the agent's OWN key (403 aauth_agent_only) — a human may not make the backend sign as the agent"),
     "routers/notifications.py::create_notification": (
         "POST /api/notifications", "an agent raises a notification; agent name comes from its key (NOTIF-001)"),
     # MCP schedule tools — the agent's own use; autonomy (person-only) bounds cron firing.

@@ -5541,3 +5541,61 @@ class PersonTagState(BaseModel):
     label: str
     state: str                     # 'delivered' | 'read'
     read_at: Optional[str] = None
+
+
+# --- AAuth person token (trinity-enterprise#878) -----------------------------
+
+class PersonTokenRequest(BaseModel):
+    """Body for `POST /api/agents/{name}/aauth/person-token` (ent#878).
+
+    `resource` is an https server identifier (host only). `pending_handle`
+    resumes an earlier `pending` answer instead of starting a new request.
+    `wait` is the `Prefer: wait=N` the person server is asked to honour,
+    clamped so the route stays under the MCP gateway ceiling.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    resource: str = Field(..., min_length=9, max_length=2048,
+                          description="The resource the person token is for: https://<host>.")
+    pending_handle: Optional[str] = Field(
+        None, pattern=r"^[A-Za-z0-9_-]{32}$",
+        description="Resume a pending interaction returned by an earlier call.",
+    )
+    wait: Optional[int] = Field(None, ge=0, le=15, description="Prefer: wait=N seconds (default 5 / 15 on resume).")
+    execution_id: Optional[str] = Field(None, max_length=200, description="The calling execution, for the audit row.")
+    trigger_source: Optional[Literal["mcp", "api", "script"]] = Field(
+        None, description="Where the request came from, for the audit row (default api).")
+
+
+class PersonTokenInteraction(BaseModel):
+    """What the agent relays to its owner — nothing here is a secret."""
+    url: Optional[str] = None
+    code: Optional[str] = None
+    link: Optional[str] = None          # `{url}?code={code}`
+    pending_handle: str
+    retry_after: int
+    status: str                         # pending | interacting | slow_down
+    expires_at: int
+
+
+class PersonTokenResponse(BaseModel):
+    """Allowlisted person-token outcome (ent#878).
+
+    Deliberately has NO field that can carry the token: it stays in backend
+    memory, keyed by `jti`; `tests/unit/test_ent878_aauth_person_token.py`
+    pins the field set.
+    """
+    success: bool = True
+    outcome: Literal["issued", "pending", "refused"]
+    jti: Optional[str] = None
+    aud: Optional[str] = None
+    sub: Optional[str] = None
+    issuer: Optional[str] = None
+    exp: Optional[int] = None
+    cached: Optional[bool] = None
+    reissued_for_key: Optional[bool] = None
+    interaction: Optional[PersonTokenInteraction] = None
+    reason: Optional[str] = None
+    message: Optional[str] = None
+    ps_status: Optional[int] = None
+    next_step: str

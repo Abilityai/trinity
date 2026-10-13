@@ -20,6 +20,11 @@ FLAG_SETTING = "aauth_prototype_enabled"
 FLAG_ENV = "AAUTH_PROTOTYPE_ENABLED"
 ISSUER_SETTING = "aauth_issuer"
 ISSUER_ENV = "AAUTH_ISSUER"
+#: ent#878: the person server this instance's agents bind through (one HTTPS
+#: issuer URL, e.g. ``https://person.hello.coop``). Unset → person-token
+#: requests fail closed with ``person_server_unconfigured``.
+PERSON_SERVER_SETTING = "aauth_person_server"
+PERSON_SERVER_ENV = "AAUTH_PERSON_SERVER"
 
 #: A DNS host: labels of letters/digits/hyphens, lowercase only (the issuer
 #: rule), at least one dot. IP literals are not server identifiers here.
@@ -85,6 +90,23 @@ def get_issuer() -> Optional[str]:
     except Exception:  # noqa: BLE001 — a settings read failure means "not configured"
         stored = None
     return normalize_issuer(stored if stored else os.getenv(ISSUER_ENV, ""))
+
+
+def get_person_server() -> Optional[str]:
+    """The configured person server issuer, or None when unset/invalid (ent#878).
+
+    Same strict server-identifier rule as the issuer: a PS that needs repairing
+    is a configuration error, not something to lower-case on the operator's
+    behalf. ``system_settings`` wins over the environment, like every other
+    AAuth knob.
+    """
+    from services.settings_service import settings_service
+
+    try:
+        stored = settings_service.get_setting(PERSON_SERVER_SETTING)
+    except Exception:  # noqa: BLE001 — a settings read failure means "not configured"
+        stored = None
+    return normalize_issuer(stored if stored else os.getenv(PERSON_SERVER_ENV, ""))
 
 
 def active_issuer() -> Optional[str]:

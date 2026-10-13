@@ -4108,6 +4108,18 @@
       "description": "AAuth on the A2A seam: flag-off signed request is a plain bearer 401; bearer still works with the flag on (dual acceptance) and a bearer-less 401 advertises AAuth; allow-listed identity runs with no Trinity user and is named on audit/activity; unlisted 403; bad signature 401 problem+json before the body is parsed; every missing/erroring allow-list provider refuses; message/stream refused; tasks/get scoped to the starting identity; card lists aauth after bearerAuth; discovery documents 404 when inert; outbound registry auth_scheme rules; aauth calls refuse human principals and an inert flag before egress and are signed over the exact bytes sent to the registered host."
     },
     {
+      "file": "unit/test_ent878_aauth_person_token.py",
+      "feature": "abilityai/trinity-enterprise#878",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "security",
+        "a2a",
+        "unit"
+      ],
+      "description": "AAuth person token (the binding leg): the AAuth-Requirement / Retry-After / interaction url+code grammar; the per-agent key is HKDF-derived and equal across workers in a window, min_remaining keeps a chain on one key from an empty AND a populated cache (the key retires at window_end); PS metadata rules (four required fields, same-origin token endpoints, off-host jwks_uri, negative cache); the capped PS egress returns every status with headers and pins the a2a_client guards and the token scrub; the signed POST replays through verifier.verify_request; 200 issues/caches/serves the held token with refresh at the margin and on key change; 202 persists a Redis record and returns link+code, the same handle before next_poll_at without network; resume drives 202/200/403/408/410/429 with terminal deletes, slow-down back-off, un-persisted refresh answering slow_down, handle scoped to the agent, rolled-key reissue; every POST refusal is named and records nothing; Redis down refuses before any POST and at persist; open interactions capped; audit details name the outcome and never the token/handle/url/code. Route: uniform 404 when inert even for a malformed body, own-key only (403), named configuration refusals incl. the POST-429 next_step, issue/pending/resume/denial through TestClient with audit rows, response model has no token field, router registered after the aauth router."
+    },
+    {
       "file": "mcp-server/src/audit-denial.test.ts",
       "feature": "#2807",
       "added": "2026-09-16",

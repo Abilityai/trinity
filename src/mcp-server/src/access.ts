@@ -441,6 +441,11 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- a2a_call.ts ---
   call_a2a_agent: { kind: "in-tool", how: A2A_CALL_SELF },
   get_a2a_task: { kind: "in-tool", how: A2A_CALL_SELF },
+  // --- aauth.ts ---
+  request_person_token: {
+    kind: "none",
+    why: "self-acting (resolveActingAgent, agent scope only — there is no agent_name parameter); the backend requires the agent's OWN key and answers 403 aauth_agent_only to anyone else (trinity-enterprise#878)",
+  },
   // --- credential_vault.ts ---
   list_available_credentials: { kind: "none", why: "the calling agent's own grants (ent#279)" },
   fetch_credential: { kind: "none", why: "`name` is a credential; the backend scopes it to the calling agent (ent#279)" },

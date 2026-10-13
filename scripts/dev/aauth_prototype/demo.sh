@@ -18,6 +18,13 @@
 #   scripts/dev/aauth_prototype/demo.sh run       # the scenario (see below)
 #   scripts/dev/aauth_prototype/demo.sh status
 #   scripts/dev/aauth_prototype/demo.sh down      # tunnels, fronts, B (A's flag switched back off)
+#   scripts/dev/aauth_prototype/bind.sh <agent> <resource>   # ent#878: bind an agent to its owner at the
+#                                                            # person server (link + code), live
+#
+# Person server (ent#878): `up`/`wire` set `aauth_person_server` on A (AAUTH_PERSON_SERVER,
+# default https://person.hello.coop). Do NOT `rewire` after binding an agent with bind.sh:
+# a new tunnel host is a new issuer, and the person server sees a NEW agent
+# (aauth:<agent>@<new-host>) — the binding must be redone.
 #
 # Scenario (`run`), all against the real endpoints:
 #   1. whoami.aauth.dev echoes A's test-echo identity   (a verifier that is not ours)
@@ -41,6 +48,7 @@ B_DOCKER="tcp://127.0.0.1:23750"
 A_AGENT="${A_AGENT:-test-echo}"
 A_OTHER_AGENT="${A_OTHER_AGENT:-test-counter}"
 B_AGENT="${B_AGENT:-bravo}"
+PERSON_SERVER="${AAUTH_PERSON_SERVER:-https://person.hello.coop}"   # ent#878
 B_IMAGES=(trinity-backend:latest trinity-scheduler:latest trinity-mcp-server:latest
           trinity-agent-base:latest redis:7-alpine timberio/vector:0.43.1-alpine alpine:3.20)
 mkdir -p "$STATE"; chmod 700 "$STATE"
@@ -165,8 +173,9 @@ wire() {
   a_tok=$(token_for "$A_API" "$(envval "$REPO/.env" ADMIN_PASSWORD)")
   b_tok=$(token_for "$B_API" "$(envval "$STATE/b.env" ADMIN_PASSWORD)")
 
-  say "A: issuer $a_url, outbound on, endpoint bravo-remote → $b_url/a2a/$B_AGENT (aauth, no credential)"
+  say "A: issuer $a_url, person server $PERSON_SERVER, outbound on, endpoint bravo-remote → $b_url/a2a/$B_AGENT (aauth, no credential)"
   setting "$A_API" "$a_tok" aauth_issuer "$a_url"
+  setting "$A_API" "$a_tok" aauth_person_server "$PERSON_SERVER"     # ent#878 (bind.sh needs it)
   setting "$A_API" "$a_tok" aauth_prototype_enabled true
   setting "$A_API" "$a_tok" a2a_outbound_enabled true
   api "$A_API" "$a_tok" PUT /api/settings/a2a-endpoints \
@@ -279,6 +288,7 @@ case "${1:-}" in
     wire
     ;;
   rewire)
+    echo "  NOTE (ent#878): a new issuer host is a NEW agent to the person server — rebind with bind.sh afterwards"
     start_tunnel a 8001
     start_tunnel b 8101
     bcompose up -d --no-build backend   # B's issuer is env: recreate to pick up the new URL

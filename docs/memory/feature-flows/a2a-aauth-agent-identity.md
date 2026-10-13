@@ -36,7 +36,8 @@ so the mechanism points outward at any AAuth resource, not only at Trinity.
 | **Agent** | A Trinity agent. Its identity is `aauth:<agent-name>@<issuer-host>`; the calling agent never holds the key — its instance signs on its behalf (see Limits) |
 | **Agent Provider (AP)** | The Trinity **instance** itself. Self-hosted bootstrap: it publishes agent metadata + a JWKS and self-issues agent tokens; there is no third-party service in the loop |
 | **Resource** | The callee instance's `POST /a2a/{name}` endpoint |
-| **Person Server / Access Server / missions** | Not used in this mode. Out of scope |
+| **Person Server (PS)** | The operator-configured issuer (`aauth_person_server`, e.g. Hellō) an agent **binds** through to obtain a person token — the token that says *whose* agent this is (ent#878, Flow 5). This instance never plays the PS |
+| **Access Server / missions** | Not used. Out of scope |
 
 Two tokens/documents matter: the **agent token** (`aa-agent+jwt`, ≤1 h, signed by
 the instance key, carrying the per-agent public key in `cnf.jwk`) and the
@@ -51,7 +52,14 @@ key. The token says *who this is*; the signature proves *this request is theirs*
 | JOSE | `services/aauth/jose.py` | Compact JWS with the fully-specified `Ed25519` alg (PyJWT only registers `EdDSA`, which the draft forbids verifiers to accept), JWK ⇄ key, RFC 7638 thumbprints |
 | RFC 9421 profile | `services/aauth/httpsig.py` | Signature base, `@authority` normalisation, Content-Digest, and a **strict** RFC 8941 subset (anything unexpected is refused, not interpreted) |
 | Instance key | `services/aauth/keys.py` | One Ed25519 key per instance, AES-256-GCM in `system_settings.aauth_signing_key_encrypted` (Invariant #12), created on first use via insert-if-absent |
-| Signer (caller) | `services/aauth/signer.py` | Per-agent ephemeral key + token cache; `sign_request()` returns the headers for one request |
+| Signer (caller) | `services/aauth/signer.py` | Per-agent key + token cache; `sign_request()` returns the headers for one request. Since ent#878 the key is **HKDF-derived** from the instance seed per hour window (every worker holds the same key; `cnf` is portable) and a caller's `min_remaining` is honoured against the window end on a cache hit as on a miss, so a whole challenge chain signs with one key; `current_agent_key()` exposes key + thumbprint |
+| Person-server metadata (ent#878) | `services/aauth/person_server.py` | `{ps}/.well-known/aauth-person.json`: four required fields, `issuer` must equal the configured PS, both token endpoints on its origin, `jwks_uri` MAY be off-host; pinned egress, 64 KB, 8 s, 5 min / 60 s negative cache |
+| PS response grammar (ent#878) | `services/aauth/requirement.py` | `AAuth-Requirement` dictionary (strict), interaction url/code rules (same-origin url, Crockford code 4–32 symbols), `Retry-After` clamped 1–60 s, `link = url?code=` |
+| PS egress (ent#878) | `services/aauth/egress.py` | Every status with headers + capped body (the protocol is driven by 202/401/403/408/410/429 headers); the `a2a_client` guards — pinned address, no redirects, identity encoding only, wire-size cap, token scrubbed from transport errors — pinned by test |
+| Person token (ent#878) | `services/aauth/person_token.py` | `person_token()` / `resume()` / `held_token()`: worker-memory held token stamped with the key thumbprint, Redis pending records `aauth:pt:*` (TTL 30 min, ≤ 3 open per agent), the draft's deferred-response state machine, fail-closed `state_unavailable` |
+| Person-token route (ent#878) | `routers/aauth_person.py` | `POST /api/agents/{name}/aauth/person-token` — flag gate as a dependency, own-key only, rate budgets, audit row, HTTP mapping |
+| MCP tool (ent#878) | `src/mcp-server/src/tools/aauth.ts` | `request_person_token(resource, pending_handle?)`, self-acting, always registered (`operatorOnly`), relays outcome + link/code, never the token |
+| Live binding script (ent#878) | `scripts/dev/aauth_prototype/bind.sh` | Binds one agent against the real PS with the agent's own key; prints link + code, polls honouring `retry_after`, exits 0 on `issued` |
 | Discovery (callee) | `services/aauth/discovery.py` | `{iss}/.well-known/aauth-agent.json` → `jwks_uri` → key by `kid`, through the existing pinned public-HTTPS egress |
 | Verifier (callee) | `services/aauth/verifier.py` | FastAPI-free; returns `VerifiedAgent` or raises `AAuthError` |
 | Attribution (callee) | `services/aauth/inbound.py` | Audit details, the inbound activity row, and the execution → identity map |
@@ -69,6 +77,7 @@ key. The token says *who this is*; the signature proves *this request is theirs*
 | GET | `/.well-known/aauth-jwks.json` | none | The key set agent tokens verify against (one public Ed25519 key) |
 | GET | `/.well-known/aauth-resource.json` | none | Resource metadata: `access_mode: agent-token`, `signature_window`, `additional_signature_components` |
 | POST | `/a2a/{name}` | **AAuth** *or* bearer | The existing JSON-RPC task endpoint. A request carrying `Signature-Key` takes the AAuth path; everything else is unchanged |
+| POST | `/api/agents/{name}/aauth/person-token` | the agent's **own** key only | ent#878: obtain a person token for `resource` as the agent, or resume a pending binding by `pending_handle` (Flow 5). Uniform 404 while inert — before body validation |
 
 All three documents answer a uniform **404** unless AAuth is live (flag on **and**
 a valid issuer), so a default install publishes nothing. They are per-IP rate
@@ -81,6 +90,7 @@ limited like the public card route.
 | `aauth_prototype_enabled` | `system_settings` → `AAUTH_PROTOTYPE_ENABLED` | Master switch, default **off** |
 | `aauth_issuer` | `system_settings` → `AAUTH_ISSUER` | This instance's AAuth identity domain, `https://<host>` |
 | `aauth_signing_key_encrypted` | `system_settings` | The instance key envelope. Blocked on the generic settings PUT/DELETE; included in the credential-rotation script |
+| `aauth_person_server` | `system_settings` → `AAUTH_PERSON_SERVER` | ent#878: the person server agents bind through, `https://<host>` (same strict rule as the issuer, never repaired). Unset → `person_server_unconfigured` |
 | `agent_ownership.a2a_exposed` | OSS column | Pre-existing per-agent exposure, default off |
 | inbound allow-list | private A2A module | One list per agent; `aauth:`-prefixed entries are the AAuth audience |
 | endpoint registry `auth_scheme` | `system_settings` (AES-GCM envelope) | Per outbound endpoint: `bearer` (default) or `aauth` |
@@ -247,6 +257,76 @@ While AAuth is live, an exposed agent's card declares an `aauth` security scheme
 schemes are alternatives, so an AAuth-unaware client that takes the first entry is
 unaffected. With the flag off the card is byte-identical to before.
 
+## Flow 5 — Binding an agent to its owner (person token, ent#878)
+
+The person-server leg. An agent obtains a **person token** (`aa-person+jwt`) for one
+resource from its owner's person server (PS), as itself, after its owner has bound it
+once through the PS's link-and-code flow. The token says *whose* agent this is; the
+platform signs, holds and refreshes it, and the agent only ever sees its metadata.
+Presenting it to a resource is ent#879.
+
+1. The agent calls `request_person_token(resource)` (MCP; self-acting — the agent
+   comes from the key, agent scope only). The route takes the agent's **own** key:
+   flag live (a dependency, so the uniform 404 precedes body validation) → own key
+   (403 `aauth_agent_only` for a human, a sibling or a `system` key) → the three rate
+   budgets (10 new / min / agent, 30 polls / min / agent, 120 / min fleet).
+2. **Cache first.** A held token for `(issuer, PS, agent, resource)` with ≥ 5 min left
+   whose `cnf` is still the agent's current key → `issued` (`cached: true`, not
+   audited). Otherwise a pending record for the same scope → the same handle again,
+   with **no network call** before its `next_poll_at`.
+3. PS metadata (`issuer` must equal the configured PS, both token endpoints on its
+   origin, `jwks_uri` may be off-host) → the agent token is refreshed so ≥ 20 min
+   remain (one key for the whole chain) → a signed
+   `POST person_token_endpoint {"resource", "capabilities": ["interaction"]}` with
+   `Prefer: wait=5`.
+4. **200** — a `aa-person+jwt` whose `iss` (the PS), `aud` (the resource), `cnf` (our
+   key) and `exp` (≤ 1 h, clamped by `expires_in` and the agent token's own `exp`) are
+   checked, then held in worker memory. The response carries `jti/aud/sub/exp` and
+   nothing else. Audit `aauth_person_token_issued` with `token_jti`, never the token.
+5. **202** + `AAuth-Requirement: requirement=interaction; url=…; code=…` + `Location`
+   + `Retry-After` — every PS-chosen string is validated before it is fetched, relayed
+   or stored (same-origin url, Crockford code, same-origin pending `Location`,
+   `Retry-After` clamped 1–60 s), then a Redis record under a 192-bit random handle
+   (TTL 30 min, ≤ 3 open per agent). The answer is `pending` with
+   `interaction{url, code, link, pending_handle, retry_after}` and a `next_step` that
+   names the actor: **relay the link only to your OWNER, privately — whoever approves
+   first becomes the person this agent acts for** (use `ask_operator` when no person
+   is in the conversation). Audit `aauth_person_token_pending` once, on creation.
+6. The owner opens the link, signs in at the PS, confirms the code, approves. The
+   agent calls again with `pending_handle`: a signed GET of the pending URL with
+   `Prefer: wait=15`. 202 → still pending (the record is refreshed; if it cannot be
+   persisted the answer is `slow_down` so the client backs off anyway); 200 → step 4
+   and the record is deleted; 403 denied / abandoned / revoked, 408 expired, 410 gone
+   → a terminal `refused` (record deleted, audit `aauth_person_token_denied`); 429 →
+   `slow_down` with a +5 s interval, record kept; an empty 404 → `poll_rejected`,
+   record kept (never delete a live binding on an ambiguous status).
+7. **Window edge.** A 200 on resume whose `cnf` is no longer our key (the agent key
+   rolled, e.g. on the other worker) discards the record and asks afresh — a bound
+   agent gets a direct 200 — reported as `reissued_for_key`.
+8. A bound agent's later requests, on either worker, are a direct 200 with no
+   interaction: the binding lives at the PS, the platform only re-fetches the token.
+
+Live proof: `scripts/dev/aauth_prototype/bind.sh <agent> <resource>` (`demo.sh up`
+sets `aauth_person_server`; do not `rewire` after binding — a new issuer host is a new
+agent to the PS).
+
+### Refusals (Flow 5)
+
+| Outcome | HTTP | Carries |
+|---|---|---|
+| Prototype inert (flag off / no issuer) — also for a malformed body | 404 | Uniform |
+| Not the agent's own key (human, sibling, `system`) | 403 | `aauth_agent_only` |
+| `resource` is not an https server identifier | 422 | `invalid_resource` |
+| `aauth_person_server` unset or invalid | 409 | `person_server_unconfigured` |
+| Pending state unreadable / unwritable (Redis) | 503 | `state_unavailable` — never an in-memory fallback |
+| PS unreachable, or its metadata fails the rules | 502 | `person_server_unreachable`, `person_server_metadata_invalid` |
+| A rate budget exhausted | 429 | the rate limiter's detail |
+| Protocol outcomes | 200 | `outcome: refused` + `reason`: `denied` / `abandoned` / `revoked`, `expired`, `gone` (terminal — the agent must not retry on its own), `slow_down` (POST: call again without a handle), `signature_rejected`, `unsupported_requirement`, `token_invalid`, `pending_unknown` (another agent's, another PS's or an expired handle — uniform), `too_many_pending`, `poll_rejected`, `ps_protocol_error`, `ps_error` |
+
+The response model has no field that can carry the token (pinned by test); the audit
+row carries `token_jti`, the key thumbprint, the outcome, a bounded `ps_error`,
+`execution_id` and `trigger_source` — never the token, the handle, the url or the code.
+
 ## Trust model
 
 - **What the callee verifies:** the caller controls the private key matching the
@@ -277,8 +357,26 @@ unaffected. With the flag off the card is byte-identical to before.
    the identity. An immutable id is the productization fix.
 4. Inbound AAuth is inert without the private allow-list module (the seam fails
    closed), so an OSS-only build can call out but cannot accept.
-5. `message/stream` is refused for AAuth callers; no Person Server, missions,
-   budgets, or sub-agent identities (`parent+child@domain` is refused explicitly).
+5. `message/stream` is refused for AAuth callers; no missions, budgets, or
+   sub-agent identities (`parent+child@domain` is refused explicitly). The person
+   server is used only for the binding leg (Flow 5); no Access Server.
+6. **Binding hijack** (ent#878, plan T7). The PS binds the agent to whoever approves
+   FIRST, and the link is relayed by the agent in whatever channel it is in — a
+   public-link visitor, a Slack group or an inbound A2A caller can drive that turn.
+   The demo mitigation is the tool description + Flow 5 ("relay only to your owner,
+   privately") and the audit row's `execution_id` + `trigger_source`; owner-only
+   delivery of the link (notification / operator queue) is the productization fix,
+   registered in DEBT_INBOX and noted on #558 task G.
+7. The instance key signs for every agent, so the PS binds the **instance's** name
+   for the agent (`aauth:<agent>@<issuer-host>`): a compromised instance can bind as
+   any of its agents, and a new issuer host (a tunnel restart) is a new agent to the
+   PS — rebind, never `rewire` after binding.
+8. The held person token is per worker (a second worker re-requests; a bound agent
+   gets a direct 200, no second consent), and the PS's signature over it is **not**
+   verified here (plan T4; the resource verifies it — #558 task G).
+9. `request_person_token` is **advertised but inert** while the flag is off: always
+   registered, with the backend's 404 reported as `aauth_disabled` (plan T3
+   deviation; dynamic registration through the #846 reconciler is registered debt).
 
 ## Diagrams worth drawing
 
@@ -305,4 +403,5 @@ unaffected. With the flag off the card is byte-identical to before.
 - `feature-flows/a2a-inbound-server.md` — the serving half this extends (ent#157)
 - `feature-flows/a2a-outbound-call.md` — the calling half this extends (#736)
 - `docs/memory/requirements/mcp.md` §32.8 — the requirement, including out-of-scope
+- `docs/memory/requirements/mcp.md` §32.9 — the person-token binding leg (ent#878), Flow 5
 - `docs/memory/learnings.md` (2026-09-17) — why a second instance needs its own Docker daemon
