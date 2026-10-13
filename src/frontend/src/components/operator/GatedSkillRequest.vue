@@ -26,17 +26,23 @@
           </p>
         </dd>
       </div>
+      <!-- trinity#3527: a chat surface sent earlier turns with the request — lead
+           with the message typed that turn; the full input (what Approve runs) follows. -->
+      <div v-if="gate.request" :class="ROW">
+        <dt :class="TERM">Request</dt>
+        <dd :class="[VALUE, 'whitespace-pre-wrap']" data-testid="gate-card-request">{{ gate.request }}</dd>
+      </div>
       <div :class="ROW">
-        <dt :class="TERM">Input</dt>
+        <dt :class="TERM">{{ gate.request ? 'Full input' : 'Input' }}</dt>
         <dd class="min-w-0 flex-1">
           <!-- Bounded either way: folded to a few lines, or scrolling in its own box. -->
           <pre
             class="font-mono whitespace-pre-wrap break-words text-gray-900 dark:text-gray-100 overflow-y-auto"
-            :class="long && folded ? 'max-h-24' : 'max-h-80'"
+            :class="foldable && folded ? 'max-h-24' : 'max-h-80'"
             data-testid="gate-card-input"
           >{{ input }}</pre>
           <BaseButton
-            v-if="long"
+            v-if="foldable"
             size="sm"
             variant="ghost"
             class="mt-1"
@@ -44,6 +50,9 @@
             data-testid="gate-card-input-toggle"
             @click.stop="folded = !folded"
           >{{ folded ? 'Show the whole input' : 'Show less' }}</BaseButton>
+          <p v-if="gate.request" class="mt-1 text-xs text-gray-500 dark:text-gray-400" data-testid="gate-card-history-note">
+            Sent with earlier messages of the conversation as context. Approve runs this whole text.
+          </p>
         </dd>
       </div>
       <div v-if="gate.also_sent" :class="ROW">
@@ -132,6 +141,9 @@ const input = computed(() => {
   return typeof value === 'string' ? value : ''
 })
 const long = computed(() => gateInputLong(input.value))
+// PR #3648 review: with a Request row shown, the full input — what Approve
+// runs — is never folded away under it, so nothing it carries can hide.
+const foldable = computed(() => long.value && !gate.value.request)
 const folded = ref(true)
 const outcome = computed(() => gateOutcome(props.item))
 // Who it is waiting on, for a viewer who cannot decide it — and only while it waits.

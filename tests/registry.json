@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3524_gate_approval_card.py",
+      "feature": "abilityai/trinity#3524 #3525 #3527",
+      "added": "2026-10-12",
+      "categories": [
+        "backend",
+        "skill-gate",
+        "workspace",
+        "unit"
+      ],
+      "description": "The gated-skill approval card and its ending: an approver's rejection note reaches the requesting agent and a person's Inbox notice through the trinity-enterprise#755 reason path (absent on approval and without a note); a person with no email is named by username, never 'A caller'; a request carrying chat history leads with the new message (first-marker split); the Workspace projection carries the viewer's own answer and note; a recent gate answer names its request."
+    },
+    {
       "file": "unit/test_ent819_files_read_tier.py",
       "feature": "trinity-enterprise#819",
       "added": "2026-10-06",

@@ -460,6 +460,36 @@ async def _fingerprints_or_refuse(agent_name: str, names: List[str]) -> Dict[str
     return out
 
 
+# The two shapes the platform's own chat surfaces send history in
+# (`ChatPanel.vue` / `MobileAdmin.vue::buildContextPrompt`): a prefix, the
+# earlier turns, then the marker before the message typed this turn.
+_CHAT_HISTORY_SHAPES = (
+    ("### Previous conversation:\n", "### Current message:\n\nUser: "),
+    ("Previous conversation:\n", "\n\nUser: "),
+)
+
+
+def split_chat_history(text: str) -> Tuple[str, bool]:
+    """`(message typed this turn, whether earlier turns came with it)` for the
+    approval card (trinity#3527), so the ask leads with what was asked rather
+    than with the history. Display only: Approve still runs the whole text,
+    which the card shows in full. The FIRST marker splits, so an ambiguous
+    split shows more as the request, never less — a message cannot move its
+    own words into the part labelled context. That holds only when a platform
+    chat surface built the prefix: callers go through `requested_message`,
+    which splits a person's request only (PR #3648 review)."""
+    for prefix, marker in _CHAT_HISTORY_SHAPES:
+        if not text.startswith(prefix):
+            continue
+        at = text.find(marker, len(prefix) - 1)
+        if at < 0:
+            continue
+        message = text[at + len(marker):].strip()
+        if message:
+            return message, True
+    return text, False
+
+
 ASK_FOOTER = f"{APPROVE} runs it once, exactly as written. {REJECT} runs nothing."
 
 
@@ -472,12 +502,40 @@ def _preview(clean_text: str) -> str:
         else clean_text[:QUESTION_PREVIEW_CHARS] + "… (the full request is shown below)"
 
 
-def _also_sent(question: Optional[str], agent_name: str, clean_text: str) -> str:
+def requested_message(clean_text: str, requester_kind: Optional[str]) -> Tuple[str, bool]:
+    """`split_chat_history`, but only where the platform built the prefix.
+
+    Only a PERSON's request comes through the platform's own chat surfaces
+    (the Chat tab, `/m`), whose `buildContextPrompt` writes the history
+    shape. Any other requester — an agent, a connector, a channel, a public
+    visitor — can TYPE that shape, and would then choose which words the card
+    leads with: "summarise the above" as the Request, the payment line folded
+    into the history (PR #3648 review). Those requests are never split.
+    """
+    if requester_kind != KIND_PERSON:
+        return clean_text, False
+    return split_chat_history(clean_text)
+
+
+# trinity#3527: said when a chat surface sent earlier turns with the request.
+HISTORY_NOTE = ("Sent with earlier messages of the conversation as context; the full text, "
+                "history first, is shown below.\n\n")
+
+
+def _request_lines(clean_text: str, requester_kind: Optional[str]) -> str:
+    """The question's request block: the message typed this turn first
+    (`requested_message`), then a line saying history came with it."""
+    message, with_history = requested_message(clean_text, requester_kind)
+    return f"Request:\n{_preview(message)}\n\n{HISTORY_NOTE if with_history else ''}"
+
+
+def _also_sent(question: Optional[str], agent_name: str, clean_text: str,
+               requester_kind: Optional[str] = None) -> str:
     """The context lines `_ask_body` wrote into the question, for the card,
     which shows them in a row of their own and drops the question. Found only
-    AFTER the whole request preview, so a request that quotes the heading
+    AFTER the whole request block, so a request that quotes the heading
     itself puts nothing in the row."""
-    head = f"Request:\n{_preview(clean_text)}\n\n{_also_sent_head(agent_name)}"
+    head = f"{_request_lines(clean_text, requester_kind)}{_also_sent_head(agent_name)}"
     body = (question or "").removesuffix(ASK_FOOTER)
     at = body.find(head)
     return body[at + len(head):].strip() if at >= 0 else ""
@@ -490,14 +548,13 @@ def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints
     the context the agent also receives (`requester_context_text`)."""
     skills = _skill_list(names)
     who = requester.display()
-    preview = _preview(clean_text)
     beside = f"{_also_sent_head(agent_name)}{card_context}\n\n" if card_context else ""
     return {
         "request_id": request_id,
         "type": "approval",
         "priority": "high",
         "title": f"Approve {skills} on {agent_name}"[:300],
-        "question": (f"{who} asked {agent_name} to run {skills}.\n\nRequest:\n{preview}\n\n{beside}"
+        "question": (f"{who} asked {agent_name} to run {skills}.\n\n{_request_lines(clean_text, requester.kind)}{beside}"
                      f"{ASK_FOOTER}"),
         "options": list(OPTIONS),
         "to": role,
@@ -717,8 +774,12 @@ def requester_from_principal(current_user, *, source_agent: Optional[str] = None
         return Requester(kind=KIND_OTHER, key="event-loopback", label="An event subscription")
     email = getattr(current_user, "email", None) or None
     if is_person_principal(current_user):
+        # trinity#3527: an account with no email (the built-in admin) is still a
+        # person the platform knows — the card names it, never "A caller". One
+        # line, bounded: it sits above the request on the approver's card.
+        name = None if email else (" ".join(str(username).split())[:80] or None)
         return Requester(kind=KIND_PERSON, key=f"person:{(email or username).casefold()}",
-                         email=email, mcp_key_id=key_id, is_person=True)
+                         email=email, mcp_key_id=key_id, is_person=True, label=name)
     return Requester(kind=KIND_OTHER, key=f"principal:{key_id or username}", mcp_key_id=key_id)
 
 
@@ -1785,12 +1846,21 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
             "execution_id": record.get("requester_execution_id") if with_run_ids else None,
         },
         "also_sent": _also_sent(item.get("question"), record["agent_name"],
-                                str(proposal.get("input") or "")),
+                                str(proposal.get("input") or ""), record.get("requester_kind")),
+        # trinity#3527: the message typed this turn, when a chat surface sent
+        # earlier turns with it — the card leads with it; the full input
+        # (what Approve runs) stays below. None when there was no history.
+        "request": _typed_request(str(proposal.get("input") or ""), record.get("requester_kind")),
         "state": record.get("state"),
         "execution_id": record.get("dispatched_execution_id") if with_run_ids else None,
         "waiting_on": [_person_label(p) for p in people] if name_approvers else [],
         "can_decide": (viewer_email or "").strip().casefold() in people,
     }
+
+
+def _typed_request(clean_text: str, requester_kind: Optional[str]) -> Optional[str]:
+    message, with_history = requested_message(clean_text, requester_kind)
+    return message if with_history else None
 
 
 # Who decided, as a requester reads it whenever no display name may be shown.
@@ -1825,7 +1895,7 @@ async def _notify(record: Dict[str, Any], outcome: str, *, decider: Optional[str
     """Tell the requester, as `outcome_delivery` says: an agent by a platform
     task, a person by an Inbox notice addressed to them, anyone else not at all.
     Once per record. A person's notice names the decider by `_decider_label`,
-    never by email."""
+    never by email. `reason` is a rejecting approver's note (trinity-enterprise#755)."""
     if not db.mark_gate_request_notified(record["request_id"]):
         return
     await _audit_outcome(record, outcome, decider=decider, execution_id=execution_id)
