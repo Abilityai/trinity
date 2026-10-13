@@ -1,0 +1,19 @@
+# ent#623 demo — instance B overlay, applied INSIDE its own Docker daemon
+# (the trinity-b-dind container). The stock dev compose is reused as-is; this
+# only changes what must differ for a second, independent instance.
+services:
+  backend:
+    # No --reload: B must not bounce when A's source (the shared bind mount) is
+    # edited during the demo.
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --no-server-header
+    environment:
+      - AAUTH_PROTOTYPE_ENABLED=true
+      - AAUTH_ISSUER=${AAUTH_ISSUER:?AAUTH_ISSUER must be set}
+      # The served agent card's `url` must be the public origin, or A's client
+      # refuses it as cross-origin (the request itself arrives as plain http).
+      - PUBLIC_CHAT_URL=${AAUTH_ISSUER}
+      - A2A_OUTBOUND_ENABLED=false
+  frontend:
+    profiles: ["never"]
+  otel-collector:
+    profiles: ["never"]

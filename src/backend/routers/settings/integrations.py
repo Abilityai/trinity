@@ -655,6 +655,7 @@ async def upsert_a2a_outbound_endpoint(
             body.url,
             credential,
             clear_credential=body.clear_credentials,
+            auth_scheme=body.auth_scheme,
             credential_kind=body.credential_kind,
         )
     except a2a_outbound.EndpointValidationError as e:
@@ -674,7 +675,9 @@ async def upsert_a2a_outbound_endpoint(
             "endpoint": record["name"],
             "url": record["url"],
             "credential_set": bool(credential),
-            "credential_cleared": bool(body.clear_credentials),
+            # ent#623: switching an endpoint to aauth drops its stored secret.
+            "credential_cleared": bool(body.clear_credentials) or body.auth_scheme == "aauth",
+            "auth_scheme": record["auth_scheme"],
             # The KIND, not the value — and the store's conclusion rather than
             # the request's, so the row says what was actually written when the
             # operator left the field out.
