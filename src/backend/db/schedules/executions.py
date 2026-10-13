@@ -18,6 +18,7 @@ from models import TaskExecutionStatus
 from utils.helpers import (
     duration_ms_between,
     parse_iso_timestamp,
+    terminal_completed_at,
     to_utc_iso,
     utc_now_iso,
 )
@@ -433,7 +434,11 @@ class ScheduleExecutionsMixin:
                 return False
 
             started_at = parse_iso_timestamp(row["started_at"])
-            completed_at = parse_iso_timestamp(utc_now_iso())
+            # #3589: the producer's terminal instant when the result carries
+            # one (the #2944 watchdog claim passes the agent's `retained_at`,
+            # minutes before this write), else now. Normalized in the helper:
+            # naive → UTC, never in the future.
+            completed_at = terminal_completed_at(r.completed_at)
             # Both ends are guarded at the WRITE, not at every reader —
             # get_agent_analytics consumes duration_ms unguarded.
             #   low  (#1832): started_at and completed_at are written by

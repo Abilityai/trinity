@@ -91,6 +91,7 @@ from services import idempotency_service
 from services import dispatch_admission_service
 from services import chat_persistence_service
 from services import skill_gate_service
+from services.skill_gate_errors import SkillApprovalRequired
 from services import session_turn_service
 from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
 from services.platform_prompt_service import (
@@ -2705,36 +2706,47 @@ async def dispatch_parallel_task(
         if part and part not in gate_parts:
             gate_parts.append(part)
     gate_text = "\n".join(gate_parts)
-    gate = await skill_gate_service.enforce(
-        name,
-        request_text=gate_text,
-        context_text=skill_gate_service.requester_context_text(
-            mcp_key_name=getattr(current_user, "mcp_key_name", None),
-            source_email=current_user.email or current_user.username),
-        requester=skill_gate_service.requester_from_principal(
-            current_user, source_agent=x_source_agent,
-            # The platform-injected turn (#2392) first; the model-typed
-            # parent_execution_id only as a fallback. Either is kept only when
-            # it is one of the requesting agent's own executions.
-            execution_id=x_trinity_execution_id or getattr(request, "parent_execution_id", None)),
-        triggered_by=derivation.triggered_by,
-        occurrence_key=idempotency_key,
-        dispatch={
-            **skill_gate_service.frozen_dispatch(
-                triggered_by=derivation.triggered_by,
-                model=request.model,
-                timeout_seconds=request.timeout_seconds,
-                allowed_tools=request.allowed_tools,
-                source_user_id=current_user.id,
-                source_user_email=current_user.email or current_user.username,
-                source_agent_name=x_source_agent,
-                source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
-                source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
-                chain_depth=chain_depth,
-            ),
-            **skill_gate_service.frozen_replay(request.message, request.system_prompt),
-        },
-    )
+    try:
+        gate = await skill_gate_service.enforce(
+            name,
+            request_text=gate_text,
+            context_text=skill_gate_service.requester_context_text(
+                mcp_key_name=getattr(current_user, "mcp_key_name", None),
+                source_email=current_user.email or current_user.username),
+            requester=skill_gate_service.requester_from_principal(
+                current_user, source_agent=x_source_agent,
+                # The platform-injected turn (#2392) first; the model-typed
+                # parent_execution_id only as a fallback. Either is kept only when
+                # it is one of the requesting agent's own executions.
+                execution_id=x_trinity_execution_id or getattr(request, "parent_execution_id", None)),
+            triggered_by=derivation.triggered_by,
+            occurrence_key=idempotency_key,
+            dispatch={
+                **skill_gate_service.frozen_dispatch(
+                    triggered_by=derivation.triggered_by,
+                    model=request.model,
+                    timeout_seconds=request.timeout_seconds,
+                    allowed_tools=request.allowed_tools,
+                    source_user_id=current_user.id,
+                    source_user_email=current_user.email or current_user.username,
+                    source_agent_name=x_source_agent,
+                    source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+                    source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+                    chain_depth=chain_depth,
+                ),
+                **skill_gate_service.frozen_replay(request.message, request.system_prompt),
+            },
+        )
+    except SkillApprovalRequired as held:
+        # trinity#3526: nothing ran, so nothing below saves this turn — keep the
+        # request and its notice in the sender's conversation here. A person's
+        # own request only: an agent key resolves to its owner's id.
+        from dependencies import is_person_principal
+        if request.save_to_session and is_person_principal(current_user):
+            held.chat_session_id = chat_persistence_service.persist_held_request(
+                name, request, held, current_user.id,
+                current_user.email or current_user.username)
+        raise
 
     # RELIABILITY-006 (#525): idempotency begin/replay (shared with /chat, RD2).
     idem, replay = dispatch_admission_service.begin_task_idempotency(

@@ -9,6 +9,7 @@ from fastapi import HTTPException, Request
 
 from models import User
 from database import db
+from dependencies import agent_may_reach
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 from .helpers import check_api_key_env_matches
@@ -26,7 +27,7 @@ async def get_agent_api_key_setting_logic(
     Returns whether the agent uses the platform API key or relies on
     terminal-based authentication.
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)
@@ -62,7 +63,7 @@ async def update_agent_api_key_setting_logic(
     Note: Changes require agent restart to take effect.
     """
     # Only owner can modify this setting
-    if not db.can_user_share_agent(current_user.username, agent_name):
+    if not (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True)):
         raise HTTPException(status_code=403, detail="Only the owner can modify API key settings")
 
     container = get_agent_container(agent_name)

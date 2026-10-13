@@ -57,3 +57,17 @@ export function validateWhitelistEmail(raw) {
 export function whitelistEntryUrl(email) {
   return `/api/settings/email-whitelist/${encodeURIComponent(email)}`
 }
+
+// How the Source column names a stored `source` (trinity-enterprise#837).
+const SOURCE_LABELS = { manual: '✋ Manual', access_tab: 'Access tab' }
+
+/**
+ * A row's source as the Settings table shows it. A row given from an agent's
+ * Access tab says so, and a source without a label shows as stored — never
+ * "Manual", which claims an admin typed the row here. `agent_sharing` keeps its
+ * own badge in the view. A row with no source reads "—".
+ */
+export function whitelistSourceLabel(source) {
+  if (!source) return '—'
+  return SOURCE_LABELS[source] || source
+}

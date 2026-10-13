@@ -46,6 +46,7 @@ import {
   WHITELIST_EMAIL_MAX_LENGTH,
   validateWhitelistEmail,
   whitelistEntryUrl,
+  whitelistSourceLabel,
 } from '../../src/utils/emailWhitelist'
 import { apiErrorMessage } from '../../src/utils/apiError'
 import { useAuthStore } from '../../src/stores/auth'
@@ -346,5 +347,44 @@ describe('Settings.vue — the whitelist section, mounted', () => {
     await flushPromises()
 
     expect(axios.delete).not.toHaveBeenCalled()
+  })
+})
+
+describe('the Source column names the real source (trinity-enterprise#837)', () => {
+  it.each([
+    ['manual', '✋ Manual'],
+    ['access_tab', 'Access tab'],
+    ['sso', 'sso'],
+    ['cli', 'cli'],
+    ['access_request', 'access_request'],
+    [null, '—'],
+    ['', '—'],
+  ])('%s reads %s', (source, label) => {
+    expect(whitelistSourceLabel(source)).toBe(label)
+  })
+
+  it('in the mounted table, no row is called Manual unless it is', async () => {
+    const ROWS = [
+      { id: 1, email: 'shared@example.com', source: 'agent_sharing', added_at: null },
+      { id: 2, email: 'tab@example.com', source: 'access_tab', added_at: null },
+      { id: 3, email: 'hand@example.com', source: 'manual', added_at: null },
+      { id: 4, email: 'idp@example.com', source: 'sso', added_at: null },
+    ]
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useAuthStore().$patch({ user: { role: 'admin' } })
+    axios.get.mockImplementation((url) => {
+      if (url === '/api/settings/email-whitelist') return Promise.resolve({ data: { whitelist: ROWS } })
+      if (url === '/api/settings') return Promise.resolve({ data: [] })
+      return Promise.resolve({ data: {} })
+    })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const w = shallowMount(Settings, { global: { plugins: [pinia], stubs: { InlineError: false } } })
+    await flushPromises()
+    const source = (email) => w.findAll('tr').find((tr) => tr.text().includes(email)).findAll('td')[2].text()
+    expect(source('shared@example.com')).toContain('Auto (Agent Sharing)')
+    expect(source('tab@example.com')).toBe('Access tab')
+    expect(source('hand@example.com')).toBe('✋ Manual')
+    expect(source('idp@example.com')).toBe('sso')
   })
 })

@@ -46,6 +46,9 @@ class SkillApprovalRequired(SkillGateError):
         self.expires_at = expires_at
         # Defaults to "none": an answer that does not know never promises.
         self.outcome_delivery = outcome_delivery
+        # trinity#3526: the chat session a Chat-tab sender's held request was
+        # saved to, set by the entry that saved it. Left out of the body when unset.
+        self.chat_session_id: Optional[str] = None
         super().__init__(self.message)
 
     @property
@@ -63,10 +66,14 @@ class SkillApprovalRequired(SkillGateError):
         if self.outcome_delivery == OUTCOME_DELIVERY_NONE:
             text += (" Nothing will be sent back when it is decided: if it is approved, "
                      f"it runs as a new execution on {self.agent_name}; if not, nothing runs.")
+        else:
+            # trinity#3520: what `_notify` and `_notify_completion` really send.
+            text += (" You will be told when it is decided, and again when an approved "
+                     "run ends, with how it ended.")
         return text
 
     def detail(self) -> Dict[str, Any]:
-        return {
+        body = {
             "status": "pending_approval",
             "code": self.code,
             "request_id": self.request_id,
@@ -77,6 +84,9 @@ class SkillApprovalRequired(SkillGateError):
             "outcome_delivery": self.outcome_delivery,
             "message": self.message,
         }
+        if self.chat_session_id:
+            body["chat_session_id"] = self.chat_session_id
+        return body
 
 
 class SkillGateRefused(SkillGateError):

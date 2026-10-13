@@ -4,7 +4,6 @@
   "rule": "per-file counts of bare v-if/v-else-if loading gates may only shrink; see scripts/scan-loading-gates.mjs",
   "files": {
     "src/frontend/src/components/A2aPanel.vue": 1,
-    "src/frontend/src/components/AccessPanel.vue": 1,
     "src/frontend/src/components/AgentMcpKeyPanel.vue": 1,
     "src/frontend/src/components/AgentPermissionsMatrix.vue": 1,
     "src/frontend/src/components/AutonomyToggle.vue": 1,

@@ -1160,6 +1160,10 @@ class DatabaseManager:
         """#1854: re-point a parent's spawned children at its current key id."""
         return self._agent_ops.reconcile_spawn_key_id(agent_name, current_key_id)
 
+    def list_agents_spawned_by_key(self, agent_name: str, key_id: str) -> List[str]:
+        """ent#629: live agents spawned by `agent_name` with key `key_id`."""
+        return self._agent_ops.list_agents_spawned_by_key(agent_name, key_id)
+
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
 
@@ -2123,6 +2127,9 @@ class DatabaseManager:
     def get_chat_session(self, session_id: str):
         return self._chat_ops.get_chat_session(session_id)
 
+    def find_chat_session_by_message_source(self, agent_name: str, user_id: int, source: str):
+        return self._chat_ops.find_chat_session_by_message_source(agent_name, user_id, source)
+
     def get_chat_messages(self, session_id: str, limit: int = 100):
         return self._chat_ops.get_chat_messages(session_id, limit)
 
@@ -2201,9 +2208,12 @@ class DatabaseManager:
     def create_activity(self, activity):
         return self._activity_ops.create_activity(activity)
 
-    def complete_activity(self, activity_id: str, status: str = "completed", details: dict = None, error: str = None):
-        """#1804: returns an ``ActivityCloseOutcome`` (tri-state), not a bool."""
-        return self._activity_ops.complete_activity(activity_id, status, details, error)
+    def complete_activity(self, activity_id: str, status: str = "completed", details: dict = None, error: str = None,
+                          *, completed_at=None):
+        """#1804: returns an ``ActivityCloseOutcome`` (tri-state), not a bool.
+        ``completed_at`` (#3589): the producer's terminal instant, else now."""
+        return self._activity_ops.complete_activity(activity_id, status, details, error,
+                                                    completed_at=completed_at)
 
     def close_open_activities_for_executions(self, execution_ids, status: str = "failed", error: str = None):
         """#1804: batched bulk-sweep close (one transaction, no per-row WS)."""
@@ -2360,6 +2370,9 @@ class DatabaseManager:
 
     def list_gate_requests_with_ended_asks(self, limit: int = 200):
         return self._skill_gate_request_ops.list_gate_requests_with_ended_asks(limit)
+
+    def list_gate_requests_ended_unreported(self, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_ended_unreported(limit)
 
     def list_gate_requests_lost_in_dispatch(self, claimed_before: str, limit: int = 200):
         return self._skill_gate_request_ops.list_gate_requests_lost_in_dispatch(claimed_before, limit)
@@ -2754,6 +2767,9 @@ class DatabaseManager:
 
     def get_whitelist_default_role(self, email: str):
         return self._email_auth_ops.get_whitelist_default_role(email)
+
+    def cap_whitelist_default_role(self, email: str, role: str):
+        return self._email_auth_ops.cap_whitelist_default_role(email, role)
 
     def remove_from_whitelist(self, email: str):
         return self._email_auth_ops.remove_from_whitelist(email)
@@ -3890,6 +3906,12 @@ class DatabaseManager:
 
     def get_operator_queue_item(self, item_id):
         return self._operator_queue_ops.get_item(item_id)
+
+    def update_pending_problem_report(self, agent_name, request_id, *, question, context, now=None):
+        # trinity#3521: a comment sent after the thumbs-down reaches the alert.
+        return self._operator_queue_ops.update_pending_problem_report(
+            agent_name, request_id, question=question, context=context, now=now,
+        )
 
     def get_operator_queue_item_for_agent_by_request_id(self, agent_name, request_id):
         # trinity-enterprise#611: the agent's own readback — ignores Clear All.
