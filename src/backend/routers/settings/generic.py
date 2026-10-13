@@ -422,7 +422,7 @@ async def update_setting(
             detail=f"{key} is managed by the AAuth key service and cannot be set through the API",
         )
 
-    if key in ("a2a_trusted_networks", "a2a_internal_base_url"):
+    if key == "a2a_trusted_networks":
         raise HTTPException(
             status_code=422,
             detail=(
