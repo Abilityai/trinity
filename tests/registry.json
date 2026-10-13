@@ -5891,6 +5891,17 @@
         "execution"
       ],
       "description": "A terminal completed_at is floored at the row's own server-written started_at in both writers (update_execution_status and complete_activity): a backdated producer value (agent-authored retained_at or #1083 callback) lands in the completed_at COLUMN as started_at with duration 0 and the status still terminal, so an agent cannot age its own row into the next retention sweep; an in-window value passes verbatim (the #3589 behaviour), the future-clamp is unchanged, the floor wins over the clamp on server skew, and the helper's floor parameter is keyword-only and required so a future third writer cannot silently skip the decision."
+    },
+    {
+      "file": "unit/test_3588_close_cancelled_claimed_activities.py",
+      "feature": "#3588",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability"
+      ],
+      "description": "No activity created or owned by a terminal path stays `started` (#1804 class; the invariant is a scoped DB query, never a call-shape mock): the three cancel sites record the execution_cancelled EVENT created+completed in one breath via _record_cancel_event (fail-open, ordered after the real closes; already_finished labelled and pinned); the queued-cancel site runs the #1804 owner close so the #2329 metadata companions close (a queued row has no dispatch activity); the watchdog claim closes direct-dispatch collaboration/self-task companions from the PERSISTED row — state+instant row-derived, so a failure-style lost CAS stamps the standing terminal (e.g. a cancel's CANCELLED), never the lost envelope's FAILED — counts into report.activities_closed_on_recovery AND the startup stats, lets an authoritative close upgrade a provisional FAILED companion (the lookup agrees with the CAS), and keeps row/activity completed_at in agreement even when retained_at is unreadable."
     }
   ]
 }

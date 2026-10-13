@@ -2225,6 +2225,14 @@ class DatabaseManager:
     def get_open_activity_id_for_execution(self, execution_id: str, include_failed: bool = False):
         return self._activity_ops.get_open_activity_id_for_execution(execution_id, include_failed)
 
+    def get_open_companion_activity_ids_for_execution(
+        self, execution_id: str, *, extra_ids=(), include_failed: bool = False
+    ):
+        """#3588: open collaboration / self-task companion ids for an execution."""
+        return self._activity_ops.get_open_companion_activity_ids_for_execution(
+            execution_id, extra_ids=extra_ids, include_failed=include_failed
+        )
+
     def get_agent_activities(self, agent_name: str, activity_type: str = None, activity_state: str = None, limit: int = 100):
         return self._activity_ops.get_agent_activities(agent_name, activity_type, activity_state, limit)
 

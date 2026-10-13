@@ -448,23 +448,22 @@ await activity_service.complete_activity(
 )
 ```
 
-**Execution Cancellation Tracking** (lines 1134-1146)
+**Execution Cancellation Tracking** (#3588: the row is a point-in-time EVENT — `_record_cancel_event` creates it and completes it in the same breath, fail-open, ordered after the terminal CAS and the real activity closes; before #3588 it stayed `started` until the 120-minute sweep fabricated its duration)
 ```python
-# Track termination activity (new activity type)
-await activity_service.track_activity(
+# chat_execution_service._record_cancel_event — shared by all three cancel sites
+activity_id = await activity_service.track_activity(
     agent_name=name,
     activity_type=ActivityType.EXECUTION_CANCELLED,
-    user_id=current_user.id,
+    user_id=getattr(current_user, "id", None),
     triggered_by="user",
     related_execution_id=task_execution_id,
-    details={
-        "execution_id": execution_id,
-        "task_execution_id": task_execution_id,
-        "status": result.get("status"),
-        "returncode": result.get("returncode")
-    }
+    details={...},  # execution ids, status (incl. "already_finished"), actor_kind (ent#155)
 )
+await activity_service.complete_activity(activity_id=activity_id, status=ActivityState.COMPLETED)
 ```
+The watchdog claim additionally closes the execution's open collaboration / self-task
+companions from the persisted row (`activity_service.close_companion_activities`, #3588) —
+see `architecture/execution.md` § Terminal-Activity Close Contract.
 
 ### Schedule Integration (via `execute-task`)
 
