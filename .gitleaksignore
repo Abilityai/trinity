@@ -22,12 +22,12 @@
 # regex+entropy secret scanning against a re-split/obfuscated secret.
 
 # ---- ent#623 AAuth signing key (abilityai/trinity#3644) — false positive ----
-# `private_key: Ed25519PrivateKey = field(repr=False)` is a dataclass FIELD
-# DECLARATION (the type is the secret-shaped token; the value is a key object
-# loaded at runtime from the encrypted envelope, never a literal). The default
-# generic-api-key rule keys on the `private_key` name. A commit-range scan
-# re-flags the ADDING commit however the head reads, so an inline
-# `gitleaks:allow` on the current line cannot clear it: this fingerprint is the
-# one mechanism that does, and it IS read by the CI range scan (`gitleaks git .`
-# picks up the repo-root .gitleaksignore) — the first load-bearing entry here.
+# The Ed25519 dataclass attribute in services/aauth/keys.py:43 (an attribute
+# name with a type annotation, not a credential; the key object is loaded at
+# runtime from the encrypted envelope, never a literal) trips generic-api-key.
+# The adding commit is d70fd559, which a commit-range scan re-flags however the
+# head reads, so an inline allow marker on the current line cannot clear it:
+# the fingerprint below is the only mechanism that clears it, and it IS read by
+# the CI range scan (gitleaks picks up the repo-root .gitleaksignore) — the
+# first load-bearing entry here.
 d70fd559b87c25c9e6d2c46bbc3f934e6aa13cf5:src/backend/services/aauth/keys.py:generic-api-key:43
