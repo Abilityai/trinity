@@ -1439,6 +1439,15 @@ describe('trinity-enterprise#856 — Action\'s sort: Newest by default, Urgency 
     }
   })
 
+  it('a stray ?from= AND a stray ?sort= together both leave the URL in one replace (review I2)', async () => {
+    for (const tab of ['unread', 'all']) {
+      const w = await mountInbox({}, { query: { tab, from: 'relay', sort: 'newest' } })
+      await flushPromises()
+      expect(router.currentRoute.value.query).toEqual({ tab })
+      w.unmount()
+    }
+  })
+
   it('a sort change is a new visit: held rows re-sort on the click, and only then', async () => {
     store.asks = [ask('a1', { created_at: iso(30) }), ask('a2', { created_at: iso(5) })]
     const w = await mountInbox({}, { query: { tab: 'action', sort: 'urgency' } })

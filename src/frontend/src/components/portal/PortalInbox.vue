@@ -440,14 +440,18 @@ watch(fromQuery, async (q) => {
 }, { immediate: true })
 // A2 r1 (QA N1): `?from=` narrows Action only — on another tab (a deep link,
 // a hand-edited URL) it is ignored, so it leaves the URL rather than lingering.
-watch(() => tab.value !== 'action' && route.query.from !== undefined, (stray) => {
-  if (stray) replaceQuery({ from: undefined })
-}, { immediate: true })
 // trinity-enterprise#856: the same for `?sort=` — off Action, or a value that is
-// not one of the two orders, it is ignored and leaves the URL.
-watch(() => route.query.sort !== undefined
-  && (tab.value !== 'action' || !normalizeInboxSort(route.query.sort)), (stray) => {
-  if (stray) replaceQuery({ sort: undefined })
+// not one of the two orders. ONE watcher returns both stray keys, so one
+// replace clears both: two replaces in a tick each spread the same stale
+// query, and the second would put the first's key back.
+watch(() => {
+  const stray = []
+  if (tab.value !== 'action' && route.query.from !== undefined) stray.push('from')
+  if (route.query.sort !== undefined
+    && (tab.value !== 'action' || !normalizeInboxSort(route.query.sort))) stray.push('sort')
+  return stray.join(',')
+}, (stray) => {
+  if (stray) replaceQuery(Object.fromEntries(stray.split(',').map((k) => [k, undefined])))
 }, { immediate: true })
 // A change writes both the URL (replace — never a history entry) and the memory.
 function onSort(v) {
