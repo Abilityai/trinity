@@ -982,7 +982,8 @@ revision — the kind is a label inside the existing envelope.
 ---
 
 ### 32.7 A2A Outbound Endpoint Allowlist (trinity-enterprise#838, outbound-only since trinity-enterprise#885)
-- **Status**: 🚧 In Progress
+- **Status**: ✅ Implemented — outbound allowlist only; the rc-era inbound
+  keyless door and internal-only scope were removed by trinity-enterprise#885
 - **Implements**: trinity-enterprise#838 (parent trinity-enterprise#421),
   narrowed to outbound only by trinity-enterprise#885. Builds on #736/#761
   (outbound) and ent#157 (inbound).
