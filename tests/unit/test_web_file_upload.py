@@ -200,7 +200,8 @@ class TestProcessFileUploads:
         )
         assert len(imgs) == 1
         assert imgs[0]["media_type"].startswith("image/")
-        assert udir is None  # no container writes for images
+        assert udir is not None
+        assert any(f"saved to {udir}/img.png" in d for d in descs)
         assert not failed
 
     @pytest.mark.asyncio
@@ -294,3 +295,48 @@ class TestProcessFileUploads:
                 )
         combined = " ".join(descs)
         assert "skipped" in combined or "more file" in combined
+
+
+@pytest.mark.asyncio
+async def test_image_original_write_failure_is_explicit():
+    with (patch.object(_svc, "_MAGIC_AVAILABLE", False),
+          patch.object(_svc, "container_exec_run", AsyncMock(return_value=(0, b""))),
+          patch.object(_svc, "container_put_archive", AsyncMock(return_value=False))):
+        desc, directory, failed, images = await _svc.process_file_uploads(
+            [{"name": "photo.jpg", "mimetype": "image/jpeg", "data": b"original"}],
+            "agent", MagicMock(), "session", "user")
+    assert failed and not images
+    assert "could not save" in desc[0] and "saved to" not in desc[0]
+
+
+@pytest.mark.asyncio
+async def test_image_original_bytes_and_dispatch_directories_are_isolated():
+    import io
+    import tarfile
+    archives = []
+    async def save(container, directory, archive):
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            archives.append((directory, tar.extractfile("photo.jpg").read()))
+        return True
+    with (patch.object(_svc, "_MAGIC_AVAILABLE", False),
+          patch.object(_svc, "container_exec_run", AsyncMock(return_value=(0, b""))),
+          patch.object(_svc, "container_put_archive", save)):
+        results = await asyncio.gather(*[
+            _svc.process_file_uploads(
+                [{"name": "photo.jpg", "mimetype": "image/jpeg", "data": data}],
+                "agent", MagicMock(), "same-session", "user")
+            for data in (b"first", b"second")])
+    assert results[0][1] != results[1][1]
+    assert {body for _, body in archives} == {b"first", b"second"}
+    assert all(r[1].startswith(_svc.UPLOAD_BASE + "/") for r in results)
+
+
+@pytest.mark.asyncio
+async def test_failed_mkdir_does_not_claim_original_saved():
+    with (patch.object(_svc, "_MAGIC_AVAILABLE", False),
+          patch.object(_svc, "container_exec_run", AsyncMock(return_value=(1, b"denied")))):
+        desc, directory, failed, images = await _svc.process_file_uploads(
+            [{"name": "photo.jpg", "mimetype": "image/jpeg", "data": b"original"}],
+            "agent", MagicMock(), "session", "user")
+    assert failed and not images and directory is None
+    assert "could not create" in desc[0]

@@ -779,14 +779,9 @@ class ChannelMessageRouter:
         # Configurable via settings_service (default: WebSearch, WebFetch)
         public_allowed_tools = _get_channel_allowed_tools()
 
-        # Non-image files land at upload_dir in the container; agent needs Read
-        # to access them. Images are delivered as vision content blocks via
-        # --input-format stream-json (#562), so no Read is needed for them.
-        _IMAGE_MIMES = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"}
-        has_readable_files = message.files and any(
-            f.mimetype not in _IMAGE_MIMES for f in message.files
-        )
-        if has_readable_files and "Read" not in public_allowed_tools:
+        # Accepted attachments, including images, have workspace originals.
+        # Use the same attachment Read permission as other uploaded files.
+        if upload_dir and "Read" not in public_allowed_tools:
             public_allowed_tools = public_allowed_tools + ["Read"]
 
         # ent#117: channel turns run headless with a restricted `--allowedTools`, which
@@ -1336,7 +1331,7 @@ class ChannelMessageRouter:
 
     @staticmethod
     async def _cleanup_uploads(container, upload_dir: Optional[str]) -> None:
-        """Remove per-session upload directory from agent container."""
+        """Remove this dispatch's upload directory from agent container."""
         if not upload_dir:
             return
         try:

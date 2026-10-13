@@ -13,6 +13,7 @@ import os
 import re
 import tarfile
 import unicodedata
+import uuid
 from typing import List, Optional, Tuple
 
 from services.docker_utils import container_put_archive, container_exec_run
@@ -147,8 +148,9 @@ async def process_file_uploads(
       - all_writes_failed: True iff at least one write was attempted but all failed
       - image_data: list of {"media_type": str, "data": base64_str} for vision blocks
     """
-    safe_session_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
-    upload_dir = f"{UPLOAD_BASE}/{safe_session_id}"
+    # One bounded namespace per dispatch: concurrent messages in the same
+    # session must not overwrite files or remove another execution's uploads.
+    upload_dir = f"{UPLOAD_BASE}/{uuid.uuid4().hex}"
     descriptions: List[str] = []
     image_data: List[dict] = []
     dir_created = False
@@ -241,15 +243,59 @@ async def process_file_uploads(
                 )
                 continue
 
-            write_attempted += 1
             total_image_bytes += actual_size
-            b64 = base64.b64encode(data).decode()
-            image_data.append({"media_type": actual_mime, "data": b64})
+
+        # Preserve original bytes for every accepted attachment in the container
+        if not dir_created:
+            write_attempted += 1
+            try:
+                exit_code, _ = await container_exec_run(
+                    container, f"mkdir -p -m 700 {upload_dir}", user="developer"
+                )
+                if exit_code != 0:
+                    raise OSError("Could not create upload directory")
+                dir_created = True
+            except Exception as e:
+                logger.error(
+                    f"[UPLOAD] Failed to create {upload_dir} in {agent_name}: {e}"
+                )
+                descriptions.append(
+                    f"[File upload failed]: {safe_name} — could not create workspace upload directory"
+                )
+                continue
+        else:
+            write_attempted += 1
+
+        try:
+            tar_buf = io.BytesIO()
+            with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+                info = tarfile.TarInfo(name=safe_name)
+                info.size = actual_size
+                info.uid = 1000  # developer user
+                info.gid = 1000
+                info.mode = 0o600
+                tar.addfile(info, io.BytesIO(data))
+            tar_buf.seek(0)
+
+            success = await container_put_archive(container, upload_dir, tar_buf.read())
+            if not success:
+                logger.error(f"[UPLOAD] Failed to copy {safe_name} into {agent_name}")
+                descriptions.append(
+                    f"[File upload failed]: {safe_name} — could not save to agent workspace"
+                )
+                continue
+
+            dest_path = f"{upload_dir}/{safe_name}"
+            vision_note = " — image provided for visual analysis" if is_image else ""
             descriptions.append(
-                f"[File uploaded by {uploader}]: {safe_name} ({size_str}) — image provided for visual analysis"
+                f"[File uploaded by {uploader}]: {safe_name} ({size_str}) saved to {dest_path}{vision_note}"
             )
+            if is_image:
+                image_data.append({
+                    "media_type": actual_mime, "data": base64.b64encode(data).decode(),
+                })
             write_succeeded += 1
-            logger.info(f"[UPLOAD] Queued {safe_name} ({size_str}) as vision block for {agent_name}")
+            logger.info(f"[UPLOAD] Copied {safe_name} ({size_str}) to {agent_name}:{dest_path}")
 
             await platform_audit_service.log(
                 event_type=AuditEventType.EXECUTION,
@@ -261,82 +307,19 @@ async def process_file_uploads(
                     "filename": safe_name,
                     "size_bytes": actual_size,
                     "mime_type": actual_mime,
-                    "storage": "stream_json_vision",
+                    "storage": "container_file_and_vision" if is_image else "container_file",
+                    "dest_path": dest_path,
                     "sender_id": sender_id,
                     "channel_id": channel_id,
                     "uploader": uploader,
                 },
             )
 
-        else:
-            # Non-image: write to per-session upload directory in the container
-            if not dir_created:
-                write_attempted += 1
-                try:
-                    await container_exec_run(
-                        container, f"mkdir -p {upload_dir}", user="developer"
-                    )
-                    dir_created = True
-                except Exception as e:
-                    logger.error(
-                        f"[UPLOAD] Failed to create {upload_dir} in {agent_name}: {e}"
-                    )
-                    descriptions.append(
-                        f"[File upload failed]: {safe_name} — could not create workspace upload directory"
-                    )
-                    continue
-            else:
-                write_attempted += 1
-
-            try:
-                tar_buf = io.BytesIO()
-                with tarfile.open(fileobj=tar_buf, mode="w") as tar:
-                    info = tarfile.TarInfo(name=safe_name)
-                    info.size = actual_size
-                    info.uid = 1000  # developer user
-                    info.gid = 1000
-                    info.mode = 0o644
-                    tar.addfile(info, io.BytesIO(data))
-                tar_buf.seek(0)
-
-                success = await container_put_archive(container, upload_dir, tar_buf.read())
-                if not success:
-                    logger.error(f"[UPLOAD] Failed to copy {safe_name} into {agent_name}")
-                    descriptions.append(
-                        f"[File upload failed]: {safe_name} — could not save to agent workspace"
-                    )
-                    continue
-
-                dest_path = f"{upload_dir}/{safe_name}"
-                descriptions.append(
-                    f"[File uploaded by {uploader}]: {safe_name} ({size_str}) saved to {dest_path}"
-                )
-                write_succeeded += 1
-                logger.info(f"[UPLOAD] Copied {safe_name} ({size_str}) to {agent_name}:{dest_path}")
-
-                await platform_audit_service.log(
-                    event_type=AuditEventType.EXECUTION,
-                    event_action="file_upload",
-                    source=source,
-                    target_type="agent",
-                    target_id=agent_name,
-                    details={
-                        "filename": safe_name,
-                        "size_bytes": actual_size,
-                        "mime_type": actual_mime,
-                        "storage": "container_file",
-                        "dest_path": dest_path,
-                        "sender_id": sender_id,
-                        "channel_id": channel_id,
-                        "uploader": uploader,
-                    },
-                )
-
-            except Exception as e:
-                logger.error(f"[UPLOAD] Error copying {safe_name} to {agent_name}: {e}")
-                descriptions.append(
-                    f"[File upload failed]: {safe_name} — workspace write error"
-                )
+        except Exception as e:
+            logger.error(f"[UPLOAD] Error copying {safe_name} to {agent_name}: {e}")
+            descriptions.append(
+                f"[File upload failed]: {safe_name} — workspace write error"
+            )
 
     if len(raw_files) > max_files:
         descriptions.append(
