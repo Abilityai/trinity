@@ -136,6 +136,7 @@
           :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
           :settled="sidebarReady"
+          :threads-failed="store.sessionsFailed"
           v-model:search="search"
           :searching="searching"
           :search-results="searchResults"
@@ -148,6 +149,7 @@
           @open-keys="keyListOpen = true"
           @toggle-star="toggleStar"
           @sign-out="onSignOut"
+          @retry-threads="refreshThreads"
         />
       </div>
       <!-- #2617: `:value` is the EFFECTIVE width, not the desired one. The two
@@ -187,6 +189,7 @@
             :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
             :settled="sidebarReady"
+            :threads-failed="store.sessionsFailed"
             v-model:search="search"
             :searching="searching"
             :search-results="searchResults"
@@ -200,6 +203,7 @@
             @open-keys="() => { mobileNav = false; keyListOpen = true }"
             @toggle-star="toggleStar"
             @sign-out="onSignOut"
+            @retry-threads="refreshThreads"
           />
         </div>
       </div>

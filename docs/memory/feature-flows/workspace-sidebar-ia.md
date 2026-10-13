@@ -463,7 +463,10 @@ Portal.vue
                       then ONE wrapper .ws-fade-in with rows, toggle and empty copy
       Chats           PortalSkeleton "sidebar-chats" while !settled, then ONE wrapper
                       .ws-fade-in; an empty list says "No chats yet — …" (not with an
-                      empty roster, where the agents block says the truer sentence)
+                      empty roster, where the agents block says the truer sentence) —
+                      only when the read is trusted: with :threads-failed
+                      (store.sessionsFailed) an InlineError says the read failed
+                      (stale over rows, "Couldn't load your chats" over none) + retry
 ```
 
 `.ws-fade-in` (`style.css`) is a 180ms opacity-only fade, so nothing reflows, and

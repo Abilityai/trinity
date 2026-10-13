@@ -177,3 +177,44 @@ describe('#3672 — the Projects link holds no placeholder slot (operator ruling
     expect(afterNewChat(w).getAttribute('data-testid')).toBe('sidebar-projects')
   })
 })
+
+// A failed first chat-list read leaves the store's last good list — `[]` — so
+// the sidebar must not read that as "you have no chats" (principle 15, #1926).
+describe('#3672 — a failed chat-list read is never "No chats yet"', () => {
+  it('a failed first read shows the failed banner, not the empty copy, and offers a retry', async () => {
+    const w = sidebar({ roster: ROSTER, threads: [], settled: true, threadsFailed: true })
+    await flushPromises()
+    expect(w.find('[data-testid="sidebar-chats-empty"]').exists()).toBe(false)
+    expect(w.text()).not.toContain('No chats yet')
+    const banner = w.find('[data-testid="sidebar-chats-failed"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain("Couldn't load your chats")
+    await banner.find('button').trigger('click')                 // "Try again"
+    expect(w.emitted('retry-threads')).toHaveLength(1)
+  })
+
+  it('a failed refresh with rows on screen keeps the rows and says they are stale', async () => {
+    const w = sidebar({ roster: ROSTER, threads: THREADS, settled: true, threadsFailed: true })
+    await flushPromises()
+    expect(w.find('[data-testid="sidebar-chats-content"]').text()).toContain('Quarterly numbers')
+    expect(w.find('[data-testid="sidebar-chats-failed"]').text()).toContain("Couldn't refresh your chats")
+  })
+
+  it('a recovered read drops the banner and, if truly empty, says "No chats yet"', async () => {
+    const w = sidebar({ roster: ROSTER, threads: [], settled: true, threadsFailed: true })
+    await flushPromises()
+    await w.setProps({ threadsFailed: false })
+    expect(w.find('[data-testid="sidebar-chats-failed"]').exists()).toBe(false)
+    expect(w.find('[data-testid="sidebar-chats-empty"]').exists()).toBe(true)
+  })
+
+  it('a dismissed banner comes back on the next failure', async () => {
+    const w = sidebar({ roster: ROSTER, threads: THREADS, settled: true, threadsFailed: true })
+    await flushPromises()
+    await w.find('[data-testid="sidebar-chats-failed"] button[aria-label^="Dismiss"]').trigger('click')
+    expect(w.find('[data-testid="sidebar-chats-failed"]').exists()).toBe(false)
+    await w.setProps({ threadsFailed: false })
+    await w.setProps({ threadsFailed: true })
+    expect(w.find('[data-testid="sidebar-chats-failed"]').exists()).toBe(true)
+  })
+})

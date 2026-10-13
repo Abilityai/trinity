@@ -310,6 +310,20 @@
       <PortalSkeleton v-else-if="!settled" variant="sidebar-chats" />
 
       <div v-else class="ws-fade-in" data-testid="sidebar-chats-content">
+        <!-- A failed chat-list read is said, never shown as "No chats yet"
+             (principle 15, #1926): the store keeps the last good list, which
+             on a failed FIRST read is an empty one. With rows on screen it is
+             the stale banner; with none, the same banner says nothing loaded. -->
+        <InlineError
+          v-if="threadsFailed && !failedDismissed"
+          class="mt-3"
+          :message="threadsFailedText"
+          retryable
+          data-testid="sidebar-chats-failed"
+          @retry="$emit('retry-threads')"
+          @dismiss="failedDismissed = true"
+        />
+
         <!-- Starred first, and LIFTED OUT of the date groups below (a starred
              chat appears exactly once — see partitionStarred). -->
         <div v-if="starred.length" class="mt-3">
@@ -372,9 +386,11 @@
         <!-- #3672: a list that turns out empty keeps a stable empty state
              rather than collapsing to nothing (principle 16: it names the next
              step). Not with an empty roster: the agents block above already
-             says the truer sentence, and saying it twice is noise (ent#402). -->
+             says the truer sentence, and saying it twice is noise (ent#402).
+             Only when the list is TRUSTED: an empty list from a failed read is
+             not "no chats" (the banner above says what happened). -->
         <div
-          v-if="!activeThreads.length && !archived.length && roster.length"
+          v-if="!threadsFailed && !activeThreads.length && !archived.length && roster.length"
           class="mt-3 px-2 py-3 text-xs"
           :class="META_INK"
           data-testid="sidebar-chats-empty"
@@ -430,6 +446,7 @@ import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
 import PortalInboxRow from './PortalInboxRow.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
+import InlineError from '@/components/InlineError.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import DraftMark from '@/components/base/DraftMark.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
@@ -451,6 +468,7 @@ import { inboxCounts } from './portalInbox'
 // the day the map changes.
 import { keyHint, keyShortcutsFor, hostPlatform } from './portalKeymap'
 import { capCount } from '@/utils/tabTitle'
+import { staleBannerMessage } from '@/utils/loadingState'
 
 // ent#610 §3g B7a: the sidebar's meta ink, ONE string for every meta text
 // site. Bare gray-400 ink is 2.54:1 on white ("gray-400 is not text") and
@@ -489,6 +507,10 @@ const props = defineProps({
   // shell). False → both sections hold skeleton rows. Defaults to true so a
   // caller that never loads (a test, a static mount) renders as before.
   settled: { type: Boolean, default: true },
+  // The last chat-list read failed (`store.sessionsFailed`). `threads` is then
+  // the last good list — empty on a failed first read — so the empty copy is
+  // withheld and a banner says the read failed instead.
+  threadsFailed: { type: Boolean, default: false },
   search: { type: String, default: '' },
   searching: { type: Boolean, default: false },
   searchResults: { type: Array, default: () => [] },
@@ -498,7 +520,7 @@ const props = defineProps({
 })
 const emit = defineEmits([
   'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star', 'open-inbox',
-  'update:search', 'sign-out', 'open-projects', 'open-keys',
+  'update:search', 'sign-out', 'open-projects', 'open-keys', 'retry-threads',
 ])
 
 const isSearching = computed(() => (props.search || '').trim().length >= 2)
@@ -545,6 +567,14 @@ const archived = computed(() => props.threads
   .filter((t) => t.archived_at)
   .sort((a, b) => String(b.archived_at).localeCompare(String(a.archived_at))))
 const archivedOpen = ref(false)
+
+// The failed-read banner: dismissible, and back on the NEXT failure (a
+// recovered read clears it on its own, since `threadsFailed` drops).
+const failedDismissed = ref(false)
+watch(() => props.threadsFailed, (failed) => { if (failed) failedDismissed.value = false })
+const threadsFailedText = computed(() => (props.threads.length
+  ? staleBannerMessage('your chats', null)
+  : "Couldn't load your chats. They'll appear here once the list loads."))
 const split = computed(() => partitionStarred(activeThreads.value))
 const starred = computed(() => split.value.starred)
 const grouped = computed(() => groupThreadsByDate(split.value.rest))
