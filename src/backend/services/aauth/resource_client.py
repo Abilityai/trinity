@@ -495,7 +495,8 @@ async def _send(call: _Call, presented: Presented) -> Union[egress.CappedRespons
                 timeout=leg,
             )
     except egress.EgressError as exc:
-        possibly = exc.code == "timeout" and call.method == "POST"
+        # A dropped connection after the write is as unknown as a timeout (#914).
+        possibly = exc.code in ("timeout", "unreachable") and call.method == "POST"
         return call.refusal(exc.code, scrub_tokens(exc.detail, call.tokens), possibly_executed=possibly)
     except asyncio.TimeoutError:
         return call.refusal("timeout", "the resource did not answer within the call budget",

@@ -962,6 +962,13 @@ def test_timeout_after_a_post_is_possibly_executed(harness, seams, monkeypatch):
     assert out.code == "timeout" and out.possibly_executed
     assert call(method="GET", body=None).possibly_executed is False
 
+    async def dropped(*a, **kw):
+        raise egress.EgressError("unreachable", "The resource could not be reached: RemoteProtocolError")
+    monkeypatch.setattr(egress, "request_capped", dropped)
+    out = call()
+    assert out.code == "unreachable" and out.possibly_executed          # written, then dropped: unknown
+    assert call(method="GET", body=None).possibly_executed is False
+
 
 def test_tokens_are_scrubbed_from_the_body_and_errors(harness, seams):
     res = harness["res"]
