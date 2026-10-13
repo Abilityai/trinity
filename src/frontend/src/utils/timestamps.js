@@ -93,7 +93,7 @@ export function formatLocalDateTime(timestamp) {
 }
 
 /** "1 minute ago", "5 minutes ago" — the unit agrees with the count (#3524). */
-export function plural(n, unit) {
+export function unitsAgo(n, unit) {
   return `${n} ${unit}${n === 1 ? '' : 's'} ago`
 }
 
@@ -111,9 +111,9 @@ export function formatRelativeTime(timestamp) {
 
   if (diffSeconds < 0) return 'in the future'
   if (diffSeconds < 60) return 'just now'
-  if (diffSeconds < 3600) return plural(Math.floor(diffSeconds / 60), 'minute')
-  if (diffSeconds < 86400) return plural(Math.floor(diffSeconds / 3600), 'hour')
-  if (diffSeconds < 604800) return plural(Math.floor(diffSeconds / 86400), 'day')
+  if (diffSeconds < 3600) return unitsAgo(Math.floor(diffSeconds / 60), 'minute')
+  if (diffSeconds < 86400) return unitsAgo(Math.floor(diffSeconds / 3600), 'hour')
+  if (diffSeconds < 604800) return unitsAgo(Math.floor(diffSeconds / 86400), 'day')
   return date.toLocaleDateString()
 }
 

@@ -1041,8 +1041,11 @@ def _request_line(row: dict, excerpt) -> Optional[str]:
     proposal = row.get("proposal")
     if not isinstance(proposal, dict) or proposal.get("kind") != "gated_skill":
         return None
-    from services.skill_gate_service import split_chat_history
-    message, _ = split_chat_history(str(proposal.get("input") or ""))
+    # The requester kind comes from the gate's own record, never from
+    # `proposal` (any agent can write one): only a person's request is split.
+    from services.skill_gate_service import requested_message
+    record = db.get_gate_request(row.get("request_id") or "") or {}
+    message, _ = requested_message(str(proposal.get("input") or ""), record.get("requester_kind"))
     return excerpt(message, limit=RECENT_ANSWER_REQUEST_MAX)
 
 

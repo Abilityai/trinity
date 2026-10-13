@@ -475,7 +475,9 @@ def split_chat_history(text: str) -> Tuple[str, bool]:
     than with the history. Display only: Approve still runs the whole text,
     which the card shows in full. The FIRST marker splits, so an ambiguous
     split shows more as the request, never less — a message cannot move its
-    own words into the part labelled context."""
+    own words into the part labelled context. That holds only when a platform
+    chat surface built the prefix: callers go through `requested_message`,
+    which splits a person's request only (PR #3648 review)."""
     for prefix, marker in _CHAT_HISTORY_SHAPES:
         if not text.startswith(prefix):
             continue
@@ -500,24 +502,40 @@ def _preview(clean_text: str) -> str:
         else clean_text[:QUESTION_PREVIEW_CHARS] + "… (the full request is shown below)"
 
 
+def requested_message(clean_text: str, requester_kind: Optional[str]) -> Tuple[str, bool]:
+    """`split_chat_history`, but only where the platform built the prefix.
+
+    Only a PERSON's request comes through the platform's own chat surfaces
+    (the Chat tab, `/m`), whose `buildContextPrompt` writes the history
+    shape. Any other requester — an agent, a connector, a channel, a public
+    visitor — can TYPE that shape, and would then choose which words the card
+    leads with: "summarise the above" as the Request, the payment line folded
+    into the history (PR #3648 review). Those requests are never split.
+    """
+    if requester_kind != KIND_PERSON:
+        return clean_text, False
+    return split_chat_history(clean_text)
+
+
 # trinity#3527: said when a chat surface sent earlier turns with the request.
 HISTORY_NOTE = ("Sent with earlier messages of the conversation as context; the full text, "
                 "history first, is shown below.\n\n")
 
 
-def _request_lines(clean_text: str) -> str:
+def _request_lines(clean_text: str, requester_kind: Optional[str]) -> str:
     """The question's request block: the message typed this turn first
-    (`split_chat_history`), then a line saying history came with it."""
-    message, with_history = split_chat_history(clean_text)
+    (`requested_message`), then a line saying history came with it."""
+    message, with_history = requested_message(clean_text, requester_kind)
     return f"Request:\n{_preview(message)}\n\n{HISTORY_NOTE if with_history else ''}"
 
 
-def _also_sent(question: Optional[str], agent_name: str, clean_text: str) -> str:
+def _also_sent(question: Optional[str], agent_name: str, clean_text: str,
+               requester_kind: Optional[str] = None) -> str:
     """The context lines `_ask_body` wrote into the question, for the card,
     which shows them in a row of their own and drops the question. Found only
     AFTER the whole request block, so a request that quotes the heading
     itself puts nothing in the row."""
-    head = f"{_request_lines(clean_text)}{_also_sent_head(agent_name)}"
+    head = f"{_request_lines(clean_text, requester_kind)}{_also_sent_head(agent_name)}"
     body = (question or "").removesuffix(ASK_FOOTER)
     at = body.find(head)
     return body[at + len(head):].strip() if at >= 0 else ""
@@ -536,7 +554,7 @@ def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints
         "type": "approval",
         "priority": "high",
         "title": f"Approve {skills} on {agent_name}"[:300],
-        "question": (f"{who} asked {agent_name} to run {skills}.\n\n{_request_lines(clean_text)}{beside}"
+        "question": (f"{who} asked {agent_name} to run {skills}.\n\n{_request_lines(clean_text, requester.kind)}{beside}"
                      f"{ASK_FOOTER}"),
         "options": list(OPTIONS),
         "to": role,
@@ -1828,11 +1846,11 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
             "execution_id": record.get("requester_execution_id") if with_run_ids else None,
         },
         "also_sent": _also_sent(item.get("question"), record["agent_name"],
-                                str(proposal.get("input") or "")),
+                                str(proposal.get("input") or ""), record.get("requester_kind")),
         # trinity#3527: the message typed this turn, when a chat surface sent
         # earlier turns with it — the card leads with it; the full input
         # (what Approve runs) stays below. None when there was no history.
-        "request": _typed_request(str(proposal.get("input") or "")),
+        "request": _typed_request(str(proposal.get("input") or ""), record.get("requester_kind")),
         "state": record.get("state"),
         "execution_id": record.get("dispatched_execution_id") if with_run_ids else None,
         "waiting_on": [_person_label(p) for p in people] if name_approvers else [],
@@ -1840,8 +1858,8 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
     }
 
 
-def _typed_request(clean_text: str) -> Optional[str]:
-    message, with_history = split_chat_history(clean_text)
+def _typed_request(clean_text: str, requester_kind: Optional[str]) -> Optional[str]:
+    message, with_history = requested_message(clean_text, requester_kind)
     return message if with_history else None
 
 

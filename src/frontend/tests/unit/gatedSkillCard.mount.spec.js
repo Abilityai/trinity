@@ -218,6 +218,16 @@ describe('the Workspace (PortalAsks — the Inbox pane and the chat card)', () =
     expect(answer).toHaveBeenCalledWith('g1', expect.objectContaining({ response: 'Reject', responseText: 'Wrong supplier' }))
   })
 
+  it('with a Request row shown, the full input is never folded (PR #3648 review)', () => {
+    const long = Array.from({ length: 60 }, (_, i) => `line ${i} of the earlier conversation`).join('\n')
+    const folded = mountAsks([ask({ proposal: { ...row().proposal, input: long } })])
+    expect(tid(folded, 'gate-card-input-toggle').exists()).toBe(true)
+    expect(tid(folded, 'gate-card-input').classes()).toContain('max-h-24')
+    const shown = mountAsks([ask({ proposal: { ...row().proposal, input: long }, gate: gate({ request: '/pay-invoice 1 EUR' }) })])
+    expect(tid(shown, 'gate-card-input-toggle').exists()).toBe(false)
+    expect(tid(shown, 'gate-card-input').classes()).not.toContain('max-h-24')
+  })
+
   it('a history-carrying request leads with the typed message above the full input (trinity#3527)', () => {
     const w = mountAsks([ask({ gate: gate({ request: '/pay-invoice 100 EUR' }) })])
     expect(tid(w, 'gate-card-request').text()).toBe('/pay-invoice 100 EUR')
