@@ -2551,9 +2551,11 @@ watch([activeAgentName, pendingSession, startingNewChat], ([agent, sid, fresh]) 
 // clears it, the same agent keeps it (a re-click holds still). A snapshot taken
 // before the thread list could be trusted (a cold link) is `ids: null` —
 // untaken — and is retaken ONCE when it becomes trustworthy; a later poll never
-// retakes. In memory only, like `lastOpen`.
-const stageAgent = computed(() => (!isInboxRoute.value && !activeRoomId.value && !unreachableAgent.value
-  ? activeAgentName.value || null : null))
+// retakes. In memory only, like `lastOpen`. A room counts by its URL as well as
+// by `openRoom`'s ref: Back/forward or a link to `/workspace/r/:id` never writes
+// the ref, and the room is on stage all the same.
+const stageAgent = computed(() => (!isInboxRoute.value && !activeRoomId.value && !activeRoomIdFromRoute.value
+  && !unreachableAgent.value ? activeAgentName.value || null : null))
 const tabOrder = ref(null)   // { agent, ids } | null
 watch([stageAgent, () => threadListTrusted()], ([agent, trusted]) => {
   if (!agent) { tabOrder.value = null; return }

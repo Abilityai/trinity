@@ -96,7 +96,7 @@ let focusComposer
 // `conversationRef` here: the auto-stub exposes no `focusComposer`.
 const ConversationStub = defineComponent({
   name: 'PortalConversation',
-  props: ['agent', 'sessionId', 'newChat', 'threads', 'focusOnMount', 'prefill'],
+  props: ['agent', 'sessionId', 'newChat', 'threads', 'focusOnMount', 'prefill', 'tabOrder'],
   setup(_, { expose }) {
     expose({ focusComposer, startVoiceCall: vi.fn(), endVoiceCall: vi.fn() })
     return () => h('div')
@@ -122,8 +122,9 @@ function arm() {
 }
 
 let mounted = []
-async function boot(path) {
+async function boot(path, setup = null) {
   arm()
+  if (setup) setup()
   const router = makeRouter()
   await router.push(path)
   await router.isReady()
@@ -273,5 +274,93 @@ describe('ent#784 — a landing that reuses a chat puts the caret in the field t
     focusComposer.mockClear()
     await clickAgentRow(w, 'scout')
     expect(focusComposer).toHaveBeenCalled()
+  })
+})
+
+describe('trinity-enterprise#856 — the strip is frozen per arrival, by one watcher', () => {
+  // scout has three chats. On arrival the strip is Main, then recency:
+  // t1 (Main), s3 (newer), s2 (older).
+  const S2 = { id: 's2', session_id: 's2', agent_name: 'scout', last_message_at: '2026-09-25T10:00:00Z', unread: 0 }
+  const S3 = { id: 's3', session_id: 's3', agent_name: 'scout', last_message_at: '2026-09-26T10:00:00Z', unread: 0 }
+  const LIST = [SCOUT_MAIN, S3, S2, SAGE_EMPTY]
+  // A reply lands in s2: by recency it now outranks s3.
+  const REPLIED = [SCOUT_MAIN, { ...S2, last_message_at: '2026-09-28T10:00:00Z', unread: 1 }, S3, SAGE_EMPTY]
+  const withList = (list) => () => {
+    store.fetchAllSessions = vi.fn(async () => { store.sessionsFailed = false; return list })
+  }
+  const order = (w) => w.vm.tabOrder
+  // The reply is what every later read returns too: the Inbox re-reads the list.
+  const reply = async (w) => {
+    store.fetchAllSessions = vi.fn(async () => { store.sessionsFailed = false; return REPLIED })
+    w.vm.threads = REPLIED
+    await flushPromises()
+  }
+
+  it('a reply mid-visit changes nothing; the strip and the keys get the same snapshot', async () => {
+    const { w } = await boot('/workspace/c/s3', withList(LIST))
+    expect(order(w)).toEqual({ agent: 'scout', ids: ['t1', 's3', 's2'] })
+    await reply(w)
+    expect(order(w).ids).toEqual(['t1', 's3', 's2'])
+    expect(conversation(w).props('tabOrder')).toEqual({ agent: 'scout', ids: ['t1', 's3', 's2'] })
+  })
+
+  it('a click on the agent you are on holds the snapshot', async () => {
+    const { w } = await boot('/workspace/c/s3', withList(LIST))
+    const before = order(w)
+    await reply(w)
+    await clickAgentRow(w, 'scout')
+    expect(showing(w).agent).toBe('scout')
+    expect(order(w)).toBe(before)                       // same object: not retaken
+  })
+
+  it('agent → room (by URL: Back, a link) → agent retakes on the way back', async () => {
+    const { w, router } = await boot('/workspace/c/s3', withList(LIST))
+    await reply(w)
+    await router.push('/workspace/r/room1'); await flushPromises()
+    expect(order(w)).toBe(null)                          // off stage: cleared
+    await clickAgentRow(w, 'scout')
+    expect(showing(w).agent).toBe('scout')
+    expect(order(w)).toEqual({ agent: 'scout', ids: ['t1', 's2', 's3'] })
+  })
+
+  it('agent → room (the sidebar door) → agent retakes on the way back', async () => {
+    const { w } = await boot('/workspace/c/s3', withList(LIST))
+    await reply(w)
+    w.vm.openRoom('room1'); await flushPromises()
+    expect(order(w)).toBe(null)
+    await clickAgentRow(w, 'scout')
+    expect(order(w)).toEqual({ agent: 'scout', ids: ['t1', 's2', 's3'] })
+  })
+
+  it('agent → Inbox → agent retakes on the way back', async () => {
+    const { w, router } = await boot('/workspace/c/s3', withList(LIST))
+    await reply(w)
+    await router.push('/workspace/inbox'); await flushPromises()
+    expect(order(w)).toBe(null)
+    await clickAgentRow(w, 'scout')
+    expect(showing(w).agent).toBe('scout')
+    expect(order(w)).toEqual({ agent: 'scout', ids: ['t1', 's2', 's3'] })
+  })
+
+  it('a cold link is untaken until the list is trusted, retaken once, then held', async () => {
+    let answer
+    const { w } = await boot('/workspace/c/s3', () => {
+      store.fetchAllSessions = vi.fn(() => new Promise((r) => { answer = r }))
+    })
+    // The arrival happened before the list could be trusted: untaken, never
+    // an order built from an empty list.
+    expect(order(w)?.ids ?? null).toBe(null)
+    store.sessionsFailed = false
+    answer(LIST); await flushPromises(); await flushPromises()
+    expect(order(w)).toEqual({ agent: 'scout', ids: ['t1', 's3', 's2'] })
+    const taken = order(w)
+    await reply(w)                                       // a later poll never retakes
+    expect(order(w)).toBe(taken)
+    // Nor does a poll that fails and then recovers: trust flipping back on is
+    // not an arrival.
+    store.sessionsFailed = true; await flushPromises()
+    store.sessionsFailed = false; await flushPromises()
+    expect(order(w)).toBe(taken)
+    expect(order(w).ids).toEqual(['t1', 's3', 's2'])
   })
 })
