@@ -20,3 +20,16 @@
 # (done, #1158) + the key never re-landing verbatim (the custom
 # trinity-resend-api-key rule). This is the documented "honest limit" of
 # regex+entropy secret scanning against a re-split/obfuscated secret.
+
+# ---- ent#623 AAuth signing key (abilityai/trinity#3644) — false positive ----
+# The Ed25519 dataclass attribute in services/aauth/keys.py:43 (an attribute
+# name with a type annotation, not a credential; the key object is loaded at
+# runtime from the encrypted envelope, never a literal) trips generic-api-key.
+# The adding commit is d70fd559, which a commit-range scan re-flags however the
+# head reads, so an inline allow marker on the current line cannot clear it:
+# the fingerprint below is the only mechanism that clears it, and it IS read by
+# the CI range scan (gitleaks picks up the repo-root .gitleaksignore) — the
+# first load-bearing entry here.
+d70fd559b87c25c9e6d2c46bbc3f934e6aa13cf5:src/backend/services/aauth/keys.py:generic-api-key:43
+# Commit 391fef346's first version of this very comment quoted the pattern, and the range scan re-flags that commit too.
+391fef346478b23ed0d447175f3270c684ef3e8a:.gitleaksignore:generic-api-key:25

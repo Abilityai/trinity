@@ -86,6 +86,9 @@ MAX_ENDPOINT_CREDENTIAL_LEN = 8192
 #: and a strict subset of what h11 will put on the wire.
 _HEADER_SAFE_CREDENTIAL = re.compile(r"^[\x21-\x7E]+$")
 
+#: ent#623: how an endpoint authenticates. Absent on a stored record = "bearer".
+AUTH_SCHEMES = ("bearer", "aauth")
+
 
 def normalize_credential_kind(value: Any) -> str:
     """Any stored/provider-supplied value → a kind we will act on.
@@ -169,6 +172,9 @@ class ResolvedEndpoint:
     name: str
     url: str
     credential: Optional[str] = field(default=None, repr=False)
+    #: ent#623 — "bearer" (the #736 behaviour) or "aauth" (the call is signed as
+    #: the calling agent's AAuth identity and carries no credential at all).
+    auth_scheme: str = "bearer"
     #: `api_key` (default, and what every pre-#3185 record resolves to) or
     #: `payment_token`. The KIND is metadata and stays in the repr — an operator
     #: debugging a 402 needs to know which slot they filled; the VALUE never
@@ -179,6 +185,7 @@ class ResolvedEndpoint:
         return (
             f"ResolvedEndpoint(id={self.id!r}, name={self.name!r}, url={self.url!r}, "
             f"credential={'<set>' if self.credential else None}, "
+            f"auth_scheme={self.auth_scheme!r}, "
             f"credential_kind={self.credential_kind!r})"
         )
 
@@ -286,6 +293,11 @@ def _record_matches_ref(record: Dict[str, Any], wanted: str, lowered: str) -> bo
     )
 
 
+def _record_auth_scheme(record: Dict[str, Any]) -> str:
+    scheme = record.get("auth_scheme")
+    return scheme if scheme in AUTH_SCHEMES else "bearer"
+
+
 def _public_record(record: Dict[str, Any]) -> Dict[str, Any]:
     """The read shape: metadata plus whether a credential exists, never its value.
 
@@ -301,6 +313,7 @@ def _public_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "name": str(record.get("name") or ""),
         "url": str(record.get("url") or ""),
         "has_credentials": bool(record.get("credential")),
+        "auth_scheme": _record_auth_scheme(record),
     }
     if out["has_credentials"]:
         out["credential_kind"] = normalize_credential_kind(record.get("credential_kind"))
@@ -333,11 +346,15 @@ class SystemSettingsEndpointProvider:
                 if not url:
                     return None
                 credential = record.get("credential")
+                scheme = _record_auth_scheme(record)
                 return ResolvedEndpoint(
                     id=rid,
                     name=rname,
                     url=url,
-                    credential=str(credential) if credential else None,
+                    # An aauth endpoint never sends a stored secret, whatever the
+                    # record holds (ent#623).
+                    credential=str(credential) if credential and scheme == "bearer" else None,
+                    auth_scheme=scheme,
                     credential_kind=normalize_credential_kind(
                         record.get("credential_kind")
                     ),
@@ -475,6 +492,7 @@ def upsert_endpoint(
     credential: Optional[str] = None,
     *,
     clear_credential: bool = False,
+    auth_scheme: Optional[str] = None,
     credential_kind: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Add or update one named endpoint. Returns its public (credential-free) record.
@@ -567,14 +585,36 @@ def upsert_endpoint(
     # move when their secret has surrounding whitespace.
     clean_credential = (credential or "").strip() or None
     try:
-        validate_a2a_endpoint_url(clean_url)
+        validated = validate_a2a_endpoint_url(clean_url)
     except A2AEndpointUrlError as exc:
         raise EndpointValidationError(str(exc)) from None
+    # ent#623: `auth_scheme` omitted = keep what the record has (a rename or a
+    # repoint must never silently turn an AAuth endpoint into a bearer one).
+    if auth_scheme is not None and auth_scheme not in AUTH_SCHEMES:
+        raise EndpointValidationError(f"auth_scheme must be one of {', '.join(AUTH_SCHEMES)}")
+    if auth_scheme == "aauth":
+        if clean_credential:
+            raise EndpointValidationError(
+                "An aauth endpoint carries no credential — the call is signed as the "
+                "calling agent. Omit credentials."
+            )
+        if validated.port != 443:
+            # The callee's AAuth issuer is `https://<host>` with no port, and it
+            # verifies `@authority` against exactly that.
+            raise EndpointValidationError("An aauth endpoint must use the default HTTPS port")
 
     records = _load_endpoint_records()
     lowered = clean_name.lower()
     for record in records:
         if str(record.get("name") or "").lower() == lowered:
+            if (auth_scheme or _record_auth_scheme(record)) == "aauth":
+                if clean_credential:
+                    raise EndpointValidationError(
+                        "An aauth endpoint carries no credential — the call is signed as "
+                        "the calling agent. Omit credentials."
+                    )
+                if validated.port != 443:
+                    raise EndpointValidationError("An aauth endpoint must use the default HTTPS port")
             record["name"] = clean_name
             record["url"] = clean_url
             if clear_credential:
@@ -595,6 +635,13 @@ def upsert_endpoint(
                 _apply_credential_kind(
                     record, credential_kind, str(record.get("credential"))
                 )
+            if auth_scheme is not None:
+                record["auth_scheme"] = auth_scheme
+                if auth_scheme == "aauth":
+                    # Switching to AAuth drops the stored secret rather than
+                    # keeping a credential nothing will ever send.
+                    record.pop("credential", None)
+                    _forget_credential_kind(record)
             _store_endpoint_records(records)
             return _public_record(record)
 
@@ -628,6 +675,8 @@ def upsert_endpoint(
             "There is no stored credential to label; send the credential "
             "together with credential_kind."
         )
+    if auth_scheme == "aauth":
+        record["auth_scheme"] = "aauth"
     records.append(record)
     _store_endpoint_records(records)
     return _public_record(record)
