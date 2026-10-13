@@ -26,10 +26,18 @@ Every token this call holds — agent, person, auth, resource — is scrubbed
 from any body or error text before it reaches the LLM (H2), on top of the
 generic compact-JWS shape.
 
-FastAPI-free (Invariant #1). State the ladder cannot keep in one call — the
-auth-token cache and the pending records — lives in Redis behind the
-``ps_client`` seam (checkpoint B); until that module exists the seams answer
-"not held" / "not persisted", which the ladder turns into named refusals.
+``resume(agent, handle)`` continues a pending call: one signed GET of the
+pending URL (a PS exchange, or a resource-side deferral) and, when the PS has
+minted the auth token, the STORED request is re-sent — what runs is what the
+person consented to, never caller-supplied arguments (decision #11).
+
+Before any of this, the allow-list (``resource_allowlist``) decides whether
+the resource may be called at all — origin equality, fail closed — the only
+thing between an LLM-supplied URL and a signed server-side request.
+
+FastAPI-free (Invariant #1). The auth-token cache and the pending records live
+in Redis behind ``ps_client`` (T1); a cache that cannot be read is "not held",
+a record that cannot be written is a ``state_unavailable`` refusal.
 """
 from __future__ import annotations
 
@@ -39,19 +47,21 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import urljoin, urlsplit
 
 import httpx
 
-from services.aauth import (auth_token, config, discovery, egress, httpsig, person_token as pt,
-                            requirement, resource_meta, resource_token, signer)
+from services.aauth import (auth_token, config, discovery, egress, httpsig, person_token as pt, ps_client,
+                            requirement, resource_allowlist, resource_meta, resource_token, signer)
 
 logger = logging.getLogger(__name__)
 
 ROUTE_BUDGET = 25.0
 LEG_TIMEOUT = 10.0
 PS_WAIT = 10
+RESUME_WAIT = 15
+SLOW_DOWN_STEP = 5
 MAX_RESOURCE_SENDS = 6
 MAX_PS_EXCHANGES = 3
 RESOURCE_BODY_MAX_BYTES = 1024 * 1024
@@ -193,10 +203,12 @@ class _Call:
     reauthed: bool = False
     fresh_chain: bool = False
     stepped_up: bool = False
+    override_url: Optional[str] = None                       # a poll of a pending URL (resume)
+    polling: Optional[Tuple[str, Dict[str, Any]]] = None     # (handle, record) being polled
 
     @property
     def url(self) -> str:
-        return self.resource + self.path
+        return self.override_url or (self.resource + self.path)
 
     def remaining(self) -> float:
         return self.deadline - time.monotonic()
@@ -206,50 +218,32 @@ class _Call:
 
 
 # --------------------------------------------------------------------------- #
-# Seams wired by checkpoint B (ps_client: Redis auth-token cache, pending records, exchange)
+# State and the PS exchange (ps_client; each seam fails closed on its own)
 # --------------------------------------------------------------------------- #
-def _state():
-    try:
-        from services.aauth import ps_client
-    except ImportError:          # checkpoint A: no exchange, no cache, no records
-        return None
-    return ps_client
-
-
 def _held_auth(call: _Call) -> Optional[auth_token.HeldAuthToken]:
-    st = _state()
-    if st is None:
-        return None
     try:
-        return st.held_auth_token(call.agent, resource=call.resource, key_thumbprint=call.jkt, now=call.now)
+        return ps_client.held_auth_token(call.agent, resource=call.resource, key_thumbprint=call.jkt, now=call.now)
     except Exception:  # noqa: BLE001 — a cache that cannot be read is "not held"
         logger.warning("[aauth] auth-token cache unreadable for %s", call.agent, exc_info=True)
         return None
 
 
 def _store_auth(call: _Call, held: auth_token.HeldAuthToken) -> None:
-    st = _state()
-    if st is not None:
-        try:
-            st.store_auth_token(call.agent, held, now=call.now)
-        except Exception:  # noqa: BLE001 — a cache miss next call costs one PS exchange, never safety
-            logger.warning("[aauth] auth-token cache unwritable for %s", call.agent, exc_info=True)
+    try:
+        ps_client.store_auth_token(call.agent, held, now=call.now)
+    except Exception:  # noqa: BLE001 — a miss next call costs one PS exchange, never safety
+        logger.warning("[aauth] auth-token cache unwritable for %s", call.agent, exc_info=True)
 
 
 def _forget_auth(call: _Call) -> None:
-    st = _state()
-    if st is not None:
-        try:
-            st.forget_auth_token(call.agent, resource=call.resource, key_thumbprint=call.jkt)
-        except Exception:  # noqa: BLE001
-            logger.warning("[aauth] auth-token cache eviction failed for %s", call.agent, exc_info=True)
+    try:
+        ps_client.forget_auth_token(call.agent, resource=call.resource, key_thumbprint=call.jkt)
+    except Exception:  # noqa: BLE001
+        logger.warning("[aauth] auth-token cache eviction failed for %s", call.agent, exc_info=True)
 
 
 def _save_pending(call: _Call, kind: str, extra: Dict[str, Any]) -> Optional[str]:
     """Persist a pending record; the handle, or None when it cannot be recorded (fail closed)."""
-    st = _state()
-    if st is None:
-        return None
     record = {
         "kind": kind, "agent": call.agent, "our_issuer": call.our_issuer, "ps_issuer": call.ps,
         "resource": call.resource, "method": call.method, "path": call.path,
@@ -258,7 +252,7 @@ def _save_pending(call: _Call, kind: str, extra: Dict[str, Any]) -> Optional[str
         "created_at": call.now, "expires_at": call.now + PENDING_TTL, **extra,
     }
     try:
-        return st.save_pending(call.agent, record, now=call.now)
+        return ps_client.save_pending(call.agent, record, now=call.now)
     except Exception:  # noqa: BLE001
         logger.error("[aauth] could not persist pending record for %s", call.agent, exc_info=True)
         return None
@@ -266,11 +260,8 @@ def _save_pending(call: _Call, kind: str, extra: Dict[str, Any]) -> Optional[str
 
 async def _exchange(call: _Call, verified: resource_token.ResourceToken,
                     presented: Presented) -> auth_token.ExchangeOutcome:
-    st = _state()
-    if st is None:
-        return auth_token.ExchangeRefused("ps_unavailable", "the auth-token exchange is not available on this build")
     wait = max(0, min(PS_WAIT, int(call.remaining()) - 2))
-    return await st.exchange_auth_token(
+    return await ps_client.exchange_auth_token(
         call.agent, resource=call.resource, resource_token=verified, presented=presented,
         justification=call.justification, wait=wait, now=call.now, client_factory=call.factory,
         key_thumbprint=call.jkt,
@@ -368,6 +359,10 @@ async def call_resource(
     if not norm:
         return Refusal("invalid_resource", "resource must be an https server identifier (host only, no port/path/query)")
     resource = norm
+    if not resource_allowlist.is_allowed(resource):
+        return Refusal("resource_not_allowed",
+                       "the resource is not on this instance's allow-list (setting aauth_resource_allowlist)",
+                       resource=resource)
     method = (method or "").upper()
     if method not in METHODS:
         return Refusal("invalid_method", "method must be GET or POST", resource=resource)
@@ -427,8 +422,12 @@ async def _run(call: _Call, presented: Presented) -> Outcome:
             return resp
         status = resp.status
         if 200 <= status < 300 and status != 202:
+            if call.polling is not None:
+                ps_client.delete_pending(*call.polling)
             return _result(call, resp, presented)
         if status == 202:
+            if call.polling is not None:
+                return _still_pending(call, resp)
             return await _deferred(call, resp, presented)
         if status == 401:
             nxt = await _challenge(call, resp, presented)
@@ -511,7 +510,7 @@ async def _person(call: _Call) -> Union[Presented, Outcome]:
                                        challenges=list(call.challenges), expires_at=out.expires_at,
                                        resource=call.resource)
         if isinstance(out, pt.PersonTokenRefused):
-            if out.code in pt._DENIAL_CODES:
+            if out.code in pt.DENIAL_CODES:
                 return Denied(out.code, out.detail, list(call.challenges), call.resource)
             if out.code in ("expired", "gone"):
                 return Expired(f"pending_{out.code}", list(call.challenges), call.resource)
@@ -607,6 +606,7 @@ async def _exchange_and_continue(call: _Call, verified: resource_token.ResourceT
         handle = _save_pending(call, kind, {
             "pending_url": out.pending_url, "retry_after": out.retry_after, "url": out.url, "code": out.code,
             "status": out.status, "presented_jti": presented.jti, "presented_kind": presented.kind,
+            "presented_sub": presented.sub, "presented_exp": presented.exp,
             "resource_token_jti": verified.jti, "next_poll_at": call.now + out.retry_after,
         })
         if handle is None:
@@ -669,3 +669,147 @@ async def _deferred(call: _Call, resp: egress.CappedResponse, presented: Present
     return ResourcePending(handle=handle, retry_after=retry_after, requirement="deferred", at="resource",
                            challenges=list(call.challenges), expires_at=call.now + PENDING_TTL,
                            resource=call.resource)
+
+
+def _still_pending(call: _Call, resp: egress.CappedResponse) -> Outcome:
+    """A poll answered 202: refresh the record's interval, hand the same handle back."""
+    handle, record = call.polling
+    retry_after = requirement.parse_retry_after(resp.headers.get("retry-after"), default=int(record["retry_after"]))
+    record["retry_after"] = retry_after
+    record["next_poll_at"] = call.now + retry_after
+    try:
+        ps_client.update_pending(handle, record, now=call.now)
+    except Exception:  # noqa: BLE001 — the record stands until its TTL
+        logger.warning("[aauth] could not refresh pending record for %s", call.agent, exc_info=True)
+    return ResourcePending(handle=handle, retry_after=retry_after, requirement="deferred", at="resource",
+                           challenges=list(call.challenges), expires_at=int(record["expires_at"]),
+                           resource=call.resource)
+
+
+def _pending_shape(call: _Call, handle: str, record: Dict[str, Any]) -> Outcome:
+    """The outcome a still-pending record presents (same handle, current interval)."""
+    kind = record["kind"]
+    if kind == "ps_interaction":
+        url, code = record.get("url"), record.get("code")
+        return InteractionRequired(handle=handle, url=url, code=code,
+                                   link=requirement.interaction_link(url, code) if url and code else None,
+                                   retry_after=int(record["retry_after"]), at="person_server",
+                                   challenges=list(call.challenges), expires_at=int(record["expires_at"]),
+                                   resource=call.resource)
+    return ResourcePending(handle=handle, retry_after=int(record["retry_after"]),
+                           requirement="approval" if kind == "ps_approval" else "deferred",
+                           at="person_server" if kind == "ps_approval" else "resource",
+                           challenges=list(call.challenges), expires_at=int(record["expires_at"]),
+                           resource=call.resource)
+
+
+async def resume(agent_name: str, handle: Any, *, now: Optional[int] = None, wait: int = RESUME_WAIT,
+                 client_factory: Optional[Callable] = None, budget_seconds: float = ROUTE_BUDGET) -> Outcome:
+    """Continue a pending call by its handle (fail closed: ``handle_unknown``)."""
+    from services import a2a_client
+
+    our_issuer = config.active_issuer()
+    if not our_issuer:
+        raise signer.SigningUnavailable("AAuth is not enabled on this instance (flag off or no issuer)")
+    now = int(time.time()) if now is None else now
+    try:
+        record = ps_client.load_pending(agent_name, handle)
+    except Exception:  # noqa: BLE001
+        return Refusal("state_unavailable", "pending state is unavailable (Redis)")
+    if record is None:
+        return Expired("handle_unknown", [], "")
+    resource = record["resource"]
+    if record.get("our_issuer") != our_issuer or record.get("ps_issuer") != config.get_person_server():
+        ps_client.delete_pending(handle, record)     # a re-pointed PS or a new tunnel host: the consent is moot
+        return Expired("handle_unknown", list(record.get("challenges") or []), resource)
+    if not resource_allowlist.is_allowed(resource):
+        ps_client.delete_pending(handle, record)
+        return Refusal("resource_not_allowed", "the resource is no longer on the allow-list", resource=resource)
+    try:
+        meta = await resource_meta.metadata(resource)
+    except resource_meta.ResourceMetadataError as exc:
+        return Refusal(exc.code, exc.detail, resource=resource)
+    info = signer.agent_token_info(agent_name, now=now, min_remaining=AGENT_TOKEN_MIN_REMAINING)
+    body = record.get("body")
+    call = _Call(agent=agent_name, resource=resource, method=record["method"], path=record["path"],
+                 body=body.encode("utf-8") if isinstance(body, str) else None,
+                 content_type=record.get("content_type"), justification=None, now=now, our_issuer=our_issuer,
+                 ps=config.get_person_server(), meta=meta, jkt=info.thumbprint, agent_info=info,
+                 factory=client_factory or a2a_client._http_client,
+                 deadline=time.monotonic() + max(0.0, float(budget_seconds)),
+                 challenges=list(record.get("challenges") or []))
+    call.tokens.add(info.token)
+    if info.thumbprint != record.get("key_thumbprint"):
+        # The consent was given against the previous key window; the PS's auth
+        # token would be bound to that key. Start over rather than sign a lie.
+        ps_client.delete_pending(handle, record)
+        return call.refusal("key_rotated", "the agent key rotated while the call was pending; call again")
+    if now < int(record.get("next_poll_at", 0)):
+        return _pending_shape(call, handle, record)          # early: no network call
+
+    if record["kind"] in ("ps_interaction", "ps_approval"):
+        return await _resume_exchange(call, handle, record, wait=max(0, min(wait, pt.MAX_WAIT)))
+    return await _resume_resource_poll(call, handle, record)
+
+
+async def _resume_exchange(call: _Call, handle: str, record: Dict[str, Any], *, wait: int) -> Outcome:
+    out = await ps_client.poll_exchange(call.agent, record, wait=wait, now=call.now,
+                                        client_factory=call.factory, key_thumbprint=call.jkt)
+    if isinstance(out, auth_token.AuthTokenIssued):
+        held = out.held
+        call.tokens.add(held.token)
+        _store_auth(call, held)
+        ps_client.delete_pending(handle, record)
+        return await _run(call, Presented("auth", held.token, held.sub, held.jti, held.exp))
+    if isinstance(out, auth_token.ExchangePending):
+        record.update(retry_after=out.retry_after, next_poll_at=call.now + out.retry_after, status=out.status)
+        if out.url and out.code:
+            record.update(url=out.url, code=out.code)
+        try:
+            ps_client.update_pending(handle, record, now=call.now)
+        except Exception:  # noqa: BLE001
+            logger.warning("[aauth] could not refresh pending record for %s", call.agent, exc_info=True)
+        return _pending_shape(call, handle, record)
+    code = out.code
+    if code in _DENIAL_CODES:
+        ps_client.delete_pending(handle, record)
+        return Denied(code, out.detail, list(call.challenges), call.resource)
+    if code == "expired":
+        ps_client.delete_pending(handle, record)
+        return Expired("pending_expired", list(call.challenges), call.resource)
+    if code == "gone":
+        ps_client.delete_pending(handle, record)
+        return call.refusal("gone", out.detail, status=410)
+    if code == "slow_down":
+        record["retry_after"] = min(requirement.MAX_RETRY_AFTER, int(record["retry_after"]) + SLOW_DOWN_STEP)
+        record["next_poll_at"] = call.now + record["retry_after"]
+        try:
+            ps_client.update_pending(handle, record, now=call.now)
+        except Exception:  # noqa: BLE001
+            logger.warning("[aauth] could not persist the slow-down for %s", call.agent, exc_info=True)
+        return _pending_shape(call, handle, record)
+    if code == "as_unreachable":
+        return call.refusal("ps_unreachable", out.detail, status=out.ps_status)
+    return call.refusal(f"ps_rejected:{code}", out.detail, status=out.ps_status)
+
+
+async def _resume_resource_poll(call: _Call, handle: str, record: Dict[str, Any]) -> Outcome:
+    kind = record.get("token_kind")
+    if kind == "auth":
+        held = _held_auth(call)
+        if held is None:
+            return call.refusal("token_unavailable", "the auth token this deferred call used is no longer held; call again")
+        call.tokens.add(held.token)
+        presented = Presented("auth", held.token, held.sub, held.jti, held.exp)
+    elif kind == "person":
+        held = pt.held_token(call.agent, call.resource, now=call.now)
+        if held is None or held.key_thumbprint != call.jkt:
+            return call.refusal("token_unavailable", "the person token this deferred call used is no longer held; call again")
+        call.tokens.add(held.token)
+        presented = Presented("person", held.token, held.sub, held.jti, held.exp)
+    else:
+        presented = _agent_presented(call.agent_info)
+    call.method, call.body, call.content_type = "GET", None, None
+    call.override_url = record["pending_url"]
+    call.polling = (handle, record)
+    return await _run(call, presented)

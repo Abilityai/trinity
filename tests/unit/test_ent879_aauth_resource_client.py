@@ -40,8 +40,8 @@ if _BACKEND not in sys.path:
 
 from services import a2a_client  # noqa: E402
 from services.aauth import (auth_token, config, discovery, egress, httpsig, jose, keys,  # noqa: E402
-                            person_server, requirement, resource_client as rc, resource_meta,
-                            resource_token, signer)
+                            person_server, ps_client, requirement, resource_allowlist,
+                            resource_client as rc, resource_meta, resource_token, signer)
 from services.aauth import person_token as pt  # noqa: E402
 from utils.url_validation import ValidatedPublicUrl  # noqa: E402
 
@@ -224,7 +224,9 @@ def harness(monkeypatch):
     monkeypatch.setattr(config, "get_person_server", lambda: state["ps"])
     monkeypatch.setattr(keys, "get_instance_key",
                         lambda: keys.InstanceKey(kid=kid, public_jwk={**jwk, "kid": kid}, private_key=instance_key))
-    monkeypatch.setattr(pt, "_get_redis", lambda: redis)
+    monkeypatch.setattr(pt, "_get_redis", lambda: None if state.get("no_redis") else redis)
+    monkeypatch.setattr(ps_client, "_get_redis", lambda: None if state.get("no_redis") else redis)
+    monkeypatch.setattr(resource_allowlist, "allowed_resources", lambda: tuple(state.get("allowed", (RES,))))
 
     async def _validate(url):
         host = httpx.URL(url).host
@@ -596,7 +598,7 @@ def test_agent_token_resource_answers_directly_with_budget(harness, seams):
     assert out.budget == resource_meta.Budget(2, 38, "credits") and json.loads(out.body) == {"entities": [{"id": 1}]}
     req = res.calls[0]
     _, claims = presented_of(req)
-    assert claims["typ"] if "typ" in claims else True
+    assert claims["iss"] == OUR                                         # the agent token
     assert req.headers["aauth-capabilities"] == "interaction" and req.headers["content-type"] == "application/json"
     assert req.content == BODY and req.headers["content-digest"] == httpsig.content_digest(BODY)
     assert harness["ps_fake"].posts == []                               # no PS trip for an agent-token resource
@@ -673,7 +675,7 @@ def test_full_chain_person_to_auth_token(harness, seams):
     verified, presented = seams.exchanges[0]
     assert presented.kind == "person" and verified.presented_jti == presented.jti and verified.sub == presented.sub
     token, claims = presented_of(res.calls[1])
-    assert claims["typ"] if False else token == seams.stored[0].token
+    assert token == seams.stored[0].token and claims["aud"] == RES
     assert seams.stored[0].token not in out.body
 
 
@@ -799,16 +801,6 @@ def test_exchange_denials_and_ps_unreachable(harness, seams):
     seams.exchange_script = [auth_token.ExchangeRefused("as_unreachable", "down", 502)]
     out = call()
     assert out.outcome == "refusal" and out.code == "ps_unreachable" and out.status == 502
-
-
-def test_without_ps_client_the_exchange_is_a_named_refusal(harness, monkeypatch):
-    """Checkpoint A: the seams are unwired — the ladder names it, never crashes."""
-    res = harness["res"]
-    bind_person_token(harness)
-    res.script = [res.require_auth]
-    monkeypatch.setattr(rc, "_state", lambda: None)
-    out = call()
-    assert out.outcome == "refusal" and out.code == "ps_rejected:ps_unavailable"
 
 
 def test_step_up_on_a_held_auth_token_once(harness, seams):
@@ -992,3 +984,479 @@ def test_person_token_forget_drops_the_held_token(harness, seams):
     assert pt.held_token(AGENT, RES, now=NOW) is not None
     assert pt.forget(AGENT, RES) is True and pt.held_token(AGENT, RES, now=NOW) is None
     assert pt.forget(AGENT, RES) is False
+
+
+# =========================================================================== #
+# Checkpoint B — allow-list (sink), ps_client exchange + cache + records, resume
+# =========================================================================== #
+class FakePS2(FakePS):
+    """ent#878's fake PS plus the auth-token endpoint and its pending URL."""
+
+    AUTH_PENDING = "/aauth/pending/auth-1"
+
+    def __init__(self):
+        super().__init__()
+        self.auth_posts, self.auth_polls = [], []
+        self.auth_script, self.auth_poll_script = [], []
+
+    def auth_token_for(self, request: httpx.Request, *, sub=None, cnf=None, header=None, **claims):
+        doc = json.loads(request.content.decode()) if request.content else {}
+        _, pres, _, _ = jose.decode_unverified(doc["presented_token"])
+        body = {"iss": PS, "dwk": "aauth-person.json", "aud": RES, "sub": sub or pres["sub"], "scope": "senzing",
+                "jti": "at-" + os.urandom(4).hex(), "iat": NOW, "exp": NOW + 3600,
+                "cnf": {"jwk": cnf or pres["cnf"]["jwk"]}}
+        body.update(claims)
+        hdr = {"alg": "RS256", "typ": "aa-auth+jwt", "kid": "ps-kid"}
+        hdr.update(header or {})
+        return jose.sign_jws(hdr, body, self.key)
+
+    @staticmethod
+    def auth_ok(token, expires_in=3600):
+        return (200, {"content-type": "application/json"}, json.dumps({"auth_token": token, "expires_in": expires_in}))
+
+    @staticmethod
+    def auth_pending(requirement_header="auto", *, location=PS + "/aauth/pending/auth-1", retry_after="5"):
+        headers = {"content-type": "application/json"}
+        if requirement_header == "auto":
+            requirement_header = f'requirement=interaction; url="{PS}/auth"; code="WXYZ-5678"'
+        if requirement_header is not None:
+            headers["aauth-requirement"] = requirement_header
+        if location is not None:
+            headers["location"] = location
+        if retry_after is not None:
+            headers["retry-after"] = retry_after
+        return (202, headers, json.dumps({"status": "pending"}))
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/aauth/token/auth":
+            self.auth_posts.append(request)
+            step = self.auth_script.pop(0)
+        elif request.method == "GET" and path == self.AUTH_PENDING:
+            self.auth_polls.append(request)
+            step = self.auth_poll_script.pop(0)
+        else:
+            return super().handle(request)
+        if callable(step):
+            step = step(request)
+        status, headers, body = step
+        raw = body.encode() if isinstance(body, str) else body
+        return httpx.Response(status, headers=headers, stream=httpx.ByteStream(raw))
+
+
+@pytest.fixture()
+def wired(harness):
+    """The harness with a PS that speaks the auth-token endpoint and NO seams."""
+    ps = FakePS2()
+    harness["ps_fake"] = ps
+    harness["ps2"] = ps
+    return harness
+
+
+def _wired_route(harness, monkeypatch):
+    res, ps = harness["res"], harness["ps_fake"]
+
+    def route(request):
+        host = request.headers.get("host") or request.url.host
+        return res.handle(request) if host == "res.example" else ps.handle(request)
+
+    def factory(timeout):
+        return httpx.AsyncClient(transport=httpx.MockTransport(route), timeout=timeout,
+                                 follow_redirects=False, trust_env=False)
+    monkeypatch.setattr(a2a_client, "_http_client", factory)
+
+
+@pytest.fixture()
+def live(wired, monkeypatch):
+    _wired_route(wired, monkeypatch)
+    return wired
+
+
+def resume(handle, now=NOW, agent=AGENT, **kw):
+    return asyncio.run(rc.resume(agent, handle, now=now, **kw))
+
+
+# --------------------------------------------------------------------------- #
+# resource_allowlist — fail-closed matrix
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("raw, expect", [
+    ('["https://res.example"]', (RES,)),
+    ('["https://res.example", "https://other.example"]', (RES, OTHER)),
+    ("https://res.example, https://other.example", (RES, OTHER)),
+    ('["https://res.example", "https://res.example"]', (RES,)),
+    (None, ()), ("", ()), ("   ", ()), ("[]", ()), ("{}", ()), ("[1]", ()), ('"https://res.example"', ()),
+    ("not json [", ()), ('["https://res.example", "https://bad"]', ()),          # one bad line empties the list
+    ('["http://res.example"]', ()), ('["https://res.example:8443"]', ()), ('["https://res.example/v1"]', ()),
+    ('["https://RES.example"]', ()), ('["https://res.example/"]', ()), ("x" * 20000, ()),
+    ("[" + ",".join(f'"https://h{i}.example"' for i in range(101)) + "]", ()),
+])
+def test_allowlist_parse_matrix(raw, expect):
+    assert resource_allowlist.parse_allowlist(raw) == expect
+
+
+def test_allowlist_resolution_settings_then_env_fail_closed(monkeypatch):
+    from services.settings_service import settings_service
+
+    monkeypatch.setattr(settings_service, "get_setting", lambda key: '["https://res.example"]')
+    monkeypatch.setenv("AAUTH_RESOURCE_ALLOWLIST", "https://other.example")
+    assert resource_allowlist.allowed_resources() == (RES,)                     # settings win
+    assert resource_allowlist.is_allowed(RES) and not resource_allowlist.is_allowed(OTHER)
+    monkeypatch.setattr(settings_service, "get_setting", lambda key: None)
+    assert resource_allowlist.allowed_resources() == (OTHER,)                   # env fallback
+    monkeypatch.delenv("AAUTH_RESOURCE_ALLOWLIST")
+    assert resource_allowlist.allowed_resources() == ()
+
+    def boom(key):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(settings_service, "get_setting", boom)
+    assert resource_allowlist.allowed_resources() == () and not resource_allowlist.is_allowed(RES)   # unreadable → none
+
+
+@pytest.mark.parametrize("probe", [OTHER, "https://res.example.evil", "https://evil.res.example", "https://res.example/v1",
+                                   "http://res.example", "https://res.example:443", "", None, 5])
+def test_allowlist_origin_equality_not_prefix(probe, monkeypatch):
+    monkeypatch.setattr(resource_allowlist, "allowed_resources", lambda: (RES,))
+    assert resource_allowlist.is_allowed(probe) is False
+    assert resource_allowlist.is_allowed(RES) is True
+
+
+def test_ladder_refuses_unlisted_resource_before_any_egress(harness, seams):
+    harness["allowed"] = ()
+    out = call()
+    assert out.outcome == "refusal" and out.code == "resource_not_allowed" and out.resource == RES
+    assert harness["res"].metadata_fetches == 0 and harness["res"].calls == [] and harness["ps_fake"].posts == []
+    harness["allowed"] = (OTHER,)
+    assert call().code == "resource_not_allowed"
+
+
+# --------------------------------------------------------------------------- #
+# ps_client — the auth-token cache
+# --------------------------------------------------------------------------- #
+def _held(info, exp=NOW + 3600):
+    pres = rc.Presented("person", "t", "ps-directed-sub", "pt-1", NOW + 3600)
+    return auth_token.inspect_auth_token(auth_token_for(pres, jose.public_jwk(info.key.public_key()), exp=exp),
+                                         resource=RES, ps=PS, agent_jkt=info.thumbprint, presented_sub=pres.sub,
+                                         presented_exp=pres.exp, now=NOW)
+
+
+def test_auth_cache_round_trip_margin_key_and_outage(harness):
+    info = signer.agent_token_info(AGENT, now=NOW)
+    held = _held(info)
+    assert ps_client.held_auth_token(AGENT, resource=RES, key_thumbprint=info.thumbprint, now=NOW) is None
+    assert ps_client.store_auth_token(AGENT, held, now=NOW) is True
+    got = ps_client.held_auth_token(AGENT, resource=RES, key_thumbprint=info.thumbprint, now=NOW)
+    assert got.token == held.token and got.sub == held.sub and got.scope == "senzing"
+    assert ps_client.held_auth_token(AGENT, resource=RES, key_thumbprint=info.thumbprint, now=NOW + 3600 - 299) is None
+    assert ps_client.held_auth_token(AGENT, resource=RES, key_thumbprint="other-key", now=NOW) is None
+    assert ps_client.held_auth_token(AGENT, resource=OTHER, key_thumbprint=info.thumbprint, now=NOW) is None
+    assert ps_client.held_auth_token("other-agent", resource=RES, key_thumbprint=info.thumbprint, now=NOW) is None
+    assert ps_client.store_auth_token(AGENT, _held(info, exp=NOW + 100), now=NOW) is False     # already inside the margin
+    ps_client.forget_auth_token(AGENT, resource=RES, key_thumbprint=info.thumbprint)
+    assert ps_client.held_auth_token(AGENT, resource=RES, key_thumbprint=info.thumbprint, now=NOW) is None
+    harness["no_redis"] = True
+    assert ps_client.store_auth_token(AGENT, held, now=NOW) is False
+    assert ps_client.held_auth_token(AGENT, resource=RES, key_thumbprint=info.thumbprint, now=NOW) is None
+
+
+def test_auth_cache_value_never_logged_in_repr_and_unreadable_is_not_held(harness, monkeypatch):
+    """A Redis read error is "not held" for the ladder — one more exchange, never an unsigned call."""
+    harness["redis"].fail = True
+    with pytest.raises(RuntimeError):
+        ps_client.held_auth_token(AGENT, resource=RES, key_thumbprint="k", now=NOW)
+    res = harness["res"]
+    res.metadata = {k: v for k, v in SENZING_METADATA.items() if k != "access_mode"}
+    harness["redis"].fail = False
+    res.script = [FakeResource.ok()]
+    harness["redis"].fail = True
+    out = call()                                   # cache read raises → not held → agent token → 200
+    assert out.outcome == "result" and out.token_kind == "agent"
+
+
+# --------------------------------------------------------------------------- #
+# ps_client — pending records in ent#878's namespace
+# --------------------------------------------------------------------------- #
+def _record(**over):
+    rec = {"kind": "ps_interaction", "agent": AGENT, "our_issuer": OUR, "ps_issuer": PS, "resource": RES,
+           "method": "POST", "path": PATH, "body": BODY.decode(), "content_type": "application/json",
+           "key_thumbprint": "k", "challenges": ["auth-token"], "created_at": NOW, "expires_at": NOW + 1800,
+           "pending_url": PS + FakePS2.AUTH_PENDING, "retry_after": 5, "url": PS + "/auth", "code": "WXYZ-5678",
+           "status": "pending", "presented_jti": "pt-1", "presented_kind": "person", "presented_sub": "ps-directed-sub",
+           "presented_exp": NOW + 900, "next_poll_at": NOW}
+    rec.update(over)
+    return rec
+
+
+def test_pending_records_are_kind_and_agent_scoped(harness):
+    handle = ps_client.save_pending(AGENT, _record(), now=NOW)
+    assert pt.HANDLE_RE.match(handle) and len(harness["redis"].handles()) == 1
+    got = ps_client.load_pending(AGENT, handle)
+    assert got["kind"] == "ps_interaction" and got["body"] == BODY.decode() and got["scope"].startswith("879\n")
+    assert ps_client.load_pending("other-agent", handle) is None
+    assert ps_client.load_pending(AGENT, "nope") is None and ps_client.load_pending(AGENT, None) is None
+    # ent#878's resume refuses our kinds; our loader refuses its kind
+    out = asyncio.run(pt.resume(AGENT, handle, now=NOW))
+    assert out.code == "pending_unknown"
+    with pytest.raises(ValueError):
+        ps_client.save_pending(AGENT, _record(kind="person_token"), now=NOW)
+    with pytest.raises(ValueError):
+        ps_client.save_pending("other-agent", _record(), now=NOW)
+    ps_client.delete_pending(handle, got)
+    assert ps_client.load_pending(AGENT, handle) is None
+    harness["no_redis"] = True
+    with pytest.raises(RuntimeError):
+        ps_client.save_pending(AGENT, _record(), now=NOW)
+    with pytest.raises(RuntimeError):
+        ps_client.load_pending(AGENT, handle)
+
+
+# --------------------------------------------------------------------------- #
+# ps_client — the exchange against the PS auth-token endpoint
+# --------------------------------------------------------------------------- #
+def _exchange(live, **kw):
+    """Drive the real exchange: a bound person token, a resource token minted for it."""
+    bind_person_token(live)
+    res = live["res"]
+    res.script = [res.require_auth]
+    return call(**kw)
+
+
+def test_exchange_posts_the_signed_request_shape_and_holds_the_token(live):
+    ps = live["ps2"]
+    ps.auth_script = [lambda req: FakePS2.auth_ok(ps.auth_token_for(req))]
+    bind_person_token(live)
+    res = live["res"]
+    res.script = [res.require_auth, FakeResource.ok()]
+    out = call()
+    assert out.outcome == "result" and out.token_kind == "auth" and out.challenges == ["auth-token"]
+    req = ps.auth_posts[0]
+    doc = json.loads(req.content)
+    assert set(doc) == {"resource_token", "presented_token", "justification", "capabilities"}
+    assert doc["capabilities"] == ["interaction"] and doc["justification"] == "demo"
+    assert doc["presented_token"] == pt.held_token(AGENT, RES, now=NOW).token
+    _, rt, _, _ = jose.decode_unverified(doc["resource_token"])
+    assert rt["dwk"] == "aauth-resource.json" and rt["ps"] == PS
+    assert req.headers["prefer"].startswith("wait=") and req.headers["content-type"] == "application/json"
+    _, sk = presented_of(req)
+    assert sk["iss"] == OUR                                   # the PS leg is signed with the AGENT token
+    # held in Redis, presented on the next call with no PS trip at all
+    info = signer.agent_token_info(AGENT, now=NOW)
+    assert ps_client.held_auth_token(AGENT, resource=RES, key_thumbprint=info.thumbprint, now=NOW).token == \
+        presented_of(res.calls[1])[0]
+    res.script = [FakeResource.ok()]
+    again = call()
+    assert again.outcome == "result" and again.token_kind == "auth" and again.challenges == []
+    assert len(ps.auth_posts) == 1 and len(ps.posts) == 1
+
+
+def test_exchange_refuses_an_auth_token_bound_elsewhere(live):
+    ps = live["ps2"]
+    other = jose.public_jwk(Ed25519PrivateKey.generate().public_key())
+    ps.auth_script = [lambda req: FakePS2.auth_ok(ps.auth_token_for(req, cnf=other))]
+    out = _exchange(live)
+    assert out.code == "ps_rejected:auth_token_invalid" and out.status == 200
+    ps.auth_script = [lambda req: FakePS2.auth_ok(ps.auth_token_for(req, sub="someone-else"))]
+    assert _exchange(live).code == "ps_rejected:auth_token_invalid"
+    ps.auth_script = [(200, {"content-type": "application/json"}, "[]")]
+    assert _exchange(live).code == "ps_rejected:auth_token_invalid"
+    info = signer.agent_token_info(AGENT, now=NOW)
+    assert ps_client.held_auth_token(AGENT, resource=RES, key_thumbprint=info.thumbprint, now=NOW) is None
+
+
+def test_exchange_pending_interaction_records_and_relays(live):
+    ps = live["ps2"]
+    ps.auth_script = [FakePS2.auth_pending()]
+    out = _exchange(live)
+    assert out.outcome == "interaction_required" and out.link == PS + "/auth?code=WXYZ-5678" and out.at == "person_server"
+    rec = ps_client.load_pending(AGENT, out.handle)
+    assert rec["kind"] == "ps_interaction" and rec["pending_url"] == PS + FakePS2.AUTH_PENDING and rec["body"] == BODY.decode()
+    assert rec["presented_sub"] == "ps-directed-sub" and rec["presented_exp"] > NOW
+    held = pt.held_token(AGENT, RES, now=NOW).token
+    assert held not in json.dumps(rec)
+    ps.auth_script = [FakePS2.auth_pending(requirement_header=None, retry_after="9")]
+    out = _exchange(live)
+    assert out.outcome == "pending" and out.requirement == "approval" and out.retry_after == 9
+
+
+@pytest.mark.parametrize("script, code", [
+    (FakePS2.auth_pending('requirement=interaction; url="https://evil.example/auth"; code="WXYZ-5678"'), "ps_rejected:ps_protocol_error"),
+    (FakePS2.auth_pending('requirement=interaction; url="https://ps.example/auth"; code="ILOU"'), "ps_rejected:ps_protocol_error"),
+    (FakePS2.auth_pending("requirement=(x)"), "ps_rejected:ps_protocol_error"),
+    (FakePS2.auth_pending("requirement=payment"), "ps_rejected:unsupported_requirement"),
+    (FakePS2.auth_pending(location="https://evil.example/p"), "ps_rejected:ps_protocol_error"),
+    (FakePS.problem(400, "invalid_resource_token"), "ps_rejected:invalid_resource_token"),
+    (FakePS.problem(400, "weird!"), "ps_rejected:ps_error"),
+    ((401, {"signature-error": 'error="invalid_signature"'}, ""), "ps_rejected:signature_rejected"),
+    (FakePS.problem(502, "as_unreachable"), "ps_unreachable"),
+    (FakePS.problem(500, "boom"), "ps_rejected:ps_error"),
+])
+def test_exchange_refusal_mapping(live, script, code):
+    live["ps2"].auth_script = [script]
+    out = _exchange(live)
+    assert out.outcome == "refusal" and out.code == code
+
+
+@pytest.mark.parametrize("script, reason", [
+    (FakePS.problem(403, "user_unreachable"), "user_unreachable"),
+    (FakePS.problem(403, "denied"), "denied"),
+    (FakePS.problem(403, "other"), "denied"),
+])
+def test_exchange_denials(live, script, reason):
+    live["ps2"].auth_script = [script]
+    out = _exchange(live)
+    assert out.outcome == "denied" and out.reason == reason and out.do_not_retry
+
+
+def test_exchange_expired_presented_token_runs_one_fresh_chain_for_real(live):
+    ps, res = live["ps2"], live["res"]
+    ps.auth_script = [FakePS.problem(400, "expired_presented_token"), lambda req: FakePS2.auth_ok(ps.auth_token_for(req))]
+    bind_person_token(live)
+    bind_person_token(live)
+    res.script = [res.require_auth, res.require_auth, FakeResource.ok()]
+    out = call()
+    assert out.outcome == "result" and out.token_kind == "auth" and len(ps.posts) == 2 and len(ps.auth_posts) == 2
+    first, second = (json.loads(r.content)["presented_token"] for r in ps.auth_posts)
+    assert first != second
+
+
+def test_exchange_person_server_failures(live, monkeypatch):
+    ps = live["ps2"]
+    bind_person_token(live)                         # the person token is cached from a healthy PS first
+    live["res"].script = [FakeResource.ok()]
+    assert call().outcome == "result"
+    ps.metadata_status = 500
+    person_server.reset_cache()
+    live["res"].script = [live["res"].require_auth]
+    out = call()
+    assert out.outcome == "refusal" and out.code == "ps_rejected:person_server_unreachable"
+    ps.metadata_status = 200
+    person_server.reset_cache()
+    live["ps"] = None
+    live["res"].script = [live["res"].require_auth]
+    assert call().code == "person_server_unconfigured"
+
+
+# --------------------------------------------------------------------------- #
+# resume — the pending handle
+# --------------------------------------------------------------------------- #
+def _pending_handle(live):
+    live["ps2"].auth_script = [FakePS2.auth_pending(retry_after="0")]
+    out = _exchange(live)
+    assert out.outcome == "interaction_required"
+    return out.handle
+
+
+def test_resume_polls_then_resends_the_stored_request(live):
+    ps, res = live["ps2"], live["res"]
+    handle = _pending_handle(live)
+    ps.auth_poll_script = [lambda req: FakePS2.auth_ok(ps.auth_token_for(httpx.Request(
+        "POST", PS, content=json.dumps({"presented_token": pt.held_token(AGENT, RES, now=NOW).token}).encode())))]
+    res.script = [FakeResource.ok()]
+    out = resume(handle, now=NOW + 1)
+    assert out.outcome == "result" and out.token_kind == "auth" and out.challenges == ["auth-token"]
+    sent = res.calls[-1]
+    assert sent.method == "POST" and sent.url.path == PATH and sent.content == BODY        # the STORED request
+    assert presented_of(sent)[1]["aud"] == RES and presented_of(sent)[1]["iss"] == PS
+    assert ps_client.load_pending(AGENT, handle) is None                                  # consumed
+    assert ps.auth_polls[0].headers["prefer"] == "wait=15"
+    res.script = [FakeResource.ok()]
+    assert call().challenges == [] and len(ps.auth_posts) == 1                              # cached afterwards
+
+
+def test_resume_states(live):
+    ps = live["ps2"]
+    handle = _pending_handle(live)
+    # still pending: same handle, refreshed interval, url/code kept
+    ps.auth_poll_script = [FakePS2.auth_pending(retry_after="20")]
+    out = resume(handle, now=NOW + 1)
+    assert out.outcome == "interaction_required" and out.handle == handle and out.retry_after == 20
+    assert out.link == PS + "/auth?code=WXYZ-5678"
+    # early poll: no network
+    polls = len(ps.auth_polls)
+    assert resume(handle, now=NOW + 2).handle == handle and len(ps.auth_polls) == polls
+    # slow down: +5 s
+    ps.auth_poll_script = [FakePS.problem(429, "slow_down")]
+    out = resume(handle, now=NOW + 30)
+    assert out.outcome == "interaction_required" and out.retry_after == 25
+    # denied: terminal, record gone
+    ps.auth_poll_script = [FakePS.problem(403, "abandoned")]
+    out = resume(handle, now=NOW + 60)
+    assert out.outcome == "denied" and out.reason == "abandoned" and ps_client.load_pending(AGENT, handle) is None
+    assert resume(handle, now=NOW + 61).reason == "handle_unknown"
+
+
+@pytest.mark.parametrize("script, outcome, key, value", [
+    (FakePS.problem(408, "expired"), "expired", "reason", "pending_expired"),
+    (FakePS.problem(410, "gone"), "refusal", "code", "gone"),
+    (FakePS.problem(502, "as_unreachable"), "refusal", "code", "ps_unreachable"),
+    (FakePS.problem(500, "boom"), "refusal", "code", "ps_rejected:ps_error"),
+])
+def test_resume_terminal_and_transient_refusals(live, script, outcome, key, value):
+    handle = _pending_handle(live)
+    live["ps2"].auth_poll_script = [script]
+    out = resume(handle, now=NOW + 1)
+    assert out.outcome == outcome and getattr(out, key) == value
+    gone = ps_client.load_pending(AGENT, handle) is None
+    assert gone is (outcome == "expired" or value == "gone")      # transient PS errors keep the record
+
+
+def test_resume_refuses_unknown_wrong_agent_rotated_and_repointed(live):
+    handle = _pending_handle(live)
+    assert resume("x" * 32).outcome == "expired" and resume("x" * 32).reason == "handle_unknown"
+    assert resume(handle, agent="other-agent").reason == "handle_unknown"
+    out = resume(handle, now=NOW + 3600)                   # a new key window
+    assert out.outcome == "refusal" and out.code == "key_rotated" and ps_client.load_pending(AGENT, handle) is None
+    handle = _pending_handle(live)
+    live["allowed"] = ()
+    assert resume(handle, now=NOW + 1).code == "resource_not_allowed"
+    live["allowed"] = (RES,)
+    handle = _pending_handle(live)
+    live["ps"] = "https://ps2.example"
+    assert resume(handle, now=NOW + 1).reason == "handle_unknown"
+    live["ps"] = PS
+    live["no_redis"] = True
+    assert resume(handle, now=NOW + 1).code == "state_unavailable"
+    live["no_redis"] = False
+    live["issuer"] = None
+    with pytest.raises(signer.SigningUnavailable):
+        resume(handle)
+
+
+def test_resume_resource_deferred_poll(live):
+    ps, res = live["ps2"], live["res"]
+    ps.auth_script = [lambda req: FakePS2.auth_ok(ps.auth_token_for(req))]
+    bind_person_token(live)
+    res.script = [res.require_auth, FakeResource.deferred(retry_after="0")]
+    out = call()
+    assert out.outcome == "pending" and out.at == "resource"
+    handle = out.handle
+    res.script = [FakeResource.deferred(retry_after="7")]
+    again = resume(handle, now=NOW + 1)
+    assert again.outcome == "pending" and again.handle == handle and again.retry_after == 7
+    poll = res.calls[-1]
+    assert poll.method == "GET" and poll.url.path == "/v1/pending/1"
+    assert presented_of(poll)[0] == ps_client.held_auth_token(AGENT, resource=RES, key_thumbprint=signer.agent_token_info(AGENT, now=NOW).thumbprint, now=NOW).token
+    res.script = [FakeResource.ok({"done": True})]
+    done = resume(handle, now=NOW + 10)
+    assert done.outcome == "result" and json.loads(done.body) == {"done": True} and ps_client.load_pending(AGENT, handle) is None
+    # the auth token the deferral used is gone from the cache → named refusal, call again
+    res.script = [res.require_auth, FakeResource.deferred(retry_after="0")]
+    ps.auth_script = [lambda req: FakePS2.auth_ok(ps.auth_token_for(req))]
+    ps_client.forget_auth_token(AGENT, resource=RES, key_thumbprint=signer.agent_token_info(AGENT, now=NOW).thumbprint)
+    handle = call().handle
+    ps_client.forget_auth_token(AGENT, resource=RES, key_thumbprint=signer.agent_token_info(AGENT, now=NOW).thumbprint)
+    assert resume(handle, now=NOW + 1).code == "token_unavailable"
+
+
+def test_pending_consent_is_recorded_or_refused_never_half(live, monkeypatch):
+    live["ps2"].auth_script = [FakePS2.auth_pending()]
+    live["redis"].fail = True
+    bind_person_token(live)
+    live["res"].script = [live["res"].require_auth]
+    pt.reset_cache()
+    live["redis"].fail = False
+    live["res"].script = [FakeResource.ok()]
+    call()                                                      # person token held
+    live["res"].script = [live["res"].require_auth]
+    live["redis"].fail = True
+    out = call()
+    assert out.outcome == "refusal" and out.code == "state_unavailable"

@@ -74,8 +74,8 @@ _POINTER_KEY = "aauth:pt:pending:{}"
 _AGENT_SET_KEY = "aauth:pt:agent:{}"
 
 #: PS problem ``error`` values on a 403 poll that are distinct outcomes (draft §Polling Error Codes).
-_DENIAL_CODES = ("denied", "abandoned", "revoked")
-TERMINAL_REFUSALS = frozenset(_DENIAL_CODES) | {"expired", "gone"}
+DENIAL_CODES = ("denied", "abandoned", "revoked")
+TERMINAL_REFUSALS = frozenset(DENIAL_CODES) | {"expired", "gone"}
 
 
 # --------------------------------------------------------------------------- #
@@ -158,7 +158,15 @@ def _text(value: Any) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
-def _load_record(client, handle: str) -> Optional[Dict[str, Any]]:
+#: The record kind this module owns. ent#879 stores its own kinds in the same
+#: namespace (``ps_interaction`` / ``ps_approval`` / ``resource_polling``) and
+#: resumes them itself; ``resume`` below answers ``pending_unknown`` for those,
+#: so a handle minted by one tool cannot be driven by the other.
+RECORD_KIND = "person_token"
+
+
+def load_record(client, handle: str) -> Optional[Dict[str, Any]]:
+    """The record under ``handle`` (any kind), or None. Public for ent#879's store."""
     raw = _text(client.get(_HANDLE_KEY.format(_h(handle))))
     if not raw:
         return None
@@ -169,7 +177,8 @@ def _load_record(client, handle: str) -> Optional[Dict[str, Any]]:
     return record if isinstance(record, dict) else None
 
 
-def _save_record(client, handle: str, record: Dict[str, Any], *, now: int) -> None:
+def save_record(client, handle: str, record: Dict[str, Any], *, now: int) -> None:
+    """Persist ``record`` under ``handle`` with its scope pointer and the per-agent bound set."""
     ttl = max(1, int(record["expires_at"]) - now)
     client.set(_HANDLE_KEY.format(_h(handle)), json.dumps(record, separators=(",", ":")), ex=ttl)
     client.set(_POINTER_KEY.format(_h(record["scope"])), handle, ex=ttl)
@@ -178,7 +187,7 @@ def _save_record(client, handle: str, record: Dict[str, Any], *, now: int) -> No
     client.expire(agent_key, PENDING_TTL)
 
 
-def _delete_record(client, handle: str, record: Dict[str, Any]) -> None:
+def delete_record(client, handle: str, record: Dict[str, Any]) -> None:
     client.delete(_HANDLE_KEY.format(_h(handle)))
     client.delete(_POINTER_KEY.format(_h(record["scope"])))
     client.srem(_AGENT_SET_KEY.format(record["agent"]), _h(handle))
@@ -234,8 +243,13 @@ def _clamp_wait(wait: int) -> int:
     return max(0, min(MAX_WAIT, int(wait)))
 
 
-async def _signed_request(agent_name: str, method: str, url: str, *, body: bytes, content_type: Optional[str],
-                          wait: int, now: int, client_factory: Optional[Callable]) -> Tuple[egress.CappedResponse, signer.AgentToken]:
+async def signed_ps_request(agent_name: str, method: str, url: str, *, body: bytes, content_type: Optional[str],
+                            wait: int, now: int, client_factory: Optional[Callable]) -> Tuple[egress.CappedResponse, signer.AgentToken]:
+    """One request to the PS signed with the agent token (``Prefer: wait=N``).
+
+    Public: ent#879's auth-token exchange is the same leg against the PS's
+    ``auth_token_endpoint`` (draft §Auth Token Endpoint).
+    """
     from services import a2a_client
 
     info = signer.agent_token_info(agent_name, now=now, min_remaining=AGENT_TOKEN_MIN_REMAINING)
@@ -333,7 +347,7 @@ def _refusal(resp: egress.CappedResponse, *, resource: str, ps_issuer: str) -> P
                                   ps_error=err, **kw)
     if status == 403:
         err = _problem_error(resp.body)
-        code = err if err in _DENIAL_CODES else "denied"
+        code = err if err in DENIAL_CODES else "denied"
         return PersonTokenRefused(code, f"the person declined or the binding was {code}", ps_error=err, **kw)
     if status == 408:
         return PersonTokenRefused("expired", "the interaction expired before the person answered",
@@ -476,8 +490,8 @@ async def person_token(agent_name: str, resource: str, *, wait: int = POST_WAIT,
     try:
         handle = _pending_handle(client, scope)
         if handle:
-            record = _load_record(client, handle)
-            if record and record.get("agent") == agent_name:
+            record = load_record(client, handle)
+            if record and record.get("agent") == agent_name and record.get("kind", RECORD_KIND) == RECORD_KIND:
                 return await _resume_record(agent_name, handle, record, wait=wait, now=now,
                                             client_factory=client_factory, redis=client)
             client.delete(_POINTER_KEY.format(_h(scope)))
@@ -498,7 +512,7 @@ async def person_token(agent_name: str, resource: str, *, wait: int = POST_WAIT,
     body = json.dumps({"resource": resource, "capabilities": list(CAPABILITIES)},
                       separators=(",", ":")).encode("utf-8")
     try:
-        resp, info = await _signed_request(agent_name, "POST", meta.person_token_endpoint, body=body,
+        resp, info = await signed_ps_request(agent_name, "POST", meta.person_token_endpoint, body=body,
                                            content_type="application/json", wait=wait, now=now,
                                            client_factory=client_factory)
     except egress.EgressError as exc:
@@ -523,12 +537,13 @@ async def person_token(agent_name: str, resource: str, *, wait: int = POST_WAIT,
                                   resource=resource, iss=ps_issuer)
     handle = secrets.token_urlsafe(24)
     record = {
+        "kind": RECORD_KIND,
         "agent": agent_name, "resource": resource, "our_issuer": our_issuer, "ps_issuer": ps_issuer,
         "scope": scope, **fields,
         "next_poll_at": now + fields["retry_after"], "created_at": now, "expires_at": now + PENDING_TTL,
     }
     try:
-        _save_record(client, handle, record, now=now)
+        save_record(client, handle, record, now=now)
     except Exception:  # noqa: BLE001 — fail closed, audited by the router as a refusal
         logger.error("[aauth] could not persist pending interaction for %s", agent_name, exc_info=True)
         return PersonTokenRefused("state_unavailable", "the pending interaction could not be recorded (Redis)",
@@ -548,10 +563,10 @@ async def resume(agent_name: str, handle: str, *, wait: int = RESUME_WAIT, now: 
     if client is None:
         return PersonTokenRefused("state_unavailable", "pending-interaction state is unavailable (Redis)")
     try:
-        record = _load_record(client, handle)
+        record = load_record(client, handle)
     except Exception:  # noqa: BLE001
         return PersonTokenRefused("state_unavailable", "pending-interaction state is unavailable (Redis)")
-    if record is None or record.get("agent") != agent_name:
+    if record is None or record.get("agent") != agent_name or record.get("kind", RECORD_KIND) != RECORD_KIND:
         return PersonTokenRefused("pending_unknown", "no pending interaction under that handle")
     return await _resume_record(agent_name, handle, record, wait=_clamp_wait(wait), now=now,
                                 client_factory=client_factory, redis=client)
@@ -561,7 +576,7 @@ async def _resume_record(agent_name: str, handle: str, record: Dict[str, Any], *
                          client_factory: Optional[Callable], redis) -> Outcome:
     our_issuer, ps_issuer, resource = record["our_issuer"], record["ps_issuer"], record["resource"]
     if ps_issuer != config.get_person_server() or our_issuer != config.active_issuer():
-        _delete_record(redis, handle, record)   # a re-pointed PS or a new tunnel host: the binding is moot
+        delete_record(redis, handle, record)   # a re-pointed PS or a new tunnel host: the binding is moot
         return PersonTokenRefused("pending_unknown", "the pending interaction belongs to another configuration")
     if now < int(record.get("next_poll_at", 0)):
         return _as_pending(handle, record)       # early: no network call (E8)
@@ -570,7 +585,7 @@ async def _resume_record(agent_name: str, handle: str, record: Dict[str, Any], *
     except person_server.PersonServerError as exc:
         return PersonTokenRefused(exc.code, exc.detail, resource=resource, iss=ps_issuer)
     try:
-        resp, info = await _signed_request(agent_name, "GET", record["pending_url"], body=b"", content_type=None,
+        resp, info = await signed_ps_request(agent_name, "GET", record["pending_url"], body=b"", content_type=None,
                                            wait=wait, now=now, client_factory=client_factory)
     except egress.EgressError as exc:
         return PersonTokenRefused("person_server_unreachable", exc.detail, resource=resource, iss=ps_issuer)
@@ -585,14 +600,14 @@ async def _resume_record(agent_name: str, handle: str, record: Dict[str, Any], *
             # The PS bound the token to the key of the original POST; ours has
             # rolled (window edge, other worker). Clear the record FIRST, then
             # ask afresh — a bound agent gets a direct 200 on the new key.
-            _delete_record(redis, handle, record)
+            delete_record(redis, handle, record)
             fresh = await person_token(agent_name, resource, wait=min(wait, POST_WAIT), now=now,
                                        client_factory=client_factory)
             if isinstance(fresh, PersonTokenIssued):
                 return PersonTokenIssued(**{**fresh.__dict__, "reissued_for_key": True})
             return fresh
         if isinstance(outcome, PersonTokenIssued):
-            _delete_record(redis, handle, record)
+            delete_record(redis, handle, record)
         return outcome
     if resp.status == 202:
         fields = _pending_from(resp, endpoint=record["pending_url"], meta=meta, record=record)
@@ -601,7 +616,7 @@ async def _resume_record(agent_name: str, handle: str, record: Dict[str, Any], *
         record.update(fields)
         record["next_poll_at"] = now + fields["retry_after"]
         try:
-            _save_record(redis, handle, record, now=now)
+            save_record(redis, handle, record, now=now)
         except Exception:  # noqa: BLE001 — the record still stands until its TTL
             logger.warning("[aauth] could not refresh pending interaction for %s", agent_name, exc_info=True)
             # The PS's interval was not persisted, so the early-poll guard will
@@ -614,12 +629,12 @@ async def _resume_record(agent_name: str, handle: str, record: Dict[str, Any], *
                                     max(int(record["retry_after"]), refused_retry_after(resp)) + SLOW_DOWN_STEP)
         record["next_poll_at"] = now + record["retry_after"]
         try:
-            _save_record(redis, handle, record, now=now)
+            save_record(redis, handle, record, now=now)
         except Exception:  # noqa: BLE001 — the backed-off interval still reaches the client below
             logger.warning("[aauth] could not persist the slow-down for %s", agent_name, exc_info=True)
         return _as_pending(handle, record, status="slow_down")
     if refused.code in TERMINAL_REFUSALS:
-        _delete_record(redis, handle, record)
+        delete_record(redis, handle, record)
     return refused
 
 
