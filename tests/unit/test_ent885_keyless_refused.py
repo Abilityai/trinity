@@ -227,7 +227,7 @@ def test_the_card_is_served_at_the_public_origin(door):
 # --------------------------------------------------------------------------- #
 # Static: nothing reads the inert columns, the db object has no scope reader
 # --------------------------------------------------------------------------- #
-_INERT = re.compile(r"\ba2a_scope\b|\ba2a_keyless_internal\b|\bsource_host\b")
+_INERT = re.compile(r"a2a_scope\b|a2a_keyless_internal\b|\bsource_host\b")  # no leading \b: catches get_a2a_scope too
 _DDL_HOMES = {
     BACKEND_SRC / "db" / "schema.py",
     BACKEND_SRC / "db" / "tables.py",
