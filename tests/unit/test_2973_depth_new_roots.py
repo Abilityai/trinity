@@ -75,6 +75,9 @@ def world(db_backend, monkeypatch):
     db.create_user(UserCreate(username="admin", role="admin", email="nr-admin@example.com"))
     db.register_agent_owner(A, OWNER)
     db.register_agent_owner(B, OWNER)
+    # ent#629: an agent key reaches a sibling only over an agent_permissions edge
+    # (the backend now holds what the MCP layer checks) — A calls B here.
+    db.add_agent_permission(A, B, created_by=OWNER)
 
     capacity = SimpleNamespace(
         acquire=AsyncMock(return_value=SimpleNamespace(state="admitted", queue_position=None))

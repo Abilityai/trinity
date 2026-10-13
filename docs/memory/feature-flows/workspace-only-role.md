@@ -7,15 +7,16 @@ The operator UI starts at `operator`. A Workspace-only principal — role `user`
 outside `ROLE_HIERARCHY` — is refused on every operator route with one named 403; the
 Workspace keeps working. Sharing an agent no longer creates a platform login.
 
-**Implementation status**: PR 1 (OSS core: the floor, sign-in routing, sharing). PR 2,
-after trinity-enterprise#810, adds the role control on the Access-tab row and the
-companion-assignment check. Requirement: `requirements/auth.md` §2.10 (ROLE-002).
+**Implementation status**: PR 1 (OSS core: the floor, sign-in routing, sharing) and PR 2
+(the role on the Access-tab row, a platform account before the first sign-in, assigning a
+`user` to a companion). Requirement: `requirements/auth.md` §2.10 (ROLE-002).
 
 ## Revision History
 
 | Date | Changes |
 |------|---------|
 | 2026-10-09 | Initial flow (trinity-enterprise#837 PR 1) |
+| 2026-10-12 | PR 2: the Access tab's role select and "Give a platform account"; the role route is interactive-only and audited; assigning someone shares the agent with them |
 
 ## User Story
 
@@ -172,6 +173,29 @@ The share row is the Workspace access (`client_portal/service.py::email_has_acce
 manual whitelist (`routers/settings/whitelist.py`, `default_role` from the new picker), CLI
 self-signup and SSO first sign-in keep writing.
 
+### Changing a role, and an account before the first sign-in (PR 2)
+
+- **The role route** `PUT /api/users/{username}/role` (`routers/users.py::update_user_role`)
+  refuses every key with `reject_non_interactive_principal` before anything else:
+  `require_admin` alone admits `trinity-system`'s key and an admin's user-scoped key, and a
+  role applies on every agent. A change writes one `role_change` audit row
+  (`AUTHORIZATION`, target `user`, details `{from, to}`); a no-op and every refusal write none.
+  Before the role is written, the person's whitelist row (if any) is capped at the new role
+  (`db.cap_whitelist_default_role`, one conditional UPDATE): lowered, never raised. That row is
+  what an account created for the address gets — again after a re-bind — so a row above the
+  account let a demoted person re-bind away and sign in with the old address at the old role,
+  and a row raised on a promotion would hand the old address a second account a later demotion
+  would not reach. A failure in that write leaves the role unchanged.
+- **A platform account now**: an admin can create the account for a person an agent is shared
+  with before they first sign in, so they can be assigned at once. The account is the one their
+  first sign-in would create, at the role their allow-list entry records: `user` for a new
+  member, or the role an admin chose earlier. It has no password; a sign-in is still the
+  mailbox's emailed code at `/login` or the instance's SSO provider, as a first sign-in's would be.
+- **An assignment is not access** (ent#500): the Inbox lists an agent's asks only for people
+  on the Workspace roster (shared with them, or owned). So assigning someone on the Access tab
+  shares the agent with them, after the assignment is written; a failed share leaves the row's
+  "Not shared" warning. `tests/unit/test_837_assigned_user_inbox.py` pins both halves.
+
 ## Frontend
 
 | File | Change |
@@ -184,7 +208,10 @@ self-signup and SSO first sign-in keep writing.
 | `views/Portal.vue`, `components/portal/PortalSidebar.vue` | an empty roster shows a `user` the ask-for-a-share copy, not "Go to your agents" / "Create one →" |
 | `views/Settings.vue` | Email Whitelist: role picker (default `user`) + Role column; tip rewritten. User Management: legend and pickers read "user — Workspace only"; a one-line count of Workspace-only accounts with a **Show only these** filter |
 | `components/settings/SsoPanel.vue` | the default-role picker's `user` option relabelled |
-| `components/AccessPanel.vue` | copy: adding a person grants Workspace access; the operator UI is the platform role |
+| `components/AccessPanel.vue` | copy: adding a person grants Workspace access; the operator UI is the platform role. PR 2, for an admin whose role the server verified: a role select on every other Active row (bound to the value under confirmation, so a cancel or a refusal snaps back), every change confirmed, "Give a platform account" (confirmed) on a Pending row — both in one fixed-width slot on every row, so the controls after it line up — "never signed in"; at phone width the share box puts the button under the field; the list loads through `viewState` and reloads in place; it hands the serves section the loaded list, the owner and an awaitable reload |
+| `components/AgentAssignmentsSection.vue` | PR 2: each person's role as a badge and in the pickers (`Name · Workspace only`); assigning someone writes the assignment, then shares the agent (never the owner, yourself, or an account with no email; a 409 is "already shared"); an admin sees "Not shared with …" + **Share with them** on an assignment the agent isn't shared for, and who the picker can't offer yet |
+| `stores/users.js` | PR 2: `setPlatformRole`, `provisionMember` (on `api`) |
+| `views/Settings.vue`, `utils/emailWhitelist.js` | PR 2: the whitelist Source column labels `access_tab` "Access tab" and shows any other source as stored (`whitelistSourceLabel`), never "Manual" |
 
 ## Sequence — a `user` signs in
 
@@ -205,6 +232,10 @@ operator URL → router guard → /workspace          any operator route → 403
 | agent of a `user` owner off its runtime surface | 403 `workspace_only` |
 | stale cached role in the SPA | the interceptor re-reads the role and moves the tab to `/workspace` |
 | role not yet loaded | the guard does not redirect; the API refuses what it must |
+| a key on the role route | 403 before any write (`reject_non_interactive_principal`) |
+| a role change cancelled or refused | the select shows the stored role again; the refusal on the row |
+| an account that exists already | 409 naming its role; the row reloads as Active |
+| the share after an assignment fails | the assignment stays; the row reads "Not shared with …" with the reason |
 
 ## Security Considerations
 
@@ -218,10 +249,13 @@ operator URL → router guard → /workspace          any operator route → 403
 
 - `tests/unit/test_837_workspace_only_floor.py`, `tests/unit/test_837_workspace_route_census.py`,
   `tests/unit/test_837_ws_workspace_event_kinds.py`
+- `tests/unit/test_837_role_change_audit.py` (PR 2: the audit row, the interactive gate),
+  `tests/unit/test_837_assigned_user_inbox.py` (PR 2: a `user` answers an assigned ask)
 - `tests/test_access_control.py::TestWorkspaceOnlyRung` (live)
 - Frontend: `workspaceOnly.spec.js`, `workspaceOnlyRouterGuard.spec.js`,
   `websocketWorkspaceOnly.spec.js`, `apiWorkspaceOnlyInterceptor.spec.js`,
-  `loginRedirect.spec.js`, `portalSidebarWorkspaceOnly.mount.spec.js`
+  `loginRedirect.spec.js`, `portalSidebarWorkspaceOnly.mount.spec.js`,
+  `accessPanelMembers.mount.spec.js`, `agentAssignmentsShare.mount.spec.js` (PR 2)
 
 Manual: whitelist an email with role `user`, sign in at `/login` → `/workspace`; open
 `/agents/<name>` → `/workspace?agent=<name>`; `curl -H "Authorization: Bearer <jwt>"

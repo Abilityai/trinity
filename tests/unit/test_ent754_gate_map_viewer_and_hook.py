@@ -115,6 +115,10 @@ def env(monkeypatch):
     monkeypatch.setattr(db, "list_agent_skill_gates", lambda name: list(rows))
     monkeypatch.setattr(role_addressing, "owner_email", lambda name: owners["email"])
     monkeypatch.setattr(db, "can_user_share_agent", lambda username, name: username in managers)
+    # trinity-enterprise#629 (#3346 review): an agent key's capability reaches
+    # only agents its owner OWNS — "owner" owns the gated agent in this world.
+    monkeypatch.setattr(db, "get_agent_owner",
+                        lambda name: {"owner_username": "owner"} if name == AGENT else None)
     monkeypatch.setattr(assignment_provider, "_provider", None)
     monkeypatch.setattr(skill_gate_map_service, "agent_httpx_client", health.client)
 

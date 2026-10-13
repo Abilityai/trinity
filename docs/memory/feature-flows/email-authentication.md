@@ -329,7 +329,7 @@ async verifyEmailCode(email, code) {
 | 304-324 | Add email form | Input field + Add button |
 | 327-383 | Whitelist table | Shows email, source, date, actions |
 | 356-380 | Table rows | Iterates over `emailWhitelist` array |
-| 361-366 | Source badges | Auto (Agent Sharing) or Manual |
+| 361-366 | Source badges | Auto (Agent Sharing), or `whitelistSourceLabel(source)`: Manual, Access tab, else the stored source |
 | 372-378 | Remove button | DELETE action per email |
 | 385-387 | Help text | "When you share an agent..." tip |
 | 505-510 | Whitelist state | `emailWhitelist`, `newEmail`, loading flags |
@@ -488,6 +488,7 @@ CREATE INDEX idx_email_login_codes_code ON email_login_codes(code)
 | `is_email_whitelisted(email)` | 27-35 | Check if email is in whitelist |
 | `add_to_whitelist(email, added_by, source, *, default_role)` | 37-90 | Add email to whitelist (default_role is a required kwarg, #314) |
 | `get_whitelist_default_role(email)` | 92-103 | Read default_role for a whitelisted email |
+| `cap_whitelist_default_role(email, role)` | — | Lower an existing row to `role` when it ranks above it; never raises one, never creates one (one conditional UPDATE). Called by `PUT /api/users/{username}/role` before the role is written (trinity-enterprise#837): the row is what an account created for the address gets — again after a re-bind — so it may never rank above the account |
 | `remove_from_whitelist(email)` | 69-83 | Remove email from whitelist |
 | `list_whitelist(limit)` | 85-104 | Get all whitelisted emails with metadata |
 | `create_login_code(email, expiry_minutes)` | 110-145 | Generate 6-digit code with 10 min expiry |
@@ -1621,9 +1622,12 @@ This allows distinguishing between:
 
 ### Source Tracking
 
-The whitelist tracks how emails were added (visible in Settings UI):
+The whitelist tracks how emails were added (visible in Settings UI; the label comes from
+`utils/emailWhitelist.js::whitelistSourceLabel`):
 - `source="manual"` - ✋ Manual badge - Added by admin via Settings page
-- `source="agent_sharing"` - 🤝 Auto badge - Auto-added when agent was shared
+- `source="agent_sharing"` - 🤝 Auto badge - Auto-added when agent was shared (before trinity-enterprise#837)
+- `source="access_tab"` - "Access tab" - an account given from an agent's Access tab (trinity-enterprise#837)
+- any other source (`sso`, `cli`, `access_request`, …) - shown as stored, never as "Manual"; no source reads "—"
 
 This provides an audit trail and helps admins understand whitelist growth.
 

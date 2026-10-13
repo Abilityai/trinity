@@ -14,10 +14,10 @@ Two owner-only tabs on the Agent Detail page control who can reach an agent: the
 The **Access** tab lists the people this agent is shared with.
 
 1. Open the agent detail page and click the **Access** tab (owner only).
-2. Enter an email and click **Add person**. The person can sign in to the [Workspace](workspace.md) with a code emailed to them. Sharing does **not** create a platform account or add the email to the login whitelist; whether someone also gets the operator UI is their platform role, which an admin sets in **Settings → Access**.
+2. Enter an email and click **Add person**. The person can sign in to the [Workspace](workspace.md) with a code emailed to them. Sharing does **not** create a platform account or add the email to the login whitelist; whether someone also gets the operator UI is their platform role, which an admin sets on the person's row here or in **Settings → Access**.
 3. Each row shows a status badge:
-   - **Active** — the email resolved to an existing Trinity account (shows username, role, and last-active time).
-   - **Pending** — no platform account ("No platform account — uses the Workspace"). The row turns Active if an admin gives the person an account and they sign in.
+   - **Active** — the email resolved to an existing Trinity account (shows username, role, and last-active time, or "never signed in"). An admin may see a role select on the row instead of the role label: the role applies on every agent, every change asks for confirmation, and an admin's own row stays read-only.
+   - **Pending** — no platform account ("No platform account — uses the Workspace"). Where the row offers **Give a platform account**, an admin can create the account right away (after a confirmation; as `user` — Workspace only — unless an earlier allow-list entry set another role), so the person can be assigned to the agent before they first sign in; they sign in at `/login`. Give accounts to colleagues — a platform account sees the team's view of every agent shared with its address — and keep outside clients on a plain share.
 4. Each operator row also carries a **proactive-messaging toggle** — "allow this operator to receive proactive DMs from the agent." It is off by default; turn it on per operator to let the agent message that person unprompted. This is a **per-recipient** DM permission (`PUT /api/agents/{name}/shares/proactive`, body `{email, allow_proactive}`).
 5. Click **Remove** on a row to revoke access.
 

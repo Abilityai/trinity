@@ -32,6 +32,7 @@ from .terminal import (
     TerminalSessionManager,
 )
 from .permissions import (
+    agent_reach_logic,
     get_agent_permissions_logic,
     set_agent_permissions_logic,
     add_agent_permission_logic,
@@ -110,6 +111,7 @@ __all__ = [
     # Terminal
     "TerminalSessionManager",
     # Permissions
+    "agent_reach_logic",
     "get_agent_permissions_logic",
     "set_agent_permissions_logic",
     "add_agent_permission_logic",
