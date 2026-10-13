@@ -504,12 +504,19 @@ range returns `valid: null, status: "unverifiable"`; an empty range returns
 - **JSON**: Returns `{entries: [...], count: N, format: "json"}`
 - **CSV**: Returns downloadable CSV file with `Content-Disposition: attachment`
 - Time bounds are inclusive instants, shared with list, count, stats, calendar and
-  heatmap queries (#3555). A whole-second upper bound includes that instant,
-  not the rest of the second. ISO bounds with fractional seconds or UTC offsets
-  are normalized to UTC for comparison against stored UTC-Z timestamps, whose
-  fractions can be absent or contain up to six digits. Stored timestamps and
-  hash-chain fields are never rewritten. Malformed bounds retain the legacy
+  heatmap queries (#3555). Bounds are normalized to UTC and compared against
+  stored UTC-Z timestamps, whose fractions can be absent or contain up to six
+  digits. An upper bound with a time part and no fraction covers the end of the
+  smallest unit it states: `T23:59:59Z` through `:59.999999`, `T23:59Z` through
+  `23:59:59.999999`, `T23Z` through `23:59:59.999999`. Date-only bounds (midnight)
+  and bounds with a fraction are exact, and lower bounds are always exact. The
+  calendar day drill-down sends `<day>T23:59:59Z`, so it keeps the last second of
+  the day. Stored timestamps and hash-chain fields are never rewritten.
+  Malformed bounds, and offset bounds outside the datetime range, keep the legacy
   raw-string comparison; this fix does not add API validation.
+- Two exports that share a whole second, minute or hour boundary (one ends at
+  `T10:30:52Z`, the next starts at `T10:30:52Z`) both contain the events of that
+  unit, so consumers should de-duplicate by `event_id`.
 
 ### Endpoints Added
 

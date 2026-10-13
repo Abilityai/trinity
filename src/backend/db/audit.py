@@ -15,15 +15,51 @@ ISO-Z timestamps so the aggregation is dialect-agnostic.
 """
 
 import json
-from datetime import datetime
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select, insert, func, and_, case, text
 
-from utils.helpers import to_utc_iso
-
 from .engine import get_engine
 from .tables import audit_log
+
+
+# An ISO bound whose time part states hour, minute or second and no fraction,
+# e.g. "2026-05-18T23Z", "2026-05-18T23:59", "2026-05-18T23:59:59+00:00".
+# Group 3 is the seconds, group 2 the minutes, group 1 the hour. A date-only
+# bound or one with a fraction does not match and stays an exact instant.
+_BOUND_TIME_RE = re.compile(
+    r"^.{8,10}[Tt ](\d{2})(?::?(\d{2}))?(?::?(\d{2}))?"
+    r"(?:[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?)?$"
+)
+_ONE_MICROSECOND = timedelta(microseconds=1)
+
+
+def _bound_to_utc_text(bound: str, is_start: bool) -> str:
+    """Return ``YYYY-MM-DDTHH:MM:SS.ffffff`` (UTC, no suffix) for an ISO bound.
+
+    Raises ValueError for text that is not ISO 8601 and OverflowError for an
+    offset that moves the instant outside the datetime range. An upper bound
+    that states a time without a fraction covers the end of the smallest unit
+    it states (hour, minute or second), so ``T23:59:59Z`` keeps the whole last
+    second of a day. Lower bounds, date-only bounds and bounds with a fraction
+    stay exact. isoformat() always zero-pads the year, unlike strftime("%Y").
+    """
+    parsed = datetime.fromisoformat(bound)
+    if not is_start:
+        match = _BOUND_TIME_RE.match(bound)
+        if match:
+            hour, minute, second = match.groups()
+            unit = (
+                timedelta(seconds=1) if second
+                else timedelta(minutes=1) if minute
+                else timedelta(hours=1)
+            )
+            parsed += unit - _ONE_MICROSECOND
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed.isoformat(timespec="microseconds")
 
 
 # Serialises hash-chain appends on PostgreSQL (#2015). Transaction-scoped, so
@@ -211,8 +247,8 @@ class PlatformAuditOperations:
                 if not bound:
                     continue
                 try:
-                    normalized = to_utc_iso(datetime.fromisoformat(bound))[:-1]
-                except ValueError:
+                    normalized = _bound_to_utc_text(bound, is_start)
+                except (ValueError, OverflowError):
                     # Preserve the legacy unvalidated-string behavior for
                     # malformed bounds rather than introducing a new API error.
                     conditions.append(timestamp >= bound if is_start else timestamp <= bound)
