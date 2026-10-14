@@ -4992,15 +4992,14 @@ class A2ACallResponse(BaseModel):
 
 
 class A2ATrustedNetworksUpdate(BaseModel):
-    """trinity-enterprise#838 — the admin's declaration of our own private networks.
+    """trinity-enterprise#838 — the admin's outbound A2A endpoint allowlist
+    (outbound-only since trinity-enterprise#885).
 
     `entries` replaces the whole list (CIDRs, exact host names, or `*.domain`);
-    `[]` turns the feature off. `internal_base_url` is the origin an
-    internal-scope agent's card advertises; omit it to leave it unchanged, send
-    `""` to clear it. Validation lives in `services/a2a_trusted_networks.py`.
+    `[]` turns the allowance off. Validation lives in
+    `services/a2a_trusted_networks.py`.
     """
     entries: List[str] = Field(default_factory=list, max_length=32)
-    internal_base_url: Optional[str] = Field(default=None, max_length=512)
 
 
 class A2AOutboundEndpointUpsert(BaseModel):

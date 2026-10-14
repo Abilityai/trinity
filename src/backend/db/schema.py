@@ -100,8 +100,8 @@ TABLES = {
             circuit_breaker_enabled INTEGER DEFAULT 0,
             mcp_exposed INTEGER DEFAULT 0,
             a2a_exposed INTEGER DEFAULT 0,
-            a2a_scope TEXT DEFAULT 'public',
-            a2a_keyless_internal INTEGER DEFAULT 1,
+            a2a_scope TEXT DEFAULT 'public',  -- inert since ent#885; drop under #746
+            a2a_keyless_internal INTEGER DEFAULT 1,  -- inert since ent#885; drop under #746
             operator_resume_enabled INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,

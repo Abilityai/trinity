@@ -1016,11 +1016,9 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
-    // ent#838: `extra` may carry `scope` ('public' | 'internal') and `keyless`;
-    // omitted, each keeps its current value on the server.
-    async setA2aExposure(name, enabled, extra = {}) {
+    async setA2aExposure(name, enabled) {
       const authStore = useAuthStore()
-      const response = await axios.put(`/api/enterprise/a2a/${name}/exposure`, { enabled, ...extra }, {
+      const response = await axios.put(`/api/enterprise/a2a/${name}/exposure`, { enabled }, {
         headers: authStore.authHeader
       })
       return response.data
