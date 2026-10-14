@@ -34,6 +34,7 @@ vi.mock('../../src/api', () => ({
 
 import axios from 'axios'
 import { useAgentsStore } from '../../src/stores/agents'
+import { useAuthStore } from '../../src/stores/auth'
 import A2aPanel from '../../src/components/A2aPanel.vue'
 
 function config(over = {}) {
@@ -45,7 +46,8 @@ function config(over = {}) {
 
 const LEGACY = { id: 'ep-1', name: 'acme', url: 'https://acme.example/a2a', has_credentials: true }
 
-async function mountWith(cfg) {
+async function mountWith(cfg, { role = 'admin' } = {}) {
+  useAuthStore().user = { username: 'u', role }
   axios.get.mockImplementation(async (url) => {
     if (url.endsWith('/config')) return { data: cfg }
     return { data: { skills: [], capabilities: [] } }
@@ -81,6 +83,14 @@ describe('A2aPanel — outbound endpoints live in Settings (ent#898)', () => {
     expect(link.props('to')).toBe('/settings?tab=integrations')
   })
 
+  it('gives a non-admin no link into the admin-only Settings tab', async () => {
+    // Settings › Integrations is adminOnly; a link would silently land an owner
+    // on their default Settings tab. They get the place named, as text.
+    const w = await mountWith(config(), { role: 'creator' })
+    expect(w.findComponent('[data-testid="a2a-endpoints-settings-link"]').exists()).toBe(false)
+    expect(w.text()).toContain('Settings › Integrations')
+  })
+
   it('lists a per-agent row as not callable and lets the operator remove it', async () => {
     axios.delete.mockResolvedValue({ data: { status: 'removed', endpoint_id: 'ep-1' } })
     const w = await mountWith(config({ outbound_endpoints: [LEGACY] }))
@@ -95,6 +105,14 @@ describe('A2aPanel — outbound endpoints live in Settings (ent#898)', () => {
     expect(axios.delete).toHaveBeenCalledWith(
       '/api/enterprise/a2a/beta/endpoints/ep-1', expect.anything(),
     )
+  })
+
+  it('shows the section on an agent that is not exposed inbound', async () => {
+    // Outbound has nothing to do with inbound exposure, and a legacy row on an
+    // unexposed agent is still a row someone thinks is callable.
+    const w = await mountWith(config({ a2a_exposed: false, outbound_endpoints: [LEGACY] }))
+    expect(w.findComponent('[data-testid="a2a-endpoints-settings-link"]').exists()).toBe(true)
+    expect(w.find('[data-testid="a2a-legacy-endpoints"]').text()).toContain('acme')
   })
 
   it('shows no legacy block when the per-agent table is empty', async () => {

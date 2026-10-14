@@ -182,56 +182,59 @@
           >Add</button>
         </form>
       </div>
+    </template>
 
-      <!-- Outbound endpoints (ent#898): call_a2a_agent resolves only the
-           platform-wide registry in Settings › Integrations, so this tab no
-           longer registers endpoints — it points there, and lists rows left in
-           the per-agent table as not callable so they can be cleared. -->
-      <div class="mt-5 pt-5 border-t border-gray-200 dark:border-gray-700">
-        <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">Outbound endpoints</h4>
-        <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
-          The external A2A endpoints an agent may call with <code class="font-mono">call_a2a_agent</code> are
-          one platform-wide list, managed by an admin in
-          <router-link
-            to="/settings?tab=integrations"
-            data-testid="a2a-endpoints-settings-link"
-            class="text-action-primary-600 dark:text-action-primary-400 hover:underline"
-          >Settings › Integrations</router-link>.
+    <!-- Outbound endpoints (ent#898): call_a2a_agent resolves only the
+         platform-wide registry in Settings › Integrations, so this tab no
+         longer registers endpoints — it points there, and lists rows left in
+         the per-agent table as not callable so they can be cleared. Outside the
+         exposure guard: outbound has nothing to do with inbound exposure. -->
+    <div class="mt-5 pt-5 border-t border-gray-200 dark:border-gray-700">
+      <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">Outbound endpoints</h4>
+      <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
+        The external A2A endpoints an agent may call with <code class="font-mono">call_a2a_agent</code> are
+        one platform-wide list, managed by an admin in
+        <router-link
+          v-if="isAdmin"
+          to="/settings?tab=integrations"
+          data-testid="a2a-endpoints-settings-link"
+          class="text-action-primary-600 dark:text-action-primary-400 hover:underline"
+        >Settings › Integrations</router-link><span v-else>Settings › Integrations</span>.
+      </p>
+      <div v-if="config.outbound_endpoints.length" data-testid="a2a-legacy-endpoints" class="space-y-2">
+        <p class="text-xs text-status-warning-700 dark:text-status-warning-300">
+          Registered on this agent's tab before 1.0. These are not callable — <code class="font-mono">call_a2a_agent</code>
+          never reads them. Re-add any you need in Settings › Integrations, then remove them here.
         </p>
-        <div v-if="config.outbound_endpoints.length" data-testid="a2a-legacy-endpoints" class="space-y-2">
-          <p class="text-xs text-status-warning-700 dark:text-status-warning-300">
-            Registered on this agent's tab before 1.0. These are not callable — <code class="font-mono">call_a2a_agent</code>
-            never reads them. Re-add any you need in Settings › Integrations, then remove them here.
-          </p>
-          <div
-            v-for="ep in config.outbound_endpoints"
-            :key="ep.id"
-            class="flex items-center justify-between gap-2 px-3 py-2 rounded-md bg-gray-50 dark:bg-gray-900/50 border border-gray-200 dark:border-gray-700"
-          >
-            <div class="min-w-0">
-              <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">{{ ep.name }}</div>
-              <div class="text-xs text-gray-500 dark:text-gray-400 font-mono truncate">{{ ep.url }}</div>
-            </div>
-            <div class="flex items-center gap-2 shrink-0">
-              <span class="px-1.5 py-0.5 text-xs rounded bg-status-warning-100 dark:bg-status-warning-900/40 text-status-warning-700 dark:text-status-warning-300">not callable</span>
-              <button
-                type="button"
-                data-testid="a2a-legacy-endpoint-remove"
-                @click="removeEndpoint(ep.id)"
-                :disabled="busy"
-                class="text-status-danger-600 hover:text-status-danger-700 text-xs font-medium disabled:opacity-50"
-              >Remove</button>
-            </div>
+        <div
+          v-for="ep in config.outbound_endpoints"
+          :key="ep.id"
+          class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-3 py-2 rounded-md bg-gray-50 dark:bg-gray-900/50 border border-gray-200 dark:border-gray-700"
+        >
+          <div class="min-w-0">
+            <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">{{ ep.name }}</div>
+            <div class="text-xs text-gray-500 dark:text-gray-400 font-mono truncate">{{ ep.url }}</div>
+          </div>
+          <div class="flex items-center gap-2 shrink-0">
+            <span class="px-1.5 py-0.5 text-xs rounded bg-status-warning-100 dark:bg-status-warning-900/40 text-status-warning-700 dark:text-status-warning-300">not callable</span>
+            <button
+              type="button"
+              data-testid="a2a-legacy-endpoint-remove"
+              @click="removeEndpoint(ep.id)"
+              :disabled="busy"
+              class="text-status-danger-600 hover:text-status-danger-700 text-xs font-medium disabled:opacity-50"
+            >Remove</button>
           </div>
         </div>
       </div>
-    </template>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useAgentsStore } from '../stores/agents'
+import { useRole } from '../composables/useRole'
 import { copyToClipboard } from '../utils/clipboard'
 
 const props = defineProps({
@@ -242,6 +245,8 @@ const props = defineProps({
 })
 
 const agentsStore = useAgentsStore()
+// Settings › Integrations is adminOnly — only an admin gets a link into it.
+const { isAdmin } = useRole()
 function notifyUser(message, type = 'success') {
   if (props.notify) props.notify(message, type)
 }
