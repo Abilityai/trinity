@@ -2,6 +2,7 @@
 Session activity tracking for real-time monitoring.
 """
 from datetime import datetime
+import uuid
 from typing import Any, Dict, Optional
 
 from ..state import agent_state
@@ -56,7 +57,11 @@ def start_tool_execution(
 
     # Add to timeline (newest first)
     timeline_entry = {
-        "id": tool_id,
+        # Provider IDs (notably Codex item_0) are only unique within a run.
+        # The existing activity/detail API uses this opaque ID for drill-down.
+        "id": uuid.uuid4().hex if execution_id else tool_id,
+        "provider_tool_id": tool_id,
+        "execution_id": execution_id,
         "tool": display_name,
         "input": input_data,
         "input_summary": input_summary,
@@ -79,39 +84,45 @@ def start_tool_execution(
     agent_state.session_activity["totals"]["calls"] += 1
 
 
-def complete_tool_execution(tool_id: str, success: bool, output: str = None):
-    """Record completion of a tool execution"""
+def complete_tool_execution(
+    tool_id: str, success: bool, output: str = None, execution_id: Optional[str] = None
+):
+    """Complete only the owning execution's tool, preserving its detail output.
+
+    Legacy callers without an execution ID may resolve an unambiguous tool;
+    they must never guess between runs, including already completed runs.
+    """
+    candidates = [
+        entry for entry in agent_state.session_activity["timeline"]
+        if entry.get("provider_tool_id", entry["id"]) == tool_id
+        and (execution_id is None or entry.get("execution_id") == execution_id)
+    ]
+    if len(candidates) != 1 or candidates[0]["status"] != "running":
+        return
+    entry = candidates[0]
     now = datetime.now()
-
-    # Find the timeline entry
-    for entry in agent_state.session_activity["timeline"]:
-        if entry["id"] == tool_id and entry["status"] == "running":
-            started_at = datetime.fromisoformat(entry["started_at"])
-            duration_ms = int((now - started_at).total_seconds() * 1000)
-
-            entry["ended_at"] = now.isoformat()
-            entry["duration_ms"] = duration_ms
-            entry["success"] = success
-            entry["status"] = "completed"
-            entry["output_summary"] = truncate_output(output) if output else None
-
-            # Update total duration
-            agent_state.session_activity["totals"]["duration_ms"] += duration_ms
-            break
-
-    # Store full output for drill-down
+    started_at = datetime.fromisoformat(entry["started_at"])
+    duration_ms = int((now - started_at).total_seconds() * 1000)
+    entry.update({
+        "ended_at": now.isoformat(), "duration_ms": duration_ms,
+        "success": success, "status": "completed",
+        "output_summary": truncate_output(output) if output else None,
+    })
+    agent_state.session_activity["totals"]["duration_ms"] += duration_ms
     if output:
-        agent_state.tool_outputs[tool_id] = output
+        agent_state.tool_outputs[entry["id"]] = output
 
-    # Clear active tool
-    agent_state.session_activity["active_tool"] = None
-    # The execution that owned this tool is now between tools — "Thinking"
-    # until its next tool_use, never a stale "Reading …" (#620 AC #4).
-    for slot in _by_execution().values():
-        if slot.get("tool_id") == tool_id:
-            slot.update({"tool": None, "input_summary": None, "since": now.isoformat(), "tool_id": None})
+    owner = entry.get("execution_id")
+    slot = _by_execution().get(owner)
+    if slot and slot.get("tool_id") == tool_id:
+        slot.update({"tool": None, "input_summary": None,
+                     "since": now.isoformat(), "tool_id": None})
 
-    # Check if there are any other running tools
-    has_running = any(e["status"] == "running" for e in agent_state.session_activity["timeline"])
-    if not has_running:
-        agent_state.session_activity["status"] = "idle"
+    # Completing one run must not clear another run's active tool.
+    running = next((item for item in agent_state.session_activity["timeline"]
+                    if item["status"] == "running"), None)
+    agent_state.session_activity["active_tool"] = ({
+        "name": running["tool"], "input_summary": running["input_summary"],
+        "started_at": running["started_at"],
+    } if running else None)
+    agent_state.session_activity["status"] = "running" if running else "idle"

@@ -911,7 +911,7 @@ def _record_tool_result(state: _CodexParseState, tool_id: str, item: dict, item_
         )
     )
     try:
-        complete_tool_execution(tool_id, not is_error, output)
+        complete_tool_execution(tool_id, not is_error, output, execution_id=state.execution_id)
     except Exception:  # noqa: BLE001
         logger.debug("[Codex] complete_tool_execution failed for %s", tool_id, exc_info=True)
 

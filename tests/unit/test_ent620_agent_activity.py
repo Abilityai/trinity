@@ -211,3 +211,83 @@ def test_heartbeat_activity_fails_open_to_an_empty_list(monkeypatch):
     assert heartbeat._executions_activity() == []
     payload = heartbeat._build_payload()
     assert payload["executions"] == []
+
+
+@pytest.mark.parametrize("first", ["alice", "bob"])
+def test_reused_provider_tool_ids_keep_completion_and_outputs_execution_scoped(first):
+    """Concurrent Codex executions both start at item_0; neither owns the other's output."""
+    agent_state.tool_outputs = {}
+    for execution in ("alice", "bob"):
+        at.start_tool_execution("item_0", "Read", {"file_path": execution}, execution_id=execution)
+    entries = {e["execution_id"]: e for e in agent_state.session_activity["timeline"]}
+    assert entries["alice"]["id"] != entries["bob"]["id"]
+    other = "bob" if first == "alice" else "alice"
+    at.complete_tool_execution("item_0", True, first + " private output", execution_id=first)
+    assert entries[first]["status"] == "completed"
+    assert entries[other]["status"] == "running"
+    assert at.execution_activity(other)["tool"] == "Read"
+    assert agent_state.session_activity["active_tool"] is not None
+    at.complete_tool_execution("item_0", True, "late duplicate", execution_id=first)
+    assert agent_state.tool_outputs[entries[first]["id"]] == first + " private output"
+    at.complete_tool_execution("item_0", True, other + " private output", execution_id=other)
+    assert agent_state.tool_outputs[entries[other]["id"]] == other + " private output"
+    assert agent_state.session_activity["status"] == "idle"
+
+
+def test_unscoped_completion_does_not_guess_between_execution_owners():
+    for execution in ("alice", "bob"):
+        at.start_tool_execution("item_0", "Read", {}, execution_id=execution)
+    at.complete_tool_execution("item_0", True, "ambiguous")
+    assert all(e["status"] == "running" for e in agent_state.session_activity["timeline"])
+
+
+def test_legacy_unscoped_activity_keeps_original_detail_id():
+    agent_state.tool_outputs = {}
+    at.start_tool_execution("legacy-id", "Read", {})
+    at.complete_tool_execution("legacy-id", True, "legacy output")
+    assert agent_state.session_activity["timeline"][0]["id"] == "legacy-id"
+    assert agent_state.tool_outputs["legacy-id"] == "legacy output"
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_live_parsers_pass_completion_owner(provider, monkeypatch):
+    import json
+    from agent_server.models import ExecutionMetadata
+    from agent_server.services import codex_runtime as cr, stream_parser as sp
+    parser = cr if provider == "codex" else sp
+    monkeypatch.setattr(parser, "start_tool_execution", at.start_tool_execution)
+    monkeypatch.setattr(parser, "complete_tool_execution", at.complete_tool_execution)
+    states = {owner: cr._CodexParseState([], ExecutionMetadata(), [], execution_id=owner)
+              for owner in ("alice", "bob")}
+    for owner, state in states.items():
+        if provider == "codex":
+            cr._process_codex_event({"type": "item.started", "item": {
+                "id": "item_0", "type": "command_execution", "command": "true"}}, state)
+        else:
+            sp.process_stream_line(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "item_0", "name": "Read", "input": {}}]}}),
+                state.execution_log, state.metadata, {}, [], execution_id=owner)
+    if provider == "codex":
+        cr._process_codex_event({"type": "item.completed", "item": {
+            "id": "item_0", "type": "command_execution", "exit_code": 0,
+            "aggregated_output": "alice output"}}, states["alice"])
+    else:
+        sp.process_stream_line(json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "item_0", "content": "alice output"}]}}),
+            states["alice"].execution_log, states["alice"].metadata, {}, [], execution_id="alice")
+    assert at.execution_activity("alice")["tool"] is None
+    assert at.execution_activity("bob")["tool"] is not None
+
+
+@pytest.mark.asyncio
+async def test_existing_activity_detail_route_reads_each_runs_own_output(monkeypatch):
+    from agent_server.routers import activity
+    monkeypatch.setattr(activity, "agent_state", agent_state)
+    agent_state.tool_outputs = {}
+    for owner in ("alice", "bob"):
+        at.start_tool_execution("item_0", "Read", {"file_path": owner}, execution_id=owner)
+        at.complete_tool_execution("item_0", True, owner + " output", execution_id=owner)
+    for entry in agent_state.session_activity["timeline"]:
+        detail = await activity.get_tool_call_detail(entry["id"])
+        assert detail["output"] == entry["execution_id"] + " output"
+        assert detail["input"]["file_path"] == entry["execution_id"]
