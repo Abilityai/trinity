@@ -67,6 +67,16 @@ def reset_redis_client() -> None:
         _redis_client = None
 
 
+def redis_client():
+    """The limiter's shared Redis client, or None when Redis is unavailable (fail-open).
+
+    The PUBLIC name a sibling service reaches this through (``aauth/person_token.py``,
+    ent#878): a private pulled in by a from-import alias is the Invariant #1(b)
+    monkeypatch-detach hazard, so the private stays private and this is the seam.
+    """
+    return _get_redis()
+
+
 def _get_redis():
     """Return a cached Redis client, or None if Redis is unavailable (fail-open)."""
     global _redis_client

@@ -442,6 +442,48 @@ Fixing it is a change to that view (Lane B territory here) and is tracked
 separately; the wording above never claims more than the per-section facts it
 can actually see.
 
+## First load holds its layout (#3672)
+
+The roster, the chat list and the asks feed land at different times, and each used
+to re-lay the list as it arrived: agent rows rendered, then re-ordered and grew a
+subtitle when the chats landed (`orderRosterAgents` and `agentRowMeta` read the
+threads), then an asked agent joined past the collapse limit when the asks landed,
+the chat groups popped in below, and the Projects link (its capability rides the
+roster) pushed the search box and both lists down a beat after first paint.
+
+```
+Portal.vue
+├─ sidebarSettled({ resolved: bootstrapResolved, asksLoaded, asksAbsent, asksFailed })
+│     bootstrap placed the caller (roster + chats read, success OR failure) AND the asks
+│     feed has a verdict (404/403 and a failed read count) — state, never a timer
+├─ sidebarReady  LATCHED true once settled; reset only when the session ends
+└─ <PortalSidebar :settled="sidebarReady">   (column and drawer)
+      Projects link   rendered only once the roster says projectsAvailable — NO held slot
+      Agents          PortalSkeleton "sidebar-agents" while !settled (or #2159's retry case),
+                      then ONE wrapper .ws-fade-in with rows, toggle and empty copy
+      Chats           PortalSkeleton "sidebar-chats" while !settled, then ONE wrapper
+                      .ws-fade-in; an empty list says "No chats yet — …" (not with an
+                      empty roster, where the agents block says the truer sentence) —
+                      only when the read is trusted: with :threads-failed
+                      (store.sessionsFailed) an InlineError says the read failed
+                      (stale over rows, "Couldn't load your chats" over none) + retry
+```
+
+`.ws-fade-in` (`style.css`) is a 180ms opacity-only fade, so nothing reflows, and
+`prefers-reduced-motion` turns it off. Measured with Playwright on a cold
+`/workspace` load (Inbox landing, 15 agents): cumulative layout shift 0.008 → 0.0003,
+fast and with staggered latency; the 0.0003 left is in the Inbox pane header, not
+the sidebar. Layout-shift entries count existing elements that MOVE, not content that
+pops in, so the "before" number understates the jump a person sees.
+
+The Projects link is the one arrival left unheld, by operator ruling. Its capability
+rides the roster and most installs (every OSS one) are not entitled to it, so a held
+slot appeared and then vanished there — a new shift on every load to spare a late
+pop-in on the few entitled installs. Those accept the pop-in; nothing renders between
+**New chat** and the search box before the roster answers.
+
+Tests: `portalSidebarCalmLoad.mount.spec.js`.
+
 ## Tests
 
 | Test | Pins |

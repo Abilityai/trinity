@@ -795,9 +795,9 @@ Correction supersedes (a new row; the old stays as history), close / reverse are
 status flips, reconfirm moves `review_by`. A `direction` decision (R C3) is kept as
 `routed` with the canon hint — never a seat decision, never dropped. **Readers:**
 own seat always; the agent OWNER (`role_card._is_owner`, never an assignment kind)
-every seat, writable; a stakeholder the assignment provider recognises through the
-optional `kinds_for` seam method every seat read-only (per-agent in v1); an external
-principal is never an owner. Writes: own seat, or the owner on a named seat. The
+every seat, writable; nobody else — an assignment kind (`kinds_for`) answers the role
+card's relationship line and never widens this read (#3660; per-role reads are #3381);
+an external principal is never an owner. Writes: own seat, or the owner on a named seat. The
 companion's half (`routers/seat_decisions.py`, MCP `record_decision` /
 `list_seat_decisions`) resolves the seat from `execution_id` and returns no email.
 The seat's active decisions ride the shared memory block into every turn

@@ -1,28 +1,28 @@
-"""Trusted internal networks for A2A (trinity-enterprise#838).
+"""The admin's outbound A2A endpoint allowlist (trinity-enterprise#838, narrowed
+to outbound only by trinity-enterprise#885).
 
 An operator running several Trinity instances on one private network (a
-tailnet, a VPN) declares that network here, once, as an admin. Two things then
-follow, and nothing else changes:
+tailnet, a VPN) declares that network here, once, as an admin. ONE thing then
+follows, and nothing else changes:
 
 * **Outbound** — an A2A endpoint whose host matches a trusted entry may resolve
   to a private or CGNAT address and may use ``http://``
   (``utils/url_validation.validate_a2a_endpoint_url``). Every OTHER endpoint
-  keeps today's public-HTTPS rule, and the check still runs on every call, so a
+  keeps the public-HTTPS rule, and the check still runs on every call, so a
   trusted name that later resolves outside the trusted set is refused.
-* **Inbound** — an agent whose A2A scope is ``internal`` answers only a request
-  whose source address is inside a trusted CIDR (``internal_source``), and, when
-  its keyless switch is on, answers it without a key.
+
+Nothing inbound reads this list. The keyless inbound path #3361 built on it
+(an ``internal``-scope agent answering a trusted source without a credential)
+was dropped before 1.0 (ent#885, operator ruling 2026-10-10): a caller with no
+Trinity credential gets the 401, whatever network it arrives from.
 
 Entries are a CIDR (``100.64.0.0/10``) or a host pattern (``host.example.net``
-exactly, or ``*.example.net`` for any name under it). **A host pattern never
-grants inbound trust:** the name a caller presents is a header it chose, so the
-inbound side reads addresses only.
+exactly, or ``*.example.net`` for any name under it).
 
 Refused entries, and why each one is load-bearing:
 
 * a CIDR overlapping the platform's own Docker networks — agents and the public
-  tunnel (cloudflared) reach the backend from there, so trusting them would
-  make every agent, and the public internet, a keyless caller;
+  tunnel (cloudflared) reach the backend from there;
 * loopback, link-local (cloud metadata lives at 169.254.169.254), unspecified
   and multicast ranges;
 * anything broader than a /8 (IPv4) or a /32 (IPv6), and a host pattern of a
@@ -42,7 +42,6 @@ from typing import Iterable, List, Optional, Sequence, Union
 logger = logging.getLogger(__name__)
 
 SETTING_KEY = "a2a_trusted_networks"
-INTERNAL_BASE_URL_KEY = "a2a_internal_base_url"
 
 MAX_ENTRIES = 32
 MAX_ENTRY_LEN = 253
@@ -68,21 +67,6 @@ _FORBIDDEN = PLATFORM_NETWORKS + (
 )
 
 _MIN_PREFIX = {4: 8, 6: 32}
-
-# The ONE peer whose X-Real-IP is read rather than the peer itself: the
-# platform's own reverse proxy (nginx in production, the Vite dev server
-# locally), found by its container name. NOT "any Docker-bridge peer": agents
-# sit on the same bridge and reach the backend directly, so trusting the header
-# from any bridge address would let an agent name its own source. Any other
-# peer IS the source.
-_PROXY_HOSTS_ENV = "A2A_PROXY_HOSTS"
-_PROXY_HOSTS_DEFAULT = "trinity-frontend"
-_PROXY_CACHE_TTL = 60.0
-_proxy_cache: dict = {"at": 0.0, "ips": frozenset()}
-
-# Headers cloudflared adds to every request it forwards. Their presence means
-# the request came through the public tunnel, whatever else it claims.
-_PUBLIC_INGRESS_HEADERS = ("cf-connecting-ip", "cf-ray")
 
 Network = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
 
@@ -156,10 +140,10 @@ def normalize_entries(entries: Sequence[str]) -> List[str]:
     return out
 
 
-# The list is read on the anonymous A2A door BEFORE its rate limiter (it decides
-# which budget applies), so it must not cost a DB read per request: cached per
-# worker for a few seconds. A write here drops this worker's copy; another
-# worker sees the change within the TTL.
+# The list is read on every outbound call (`validate_a2a_endpoint_url` re-runs
+# per call), so it must not cost a DB read per request: cached per worker for a
+# few seconds. A write here drops this worker's copy; another worker sees the
+# change within the TTL.
 _ENTRIES_TTL = 5.0
 _entries_cache: dict = {"at": float("-inf"), "entries": []}
 
@@ -280,95 +264,3 @@ def _local_gateways() -> frozenset:
         ips = frozenset()
     _gateway_cache.update(at=now, ips=ips)
     return ips
-
-
-def _proxy_ips() -> frozenset:
-    """The platform proxy's addresses, resolved by container name and cached.
-    A failed lookup is an empty set: the header is then never read, and the
-    peer — a bridge address no entry may trust — is the source (fail closed)."""
-    import os
-    import socket
-    import time
-
-    now = time.monotonic()
-    if now - _proxy_cache["at"] < _PROXY_CACHE_TTL:
-        return _proxy_cache["ips"]
-    ips = set()
-    for host in os.environ.get(_PROXY_HOSTS_ENV, _PROXY_HOSTS_DEFAULT).split(","):
-        host = host.strip()
-        if not host:
-            continue
-        try:
-            for info in socket.getaddrinfo(host, None):
-                ips.add(info[4][0])
-        except OSError:
-            continue
-    _proxy_cache.update(at=now, ips=frozenset(ips))
-    return _proxy_cache["ips"]
-
-
-def _source_address(request) -> Optional[str]:
-    peer = request.client.host if getattr(request, "client", None) else None
-    if not peer:
-        return None
-    if peer in _proxy_ips():
-        real = (request.headers.get("x-real-ip") or "").strip()
-        return real or peer
-    return peer
-
-
-def internal_source(request, entries: Optional[Sequence[str]] = None) -> Optional[str]:
-    """The caller's address when it is inside a trusted CIDR, else ``None``.
-
-    * A request carrying cloudflared's headers came through the public tunnel:
-      never trusted, whatever address it claims.
-    * When the peer is the platform's own proxy (by container name), the
-      source is its ``X-Real-IP`` — nginx overwrites it with ``$remote_addr``
-      and the Vite dev proxy sets it from the socket, so a client cannot
-      choose it. Any other peer — an agent on the bridge included — is the
-      source itself.
-    """
-    if any(request.headers.get(h) for h in _PUBLIC_INGRESS_HEADERS):
-        return None
-    entries = get_entries() if entries is None else entries
-    if not entries:
-        return None
-    source = _source_address(request)
-    if not source:
-        return None
-    plain = source[7:] if source.startswith("::ffff:") else source
-    if plain in _local_gateways():
-        # Forwarded by the host (a published port, hairpin NAT): the real
-        # caller is unknowable from here, so never trusted (#838 live test).
-        return None
-    if address_is_trusted(source, entries):
-        return source
-    return None
-
-
-def internal_base_url() -> Optional[str]:
-    """The origin an internal-scope agent's card advertises, or ``None``."""
-    from database import db
-
-    try:
-        raw = (db.get_setting_value(INTERNAL_BASE_URL_KEY, None) or "").strip()
-    except Exception:  # noqa: BLE001
-        return None
-    return raw.rstrip("/") or None
-
-
-def validate_internal_base_url(url: str) -> str:
-    """An ``http(s)://host[:port]`` origin with no path, query or credentials."""
-    from urllib.parse import urlsplit
-
-    url = (url or "").strip()
-    if not url:
-        return ""
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        raise TrustedNetworkError("internal base URL must be http(s)://host[:port]")
-    if parts.username or parts.password or "@" in parts.netloc:
-        raise TrustedNetworkError("internal base URL must not carry credentials")
-    if parts.path not in ("", "/") or parts.query or parts.fragment:
-        raise TrustedNetworkError("internal base URL is an origin only — no path or query")
-    return f"{parts.scheme}://{parts.netloc}"

@@ -23,10 +23,10 @@ with the chat. This module is the policy leaf over ``db/seat_decisions.py``:
   conversion metric — not volume); per `ask_class`: the distinct criteria,
   the reversals, and `stable` (≥3 records, one criterion, no reversal) — the
   autonomy dial's input (tandem-06 §2.2, ent#641), not its verdict.
-* **Readers.** The seat and the agent's owner see everything; another
-  stakeholder sees a seat read-only when the assignment provider says they
-  hold a kind on the agent (`kinds_for`, an optional seam method — absent on
-  a core build → own seat only). The filter runs before serialization.
+* **Readers.** The seat sees its own record; the agent's owner sees every
+  seat. An assignment kind (`kinds_for`) does not widen the read — it is per
+  agent, not per role (#3660; per-role reads are #3381). The filter runs
+  before serialization.
 
 Field names match the role pack's YAML (`record-decision`, ent#510) so the
 canon-folder copy is a move, not a translation: `outcome`, `decided`,
@@ -433,13 +433,15 @@ def reader_kind(agent_name: str, reader_email: str) -> Optional[str]:
 
 def readable_seats(db, agent_name: str, reader_email: str, *, is_owner: bool) -> Dict[str, bool]:
     """`{seat_email: writable}` for this reader. Own seat always (writable);
-    the owner sees every seat (writable); a provider-declared stakeholder sees
-    every seat read-only (per-agent in v1 — DEBT_INBOX 2026-09-22)."""
+    the owner sees every seat (writable). An assignment kind does NOT widen the
+    read (#3660): `reader_kind` answers the role card's relationship line, and
+    a kind is per agent, not per role, so it would hand an approver every
+    person's seat decisions. Per-role stakeholder reads are #3381."""
     me = (reader_email or "").strip().lower()
     seats: Dict[str, bool] = {me: True}
-    if is_owner or reader_kind(agent_name, me) is not None:
+    if is_owner:
         for s in db.list_seat_decision_seats(agent_name, limit=MAX_SEATS):
-            seats.setdefault(s, is_owner)
+            seats.setdefault(s, True)
     return seats
 
 

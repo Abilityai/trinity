@@ -225,7 +225,8 @@ and `validate_a2a_endpoint_url` runs on **every call**:
 
 * HTTPS only — an `http://` row is refused at **use**, with a message telling
   the operator to re-register. Not silently upgraded: a client that quietly
-  rewrites a scheme is one that will quietly rewrite it back.
+  rewrites a scheme is one that will quietly rewrite it back. The one
+  exception is a host on the admin's outbound endpoint allowlist (below).
 * No userinfo — refused, never stripped (a stripped credential is one the
   operator believes is in use).
 * IDNA/A-label normalised **once**, so the parser and the resolver cannot
@@ -235,7 +236,17 @@ and `validate_a2a_endpoint_url` runs on **every call**:
   homograph lives.
 * **Every** address `getaddrinfo` returns must be public. One internal record
   among public ones refuses the whole endpoint — which record a resolver hands
-  out is not our choice.
+  out is not our choice. Same single exception as `http://`.
+* **Outbound endpoint allowlist** (trinity-enterprise#838, outbound-only since
+  trinity-enterprise#885; setting key `a2a_trusted_networks`, admin-only route
+  `GET/PUT /api/settings/a2a-trusted-networks`): when the public-HTTPS rule
+  refuses, `_validate_trusted_a2a_url` admits the endpoint only if its host
+  matches a name entry, or every address it resolves to is public or inside a
+  CIDR entry. Such an endpoint may be private/CGNAT (a tailnet peer) and
+  `http://`; metadata, loopback and the platform's own networks stay refused
+  whatever the list says. It runs at registration and again on every call, so
+  a name that later resolves outside the list is refused. Nothing inbound
+  reads the list (requirements `mcp.md` §32.7).
 * DNS failure is fatal, and resolution runs **off the event loop**: a
   synchronous `getaddrinfo` on a per-call agent path freezes an entire worker's
   loop, which no per-agent rate limit bounds.
@@ -366,8 +377,8 @@ agent an error object as if it were an answer.
 |---|---|---|
 | `endpoint_not_found` | 404 | No registered endpoint matched (or the seam refused) |
 | *(kill switch off)* | 404 | `A2A_OUTBOUND_ENABLED` off |
-| `endpoint_not_https` | 400 | A registry row holding `http://` |
-| `endpoint_private_address` | 400 | Resolved inside the perimeter |
+| `endpoint_not_https` | 400 | A registry row holding `http://`, host not on the outbound allowlist |
+| `endpoint_private_address` | 400 | Resolved inside the perimeter, host not on the outbound allowlist |
 | `endpoint_dns_failure` | 400 | Unresolvable, or resolution timed out |
 | `message_too_long` | 422 | Over the 100 000-char outbound cap |
 | `card_redirect` / `rpc_redirect` | 502 | A 3xx — a failure, not a hop |
