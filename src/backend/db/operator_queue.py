@@ -1149,7 +1149,9 @@ class OperatorQueueOperations:
         (trinity-enterprise#611 — the Execution Context line).
 
         Ids and the ending only — `request_id`, `disposition`, `disposed_at`,
-        `disposed_by` (#3247: `agent` reads `replaced`) — never a title, an answer or a reason: the line reaches every composed
+        `disposed_by` and `replaced_by` (#3247 / trinity-enterprise#901: an
+        `agent` ending reads `replaced` when `replaced_by` is set, `withdrawn`
+        otherwise) — never a title, an answer or a reason: the line reaches every composed
         turn. Only rows that carry the ledger (a row that ended before it has no
         ending time to show); platform alarms excluded by prefix (the agent
         raised none of them, ent#499).
@@ -1160,6 +1162,7 @@ class OperatorQueueOperations:
                 operator_queue.c.disposition,
                 operator_queue.c.disposed_at,
                 operator_queue.c.disposed_by,
+                operator_queue.c.replaced_by,
             )
             .where(
                 and_(

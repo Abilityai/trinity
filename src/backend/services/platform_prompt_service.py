@@ -843,12 +843,15 @@ def _render_ended_asks(ctx: ExecutionContext) -> Optional[str]:
     reaches every composed turn. Bounded; the rest is one tool call away."""
     if not ctx.ended_asks:
         return None
+    from services.ask_service import agent_ending_kind
+
     entries: List[str] = []
     for ask in ctx.ended_asks[:MAX_ENDED_ASKS]:
         rid = _sanitize_field(ask.get("request_id"), max_len=MAX_REQUEST_ID_LEN)
         how = _sanitize_field(ask.get("disposition"), max_len=16)
-        if ask.get("disposed_by") == "agent":
-            how = "replaced"  # #3247: the agent ended it itself by replacing it
+        # #3247 / trinity-enterprise#901: the agent ended it itself — by
+        # replacing it or withdrawing it. The kind, never the agent's reason.
+        how = agent_ending_kind(ask) or how
         when = _sanitize_field(ask.get("disposed_at"), max_len=MAX_TIMESTAMP_LEN)
         if rid and how:
             entries.append(" ".join(x for x in (rid, how, when) if x))

@@ -175,7 +175,10 @@ def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict
         return [{**item, "decided_by_options": ask_service.decided_by_options(item),
                  "gate": skill_gate_service.card_view(
                      item, viewer_email=current_user.email, with_run_ids=True,
-                     name_approvers=True)}
+                     name_approvers=True),
+                 # trinity-enterprise#901: which ending the agent authored
+                 # (replaced | withdrawn | None), derived once server-side.
+                 "agent_ending": ask_service.agent_ending_kind(item)}
                 for item in items]
     # #715: the platform's heads-ups ABOUT a person (a client's complaint, the
     # client addresses behind a shared inbox) are the operator's, not a machine's.

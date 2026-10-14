@@ -147,7 +147,9 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
     answered or cancelled), `someone_else` (a person a SHARED ask was also
     delivered to answered it, trinity-enterprise#816), `platform` (the platform ended the row itself —
     `disposed_by = 'platform'`, #3246: never a person's answer, never a
-    timeout), `agent` (the agent replaced it, #3247) or `timeout`; never an email and never the cancel
+    timeout), `agent` (the agent replaced it, #3247, or withdrew it,
+    trinity-enterprise#901 — `_project` says which as `agent_ending`) or
+    `timeout`; never an email and never the cancel
     reason (both are the operator's, not the client's). `ended_at` is the
     ledger's time, or a legacy answer's time — never `created_at`, which is when
     the ask was filed, not when it ended.
@@ -159,9 +161,10 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
         return item.get("disposed_at"), "timeout"
     if item.get("disposed_by") == "platform":
         return item.get("disposed_at"), "platform"
-    # #3247: the agent replaced it with a newer ask. Read BEFORE the email arm,
-    # which would otherwise call an ending with no email the operator's.
-    if item.get("disposed_by") == "agent":
+    # #3247: the agent replaced it with a newer ask; trinity-enterprise#901: or
+    # withdrew it. Read BEFORE the email arm, which would otherwise call an
+    # ending with no email the operator's.
+    if ask_service.agent_ending_kind(item) in (ask_service.REPLACED, ask_service.WITHDRAWN):
         return item.get("disposed_at"), "agent"
     by = item.get("disposed_by_email") or (item.get("responded_by_email") if status == "answered" else None)
     who = "you" if by and viewer_email and by.lower() == viewer_email.lower() else "operator"
@@ -254,6 +257,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
     discussion = context.get("workspace_discussion_id")
     from services.operator_queue_service import is_aged
     ended_at, ended_by = _ending_of(item, viewer_email)
+    agent_ending = ask_service.agent_ending_kind(item) if ended_by == "agent" else None
     return WorkspaceAsk(
         id=item["id"],
         agent_name=item["agent_name"],
@@ -282,6 +286,10 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
                                           with_run_ids=is_platform),
         replaces=_linked_request_id(item, "replaces", viewer_email),
         replaced_by=_linked_request_id(item, "replaced_by", viewer_email),
+        # trinity-enterprise#901: the agent's reason crosses for a WITHDRAW only.
+        agent_ending=agent_ending,
+        ending_reason=(item.get("disposition_reason") or None)
+        if agent_ending == ask_service.WITHDRAWN else None,
     )
 
 
@@ -589,7 +597,12 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
         # the deadline refused it before the poller swept the row.
         if conflict.code == "expired":
             raise AskError(409, "expired", "This ask expired before it was answered.")
-        if (conflict.item or {}).get("disposed_by") == "agent":
+        kind = ask_service.agent_ending_kind(conflict.item or {})
+        if kind == ask_service.WITHDRAWN:
+            # trinity-enterprise#901: nobody answered it — the agent withdrew it.
+            raise AskError(409, "already_resolved",
+                           "The agent just withdrew this ask — it no longer needs an answer.")
+        if kind == ask_service.REPLACED:
             # #3247: nobody answered it — the agent replaced it first.
             raise AskError(409, "already_resolved",
                            "The agent just replaced this ask with a newer one.")

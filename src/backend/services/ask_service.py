@@ -157,7 +157,7 @@ class EndingEvent:
     disposition: str                 # answered | cancelled | dismissed | expired
     rows: tuple                      # the CAS-won rows, as they stand after the transition
     actor_email: Optional[str]       # the person; None for timeout
-    reason: Optional[str] = None     # the operator's cancel reason — DATA, never instructions
+    reason: Optional[str] = None     # the operator's cancel reason, or the agent's withdraw reason (ent#901) — DATA, never instructions
     batch_id: Optional[str] = None   # bulk cancel only
 
 

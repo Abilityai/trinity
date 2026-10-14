@@ -771,3 +771,138 @@ class TestPendingLineOffersWithdraw:
             ExecutionContext(agent_name=agent, triggered_by="schedule")))
         assert line is not None and "line-legacy-1" in line
         assert "withdraw" not in line
+
+
+# ===========================================================================
+# 6. The readers (checkpoint C) — every surface that maps an agent ending says
+#    `withdrawn` for a withdraw, keyed on the derived kind, never on the reason
+#    token; the reason reaches the person asked, never the Execution Context.
+# ===========================================================================
+
+def _withdrawn_row(real_db, agent, rid, reason="The build fixed itself.", **over):
+    row = _native(real_db, agent, rid, **over)["row"]
+    out = _withdraw_db(real_db, agent, row["id"], reason=reason)
+    assert out["outcome"] == "withdrawn", out
+    return real_db.get_operator_queue_item(row["id"])
+
+
+class TestWorkspaceProjection:
+    AGENT = "agent-901-ws"
+
+    @pytest.fixture(autouse=True)
+    def _roster(self, monkeypatch):
+        import client_portal.service as portal_service
+        monkeypatch.setattr(portal_service, "agent_on_roster", lambda *a, **k: True)
+
+    def test_a_withdraw_projects_its_kind_and_the_agents_reason(self, real_db):
+        from client_portal.asks.service import _project
+        to = "ws901-a@example.com"
+        row = _withdrawn_row(real_db, self.AGENT, "ws-w-a", addressed_to_email=to)
+        p = _project(row, viewer_email=to)
+        assert (p.status, p.ended_by, p.agent_ending) == ("cancelled", "agent", "withdrawn")
+        assert p.ending_reason == "The build fixed itself."
+        assert p.ended_at == row["disposed_at"]
+        assert p.replaced_by is None
+
+    def test_a_reason_that_reads_replaced_is_still_a_withdraw(self, real_db):
+        from client_portal.asks.service import _project
+        to = "ws901-b@example.com"
+        row = _withdrawn_row(real_db, self.AGENT, "ws-w-b", reason="replaced", addressed_to_email=to)
+        p = _project(row, viewer_email=to)
+        assert (p.agent_ending, p.ending_reason) == ("withdrawn", "replaced")
+
+    def test_a_replace_carries_no_reason(self, real_db):
+        from client_portal.asks.service import _project
+        to = "ws901-c@example.com"
+        old = _native(real_db, self.AGENT, "ws-r-old", addressed_to_email=to)["row"]
+        assert _native(real_db, self.AGENT, "ws-r-new", replaces=old["id"],
+                       addressed_to_email=to)["outcome"] == "created"
+        p = _project(real_db.get_operator_queue_item(old["id"]), viewer_email=to)
+        assert (p.ended_by, p.agent_ending, p.ending_reason) == ("agent", "replaced", None)
+
+    def test_no_other_ending_forwards_a_reason(self, real_db):
+        """The operator's cancel reason is theirs (§26.9): never on the projection."""
+        from client_portal.asks.service import _project
+        to = "ws901-d@example.com"
+        row = _native(real_db, self.AGENT, "ws-p-d", addressed_to_email=to)["row"]
+        real_db.cancel_operator_queue_item(row["id"], disposed_by_email="op@example.com",
+                                           reason="Not needed, I did it myself")
+        p = _project(real_db.get_operator_queue_item(row["id"]), viewer_email=to)
+        assert (p.ended_by, p.agent_ending, p.ending_reason) == ("operator", None, None)
+        for ended in ({"status": "expired", "disposition": "expired", "disposed_by": "timeout",
+                       "disposition_reason": "x"},
+                      {"status": "cancelled", "disposition": "cancelled", "disposed_by": "platform",
+                       "disposition_reason": "condition_cleared"}):
+            p = _project({**row, **ended}, viewer_email=to)
+            assert (p.agent_ending, p.ending_reason) == (None, None), ended
+
+    def test_a_withdrawn_ask_leaves_the_open_list_and_shows_as_history(self, real_db):
+        """AC2/AC3: no longer Waiting for the person asked; still on their
+        ended history with the reason. (Delivery is at parity with a person's
+        cancel — the Workspace refetches; nothing here claims a push.)"""
+        from client_portal.asks.service import list_asks
+        to = "ws901-e@example.com"
+        _withdrawn_row(real_db, self.AGENT, "ws-w-e", addressed_to_email=to)
+        assert all(a.id != "ws-w-e" and a.status != "pending" or a.title != "Ask ws-w-e"
+                   for a in list_asks(to, False, self.AGENT))
+        ended = [a for a in list_asks(to, False, self.AGENT, include_ended=True)
+                 if a.title == "Ask ws-w-e"]
+        assert len(ended) == 1
+        assert (ended[0].status, ended[0].agent_ending) == ("cancelled", "withdrawn")
+        assert ended[0].ending_reason == "The build fixed itself."
+
+    def test_answering_an_ask_the_agent_just_withdrew_says_so(self, real_db, monkeypatch):
+        import client_portal.asks.service as asks
+        to = "ws901-race@example.com"
+        row = _native(real_db, self.AGENT, "ws-w-race", addressed_to_email=to)["row"]
+        stale = dict(real_db.get_operator_queue_item(row["id"]))   # what the page read
+        assert _withdraw_db(real_db, self.AGENT, row["id"])["outcome"] == "withdrawn"
+        monkeypatch.setattr(asks, "_owned_ask", lambda *a, **k: stale)
+        with pytest.raises(asks.AskError) as ei:
+            asks.answer_ask(row["id"], to, False, "approve", None)
+        assert (ei.value.status_code, ei.value.code) == (409, "already_resolved")
+        assert "withdrew" in ei.value.detail
+        assert "replaced" not in ei.value.detail and "answered" not in ei.value.detail
+        fresh = real_db.get_operator_queue_item(row["id"])
+        assert fresh["disposed_by"] == "agent" and fresh["response"] is None
+
+
+class TestEndedAsksLine:
+    AGENT = "agent-901-ended-line"
+
+    def _line(self, prompt):
+        return next((l for l in prompt.splitlines() if "Ended asks" in l), None)
+
+    def test_a_withdraw_reads_withdrawn_and_never_carries_the_reason(self, real_db):
+        from services.platform_prompt_service import ExecutionContext, compose_system_prompt
+        _withdrawn_row(real_db, self.AGENT, "el-w-1", reason="replaced because SECRET-901")
+        old = _native(real_db, self.AGENT, "el-r-old")["row"]
+        assert _native(real_db, self.AGENT, "el-r-new", replaces=old["id"])["outcome"] == "created"
+        line = self._line(compose_system_prompt(
+            ExecutionContext(agent_name=self.AGENT, triggered_by="schedule")))
+        assert line is not None
+        assert "el-w-1 withdrawn" in line
+        assert "el-r-old replaced" in line
+        assert "SECRET-901" not in line and "because" not in line
+
+    def test_the_read_selects_the_link_and_still_no_text(self, real_db):
+        from utils.helpers import iso_cutoff
+        agent = "agent-901-ended-read"
+        _withdrawn_row(real_db, agent, "er-w-1")
+        rows = real_db.list_recent_operator_queue_endings(agent, iso_cutoff(hours=24), 10)
+        assert rows and all(
+            set(r) == {"request_id", "disposition", "disposed_at", "disposed_by", "replaced_by"}
+            for r in rows)
+
+
+class TestOperatorView:
+    def test_the_person_view_carries_the_derived_kind(self, real_db):
+        from types import SimpleNamespace
+        import routers.operator_queue as r
+        agent = "agent-901-op-view"
+        row = _withdrawn_row(real_db, agent, "op-w-1")
+        person = SimpleNamespace(email="op@example.com", mcp_scope=None, agent_name=None,
+                                 role="admin", id=1, username="op")
+        out = r._for_principal([row], person) if r.is_person_principal(person) else None
+        assert out is not None, "fixture is not a person principal"
+        assert out[0]["agent_ending"] == "withdrawn"
