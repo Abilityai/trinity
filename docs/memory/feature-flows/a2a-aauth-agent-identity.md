@@ -11,9 +11,12 @@ bootstrap: no Person Server, no Access Server, no missions) applied to the A2A
 seam Trinity already ships. It is an **authentication** change, not a new
 transport: the wire is still A2A JSON-RPC 2.0 over `POST /a2a/{name}`.
 
-> **Status:** prototype behind `aauth_prototype_enabled`, **OFF by default**.
-> With the flag off, inbound, outbound and the served card behave exactly as
-> they did before (§32.8 in `docs/memory/requirements/mcp.md`).
+> **Status:** Flows 1–4 graduated for Trinity-to-Trinity calls behind
+> `aauth_enabled`, **OFF by default**, switchable from Settings → Integrations
+> (ent#862 PR1). Flows 5–6 stay prototype behind a second switch,
+> `aauth_prototype_enabled`, and need both. With the switch off, inbound,
+> outbound and the served card behave exactly as they did before (§32.8 in
+> `docs/memory/requirements/mcp.md`).
 
 ## Why it exists
 
@@ -48,7 +51,8 @@ key. The token says *who this is*; the signature proves *this request is theirs*
 
 | Layer | File | Notes |
 |---|---|---|
-| Flag + issuer | `services/aauth/config.py` | `aauth_prototype_enabled`, `aauth_issuer` — both `system_settings` → env → default. Issuer must be `https://<host>`: no port, no path, lowercase |
+| Switches + issuer | `services/aauth/config.py` | `aauth_enabled` (Flows 1–4, the single input of `active_issuer()`), `aauth_prototype_enabled` (Flows 5–6, read once at `require_live` via `prototype_active_issuer()`), `aauth_issuer` — all `system_settings` → env → default. Issuer must be `https://<host>`: no port, no path, lowercase |
+| Settings surface (ent#862) | `services/aauth/settings.py`, `routers/settings/aauth.py`, `components/settings/AAuthPanel.vue`, `stores/a2aFederation.js`, `utils/aauthSettings.js` | `GET/PUT /api/settings/aauth`: each value with its source, `live` = switch AND valid issuer, the readiness checklist; the write is admin + interactive, diff-only, `invalid_issuer` by name; the panel asks before changing a live issuer |
 | JOSE | `services/aauth/jose.py` | Compact JWS with the fully-specified `Ed25519` alg (PyJWT only registers `EdDSA`, which the draft forbids verifiers to accept), JWK ⇄ key, RFC 7638 thumbprints |
 | RFC 9421 profile | `services/aauth/httpsig.py` | Signature base, `@authority` normalisation, Content-Digest, and a **strict** RFC 8941 subset (anything unexpected is refused, not interpreted) |
 | Instance key | `services/aauth/keys.py` | One Ed25519 key per instance, AES-256-GCM in `system_settings.aauth_signing_key_encrypted` (Invariant #12), created on first use via insert-if-absent |
@@ -79,6 +83,7 @@ key. The token says *who this is*; the signature proves *this request is theirs*
 | POST | `/a2a/{name}` | **AAuth** *or* bearer | The existing JSON-RPC task endpoint. A request carrying `Signature-Key` takes the AAuth path; everything else is unchanged |
 | POST | `/api/agents/{name}/aauth/person-token` | the agent's **own** key only | ent#878: obtain a person token for `resource` as the agent, or resume a pending binding by `pending_handle` (Flow 5). Uniform 404 while inert — before body validation |
 | POST | `/api/agents/{name}/aauth/resource-call` | the agent's **own** key only | ent#879: call an allow-listed AAuth resource (`{resource}{path}`) as the agent — the whole requirement ladder, every token held by the platform — or resume a pending call by `pending_handle` (Flow 6). Same gates as the person-token route, consulted before the allow-list |
+| GET/PUT | `/api/settings/aauth` | admin; the write **interactive-only** | ent#862: the switches, issuer, person server and resource allow-list with their sources, `live`, the identity example and the readiness checklist. PUT writes only the fields sent; `422 invalid_{issuer,person_server,resource_allowlist}`; audited. The generic catch-all refuses all five keys |
 
 All three documents answer a uniform **404** unless AAuth is live (flag on **and**
 a valid issuer), so a default install publishes nothing. They are per-IP rate
@@ -88,7 +93,8 @@ limited like the public card route.
 
 | Key | Where | Meaning |
 |---|---|---|
-| `aauth_prototype_enabled` | `system_settings` → `AAUTH_PROTOTYPE_ENABLED` | Master switch, default **off** |
+| `aauth_enabled` | `system_settings` → `AAUTH_ENABLED` | The switch for Flows 1–4, default **off**; Settings → Integrations → AAuth (ent#862) |
+| `aauth_prototype_enabled` | `system_settings` → `AAUTH_PROTOTYPE_ENABLED` | The Flow 5–6 prototypes, default **off**; inert without `aauth_enabled` |
 | `aauth_issuer` | `system_settings` → `AAUTH_ISSUER` | This instance's AAuth identity domain, `https://<host>` |
 | `aauth_signing_key_encrypted` | `system_settings` | The instance key envelope. Blocked on the generic settings PUT/DELETE; included in the credential-rotation script |
 | `aauth_person_server` | `system_settings` → `AAUTH_PERSON_SERVER` | ent#878: the person server agents bind through, `https://<host>` (same strict rule as the issuer, never repaired). Unset → `person_server_unconfigured` |
@@ -103,7 +109,7 @@ the ordinary bearer 401.
 
 ## Flow 1 — Enablement (per instance)
 
-1. Operator sets `aauth_issuer` to the instance's public origin and turns the flag on.
+1. An admin sets the issuer to the instance's public origin and turns the switch on — in Settings → Integrations → "Calls between Trinity instances" (or `AAUTH_ISSUER` / `AAUTH_ENABLED` for bootstrap; a stored row wins over the environment in both directions). The panel reports "On, inactive" until the issuer is valid, and asks before changing a live issuer, since that re-keys every agent's identity for every peer.
 2. First use of the key (a signature, or a JWKS fetch) creates one Ed25519 key,
    encrypts it, and writes it **insert-if-absent**, then re-reads the row — so two
    uvicorn workers racing on first use converge on one key rather than forking.

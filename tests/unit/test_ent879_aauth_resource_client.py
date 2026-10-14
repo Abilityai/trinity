@@ -223,6 +223,8 @@ def harness(monkeypatch):
     state = {"issuer": OUR, "ps": PS, "res": res, "ps_fake": ps, "redis": redis, "kid": kid}
 
     monkeypatch.setattr(config, "active_issuer", lambda: state["issuer"])
+    # ent#862: Flows 5–6 also need the prototype switch (gated at require_live).
+    monkeypatch.setattr(config, "is_prototype_enabled", lambda: True)
     monkeypatch.setattr(config, "get_person_server", lambda: state["ps"])
     monkeypatch.setattr(keys, "get_instance_key",
                         lambda: keys.InstanceKey(kid=kid, public_jwk={**jwk, "kid": kid}, private_key=instance_key))

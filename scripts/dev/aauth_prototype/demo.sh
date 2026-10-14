@@ -195,10 +195,11 @@ wire() {
   b_tok=$(token_for "$B_API" "$(envval "$STATE/b.env" ADMIN_PASSWORD)")
 
   say "A: issuer $a_url, person server $PERSON_SERVER, resources $SENZING + $WHOAMI, outbound on, endpoint bravo-remote → $b_url/a2a/$B_AGENT (aauth, no credential)"
-  setting "$A_API" "$a_tok" aauth_issuer "$a_url"
-  setting "$A_API" "$a_tok" aauth_person_server "$PERSON_SERVER"     # ent#878 (bind.sh needs it)
-  setting "$A_API" "$a_tok" aauth_resource_allowlist "$SENZING,$WHOAMI"   # ent#879 (origin equality, fail-closed)
-  setting "$A_API" "$a_tok" aauth_prototype_enabled true
+  # ent#862: the switches + issuer go through their own route (the generic
+  # settings PUT refuses those keys); Flows 5-6 need BOTH switches.
+  api "$A_API" "$a_tok" PUT /api/settings/aauth \
+    "{\"issuer\": \"$a_url\", \"enabled\": true, \"prototype_enabled\": true,
+      \"person_server\": \"$PERSON_SERVER\", \"resource_allowlist\": \"$SENZING,$WHOAMI\"}" >/dev/null
   setting "$A_API" "$a_tok" a2a_outbound_enabled true
   api "$A_API" "$a_tok" PUT /api/settings/a2a-endpoints \
     "{\"name\": \"bravo-remote\", \"url\": \"$b_url/a2a/$B_AGENT\", \"auth_scheme\": \"aauth\"}"; echo
@@ -352,11 +353,10 @@ down() {
   done
   docker rm -f aauth-front-a aauth-front-b "$DIND" >/dev/null 2>&1 || true
   local a_tok; a_tok=$(token_for "$A_API" "$(envval "$REPO/.env" ADMIN_PASSWORD)" 2>/dev/null) || return 0
-  setting "$A_API" "$a_tok" aauth_prototype_enabled false
+  api "$A_API" "$a_tok" PUT /api/settings/aauth \
+    '{"enabled": false, "prototype_enabled": false, "person_server": "", "resource_allowlist": ""}' >/dev/null || true
   setting "$A_API" "$a_tok" a2a_outbound_enabled false
   api "$A_API" "$a_tok" DELETE /api/settings/a2a-endpoints/bravo-remote >/dev/null || true
-  api "$A_API" "$a_tok" DELETE /api/settings/aauth_resource_allowlist >/dev/null || true   # ent#879
-  api "$A_API" "$a_tok" DELETE /api/settings/aauth_person_server >/dev/null || true        # ent#878
   echo "  A: AAuth + outbound switched off, demo endpoint, resource allow-list and person server removed"
   echo "  (B's data volume trinity-b-dind-data kept; 'docker volume rm trinity-b-dind-data' resets B)"
 }

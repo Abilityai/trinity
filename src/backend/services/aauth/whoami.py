@@ -5,7 +5,7 @@
 Proof against a verifier that is not ours: whoami.aauth.dev fetches this
 instance's ``/.well-known/aauth-agent.json`` + JWKS over the public internet,
 verifies the agent token and the RFC 9421 signature, and echoes the identity.
-Requires the prototype flag, a public ``aauth_issuer``, and the issuer's
+Requires ``aauth_enabled`` (ent#862), a public ``aauth_issuer``, and the issuer's
 well-known documents reachable from the internet.
 
 Not an endpoint on purpose: signing as an agent is only placed on the A2A call
