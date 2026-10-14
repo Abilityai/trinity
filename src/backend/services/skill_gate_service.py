@@ -1478,6 +1478,11 @@ async def _end_not_run(record, decider, why: str) -> str:
     return "not_run"
 
 
+#: The ask-resume and ask-ending wakes (ent#329, ent#611) — mirrors
+#: `operator_resume_service.TRIGGERED_BY{,_ENDING}`.
+_PERSONLESS_REPLAY_TRIGGERS = frozenset({"operator_response", "operator_ending"})
+
+
 async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
     """Start the approved run the way an async `/task` starts: the row (under
     the id the claim wrote), the capacity slot with the PERSISTENT overflow —
@@ -1495,6 +1500,11 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
     agent = record["agent_name"]
     frozen = dict(record.get("dispatch") or {})
     triggered_by = frozen.get("triggered_by") or record.get("triggered_by") or "manual"
+    # trinity-enterprise#886: a resume or ending run carries no person. A request
+    # frozen before that fix (or by a producer that reintroduces the field)
+    # would otherwise re-stamp the responder on the approved run's prompt.
+    if triggered_by in _PERSONLESS_REPLAY_TRIGGERS:
+        frozen.pop("source_user_email", None)
     # The message and the caller's system prompt where the requester put them
     # (`frozen_replay`); a record frozen without them replays its request text.
     if REPLAY_MESSAGE in frozen:

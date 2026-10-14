@@ -73,6 +73,18 @@ def _resolve_agent_runtime(agent_name: Optional[str]) -> str:
         return "claude-code"
 
 
+def _served_person(row: dict) -> Optional[str]:
+    """The person the claimed run serves (ent#814/ent#886), read off the row by
+    the same helper the push composer uses. Lazy import (as below), fail-soft."""
+    try:
+        from services.task_execution_service import served_person_for_row
+
+        return served_person_for_row(row)
+    except Exception as e:  # noqa: BLE001 — never block a claim on the seat line
+        logger.debug("[PullCoordination] served person for %s: %s", row.get("id"), e)
+        return None
+
+
 def _compose_pull_system_prompt(
     agent_name: Optional[str],
     triggered_by: Optional[str],
@@ -86,6 +98,7 @@ def _compose_pull_system_prompt(
     timeout_seconds: Optional[int] = None,
     schedule_context: Optional[dict] = None,
     attempt: Optional[int] = None,
+    served_person_email: Optional[str] = None,
 ) -> Optional[str]:
     """Compose platform prompt + execution context + caller override for a
     pull-claimed turn (#1629). Fail-open: on ANY composition error the turn runs
@@ -99,7 +112,9 @@ def _compose_pull_system_prompt(
 
     #3114: the provenance, timeout, schedule and attempt fields match what
     ``task_execution_service._compose_effective_system_prompt`` builds on
-    push, so an interactive turn routed to the queue sees the same context."""
+    push, so an interactive turn routed to the queue sees the same context.
+    ``served_person_email`` (ent#814/ent#886) likewise: the caller reads it off
+    the claimed row through the same ``served_person_for_row`` push uses."""
     runtime = _resolve_agent_runtime(agent_name)
     try:
         schedule_context = schedule_context or {}
@@ -117,6 +132,7 @@ def _compose_pull_system_prompt(
             schedule_next_run=schedule_context.get("next_run"),
             execution_id=execution_id,
             model=model,
+            served_person_email=served_person_email,
         )
         return compose_system_prompt(
             execution_context=exec_ctx,
@@ -399,6 +415,7 @@ def _build_claim_response(row: Dict[str, Any], cap: Optional[int] = None) -> Dic
         timeout_seconds=overrides.get("timeout_seconds"),
         schedule_context=meta.get("schedule_context") if isinstance(meta.get("schedule_context"), dict) else None,
         attempt=meta.get("attempt"),
+        served_person_email=_served_person(row),
     )
     payload["task_overrides"] = overrides
 
