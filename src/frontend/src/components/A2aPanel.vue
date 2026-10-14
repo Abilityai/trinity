@@ -202,7 +202,7 @@
         >Settings › Integrations</router-link><span v-else>Settings › Integrations</span>.
       </p>
       <div v-if="config.outbound_endpoints.length" data-testid="a2a-legacy-endpoints" class="space-y-2">
-        <p class="text-xs text-status-warning-700 dark:text-status-warning-300">
+        <p class="text-xs text-status-warning-700 dark:text-status-warning-400">
           Registered on this agent's tab before 1.0. These are not callable — <code class="font-mono">call_a2a_agent</code>
           never reads them. Re-add any you need in Settings › Integrations, then remove them here.
         </p>
