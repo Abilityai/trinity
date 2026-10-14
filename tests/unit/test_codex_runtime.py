@@ -1876,3 +1876,38 @@ def test_classify_rate_status_pattern_is_linear_on_long_whitespace():
     status, _ = _classify(stderr="status" + " " * 200_000 + "x")
     assert status == 500
     assert time.monotonic() - start < 2.0
+
+
+@pytest.mark.parametrize("terminal,stderr,expected", [
+    ("The requested model does not exist", "Earlier attempt: 401 Unauthorized", 500),
+    ("401 Unauthorized", "Earlier attempt: HTTP 429", 503),
+    ("HTTP 429 Too Many Requests", "Earlier attempt: 401 Unauthorized", 429),
+    ("401 Unauthorized", "WARNING: PATH unavailable " * 100, 503),
+])
+def test_terminal_turn_failure_controls_status_and_detail(terminal, stderr, expected):
+    """A final provider failure must not be classified from a previous retry."""
+    _, _, metadata, _ = parse_codex_jsonl([
+        json.dumps({"type": "error", "message": "Earlier attempt: 401 Unauthorized"}),
+        json.dumps({"type": "turn.failed", "error": {"message": terminal}}),
+    ])
+    status, detail = codex_runtime._classify_codex_failure(1, stderr, metadata)
+    assert status == expected
+    assert terminal in detail
+    assert "Earlier attempt" not in detail
+
+
+@pytest.mark.parametrize("error", [None, {}, {"message": ""}, {"message": 7}, {"message": {"code": "unauthorized"}}])
+def test_empty_terminal_failure_does_not_resurrect_stderr_auth(error):
+    _, _, metadata, _ = parse_codex_jsonl([
+        json.dumps({"type": "turn.failed", "error": error}),
+    ])
+    status, detail = codex_runtime._classify_codex_failure(1, "Earlier attempt: 401 Unauthorized", metadata)
+    assert status == 500
+    assert "Codex turn failed" in detail
+
+
+def test_nonterminal_error_keeps_stderr_fallback():
+    _, _, metadata, _ = parse_codex_jsonl([
+        json.dumps({"type": "error", "message": "transport failed"}),
+    ])
+    assert codex_runtime._classify_codex_failure(1, "HTTP 429", metadata)[0] == 429
