@@ -26,9 +26,11 @@
     <!-- §3g L5: SPLIT, the header never wraps: [title] … [Mark read][Reply]
          [Open in chat] — the volatile actions sit LEFTMOST of the group, so
          when one arrives late only the truncating title gives way, and the
-         row's height is reserved so an ask pane (no actions until a canvas
-         lands) does not grow under the reader (round 3). STACKED:
-         [Back] … [Open in chat][More ▾], and the title on a line of its own
+         row's height is reserved so an ask pane with no actions (a background
+         ask) keeps the header's height (round 3). Open canvas is a chat action
+         (#3714); an ask's header carries only Open in chat, for the chat that
+         raised it. STACKED: [Back] … [Open in chat][More ▾] — More only on a
+         chat, never an empty menu — and the title on a line of its own
          below — beside them it got 73–90px on a phone and 0px at 200% zoom,
          which pushed More off-screen (round 3, WCAG 1.4.10). It moves by
          `order`, so the heading stays first in the reading order. -->
@@ -56,12 +58,12 @@
         :class="stacked ? 'order-last basis-full' : ''"
         data-testid="inbox-pane-heading"
       >{{ heading }}</h2>
-      <div v-if="item.type === 'thread' || canvasCount > 0" class="shrink-0 flex items-center gap-2" :class="stacked ? 'ml-auto' : ''" data-testid="inbox-pane-actions">
+      <div v-if="item.type === 'thread' || askThread" class="shrink-0 flex items-center gap-2" :class="stacked ? 'ml-auto' : ''" data-testid="inbox-pane-actions">
         <template v-if="!stacked">
           <!-- §3g C10: leftmost — it arrives late (the canvas feed), and only
                the truncating title may give way when it does. -->
           <BaseButton
-            v-if="canvasCount > 0"
+            v-if="item.type === 'thread' && canvasCount > 0"
             variant="ghost"
             size="sm"
             data-testid="inbox-pane-open-canvas"
@@ -78,11 +80,13 @@
           >Mark read</BaseButton>
           <BaseButton variant="secondary" size="sm" data-testid="inbox-pane-reply" @click="$emit('reply', target)">Reply in chat</BaseButton>
         </template>
-        <BaseButton v-if="item.type === 'thread'" variant="primary" size="sm" class="max-sm:min-h-11" data-testid="inbox-pane-open" @click="$emit('open-chat', target)">Open in chat</BaseButton>
+        <!-- #3714: an ask goes through the card's own `open-thread` path, which
+             also opens a chat the sidebar has not loaded (#3140). -->
+        <BaseButton v-if="item.type === 'thread' || askThread" variant="primary" size="sm" class="max-sm:min-h-11" data-testid="inbox-pane-open" @click="askThread ? $emit('open-thread', askThread) : $emit('open-chat', target)">Open in chat</BaseButton>
         <!-- Esc is handled on the WRAPPER: focus stays on the More button
              when it opens the menu, so a handler on the menu never ran and
              Esc reached the Inbox's own Esc — Back (round 3). -->
-        <div v-if="stacked" ref="moreRootEl" class="relative" @keydown.esc="onMoreEsc">
+        <div v-if="stacked && item.type === 'thread'" ref="moreRootEl" class="relative" @keydown.esc="onMoreEsc">
           <BaseButton
             ref="moreBtn"
             variant="ghost"
@@ -103,7 +107,7 @@
             data-testid="inbox-pane-more-menu"
           >
             <BaseButton
-              v-if="canvasCount > 0"
+              v-if="item.type === 'thread' && canvasCount > 0"
               variant="ghost"
               size="sm"
               class="justify-start rounded-none max-sm:min-h-11"
@@ -303,7 +307,7 @@ import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalMentionCard from './PortalMentionCard.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { relativeTime } from './portalUtils'
-import { PANE_HISTORY_LIMIT, paneWindow, paneRuns, openInChatTarget, paneHeading, replyExcerpt, messageReplyTarget } from './portalInbox'
+import { PANE_HISTORY_LIMIT, paneWindow, paneRuns, openInChatTarget, askOriginThread, paneHeading, replyExcerpt, messageReplyTarget } from './portalInbox'
 import { viewState } from '@/utils/loadingState'
 import { formatLocalDateTime } from '@/utils/timestamps'
 
@@ -332,6 +336,7 @@ const headingId = computed(() => `inbox-pane-h-${props.item.key}`)
 
 const heading = computed(() => paneHeading(props.item, props.agentLabel))
 const target = computed(() => openInChatTarget(props.item))
+const askThread = computed(() => askOriginThread(props.item))
 
 // ---- a chat's arrivals ---------------------------------------------------------
 const messages = ref([])
