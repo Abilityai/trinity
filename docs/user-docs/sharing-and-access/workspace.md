@@ -11,7 +11,8 @@ Workspace lives at `/workspace` and ships in **every** build. The older `/portal
 - **Client** — An external person who signs in with a verified email. They have no Trinity account and never see the admin UI.
 - **Chat** — One ongoing conversation. A **1:1** chat is with a single agent; a **room** is a chat with two or more.
 - **Main** — The pinned chat every (you, agent) pair has. It is the first tab for every agent and the place the agent reaches you when nothing else names a chat: an agent-initiated message, a question it raises outside a conversation, or a scheduled brief.
-- **Rail** — The right-hand column beside the conversation. Its tabs are **Work**, **Loops**, **Canvas**, **Files** and **Info**, plus **Asks** while the agent is waiting on you.
+- **Rail** — The right-hand column beside the conversation. Its tabs are **Work**, **Loops**, **Canvas**, **Files** and **Info**, plus **Asks** while the agent is waiting on you, and **Projects** on instances licensed for them.
+- **Project** — The record of a piece of sustained work — goal, members, agents, tasks and a shared log — linked to the chats where it happens. Licensed instances only; see [Workspace Projects](workspace-projects.md).
 - **Briefing** — The panel on an empty chat headed **Things you can ask**, drawn from the agent's exposed skills or its template.
 - **Suggestions** — A short list headed **Suggested for you**, computed for you and the agent in front of you: what is waiting on you, and what you could do next. Platform users only.
 - **Seat** — You and one agent together. The agent's memory of you, and the decisions you and it record, belong to the seat. The [role card](#the-role-card) also uses *seat* for a business role a person or agent holds (*Head of Sales*); that seat decides which objectives the agent owns.
@@ -50,6 +51,7 @@ Top to bottom:
 
 - **Trinity Workspace** — the wordmark. It links to the Inbox.
 - **Inbox** — a pinned row with two badges: the number of asks agents are waiting on you to answer, and the number of chats with something you haven't read. See [The Inbox](#the-inbox).
+- **Projects** — the list of your projects, on instances licensed for them; absent otherwise, with nothing holding its place. See [Workspace Projects](workspace-projects.md).
 - **New chat** — opens the agent picker.
 - **Search agents and chats…** — two characters or more. **⌘/** / **Ctrl+/** puts the cursor there from anywhere; pressed again from the field, it returns you to the message field. Agents filter in place; chat results replace the chat list below, and each half says separately when it matched nothing.
 - **Agents** — your roster, ordered by the agents you worked with most recently, then by name. Five rows show, with **Show all** to expand. A row carries the agent's display name, the title of your newest chat with it (or its slug when the name is a label), when you last heard from it, an availability chip when the agent is stopped or unreachable, an orange ring with a count when it has asks waiting on you, and a blue unread count. **Clicking an agent opens a new, empty chat with it**, with the cursor in the message field — or returns you to a chat with that agent where you left unsent text. Your earlier chats are its tabs, one click away.
@@ -351,10 +353,11 @@ Asks (`/asks`, with `/asks/{id}/answer`, `/discuss`, `/dismiss` and `/context`) 
 - **Tags are in-app only.** A tagged person is not emailed; they see the tag the next time they open the Workspace.
 - **An ask several people received** cannot be dismissed or discussed yet — only answered.
 - **Agent memory for the switch keys is per tab.** Which chat you last had open with each agent is forgotten on reload.
-- **Some Workspace surfaces need an entitlement.** A few platform-user features appear only on instances licensed for them; an external client never sees them.
+- **Some Workspace surfaces need an entitlement.** A few platform-user features — [Projects](workspace-projects.md) among them — appear only on instances licensed for them; an external client never sees them.
 
 ## See Also
 
+- [Workspace Projects](workspace-projects.md) — the record that links your chats into a piece of sustained work: continuing it, what the agent records, tasks and verification, the steward
 - [Public Links](public-links.md) — a single anonymous chat URL for one agent, no sign-in and no history (Workspace is the signed-in, multi-conversation counterpart)
 - [Agent Sharing & Access](agent-sharing.md) — sharing agents with operators and external clients (grants the Workspace roster)
 - [Cross-Channel Access Control](access-control.md) — verified-email identity and access requests across channels
