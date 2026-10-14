@@ -363,7 +363,9 @@ describe('#2582 — the conversation and the room are untouched', () => {
   it('the composer still uploads through the store funnel and knows nothing of the rail', () => {
     // The whole point of fixing this at `uploadDocument`: this file is what the
     // delivery sequence is serialized to protect.
-    expect(CONVERSATION).toMatch(/usePortalFileDrop\(\(file\) => store\.uploadDocument\(props\.agent\.name, file\)\)/)
+    // #3738: the upload fn now also returns the agent it uploaded to, so a
+    // removed chip is deleted from the right inbox — still the one funnel.
+    expect(CONVERSATION).toMatch(/usePortalFileDrop\(\s*async \(file\) => \{\s*const agent = props\.agent\.name\s*const res = await store\.uploadDocument\(agent, file\)/)
     expect(CONVERSATION).not.toMatch(/portalRailFeeds/)
     expect(CONVERSATION).not.toMatch(/noteUpload/)
   })
