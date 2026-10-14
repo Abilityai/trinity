@@ -2011,6 +2011,21 @@ export const useClientPortalStore = defineStore('clientPortal', {
       )
     },
 
+    /**
+     * A composer chip was removed after its file reached `agentName` (#3738).
+     *
+     * The carry log is forgotten FIRST and synchronously, so an @mention
+     * escalation cannot re-carry the removed file even when the DELETE below
+     * fails — that log is matched by `File` identity, the same object the chip
+     * held. Rejects on a failed DELETE so the caller can log it; the composer
+     * shows nothing either way.
+     */
+    async discardComposerUpload(agentName, filename, file) {
+      this.uploadCarryLog = this.uploadCarryLog.filter((e) => !(e.agent === agentName && e.file === file))
+      await this.deleteUpload(agentName, filename)
+      this.noteUploadPending(agentName)
+    },
+
     // `scope`: 'me' hides it from this viewer's list only; 'everyone' revokes
     // the share and needs the agent's owner in a platform session.
     async deleteDocument(agentName, fileId, scope = 'me') {
