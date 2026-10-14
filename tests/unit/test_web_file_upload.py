@@ -324,7 +324,10 @@ async def test_image_original_bytes_and_dispatch_directories_are_isolated():
     archives = []
     async def save(container, directory, archive):
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            archives.append((directory, tar.extractfile("photo.jpg").read()))
+            member = tar.getmember("photo.jpg")
+            assert member.mode == 0o600
+            assert member.uid == member.gid == 1000
+            archives.append((directory, tar.extractfile(member).read()))
         return True
     with (patch.object(_svc, "_MAGIC_AVAILABLE", False),
           patch.object(_svc, "container_exec_run", AsyncMock(return_value=(0, b""))),
