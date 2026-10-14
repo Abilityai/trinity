@@ -1110,6 +1110,10 @@ def withdraw(agent_name: str, request_id: str, reason: Any, *,
             differs = [] if row.get("disposition_reason") == text else ["reason"]
             return _receipt(row, status="replayed", differs=differs)
         _refuse_ended(row, code="ask_ended", key="request_id")
+    if out["outcome"] != "withdrawn":
+        # only the compare-and-set's winner reaches the sink; an outcome the db
+        # layer grows later fails closed here instead of falling through to `_ended`
+        raise RuntimeError(f"unexpected withdraw outcome {out['outcome']!r}")
     # Agent-keyed like the `replaced` row (#3247): there is no person `Actor`.
     # `has_reason` only — the §26.9 rule: ids and enums, never the text.
     audit = [{
