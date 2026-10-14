@@ -13,16 +13,50 @@
  *      server stored it under — best effort, never a chip error.
  *
  * Mounted (#2918) for the chip itself: the × is a real button inside a form,
- * so the test clicks it and counts submits.
+ * so the test clicks it and counts submits. The room is mounted too: a removed
+ * chip there is one delete per participant, which only the component wires.
+ *
+ * @source-text-pin: section 4 walks both composers' parsed templates to pin
+ *   that EVERY chip site uses the shared chip with `@remove` on its own loop
+ *   entry and a bound lock; the mounts prove one site each, not the set.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { defineComponent, h } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
+import { createRouter, createMemoryHistory } from 'vue-router'
+import { readFileSync } from 'fs'
+import path from 'path'
+import { parse } from '@vue/compiler-sfc'
+import { baseParse } from '@vue/compiler-core'
+
+vi.mock('@/stores/auth', () => ({
+  useAuthStore: () => ({ isAuthenticated: true, authHeader: {}, logout: vi.fn() }),
+}))
+vi.mock('axios', () => {
+  const mk = () => ({
+    get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn(),
+    interceptors: { request: { use: vi.fn() }, response: { use: vi.fn() } },
+    defaults: { headers: { common: {} } },
+  })
+  return {
+    default: Object.assign(
+      { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn(), create: mk },
+      { interceptors: { request: { use: vi.fn() }, response: { use: vi.fn() } },
+        defaults: { headers: { common: {} } } },
+    ),
+  }
+})
 
 import PortalAttachmentChip from '@/components/portal/PortalAttachmentChip.vue'
 import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import PortalRoom from '@/components/portal/PortalRoom.vue'
+
+globalThis.ResizeObserver = globalThis.ResizeObserver || class { observe() {} unobserve() {} disconnect() {} }
+window.matchMedia = window.matchMedia || ((q) => ({
+  matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+}))
 
 function deferred() {
   let resolve
@@ -284,5 +318,127 @@ describe('#3738 PortalAttachmentChip ×', () => {
     })
     expect(w.text()).toContain('· to scout')
     expect(w.find('[data-testid="portal-room-attachment-chip-remove"]').exists()).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 4. the room — one delete per participant, by each one's stored name
+// ---------------------------------------------------------------------------
+
+describe('#3738 the room composer', () => {
+  const ROOM = {
+    id: 'room_1', name: 'Pricing review', status: 'open',
+    participants: [
+      { kind: 'user', identity: 'alice', role: 'moderator' },
+      { kind: 'agent', identity: 'scout' },
+      { kind: 'agent', identity: 'ranger' },
+    ],
+    messages: [], own_tags: {}, working: [],
+  }
+  let store
+  let wrapper
+
+  beforeEach(async () => {
+    localStorage.clear()
+    setActivePinia(createPinia())
+    store = useClientPortalStore()
+    store.portalToken = 'tok'
+    store.fetchRoom = vi.fn(async () => JSON.parse(JSON.stringify(ROOM)))
+    // The real carry log, so the test sees what an escalation would see.
+    store.uploadDocument = vi.fn(async (agent, f) => {
+      store.noteUploadForCarry(agent, f)
+      return { filename: `${agent}_${f.name}` }
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/workspace/r/:roomId', component: { template: '<div />' } }],
+    })
+    await router.push('/workspace/r/room_1')
+    await router.isReady()
+    wrapper = mount(PortalRoom, {
+      props: { roomId: 'room_1', roster: [{ name: 'scout' }, { name: 'ranger' }] },
+      global: { plugins: [router] },
+      attachTo: document.body,
+    })
+    await flushPromises()
+  })
+  afterEach(() => { wrapper?.unmount(); wrapper = null })
+
+  async function dropFile(f) {
+    // The root is the drop target; the template's leading comment makes the
+    // wrapper a fragment, so the event is dispatched on the element itself.
+    const ev = new Event('drop', { bubbles: true, cancelable: true })
+    Object.defineProperty(ev, 'dataTransfer', { value: { types: ['Files'], files: [f] } })
+    wrapper.find('div').element.dispatchEvent(ev)
+    await flushPromises()
+  }
+
+  it('× deletes every participant\'s copy and forgets every carry entry', async () => {
+    store.deleteUpload = vi.fn(async () => {})
+    const f = file('a.pdf')
+    await dropFile(f)
+    expect(store.uploadDocument).toHaveBeenCalledTimes(2)
+    const x = wrapper.find('[data-testid="portal-room-attachment-chip-remove"]')
+    expect(x.attributes('aria-label')).toBe('Remove a.pdf')
+
+    await x.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="portal-room-attachment-chip"]').exists()).toBe(false)
+    expect(store.deleteUpload.mock.calls).toEqual([['scout', 'scout_a.pdf'], ['ranger', 'ranger_a.pdf']])
+    expect(store.carryableUploadsFor('scout')).toEqual([])
+    expect(store.carryableUploadsFor('ranger')).toEqual([])
+  })
+
+  it('one participant refusing the delete: the other is still deleted, both carry entries forgotten, one warn', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    store.deleteUpload = vi.fn(async (agent) => {
+      if (agent === 'scout') throw Object.assign(new Error('rate'), { response: { status: 429 } })
+    })
+    await dropFile(file('a.pdf'))
+    await wrapper.find('[data-testid="portal-room-attachment-chip-remove"]').trigger('click')
+    await flushPromises()
+
+    expect(store.deleteUpload).toHaveBeenCalledWith('ranger', 'ranger_a.pdf')
+    expect(store.carryableUploadsFor('scout')).toEqual([])
+    expect(store.carryableUploadsFor('ranger')).toEqual([])
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0]).toContain(429)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5. both composers render every chip through the shared component
+// ---------------------------------------------------------------------------
+
+describe.each([
+  ['PortalConversation', 'portal-attachment-chip'],
+  ['PortalRoom', 'portal-room-attachment-chip'],
+])('#3738 %s chip sites', (component, testid) => {
+  const SRC = readFileSync(path.resolve(process.cwd(), `src/components/portal/${component}.vue`), 'utf8')
+  const { descriptor } = parse(SRC, { filename: `${component}.vue` })
+  const all = []
+  const walk = (node) => {
+    for (const c of node.children || []) {
+      if (c.type === 1) { all.push(c); walk(c) }
+    }
+  }
+  walk(baseParse(descriptor.template.content))
+  const attr = (n, name) => (n.props || []).find((p) => p.type === 6 && p.name === name)
+  const dir = (n, name, arg) => (n.props || []).find((p) => p.type === 7 && p.name === name && (!arg || p.arg?.content === arg))
+
+  it('has no hand-rolled chip left', () => {
+    const rolled = all.filter((n) => n.tag !== 'PortalAttachmentChip' && attr(n, 'data-testid')?.value?.content === testid)
+    expect(rolled).toEqual([])
+  })
+
+  it('every chip removes its own loop entry, behind a bound lock', () => {
+    const chips = all.filter((n) => n.tag === 'PortalAttachmentChip')
+    expect(chips.length).toBeGreaterThan(0)
+    for (const chip of chips) {
+      const loopVar = dir(chip, 'for').exp.content.match(/^\(?\s*(\w+)/)[1]
+      expect(attr(chip, 'testid').value.content).toBe(testid)
+      expect(dir(chip, 'on', 'remove').exp.content).toMatch(new RegExp(`^\\w+\\(${loopVar}\\)$`))
+      expect(dir(chip, 'bind', 'locked')).toBeTruthy()
+    }
   })
 })
