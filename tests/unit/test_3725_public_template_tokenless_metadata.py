@@ -18,9 +18,8 @@ Sections:
   * helpers (checkpoint A, GREEN): `resolve_github_pat_candidates`,
     `probe_anonymous_ref`, `probe_tokened_repo_access`, `GitHubError.status`.
   * the raw reader + 401/403 classifier (checkpoint B, GREEN).
-  * the chain driven through the real `_resolve_template` (checkpoint C, strict
-    xfail until then), plus the rows that already hold today and must keep
-    holding (green now, never xfail).
+  * the chain driven through the real `_resolve_template` (checkpoint C),
+    plus the rows that already held before it and must keep holding.
 
 Sync throughout (`tests/unit/pytest.ini`: a bare `async def test_*` is collected
 and never awaited), so async calls are driven with `asyncio.run`.
@@ -46,8 +45,6 @@ pytestmark = pytest.mark.unit
 SHA = "a" * 40
 USER_PAT = "user-pat-3725"
 PLATFORM_PAT = "platform-pat-3725"
-
-CHECKPOINT_C = pytest.mark.xfail(strict=True, reason="checkpoint C")
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +489,6 @@ def test_a_private_required_template_no_path_can_read_still_refuses(chain):
 
 # -- the chain (checkpoint C) -----------------------------------------------
 
-@CHECKPOINT_C
 def test_AC5_1_stale_user_token_platform_token_reads_and_becomes_the_identity(chain):
     chain.ladder((USER_PAT, "per_user"), (PLATFORM_PAT, "global"))
     chain.answers(**{USER_PAT: ({}, "HTTP 401"),
@@ -511,7 +507,6 @@ def test_AC5_2_no_token_anonymous_REST_capped_reads_credential_free(chain):
     assert not tr.github_pat_for_agent
 
 
-@CHECKPOINT_C
 def test_AC5_3_nothing_can_read_names_every_tier_and_no_token(chain):
     chain.ladder((USER_PAT, "per_user"), (PLATFORM_PAT, "global"))
     chain.answers(**{USER_PAT: ({}, "HTTP 401"), PLATFORM_PAT: ({}, "HTTP 404")})
@@ -541,7 +536,6 @@ def test_a_public_repo_with_no_template_yaml_creates_after_401_and_404(chain):
     assert chain.raw_calls == [("acme/public-tpl", SHA)]
 
 
-@CHECKPOINT_C
 def test_a_swap_to_tokenless_is_regated_after_the_swap(chain):
     """Orchestrator ruling T-e: bidirectional + saved token 401 + only the
     credential-free path reads → the ent#123 400 naming the rejected saved
@@ -584,7 +578,6 @@ def test_a_required_template_read_by_a_fallback_tier_still_refuses(chain):
     assert exc.value.detail["code"] == "FORK_TO_OWN_REQUIRED"
 
 
-@CHECKPOINT_C
 def test_a_transient_anonymous_probe_after_a_fallback_404_refuses(chain):
     chain.ladder((USER_PAT, "per_user"), (PLATFORM_PAT, "global"))
     chain.answers(**{USER_PAT: ({}, "HTTP 401"), PLATFORM_PAT: ({}, "HTTP 404")})

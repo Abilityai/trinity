@@ -769,7 +769,7 @@ def _declared_metrics_for_snapshot(snapshot) -> list:
 
 
 def _gate_tokenless_request(
-    config: AgentConfig, github_pat: str
+    config: AgentConfig, github_pat: str, *, rejected_tier: Optional[str] = None
 ) -> Optional[str]:
     """ent#123: admit or reject a github-template create with no PAT.
 
@@ -787,6 +787,18 @@ def _gate_tokenless_request(
     if github_pat:
         return github_pat
     if not config.fork_to_own and not config.source_mode:
+        if rejected_tier:
+            # #3725: re-gated after an identity swap — "add your token" to a
+            # user who HAS one would be misleading; name what was rejected.
+            label = _TIER_LABELS.get(rejected_tier, rejected_tier)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Bidirectional git sync requires write credentials, and "
+                    f"{label} was rejected by GitHub (HTTP 401) — update it in "
+                    f"Settings, or create the agent in source mode (pull-only)."
+                ),
+            )
         raise HTTPException(
             status_code=400,
             detail=(
@@ -854,6 +866,55 @@ def _resolve_github_repo_and_pat(
     return None, repo_path, github_pat, github_pat_tier
 
 
+def _metadata_unavailable_detail(template: str, attempts: Optional[list]) -> dict:
+    """The 503 `TEMPLATE_METADATA_UNAVAILABLE` detail (#3725): one human
+    sentence listing each path tried as `label: status-category`, the remedy
+    keyed on the FIRST rejection, and the machine-readable `attempts`. Status
+    categories only — never `str(e)`, a token or a URL. Without `attempts`
+    (older callers) today's text is kept verbatim."""
+    if not attempts:
+        return {
+            "error": (
+                f"Could not read '{template}' template metadata from "
+                f"GitHub, so Trinity cannot tell whether this template must "
+                f"be copied into a repo you own. Refusing rather than "
+                f"guessing. This is usually a transient GitHub rate limit — "
+                f"retry shortly, or configure a platform GitHub token in "
+                f"Settings to raise the limit from 60 to 5000 requests/hour."
+            ),
+            "code": "TEMPLATE_METADATA_UNAVAILABLE",
+        }
+    tried = "; ".join(
+        f"{_TIER_LABELS.get(a['tier'], a['tier'])}: {a['status']}" for a in attempts
+    )
+    first = attempts[0]
+    status = first["status"]
+    if status == "HTTP 401" and first["tier"] in ("per_user", "per_agent"):
+        remedy = "GitHub rejected that token — update it in Settings."
+    elif status == "HTTP 401":
+        remedy = ("GitHub rejected the platform token — ask an admin to "
+                  "update it in Settings.")
+    elif status == "HTTP 403":
+        remedy = ("GitHub rate-limited or refused that request — retry "
+                  "shortly, or add a GitHub token with access in Settings.")
+    elif status == "template refused":
+        remedy = "The template's template.yaml was refused by the parser — fix the file."
+    elif status == "network error":
+        remedy = "GitHub was unreachable — retry shortly."
+    else:
+        remedy = ("If the repository is private, add a GitHub token that can "
+                  "read it in Settings; otherwise retry shortly.")
+    return {
+        "error": (
+            f"Could not read '{template}' template metadata, so Trinity "
+            f"cannot tell whether this template must be copied into a repo "
+            f"you own. Refusing rather than guessing. Tried — {tried}. {remedy}"
+        ),
+        "code": "TEMPLATE_METADATA_UNAVAILABLE",
+        "attempts": [dict(a) for a in attempts],
+    }
+
+
 async def _apply_fork_to_own(
     config: AgentConfig,
     current_user: User,
@@ -866,6 +927,7 @@ async def _apply_fork_to_own(
     source_metadata: dict,
     source_metadata_reason: Optional[str],
     allow_unforked_pull_only: bool = False,
+    attempts: Optional[list] = None,
 ) -> tuple[str, Optional[str], str, Optional[str]]:
     """trinity-enterprise#93: enforce a `fork_to_own: required` template and, when
     the caller forks, copy the template into a user-owned repo and return the
@@ -933,20 +995,26 @@ async def _apply_fork_to_own(
     # where it previously depended only on `git clone`. A loud, retryable refusal
     # beats a silent wrong-repo binding — the learnings.md 2026-07-15
     # direction-of-failure rule, applied to a gate instead of a retention window.
+    #
+    # #3725 — WHICH TOKEN DECIDES. The read above used to be one call with the
+    # preferred tier's token, so a saved token GitHub had revoked (401), a
+    # rate-limited one (403) or an anonymous REST call over the 60/h cap
+    # refused a PUBLIC template any anonymous clone could read — while a
+    # platform token that could read it sat one tier down. `_read_source_template`
+    # now walks the remaining tiers and then a credential-free path (anonymous
+    # `ls-remote` to prove the repo public and pin the ref to a SHA, then the
+    # raw file at that SHA) and the refusal below names every path tried. The
+    # two ent#14 properties hold by construction: a fallback TOKEN's 404 never
+    # reads as absence (only a 200 ends the token walk — the false pass stayed
+    # closed), and a template NO path can read still refuses here. Identity
+    # follows the read only away from a 401 token — that token would 502 in
+    # `_validate_github_access` one step later — never on 403 or an outage,
+    # never when forking, and never persisted; a 403 is re-checked over the git
+    # transport with the same token instead (`_validate_github_access`).
     if metadata_reason_is_unreadable(source_metadata_reason) and not config.fork_to_own:
         raise HTTPException(
             status_code=503,
-            detail={
-                "error": (
-                    f"Could not read '{config.template}' template metadata from "
-                    f"GitHub, so Trinity cannot tell whether this template must "
-                    f"be copied into a repo you own. Refusing rather than "
-                    f"guessing. This is usually a transient GitHub rate limit — "
-                    f"retry shortly, or configure a platform GitHub token in "
-                    f"Settings to raise the limit from 60 to 5000 requests/hour."
-                ),
-                "code": "TEMPLATE_METADATA_UNAVAILABLE",
-            },
+            detail=_metadata_unavailable_detail(config.template, attempts),
         )
 
     # The union, not a precedence: `required` from EITHER read wins. The
@@ -1234,7 +1302,47 @@ async def _validate_github_access(
         gh_service = GitHubService(github_pat_for_agent)
         repo_parts = github_repo_for_agent.split("/", 1)
         if len(repo_parts) == 2:
-            repo_info = await gh_service.check_repo_exists(repo_parts[0], repo_parts[1])
+            try:
+                repo_info = await gh_service.check_repo_exists(repo_parts[0], repo_parts[1])
+            except GitHubError as e:
+                # `getattr`: raises that predate `GitHubError.status` (and
+                # test stubs) carry no attribute — treat them as before.
+                if getattr(e, "status", None) != 403:
+                    raise
+                # #3725: a 403 from the REST API (rate limit, SSO, org policy)
+                # is not proof the token cannot READ the repo — the git
+                # transport is a separate budget and the one the clone uses.
+                # Re-check with the SAME token over `ls-remote`, against the
+                # branch the agent will clone, and never touch `repo_info` on
+                # this branch of the code: nothing here read it.
+                outcome, _sha = await git_service.probe_tokened_repo_access(
+                    github_repo_for_agent, github_pat_for_agent,
+                    config.source_branch or None,
+                )
+                if outcome == "missing_ref":
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Branch '{config.source_branch}' not found in "
+                            f"repository '{github_repo_for_agent}'."
+                        ),
+                    )
+                if outcome != "ok":
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            f"Failed to validate GitHub repository access: {e} "
+                            f"(the git transport could not confirm read access "
+                            f"to '{github_repo_for_agent}' either)."
+                        ),
+                    )
+                logger.info(
+                    f"[#3725] REST answered 403 for {github_repo_for_agent}; "
+                    f"read access confirmed over the git transport"
+                )
+                if will_push and not push_verified:
+                    await _validate_push_access(github_repo_for_agent, github_pat_for_agent)
+                return
             if not repo_info.exists:
                 raise HTTPException(
                     status_code=400,
@@ -1713,6 +1821,44 @@ async def _resolve_template(
                 tier=tr.github_pat_tier, owner_id=current_user.id,
             )
             source_metadata, source_metadata_reason = read.metadata, read.reason
+            # #3725: identity follows the read — but ONLY away from a token
+            # GitHub answered 401 (dead/revoked): it would 502 one step later
+            # in `_validate_github_access`, so keeping it guarantees a failed
+            # create. A 403 (rate limit, SSO) or an outage keeps the token: the
+            # same-token git re-check in `_validate_github_access` decides. The
+            # swap is never persisted (the per-agent persist site keys on
+            # `fork`/`per_user`) and never happens on the fork path, which owns
+            # its identity and reports a stale saved token itself.
+            rejected_tier = None
+            if (
+                not config.fork_to_own
+                and read.read_tier is not None
+                and read.read_tier != tr.github_pat_tier
+                and (read.preferred_reason or "").startswith("HTTP 401")
+            ):
+                rejected_tier = tr.github_pat_tier
+                tr.github_pat_for_agent = read.read_pat or None
+                tr.github_pat_tier = (
+                    "none" if read.read_tier == "anonymous" else read.read_tier
+                )
+                logger.warning(
+                    "[#3725] github template %s for %s: %s was rejected "
+                    "(HTTP 401); using %s for this create (not persisted). "
+                    "Attempts: %s",
+                    _sanitize_for_warning(tr.github_repo_for_agent),
+                    _sanitize_for_warning(config.name or ""),
+                    _TIER_LABELS.get(rejected_tier, rejected_tier),
+                    _TIER_LABELS.get(tr.github_pat_tier, tr.github_pat_tier),
+                    "; ".join(f"{a['tier']}: {a['status']}" for a in read.attempts),
+                )
+                # The tokenless admission re-runs AFTER the swap: bidirectional
+                # with only the credential-free path left answers the ent#123
+                # 400, naming the token that was rejected — never a silently
+                # pull-only agent under an identity the user did not choose.
+                if not tr.github_pat_for_agent:
+                    _gate_tokenless_request(
+                        config, "", rejected_tier=rejected_tier
+                    )
             tr.declared_schedules = normalize_declared_schedules(
                 source_metadata.get("schedules")
             )
@@ -1738,6 +1884,7 @@ async def _resolve_template(
                 source_metadata=source_metadata,
                 source_metadata_reason=source_metadata_reason,
                 allow_unforked_pull_only=allow_unforked_pull_only,
+                attempts=read.attempts,
             )
             # trinity-enterprise#705: agent vs deployment decides the git mode —
             # BEFORE validation and branch reservation, which both read it.
@@ -1761,6 +1908,11 @@ async def _resolve_template(
                 tr.github_pat_for_agent, tr.fork_upstream_repo,
             ))
             tr.git_mode_decision["pushes"] = will_push
+            # #3725: the identity tier this create actually used, and the one
+            # it set aside, ride the create response beside the git mode.
+            tr.git_mode_decision["token_tier"] = tr.github_pat_tier
+            if rejected_tier:
+                tr.git_mode_decision["rejected_token_tier"] = rejected_tier
             # Validate PAT has access to the repository before creating container
             # This prevents silent clone failures in startup.sh (#218)
             await _validate_github_access(
