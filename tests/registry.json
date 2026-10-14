@@ -1,6 +1,31 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3725_public_template_tokenless_metadata.py",
+      "feature": "abilityai/trinity#3725",
+      "added": "2026-10-14",
+      "categories": [
+        "backend",
+        "templates",
+        "github",
+        "unit"
+      ],
+      "description": "A public github: template's metadata read walks the remaining token tiers, then a credential-free SHA-pinned read, before the ent#14 gate refuses; helpers, raw reader and the chain's read decisions."
+    },
+    {
+      "file": "unit/test_3725_identity_and_validation.py",
+      "feature": "abilityai/trinity#3725",
+      "added": "2026-10-14",
+      "categories": [
+        "backend",
+        "templates",
+        "github",
+        "security",
+        "unit"
+      ],
+      "description": "The chain's effect on the create: 403 git re-check in _validate_github_access, 401 identity swap (never persisted, never on fork), git_mode.token_tier / rejected_token_tier, token dedupe, non-default git base fail-closed, no token in any log record."
+    },
+    {
       "file": "unit/test_ent862_aauth_settings.py",
       "feature": "abilityai/trinity-enterprise#862",
       "added": "2026-10-13",
