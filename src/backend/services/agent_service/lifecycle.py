@@ -1662,6 +1662,31 @@ async def recreate_missing_container(agent_name: str):
             ),
         )
 
+    # #3722: legacy rows keep stock recovery. Only newly created persistent
+    # agents require a saved config volume; never guess from a volume's name.
+    storage_format = db.get_agent_config_storage_format(agent_name)
+    config_name = None
+    if storage_format not in (None, "volume-v1"):
+        raise HTTPException(status_code=409, detail={
+            "code": "AGENT_CONFIG_FORMAT_UNSUPPORTED",
+            "message": "Agent configuration format is unsupported by this backend.",
+        })
+    if storage_format == "volume-v1":
+        from services.docker_utils import is_reclaimable_agent_volume, _resolve_instance_id
+        volume_base = db.get_volume_base_name(agent_name) or agent_name
+        config_name = f"agent-{volume_base}-config"
+        try:
+            config_volume = await volume_get(config_name)
+        except docker.errors.NotFound:
+            raise HTTPException(status_code=409, detail={
+                "code": "AGENT_CONFIG_UNAVAILABLE",
+                "message": "Original agent configuration is unavailable; restore it before recovery.",
+            }) from None
+        if not is_reclaimable_agent_volume(config_volume, volume_base, _resolve_instance_id()):
+            raise HTTPException(status_code=409, detail={
+                "code": "AGENT_CONFIG_OWNER_MISMATCH",
+                "message": "Agent configuration ownership could not be verified.",
+            })
     image = "trinity-agent-base:latest"
     validate_base_image(image)
 
@@ -1809,6 +1834,10 @@ async def recreate_missing_container(agent_name: str):
             "mode": "rw",
         }
     }
+
+
+    if config_name is not None:
+        base_volumes[config_name] = {"bind": "/config", "mode": "ro"}
 
     logger.info("Rebuilding missing container for recovered agent %s (#1559)", agent_name)
     return await _provision_folders_and_run_agent_container(

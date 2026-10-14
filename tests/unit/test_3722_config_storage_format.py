@@ -1,0 +1,72 @@
+"""#3722: persisted transport identity separates legacy recovery from lost config."""
+import sqlite3
+from unittest.mock import Mock
+
+import pytest
+from db_harness import db_backend, seed_user  # noqa: F401
+
+
+def test_sqlite_upgrade_preserves_legacy_and_is_idempotent():
+    from db.migrations import _migrate_agent_config_storage_format
+    with sqlite3.connect(':memory:') as conn:
+        conn.execute('CREATE TABLE agent_ownership (agent_name TEXT)')
+        conn.execute("INSERT INTO agent_ownership VALUES ('legacy')")
+        _migrate_agent_config_storage_format(conn.cursor(), conn)
+        _migrate_agent_config_storage_format(conn.cursor(), conn)
+        assert conn.execute('SELECT config_storage_format FROM agent_ownership').fetchone() == (None,)
+
+
+def test_registration_records_transport_atomically_and_never_upgrades_existing(db_backend, monkeypatch):
+    import db.agents as agents
+    seed_user()
+    users = Mock()
+    users.get_user_by_username.return_value = {'id': 1}
+    ops = agents.AgentOperations(users)
+    assert ops.register_agent_owner('legacy', 'owner')
+    assert ops.get_agent_config_storage_format('legacy') is None
+    revision = None
+    if db_backend == 'postgres':
+        import importlib.util
+        from pathlib import Path
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        from db.engine import get_engine
+        from sqlalchemy.exc import DBAPIError
+        spec = importlib.util.spec_from_file_location('migration_3722', Path(__file__).parents[2] /
+            'src/backend/migrations/versions/0099_agent_config_storage_format.py')
+        revision = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(revision)
+        # Simulate an existing legacy database, then run the actual revision.
+        with get_engine().begin() as conn:
+            conn.exec_driver_sql('ALTER TABLE agent_ownership DROP COLUMN config_storage_format')
+            monkeypatch.setattr(revision, 'op', Operations(MigrationContext.configure(conn)))
+            revision.upgrade()
+            revision.upgrade()
+        assert ops.get_agent_config_storage_format('legacy') is None
+    assert ops.register_agent_owner('new', 'owner', config_storage_format='volume-v1')
+    assert ops.get_agent_config_storage_format('new') == 'volume-v1'
+    if revision is not None:
+        with pytest.raises(DBAPIError, match='Cannot downgrade'):
+            with get_engine().begin() as conn:
+                monkeypatch.setattr(revision, 'op', Operations(MigrationContext.configure(conn)))
+                revision.downgrade()
+        assert ops.get_agent_config_storage_format('new') == 'volume-v1'
+    assert not ops.register_agent_owner('legacy', 'owner', config_storage_format='volume-v1')
+    assert ops.get_agent_config_storage_format('legacy') is None
+    with pytest.raises(ValueError):
+        ops.register_agent_owner('unknown', 'owner', config_storage_format='future-format')
+    assert ops.rename_agent('new', 'renamed')
+    assert ops.get_agent_config_storage_format('renamed') == 'volume-v1'
+    assert ops.get_volume_base_name('renamed') == 'new'
+    assert ops.delete_agent_ownership('renamed')
+    assert ops.get_agent_config_storage_format('renamed') == 'volume-v1'
+    assert ops.purge_agent_ownership('renamed')
+    with pytest.raises(ValueError, match='ownership'):
+        ops.get_agent_config_storage_format('renamed')
+    if revision is not None:
+        # Once only legacy rows remain, downgrade and upgrade preserve them.
+        with get_engine().begin() as conn:
+            monkeypatch.setattr(revision, 'op', Operations(MigrationContext.configure(conn)))
+            revision.downgrade()
+            revision.upgrade()
+        assert ops.get_agent_config_storage_format('legacy') is None

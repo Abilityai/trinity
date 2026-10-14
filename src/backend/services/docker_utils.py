@@ -342,9 +342,9 @@ async def volume_remove(volume, force: bool = False) -> None:
 # its `trinity.agent-name` label matches AND its `trinity.platform` label is an
 # agent-data platform. Any mismatch/missing-label refuses (fail-closed).
 
-_AGENT_VOLUME_SUFFIXES = ("workspace", "public", "shared")
+_AGENT_VOLUME_SUFFIXES = ("workspace", "public", "shared", "config")
 _AGENT_VOLUME_PLATFORMS = frozenset(
-    {"agent-workspace", "agent-public", "agent-shared"}
+    {"agent-workspace", "agent-public", "agent-shared", "agent-config"}
 )
 # Label key present on every agent data volume — the cheap list filter for the
 # orphan sweep (catches all three platforms in one call).

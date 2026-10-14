@@ -101,6 +101,7 @@ class AgentOperations(
         spawned_by_agent: Optional[str] = None,
         spawned_by_key_id: Optional[str] = None,
         max_parallel_tasks: Optional[int] = None,
+        config_storage_format: Optional[str] = None,
     ) -> bool:
         """Register the owner of an agent.
 
@@ -122,6 +123,10 @@ class AgentOperations(
             max_parallel_tasks: optional explicit concurrency cap; ghosts pass 1
                 (overshoot bound). None keeps the column default.
         """
+        if config_storage_format not in (None, "volume-v1"):
+            raise ValueError("Unsupported agent configuration storage format")
+        if config_storage_format is not None and (is_ephemeral or is_system):
+            raise ValueError("Configuration volumes are for persistent regular agents")
         user = self._user_ops.get_user_by_username(owner_username)
         if not user:
             return False
@@ -145,6 +150,7 @@ class AgentOperations(
                 is_system=1 if is_system else 0,
                 execution_timeout_seconds=3600,
                 require_email=1 if require_email else 0,
+                config_storage_format=config_storage_format,
             )
             if is_ephemeral:
                 values.update(
@@ -250,6 +256,20 @@ class AgentOperations(
                 select(agent_ownership.c.agent_name).where(*where)
             ).first()
             return row is not None
+
+    def get_agent_config_storage_format(self, agent_name: str) -> Optional[str]:
+        """#3722: authoritative config transport; NULL means unchanged legacy.
+
+        Only creation writes this field. Never infer it from Docker volume names
+        or adopt old host files: neither establishes the original owner intent.
+        """
+        with get_engine().connect() as conn:
+            row = conn.execute(select(agent_ownership.c.config_storage_format).where(
+                agent_ownership.c.agent_name == agent_name
+            )).first()
+            if row is None:
+                raise ValueError("Agent ownership is unavailable")
+            return row.config_storage_format
 
     def get_volume_base_name(self, agent_name: str) -> Optional[str]:
         """The base name of ``agent_name``'s Docker data volumes (#1664).
