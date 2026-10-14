@@ -83,6 +83,16 @@
       ]
     },
     {
+      "file": "../src/frontend/tests/unit/portalSidebarTopOrder.mount.spec.js",
+      "feature": "#3695",
+      "added": "2026-10-13",
+      "categories": [
+        "frontend",
+        "workspace",
+        "sidebar"
+      ]
+    },
+    {
       "file": "../src/frontend/tests/unit/operatorQueueOutcomeUnknown.spec.js",
       "feature": "abilityai/trinity-enterprise#844",
       "added": "2026-10-10",
