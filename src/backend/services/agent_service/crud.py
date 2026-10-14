@@ -34,20 +34,23 @@ from services.docker_utils import (
     agent_volume_labels
 )
 from services.agent_runtime_state import clear_agent_breakers, clear_agent_runtime_state
+from services import template_service
 from services.template_service import (
     CredentialDeclarationError,
     credential_mcp_server_names,
     fetch_template_metadata_result_for_create,
     get_github_template,
     is_catalog_github_template,
+    metadata_reason_is_token_rejection,
     metadata_reason_is_unreadable,
+    _sanitize_for_warning,
     generate_credential_files,
 )
 from services.template_schedules import normalize_declared_schedules
 from services.template_plugins import normalize_declared_plugins
 from services import metric_registry
 from services import git_service
-from services.settings_service import get_anthropic_api_key, resolve_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
+from services.settings_service import get_anthropic_api_key, resolve_github_pat, resolve_github_pat_candidates, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
 from services import rate_limiter
 from . import ephemeral as ephemeral_service
@@ -555,11 +558,56 @@ def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
     return template_lookup, template_str, url_branch
 
 
-def _read_source_template(
-    repo: str, pat: Optional[str], ref: Optional[str]
-) -> tuple:
+# #3725: the labels the create path uses when it names a tier to a person —
+# never a token value, never a URL.
+_TIER_LABELS = {
+    "per_agent": "agent GitHub token",
+    "per_user": "your saved GitHub token",
+    "global": "platform GitHub token",
+    "none": "anonymous API read",
+    "anonymous": "anonymous read",
+}
+_DEFAULT_GIT_BASE_URL = "https://github.com"
+
+
+def _attempt_status(reason: Optional[str]) -> str:
+    """A `reason` reduced to the status CATEGORY a person may see (#3725):
+    `ok`, `HTTP <n>`, `template refused` (an ent#314 code) or `network error`.
+    Never `str(e)` — an httpx message can quote the request URL and the
+    response body."""
+    if not reason:
+        return "ok"
+    if reason.startswith("HTTP "):
+        return " ".join(reason.split()[:2])
+    head = reason.split(":", 1)[0]
+    if re.fullmatch(r"template_[a-z_]+", head):
+        return "template refused"
+    return "network error"
+
+
+@dataclass
+class TemplateRead:
+    """What `_read_source_template` learned (#3725).
+
+    `metadata`/`reason` keep the `(metadata, reason)` contract both consumers
+    read. `read_tier` is the tier whose answer `reason` is — the preferred
+    tier when the first read decided, a later token tier, `"anonymous"` for the
+    credential-free path, or `None` when no path could read. `attempts` lists
+    every path tried as `{"tier", "status"}` with status CATEGORIES only, for
+    the refusal's `detail` and the WARNING."""
+    metadata: dict
+    reason: Optional[str]
+    read_tier: Optional[str]
+    read_pat: Optional[str]
+    preferred_reason: Optional[str]
+    attempts: list = field(default_factory=list)
+
+
+async def _read_source_template(
+    repo: str, pat: Optional[str], ref: Optional[str], *,
+    tier: str = "none", owner_id: Optional[int] = None,
+) -> TemplateRead:
     """The ONE creation-time read of a `github:` template's `template.yaml`.
-    Returns `(metadata, reason)`.
 
     Deliberately NOT the catalog's `gh_template` (trinity-enterprise#89 R2):
     that dict comes from `_get_cached_metadata`, which reads with the **global
@@ -574,14 +622,89 @@ def _read_source_template(
     was built on the catalog dict anyway, one line below the call site that had
     already read the file correctly (trinity-enterprise#14 S2). So this returns
     the whole `(metadata, reason)` pair and BOTH consumers — the schedules
-    normalizer and the `fork_to_own` gate — read it. One GitHub call, one set of
-    credentials, one ref, and no second source that can disagree.
+    normalizer and the `fork_to_own` gate — read it. One set of credentials,
+    one ref, and no second source that can disagree.
 
     Non-fatal by construction for schedules (the normalizer is total, and any
     failure yields `{}` plus a WARNING naming the repo, the ref and the reason).
     The `reason` is what makes the gate's fail-closed decision possible.
+
+    #3725 — the read must not hinge on ONE tier's token. The first read is
+    today's call, unchanged (same function, same PAT, same ref); a 200 or a
+    clean 404 there decides as it always has, with no further call. Only when
+    its reason is UNREADABLE does a chain run:
+
+    1. the remaining tiers of `resolve_github_pat_candidates` (resolver order,
+       value-deduplicated, the tier already tried skipped). Only a 200 ends
+       this walk — a 404 from a fallback token is "this token cannot see it",
+       never absence (ent#14 S2: the private-`required` false pass);
+    2. the credential-free path: `probe_anonymous_ref` (the branch from
+       `@branch` as `refs/heads/<b>`, else HEAD) proves the repo public AND
+       pins the ref to a SHA; `_fetch_template_yaml_raw_result(repo, sha)`
+       reads that exact tree with no token. A 404 THERE is definitive absence
+       (public repo, pinned commit, no file) and clears the earlier
+       rejections. Skipped fail-closed on a non-default `TRINITY_GIT_BASE_URL`,
+       where the probe and the raw host would disagree.
+
+    Every read runs off the event loop (`asyncio.to_thread`): the reads touch
+    no DB, and three 10 s reads plus a 15 s probe would otherwise block it.
     """
-    return fetch_template_metadata_result_for_create(repo, pat=pat, ref=ref)
+    attempts: list = []
+
+    # Step 1 — today's read, byte-identical. ent#89's alias seam
+    # (`crud.fetch_template_metadata_result_for_create`) stays the target.
+    metadata, reason = await asyncio.to_thread(
+        fetch_template_metadata_result_for_create, repo, pat=pat, ref=ref
+    )
+    preferred_reason = reason
+    attempts.append({"tier": tier, "status": _attempt_status(reason)})
+    if not metadata_reason_is_unreadable(reason):
+        return TemplateRead(metadata, reason, tier, pat, preferred_reason, attempts)
+
+    # Step 2 — the remaining token tiers. Only a 200 answers.
+    tried = {pat} if pat else set()
+    for candidate_pat, candidate_tier in resolve_github_pat_candidates(owner_id=owner_id):
+        if candidate_tier == tier or candidate_pat in tried:
+            continue
+        tried.add(candidate_pat)
+        c_metadata, c_reason = await asyncio.to_thread(
+            fetch_template_metadata_result_for_create, repo, pat=candidate_pat, ref=ref
+        )
+        attempts.append({"tier": candidate_tier, "status": _attempt_status(c_reason)})
+        if c_reason is None:
+            return TemplateRead(c_metadata, None, candidate_tier, candidate_pat,
+                                preferred_reason, attempts)
+        # An unreadable reason from a later tier is what the gate sees if
+        # nothing else answers — never a token-tier 404, which reads as absence.
+        if metadata_reason_is_unreadable(c_reason):
+            reason = c_reason
+
+    # Step 3 — the credential-free path.
+    base = os.getenv("TRINITY_GIT_BASE_URL", _DEFAULT_GIT_BASE_URL).rstrip("/")
+    if base != _DEFAULT_GIT_BASE_URL:
+        attempts.append({"tier": "anonymous",
+                         "status": "skipped (non-github.com git base)"})
+        return TemplateRead({}, "anonymous read skipped: non-github.com git base",
+                            None, None, preferred_reason, attempts)
+    outcome, sha = await git_service.probe_anonymous_ref(repo, ref)
+    if outcome == "ok":
+        r_metadata, r_reason = await asyncio.to_thread(
+            template_service._fetch_template_yaml_raw_result, repo, sha
+        )
+        attempts.append({"tier": "anonymous", "status": _attempt_status(r_reason)})
+        if r_reason is None or r_reason.startswith("HTTP 404"):
+            # Read, or definitively absent: a pinned commit of a public repo.
+            return TemplateRead(r_metadata, r_reason, "anonymous", None,
+                                preferred_reason, attempts)
+        return TemplateRead({}, f"anonymous read: {r_reason}", None, None,
+                            preferred_reason, attempts)
+    status = {
+        "unavailable": "repository is private or does not exist",
+        "missing_ref": "branch not found",
+    }.get(outcome, "network error")
+    attempts.append({"tier": "anonymous", "status": status})
+    return TemplateRead({}, f"anonymous read: {status}", None, None,
+                        preferred_reason, attempts)
 
 
 def _declared_schedules_for_snapshot(snapshot) -> list:
@@ -1585,9 +1708,11 @@ async def _resolve_template(
             # actually see a private template. ONE read feeds both consumers —
             # ent#89's schedules and ent#14's fork gate (which used to decide
             # from the catalog cache instead; see `_apply_fork_to_own`).
-            source_metadata, source_metadata_reason = _read_source_template(
-                tr.github_repo_for_agent, tr.github_pat_for_agent, url_branch
+            read = await _read_source_template(
+                tr.github_repo_for_agent, tr.github_pat_for_agent, url_branch,
+                tier=tr.github_pat_tier, owner_id=current_user.id,
             )
+            source_metadata, source_metadata_reason = read.metadata, read.reason
             tr.declared_schedules = normalize_declared_schedules(
                 source_metadata.get("schedules")
             )

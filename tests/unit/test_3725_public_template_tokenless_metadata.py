@@ -502,7 +502,6 @@ def test_AC5_1_stale_user_token_platform_token_reads_and_becomes_the_identity(ch
     assert chain.raw_calls == []
 
 
-@CHECKPOINT_C
 def test_AC5_2_no_token_anonymous_REST_capped_reads_credential_free(chain):
     chain.ladder()
     chain.answers(**{"": ({}, "HTTP 403")})
@@ -529,7 +528,6 @@ def test_AC5_3_nothing_can_read_names_every_tier_and_no_token(chain):
     assert "https://" not in dumped
 
 
-@CHECKPOINT_C
 def test_a_public_repo_with_no_template_yaml_creates_after_401_and_404(chain):
     """Orchestrator ruling T-a: user 401, platform 404, anonymous ls-remote ok,
     SHA-pinned raw 404 → absence. A raw 404 on a probe-proven public repo is
@@ -559,7 +557,6 @@ def test_a_swap_to_tokenless_is_regated_after_the_swap(chain):
     assert USER_PAT not in text
 
 
-@CHECKPOINT_C
 def test_an_outage_never_swaps_the_identity(chain):
     chain.ladder((USER_PAT, "per_user"), (PLATFORM_PAT, "global"))
     chain.answers(**{USER_PAT: ({}, "HTTP 502"),
@@ -568,7 +565,6 @@ def test_an_outage_never_swaps_the_identity(chain):
     assert (tr.github_pat_for_agent, tr.github_pat_tier) == (USER_PAT, "per_user")
 
 
-@CHECKPOINT_C
 def test_a_403_reads_through_but_never_swaps_the_identity(chain):
     chain.ladder((USER_PAT, "per_user"), (PLATFORM_PAT, "global"))
     chain.answers(**{USER_PAT: ({}, "HTTP 403"),
@@ -577,7 +573,6 @@ def test_a_403_reads_through_but_never_swaps_the_identity(chain):
     assert (tr.github_pat_for_agent, tr.github_pat_tier) == (USER_PAT, "per_user")
 
 
-@CHECKPOINT_C
 def test_a_required_template_read_by_a_fallback_tier_still_refuses(chain):
     """The false pass stays closed: the fallback read decides the gate."""
     chain.ladder((USER_PAT, "per_user"), (PLATFORM_PAT, "global"))
