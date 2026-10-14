@@ -19,6 +19,7 @@ from models import (
     BulkCancelRequest,
     ClearResolvedRequest,
     OperatorAskCreate,
+    OperatorAskWithdraw,
     OperatorCancel,
     OperatorResponse,
 )
@@ -643,4 +644,33 @@ async def get_my_ask(
     # #3247: the replace link, both ways, the same way.
     readback["replaces"] = ask_service.request_id_of(item.get("replaces"))
     readback["replaced_by"] = ask_service.request_id_of(item.get("replaced_by"))
+    # trinity-enterprise#901: which ending the agent authored (replaced |
+    # withdrawn | None), derived once server-side, never inferred from the link.
+    readback["agent_ending"] = ask_service.agent_ending_kind(item)
     return readback
+
+
+@agent_router.post("/{name}/operator-queue/{request_id}/withdraw")
+async def withdraw_my_ask(
+    request_id: str,
+    body: OperatorAskWithdraw,
+    name: str = Depends(get_self_acting_agent),
+    current_user: User = Depends(get_current_user),
+):
+    """The agent ends one of its OWN pending asks with a reason and no successor
+    (trinity-enterprise#901) — the question answered itself, the action is no
+    longer needed. The calling agent only, as itself (`get_self_acting_agent`;
+    deliberately NOT `reject_non_person_principal` — this door is agent-only).
+    200 with the receipt (`status: "withdrawn"`), or `status: "replayed"` when
+    this agent already withdrew it. Refusals carry named codes: 404
+    `ask_not_found` (uniform — unknown, another agent's, a gate's, the
+    platform's), 409 `ask_ended` (a person answered or ended it first; the
+    answer stands), 422 `invalid_reason`.
+    """
+    try:
+        return ask_service.withdraw(name, request_id, body.reason, actor_user=current_user)
+    except ask_service.AskRejected as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail={"code": e.code, "message": e.message, **e.extra},
+        )

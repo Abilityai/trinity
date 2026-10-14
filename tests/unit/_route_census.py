@@ -579,6 +579,10 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     # only the agent's own key (or trinity-system as itself) and refuses every person.
     "routers/operator_queue.py::raise_my_ask": (
         "POST /api/agents/{name}/operator-queue", "MCP ask_operator; the agent raises its own ask, self-only (get_self_acting_agent)"),
+    # trinity-enterprise#901: the agent ends its OWN pending ask with a reason; the same
+    # self-only gate, the row must carry raised_by='agent' (a gate's approval is a 404).
+    "routers/operator_queue.py::withdraw_my_ask": (
+        "POST /api/agents/{name}/operator-queue/{request_id}/withdraw", "MCP withdraw_ask; the agent withdraws its own pending ask, self-only (get_self_acting_agent)"),
     # trinity-enterprise#752: the in-container skill-gate hook reads its own gates and its own
     # run's clearance; the agent comes from the key (get_self_agent), every person is refused.
     "routers/skill_gate.py::check_skill_invocation": (

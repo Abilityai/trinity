@@ -6063,6 +6063,17 @@
         "auth"
       ],
       "description": "trinity-enterprise#848: gate map API for role:<id> approvers: PUT saved lower-cased when this agent's roster names the role; unknown_role / approver_unavailable (OSS, no roster answer) / invalid_approver refused with nothing written; named-but-unfilled saved with approver_unassigned; deadline-only PUT on a stored role gate passes on OSS; GET lists roles after kinds with label + role_id through the response model, booleans only; viewer_fills agrees with enforce; stored role gates report reach via approver_people; the MCP set_skill_gate regex accepts exactly what the backend parses."
+    },
+    {
+      "file": "unit/test_ent901_withdraw_ask.py",
+      "feature": "abilityai/trinity-enterprise#901",
+      "added": "2026-10-14",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "trinity-enterprise#901 checkpoint A: an agent withdraws its own pending ask with a reason and no successor. The shared compare-and-set (`_end_own_pending`) ends the row cancelled/agent/reason with replaced_by NULL and no deadline clause (a pending row past its deadline is withdrawn, like a person's cancel); a person's answer, cancel or the sweep wins and nothing is written; NULL-raiser, gate and another agent's rows are not_own; replace still runs through the shared writer. `agent_ending_kind` tells replaced from withdrawn by the link, never the reason's text. The sink: uniform 404 ask_not_found (unknown / another's / gate / platform / about-a-person), 409 ask_ended with ids+enums only, 200 replayed on a repeat (differs on a changed reason), 422 invalid_reason, agent-keyed `withdrawn` audit row without the text, one thin trigger, no wake. The route: get_self_acting_agent 403 for every other principal, receipt and readback redacted and carrying agent_ending; the #2996 census lists it as agent-callable."
     }
   ]
 }
