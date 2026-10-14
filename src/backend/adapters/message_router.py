@@ -13,6 +13,7 @@ Uses the same execution path as web public chat (EXEC-024) for:
 """
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import re
 import time
@@ -340,6 +341,32 @@ def _check_rate_limit(key: str, max_msgs: Optional[int] = None, window: Optional
     return True
 
 
+@dataclass
+class _UploadLifetime:
+    """Request-local ownership only; a lost waiter is not a terminal execution."""
+
+    dispatched: bool = False
+    result: object = None
+
+    def safe_to_remove(self) -> bool:
+        if not self.dispatched:
+            return True
+        if self.result is None:
+            return False
+        result = self.result
+        code = getattr(result, "error_code", None)
+        if getattr(code, "value", code) == "timeout":
+            # Pull dispatch can return a synthetic timeout while its durable
+            # execution is still queued/running. Consult the existing terminal
+            # result interface; missing/unreadable state is not permission.
+            try:
+                from services.task_execution_service import result_from_execution_row
+                result = result_from_execution_row(result.execution_id)
+            except Exception:
+                return False
+        return result is not None and result.status in ("success", "failed", "cancelled", "skipped")
+
+
 class ChannelMessageRouter:
     """Channel-agnostic message dispatcher."""
 
@@ -561,51 +588,51 @@ class ChannelMessageRouter:
         # Issue #487: workspace-write failures abort execution and surface a
         # channel-native error so the user knows the upload didn't land.
         upload_dir = None  # Track for cleanup
-        image_data: list = []
-        if message.files:
-            file_descriptions, upload_dir, all_writes_failed, image_data = await self._handle_file_uploads(
-                adapter, message, agent_name, container, session_id,
-                verified_email=verified_email,
-            )
-            if all_writes_failed:
+        upload_lifetime = _UploadLifetime()
+        try:
+            image_data: list = []
+            if message.files:
+                file_descriptions, upload_dir, all_writes_failed, image_data = await self._handle_file_uploads(
+                    adapter, message, agent_name, container, session_id,
+                    verified_email=verified_email,
+                )
+                if all_writes_failed:
+                    logger.warning(
+                        f"[ROUTER:{channel}] All file writes failed for {agent_name}; "
+                        f"replying with error and aborting execution"
+                    )
+                    await adapter.send_response(
+                        message.channel_id,
+                        ChannelResponse(
+                            text="Sorry, I couldn't save the file(s) you sent. Please try again in a moment.",
+                            metadata={"bot_token": bot_token, "agent_name": agent_name},
+                        ),
+                        thread_id=message.thread_id,
+                    )
+                    return
+                if file_descriptions:
+                    file_block = "\n".join(file_descriptions)
+                    context_prompt = f"{context_prompt}\n\n{file_block}"
+                    logger.info(f"[ROUTER] Step 7b - {len(file_descriptions)} file(s) processed for agent")
+
+            # 8. Show processing indicator (⏳/👀 reaction, typing, etc.) and arm
+            # the ent#264 progress driver. Wrapped so an adapter hook that raises
+            # (the upgraded Telegram hook adds DB + HTTP surface) can never abort
+            # the turn — one wrap protecting every adapter, now and future.
+            try:
+                await adapter.indicate_processing(message)
+                self._arm_progress_driver(adapter, message)
+            except Exception as e:
                 logger.warning(
-                    f"[ROUTER:{channel}] All file writes failed for {agent_name}; "
-                    f"replying with error and aborting execution"
+                    f"[ROUTER:{channel}] indicate_processing/arm failed (non-fatal): {e}"
                 )
-                await adapter.send_response(
-                    message.channel_id,
-                    ChannelResponse(
-                        text="Sorry, I couldn't save the file(s) you sent. Please try again in a moment.",
-                        metadata={"bot_token": bot_token, "agent_name": agent_name},
-                    ),
-                    thread_id=message.thread_id,
-                )
-                await self._cleanup_uploads(container, upload_dir)
-                return
-            if file_descriptions:
-                file_block = "\n".join(file_descriptions)
-                context_prompt = f"{context_prompt}\n\n{file_block}"
-                logger.info(f"[ROUTER] Step 7b - {len(file_descriptions)} file(s) processed for agent")
 
-        # 8. Show processing indicator (⏳/👀 reaction, typing, etc.) and arm
-        # the ent#264 progress driver. Wrapped so an adapter hook that raises
-        # (the upgraded Telegram hook adds DB + HTTP surface) can never abort
-        # the turn — one wrap protecting every adapter, now and future.
-        try:
-            await adapter.indicate_processing(message)
-            self._arm_progress_driver(adapter, message)
-        except Exception as e:
-            logger.warning(
-                f"[ROUTER:{channel}] indicate_processing/arm failed (non-fatal): {e}"
-            )
-
-        try:
             # 9. Execute via TaskExecutionService (same path as web public chat).
-            # None ⇒ failure/exception already surfaced to the user + uploads cleaned.
+            # None ⇒ failure/exception already surfaced; finally owns uploads.
             result = await self._run_agent_task(
                 adapter, message, agent_name, bot_token, channel, is_group,
                 container, upload_dir, context_prompt, verified_email, image_data,
-                session_id=session_id,
+                session_id=session_id, upload_lifetime=upload_lifetime,
             )
             if result is None:
                 return
@@ -623,7 +650,23 @@ class ChannelMessageRouter:
             # paths, so this is a safe no-op double-pop there. (A reaction/
             # placeholder may strand on such a raise — same accepted class as
             # a backend restart.)
-            await self._cancel_progress_driver(message)
+            try:
+                await self._cancel_progress_driver(message)
+            finally:
+                if upload_dir and upload_lifetime.safe_to_remove():
+                    # Once safe, settle cleanup even under repeated cancellation.
+                    cleanup = asyncio.create_task(self._cleanup_uploads(container, upload_dir))
+                    cancelled = False
+                    while not cleanup.done():
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            cancelled = True
+                    cleanup.result()
+                    if cancelled:
+                        raise asyncio.CancelledError
+                elif upload_dir:
+                    logger.warning("[ROUTER] Retaining uploads: execution may still be active")
 
     # =========================================================================
     # In-flight progress driver (ent#264) — channel-agnostic start/progress/
@@ -739,12 +782,13 @@ class ChannelMessageRouter:
         verified_email: Optional[str],
         image_data: list,
         session_id: Optional[str] = None,
+        upload_lifetime: Optional[_UploadLifetime] = None,
     ):
         """Step 9: assemble public-channel execution params (source identity,
         MEM-001 memory injection, restricted tool set) and run the task.
 
         Returns the execution result on success, or ``None`` after surfacing the
-        error to the user and cleaning up uploads on failure/exception — the
+        error to the user; the caller owns upload cleanup — the
         caller treats ``None`` as "abort, do not finalize".
         """
         logger.debug(f"[ROUTER:{channel}] Step 9 - executing via TaskExecutionService")
@@ -796,6 +840,8 @@ class ChannelMessageRouter:
             # conversation's key and awaited here.
             from services.task_execution_service import dispatch_and_await_terminal
 
+            if upload_lifetime is not None:
+                upload_lifetime.dispatched = True
             result = await dispatch_and_await_terminal(
                 service=get_task_execution_service(),
                 agent_name=agent_name,
@@ -839,6 +885,9 @@ class ChannelMessageRouter:
                 source_channel_client=verified_email if (verified_email and not is_group) else None,
             )
 
+            if upload_lifetime is not None:
+                upload_lifetime.result = result
+
             if result.status in ("failed", "cancelled"):
                 # #679: a CANCELLED turn is non-delivery — surface the cancel
                 # notice instead of posting the empty response as if it succeeded.
@@ -857,7 +906,6 @@ class ChannelMessageRouter:
                     ChannelResponse(text=response_text, metadata={"bot_token": bot_token, "agent_name": agent_name}),
                     thread_id=message.thread_id,
                 )
-                await self._cleanup_uploads(container, upload_dir)
                 return None
 
             response_text = result.response or ""
@@ -865,6 +913,8 @@ class ChannelMessageRouter:
             return result
 
         except SkillGateError as e:
+            if upload_lifetime is not None:
+                upload_lifetime.dispatched = False  # Gate rejected before execution.
             # trinity-enterprise#751: the message names a gated skill — nothing
             # ran. Say so in the conversation (with the request id when an
             # approval was raised) instead of an error or an empty reply.
@@ -876,7 +926,6 @@ class ChannelMessageRouter:
                                 metadata={"bot_token": bot_token, "agent_name": agent_name}),
                 thread_id=message.thread_id,
             )
-            await self._cleanup_uploads(container, upload_dir)
             return None
 
         except Exception as e:
@@ -890,7 +939,6 @@ class ChannelMessageRouter:
                 ),
                 thread_id=message.thread_id,
             )
-            await self._cleanup_uploads(container, upload_dir)
             return None
 
     async def _finalize_response(
@@ -910,7 +958,7 @@ class ChannelMessageRouter:
     ) -> None:
         """Steps 10–14: completion indicator, persist the exchange, MEM-001
         count/summarize, extract outbound files, honor the [NO_REPLY] marker,
-        send the reply, run the post-response hook, and clean up uploads.
+        send the reply, and run the post-response hook. The caller owns uploads.
         """
         # 10. Done processing — resolve the in-flight indicator (ent#264: driver
         # cancelled + awaited dead, in-flight placeholder settled, THEN
@@ -982,8 +1030,7 @@ class ChannelMessageRouter:
         # but chooses not to respond. This enables selective engagement in groups.
         if send_text.strip() == _NO_REPLY_MARKER:
             logger.info(f"[ROUTER:{channel}] Agent returned {_NO_REPLY_MARKER}, skipping response")
-            # Still run cleanup but skip sending
-            await self._cleanup_uploads(container, upload_dir)
+            # The caller still cleans uploads; skip sending
             logger.info(f"[ROUTER:{channel}] DONE (no reply): {agent_name}, execution_id={result.execution_id}")
             return
 
@@ -1006,8 +1053,7 @@ class ChannelMessageRouter:
         # 13. Post-response hook (thread tracking, etc.)
         await adapter.on_response_sent(message, agent_name)
 
-        # 14. Clean up uploaded files (per-session directory)
-        await self._cleanup_uploads(container, upload_dir)
+        # The outer dispatch finally owns upload cleanup.
 
         logger.info(f"[ROUTER:{channel}] DONE: {agent_name}, execution_id={result.execution_id}")
 

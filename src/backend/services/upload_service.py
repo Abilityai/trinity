@@ -6,6 +6,7 @@ Extracted from adapters/message_router.py so that both the channel adapter path
 share the same validation, MIME-checking, and container-write logic.
 """
 
+import asyncio
 import base64
 import io
 import logging
@@ -148,9 +149,60 @@ async def process_file_uploads(
       - all_writes_failed: True iff at least one write was attempted but all failed
       - image_data: list of {"media_type": str, "data": base64_str} for vision blocks
     """
+    upload_dir = f"{UPLOAD_BASE}/{uuid.uuid4().hex}"
+    # Docker writes run in executor threads. The producer retains ownership
+    # until it returns the path: caller cancellation must settle those writes
+    # before removing their directory, or a late archive can recreate it.
+    writer = asyncio.create_task(_write_file_uploads(
+        upload_dir, raw_files, agent_name, container, session_id, uploader,
+        source=source, sender_id=sender_id, channel_id=channel_id, max_files=max_files,
+        max_file_size=max_file_size, max_image_size=max_image_size,
+        max_total_image_size=max_total_image_size,
+    ))
+    try:
+        return await asyncio.shield(writer)
+    except BaseException:
+        while not writer.done():
+            try:
+                await asyncio.shield(writer)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        # Consume a late writer error without replacing the original failure.
+        if not writer.cancelled():
+            writer.exception()
+        cleanup = asyncio.create_task(container_exec_run(
+            container, f"rm -rf {upload_dir}", user="developer"))
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not cleanup.cancelled() and cleanup.exception() is not None:
+            logger.warning("Upload cleanup failed after interrupted preparation")
+        raise
+
+
+async def _write_file_uploads(
+    upload_dir: str,
+    raw_files: List[dict],
+    agent_name: str,
+    container,
+    session_id: str,
+    uploader: str,
+    source: str = "web",
+    sender_id: str = "",
+    channel_id: str = "",
+    max_files: int = CHANNEL_MAX_FILES,
+    max_file_size: int = CHANNEL_MAX_FILE_SIZE,
+    max_image_size: int = CHANNEL_MAX_IMAGE_SIZE,
+    max_total_image_size: int = CHANNEL_MAX_TOTAL_IMAGE_SIZE,
+) -> Tuple[List[str], Optional[str], bool, List[dict]]:
     # One bounded namespace per dispatch: concurrent messages in the same
     # session must not overwrite files or remove another execution's uploads.
-    upload_dir = f"{UPLOAD_BASE}/{uuid.uuid4().hex}"
     descriptions: List[str] = []
     image_data: List[dict] = []
     dir_created = False
