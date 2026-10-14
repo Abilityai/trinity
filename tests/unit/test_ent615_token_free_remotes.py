@@ -1522,6 +1522,7 @@ class TestTheRootOwnershipClaimStaysHonest:
 
 
 class TestOwnerMaintenance:
+    """Regression #3719: checked installation and owner-readable maintenance."""
     def test_unseeded_sweep_uses_owner_after_checked_root_install(self, gs_with_exec):
         import asyncio
         gs = _git_service()
