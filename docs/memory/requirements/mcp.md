@@ -1030,8 +1030,10 @@ revision — the kind is a label inside the existing envelope.
 - **Flow**: `docs/memory/feature-flows/a2a-inbound-server.md` → Outbound endpoint allowlist
 
 ### 32.8 AAuth Agent Identity on the A2A Seam — prototype (ent#623)
-- **Status**: 🧪 Prototype on a branch, flag OFF by default — not a platform
-  promise. Productization is decided after the 2026-09-18 call.
+- **Status**: ✅ Flows 1–4 graduated for Trinity-to-Trinity calls behind
+  `aauth_enabled` (OFF by default; Settings → Integrations) — ent#862 PR1 (flag
+  split, Settings surface, outbound endpoint UI). The core inbound allow-list and
+  the execution-record attribution follow in ent#862 PR2/PR3.
 - **Implements**: trinity-enterprise#623 (evaluation home: ent#558)
 - **Description**: A Trinity agent calls an agent on a *different* Trinity
   instance and is authenticated as **itself** under AAuth's
@@ -1040,11 +1042,25 @@ revision — the kind is a label inside the existing envelope.
   bootstrap): it publishes `/.well-known/aauth-agent.json` + a JWKS and
   self-issues `aa-agent+jwt` agent tokens; requests are signed per RFC 9421
   with the key conveyed by `Signature-Key: sig=jwt;jwt="…"`.
-- **FR-1 — Flag + issuer**: `aauth_prototype_enabled` (`system_settings` →
-  `AAUTH_PROTOTYPE_ENABLED` → OFF) and `aauth_issuer` (`system_settings` →
-  `AAUTH_ISSUER`; `https://<host>`, no port/path, lowercase). Flag OFF, or no
-  valid issuer, leaves inbound, outbound and the card byte-identical to §32.2 /
-  §32.5.
+- **FR-1 — Switches + issuer (ent#862 N3)**: `aauth_enabled` (`system_settings`
+  → `AAUTH_ENABLED` → OFF) governs Flows 1–4 and is the single input of
+  `config.active_issuer()`; `aauth_prototype_enabled` (`AAUTH_PROTOTYPE_ENABLED`
+  → OFF) is narrowed to the §32.9/§32.10 prototypes, which need BOTH
+  (`config.prototype_active_issuer()`, read only at `aauth_person.require_live`).
+  `aauth_issuer` (`system_settings` → `AAUTH_ISSUER`; `https://<host>`, no
+  port/path, lowercase, never repaired). Switch OFF, or no valid issuer, leaves
+  inbound, outbound and the card byte-identical to §32.2 / §32.5 — "on, inactive"
+  is reported as such, never as live. **Settings surface**: `GET/PUT
+  /api/settings/aauth` — admin on read; admin **and interactive** (`require_interactive`,
+  no MCP key of any scope) on write; the body carries only the fields changed;
+  an invalid issuer is `422 {reason: invalid_issuer}`; audited as
+  `aauth_config_change`; the route also carries the §32.9 person server and
+  the §32.10 resource allow-list (validated, empty clears), and the generic
+  `PUT/DELETE /api/settings/{key}` refuses all five `aauth_*` keys
+  (`cso-diff-2026-10-13-ent862` F1). `GET /api/settings/feature-flags` reports `aauth_available`
+  (switch on AND valid issuer). Every backend compose file forwards
+  `AAUTH_ENABLED=${AAUTH_ENABLED:-}` (empty default, so the row stays the
+  observable source) — `tests/unit/test_ent862_aauth_settings.py`.
 - **FR-2 — Identity**: `aauth:<agent-name>@<issuer-host>` — per agent, never
   per owner; no owner role travels with it. One instance signing key
   (Ed25519, AES-256-GCM at rest in `system_settings`, Invariant #12); each
@@ -1077,14 +1093,22 @@ revision — the kind is a label inside the existing envelope.
   principal cannot make the backend sign as an agent. The request is signed
   over the final bytes sent. For a path-bearing `aauth` endpoint the card is
   read from `<endpoint>/.well-known/agent-card.json` first.
+- **FR-8 — Outbound endpoint UI (ent#862)**: Settings → Integrations carries
+  the OSS registry (`GET/PUT/DELETE /api/settings/a2a-endpoints`): list,
+  register/update by name with `auth_scheme` (bearer | aauth — the aauth choice
+  hides the credential field and says a stored one is dropped), remove (asks
+  first), and the outbound kill switch; `register_a2a_endpoint` over MCP takes
+  the same `auth_scheme`. The AAuth panel shows a federation-readiness checklist
+  (issuer valid · switched on · outbound allowed · an aauth endpoint registered),
+  each unmet item naming its next step.
 - **Out of scope**: Person Server, missions, budgets, sub-agents, key
-  rotation, hardware-backed keys, UI. Stated limits: software key in the
+  rotation, hardware-backed keys. Stated limits: software key in the
   backend; identity keyed by agent name (a recreated name inherits it); the
   backend signs on the agent's behalf; inbound AAuth is inert without the
   private allow-list module.
 
 ### 32.9 AAuth Person Token — binding an agent to its owner (ent#878)
-- **Status**: 🧪 Prototype on the §32.8 stack, flag OFF by default — not a
+- **Status**: 🧪 Prototype on the §32.8 stack, behind BOTH `aauth_enabled` and `aauth_prototype_enabled` (ent#862), OFF by default — not a
   platform promise. Chained after §32.8; the resource/auth-token leg (ent#879,
   `call_aauth_resource`) is §32.10.
 - **Implements**: trinity-enterprise#878 (evaluation home: ent#558)
@@ -1191,7 +1215,7 @@ revision — the kind is a label inside the existing envelope.
   is advertised but inert while the flag is off.
 
 ### 32.10 AAuth Resource Call — `call_aauth_resource` (ent#879)
-- **Status**: 🧪 Prototype on the §32.9 stack, flag OFF by default — not a
+- **Status**: 🧪 Prototype on the §32.9 stack, behind BOTH switches like §32.9 (ent#862), OFF by default — not a
   platform promise. Chained after §32.9 (the person token is one rung of this
   ladder).
 - **Implements**: trinity-enterprise#879 (evaluation home: ent#558)

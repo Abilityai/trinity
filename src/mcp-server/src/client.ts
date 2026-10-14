@@ -3932,6 +3932,7 @@ export class TrinityClient {
       clear_credentials?: boolean;
       /** `payment_token` makes the credential ride as x402 payment (#3185). */
       credential_kind?: "api_key" | "payment_token";
+      auth_scheme?: "bearer" | "aauth"; // ent#862
     },
   ): Promise<{ endpoint?: unknown; enabled?: boolean; hint?: string }> {
     return this.request<{ endpoint?: unknown; enabled?: boolean; hint?: string }>(

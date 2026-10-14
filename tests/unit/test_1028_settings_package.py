@@ -178,6 +178,10 @@ _ADDED_SINCE_SPLIT = {
     # logged a failed request on every Settings tab. Lives in `mcp_url` beside
     # its precedent `/mcp-url`.
     ("/api/settings/public-chat-url", ("GET",), "get_public_chat_url"),
+    # trinity-enterprise#862 — the AAuth switch and issuer, with a human-only
+    # write; the generic catch-all refuses those keys.
+    ("/api/settings/aauth", ("GET",), "get_aauth_settings"),
+    ("/api/settings/aauth", ("PUT",), "update_aauth_settings"),
 }
 
 

@@ -1,6 +1,16 @@
-"""Flag + issuer resolution for the AAuth prototype (ent#623).
+"""Flags + issuer resolution for AAuth (ent#623, graduated by ent#862).
 
-Both are runtime-resolved (``system_settings`` → env → default), the
+Two switches (ent#862, decision N3):
+
+* ``aauth_enabled`` — the graduated agent identity, Flows 1–4 (well-known
+  documents, outbound signing, inbound verification, card / 401
+  advertisement). :func:`active_issuer` is its single reader.
+* ``aauth_prototype_enabled`` — the person-token and resource-calling
+  prototypes (Flows 5–6) only. They require BOTH switches:
+  :func:`prototype_active_issuer`, consulted once, at
+  ``routers.aauth_person.require_live``.
+
+Every value is runtime-resolved (``system_settings`` → env → default), the
 ``a2a_outbound_enabled`` shape, so an admin flip needs no restart. The issuer is
 this instance's AAuth server identifier and therefore the domain of every agent
 identity it asserts: ``https://<host>`` — https, host only, no port, no path, no
@@ -16,8 +26,10 @@ import re
 from typing import Optional
 from urllib.parse import urlsplit
 
-FLAG_SETTING = "aauth_prototype_enabled"
-FLAG_ENV = "AAUTH_PROTOTYPE_ENABLED"
+FLAG_SETTING = "aauth_enabled"
+FLAG_ENV = "AAUTH_ENABLED"
+PROTOTYPE_FLAG_SETTING = "aauth_prototype_enabled"
+PROTOTYPE_FLAG_ENV = "AAUTH_PROTOTYPE_ENABLED"
 ISSUER_SETTING = "aauth_issuer"
 ISSUER_ENV = "AAUTH_ISSUER"
 #: ent#878: the person server this instance's agents bind through (one HTTPS
@@ -25,6 +37,20 @@ ISSUER_ENV = "AAUTH_ISSUER"
 #: requests fail closed with ``person_server_unconfigured``.
 PERSON_SERVER_SETTING = "aauth_person_server"
 PERSON_SERVER_ENV = "AAUTH_PERSON_SERVER"
+#: ent#879: the AAuth resources agents may call — parsed by
+#: ``services.aauth.resource_allowlist`` (which imports this name, not a twin).
+RESOURCE_ALLOWLIST_SETTING = "aauth_resource_allowlist"
+RESOURCE_ALLOWLIST_ENV = "AAUTH_RESOURCE_ALLOWLIST"
+
+#: The keys only `PUT /api/settings/aauth` may write (ent#862); the generic
+#: settings catch-all refuses them on PUT and DELETE. The person server and the
+#: resource allow-list are here too (cso-diff-2026-10-13-ent862 F1): they decide
+#: which host mediates owner binding and where a signed agent request may go —
+#: the same grant class as the issuer, so the same human-only door.
+SETTINGS_ROUTE_KEYS = frozenset({
+    FLAG_SETTING, PROTOTYPE_FLAG_SETTING, ISSUER_SETTING,
+    PERSON_SERVER_SETTING, RESOURCE_ALLOWLIST_SETTING,
+})
 
 #: A DNS host: labels of letters/digits/hyphens, lowercase only (the issuer
 #: rule), at least one dot. IP literals are not server identifiers here.
@@ -36,7 +62,7 @@ _HOST_RE = re.compile(
 
 
 def is_enabled() -> bool:
-    """The prototype flag. Default OFF.
+    """The graduated AAuth switch (Flows 1–4). Default OFF.
 
     Fail-closed: a flag that cannot be read is OFF, the same direction
     `get_issuer` takes on an unreadable issuer. The card builder (ent#180, the
@@ -49,6 +75,21 @@ def is_enabled() -> bool:
 
     try:
         return bool(settings_service._resolve_bool_flag(FLAG_SETTING, FLAG_ENV, default=False))
+    except Exception:  # noqa: BLE001 — an unreadable flag means "not enabled"
+        return False
+
+
+def is_prototype_enabled() -> bool:
+    """The prototype switch, narrowed to Flows 5–6 by ent#862. Default OFF.
+
+    On its own it turns nothing on: :func:`prototype_active_issuer` also needs
+    :func:`is_enabled`. Fail-closed exactly like the graduated switch.
+    """
+    from services.settings_service import settings_service
+
+    try:
+        return bool(settings_service._resolve_bool_flag(
+            PROTOTYPE_FLAG_SETTING, PROTOTYPE_FLAG_ENV, default=False))
     except Exception:  # noqa: BLE001 — an unreadable flag means "not enabled"
         return False
 
@@ -110,10 +151,22 @@ def get_person_server() -> Optional[str]:
 
 
 def active_issuer() -> Optional[str]:
-    """The issuer when AAuth is live (flag ON and a valid issuer), else None."""
+    """The issuer when AAuth is live (graduated flag ON and a valid issuer), else None."""
     if not is_enabled():
         return None
     return get_issuer()
+
+
+def prototype_active_issuer() -> Optional[str]:
+    """The issuer when the Flow 5–6 prototypes are live: BOTH switches and an issuer.
+
+    Read only by the routes' single gate (``aauth_person.require_live``). The
+    services behind those routes keep reading :func:`active_issuer`, so a call
+    that got past the gate compares one issuer throughout (ent#862 review).
+    """
+    if not is_prototype_enabled():
+        return None
+    return active_issuer()
 
 
 def agent_identity(agent_name: str, issuer: str) -> str:

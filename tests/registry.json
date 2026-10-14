@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent862_aauth_settings.py",
+      "feature": "abilityai/trinity-enterprise#862",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "settings",
+        "aauth",
+        "a2a",
+        "unit"
+      ]
+    },
+    {
       "file": "unit/test_3524_gate_approval_card.py",
       "feature": "abilityai/trinity#3524 #3525 #3527",
       "added": "2026-10-12",

@@ -1295,6 +1295,11 @@
                paydown of #717/#1030; the section owns its own data loads). -->
           <SubscriptionsPanel v-if="activeTab === 'integrations'" />
 
+          <!-- Calls between Trinity instances (abilityai/trinity-enterprise#862):
+               the AAuth switch + issuer, and the outbound A2A endpoint registry. -->
+          <AAuthPanel v-if="activeTab === 'integrations'" />
+          <A2AEndpointsPanel v-if="activeTab === 'integrations'" />
+
           <!-- Trinity Prompt Section -->
           <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -2350,6 +2355,8 @@ import {
 } from '../components/onboarding/hardeningGuide'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
+import AAuthPanel from '../components/settings/AAuthPanel.vue'
+import A2AEndpointsPanel from '../components/settings/A2AEndpointsPanel.vue'
 import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import BaseBadge from '../components/base/BaseBadge.vue'

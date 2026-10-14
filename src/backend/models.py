@@ -7,7 +7,7 @@ import os
 import re
 import unicodedata
 
-from pydantic import BaseModel, ConfigDict, Discriminator, EmailStr, Field, PrivateAttr, SecretStr, StrictInt, Tag, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, EmailStr, Field, PrivateAttr, SecretStr, StrictBool, StrictInt, Tag, field_validator, model_validator
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from datetime import datetime
 from enum import Enum
@@ -4318,6 +4318,26 @@ class TemplateRegistryUpdate(BaseModel):
     """
     url: Optional[str] = None
     enabled: Optional[bool] = None
+
+
+class AAuthSettingsUpdate(BaseModel):
+    """PUT body for `/api/settings/aauth` (abilityai/trinity-enterprise#862).
+
+    Partial: an omitted field is left untouched, so the panel sends only what
+    the admin changed and a save never freezes an untouched value into a row
+    (learnings 2026-09-29). `issuer` is validated at the service by the strict
+    server-identifier rule; an empty string clears the stored one. Booleans are
+    strict — `1` is refused, not stored as `true`.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: Optional[StrictBool] = None
+    issuer: Optional[str] = Field(default=None, max_length=260)
+    prototype_enabled: Optional[StrictBool] = None
+    # The Flow 5–6 knobs (ent#878 / ent#879), on this route rather than the
+    # generic catch-all for the same reason as the issuer (cso F1).
+    person_server: Optional[str] = Field(default=None, max_length=260)
+    resource_allowlist: Optional[str] = Field(default=None, max_length=16 * 1024)
 
 
 class McpUrlUpdate(BaseModel):

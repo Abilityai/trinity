@@ -27,8 +27,8 @@ from typing import Any, Tuple
 
 from services.aauth import config
 
-SETTING = "aauth_resource_allowlist"
-ENV = "AAUTH_RESOURCE_ALLOWLIST"
+SETTING = config.RESOURCE_ALLOWLIST_SETTING
+ENV = config.RESOURCE_ALLOWLIST_ENV
 MAX_RAW_CHARS = 16 * 1024
 MAX_ENTRIES = 100
 

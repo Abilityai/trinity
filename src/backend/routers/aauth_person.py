@@ -126,8 +126,13 @@ def require_live() -> None:
 
     Public: `routers/aauth_resource.py` (ent#879) takes the same gate — one
     mechanism for every route that signs as the agent, never a second copy.
+
+    ent#862: these are the Flow 5–6 prototypes, so the gate needs BOTH the
+    graduated AAuth switch and the prototype switch. This is the only place the
+    prototype switch is read; the services behind the routes keep reading
+    `active_issuer()`.
     """
-    if not aauth_config.active_issuer():
+    if not aauth_config.prototype_active_issuer():
         raise HTTPException(status_code=404, detail="Not found")
 
 

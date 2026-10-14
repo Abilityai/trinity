@@ -146,6 +146,7 @@ async def get_public_feature_flags(
     )
     from services.entitlement_service import entitlement_service
     from services import a2a_outbound_service
+    from services.aauth import config as aauth_config
     from models import CANVAS_MAX_PER_AGENT
     # Function-local (#2217): a top-level import would pull the whole canary
     # package into the settings-router load; the handler pattern here is
@@ -218,6 +219,10 @@ async def get_public_feature_flags(
         # both call routes 404 when off. Observability + UI gating only — the
         # routes enforce it themselves.
         "a2a_outbound_available": a2a_outbound_service.is_outbound_enabled(),
+        # AAuth agent identity (ent#862) — true when it is LIVE (switch on AND a
+        # valid issuer), not merely switched on: "on but inert" is off in effect.
+        # Observability + UI gating only; every AAuth route enforces it itself.
+        "aauth_available": aauth_config.active_issuer() is not None,
         "platform_default_model": settings_service.get_platform_default_model(),
         # ent#553: the per-agent canvas ceiling, so the UI can WARN before the
         # agent meets the refusal instead of only reporting it afterwards. An

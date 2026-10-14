@@ -422,6 +422,22 @@ async def update_setting(
             detail=f"{key} is managed by the AAuth key service and cannot be set through the API",
         )
 
+    # ent#862: the AAuth switches and the issuer are grants (publish this
+    # instance's key, accept signed callers, change every agent's identity), so
+    # they go through the dedicated route, which is admin AND interactive and
+    # validates the issuer. This catch-all is admin-only: an MCP key carrying an
+    # admin owner's role would otherwise flip them.
+    from services.aauth import config as aauth_config
+
+    if key in aauth_config.SETTINGS_ROUTE_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/aauth "
+                "(admin + interactive-only, issuer validated, audit-logged)"
+            ),
+        )
+
     if key == "a2a_trusted_networks":
         raise HTTPException(
             status_code=422,
@@ -636,6 +652,19 @@ async def delete_setting(
         raise HTTPException(
             status_code=422,
             detail=f"{key} is managed by the AAuth key service and cannot be cleared through the API",
+        )
+
+    # ent#862: same reason as on PUT — clearing the issuer or a switch is a change
+    # to this instance's AAuth posture, made through the dedicated route.
+    from services.aauth import config as aauth_config
+
+    if key in aauth_config.SETTINGS_ROUTE_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be changed via PUT /api/settings/aauth "
+                "(admin + interactive-only, audit-logged)"
+            ),
         )
 
     # ent#14: blocked here as well as on PUT, unlike the #1644 retention acks.
