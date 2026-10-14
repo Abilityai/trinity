@@ -144,20 +144,20 @@ describe('#3672 — after the verdict, everything lands in one pass with one fad
   })
 })
 
-// The element right after "New chat" in the top block. With no Projects
-// link it must be the search box's wrapper — anything else (a placeholder, a
-// held slot) sits between them and would vanish later, which is the shift.
-function afterNewChat(w) {
+// The element right before "New chat" in the top block (#3695 put the
+// Projects link between Inbox and New chat). With no Projects link it must be
+// the Inbox row itself — anything else (a placeholder, a held slot) sits
+// between them and would vanish later, which is the shift.
+function beforeNewChat(w) {
   const newChat = w.findAll('button').find((b) => b.text().includes('New chat'))
-  return newChat.element.nextElementSibling
+  return newChat.element.previousElementSibling
 }
 
 describe('#3672 — the Projects link holds no placeholder slot (operator ruling)', () => {
-  it('a platform session before the verdict renders nothing between New chat and search', async () => {
+  it('a platform session before the verdict renders nothing between Inbox and New chat', async () => {
     const w = sidebar({ roster: [], threads: [], settled: false, isPlatformSession: true })
     await flushPromises()
-    const next = afterNewChat(w)
-    expect(next.querySelector('input[type="search"]')).not.toBeNull()
+    expect(beforeNewChat(w).getAttribute('data-testid')).toBe('sidebar-inbox')
     expect(w.find('[data-testid="sidebar-projects"]').exists()).toBe(false)
     // The only busy regions are the two lists — no third, link-shaped one.
     expect(w.findAll('[aria-busy="true"]').length).toBe(2)
@@ -166,7 +166,7 @@ describe('#3672 — the Projects link holds no placeholder slot (operator ruling
   it('settled without the capability: still nothing there, so nothing ever vanished', async () => {
     const w = sidebar({ roster: ROSTER, threads: THREADS, settled: true, isPlatformSession: true })
     await flushPromises()
-    expect(afterNewChat(w).querySelector('input[type="search"]')).not.toBeNull()
+    expect(beforeNewChat(w).getAttribute('data-testid')).toBe('sidebar-inbox')
     expect(w.find('[data-testid="sidebar-projects"]').exists()).toBe(false)
   })
 
@@ -174,7 +174,7 @@ describe('#3672 — the Projects link holds no placeholder slot (operator ruling
     const w = sidebar({ roster: [], threads: [], settled: false, isPlatformSession: true })
     await flushPromises()
     await w.setProps({ projectsAvailable: true })
-    expect(afterNewChat(w).getAttribute('data-testid')).toBe('sidebar-projects')
+    expect(beforeNewChat(w).getAttribute('data-testid')).toBe('sidebar-projects')
   })
 })
 
