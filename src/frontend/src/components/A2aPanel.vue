@@ -381,8 +381,12 @@ async function onToggle(enabled) {
   try {
     config.value = await agentsStore.setA2aExposure(props.agentName, enabled)
     notifyUser(enabled ? 'Agent exposed over A2A.' : 'No longer exposed over A2A.', 'success')
-    if (enabled) loadSkills()
-    else skills.value = []
+    // #3702: load() fetches capabilities only for an agent exposed at mount, so
+    // exposing from here must fetch them too or "Choose…" stays hidden.
+    if (enabled) {
+      loadSkills()
+      loadCapabilities()
+    } else skills.value = []
   } catch (e) {
     notifyUser(e.response?.data?.detail || `Failed to toggle A2A exposure: ${e.message}`, 'error')
     await load()  // reflect actual state
