@@ -112,18 +112,6 @@
       <ProjectLog v-if="!guest && tab === 'log'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
       <ProjectMaterial v-if="!guest && tab === 'material'" :project="p" :my-email="myEmail" :agents="usableAgents" />
 
-      <!-- ent#896: how a project moves, said once. -->
-      <div
-        v-if="!guest && tab === 'overview' && !howItMovesDismissed"
-        class="flex items-start gap-3 rounded-lg border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-800 px-4 py-3 text-sm text-gray-700 dark:text-gray-300"
-        data-testid="project-how-it-moves"
-      >
-        <p class="min-w-0 flex-1">
-          Chats linked to this project build it up: every turn tells the agent which project it is in, agents record decisions, deliverables and blockers in the <strong class="font-medium text-gray-900 dark:text-gray-100">Log</strong>, and the steward checks on it.
-        </p>
-        <BaseButton size="sm" variant="ghost" data-testid="project-how-it-moves-dismiss" @click="dismissHowItMoves">Got it</BaseButton>
-      </div>
-
       <div v-show="guest || tab === 'overview'" class="grid grid-cols-1 gap-4 lg:grid-cols-3 lg:items-start" data-testid="project-overview">
         <!-- ===================== main stack ===================== -->
         <div class="min-w-0 space-y-4 lg:col-span-2" data-testid="project-overview-main">
@@ -162,6 +150,16 @@
             <p v-else class="mt-2 text-sm text-gray-600 dark:text-gray-300">
               None of this project's agents is available to you yet — Work on it below says why.
             </p>
+          </BaseCard>
+
+          <!-- ent#896: how a project moves, said once — below Continue, so Continue stays the first control. -->
+          <BaseCard v-if="!guest && !howItMovesDismissed" data-testid="project-how-it-moves">
+            <div class="flex items-start gap-3 text-sm text-gray-700 dark:text-gray-300">
+              <p class="min-w-0 flex-1">
+                Chats linked to this project build it up: every turn tells the agent which project it is in, agents record decisions, deliverables and blockers in the <strong class="font-medium text-gray-900 dark:text-gray-100">Log</strong>, and the steward checks on it.
+              </p>
+              <BaseButton size="sm" variant="ghost" data-testid="project-how-it-moves-dismiss" @click="dismissHowItMoves">Got it</BaseButton>
+            </div>
           </BaseCard>
 
           <ProjectRollupCard v-if="!guest" :project="p" @open-tasks="tab = 'tasks'" />

@@ -1089,7 +1089,7 @@ private module; this section is the edition-agnostic surface it needs.
   **Start with** the first agent I can use, the other usable agents one click
   away; with no linked chat the empty state says what follows ("Start with
   <agent>, and it will record what it does here"); with no agent, add one in
-  Members & access. One dismissable line says how a project moves (linked
+  Members & access. One dismissable line, below Continue, says how a project moves (linked
   chats build it up, agents record outcomes in the Log, the steward checks on
   it). A **Steward** card replaces the header label: for an agent steward,
   health, the last sweep (its last digest read, stamped by the private module),

@@ -1512,7 +1512,8 @@ is the edition-agnostic surface it plugs into:
   over `workOnItOptions`: my newest linked chat across agents (reopen), else
   the first agent I can start with (new), the other actionable agents one click
   away; it is the first focusable control after the tabs. One dismissable
-  "how it moves" line (`HOW_IT_MOVES_KEY`, per browser). **Steward card**: the
+  "how it moves" line (`HOW_IT_MOVES_KEY`, per browser) sits as a `BaseCard`
+  directly below Continue, so it never takes first focus. **Steward card**: the
   read's `steward` — `{kind, ref}` plus, for an agent steward on a backend
   that carries them, `last_sweep_at` and `schedule {state ∈ none | scheduled |
   hidden | unknown, next_run_at}` (worded by `stewardScheduleLine`; a backend
