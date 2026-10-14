@@ -1719,13 +1719,27 @@ def _stage_config_files(
     try:
         cred_files_dir = (staging_root / "generated-creds" if staging_root
                           else Path(f"/tmp/agent-{config.name}-creds"))
-        cred_files_dir.mkdir(exist_ok=True)
+        # Keep the containment barrier at each filesystem sink, as in
+        # _install_bundled_avatar. In particular, a legacy ephemeral name must
+        # never turn its /tmp fallback into a path outside the staging root.
+        allowed_root = os.path.join(str((staging_root or Path("/tmp")).resolve()), "")
+        cred_dir_path = os.path.realpath(cred_files_dir)
+        if not cred_dir_path.startswith(allowed_root):
+            raise ValueError("Credential staging directory escaped its root")
+        os.makedirs(cred_dir_path, exist_ok=True)
 
         # Write template-generated files (.env, .mcp.json, etc.)
         for filepath, content in generated_files.items():
             file_path = _safe_cred_file_path(filepath, cred_files_dir)
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(file_path, "w") as f:
+            credential_root = os.path.join(cred_dir_path, "")
+            file_target = os.path.realpath(file_path)
+            parent_target = os.path.dirname(file_target)
+            if not file_target.startswith(credential_root):
+                raise ValueError("Credential staging file escaped its root")
+            if not parent_target.startswith(allowed_root):
+                raise ValueError("Credential staging parent escaped its root")
+            os.makedirs(parent_target, exist_ok=True)
+            with open(file_target, "w") as f:
                 f.write(content)
 
         agent_config = {
@@ -1740,11 +1754,17 @@ def _stage_config_files(
         }
 
         config_path = staging_root / "agent-config.yaml" if staging_root else Path(f"/tmp/agent-{config.name}.yaml")
-        with open(config_path, "w") as f:
+        config_target = os.path.realpath(config_path)
+        if not config_target.startswith(allowed_root):
+            raise ValueError("Agent configuration escaped its staging root")
+        with open(config_target, "w") as f:
             yaml.dump(agent_config, f)
 
         credentials_path = staging_root / "credentials.json" if staging_root else Path(f"/tmp/agent-{config.name}-credentials.json")
-        with open(credentials_path, "w") as f:
+        credentials_target = os.path.realpath(credentials_path)
+        if not credentials_target.startswith(allowed_root):
+            raise ValueError("Agent credentials escaped their staging root")
+        with open(credentials_target, "w") as f:
             json.dump({}, f)  # CRED-002: Empty credentials, injected after creation
 
         template_volume = None
@@ -1767,7 +1787,11 @@ def _stage_config_files(
                 curated_path = _safe_local_template_path(
                     raw_name, _LOCAL_TEMPLATE_ROOTS[0]
                 )
-                if curated_path.exists():
+                curated_root = os.path.join(str(_LOCAL_TEMPLATE_ROOTS[0].resolve()), "")
+                curated_target = os.path.realpath(curated_path)
+                if not curated_target.startswith(curated_root):
+                    raise ValueError("Curated template escaped its root")
+                if os.path.exists(curated_target):
                     # `or`, NOT `os.getenv(key, default)` (#1759): an EMPTY
                     # HOST_TEMPLATES_PATH made `Path("") / name` collapse to the
                     # bare name, which Docker reads as a NAMED VOLUME — an empty
@@ -1809,6 +1833,19 @@ def _stage_config_files(
         if staging_root is not None:
             shutil.rmtree(staging_root, ignore_errors=True)
         raise
+
+
+def _cleanup_persistent_config_staging(staging_root: Path) -> None:
+    # The helper returns only this attempt's private mkdtemp directory.
+    # Keep the deletion sink bounded even if a future caller changes
+    # that return contract; never infer authority from a user filename.
+    staging_parent = os.path.realpath(staging_root)
+    temporary_root = os.path.join(os.path.realpath(tempfile.gettempdir()), "")
+    if not staging_parent.startswith(temporary_root):
+        raise ValueError("Configuration cleanup escaped the temporary root")
+    if not os.path.basename(staging_parent).startswith("trinity-agent-config-"):
+        raise ValueError("Configuration cleanup requires private staging")
+    shutil.rmtree(staging_parent, ignore_errors=True)
 
 
 def _build_base_env(config: AgentConfig) -> dict:
@@ -3706,4 +3743,4 @@ async def create_agent_internal(
             )
     finally:
         if not config.ephemeral:
-            shutil.rmtree(config_path.parent, ignore_errors=True)
+            _cleanup_persistent_config_staging(config_path.parent)

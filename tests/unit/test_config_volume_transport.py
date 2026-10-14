@@ -200,3 +200,83 @@ def test_helper_remove_failure_still_attempts_owned_volume_cleanup(monkeypatch, 
     with pytest.raises(docker.errors.APIError):
         config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None)
     volume.remove.assert_called_once_with(force=False)
+
+
+@pytest.mark.parametrize('name', ['x/../../outside', 'x/../../../outside'])
+def test_3722_ephemeral_staging_rejects_escape_before_filesystem_write(monkeypatch, name):
+    from unittest.mock import Mock
+    from models import AgentConfig
+    from services.agent_service import crud
+    mkdir = Mock()
+    legacy_mkdir = Mock(side_effect=AssertionError('legacy write reached'))
+    monkeypatch.setattr(Path, 'mkdir', legacy_mkdir)
+    monkeypatch.setattr(crud.os, 'makedirs', mkdir)
+    with pytest.raises(ValueError, match='escaped its root'):
+        crud._stage_config_files(AgentConfig(name=name, ephemeral={"ttl_seconds": 60}), {}, None)
+    mkdir.assert_not_called()
+    legacy_mkdir.assert_not_called()
+
+
+def test_3722_generated_file_symlink_escape_is_refused(monkeypatch, tmp_path):
+    from models import AgentConfig
+    from services.agent_service import crud
+    from fastapi import HTTPException
+    root = tmp_path / 'private'
+    root.mkdir()
+    seeds = root / 'generated-creds'
+    seeds.mkdir()
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'secret').write_text('unchanged')
+    (seeds / 'linked').symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(crud.tempfile, 'mkdtemp', lambda **kwargs: str(root))
+    monkeypatch.setattr(crud, 'generate_credential_files', lambda *a, **kw: {'linked/secret': 'replacement'})
+    with pytest.raises(HTTPException):
+        crud._stage_config_files(AgentConfig(name='contained'), {'name': 'synthetic'}, None)
+    assert (outside / 'secret').read_text() == 'unchanged'
+    assert not root.exists()
+
+
+def test_3722_private_staging_accepts_nested_generated_files(monkeypatch, tmp_path):
+    import shutil
+    from models import AgentConfig
+    from services.agent_service import crud
+    root = tmp_path / 'private'
+    root.mkdir()
+    monkeypatch.setattr(crud.tempfile, 'mkdtemp', lambda **kwargs: str(root))
+    monkeypatch.setattr(crud, '_get_default_resource', lambda field: '2' if field == 'cpu' else '4g')
+    monkeypatch.setattr(crud, 'generate_credential_files', lambda *a, **kw: {'nested/config.json': '{}'})
+    paths = crud._stage_config_files(AgentConfig(name='contained'), {'name': 'synthetic'}, None)
+    assert paths[0].is_file() and paths[1].is_file()
+    assert (root / 'generated-creds/nested/config.json').read_text() == '{}'
+    shutil.rmtree(root)
+
+
+@pytest.mark.parametrize('location', ['outside', 'wrong-prefix'])
+def test_3722_cleanup_refuses_untrusted_directory(monkeypatch, tmp_path, location):
+    from unittest.mock import Mock
+    from services.agent_service import crud
+    temporary = tmp_path / 'temporary'
+    temporary.mkdir()
+    target = (tmp_path / 'trinity-agent-config-outside' if location == 'outside'
+              else temporary / 'unrelated')
+    target.mkdir()
+    sentinel = target / 'keep'
+    sentinel.write_text('unchanged')
+    monkeypatch.setattr(crud.tempfile, 'gettempdir', lambda: str(temporary))
+    remove = Mock()
+    monkeypatch.setattr(crud.shutil, 'rmtree', remove)
+    with pytest.raises(ValueError):
+        crud._cleanup_persistent_config_staging(target)
+    remove.assert_not_called()
+    assert sentinel.read_text() == 'unchanged'
+
+
+def test_3722_cleanup_removes_valid_private_staging(monkeypatch, tmp_path):
+    from services.agent_service import crud
+    target = tmp_path / 'trinity-agent-config-owned'
+    target.mkdir()
+    (target / 'config.yaml').write_text('synthetic')
+    monkeypatch.setattr(crud.tempfile, 'gettempdir', lambda: str(tmp_path))
+    crud._cleanup_persistent_config_staging(target)
+    assert not target.exists()
