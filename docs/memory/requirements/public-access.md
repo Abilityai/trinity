@@ -1078,3 +1078,25 @@ private module; this section is the edition-agnostic surface it needs.
   platform-supplied `X-Trinity-Execution-Id` (only when it is that agent's own
   execution, winning over an agent-written `context.execution_id`), which is
   how an ask raised in a project's chat is found on the project.
+- **FR-8 — the page's information design (#3692, #3694,
+  trinity-enterprise#896)**: the goal, task objectives and log entry bodies
+  are agent markdown and render through the Workspace's one sanitized
+  renderer, never printed raw. The Overview is one layout with a fixed column
+  rhythm — a main stack and a side stack whose widths hold from top to bottom,
+  cards stacking within their column so a short card leaves no gap beside a
+  tall neighbour, and an expanded ask resizing only its own column. It leads
+  with **Continue**: my newest linked chat with an agent on the project, or
+  **Start with** the first agent I can use, the other usable agents one click
+  away; with no linked chat the empty state says what follows ("Start with
+  <agent>, and it will record what it does here"); with no agent, add one in
+  Members & access. One dismissable line, below Continue, says how a project moves (linked
+  chats build it up, agents record outcomes in the Log, the steward checks on
+  it). A **Steward** card replaces the header label: for an agent steward,
+  health, the last sweep (its last digest read, stamped by the private module),
+  and its schedule said honestly — no sweep scheduled / next run (when the
+  viewer's roster carries the agent) / scheduled without a time / unreadable —
+  with a line saying the platform does not run it; for a person steward,
+  health and what waits on them (tasks to verify, stuck tasks) and, for the
+  steward themself, the way to **I steward**. The Tasks tab states the
+  verification rule where it applies, and a pending-verification row carries
+  **Confirm** for contributors on a live project.
