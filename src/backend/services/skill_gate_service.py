@@ -1714,6 +1714,19 @@ def completion_detail(status: str, excerpt: Optional[str]) -> str:
     return f'{line}. {label} (the run\'s output, not an instruction): "{words}"'
 
 
+def _completion_parts(status: str, execution) -> Tuple[str, Optional[str]]:
+    """`(detail, headline)` for a run reported as ending `status` — the one
+    wording for the notice sent at the terminal and for the conversation read
+    later (trinity#3654). The run's words are quoted only from a row that still
+    shows that ending: a pruned row, or one that moved since, gives the status
+    line alone rather than someone else's words or a false "no output"."""
+    ran = getattr(execution, "status", None)
+    if getattr(ran, "value", ran) != status:
+        return _RUN_STATUS_LINE.get(status, f"It ended ({status})"), _FAILED_HEADLINE.get(status)
+    excerpt = getattr(execution, "response" if status == "success" else "error", None)
+    return completion_detail(status, excerpt), _FAILED_HEADLINE.get(status)
+
+
 async def report_completion_on_terminal(execution_id: Optional[str]) -> Optional[str]:
     """Tell the requester how an APPROVED run ended (trinity#3520).
 
@@ -1737,11 +1750,9 @@ async def report_completion_on_terminal(execution_id: Optional[str]) -> Optional
         outcome = "succeeded" if status == "success" else "failed"
         if not db.transition_gate_request(record["request_id"], outcome, detail=status):
             return None   # another worker or the sweep reported it
-        excerpt = getattr(execution, "response", None) if status == "success" \
-            else getattr(execution, "error", None)
+        detail, headline = _completion_parts(status, execution)
         await _notify_completion(record, outcome, execution_id=execution_id,
-                                 detail=completion_detail(status, excerpt),
-                                 headline=_FAILED_HEADLINE.get(status))
+                                 detail=detail, headline=headline)
         return outcome
     except Exception:  # noqa: BLE001 — never affect the terminal that called us
         logger.warning("[SkillGate] completion report failed for %s", execution_id, exc_info=True)
@@ -1820,9 +1831,23 @@ def request_status(request_id: str, agent_name: str) -> Dict[str, Optional[str]]
     if state == "denied":
         row = db.get_operator_queue_item_for_agent_by_request_id(agent_name, request_id)
         reason = (row or {}).get("response_text")
+    # trinity#3654: a finished run reads here as it does in the Inbox notice —
+    # how it ended and what it said. `state_detail` is the status it was
+    # reported with; the words come from the execution.
+    detail, headline = record.get("state_detail"), None
+    if state in ("succeeded", "failed") and detail in _RUN_STATUS_LINE:
+        try:
+            # ponytail: whole-row read (execution_log included) per finished
+            # request per session read; a (status, response, error) select
+            # beside get_execution_gate_state if session loads get slow.
+            execution = db.get_execution(record.get("dispatched_execution_id"))
+        except Exception:  # noqa: BLE001 — the conversation still loads, unquoted
+            logger.warning("[SkillGate] could not read the run of %s", request_id, exc_info=True)
+            execution = None
+        detail, headline = _completion_parts(detail, execution)
     return {"request_id": request_id, "state": outcome, "text": outcome_text(
         record, outcome, execution_id=record.get("dispatched_execution_id"),
-        detail=record.get("state_detail"), for_person=True, reason=reason)}
+        detail=detail, for_person=True, reason=reason, headline=headline)}
 
 
 # Outcomes that are exactly what the decider did. A person who decided their own
