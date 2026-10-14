@@ -173,9 +173,10 @@ def _get_internal_token(
     from config import SECRET_KEY, ALGORITHM
     from datetime import datetime, timedelta
     from dependencies import EVENT_LOOPBACK_SCOPE
+    from utils.admin_identity import admin_username
 
     payload = {
-        "sub": "admin",
+        "sub": admin_username(),
         "scope": EVENT_LOOPBACK_SCOPE,
         "exp": datetime.utcnow() + timedelta(minutes=5),
     }
@@ -634,6 +635,13 @@ async def _terminal_side_effects(execution_id: Optional[str]) -> None:
         await join_fan_out_on_terminal(execution_id)
     except Exception as e:  # noqa: BLE001
         logger.warning("[#2524] fan-out join failed for %s: %s", execution_id, e)
+    try:
+        # trinity#3520: an approved gated run's requester is told how it ended.
+        from services.skill_gate_service import report_completion_on_terminal
+
+        await report_completion_on_terminal(execution_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[#3520] gated-run completion report failed for %s: %s", execution_id, e)
 
 
 def _spawn_named(tag: str, coro: "Any") -> None:

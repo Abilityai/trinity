@@ -12,6 +12,7 @@ gate and map errors. Only a person ends an ask (`reject_non_person_principal`).
 """
 
 import json
+import logging
 from typing import Any, Dict, List, Optional, Set
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from models import (
@@ -32,7 +33,9 @@ from dependencies import (
 from db_models import User
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.operator_queue_choices import ReservedAnswerError, ResponseNotOfferedError
-from services import ask_service, operator_queue_service
+from services import ask_service, operator_queue_service, skill_gate_service
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api/operator-queue", tags=["operator-queue"])
@@ -60,12 +63,72 @@ def _accessible_set(current_user: User) -> Optional[Set[str]]:
 
     Returns None for admins (no filter — sees everything).
     Returns a set (possibly empty) for regular users.
+
+    trinity-enterprise#629: an agent key carries its OWNER's role, so on an
+    admin-owned install it got None — every agent's queue. It always gets a set,
+    narrowed to its reach (itself, its edges, the agents it spawned).
     """
-    if current_user.role == "admin":
+    is_agent = isinstance(getattr(current_user, "agent_name", None), str) and bool(current_user.agent_name)
+    if current_user.role == "admin" and not is_agent:
         return None
     user_email = current_user.email or ""
-    names = db.get_accessible_agent_names(user_email, is_admin=False)
-    return set(names)
+    is_admin = current_user.role == "admin"
+    names = set(db.get_accessible_agent_names(user_email, is_admin=is_admin))
+    if is_agent:
+        return _agent_reach_set(current_user, names, is_admin=is_admin)
+    return names
+
+
+def _agent_reach_set(current_user: User, owner_names: Set[str], *, is_admin: bool) -> Set[str]:
+    """An agent key's queue scope (trinity-enterprise#629): itself and its
+    edges directly — the same `{self} ∪ permitted` the MCP layer reads — and,
+    of the rest of its owner's agents, the ones it spawned. A non-admin owner's
+    accessible set still bounds it; an admin owner can access every agent, so
+    an edge needs no ownership row to count. The edge read fails closed."""
+    me = current_user.agent_name
+    try:
+        permitted = set(db.get_permitted_agents(me) or [])
+    except Exception:
+        logger.warning("[ent#629] edge list for %s failed; treating as no edges", me)
+        permitted = set()
+    reach = {me} | permitted
+    if not is_admin:
+        reach &= owner_names | {me}
+    try:  # one query, not two lookups per held agent; same key-id rule as the gate
+        key = db.get_agent_mcp_api_key(me)
+        spawned = set(db.list_agents_spawned_by_key(me, key.id)) if key else set()
+    except Exception:
+        logger.warning("[ent#629] spawned list for %s failed; treating as none", me)
+        spawned = set()
+    return reach | (spawned & owner_names)
+
+
+def _owned_set(current_user: User) -> Optional[Set[str]]:
+    """The agents this caller OWNS, for the owner-only rows
+    (trinity-enterprise#866), or None when that rule does not apply: an admin
+    sees every row. A machine key never reaches an owner-only row at all — it is
+    about a person (#715) — so its set is irrelevant and it gets None too."""
+    if current_user.role == "admin" or not is_person_principal(current_user):
+        return None
+    return set(db.get_agents_by_owner(current_user.username))
+
+
+def _hidden_from(item: Dict[str, Any], owned: Optional[Set[str]]) -> bool:
+    """An owner-only row (a client's complaint) on an agent this caller does not
+    own (trinity-enterprise#866). To them it reads like a row that is not there."""
+    return (owned is not None and operator_queue_service.is_owner_only(item)
+            and item.get("agent_name") not in owned)
+
+
+def _drop_hidden(items: List[Dict[str, Any]], owned: Optional[Set[str]]) -> List[Dict[str, Any]]:
+    return [item for item in items if not _hidden_from(item, owned)]
+
+
+def _hidden_for(item: Dict[str, Any], current_user: User) -> bool:
+    """`_hidden_from` for one row, resolving the caller's agents only when the
+    row is owner-only — every other row costs no lookup."""
+    return (operator_queue_service.is_owner_only(item)
+            and _hidden_from(item, _owned_set(current_user)))
 
 
 def _assert_agent_accessible(agent_name: str, accessible: Optional[Set[str]]) -> None:
@@ -94,6 +157,7 @@ _MACHINE_ROW_FIELDS = (
     "divergence_acknowledged_at",
     "disposition", "disposed_at", "disposed_by", "disposition_reason", "batch_id",
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
+    "replaces", "replaced_by",  # #3247 — uuids; the readback maps them to request_ids
     "aging", "aged_since",
     "subject", "last_seen_at",  # #3246: a platform alert's condition key + latest reading
 )
@@ -104,7 +168,13 @@ def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict
         # #3242: whether the reserved "(something else)" answer applies — the
         # sink's own predicate, so no operator surface offers a chip that 422s.
         # A bare boolean; the machine view never needs it (it cannot answer).
-        return [{**item, "decided_by_options": ask_service.decided_by_options(item)}
+        # trinity-enterprise#755: `gate` is the gated-skill approval card's
+        # platform view (None for every other row) — who asked, who it waits
+        # on, whether THIS person may decide, how it ended.
+        return [{**item, "decided_by_options": ask_service.decided_by_options(item),
+                 "gate": skill_gate_service.card_view(
+                     item, viewer_email=current_user.email, with_run_ids=True,
+                     name_approvers=True)}
                 for item in items]
     # #715: the platform's heads-ups ABOUT a person (a client's complaint, the
     # client addresses behind a shared inbox) are the operator's, not a machine's.
@@ -125,6 +195,7 @@ _READBACK_FIELDS = (
     "response", "response_text", "responded_at",
     "disposition", "disposed_at", "disposed_by", "disposition_reason",
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
+    "replaces", "replaced_by",  # #3247 — mapped to request_ids below
 )
 
 
@@ -150,33 +221,55 @@ async def list_queue_items(
     since: Optional[str] = Query(None, description="Items created after this ISO timestamp"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    agent_names: Optional[List[str]] = Query(
+        None,
+        description=(
+            "Narrow to these agents (repeat the parameter per name, at most 500). "
+            "Only ever narrows what the caller may see (trinity-enterprise#815)."
+        ),
+    ),
+    cursor: Optional[str] = Query(
+        None,
+        description=(
+            "Keyset walk: 'start' to begin, then each page's next_cursor. Within one "
+            "walk no item is returned twice or skipped while the queue changes "
+            "(trinity-enterprise#815). Omit for offset paging."
+        ),
+    ),
     current_user: User = Depends(get_current_user),
 ):
-    """List operator queue items with optional filters."""
-    accessible = _accessible_set(current_user)
-    items = db.list_operator_queue_items(
-        status=status,
-        type=type,
-        priority=priority,
-        agent_name=agent_name,
-        since=since,
-        limit=limit,
-        offset=offset,
-        accessible_agent_names=accessible,
-    )
-    # #2915: aging is computed once, here, from the operator's bound — the
-    # frontend renders `aging`/`aged_since`, it never recomputes them. The two
-    # counts are the visible escalation (undelivered answers, items the agent
-    # closed on its side) the Operations header shows instead of minting queue
-    # items about queue items.
-    items = _for_principal(operator_queue_service.annotate_aging(items), current_user)
-    flags = db.count_operator_queue_flags(accessible_agent_names=accessible)
-    return {
-        "items": items,
-        "count": len(items),
-        "undelivered_count": flags["undelivered"],
-        "closed_by_filer_count": flags["closed_by_filer"],
-    }
+    """List operator queue items with optional filters.
+
+    trinity-enterprise#815: complete within `limit` — every visibility filter
+    runs in SQL before the cut — and says so: `total`, `has_more`,
+    `next_offset` (see `operator_queue_service.list_for_principal`). An
+    agent-scoped key is narrowed to `{self} ∪ permitted` before the cut;
+    `agent_names` narrows any caller further.
+    """
+    owned = _owned_set(current_user)
+    try:
+        return operator_queue_service.list_for_principal(
+            current_user,
+            accessible=_accessible_set(current_user),
+            exclude_about_a_person=not is_person_principal(current_user),
+            # trinity-enterprise#866: a client's complaint is the agent owner's.
+            owned_agents=owned,
+            # #2915: aging is computed once, here, from the operator's bound —
+            # the frontend renders `aging`/`aged_since`, it never recomputes
+            # them. The two flag counts are the visible escalation (undelivered
+            # answers, items the agent closed on its side) the Operations header
+            # shows instead of minting queue items about queue items.
+            project=lambda rows: _for_principal(
+                operator_queue_service.annotate_aging(_drop_hidden(rows, owned)), current_user),
+            filters=dict(status=status, type=type, priority=priority,
+                         agent_name=agent_name, since=since),
+            limit=limit,
+            offset=offset,
+            agent_names=agent_names,
+            cursor=cursor,
+        )
+    except operator_queue_service.QueueListError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
 
 
 @router.get("/stats")
@@ -206,8 +299,12 @@ async def bulk_cancel_queue_items(
     reject_non_person_principal(current_user)
     accessible = _accessible_set(current_user)
     ids = list(dict.fromkeys(body.ids))  # dedupe, keep order — honest skipped count
+    # trinity-enterprise#866: an owner-only row a caller cannot read is not
+    # theirs to end either; it counts as skipped, like an inaccessible id.
+    cancellable = [i for i in ids
+                   if not _hidden_for(db.get_operator_queue_item(i) or {}, current_user)]
     ending = ask_service.bulk_cancel(
-        ids, accessible, actor=_actor(current_user, request), reason=body.reason,
+        cancellable, accessible, actor=_actor(current_user, request), reason=body.reason,
     )
     cancelled = len(ending.rows)
     return {"cancelled": cancelled, "skipped": len(ids) - cancelled, "batch_id": ending.batch_id}
@@ -270,10 +367,14 @@ async def get_queue_item(
 ):
     """Get a single queue item by ID."""
     item = db.get_operator_queue_item(item_id)
-    if not item:
+    # trinity-enterprise#631: a person's tag is read through its addressee's own
+    # door only — to the operator's door it is a row that is not there.
+    if not item or operator_queue_service.is_person_tag(item):
         raise HTTPException(status_code=404, detail="Queue item not found")
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(item["agent_name"], accessible)
+    if _hidden_for(item, current_user):
+        raise HTTPException(status_code=404, detail="Queue item not found")  # ent#866
     visible = _for_principal(operator_queue_service.annotate_aging([item]), current_user)
     if not visible:
         # #715: a row about a person reads, to a machine, like one that is not there.
@@ -296,11 +397,14 @@ async def respond_to_queue_item(
     """
     reject_non_person_principal(current_user)
     existing = db.get_operator_queue_item(item_id)
-    if not existing:
+    # trinity-enterprise#631: the same "not there" GET gives a person's tag.
+    if not existing or operator_queue_service.is_person_tag(existing):
         raise HTTPException(status_code=404, detail="Queue item not found")
 
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(existing["agent_name"], accessible)
+    if _hidden_for(existing, current_user):
+        raise HTTPException(status_code=404, detail="Queue item not found")  # ent#866
 
     if existing["status"] != "pending":
         raise HTTPException(
@@ -407,11 +511,14 @@ async def cancel_queue_item(
     """
     reject_non_person_principal(current_user)
     existing = db.get_operator_queue_item(item_id)
-    if not existing:
+    # trinity-enterprise#631: the same "not there" GET gives a person's tag.
+    if not existing or operator_queue_service.is_person_tag(existing):
         raise HTTPException(status_code=404, detail="Queue item not found")
 
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(existing["agent_name"], accessible)
+    if _hidden_for(existing, current_user):
+        raise HTTPException(status_code=404, detail="Queue item not found")  # ent#866
 
     if existing["status"] != "pending":
         raise HTTPException(
@@ -450,12 +557,23 @@ async def get_agent_queue_items(
     """Get queue items for a specific agent."""
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(agent_name, accessible)
+    owned = _owned_set(current_user)
+    owner_only = ({} if owned is None else
+                  dict(owner_only_request_id_prefixes=operator_queue_service.OWNER_ONLY_ID_PREFIXES,
+                       owner_agent_names=owned))
     items = db.list_operator_queue_items(
         agent_name=agent_name,
         status=status,
         limit=limit,
+        # trinity-enterprise#815: a machine's about-a-person exclusion runs in
+        # SQL, before the limit, so those rows can no longer empty the page.
+        exclude_request_id_prefixes=(
+            None if is_person_principal(current_user)
+            else operator_queue_service.ABOUT_A_PERSON_ID_PREFIXES),
+        **owner_only,  # trinity-enterprise#866: before the limit, like the line above
     )
-    items = _for_principal(operator_queue_service.annotate_aging(items), current_user)
+    items = _for_principal(
+        operator_queue_service.annotate_aging(_drop_hidden(items, owned)), current_user)
     return {"agent_name": agent_name, "items": items, "count": len(items)}
 
 
@@ -522,4 +640,7 @@ async def get_my_ask(
     # The row stores the predecessor's uuid; the agent knows its asks by the
     # request_id it chose, and the receipt names the predecessor that way too.
     readback["supersedes_expired"] = ask_service.request_id_of(item.get("supersedes_expired"))
+    # #3247: the replace link, both ways, the same way.
+    readback["replaces"] = ask_service.request_id_of(item.get("replaces"))
+    readback["replaced_by"] = ask_service.request_id_of(item.get("replaced_by"))
     return readback

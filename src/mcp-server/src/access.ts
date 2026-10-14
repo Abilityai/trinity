@@ -27,11 +27,11 @@
  *      stamps the per-call context so `withAudit` records the refusal; a deny
  *      site that serialises its own envelope fails `audit-denial.test.ts`.
  *
- * What this is NOT: a capability boundary. The backend resolves an agent key to
- * its owner carrying the owner's role (architecture.md Invariant #8), so the
- * REST routes behind these tools admit a sibling with no edge. Whether that
- * boundary should hold one hop down is abilityai/trinity-enterprise#629; the
- * `baselined` rows carrying that reference are its work list.
+ * Not the only fence. Since abilityai/trinity-enterprise#629 the backend narrows
+ * an agent key itself (`dependencies.agent_may_reach`): it reaches itself, the
+ * agents it holds an edge to, and the agents it spawned — and only itself and
+ * its spawned agents for owner-level routes. This table is the first fence and
+ * the readable refusal; the backend is the one that holds.
  *
  * Leaf module: imports `client.js` and `types.js` only.
  */
@@ -203,15 +203,21 @@ export const AGENT_TARGET_PARAMS: ReadonlySet<string> = new Set([
   "source_agent",
 ]);
 
-const ENT629 =
-  "abilityai/trinity-enterprise#629 — the backend route is owner-equivalent for an agent key (Invariant #8); MCP gate pending that ruling";
 const ADMIN_ONLY =
   "backend rejects agent principals (require_admin / assert_admin / reject_agent_principal, #1890)";
+const CREDENTIAL_HUMAN_ONLY =
+  "backend: get_owned_agent_by_name + reject_agent_principal (trinity-enterprise#69 Part 2) — owner or admin, human-only; hidden from agent sessions by a per-tool canAccess (#3435)";
+const KEY_ADMIN_ONLY =
+  "backend require_admin (#1890): admin + human-only; hidden from agent sessions by a per-tool canAccess (#3435)";
 const TEARDOWN_HUMAN_ONLY =
   "backend fence: the gated route requires role 'creator' AND a HUMAN caller — reject_agent_principal plus a credential-kind refusal, because one call removes N agents without delete_agent's per-agent spawn-scope check (abilityai/trinity-enterprise#454)";
 const REMINDER_SELF_GATE = "backend self-gate: reminders.py::_self_gate refuses an agent key naming another agent";
 const SKILL_MANAGER_FENCE =
   "backend fence: routers/skills.py get_skill_managed_agent_by_name refuses an agent key whose agent does not hold the skills.manage capability — on a sibling AND on itself (abilityai/trinity-enterprise#596)";
+const SKILL_GATE_FENCE =
+  "backend fence: routers/skill_gate.py — writes take require_person_or_capability(skills.manage, self_person_only): a person who owns the agent or an admin, or a holder on an agent its owner owns, never itself; reads are own-gates-only for an agent key (get_skill_gate_readable_agent_by_name) (abilityai/trinity-enterprise#753)";
+const SKILL_SOURCES_ADMIN =
+  "no agent target — library source management; backend require_admin + reject_agent_principal refuse agent and connector principals (#1890), and the tool's own canAccess allow-lists user/system scope (abilityai/trinity-enterprise#692)";
 const CONNECTOR_SCOPE = "connector scope — the key is bound to one agent; backend _enforce_connector_scope (ent#46)";
 const ROOMS_SERVICE = "room membership is the rooms service's decision (ent#169, ent#443), not a per-agent permission edge";
 const EVENT_EDGE = "backend gates by agent_permissions edge itself (event_subscriptions.py, uniform 403)";
@@ -236,37 +242,36 @@ const LOOP_RESOLVE =
 /**
  * One row per registered static tool, keyed by tool NAME (a module rename moves
  * nothing here). Dynamic tools (`chat_with_<slug>`, #846) pass their policy to
- * `registerDynamicTool` explicitly. The `baselined` rows referencing ent#629
- * are that issue's work list; flip a row to `enforce` when the ruling lands.
+ * `registerDynamicTool` explicitly.
  */
 export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- agents.ts ---
   list_agents: { kind: "in-tool", how: AGENTS_INLINE },
-  get_agent: { kind: "baselined", owner: ENT629 },
+  get_agent: { kind: "enforce", param: "name" },
   get_agent_info: { kind: "in-tool", how: AGENTS_INLINE },
   get_agent_compatibility_report: { kind: "in-tool", how: AGENTS_INLINE },
   create_agent: { kind: "none", why: "creates the agent; `name` is the new agent's name, not a target" },
   rename_agent: { kind: "baselined", owner: ADMIN_ONLY },
-  delete_agent: { kind: "baselined", owner: ENT629 },
-  start_agent: { kind: "baselined", owner: ENT629 },
-  stop_agent: { kind: "baselined", owner: ENT629 },
+  delete_agent: { kind: "enforce", param: "name" },
+  start_agent: { kind: "enforce", param: "name" },
+  stop_agent: { kind: "enforce", param: "name" },
   list_templates: { kind: "none", why: "no agent target" },
-  get_credential_status: { kind: "baselined", owner: ENT629 },
+  get_credential_status: { kind: "enforce", param: "name" },
   inject_credentials: { kind: "baselined", owner: ADMIN_ONLY },
-  export_credentials: { kind: "baselined", owner: ADMIN_ONLY },
-  import_credentials: { kind: "baselined", owner: ADMIN_ONLY },
-  export_agent_data: { kind: "baselined", owner: ENT629 },
-  import_agent_data: { kind: "baselined", owner: ENT629 },
-  get_credential_encryption_key: { kind: "none", why: "no agent target" },
+  export_credentials: { kind: "baselined", owner: CREDENTIAL_HUMAN_ONLY },
+  import_credentials: { kind: "baselined", owner: CREDENTIAL_HUMAN_ONLY },
+  export_agent_data: { kind: "enforce", param: "name" },
+  import_agent_data: { kind: "enforce", param: "name" },
+  get_credential_encryption_key: { kind: "none", why: "no agent target; " + KEY_ADMIN_ONLY },
   get_agent_ssh_access: { kind: "baselined", owner: ADMIN_ONLY },
   deploy_local_agent: { kind: "none", why: "creates the agent; `name` is the new agent's name, not a target" },
-  initialize_github_sync: { kind: "baselined", owner: ENT629 },
-  get_agent_github_pat_status: { kind: "baselined", owner: ENT629 },
-  set_agent_github_pat: { kind: "baselined", owner: ENT629 },
+  initialize_github_sync: { kind: "enforce", param: "agent_name" },
+  get_agent_github_pat_status: { kind: "enforce", param: "agent_name" },
+  set_agent_github_pat: { kind: "enforce", param: "agent_name" },
   // --- chat.ts ---
   chat_with_agent: { kind: "in-tool", how: CHAT_GATE },
-  get_chat_history: { kind: "baselined", owner: ENT629 },
-  get_agent_logs: { kind: "baselined", owner: ENT629 },
+  get_chat_history: { kind: "enforce", param: "agent_name" },
+  get_agent_logs: { kind: "enforce", param: "agent_name" },
   fan_out: { kind: "in-tool", how: CHAT_GATE },
   // --- systems.ts ---
   deploy_system: { kind: "none", why: "a system manifest, not an agent" },
@@ -292,8 +297,18 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   set_agent_skills: { kind: "baselined", owner: SKILL_MANAGER_FENCE },
   sync_agent_skills: { kind: "baselined", owner: SKILL_MANAGER_FENCE },
   unassign_skill_set: { kind: "baselined", owner: SKILL_MANAGER_FENCE },
-  get_agent_skills: { kind: "baselined", owner: ENT629 },
+  get_agent_skills: { kind: "enforce", param: "agent_name" },
+  list_skill_gates: { kind: "baselined", owner: SKILL_GATE_FENCE },
+  set_skill_gate: { kind: "baselined", owner: SKILL_GATE_FENCE },
+  clear_skill_gate: { kind: "baselined", owner: SKILL_GATE_FENCE },
   run_skill: { kind: "none", why: "runs on the calling agent; a skill name, not an agent" },
+  // --- skill_sources.ts (ent#692) ---
+  list_skill_sources: { kind: "none", why: SKILL_SOURCES_ADMIN },
+  register_skill_source: { kind: "none", why: SKILL_SOURCES_ADMIN },
+  update_skill_source: { kind: "none", why: SKILL_SOURCES_ADMIN },
+  delete_skill_source: { kind: "none", why: SKILL_SOURCES_ADMIN },
+  sync_skill_source: { kind: "none", why: SKILL_SOURCES_ADMIN },
+  sync_skill_library: { kind: "none", why: SKILL_SOURCES_ADMIN },
   list_runnable_skills: { kind: "none", why: "no agent target" },
   // --- schedules.ts ---
   list_agent_schedules: { kind: "in-tool", how: SCHEDULES_GATE },
@@ -306,10 +321,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   get_schedule_executions: { kind: "in-tool", how: SCHEDULES_GATE },
   // --- tags.ts ---
   list_tags: { kind: "none", why: "no agent target" },
-  get_agent_tags: { kind: "baselined", owner: ENT629 },
-  tag_agent: { kind: "baselined", owner: ENT629 },
-  untag_agent: { kind: "baselined", owner: ENT629 },
-  set_agent_tags: { kind: "baselined", owner: ENT629 },
+  get_agent_tags: { kind: "enforce", param: "agent_name" },
+  tag_agent: { kind: "enforce", param: "agent_name" },
+  untag_agent: { kind: "enforce", param: "agent_name" },
+  set_agent_tags: { kind: "enforce", param: "agent_name" },
   // --- notifications.ts ---
   send_notification: { kind: "none", why: "no agent target" },
   // --- reports.ts ---
@@ -332,14 +347,14 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- files.ts ---
   share_file: { kind: "none", why: "the calling agent's own public folder (FILES-001)" },
   // --- pipelines.ts ---
-  list_agent_pipelines: { kind: "baselined", owner: ENT629 },
-  get_agent_pipeline_state: { kind: "baselined", owner: ENT629 },
+  list_agent_pipelines: { kind: "enforce", param: "agent_name" },
+  get_agent_pipeline_state: { kind: "enforce", param: "agent_name" },
   // --- subscriptions.ts ---
   register_subscription: { kind: "none", why: "`name` is the subscription's name, not an agent" },
   list_subscriptions: { kind: "none", why: "no agent target" },
-  assign_subscription: { kind: "baselined", owner: ENT629 },
-  clear_agent_subscription: { kind: "baselined", owner: ENT629 },
-  get_agent_auth: { kind: "baselined", owner: ENT629 + "; the secrets branch is assert_admin" },
+  assign_subscription: { kind: "enforce", param: "agent_name" },
+  clear_agent_subscription: { kind: "enforce", param: "agent_name" },
+  get_agent_auth: { kind: "enforce", param: "agent_name" },  // also: the secrets branch is assert_admin
   delete_subscription: { kind: "none", why: "a subscription name, not an agent" },
   // --- monitoring.ts ---
   get_fleet_health: { kind: "none", why: "no agent target" },
@@ -347,11 +362,11 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
     kind: "none",
     why: "no agent target; the backend scopes the rows via accessible_agent_names (an agent key sees its owner's set, trinity-enterprise#707 D12)",
   },
-  get_agent_health: { kind: "baselined", owner: ENT629 },
-  trigger_health_check: { kind: "baselined", owner: ENT629 },
+  get_agent_health: { kind: "enforce", param: "agent_name" },
+  trigger_health_check: { kind: "enforce", param: "agent_name" },
   // --- nevermined.ts ---
-  configure_nevermined: { kind: "baselined", owner: ENT629 },
-  get_nevermined_config: { kind: "baselined", owner: ENT629 },
+  configure_nevermined: { kind: "enforce", param: "agent_name" },
+  get_nevermined_config: { kind: "enforce", param: "agent_name" },
   toggle_nevermined: { kind: "baselined", owner: ADMIN_ONLY },
   get_nevermined_payments: { kind: "baselined", owner: ADMIN_ONLY },
   // --- executions.ts ---
@@ -370,17 +385,14 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_event_subscriptions: { kind: "none", why: "the calling agent's own subscriptions" },
   delete_event_subscription: { kind: "none", why: "a subscription id owned by the calling agent" },
   // --- channels.ts ---
-  list_channel_groups: {
-    kind: "baselined",
-    owner: ENT629 + "; the Slack branch already rejects agent principals (reject_agent_principal), the Telegram branch does not",
-  },
-  send_group_message: { kind: "baselined", owner: ENT629 },
+  list_channel_groups: { kind: "enforce", param: "agent_name" },
+  send_group_message: { kind: "enforce", param: "agent_name" },
   // --- messages.ts ---
-  send_message: { kind: "baselined", owner: ENT629 },
+  send_message: { kind: "enforce", param: "agent_name" },
   // --- voice.ts ---
-  send_voice_reply: { kind: "baselined", owner: ENT629 + "; effect-guarded per execution (#1084)" },
+  send_voice_reply: { kind: "enforce", param: "agent_name" },  // also: effect-guarded per execution (#1084)
   // --- memory.ts ---
-  write_user_memory: { kind: "baselined", owner: ENT629 },
+  write_user_memory: { kind: "enforce", param: "agent_name" },
   // --- decisions.ts (ent#638) --- the target is only ever the seat's own agent
   record_decision: { kind: "enforce", param: "agent_name" },
   list_seat_decisions: { kind: "enforce", param: "agent_name" },
@@ -393,7 +405,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_reminders: { kind: "baselined", owner: REMINDER_SELF_GATE },
   cancel_reminder: { kind: "baselined", owner: REMINDER_SELF_GATE },
   // --- voip.ts ---
-  call_user: { kind: "baselined", owner: ENT629 + "; server-gated + rate-limited (VOIP-001)" },
+  call_user: { kind: "enforce", param: "agent_name" },  // also: server-gated + rate-limited (VOIP-001)
   // --- operator_queue.ts ---
   list_operator_queue: { kind: "in-tool", how: OPERATOR_QUEUE_GATE },
   get_operator_queue_item: { kind: "in-tool", how: "operator_queue.ts resolves the item's agent, then " + OPERATOR_QUEUE_GATE },
@@ -421,7 +433,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- a2a.ts ---
   get_agent_a2a_config: { kind: "in-tool", how: A2A_GATE },
   set_agent_a2a_exposure: { kind: "baselined", owner: ADMIN_ONLY + "; enterprise route, human-only" },
-  get_agent_a2a_card: { kind: "baselined", owner: ENT629 },
+  get_agent_a2a_card: { kind: "enforce", param: "agent_name" },
   set_a2a_inbound_allowlist: { kind: "baselined", owner: ADMIN_ONLY + "; enterprise route, human-only" },
   register_a2a_endpoint: { kind: "baselined", owner: A2A_OUTBOUND_ADMIN },
   list_a2a_endpoints: { kind: "in-tool", how: A2A_OUTBOUND_LIST },
@@ -429,6 +441,15 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- a2a_call.ts ---
   call_a2a_agent: { kind: "in-tool", how: A2A_CALL_SELF },
   get_a2a_task: { kind: "in-tool", how: A2A_CALL_SELF },
+  // --- aauth.ts ---
+  request_person_token: {
+    kind: "none",
+    why: "self-acting (resolveActingAgent, agent scope only — there is no agent_name parameter); the backend requires the agent's OWN key and answers 403 aauth_agent_only to anyone else (trinity-enterprise#878)",
+  },
+  call_aauth_resource: {
+    kind: "none",
+    why: "self-acting (same seam as request_person_token, agent scope only); the backend requires the agent's OWN key (403 aauth_agent_only) BEFORE consulting the resource allow-list, which is the operator's grant (trinity-enterprise#879)",
+  },
   // --- credential_vault.ts ---
   list_available_credentials: { kind: "none", why: "the calling agent's own grants (ent#279)" },
   fetch_credential: { kind: "none", why: "`name` is a credential; the backend scopes it to the calling agent (ent#279)" },
@@ -444,6 +465,8 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   link_to_project: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
   get_steward_digest: { kind: "none", why: "the calling agent's own stewarded projects (ent#661 v3)" },
   set_project_health: { kind: "none", why: "a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
+  create_project: { kind: "none", why: "creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
+  import_project: { kind: "none", why: "a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },
   // --- assignments.ts ---
   get_agent_assignments: { kind: "in-tool", how: ASSIGNMENTS_SELF },
   // --- connector.ts (connector / anonymous tiers) ---

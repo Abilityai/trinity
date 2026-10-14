@@ -1739,51 +1739,66 @@ def get_all_templates() -> List[dict]:
     return local + github
 
 
+def _catalog_repo_key(repo: str) -> str:
+    """GitHub repo names are case-insensitive and clone with or without `.git`."""
+    return repo.lower().removesuffix(".git")
+
+
+def _catalog_entry(repo: str) -> tuple[bool, Optional[dict]]:
+    """`(in_catalog, override)` for `owner/repo` — the one membership ladder.
+
+    Admin-configured list, else the remote registry, then the bundled defaults.
+    """
+    from services.settings_service import get_github_templates
+
+    key = _catalog_repo_key(repo)
+    db_entries = get_github_templates()
+    # trinity-enterprise#14 F1: this is the SECOND resolver of the same repo
+    # list, and it feeds `GET /api/templates/{id}` *and* agent creation
+    # (`crud._resolve_github_repo_and_pat`). Without the registry rung a
+    # registry-sourced template would list as "Cornelius — your second brain"
+    # and resolve by id as "cornelius", and under the rate-limit scenario the
+    # detail view would degrade all the way to the repo basename — i.e. the
+    # hardening the registry buys (a card that renders even when the metadata
+    # fetch fails) would not extend to the detail path at all.
+    #
+    # `learnings.md` 2026-07-10, "the create path is never one call site".
+    # Admin list vs registry follows `get_all_templates()`; a test pins list,
+    # detail and create to one ladder. The defaults are consulted on every
+    # path here, which only ever adds a repo to the catalog.
+    overrides = db_entries if db_entries is not None else _registry_template_overrides()
+    for entry in overrides:
+        entry_key = _catalog_repo_key(entry.get("github_repo") or "")
+        if entry_key and entry_key == key:
+            return True, entry
+    return key in {_catalog_repo_key(r) for r in DEFAULT_GITHUB_TEMPLATE_REPOS}, None
+
+
+def is_catalog_github_template(repo: str) -> bool:
+    """True when `owner/repo` is a template the catalog offers (#3545).
+
+    `get_github_template()` cannot answer this: it builds a template for every
+    `github:` id, listed or not. A registry that cannot be read lists nothing,
+    so its templates read as not-catalog here; agent creation still requires
+    the token's own account to own the repository and a passing push probe.
+    """
+    return _catalog_entry(repo)[0]
+
+
 def get_github_template(template_id: str) -> Optional[dict]:
     """Get a single GitHub template by ID (e.g., 'github:owner/repo').
 
-    Resolves metadata from GitHub (cached).
+    Resolves metadata from GitHub (cached). Returns a template for a repo in no
+    configured list too (the dynamic `github:owner/repo` path) — catalog
+    membership is `is_catalog_github_template()`.
     """
     if not template_id.startswith("github:"):
         return None
 
     repo = template_id[len("github:"):]
-
-    # Check if it's in the configured list (DB or defaults)
-    from services.settings_service import get_github_templates
-    db_entries = get_github_templates()
-
-    if db_entries is not None:
-        for entry in db_entries:
-            if entry["github_repo"] == repo:
-                metadata, reason = _get_cached_metadata_result(repo)
-                return _build_template(repo, metadata, entry, reason)
-    else:
-        # trinity-enterprise#14 F1: this is the SECOND resolver of the same repo
-        # list, and it feeds `GET /api/templates/{id}` *and* agent creation
-        # (`crud._resolve_github_repo_and_pat`). Without this branch a
-        # registry-sourced template would list as "Cornelius — your second brain"
-        # and resolve by id as "cornelius", and under the rate-limit scenario the
-        # detail view would degrade all the way to the repo basename — i.e. the
-        # hardening the registry buys (a card that renders even when the metadata
-        # fetch fails) would not extend to the detail path at all.
-        #
-        # `learnings.md` 2026-07-10, "the create path is never one call site".
-        # The registry-vs-defaults precedence must be IDENTICAL to
-        # `get_all_templates()`; a test pins list, detail and create to one ladder.
-        for override in _registry_template_overrides():
-            if override.get("github_repo") == repo:
-                metadata, reason = _get_cached_metadata_result(repo)
-                return _build_template(repo, metadata, override, reason)
-
-    # Check defaults
-    if repo in DEFAULT_GITHUB_TEMPLATE_REPOS:
-        metadata, reason = _get_cached_metadata_result(repo)
-        return _build_template(repo, metadata, None, reason)
-
-    # Dynamic: repo not in any configured list but still a valid github: ID
+    _, override = _catalog_entry(repo)
     metadata, reason = _get_cached_metadata_result(repo)
-    return _build_template(repo, metadata, None, reason)
+    return _build_template(repo, metadata, override, reason)
 
 
 # ent#615: `clone_github_repo(repo, pat, dest, branch)` was DELETED here. It
@@ -2185,28 +2200,6 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
         return missing_claude_md
 
     return (True, None, template_data)
-
-
-def get_name_from_template(path: Path) -> Optional[str]:
-    """
-    Extract agent name from template.yaml.
-
-    Args:
-        path: Path to the agent directory
-
-    Returns:
-        Agent name from template.yaml, or None if not found
-    """
-    template_path = path / "template.yaml"
-    if not template_path.exists():
-        return None
-
-    try:
-        with open(template_path) as f:
-            template_data = parse_template_yaml(f.read())  # ent#314
-            return template_data.get("name") if template_data else None
-    except Exception:
-        return None
 
 
 # Platform-injected environment variables — credentials/config Trinity sets on

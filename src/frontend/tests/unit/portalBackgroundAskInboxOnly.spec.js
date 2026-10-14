@@ -83,7 +83,10 @@ describe('the Inbox is its home', () => {
   it('Action lists it while it waits; All keeps it once it ended', () => {
     const asks = [bg('open'), ENDED]
     expect(actionItems(asks.filter((a) => a.status === 'pending')).map((i) => i.id)).toEqual(['open'])
-    expect(allItems([], asks, {}).filter((i) => i.type === 'ask').map((i) => i.id).sort()).toEqual(['done', 'open'])
+    // `now` pinned beside the fixture: ended asks stay in All for
+    // ENDED_ASK_WINDOW_DAYS, so the wall clock would age `done` out.
+    const now = Date.parse('2026-09-30T12:00:00Z')
+    expect(allItems([], asks, {}, now).filter((i) => i.type === 'ask').map((i) => i.id).sort()).toEqual(['done', 'open'])
   })
 })
 

@@ -22,6 +22,14 @@ export function parseExecutionIdHeader(value: string | undefined): string | unde
   return v && EXECUTION_ID_RE.test(v) ? v : undefined;
 }
 
+/**
+ * #3232: the one format rule for an execution id — the header's own — so a
+ * model-typed `execution_id` is held to the same check before it is forwarded.
+ */
+export function isWellFormedExecutionId(value: string | undefined): boolean {
+  return value !== undefined && EXECUTION_ID_RE.test(value);
+}
+
 export const MANUAL_EXECUTION_ID = "manual";
 
 /**

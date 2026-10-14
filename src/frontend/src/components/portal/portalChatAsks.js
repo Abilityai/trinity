@@ -9,7 +9,7 @@
 // The pinned box above the composer that this replaces grew with the number of
 // asks and moved the composer per chat (design principle 30).
 
-import { queueEnding, queueEndingText, queueTypeLabel } from '@/utils/operatorQueue'
+import { queueEnding, queueTypeLabel, workspaceEndingText } from '@/utils/operatorQueue'
 import { relativeTime } from './portalUtils'
 
 // The asks drawn in the chat on screen. Only the platform's literal `true`
@@ -114,7 +114,8 @@ export function askHistoryLine(ask, now = Date.now()) {
     title: ask?.title || '',
     // The row clips the title on a phone; this is its hover/long-press text.
     plain: (ask?.title || '').replace(/[*_`~]/g, ''),
-    ending: queueEndingText(ending),
+    // #3247: a replaced ask reads "Replaced by the agent with <request_id>".
+    ending: workspaceEndingText(ask),
     when: at ? relativeTime(at, now) : '',
     at,
   }

@@ -85,7 +85,7 @@
            sanitiser, #3115 — the same on every surface), never printed as its
            syntax (ent#610 sign-off). -->
       <AskMarkdown
-        v-if="ask.question && ask.question !== ask.title"
+        v-if="ask.question && ask.question !== ask.title && !isGateCard(ask)"
         :text="ask.question"
         class="mt-0.5 min-w-0 text-gray-600 dark:text-gray-300"
         :data-testid="`${tid.prefix}-question-${ask.id}`"
@@ -93,7 +93,10 @@
       <!-- trinity-enterprise#611: the exact action this approval would run, which is
            what the person is deciding. Kept on an ended ask, so it still says what
            was decided. -->
-      <QueueProposal v-if="ask.proposal" :proposal="ask.proposal" class="mt-2" />
+      <!-- trinity-enterprise#755: a gated-skill approval has its own card —
+           the same one Operations draws (one object, two windows). -->
+      <GatedSkillRequest v-if="isGateCard(ask)" :item="ask" class="mt-2" />
+      <QueueProposal v-else-if="ask.proposal" :proposal="ask.proposal" class="mt-2" />
       <!-- ent#610 §3g L6 (E2 seam): the agent's brief — Why now, then what it
            recommends — after the proposal and before the options. Kept on an
            ended ask, like the proposal: it says what the decision was about. -->
@@ -111,6 +114,21 @@
         :data-testid="tid.ending"
       >
         {{ endingLine(ask) }}
+        <!-- trinity#3524: the note the viewer gave with their own answer. -->
+        <span
+          v-if="ask.answer_note && workspaceOwnAnswer(ask)"
+          class="mt-0.5 block"
+          :data-testid="`${tid.prefix}-answer-note-${ask.id}`"
+        >Your note: “{{ ask.answer_note }}”</span>
+      </p>
+      <!-- #3247: the agent's replacement names the ask it replaced, by
+           request_id only — there is no deep link to a single item. -->
+      <p
+        v-if="workspaceReplacesText(ask)"
+        class="mt-2 text-xs"
+        :data-testid="`${tid.prefix}-replaces`"
+      >
+        {{ workspaceReplacesText(ask) }}
       </p>
 
       <!-- trinity-enterprise#748: a dismissal is undoable for a few seconds,
@@ -156,8 +174,10 @@
       <template v-if="!isEnded(ask)">
         <!-- #2375: controls come from the shared kind rule (queueResponseKind),
              so this surface cannot drift from desktop QueueCard and /m. An
-             approval is select → optional note → explicit Send — never a
-             one-tap irreversible answer; the tapped option only arms Send. -->
+             approval is select → optional note → explicit Send; the tapped
+             option only arms Send. trinity#3527: except a skill gate's
+             (`decidedByOptions`) — Approve / Reject IS the decision, so the
+             option sends, with the note typed before it, and there is no Send. -->
         <template v-if="controlsKind(ask) === 'approval'">
           <!-- ent#610 §3g L6: when the brief says what an option DOES
                (impact), the options stack full-width — the label, then the
@@ -215,13 +235,20 @@
               type="text"
               maxlength="4000"
               :disabled="busyId === ask.id"
-              :placeholder="somethingElseArmed(ask) ? 'What should it do instead? None of the options will run.' : 'Add a note (optional)…'"
-              :aria-label="somethingElseArmed(ask) ? 'Instruction' : 'Note'"
+              :placeholder="somethingElseArmed(ask) ? 'What should it do instead? None of the options will run.' : noteCopy(ask).placeholder"
+              :aria-label="somethingElseArmed(ask) ? 'Instruction' : noteCopy(ask).label"
               :class="FIELD"
               :data-testid="`${tid.prefix}-note-${ask.id}`"
-              @keydown.enter="!picks[ask.id] && $event.preventDefault()"
+              @keydown.enter="(oneClick(ask) || !picks[ask.id]) && $event.preventDefault()"
             />
+            <span
+              v-if="oneClick(ask) && busyId === ask.id"
+              class="text-xs"
+              role="status"
+              :data-testid="`${tid.prefix}-sending-${ask.id}`"
+            >Sending…</span>
             <button
+              v-if="!oneClick(ask)"
               type="submit"
               :disabled="busyId === ask.id || !approvalSendable(ask)"
               :class="SEND"
@@ -325,6 +352,7 @@ import BaseBadge from '../base/BaseBadge.vue'
 import BaseButton from '../base/BaseButton.vue'
 import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import QueueProposal from '../operator/QueueProposal.vue'
+import GatedSkillRequest from '../operator/GatedSkillRequest.vue'
 import QueueBrief from '../operator/QueueBrief.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
@@ -334,11 +362,15 @@ import { queueResponseKind, buildQueueResponse, queueTypeLabel } from '@/utils/o
 // #2915: the same home; a second line so the #2375 import pin above stays byte-exact.
 import { respondRefusedAsDiverged, QUEUE_RESPONSE_DIVERGED } from '@/utils/operatorQueue'
 // trinity-enterprise#611: the one ending rule, a third line for the same reason.
-import { queueEnding, queueEndingText } from '@/utils/operatorQueue'
+import { queueEnding, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
+// trinity#3524: the viewer's own answer on an answered card.
+import { workspaceOwnAnswer } from '@/utils/operatorQueue'
 // trinity-enterprise#610 §3g B3/B5: the Workspace's badge and a question's quick picks.
 import { workspaceAskBadge, questionQuickPicks } from '@/utils/operatorQueue'
 // trinity-enterprise#610 §3g L6 (E2 seam): the brief's per-option consequence.
 import { briefImpactFor } from '@/utils/operatorQueue'
+// trinity-enterprise#755: the gated-skill approval card.
+import { isGateCard, gateRejecting } from '@/utils/skillGateCard'
 // #3242: the reserved off-menu approval answer.
 import { SOMETHING_ELSE, SOMETHING_ELSE_LABEL, offeredChips, decidedByOptions } from '@/utils/operatorQueue'
 import { formatLocalDateTime, formatRelativeTime } from '@/utils/timestamps'
@@ -438,8 +470,17 @@ const coarsePointer = () => (
 )
 
 // B2: a pick arms Send and moves to the note, so Enter sends; an un-pick
-// only disarms. Still two steps (#2375) — the pick never sends.
+// only disarms. Still two steps (#2375) — the pick never sends — except on a
+// skill gate (trinity#3527), whose options are the whole decision: the pick
+// sends, with whatever note was typed first.
+const oneClick = (ask) => decidedByOptions(ask)
 function pick(ask, opt) {
+  if (oneClick(ask)) {
+    if (busyId.value === ask.id) return
+    picks[ask.id] = opt
+    submit(ask)
+    return
+  }
   const next = picks[ask.id] === opt ? null : opt
   picks[ask.id] = next
   if (!next || coarsePointer()) return
@@ -449,6 +490,14 @@ function pick(ask, opt) {
 // its options. With no pick, typing arms it (the note box is the instruction);
 // Enter never sends that auto-armed state — the person clicks Send.
 const offersSomethingElse = (ask) => !decidedByOptions(ask)
+// trinity-enterprise#755: beside a picked Reject on a gated-skill approval the
+// note is the reason, and the requester is told it.
+const NOTE = { placeholder: 'Add a note (optional)…', label: 'Note' }
+const REASON = { placeholder: 'Reason (optional) — the requester is told', label: 'Reason' }
+// trinity#3527: a one-click gate card sends on Approve / Reject, so the note is
+// typed first — and on Reject it is the reason the requester is told.
+const ONE_CLICK_NOTE = { placeholder: 'Reason if you reject (optional), then choose above…', label: 'Reason' }
+const noteCopy = (ask) => (oneClick(ask) ? ONE_CLICK_NOTE : gateRejecting(ask, picks[ask.id]) ? REASON : NOTE)
 const approvalOption = (ask) => picks[ask.id]
   ?? (offersSomethingElse(ask) && (notes[ask.id] || '').trim() ? SOMETHING_ELSE : null)
 const somethingElseArmed = (ask) => approvalOption(ask) === SOMETHING_ELSE
@@ -509,7 +558,8 @@ function endingLine(ask) {
   const ending = queueEnding(ask)
   // An expiry keeps its own sentence: the deadline is the fact a person reads.
   if (!ending || ending.kind === 'expired') return expiredLabel(ask.expires_at)
-  const text = queueEndingText(ending)
+  // trinity#3524: an ask the viewer answered says WHICH answer, not just "by you".
+  const text = workspaceOwnAnswer(ask)?.text || workspaceEndingText(ask)
   return ending.when ? `${text} · ${formatRelativeTime(ending.when)}` : text
 }
 const endedAtAbsolute = (ask) => {
@@ -566,11 +616,14 @@ const controlsKind = (ask) => queueResponseKind({ type: ask.kind, options: ask.o
 
 // trinity-enterprise#747: an alert has nothing to decide, so nothing to
 // discuss; and the chat already discussing this ask needs no link to itself.
-const canDiscuss = (ask) => ask.kind !== 'alert'
+// trinity-enterprise#816: not on a SHARED ask (one delivered to everyone a role
+// resolves to) — the server refuses both (`shared_ask`) until they are per
+// person, so the card does not offer them.
+const canDiscuss = (ask) => ask.kind !== 'alert' && !ask.shared
   && !(ask.discussion_chat_id && ask.discussion_chat_id === props.currentSessionId)
 // trinity-enterprise#748: a question or an approval can be declined; an alert
 // is acknowledged ("Got it"), which already ends it without a decision.
-const canDismiss = (ask) => ask.kind !== 'alert'
+const canDismiss = (ask) => ask.kind !== 'alert' && !ask.shared
 // Not once the dismissal is on the wire: the server may already have told the agent.
 const undoable = (ask) => !!store.askDismissals[ask.id] && !store.askDismissals[ask.id].committing
 const discussingId = ref(null)

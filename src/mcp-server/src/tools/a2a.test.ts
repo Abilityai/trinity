@@ -131,6 +131,8 @@ describe("ent#761 — the three outbound control tools target the OSS endpoint s
       // #3185: absent, not defaulted — the store infers the kind from the value,
       // and an `api_key` sent here would override that inference with a guess.
       credential_kind: undefined,
+      // ent#862: absent keeps the stored scheme (a new endpoint is bearer).
+      auth_scheme: undefined,
     });
     assert.equal(out.success, true);
     assert.equal(out.endpoint.name, "partner");
@@ -146,7 +148,44 @@ describe("ent#761 — the three outbound control tools target the OSS endpoint s
       credentials: undefined,
       clear_credentials: undefined,
       credential_kind: undefined,
+      auth_scheme: undefined,
     });
+  });
+
+  it("ent#862: register forwards auth_scheme aauth with no credential", async () => {
+    const calls: Recorded[] = [];
+    const tools = makeTools(calls);
+    await tools.register_a2a_endpoint.execute(
+      { name: "peer", url: "https://peer.example.com/a2a/bot", auth_scheme: "aauth" },
+      {},
+    );
+    assert.equal(calls.length, 1);
+    assert.equal((calls[0].args[0] as { auth_scheme?: string }).auth_scheme, "aauth");
+  });
+
+  it("ent#862: register refuses a credential on an aauth endpoint (no backend call)", async () => {
+    // An aauth endpoint stores no secret: the store refuses one, and the caller
+    // learns it here without a round trip.
+    const calls: Recorded[] = [];
+    const tools = makeTools(calls);
+    const out = JSON.parse(
+      await tools.register_a2a_endpoint.execute(
+        { name: "peer", url: "https://peer.example.com/a2a/bot", auth_scheme: "aauth", credentials: "TOK" },
+        {},
+      ),
+    );
+    assert.equal(out.success, false);
+    assert.equal(out.invalid, true);
+    assert.match(out.error, /aauth/);
+    assert.equal(calls.length, 0);
+  });
+
+  it("ent#862: the schema takes only bearer or aauth", () => {
+    const tools = makeTools([]);
+    const schema = tools.register_a2a_endpoint.parameters;
+    assert.equal(schema.safeParse({ name: "p", url: "https://x", auth_scheme: "aauth" }).success, true);
+    assert.equal(schema.safeParse({ name: "p", url: "https://x", auth_scheme: "bearer" }).success, true);
+    assert.equal(schema.safeParse({ name: "p", url: "https://x", auth_scheme: "oauth" }).success, false);
   });
 
   it("register forwards clear_credentials", async () => {

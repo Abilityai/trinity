@@ -59,7 +59,7 @@
 
     <div class="flex-1 min-h-0 flex">
       <div class="min-h-0 flex-col shrink-0 border-gray-200 dark:border-gray-750 focus:outline-none" :class="listColClass" data-testid="inbox-skeleton-list">
-        <p class="shrink-0 px-4 pt-3 pb-2 text-[11px] font-semibold uppercase tracking-wide" aria-hidden="true">&nbsp;</p>
+        <p class="shrink-0 h-11 px-4" aria-hidden="true">&nbsp;</p>
         <PortalInboxSkeleton part="rows" :announce="false" />
       </div>
       <div v-if="!stacked" class="min-w-0 flex-1 min-h-0 flex flex-col">

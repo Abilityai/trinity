@@ -160,15 +160,19 @@ class TestTheRoutesThisChangeGates:
     PERSON = [
         "routers/agent_config.py::set_agent_autonomy_status",
         "routers/agent_config.py::update_agent_api_key_setting",
-        "routers/agent_config.py::set_agent_read_only_status",
-        "routers/agent_config.py::set_agent_resources",
         "routers/agent_config.py::set_agent_capabilities",
         "routers/agent_config.py::set_agent_capacity",
+    ]
+    # trinity-enterprise#164: a person, or an agent holding `agents.manage`.
+    PERSON_OR_GRANT = [
+        "routers/agent_config.py::set_agent_read_only_status",
+        "routers/agent_config.py::set_agent_resources",
         "routers/agent_config.py::set_agent_timeout",
         "routers/agent_config.py::set_public_channel_model",
         "routers/agent_config.py::set_agent_guardrails",
     ]
     INTERACTIVE = [
+        "routers/agent_config.py::set_agent_capability_grant",
         "routers/users.py::update_my_email",
         "routers/users.py::set_my_github_pat",
         "routers/users.py::clear_my_github_pat",
@@ -180,6 +184,10 @@ class TestTheRoutesThisChangeGates:
     @pytest.mark.parametrize("key", PERSON)
     def test_person(self, classified, key):
         assert classified[0][key] == "person"
+
+    @pytest.mark.parametrize("key", PERSON_OR_GRANT)
+    def test_person_or_grant(self, classified, key):
+        assert classified[0][key] == "person_or_grant"
 
     @pytest.mark.parametrize("key", INTERACTIVE)
     def test_interactive(self, classified, key):

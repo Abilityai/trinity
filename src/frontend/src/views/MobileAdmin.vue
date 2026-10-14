@@ -261,10 +261,12 @@
                 <!-- #3246: one row per condition — how often the platform saw it. -->
                 <p v-if="queueSeenLine(item)" class="ops-card-type" data-testid="queue-seen-line">{{ queueSeenLine(item) }}</p>
                 <!-- #3115: agent-written markdown, rendered — never shown raw. -->
-                <AskMarkdown class="ops-card-message" :text="item.message || item.question || item.description" :prose="false" data-testid="queue-message" />
+                <AskMarkdown v-if="!item.gate" class="ops-card-message" :text="item.message || item.question || item.description" :prose="false" data-testid="queue-message" />
                 <!-- trinity-enterprise#611: the exact action this approval would run,
                      on the same card that offers the decision (desktop parity). -->
-                <QueueProposal v-if="item.proposal" :proposal="item.proposal" class="mt-2" />
+                <!-- trinity-enterprise#755: a gated-skill approval has its own card. -->
+                <GatedSkillRequest v-if="item.gate" :item="item" class="mt-2" />
+                <QueueProposal v-else-if="item.proposal" :proposal="item.proposal" class="mt-2" />
                 <!-- Controls switch on the item TYPE (desktop parity), and an
                      approval is never answered on one tap: select → restated
                      consequence → optional note → explicit Send. The decision
@@ -275,7 +277,11 @@
                      This inline step is deliberately p19-shaped — named verb,
                      restated consequence, the safe action first and focused —
                      and is NOT a confirm overlay (see the note on #1924). -->
-                <template v-if="queueResponseKind(item) === 'approval'">
+                <!-- trinity-enterprise#755: a gated-skill approval offers its
+                     controls only to a person it is addressed to; anyone else
+                     reads who it is waiting on, in the card above. -->
+                <template v-if="gateReadOnly(item)" />
+                <template v-else-if="queueResponseKind(item) === 'approval'">
                   <div class="ops-options" role="group" aria-label="Options">
                     <button
                       v-for="(opt, idx) in offeredChips(item)"
@@ -310,7 +316,7 @@
                       type="text"
                       enterkeyhint="done"
                       maxlength="4000"
-                      :placeholder="selectedOptions[item.id] === SOMETHING_ELSE ? 'What should it do instead?' : 'Add a note (optional)...'"
+                      :placeholder="selectedOptions[item.id] === SOMETHING_ELSE ? 'What should it do instead?' : (gateRejecting(item, selectedOptions[item.id]) ? 'Reason (optional) — the requester is told' : 'Add a note (optional)...')"
                       class="ops-response-input"
                       data-testid="queue-note"
                       :disabled="respondingItems[item.id]"
@@ -575,7 +581,9 @@
             v-for="(msg, i) in chatMessages"
             :key="i"
             class="chat-bubble"
-            :class="msg.role === 'user' ? 'bubble-user' : 'bubble-assistant'"
+            :class="msg.role === 'user' ? 'bubble-user' : msg.role === 'system' ? 'bubble-system' : 'bubble-assistant'"
+            :data-testid="msg.role === 'system' ? 'chat-system-line' : undefined"
+            :role="msg.role === 'system' ? 'status' : undefined"
           >
             <div class="bubble-content">{{ msg.content }}</div>
             <div class="bubble-time">{{ formatTime(msg.timestamp) }}</div>
@@ -666,6 +674,7 @@ import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
 import AskMarkdown from '../components/operator/AskMarkdown.vue'
 import { apiErrorMessage } from '../utils/apiError'
+import { isGateRefusal, pendingApprovalMessage, storedChatMessage } from '../utils/skillGate'
 import { viewState, staleBannerMessage, listFrom } from '../utils/loadingState'
 import {
   queueResponseKind, buildQueueResponse, queueTypeLabel,
@@ -679,6 +688,8 @@ import { formatLocalDateTime } from '../utils/timestamps'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
 import QueueProposal from '../components/operator/QueueProposal.vue'
+import GatedSkillRequest from '../components/operator/GatedSkillRequest.vue'
+import { gateReadOnly, gateRejecting } from '../utils/skillGateCard'
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -1095,7 +1106,7 @@ async function selectSession(session) {
   showSessions.value = false
   try {
     const res = await http.get(`/api/agents/${chatAgent.value}/chat/sessions/${session.id}`)
-    chatMessages.value = res.data.messages || []
+    chatMessages.value = (res.data.messages || []).map(storedChatMessage)
     scrollChatToBottom()
   } catch (e) {
     console.error('Failed to load session:', e)
@@ -1103,8 +1114,10 @@ async function selectSession(session) {
 }
 
 function buildContextPrompt(userMessage) {
-  // Include last 10 exchanges for context
-  const recent = chatMessages.value.slice(-20)
+  // Include last 10 exchanges for context. A held (gated-skill) request and
+  // its notice stay on screen but out of it (trinity#3274), or every later
+  // turn would ask for the approval again.
+  const recent = chatMessages.value.filter(m => !m.held).slice(-20)
   if (recent.length === 0) return userMessage
   let context = 'Previous conversation:\n'
   recent.forEach(m => {
@@ -1123,18 +1136,23 @@ async function sendChatMessage() {
     chatInputEl.value.style.height = 'auto'
   }
 
+  // trinity#3163: the context is built from the conversation as it stands, so
+  // the message being sent reaches the agent once, and a first message carries
+  // no history.
+  const contextPrompt = buildContextPrompt(message)
+
   // Add user message immediately
   chatMessages.value.push({
     role: 'user',
     content: message,
     timestamp: new Date().toISOString()
   })
+  const userEntry = chatMessages.value[chatMessages.value.length - 1]
   scrollChatToBottom()
 
   chatExecutionStatus.value = 'running'
 
   try {
-    const contextPrompt = buildContextPrompt(message)
     const payload = {
       message: contextPrompt,
       save_to_session: true,
@@ -1145,6 +1163,15 @@ async function sendChatMessage() {
     }
 
     const submitRes = await http.post(`/api/agents/${chatAgent.value}/task`, payload)
+    // trinity#3274: a gated skill — nothing ran, nothing to poll.
+    const held = pendingApprovalMessage(submitRes)
+    if (held) {
+      userEntry.held = true
+      chatMessages.value.push({ role: 'system', content: held, held: true, timestamp: new Date().toISOString() })
+      // trinity#3526: the request was saved to a conversation — stay in it.
+      if (submitRes.data.chat_session_id) chatSessionId.value = submitRes.data.chat_session_id
+      return
+    }
     const executionId = submitRes.data.execution_id
 
     // Poll for completion
@@ -1170,9 +1197,14 @@ async function sendChatMessage() {
       chatSessionId.value = chatSessions.value[0].id
     }
   } catch (e) {
+    // A refused gated request stays out of the next message's history too:
+    // resent, it would be refused again on every later turn (#3274).
+    const refused = isGateRefusal(e)
+    if (refused) userEntry.held = true
     chatMessages.value.push({
       role: 'assistant',
-      content: `Error: ${e.response?.data?.detail || e.message || 'Failed to send message'}`,
+      content: `Error: ${refused ? apiErrorMessage(e) : (e.response?.data?.detail || e.message || 'Failed to send message')}`,
+      held: refused,
       timestamp: new Date().toISOString()
     })
   } finally {
@@ -2758,6 +2790,18 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
   font-size: 10px;
   color: rgba(255, 255, 255, 0.4);
   margin-top: 4px;
+}
+
+/* trinity#3274: a platform line (a held request's notice), not a bubble —
+   centred and muted, gray-400 on this view's dark ground (gray-500 is below
+   AA there). A theme() token, not a literal. */
+.bubble-system {
+  align-self: center;
+  max-width: 100%;
+  padding: 4px 16px;
+  font-size: 12.5px;
+  text-align: center;
+  color: theme('colors.gray.400');
 }
 
 .bubble-assistant .bubble-time {

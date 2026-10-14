@@ -22,7 +22,8 @@ companion (execution e1, seat run or user-facing turn)
   │  Idempotency-Key = mcp:sha256(record_decision agent execution_id decided)
   ▼
 POST /api/agents/{name}/decisions            routers/seat_decisions.py  (# mcp: decisions.ts)
-  │  assert_agent_access · rate limit · seat = _seat_for(execution)   ← the MEM-001 rule:
+  │  _self_gate (an agent key names only its own agent, ent#839) · assert_agent_access
+  │  · rate limit · seat = _seat_for(execution)   ← the MEM-001 rule:
   │      schedule_seat_memory.seat_for_execution (ent#498 stamp) | source_user_email (public/slack/…) | 422 no_seat
   │  idempotency_service.begin(scope="seat_decision:{agent}:{seat}") → replay → snapshot
   │  decided_by_role = body.decided_by_role | assignment_provider.resolve_assignment().role_id | None
@@ -41,7 +42,7 @@ person (Workspace principal)
   ▼
 client_portal/seat_decisions.page      _require_roster (uniform 404)
   │  readable_seats: own seat (writable) ∪ owner → every seat (writable)
-  │                  ∪ provider.kinds_for(agent, me) ∈ READER_KINDS → every seat (read-only)
+  │                  (an assignment kind never widens it — #3660)
   │  rows per seat → to_human(row, writable)  (status = effective_status: expired computed)
   │  stats(own seat rows): recorded, reused, reuse_rate, reversed, ask_classes[{criteria, reversals, expired, stable}]
   ▼
@@ -61,6 +62,8 @@ every turn ──► platform_prompt_service.format_user_memory_block(record)
 ```
 
 ## Why it is shaped this way
+
+- **An agent key reads and writes only its own agent's records (ent#839, CWE-863).** An agent-scoped key resolves to its owner carrying the owner's role, so `assert_agent_access` alone let a sibling agent (and, under an admin owner, any agent on the instance) name another agent and one of its seat runs. A forged `active` row then became standing instruction text in that agent's system prompt, and the GET returned a person's criteria and notes. Both handlers self-gate first, before any lookup, like `reminders._self_gate` and `public_memory`. The MCP tools refuse an `agent_name` that is not the key's own agent before calling; the override remains for a user-scoped key. Tests: `tests/unit/test_ent839_seat_decisions_self_gate.py`, `decisions.test.ts`.
 
 - **A note is not a decision.** tandem-07 §7a: a record with no alternatives is a note.
   The grammar refuses it (`decision_is_a_note`) rather than storing a weaker row —
@@ -85,10 +88,12 @@ every turn ──► platform_prompt_service.format_user_memory_block(record)
   back (`to_agent` labels the decider `seat` / `owner`) — an execution can be an
   anonymous public turn, the audience the assignment provider must never expose staff
   identities to.
-- **Readers per assignment kind, safely.** The assignment record is private; the seam
-  gains one optional method (`kinds_for`), read through `getattr`, allowlisted,
-  failure → `None`. A core build reads own-seat only; the owner (creator / infra owner,
-  `role_card._is_owner`) reads every seat. Per-agent in v1 — DEBT_INBOX 2026-09-22.
+- **Readers: own seat, and the owner.** The owner (creator / infra owner,
+  `role_card._is_owner`) reads every seat; everyone else reads their own. The seam's
+  optional `kinds_for` (read through `getattr`, allowlisted, failure → `None`) answers
+  the role card's relationship line only. It never widens this read: a kind is per
+  agent, not per role, so it would hand an approver every person's decisions (#3660).
+  Per-role stakeholder reads are #3381.
 - **Conversion, not volume.** `reused` counts records a LATER record cited; a
   superseding record does not implicitly cite its predecessor. Per ask class the raw
   evidence (criteria, reversals, expired) plus `stable` (≥3, one criterion, no reversal)

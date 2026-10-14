@@ -62,19 +62,19 @@ The first four tools need the A2A capability enabled; the three outbound-registr
 
 ## Part 2 — Consume an exposed agent (external orchestrator)
 
-Once an agent is exposed, an external A2A client discovers and tasks it in three steps. The examples below use `curl` against a local instance (front door on port `8001`); a real A2A SDK does the same automatically.
+Once an agent is exposed, an external A2A client discovers and tasks it in three steps. The examples below use `curl` against a local instance (the frontend's front door on port `80`); a real A2A SDK does the same automatically.
 
 ### 1. Discover — fetch the Agent Card
 
 ```bash
-curl -s http://localhost:8001/a2a/new_cool_agent/.well-known/agent-card.json | jq
+curl -s http://localhost/a2a/new_cool_agent/.well-known/agent-card.json | jq
 ```
 
 ```json
 {
   "protocolVersion": "0.3.0",
   "name": "new_cool_agent",
-  "url": "http://localhost:8001/a2a/new_cool_agent",
+  "url": "http://localhost/a2a/new_cool_agent",
   "preferredTransport": "JSONRPC",
   "capabilities": { "streaming": true },
   "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
@@ -93,7 +93,7 @@ Issue an MCP key from **Settings → MCP Keys** (or the API) and share it with t
 **Synchronous (`message/send`):**
 
 ```bash
-curl -s -X POST http://localhost:8001/a2a/new_cool_agent \
+curl -s -X POST http://localhost/a2a/new_cool_agent \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -170,6 +170,8 @@ price. An agent with no payment config has a byte-identical card to before.
 > agent *costs*; A2A exposure is what makes the paid A2A door reachable. On a
 > build without the exposure feature, a configured price block points at a door
 > that answers `404` — turn exposure on for that agent to open it.
+
+Crypto and card (fiat) plans both work: Trinity advertises the x402 scheme that matches the agent's plan, and the 402's `resource.url` uses the public origin buyers reach you on. See [Nevermined Payments](nevermined-payments.md) for both.
 
 **Time-based (duration) plans.** Set **Credits per Request** to `0`. A duration
 plan charges by time, so Trinity sends no per-call amount and the plan decides
@@ -276,7 +278,7 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
   http://localhost:8000/api/settings/a2a-endpoints/research-partner
 ```
 
-The URL must be **HTTPS** and must resolve to a public address; Trinity refuses anything pointing inside your network. It re-checks this on **every call**, not just at registration, so a hostname that later resolves somewhere internal stops working rather than being trusted because it was once accepted.
+The URL must be **HTTPS** and must resolve to a public address; Trinity refuses anything pointing inside your network. It re-checks this on **every call**, not just at registration, so a hostname that later resolves somewhere internal stops working rather than being trusted because it was once accepted. The one exception is a host an admin has put on the outbound endpoint allowlist — see [Between your own instances on a private network](#between-your-own-instances-on-a-private-network).
 
 > **⚠ Registering an endpoint is a trust decision, not a configuration step.**
 > Trinity removes the literal credential from anything the remote sends back. It **cannot** stop a remote that base64-encodes, splits or otherwise transforms it — and an agent under prompt injection can be talked into asking for exactly that. **Registering an endpoint grants that endpoint the ability to exfiltrate its own credential.** Register peers you would trust with the token you are handing them.
@@ -375,14 +377,34 @@ A few behaviors that surprise people, all deliberate: the **calling agent's cont
 
 Register the remote instance's agent endpoint (`https://their-trinity.example.com/a2a/their-agent`) with a **Trinity MCP API key from that instance** as the credential. Both sides speak A2A v0.3, so it works with no extra configuration.
 
+### Between your own instances on a private network
+
+When your Trinity instances share a private network (a tailnet or a VPN) and serve plain HTTP on it, their agents can call each other over it instead of the public internet. Every call still carries a key: the private network only changes which **addresses** Trinity will call, never who may call an agent.
+
+**1. Allow the other instance's host (admin, on the calling instance).** Add the provider instance's name on the network, its address range, or both, to the outbound endpoint allowlist:
+
+```bash
+curl -X PUT http://localhost:8000/api/settings/a2a-trusted-networks \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"entries": ["100.64.0.0/10", "*.your-tailnet.ts.net"]}'
+```
+
+The platform refuses entries that would cover its own Docker networks, loopback, link-local or reserved ranges, or anything broader than a /8. The list is read only when **this** instance calls out; it never lets anyone call in.
+
+**2. Provider side:** in the agent's **A2A** settings, turn on **Expose over A2A**, exactly as for any other caller.
+
+**3. Caller side:** register `http://<provider-instance>.<your-tailnet>/a2a/<agent>` as an outbound endpoint, with a **Trinity MCP API key from the provider instance** as the credential (see [Trinity → Trinity](#trinity--trinity)). Plain `http://` and a private address are accepted only because the host is on the allowlist. The check runs again on every call, so a name that later resolves outside the allowed ranges is refused.
+
+A call that arrives without a key gets `401`, whichever network it comes from.
+
 ### Troubleshooting
 
 | Symptom | Cause |
 |---|---|
 | `outbound_disabled` (404) | `A2A_OUTBOUND_ENABLED` is off |
 | `endpoint_not_found` (404) | No endpoint registered under that name — check spelling, or ask an admin |
-| `endpoint_not_https` (400) | The registered URL is `http://`. Re-register it as `https://` — Trinity refuses rather than silently upgrading, so a credential never travels in clear |
-| `endpoint_private_address` (400) | The hostname resolves inside your network |
+| `endpoint_not_https` (400) | The registered URL is `http://` and its host is not on the outbound endpoint allowlist. Re-register it as `https://` — Trinity refuses rather than silently upgrading, so a credential never travels in clear — or, for one of your own instances on a private network, ask an admin to allow its host |
+| `endpoint_private_address` (400) | The hostname resolves inside your network and is not on the outbound endpoint allowlist |
 | `card_origin_mismatch` (502) | The remote's agent card points somewhere other than the registered host. Trinity refuses: a card cannot redirect a credentialed call |
 | `endpoint_dns_failure` (400) | The hostname does not resolve. Trinity treats a DNS failure as fatal rather than retrying blindly |
 | `card_url_ambiguous` (502) | The remote's card declares a URL that doesn't unambiguously match what you registered. Register the origin, or a URL matching the card's declared `url` exactly |
@@ -469,6 +491,7 @@ Auth failures are transport-level `401`; exposure/allow-list failures are `404`/
 
 - [MCP Server](mcp-server.md) — Trinity's own inter-agent protocol, and where the Bearer key comes from
 - [Agent Network](../collaboration/agent-network.md) — agent-to-agent calls inside one Trinity instance
+- [Nevermined Payments](nevermined-payments.md) — configuring the price an inbound A2A caller pays
 
 **External references:**
 

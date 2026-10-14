@@ -1,24 +1,27 @@
 # Agent Sharing & Access
 
-Two owner-only tabs on the Agent Detail page control who can reach an agent: the **Access** tab manages *Trinity operators* (platform users — your teammates), and the **Sharing** tab manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
+Two owner-only tabs on the Agent Detail page control who can reach an agent: the **Access** tab manages the *people the agent is shared with* (they use it in the Workspace), and the **Sharing** tab manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
 
 ## Concepts
 
-- **Operator** — A Trinity platform user. Operators log into the Trinity UI and get interact-level access to agents shared with them.
+- **Operator** — A Trinity platform account with role `operator` or above. Operators log into the Trinity UI and get interact-level access to agents shared with them. A platform account with role `user` works in the [Workspace](workspace.md) only — see [Roles and Permissions](../getting-started/roles-and-permissions.md).
 - **External client** — Someone without a Trinity account who reaches the agent through a channel (Slack, Telegram, WhatsApp, a phone call) or a public link. Identified by verified email.
+- **Workspace roster** — Every email an agent is shared with can sign in to the [Workspace](workspace.md) and chat with it there. Sharing an agent to an email *is* that person's Workspace account; unsharing removes the agent from their roster.
 - **Access policy** — The per-agent Restricted/Open switch controlling whether unknown verified users may chat. See [Access Control](access-control.md) for the cross-channel verification model.
 
 ## Access Tab — Trinity Operators
 
-The **Access** tab lists platform users with access to this agent.
+The **Access** tab lists the people this agent is shared with.
 
 1. Open the agent detail page and click the **Access** tab (owner only).
-2. Enter a teammate's email and click **Add operator**. The email is also added to the platform login whitelist.
+2. Enter an email and click **Add person**. The person can sign in to the [Workspace](workspace.md) with a code emailed to them. Sharing does **not** create a platform account or add the email to the login whitelist; whether someone also gets the operator UI is their platform role, which an admin sets on the person's row here or in **Settings → Access**.
 3. Each row shows a status badge:
-   - **Active** — the email resolved to an existing Trinity account (shows username, role, and last-active time).
-   - **Pending** — no account yet ("Invited — no account yet"); the entry activates automatically once the person logs in for the first time.
-4. Each operator row also carries a **proactive-messaging toggle** — "allow this operator to receive proactive DMs from the agent." It is off by default; turn it on per operator to let the agent message that person unprompted. This is a **per-recipient** DM permission (`PUT /api/agents/{name}/shares/proactive`, body `{email, allow_proactive}`).
+   - **Active** — the email resolved to an existing Trinity account (shows username, role, and last-active time, or "never signed in"). An admin may see a role select on the row instead of the role label: the role applies on every agent, every change asks for confirmation, and an admin's own row stays read-only.
+   - **Pending** — no platform account ("No platform account — uses the Workspace"). Where the row offers **Give a platform account**, an admin can create the account right away (after a confirmation; as `user` — Workspace only — unless an earlier allow-list entry set another role), so the person can be assigned to the agent before they first sign in; they sign in at `/login`. Give accounts to colleagues — a platform account sees the team's view of every agent shared with its address — and keep outside clients on a plain share.
+4. Each operator row also carries a **proactive-messaging toggle** — "allow this operator to receive proactive DMs from the agent." It is off by default; turn it on per operator to let the agent message that person unprompted. This is a **per-recipient** DM permission (`PUT /api/agents/{name}/shares/proactive`, body `{email, allow_proactive}`). Trinity records consent in three states — *not asked* (every new share), *declined* and *consented* — and only *consented* lets the agent send; the other two are both a no, kept apart so you can see whether anyone ever asked.
 5. Click **Remove** on a row to revoke access.
+
+On instances licensed for it, the Access tab also shows a **People this agent serves** section above this list: the agent's primary person, its other stakeholders, and the seat the agent holds or serves. Assigning someone there also shares the agent with them, because an assignment by itself grants no access; a row for someone the agent is not shared with carries a warning and **Share with them**. Without the entitlement the section is absent, and non-admins see it read-only.
 
 The per-recipient DM toggle above is complemented on the channel side by the per-channel Slack consent — see [Slack Integration](../integrations/slack-integration.md). Platform-wide proactive-messaging rate caps are admin-configurable in **Settings**.
 
@@ -27,8 +30,16 @@ The per-recipient DM toggle above is complemented on the channel side by the per
 | Level | Permissions |
 |-------|-------------|
 | **Owner** | Full control -- create, delete, configure, share, manage credentials and schedules. |
-| **Shared operator** | Interact only -- chat, run tasks, view files and logs. Cannot modify config, credentials, or permissions. |
+| **Shared operator** | Interact only -- chat, run tasks, view files (except credential files) and logs. Cannot modify config, credentials, or permissions. |
 | **Admin** | Full access to all agents regardless of ownership. |
+
+### What someone you share an agent with can do
+
+- Chat with the agent and run its tasks. The agent keeps using its credentials while it works for them.
+- Open, preview and download the agent's files, **except credential files**.
+- They cannot open or download credential files: `.env`, `.mcp.json`, SSH and cloud credentials, key and certificate files (`*.key`, `*.pem`, `*.p12`, `*.pfx`) and the agent runtimes' login files. Trying shows a message saying so.
+- To see or change a credential, they ask the agent's owner or an admin. Managing credentials (set, inject, import, export) is for the owner or an admin.
+- If opening the agent's files shows "This agent needs a restart to apply an update", they ask the agent's owner or an admin to stop and start it in Trinity.
 
 Enforcement notes:
 
@@ -68,6 +79,15 @@ Compact status rows for **Slack**, **Telegram**, **WhatsApp**, and **Voice calls
 
 Each channel dialog also carries that channel's **voice-replies allow flag** — replies are text by default and the agent opts individual replies into voice per message. See [Voice Replies](../advanced/voice-replies.md).
 
+### Portal clients
+
+A list of the people you've shared this agent with, as Workspace (client portal) sign-ins: each row shows when they were last seen, whether they are blocked, and when their sessions were last ended. **Refresh** reloads it.
+
+- **Log out** — ends this person's live Workspace sessions everywhere. One sign-in covers every agent shared with them, so there is no per-agent session to end. They can sign straight back in. Any owner of an agent shared with them can do this.
+- **Block** / **Unblock** — admins only. A block keeps the person out of the whole platform until an admin lifts it, and ends their sessions; their chat history and memory are kept. To remove someone from *this agent only*, unshare them instead.
+
+Both actions are recorded in the audit log, and an agent's own API key cannot perform them.
+
 ### Client roster — who's reaching this agent
 
 A read-only table of external channel users who have messaged the agent, aggregated across Telegram and WhatsApp (more channels to follow): client name, channel, verified email, message count, and last-active time, ordered by most recent. The roster is database-sourced, so it renders even when the agent container is stopped.
@@ -85,10 +105,13 @@ Two collapsible panels for distributing the agent's output rather than granting 
 |----------|--------|-------------|
 | `/api/agents/{name}/share` | POST | Share agent with an email address |
 | `/api/agents/{name}/share/{email}` | DELETE | Remove a share |
-| `/api/agents/{name}/shares` | GET | List all shares for an agent |
-| `/api/agents/{name}/access` | GET | Operator roster (active + pending) for the Access tab |
+| `/api/agents/{name}/shares` | GET | List all shares for an agent; each carries `proactive_consent` (`not_asked`, `declined` or `consented`) |
+| `/api/agents/{name}/access` | GET | Roster of people the agent is shared with (active + pending) for the Access tab, with each row's `proactive_consent` |
 | `/api/agents/{name}/shares/proactive` | GET / PUT | Per-recipient proactive-DM permission; PUT body `{email, allow_proactive}` (owner/admin) |
 | `/api/agents/{name}/clients` | GET | External client roster (owner-only, read-only) |
+| `/api/enterprise/client-portal/agents/{name}/clients` | GET | Portal clients with last-seen, block and session state (owner/admin; the prefix is historical) |
+| `/api/enterprise/client-portal/agents/{name}/clients/{email}/logout` | POST | End the client's live Workspace sessions (owner/admin, people only) |
+| `/api/enterprise/client-portal/agents/{name}/clients/{email}/block` | POST / DELETE | Block (optional `{reason}`) or unblock the client platform-wide (admin, people only) |
 | `/api/agents/{name}/public-prompt` | GET / PUT | Public/channel-only custom instructions (owner-only, ≤4000 chars; empty clears) |
 | `/api/agents/{name}/public-channel-model` | GET / PUT | Public-channel model override (owner-only; null clears to platform default) |
 
@@ -97,6 +120,7 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 ## See Also
 
 - [Access Control](access-control.md) — cross-channel email verification and access requests
+- [Workspace](workspace.md) — where the people you share an agent with chat with it
 - [Public Links](public-links.md) — shareable chat URLs
 - [Voice Replies](../advanced/voice-replies.md) — spoken replies on Slack, Telegram, and WhatsApp
 - [MCP Server](../integrations/mcp-server.md) — exposing an agent as a dedicated MCP tool

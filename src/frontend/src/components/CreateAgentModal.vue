@@ -19,18 +19,24 @@
 
             <div class="space-y-4">
               <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Slug / Identifier</label>
-                <input
+                <BaseInput
+                  id="agent-name"
                   v-model="form.name"
-                  type="text"
+                  label="Slug / Identifier"
                   required
-                  class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm px-3 py-2 focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
                   placeholder="my-agent"
+                  :error="nameError"
+                  :aria-describedby="sanitizedName ? 'agent-name-help agent-name-preview' : 'agent-name-help'"
                 />
-                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                <p id="agent-name-help" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                   The permanent identifier used in URLs, containers, and API keys.
-                  Lowercase, no spaces — it can't be changed casually later.
+                  Check the identifier below before creating your agent.
                 </p>
+                <div class="mt-1 min-h-[20px]">
+                  <p v-if="sanitizedName" id="agent-name-preview" aria-live="polite" class="text-xs text-gray-600 dark:text-gray-300">
+                    Identifier after formatting: <code class="break-all">{{ sanitizedName }}</code>
+                  </p>
+                </div>
               </div>
 
               <!-- ent#1640: optional human-facing display name, set at creation. -->
@@ -252,22 +258,14 @@
                     />
                     <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Doesn't need to exist — it will be created for you. (If you pre-create it, leave it empty: no README.)</p>
                   </div>
-                  <div>
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">GitHub token <span class="text-status-danger-500">*</span></label>
-                    <input
-                      v-model="forkPat"
-                      type="password"
-                      autocomplete="off"
-                      class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm px-3 py-2 focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
-                      placeholder="ghp_… or github_pat_…"
-                    />
+                  <SavedGithubTokenField v-model="forkPat" v-model:overriding="forkPatOverriding" :has-saved="hasSavedGithubPat" input-id="fork-github-token">
                     <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                       <span class="font-medium">Recommended:</span> a fine-grained token scoped to just this repository
                       (Administration + Contents write). A classic PAT with <code>repo</code> scope also works but grants
                       access to <em>all</em> your repositories — and the agent can read its own git credential, so prefer
                       the narrow token. Stored encrypted as this agent's git identity.
                     </p>
-                  </div>
+                  </SavedGithubTokenField>
                   <div>
                     <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Visibility</label>
                     <div class="mt-1 flex gap-4">
@@ -310,17 +308,15 @@
           </div>
 
           <div class="bg-gray-50 dark:bg-gray-900 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
-            <button
+            <BaseButton
               type="submit"
-              :disabled="loading"
-              class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-action-primary-600 text-base font-medium text-white hover:bg-action-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800 focus:ring-action-primary-500 sm:ml-3 sm:w-auto sm:text-sm disabled:opacity-50"
+              :disabled="!sanitizedName"
+              :loading="loading"
+              :loading-label="showForkFields ? 'Creating your repository…' : 'Creating...'"
+              class="w-full sm:ml-3 sm:w-auto"
             >
-              <svg v-if="loading" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-              {{ loading ? (showForkFields ? 'Creating your repository…' : 'Creating...') : 'Create Agent' }}
-            </button>
+              Create Agent
+            </BaseButton>
             <button
               type="button"
               @click="$emit('close')"
@@ -349,6 +345,10 @@ import api from '../api'
 import ImportIntentPicker from './ImportIntentPicker.vue'
 import AgentKindPicker from './AgentKindPicker.vue'
 import ImportValidationStep from './ImportValidationStep.vue'
+import SavedGithubTokenField from './SavedGithubTokenField.vue'
+import { useAuthStore } from '../stores/auth'
+import BaseInput from './base/BaseInput.vue'
+import BaseButton from './base/BaseButton.vue'
 
 const props = defineProps({
   initialTemplate: {
@@ -365,6 +365,19 @@ const form = reactive({
   display_label: '',   // ent#1640: optional human-facing display name
   template: props.initialTemplate || ''
 })
+
+// Keep the preview in sync with utils/helpers.py::sanitize_agent_name.
+// The API still receives the original input and owns authoritative sanitization.
+const sanitizedName = computed(() => form.name
+  .replace(/[^a-zA-Z0-9_.-]/g, '-')
+  .replace(/^[^a-zA-Z0-9]+/, '')
+  .replace(/-+/g, '-')
+  .replace(/-+$/, '')
+  .toLowerCase())
+const nameSubmitted = ref(false)
+const nameError = computed(() => !sanitizedName.value && (form.name || nameSubmitted.value)
+  ? 'Enter a name with at least one ASCII letter or number (a-z, 0-9), for example my-agent.'
+  : '')
 
 const githubRepoUrl = ref('')
 const githubRepoInput = ref(null)
@@ -387,6 +400,11 @@ const postCreate = ref(null)
 // Fork-to-own inputs (trinity-enterprise#93)
 const forkDestination = ref('')
 const forkPat = ref('')
+// #3164: the user's saved personal GitHub token (presence only) stands in for
+// a typed one; the field is then an optional override.
+const hasSavedGithubPat = ref(false)
+// #3164 review: an override submitted empty is an empty token, not the saved one.
+const forkPatOverriding = ref(false)
 const forkPrivate = ref(true)
 
 // Watch for initialTemplate changes (in case modal is reused)
@@ -506,6 +524,9 @@ const fetchTemplates = async () => {
 }
 
 const createAgent = async () => {
+  nameSubmitted.value = true
+  if (!sanitizedName.value) return
+
   loading.value = true
   error.value = ''
 
@@ -548,14 +569,16 @@ const createAgent = async () => {
         loading.value = false
         return
       }
-      if (!forkPat.value.trim()) {
-        error.value = 'A GitHub token is required to create the repository in your account'
+      const typedPat = forkPat.value.trim()
+      if (!typedPat && (!hasSavedGithubPat.value || forkPatOverriding.value)) {
+        error.value = 'A GitHub token is required to create the repository in your account — enter one, or save your personal token in Settings → GitHub token'
         loading.value = false
         return
       }
+      // No token in the payload → the backend uses the saved personal one.
       payload.fork_to_own = {
         destination_repo: dest,
-        github_pat: forkPat.value.trim(),
+        ...(typedPat ? { github_pat: typedPat } : {}),
         private: forkPrivate.value
       }
     }
@@ -601,5 +624,6 @@ const createAgent = async () => {
 
 onMounted(() => {
   fetchTemplates()
+  useAuthStore().fetchGithubPatStatus().then((saved) => { hasSavedGithubPat.value = saved })
 })
 </script>

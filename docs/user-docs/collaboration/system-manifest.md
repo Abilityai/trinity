@@ -81,7 +81,7 @@ Two known limits of the preview, both deliberate:
 A manifest describes:
 
 - A list of agents with name, template, resources, and configuration.
-- **Permission presets** -- one of `full-mesh` (everyone can call everyone), `orchestrator-workers` (only an agent named `orchestrator` can call the rest), `none` (isolated), or `explicit` (a custom caller-to-target matrix).
+- **Permissions** -- either a `preset:` (`full-mesh`: everyone can call everyone; `orchestrator-workers`: only an agent named `orchestrator` can call the rest; `none`: isolated) or an `explicit:` map of each caller to the agents it may call. Setting both is an error.
 - Shared folder configuration for inter-agent file access.
 - Schedule definitions for autonomous execution.
 - Auto-start settings controlling which agents launch on deploy.

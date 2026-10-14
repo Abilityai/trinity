@@ -82,9 +82,14 @@ class TestGetFoldersConfig:
         assert isinstance(data["expose_enabled"], bool)
         assert isinstance(data["consume_enabled"], bool)
 
-    def test_folders_default_values(self, api_client: TrinityApiClient, created_agent: dict):
-        """New agents have default folder config (both disabled)."""
-        agent_name = created_agent["name"]
+    def test_folders_default_values(self, api_client: TrinityApiClient, isolated_agent: dict):
+        """New agents have default folder config (both disabled).
+
+        Uses its own fresh agent: the module-scoped `created_agent` is mutated by
+        TestUpdateFoldersConfig, so under a shuffled order (pytest-randomly) it
+        is no longer "new" when this runs.
+        """
+        agent_name = isolated_agent["name"]
         response = api_client.get(f"/api/agents/{agent_name}/folders")
 
         assert_status(response, 200)

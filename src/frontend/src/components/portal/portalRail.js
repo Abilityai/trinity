@@ -93,7 +93,14 @@ export const RAIL_DEFAULT_TAB = 'work'
  * docks later, per #472. Loops, Canvas and Files are slice 2 — they are named
  * here so the order is a contract and not a side effect of registration order.
  */
-export const RAIL_TAB_ORDER = Object.freeze(['work', 'loops', 'canvas', 'files', 'projects', 'info'])
+// ent#892 (operator, 2026-10-13) — what the agent IS first, then what it has
+// made, then what it needs from you, then what it is running: Info, Canvas,
+// Files, Projects, Asks, Work, Loops. ent#836 had pinned Asks last because it
+// came and went with data; it is always present now (an empty state when
+// nothing waits), so no tab moves when asks arrive or clear and its place can
+// follow the reading order instead. The default TAB is unchanged (Work,
+// `RAIL_DEFAULT_TAB`): order is where a tab sits, not which one opens.
+export const RAIL_TAB_ORDER = Object.freeze(['info', 'canvas', 'files', 'projects', 'asks', 'work', 'loops'])
 
 /**
  * The registry. Slice 1 (ent#474) docked ONE tab — Work (#457's Activity),
@@ -235,6 +242,39 @@ export const RAIL_TABS = Object.freeze([
     signal: RAIL_SIGNAL_UPDATED,
     icon: 'info',
     empty: null,
+  }),
+  // ent#836 — Asks: a door from the agent's page into the Inbox. Since the
+  // 2026-09-30 ruling on ent#610 an agent's asks live in the Inbox filtered to
+  // it, and a background ask shows ONLY there — so from the chat there was
+  // nothing to click. This tab lists the agent's open asks, one line each, in
+  // exactly the Inbox's Action order narrowed to the participants, and each
+  // row opens that ask in the Inbox. It answers nothing: the Inbox is the one
+  // answer surface.
+  //
+  // AGENT door (asks are addressed to clients and platform users alike). ent#892
+  // (operator ruling 2026-10-13) removed ent#836's PRESENCE rule: the tab is
+  // always there, like every other tab, and with nothing waiting it says so —
+  // the empty state below, the same shape as Loops, Canvas and Files. The
+  // signal is the "updated" dot with a note AND a count ("2 asks"), read off
+  // the same per-agent counts the sidebar's "needs you" mark reads, and drawn
+  // by the open strip as the same unfilled mark the agent row wears — so the
+  // mark appears only when an ask is waiting.
+  Object.freeze({
+    id: 'asks',
+    label: 'Asks',
+    door: RAIL_DOORS.AGENT,
+    scope: RAIL_SCOPE_PARTICIPANTS,
+    signal: RAIL_SIGNAL_UPDATED,
+    icon: 'asks',
+    empty: Object.freeze({
+      title: 'No asks',
+      body: (participants) => {
+        const who = whoIs(participants)
+        return `Nothing from ${who} is waiting on you. When it needs your answer or approval, the ask shows up here and in the Inbox.`
+      },
+      action: 'Open the Inbox',
+      event: 'open-inbox',
+    }),
   }),
 ])
 
@@ -379,6 +419,9 @@ export function signalFor(signals, tab) {
   // ("2 suggestions"). Carried only when present, so every existing signal
   // keeps its exact shape.
   if (typeof raw.note === 'string' && raw.note) out.note = raw.note
+  // ent#836: an optional COUNT the open strip draws as a badge (the Asks
+  // tab's "2"). Positive integers only; carried only when present, like `note`.
+  if (Number.isInteger(raw.count) && raw.count > 0) out.count = raw.count
   return out
 }
 

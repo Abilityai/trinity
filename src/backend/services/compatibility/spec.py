@@ -243,6 +243,10 @@ CHECKS: List[CheckDef] = [
     _c("X-007", "soft", "static", "X", "scheduled messages match existing skills/commands", claude_only=True),
     _c("X-008", "info", "ai", "X", "resource allocation is appropriate for the workload",
        prompt="Given the agent's purpose and use cases, is the cpu/memory allocation appropriate? FAIL obvious mismatches (e.g. video processing with 512m, or trivial Q&A with 16 cpu)."),
+    # ent#730. SOFT: a selector that can never match refuses ONE tile by name;
+    # the agent itself runs fine. Its point is that the agent can see it at all
+    # (the refusal otherwise renders only in the browser).
+    _c("X-009", "soft", "static", "X", "dashboard metric: is text and dims: selectors name declared dimensions of a bound metric"),
     # --- I: Composability --------------------------------------------------
     _c("I-001", "soft", "ai", "I", "callable agents declare their output format",
        prompt="If this agent is intended to be called by other agents (references Trinity MCP, agent permissions, or describes itself as a worker/specialist), does it document the format/schema of its output? FAIL if it describes only what it does, not what it returns. PASS if not a callable agent."),

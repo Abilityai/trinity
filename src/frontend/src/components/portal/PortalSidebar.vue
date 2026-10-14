@@ -20,6 +20,20 @@
            route watcher is what closes the drawer everywhere else. -->
       <PortalInboxRow :needs="inbox.needs" :came="inbox.came" @click="$emit('open-inbox')" />
 
+      <!-- ent#661: the person's Projects list — shown only when the roster
+           says this principal has the capability (internal-only).
+           #3695 (operator ruling 2026-10-13): it sits directly under Inbox —
+           the two navigation DESTINATIONS together at the top, then the two
+           ACTIONS on the chat list (New chat, Search). Between New chat and
+           Search it read as a chat-list control rather than a place to go.
+           #3672 (operator ruling): NO placeholder holds its slot while the
+           roster is out. Most installs (every OSS one) are not entitled to
+           Projects, so a held slot appeared and then vanished there — a layout
+           shift on every load to spare a late pop-in on the few entitled
+           installs. The link renders once the roster says `projectsAvailable`;
+           without it Inbox is followed by New chat with nothing between. -->
+      <PortalSidebarProjectsLink v-if="projectsAvailable" :active="projectsActive" @open="$emit('open-projects')" />
+
       <!-- New chat -->
       <!-- ent#357: disabled with an empty roster. `newChat()` only resets
            conversation state, so with no agent to chat with every branch of it
@@ -35,20 +49,34 @@
         New chat
       </button>
 
-      <!-- ent#661: the person's Projects list — shown only when the roster
-           says this principal has the capability (internal-only). -->
-      <PortalSidebarProjectsLink v-if="projectsAvailable" :active="projectsActive" @open="$emit('open-projects')" />
-
       <!-- Search -->
       <div class="relative">
         <svg class="w-4 h-4 text-gray-400 absolute left-3 top-2.5 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" /></svg>
+        <!-- ent#621 (follow-up): `⌘/` lands here (`focusSearch`, exposed for
+             the shell). The chord is shown three ways — `title`,
+             `aria-keyshortcuts`, and the key cap below — all read from the map. -->
         <input
+          ref="searchInput"
           :value="search"
           type="search"
+          :title="`${SEARCH_PLACEHOLDER} (${SEARCH_KEY_HINT})`"
+          :aria-keyshortcuts="SEARCH_KEY_SHORTCUTS"
           :placeholder="SEARCH_PLACEHOLDER"
           class="w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm pl-9 pr-3 py-2 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none"
           @input="$emit('update:search', $event.target.value)"
+          @focus="searchFocused = true"
+          @blur="searchFocused = false"
         />
+        <!-- Only while the field is empty and unfocused: it sits where the
+             field's own clear control appears, and a hint over what you are
+             typing is worse than none. Hidden below `sm`, where this sidebar is
+             the phone drawer and there is no keyboard to press it on. -->
+        <PortalKeyCap
+          v-if="!search && !searchFocused"
+          class="hidden sm:block absolute right-2.5 top-2 pointer-events-none"
+          data-testid="portal-sidebar-search-key"
+          aria-hidden="true"
+        >{{ SEARCH_KEY_HINT }}</PortalKeyCap>
       </div>
     </div>
 
@@ -72,20 +100,17 @@
 
         <!-- #2159: the roster load is the first thing that happens after
              sign-in and it is not instant on a large fleet. Without this the
-             block renders empty and the page reads as hung, not loading. Three
-             skeleton rows: enough to say "rows are coming", not so many that a
-             small roster jumps when they are replaced. -->
-        <div v-if="loadingRoster && !roster.length" class="px-2 py-1.5" aria-busy="true">
-          <div v-for="i in 3" :key="i" class="flex items-center gap-2.5 py-2 animate-pulse">
-            <div class="w-[26px] h-[26px] rounded-full bg-gray-200 dark:bg-gray-800 shrink-0"></div>
-            <div class="min-w-0 flex-1 space-y-1.5">
-              <div class="h-3 w-1/2 rounded bg-gray-200 dark:bg-gray-800"></div>
-              <div class="h-2.5 w-1/3 rounded bg-gray-100 dark:bg-gray-800/60"></div>
-            </div>
-          </div>
-          <span class="sr-only">Loading your agents…</span>
-        </div>
+             block renders empty and the page reads as hung, not loading.
+             #3672: held until the WHOLE list has a verdict (`settled`), not
+             just the roster — the rows re-order and grow a subtitle when the
+             chats land, and an asked agent joins past the collapse limit when
+             the asks land, so rendering on the roster alone made them jump.
+             The retry arm keeps #2159's "no roster on screen" case. -->
+        <PortalSkeleton v-if="!settled || (loadingRoster && !roster.length)" variant="sidebar-agents" />
 
+        <!-- #3672: everything the section shows once settled, in ONE wrapper
+             with the one fade — so the rows arrive together, never one by one. -->
+        <div v-else class="ws-fade-in" data-testid="sidebar-agents-content">
         <!-- ent#621: the row says it is the one you are in — by click as well as
              by key. `aria-current` rather than `aria-selected`: these are
              navigation destinations, not options in a listbox. -->
@@ -175,9 +200,17 @@
                agent row's "needs you" mark — the same feed (`openAsks`) and
                the same hover words as the pinned Inbox row's, so the two read
                as one fact. -->
+          <!-- trinity-enterprise#836: an UNFILLED orange circle — a ring, the
+               count in urgent ink at the AA tier (700 light / 400 dark) — not
+               the filled pill (operator ask, 2026-10-07: "more alarming than it
+               needs to be"). Still a different SHAPE from the filled unread
+               pill beside it (principle 24), still counted, still named. The
+               pinned Inbox row and the Inbox's Action counter keep their filled
+               700 pills; the rail's Asks tab wears this same recipe
+               (`OverflowTabs` `urgent-outline`). -->
           <span
             v-if="askCountFor(a.name)"
-            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-700 text-white text-[11px] font-semibold flex items-center justify-center"
+            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full ring-1 ring-inset ring-status-urgent-600 dark:ring-status-urgent-400 text-status-urgent-700 dark:text-status-urgent-400 text-[11px] font-semibold tabular-nums flex items-center justify-center"
             :title="askBadgeTitle(askCountFor(a.name))"
             aria-hidden="true"
             data-testid="agent-ask-count"
@@ -228,13 +261,14 @@
              depends on who is looking — a platform user can go make an agent,
              an external client can only ask whoever invited them. -->
         <div v-if="!roster.length && !loadingRoster" class="px-2 py-3 text-xs text-gray-500 dark:text-gray-400">
-          <template v-if="isPlatformSession">
+          <template v-if="isPlatformSession && !workspaceOnly">
             No agents yet.
             <a href="/" class="text-action-primary-600 hover:underline">Create one →</a>
           </template>
           <template v-else>
             No agents shared with you yet — ask whoever invited you to share one.
           </template>
+        </div>
         </div>
       </section>
 
@@ -276,7 +310,25 @@
         </button>
       </div>
 
-      <template v-else>
+      <!-- #3672: skeleton chat rows until the list's one verdict, then the
+           whole list in one pass with the same fade as the agents above. -->
+      <PortalSkeleton v-else-if="!settled" variant="sidebar-chats" />
+
+      <div v-else class="ws-fade-in" data-testid="sidebar-chats-content">
+        <!-- A failed chat-list read is said, never shown as "No chats yet"
+             (principle 15, #1926): the store keeps the last good list, which
+             on a failed FIRST read is an empty one. With rows on screen it is
+             the stale banner; with none, the same banner says nothing loaded. -->
+        <InlineError
+          v-if="threadsFailed && !failedDismissed"
+          class="mt-3"
+          :message="threadsFailedText"
+          retryable
+          data-testid="sidebar-chats-failed"
+          @retry="$emit('retry-threads')"
+          @dismiss="failedDismissed = true"
+        />
+
         <!-- Starred first, and LIFTED OUT of the date groups below (a starred
              chat appears exactly once — see partitionStarred). -->
         <div v-if="starred.length" class="mt-3">
@@ -306,7 +358,49 @@
             @toggle-star="$emit('toggle-star', t)"
           />
         </div>
-      </template>
+
+        <!-- ent#841: closed (archived) chats — nothing is deleted, and this is
+             where they are found again. Collapsed by default: they are out of
+             the way on purpose. Opening one reopens it as an active chat. -->
+        <div v-if="archived.length" class="mt-3" data-testid="sidebar-archived">
+          <button
+            type="button"
+            class="w-full flex items-center gap-1 px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide"
+            :class="META_INK"
+            :aria-expanded="archivedOpen"
+            data-testid="sidebar-archived-toggle"
+            @click="archivedOpen = !archivedOpen"
+          >
+            <svg class="w-3 h-3 transition-transform" :class="archivedOpen ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7" /></svg>
+            Archived · {{ archived.length }}
+          </button>
+          <template v-if="archivedOpen">
+            <ChatRow
+              v-for="t in archived"
+              :key="rowKey(t)"
+              :thread="t"
+              :active="isActive(t)"
+              :avatar-for="avatarFor"
+              :rename="rename"
+              @open="$emit('open-thread', t)"
+              @toggle-star="$emit('toggle-star', t)"
+            />
+          </template>
+        </div>
+
+        <!-- #3672: a list that turns out empty keeps a stable empty state
+             rather than collapsing to nothing (principle 16: it names the next
+             step). Not with an empty roster: the agents block above already
+             says the truer sentence, and saying it twice is noise (ent#402).
+             Only when the list is TRUSTED: an empty list from a failed read is
+             not "no chats" (the banner above says what happened). -->
+        <div
+          v-if="!threadsFailed && !activeThreads.length && !archived.length && roster.length"
+          class="mt-3 px-2 py-3 text-xs"
+          :class="META_INK"
+          data-testid="sidebar-chats-empty"
+        >No chats yet — open an agent above, or start a new chat.</div>
+      </div>
     </div>
 
     <!-- Footer: signed-in email + sign out -->
@@ -323,7 +417,7 @@
       </div>
       <!-- ent#621: the keys are only discoverable if something shows them, and
            a key chord cannot show itself. Mouse and touch reach the same list
-           the `⌘/` chord opens (the ent#261 `<kbd>` precedent). -->
+           the `⌥/` chord opens (the ent#261 `<kbd>` precedent). -->
       <button
         type="button"
         :class="FOOTER_BTN"
@@ -352,9 +446,12 @@
 import PortalSidebarProjectsLink from './projects/PortalSidebarProjectsLink.vue'
 import { computed, ref, watch } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalKeyCap from './PortalKeyCap.vue'
 import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
 import PortalInboxRow from './PortalInboxRow.vue'
+import PortalSkeleton from './PortalSkeleton.vue'
+import InlineError from '@/components/InlineError.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import DraftMark from '@/components/base/DraftMark.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
@@ -376,6 +473,7 @@ import { inboxCounts } from './portalInbox'
 // the day the map changes.
 import { keyHint, keyShortcutsFor, hostPlatform } from './portalKeymap'
 import { capCount } from '@/utils/tabTitle'
+import { staleBannerMessage } from '@/utils/loadingState'
 
 // ent#610 §3g B7a: the sidebar's meta ink, ONE string for every meta text
 // site. Bare gray-400 ink is 2.54:1 on white ("gray-400 is not text") and
@@ -402,11 +500,22 @@ const props = defineProps({
   // active row class, the auto-expand below, and `visibleAgentRows`' `keep`.
   activeAgentName: { type: String, default: null },
   isPlatformSession: { type: Boolean, default: false },
+  // trinity-enterprise#837: a `user` cannot make an agent, so the empty roster
+  // asks for a share instead of pointing at the operator UI.
+  workspaceOnly: { type: Boolean, default: false },
   // ent#661 — the roster's capability, and whether a Projects page is on screen.
   projectsAvailable: { type: Boolean, default: false },
   projectsActive: { type: Boolean, default: false },
   // #2159: distinguishes "still loading" from "loaded, and you have none".
   loadingRoster: { type: Boolean, default: false },
+  // #3672: the list's ONE first-load verdict (`sidebarSettled`, latched by the
+  // shell). False → both sections hold skeleton rows. Defaults to true so a
+  // caller that never loads (a test, a static mount) renders as before.
+  settled: { type: Boolean, default: true },
+  // The last chat-list read failed (`store.sessionsFailed`). `threads` is then
+  // the last good list — empty on a failed first read — so the empty copy is
+  // withheld and a banner says the read failed instead.
+  threadsFailed: { type: Boolean, default: false },
   search: { type: String, default: '' },
   searching: { type: Boolean, default: false },
   searchResults: { type: Array, default: () => [] },
@@ -416,7 +525,7 @@ const props = defineProps({
 })
 const emit = defineEmits([
   'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star', 'open-inbox',
-  'update:search', 'sign-out', 'open-projects', 'open-keys',
+  'update:search', 'sign-out', 'open-projects', 'open-keys', 'retry-threads',
 ])
 
 const isSearching = computed(() => (props.search || '').trim().length >= 2)
@@ -431,11 +540,47 @@ const AGENT_KEY_HINT = keyHint(['agent-prev', 'agent-next'], KEY_PLATFORM)
 const AGENT_KEY_SHORTCUTS = keyShortcutsFor(['agent-prev', 'agent-next'], KEY_PLATFORM)
 const KEY_LIST_HINT = keyHint('key-list', KEY_PLATFORM)
 const KEY_LIST_SHORTCUTS = keyShortcutsFor('key-list', KEY_PLATFORM)
+const SEARCH_KEY_HINT = keyHint('search-focus', KEY_PLATFORM)
+const SEARCH_KEY_SHORTCUTS = keyShortcutsFor('search-focus', KEY_PLATFORM)
+
+// ent#621 (follow-up) — the search key's two questions, answered by the
+// instance that owns the field (the shell has two sidebars and asks the one on
+// screen). `select()` so a second search replaces the first without a
+// backspace; `searchHasFocus` is what lets a repeat press hand the caret back.
+const searchInput = ref(null)
+const searchFocused = ref(false)
+function focusSearch() {
+  const el = searchInput.value
+  if (!el) return false
+  el.focus()
+  el.select?.()
+  return true
+}
+function searchHasFocus() {
+  return !!searchInput.value && typeof document !== 'undefined' && document.activeElement === searchInput.value
+}
+defineExpose({ focusSearch, searchHasFocus })
 
 // #2258: the accessible name of the footer button, per principal kind.
 const signOutLabel = computed(() => signOutLabelFor(props.isPlatformSession))
 
-const split = computed(() => partitionStarred(props.threads))
+// ent#841: an archived chat is out of the active list — Starred included (a
+// closed starred chat keeps its star, and gets its pinned place back when it is
+// reopened) — and is listed once, under Archived, newest closed first.
+const activeThreads = computed(() => props.threads.filter((t) => !t.archived_at))
+const archived = computed(() => props.threads
+  .filter((t) => t.archived_at)
+  .sort((a, b) => String(b.archived_at).localeCompare(String(a.archived_at))))
+const archivedOpen = ref(false)
+
+// The failed-read banner: dismissible, and back on the NEXT failure (a
+// recovered read clears it on its own, since `threadsFailed` drops).
+const failedDismissed = ref(false)
+watch(() => props.threadsFailed, (failed) => { if (failed) failedDismissed.value = false })
+const threadsFailedText = computed(() => (props.threads.length
+  ? staleBannerMessage('your chats', null)
+  : "Couldn't load your chats. They'll appear here once the list loads."))
+const split = computed(() => partitionStarred(activeThreads.value))
 const starred = computed(() => split.value.starred)
 const grouped = computed(() => groupThreadsByDate(split.value.rest))
 
@@ -447,7 +592,8 @@ const waitingFor = (name) => waiting.value[name] || 0
 const asksStore = useClientPortalStore()
 // trinity-enterprise#610 (D13): the pinned Inbox row's two counts — `needs` is
 // `askCount` (pending asks), `came` is `totalUnread` over these threads.
-const inbox = computed(() => inboxCounts(props.threads, asksStore.openAsks))
+// trinity-enterprise#631: plus the tags not yet opened.
+const inbox = computed(() => inboxCounts(props.threads, asksStore.openAsks, asksStore.mentions))
 // #2424: the ask twin of `waiting`. Kept a separate map on purpose — see the
 // Inbox-row comment in the template.
 const asksPerAgent = computed(() => asksByAgent(asksStore.openAsks))

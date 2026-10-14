@@ -85,12 +85,14 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from database import db
+from db.skill_gate_requests import RAN_STATES
 from models import TaskExecutionStatus
 from services.sync_waiter import (
     signal_fan_out_batch,
     wait_for_fan_out_batch,
 )
 from services.task_execution_service import get_task_execution_service
+from services import skill_gate_service
 from services.skill_gate_errors import SkillGateError
 from db.write_params import ExecutionResult, TaskExecutionFields
 
@@ -212,8 +214,10 @@ def build_aggregate(
             task_status = "running"
         elif row.get("id") in held and held[row["id"]].get("state") in ("pending", "dispatching"):
             task_status = "pending_approval"
-        elif row.get("id") in held and held[row["id"]].get("state") == "dispatched":
-            task_status = "approved"   # it ran later, as its own execution
+        elif row.get("id") in held and held[row["id"]].get("state") in RAN_STATES:
+            # It ran later, as its own execution — and stays "approved" once
+            # that run ends (`succeeded` / `failed`, trinity#3520).
+            task_status = "approved"
         else:
             task_status = "failed"
         task_id = row.get("fan_out_task_id") or row.get("id")
@@ -521,6 +525,8 @@ class FanOutService:
                         # system_prompt reaches this subtask's executor too, so
                         # the skill gate reads it with the subtask's message.
                         request_text="\n".join(t for t in (task.message, system_prompt) if t),
+                        # trinity#3274: an approved subtask is sent the two apart.
+                        gate_replay=skill_gate_service.frozen_replay(task.message, system_prompt),
                         triggered_by="fan_out",
                         source_user_id=source_user_id,
                         source_user_email=source_user_email,

@@ -43,15 +43,17 @@ The ops agent connects to a Trinity instance via a `.env` file in its workspace.
 | `ADMIN_PASSWORD` | Required | — | Trinity admin password for API calls |
 | `MCP_API_KEY` | Optional | — | MCP API key for agent queries |
 | `ANTHROPIC_API_KEY` | Optional | — | Passed through for agent containers |
-| `TUNNEL_FRONTEND` / `TUNNEL_BACKEND` / `TUNNEL_MCP` | Optional | `13000` / `18000` / `18080` | Local ports `tunnel.sh` forwards to on a remote instance |
+| `TUNNEL_FRONTEND` / `TUNNEL_BACKEND` / `TUNNEL_MCP` | Optional | `13000` / `18000` / `18080` (`.env.example`; `tunnel.sh` falls back to `18180` for MCP when the variable is unset) | Local ports `tunnel.sh` forwards to on a remote instance |
 
 **Local mode:** Leave `SSH_HOST` empty. All commands run directly against the local Docker daemon.
 
 **Remote mode:** Set `SSH_HOST`. Commands are forwarded over SSH — no agent container is needed on the remote server.
 
+Every skill builds on `scripts/run.sh`, which runs a command locally or over SSH depending on `SSH_HOST`. Run `./scripts/status.sh` after filling in `.env` to confirm the connection works.
+
 **Hosted (pull-only) installs:** on an instance installed with `./scripts/deploy/start.sh --hosted` (prebuilt GHCR images, including both DigitalOcean paths), set `COMPOSE_FILE=docker-compose.hosted.yml`. `/update` and `update.sh` then switch to hosted mode: instead of building, they run `start.sh --hosted --unattended` on the server, which pulls the platform images and the agent base image. The release comes from `TRINITY_IMAGE_TAG` in the **server's** `.env`, so pin it there — see [Upgrading → Hosted installs](upgrading.md#hosted-pull-only-installs). Health checks, logs, restarts and backups work the same on either install.
 
-**A DigitalOcean Droplet** created by the [installer script](digitalocean.md) or the 1-Click needs `SSH_USER=root`, `TRINITY_PATH=/opt/trinity`, `COMPOSE_FILE=docker-compose.hosted.yml` and `FRONTEND_PORT=8081` (Caddy owns ports 80 and 443 there). The backend port is not reachable from outside the Droplet, so the scripts call it on the server itself over SSH, or you reach it through `tunnel.sh`.
+**A DigitalOcean Droplet** created by the [installer script](digitalocean.md) or the 1-Click needs `SSH_USER=root`, `TRINITY_PATH=/opt/trinity`, `COMPOSE_FILE=docker-compose.hosted.yml` and `FRONTEND_PORT=8081` (Caddy owns ports 80 and 443 there). The backend port is not reachable from outside the Droplet, so the scripts call it on the server itself over SSH, or you reach it through `tunnel.sh`. The AWS Marketplace AMI, the AWS and Vultr one-command installs, and the Vultr marketplace app are provisioned the same way (`/opt/trinity`, hosted compose, Caddy in front, `FRONTEND_PORT=8081`); only the SSH user differs — `ubuntu` on AWS, `root` on Vultr. These installs run on the bundled PostgreSQL and keep its `POSTGRES_PASSWORD` in `/opt/trinity/.env`, so back that file up.
 
 ## Day-to-Day Operations
 
@@ -97,10 +99,10 @@ In order, the script:
 
 1. **Checks `CREDENTIAL_ENCRYPTION_KEY`.** It stops before touching anything if the key is empty in the server's `.env`, because the backend refuses to start without it once credentials are stored encrypted.
 2. **Backs up the database** with `backup.sh`, and aborts if the backup fails.
-3. **Pulls** the latest code from `TRINITY_BRANCH` (default `main`).
+3. **Pulls** the latest code from `TRINITY_BRANCH` (default `main`). On a hosted install pinned to a release, it checks out the git tag matching the server's `TRINITY_IMAGE_TAG` instead, so the compose file and `config/` match the images. Marketplace and one-command installs are single-tag clones, where a branch pull would not upgrade anything.
 4. **Updates the containers.** On a source-built install it rebuilds the platform images (`backend`, `frontend`, `mcp-server`, `scheduler`) and runs `docker compose up -d`. On a hosted install it runs `start.sh --hosted --unattended`.
 5. **Sweeps agent restart policies.** Agent containers created by older releases are moved to `unless-stopped`, so they come back after a host reboot. A stopped agent stays stopped.
-6. **Verifies.** It checks backend and scheduler health, and whether the running `version` matches the image it runs in, so a stale platform image is called out rather than missed. It also warns if the PostgreSQL migration history has more than one head, which stops schema migrations from applying. Finally, it reads the backend's report on moving GitHub tokens out of agents' git remotes. If any remote was rewritten, it reminds you to rotate the platform GitHub token, and it names any agent the cleanup could not finish. See [Upgrading → GitHub token out of agent remotes](upgrading.md#github-token-out-of-agent-remotes-automatic-then-rotate).
+6. **Verifies.** It checks backend and scheduler health, and whether the running `version` matches the image it runs in, so a stale platform image is called out rather than missed. It prints which database the backend runs on, and on a hosted install it flags an existing SQLite file with no `DATABASE_URL` line in `.env`, which would select the empty bundled PostgreSQL. It also warns if the PostgreSQL migration history has more than one head, which stops schema migrations from applying. Finally, it reads the backend's report on moving GitHub tokens out of agents' git remotes. If any remote was rewritten, it reminds you to rotate the platform GitHub token, and it names any agent the cleanup could not finish. See [Upgrading → GitHub token out of agent remotes](upgrading.md#github-token-out-of-agent-remotes-automatic-then-rotate).
 
 It does **not** rebuild the agent base image on a source-built install. That image changes rarely, and rebuilding it forces every agent to be re-deployed. The script tells you when the pulled range touched it, or on a hosted install that a new one was pulled. Agents adopt a new base image on a cold stop and start, and `/rebuild-agent` rolls it out to agents.
 
@@ -151,13 +153,13 @@ If an update breaks the instance:
 ./scripts/restart.sh
 ```
 
-On a **hosted** install there is nothing to rebuild. Set `TRINITY_IMAGE_TAG` in the server's `.env` back to the previous release and re-run `start.sh --hosted`, which also pulls that release's agent base image.
+On a **hosted** install there is nothing to rebuild. Set `TRINITY_IMAGE_TAG` in the server's `.env` back to the previous release, check out the matching tag, and re-run `start.sh --hosted`, which also pulls that release's agent base image. An install on the bundled PostgreSQL cannot roll back to v0.9.5 or earlier — see [Upgrading → Rollback](upgrading.md#rollback).
 
 **Rolling back to a release before v0.9.5 needs the pre-update database.** v0.9.5 encrypts the credentials entered in Settings and deletes their plaintext copies, and older releases read only the plaintext. Restore the backup taken before the update (the `/update` backup, or the platform's own `pre-migration-*.db` copy), or re-enter those credentials in Settings after the rollback. `/rollback` takes the backup file as its second argument.
 
 ## Skills
 
-Open the repo in Claude Code and use the slash commands it ships with:
+Open the repo in Claude Code and use the slash commands it ships with. The repo's `CLAUDE.md` is the agent's system prompt, carrying the runbook knowledge the skills rely on. Day to day you mostly need four: `/status`, `/diagnose`, `/update`, and `/rollback`.
 
 | Skill | What it does |
 |-------|-------------|
@@ -171,8 +173,8 @@ Open the repo in Claude Code and use the slash commands it ships with:
 | `/telemetry` | CPU, memory, disk, container resource stats |
 | `/rollback [commit] [backup]` | Roll back to a previous commit, optionally restoring a DB backup |
 | `/cleanup [--execute]` | Prune Docker images, build cache, old backups |
-| `/migrate-to-postgres` | Migrate the database from SQLite to PostgreSQL — validate in parallel, then cut over; one-line rollback |
-| `/provision [provider]` | Step-by-step provisioning for Hetzner, GCP, AWS, DigitalOcean or localhost; for DigitalOcean it offers the one-command installer first |
+| `/migrate-to-postgres` | Migrate the database from SQLite to PostgreSQL — validate in parallel, then cut over; one-line rollback. SQLite reached end of support on 2026-09-01 |
+| `/provision [provider]` | Step-by-step provisioning for Hetzner, GCP, AWS, DigitalOcean, Vultr or localhost; for DigitalOcean it offers the one-command installer first, and for AWS and Vultr it walks through the one-command `start.sh --provision` install |
 | `/sync-ops-knowledge` | Review recent Trinity changes and update the agent's own instructions |
 
 ## Minimum Server Requirements
@@ -184,7 +186,7 @@ Open the repo in Claude Code and use the slash commands it ships with:
 | Disk | 20 GB | 50 GB |
 | OS | Ubuntu 22.04+ | Ubuntu 24.04 |
 
-These are the ops repo's figures for the smallest instance it can manage. Trinity's own floor for a working fleet is **8 GB RAM** (agent containers and platform services contend below that) — see [Single-Server Deployment](single-server.md#prerequisites). Supported providers: Hetzner Cloud, GCP, AWS, DigitalOcean, any Linux VM, localhost.
+These are the ops repo's figures for the smallest instance it can manage. Trinity's own floor for a working fleet is **8 GB RAM** (agent containers and platform services contend below that) — see [Single-Server Deployment](single-server.md#prerequisites). Supported providers: Hetzner Cloud, GCP, AWS, DigitalOcean, Vultr, any Linux VM, localhost.
 
 ## See Also
 

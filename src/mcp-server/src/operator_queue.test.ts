@@ -365,7 +365,7 @@ describe("trinity-enterprise#611 ask_operator", () => {
     assert.ok(!keys.some((k) => /agent/.test(k)), `unexpected agent-shaped parameter: ${keys}`);
     assert.deepEqual(keys.sort(), [
       "context", "expires_at", "options", "priority", "proposal", "question",
-      "request_id", "supersedes_expired", "title", "to", "type",
+      "replaces", "request_id", "supersedes_expired", "title", "to", "type",
     ]);
   });
 
@@ -503,5 +503,53 @@ describe("#3243 atomic asks", () => {
     assert.equal(out.success, false);
     assert.equal(out.code, "option_too_long");
     assert.equal(out.limit, 60);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3247 — replace a pending ask instead of re-asking it.
+// ---------------------------------------------------------------------------
+
+describe("#3247 ask_operator replaces", () => {
+  const tools = createOperatorQueueTools({} as unknown as TrinityClient, false);
+
+  it("forwards replaces to the backend as a declared field", async () => {
+    const { fake, calls } = raisingClient();
+    const body = { ...ASK, request_id: "deploy-2", replaces: "deploy-1" };
+    await makeAskOperator(fake).execute(body as any, agentCtx("self"));
+    assert.deepEqual(calls, [["self", body]]);
+  });
+
+  for (const [status, detail] of [
+    [409, { code: "replaces_ended", message: "It was answered.", replaces: "deploy-1",
+            ask_status: "responded", disposition: "answered", disposed_at: "2026-10-05T10:00:00Z" }],
+    [409, { code: "already_pending", message: "You already asked this.", request_id: "deploy-1" }],
+    [422, { code: "invalid_replaces", message: "replaces must name one of your own pending asks." }],
+  ] as const) {
+    it(`a ${detail.code} refusal reaches the agent with its extras`, async () => {
+      const fake = {
+        raiseAsk: async () => { throw new ApiError(status, JSON.stringify({ detail })); },
+      } as Partial<TrinityClient>;
+      const out = JSON.parse(await makeAskOperator(fake).execute(ASK as any, agentCtx("self")));
+      assert.deepEqual(out, { success: false, status, ...detail });
+    });
+  }
+
+  it("the description carries the rule; the parameter carries the codes", () => {
+    const d = tools.askOperator.description;
+    assert.ok(d.includes("Never re-ask what is still pending"));
+    assert.ok(d.includes("set replaces"));
+    // The rule sits right after idempotency, before the long atomic-ask rules.
+    assert.ok(d.indexOf("set replaces") < d.indexOf("Write atomic asks"));
+    const param = (tools.askOperator.parameters as any).shape.replaces.description as string;
+    for (const code of ["replaces_ended", "invalid_replaces", "already_pending", "replaced_by", "supersedes_expired"]) {
+      assert.ok(param.includes(code), code);
+    }
+  });
+
+  it("get_my_ask names who replaced an ask and the link both ways", () => {
+    const d = tools.getMyAsk.description;
+    assert.ok(d.includes("replaced_by"));
+    assert.ok(d.includes("person | timeout | platform | agent"));
   });
 });

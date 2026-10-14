@@ -385,7 +385,9 @@ async def test_portal_sync_marker_ttl_adds_the_allowance(monkeypatch, pilot):
     with pytest.raises(_Stop):
         await service.portal_chat(AGENT, "hi", "c@example.com", availability="running",
                                   turn_timeout_seconds=TURN)
-    assert marks == [("s1", "e1", TURN + 60 + _allowance_expected(pilot))]
+    from services.session_turn_service import resolve_lock_ttl
+    # #3166: plus the wait for the thread's lock.
+    assert marks == [("s1", "e1", TURN + 60 + _allowance_expected(pilot) + resolve_lock_ttl(AGENT))]
 
 
 @pytest.mark.asyncio
@@ -414,7 +416,9 @@ async def test_portal_streaming_budget_adds_the_allowance(monkeypatch, pilot):
     out = await service.start_portal_turn(AGENT, "hi", "c@example.com")
     await asyncio.gather(*list(service._INFLIGHT_TURNS))
 
-    expected = service.portal_max_turn_seconds(TURN) + _allowance_expected(pilot)
+    from services.session_turn_service import resolve_lock_ttl
+    # #3166: plus the wait for the thread's lock.
+    expected = service.portal_max_turn_seconds(TURN) + _allowance_expected(pilot) + resolve_lock_ttl(AGENT)
     assert out["wait_budget_seconds"] == expected
     assert marks == [{"ttl_seconds": expected}]
 
@@ -439,8 +443,9 @@ def test_portal_history_budget_adds_the_allowance(monkeypatch, pilot):
                         lambda: SimpleNamespace(ttl=lambda k: -1))
 
     out = service.get_history(AGENT, "c@example.com")
+    from services.session_turn_service import resolve_lock_ttl
     assert out["in_flight_wait_budget_seconds"] == (
-        service.portal_max_turn_seconds(TURN) + _allowance_expected(pilot))
+        service.portal_max_turn_seconds(TURN) + _allowance_expected(pilot) + resolve_lock_ttl(AGENT))
 
 
 # ---------------------------------------------------------------------------

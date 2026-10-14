@@ -8,7 +8,7 @@
 
 Agents deployed to Trinity that don't follow Trinity conventions (no `template.yaml`, `.claude/` gitignored away, secrets committed, no playbooks) fail silently at runtime. This feature runs a deterministic + AI-assisted compatibility check against the agent's live workspace and surfaces HARD / SOFT / INFO findings — **without blocking deployment**.
 
-The canonical check list is **`docs/agent-validation-spec.md`** (88 checks), the single source of truth kept in lockstep with `services/compatibility/spec.py` by `tests/unit/test_compatibility_checks.py::TestSpecDocSync` — which asserts the id set **and** the Severity column, over a `[A-Z]{1,2}-\d{3}` id regex (#2137).
+The canonical check list is **`docs/agent-validation-spec.md`** (92 checks), the single source of truth kept in lockstep with `services/compatibility/spec.py` by `tests/unit/test_compatibility_checks.py::TestSpecDocSync` — which asserts the id set **and** the Severity column, over a `[A-Z]{1,2}-\d{3}` id regex (#2137).
 
 ## End-to-end flow
 

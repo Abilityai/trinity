@@ -455,6 +455,23 @@ class AgentOperations(
         with get_engine().begin() as conn:
             return conn.execute(stmt).rowcount or 0
 
+    def list_agents_spawned_by_key(self, agent_name: str, key_id: str) -> List[str]:
+        """Live agents `agent_name` spawned with the key `key_id` (ent#629).
+
+        The set form of `dependencies._spawned_by_caller`, for a caller that
+        needs every child at once (the operator queue's reach set) instead of
+        two lookups per candidate. Same rule: provenance names the parent AND
+        the key id matches, so a name-reused parent never inherits children."""
+        if not key_id:
+            return []
+        stmt = select(agent_ownership.c.agent_name).where(
+            agent_ownership.c.spawned_by_agent == agent_name,
+            agent_ownership.c.spawned_by_key_id == key_id,
+            agent_ownership.c.deleted_at.is_(None),
+        )
+        with get_engine().connect() as conn:
+            return [row[0] for row in conn.execute(stmt)]
+
     def delete_agent_ownership(self, agent_name: str) -> bool:
         """Soft-delete the agent ownership row (Issue #834 Phase 1a).
 

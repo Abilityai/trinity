@@ -275,7 +275,9 @@ async def test_dispatch_goes_through_execute_task_not_a_bespoke_path(service, mo
     recorder, _ = _install(monkeypatch, enabled=True)
     await service.maybe_dispatch_resume(ITEM, response="approve")
     assert set(recorder.calls[0]) <= {
-        "agent_name", "message", "triggered_by", "source_user_email",
+        # trinity-enterprise#886: no `source_user_email` — the responder never
+        # reaches the agent's prompt (ent#715); a closed set, so re-adding fails.
+        "agent_name", "message", "triggered_by",
         # trinity-enterprise#751: the person's own answer, for the skill gate —
         # not a second surface, the same `execute_task` reads it.
         "request_text",
@@ -416,6 +418,9 @@ _SET_CAS_ACCESSORS = (
     "bulk_cancel_operator_queue_items(",
     "mark_operator_queue_expired(",
     "end_operator_queue_items_by_platform(",  # #3246 — the platform ending
+    # #3247: the native create ends a replace's predecessor by compare-and-set
+    # inside its own transaction; `predecessor` is the row AS THE CAS LEFT IT
+    "create_native_operator_queue_item(",
 )
 
 

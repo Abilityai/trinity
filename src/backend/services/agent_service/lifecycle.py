@@ -31,7 +31,7 @@ from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services.skill_service import skill_service
-from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_agent_mcp_key_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name
+from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_pull_mode_env_matches, check_agent_mcp_key_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name
 from services.agent_auth import derive_agent_token
 from utils.helpers import utc_now_iso
 from .file_sharing import check_public_folder_mount_matches
@@ -222,6 +222,13 @@ async def inject_assigned_skills(agent_name: str) -> dict:
     # fail-closed) BEFORE the names are read, so a member added upstream is
     # injected and one removed upstream is pruned by the reconcile below.
     await asyncio.to_thread(skill_set_service.reconcile_agent, agent_name)
+    # trinity-enterprise#753: an assigned skill the library recommends gating is
+    # gated BEFORE it is injected (agents that held it before the recommendation
+    # included). Defaults of unassigned skills go only after the prune below has
+    # removed their packages. Explicit gates are untouched. Never raises.
+    from services import skill_gate_map_service
+    gate_ctx = skill_gate_map_service.GateContext(trigger="start")
+    await skill_gate_map_service.reconcile_library_gates(agent_name, ctx=gate_ctx)
 
     # Get assigned skills
     skill_names = db.get_agent_skill_names(agent_name)
@@ -233,6 +240,9 @@ async def inject_assigned_skills(agent_name: str) -> dict:
         # agent was stopped — returning here would strand that package on the
         # agent permanently, which is the precise gap this closes.
         reconcile = await skill_service.reconcile_agent_skills(agent_name, [])
+        await skill_gate_map_service.reconcile_library_gates(
+            agent_name, ctx=gate_ctx, add=False,
+            drop_defaults=skill_gate_map_service.drop_after_prune(reconcile))
         return {"status": "skipped", "reason": "no_skills", "reconcile": reconcile}
 
     logger.info(f"Injecting {len(skill_names)} skills into agent {agent_name}: {skill_names}")
@@ -250,6 +260,9 @@ async def inject_assigned_skills(agent_name: str) -> dict:
     # take the same per-agent lock, so reconciling first (or inside) would
     # deadlock against the injection that just ran. Never raises.
     reconcile = await skill_service.reconcile_agent_skills(agent_name, skill_names)
+    await skill_gate_map_service.reconcile_library_gates(
+        agent_name, ctx=gate_ctx, add=False,
+        drop_defaults=skill_gate_map_service.drop_after_prune(reconcile))
 
     warning_count = sum(
         len(r.get("warnings") or []) for r in result.get("results", {}).values()
@@ -408,6 +421,7 @@ async def start_agent_internal(agent_name: str) -> dict:
         not check_full_capabilities_match(container, agent_name) or
         not check_guardrails_env_matches(container, agent_name) or
         not check_agent_auth_token_env_matches(container, agent_name) or
+        not check_pull_mode_env_matches(container, agent_name) or
         not mcp_key_match
     )
 
@@ -1172,16 +1186,11 @@ async def recreate_container_with_updated_config(
             os.getenv('TRINITY_BACKEND_URL', 'http://backend:8000'),
         )
 
-    # #946 / #1081 Phase 2: re-apply the pull worker opt-in on recreate. Clear
-    # any baked pull env FIRST (set-or-clear, mirroring the guardrails/stall-limit
-    # idiom above) so DE-piloting an agent actually stops its worker on recreate —
-    # pull_mode_env_vars returns {} for a non-pilot, so a bare .update() would
-    # leave a stale TRINITY_PULL_MODE=true baked in (#1081 B1). Empty (no-op) for
-    # every non-pilot agent, so default push behavior is unchanged.
-    from services.agent_service.pull_mode import pull_mode_env_vars, PULL_MODE_ENV_KEYS
-    for _pull_key in PULL_MODE_ENV_KEYS:
-        env_vars.pop(_pull_key, None)
-    env_vars.update(pull_mode_env_vars(agent_name))
+    # #946 / #1081 Phase 2: re-apply the pull worker opt-in on recreate —
+    # set-or-clear, so DE-piloting an agent actually stops its worker (#1081
+    # B1). One owner for the idiom since #3590; no-op for every non-pilot.
+    from services.agent_service.pull_mode import apply_pull_mode_env
+    apply_pull_mode_env(agent_name, env_vars)
 
     # Get port from labels
     ssh_port = int(labels.get("trinity.ssh-port", 2222))
@@ -1756,6 +1765,23 @@ async def recreate_missing_container(agent_name: str):
     # Auth env (subscription token / platform key), GitHub PAT, guardrails,
     # stall-limit, per-agent auth token — reuse the exact create/recreate rules.
     _apply_persisted_auth_env(agent_name, env_vars, runtime)
+
+    # #3590: the pull worker opt-in. This path re-derives the env from nothing
+    # and was the one assembler that forgot it — a pilot rebuilt here ran no
+    # worker while the backend kept routing its work to the durable queue.
+    from services.agent_service.pull_mode import apply_pull_mode_env
+    apply_pull_mode_env(agent_name, env_vars)
+    if env_vars.get("TRINITY_PULL_MODE") == "true" and "TRINITY_MCP_API_KEY" not in env_vars:
+        # The worker authenticates with the agent's own key (#307/#1159), minted
+        # above; a swallowed mint leaves a pilot with the pull env and no
+        # credential to poll with — the #3590 stall with a different cause. The
+        # env is final here (no overrides follow), so this is never a false alarm.
+        logger.warning(
+            "[#3590] pull pilot %r rebuilt without TRINITY_MCP_API_KEY (key mint "
+            "failed) — its pull worker cannot authenticate and queued work will "
+            "not be claimed; regenerate the agent's MCP key and start it again",
+            agent_name,
+        )
 
     labels = {
         "trinity.platform": "agent",

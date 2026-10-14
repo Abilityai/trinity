@@ -103,6 +103,16 @@ export default defineConfig({
       '/a2a/': {
         target: `http://${backendHost}:8000`,
         changeOrigin: false,
+        // routers/public.py::_get_client_ip (#181) trusts X-Real-IP from this
+        // proxy's container (it sits inside _get_trusted_networks()) and keys
+        // the public-route rate limits on it. Overwrite it from the socket, as
+        // prod nginx does with $remote_addr — a client-sent value passed through
+        // would let a dev-mode client pick its own rate-limit bucket.
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq, req) => {
+            proxyReq.setHeader('X-Real-IP', req.socket.remoteAddress || '')
+          })
+        },
       },
       '/ws': {
         target: `ws://${backendHost}:8000`,

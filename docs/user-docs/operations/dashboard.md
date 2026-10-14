@@ -36,6 +36,7 @@ When a type-to-filter query matches nothing, the Dashboard tells you so explicit
 - On first load each pane shows a skeleton in the shape of its content — rows for Timeline and List, tile outlines for Grid — until the fleet arrives. Skeletons are for "no data yet" only; a pane with data never regresses to one.
 - If the fleet can't be read, the pane shows **Couldn't load agents** (or **Couldn't load timeline data**) with a **Retry** button, instead of an empty list that looks like a fleet with no agents.
 - A fleet with no agents shows **No agents yet** and a **Get started** button that opens the Create Agent dialog. First-run setup is a separate overlay that opens over the Dashboard on a fresh install. The **Getting started** checklist, on instances that have it, lives in the left **Systems** sidebar under the view list rather than in the fleet pane, so it never shifts the fleet down. It stays there until its milestones are done, and collapsing the sidebar hides it. Both are described in [Setup](../getting-started/setup.md#your-first-dashboard).
+- New agents appear at once. Creating an agent anywhere — the Create Agent dialog, another browser tab, the API, or another agent — pushes a live event, and the Dashboard refetches the fleet list right away instead of waiting for its 30-second poll. A burst of creates (first-run setup seeds several agents) is gathered into one refetch. Closing the first-run setup overlay also refetches, so the agents it seeded are there when it closes. A deleted agent drops out the same way.
 - Background polls swap values in place. A poll that fails after a successful one keeps the numbers on screen and marks them stale rather than blanking them — for example, the Executions tile's stamp becomes `24h · stale`.
 
 ### Timeline View (default)
@@ -123,7 +124,7 @@ The former standalone Agents page, folded into the Dashboard as a third mode (`/
 3. **Run** and **Autonomy** toggles inline on each row.
 4. Sort by **Newest First**, **Oldest First**, **Name (A-Z)**, **Name (Z-A)**, **Running First**, or **Success Rate**; filter by name (**Search agents...**) and status (**All** / **Running** / **Stopped**). These two filters persist per browser.
 5. Select multiple rows for bulk tag operations.
-6. Three responsive layouts — the row list reflows down to mobile widths.
+6. Three responsive layouts — the row list reflows down to mobile widths. The layout follows the width of the list itself, not just the window, so opening the **Systems** sidebar on a tablet-width window switches the list to the compact row rather than squeezing cells over each other.
 7. System agents pin to the top and hide the Run toggle.
 
 Tag and owner filtering use the shared Dashboard header controls; **Clear** (and **Clear all filters** in the no-match state) clears both the row-level and header-level filters at once.

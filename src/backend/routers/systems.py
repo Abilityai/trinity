@@ -17,7 +17,7 @@ from models import (
     SystemDeployResponse,
 )
 from database import db
-from dependencies import get_current_user, require_role, reject_agent_principal
+from dependencies import get_current_user, require_role, reject_agent_principal, capability_fence
 from services.system_service import (
     system_member_names,
     deploy_manifest,
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/systems", tags=["systems"])
 
 
-@router.post("/deploy", response_model=SystemDeployResponse)
+@router.post("/deploy", response_model=SystemDeployResponse, dependencies=[Depends(capability_fence("agents.manage"))])
 async def deploy_system(
     body: SystemDeployRequest,
     request: Request,

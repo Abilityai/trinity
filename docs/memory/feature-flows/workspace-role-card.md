@@ -6,8 +6,19 @@ When a companion has a role (Tandem, ent#497), the Info rail's Agent details sho
 **Role** card: the role it fills, the objectives it owns or supports with each metric's
 value / target / freshness, the viewer's relationship to it, and its **readiness**.
 Framework §8's "organisation UI over the canon" shrunk to one agent — files are truth,
-the card is a projection. This cut ships the Role + Readiness half; the relationship
-line reads from ent#500 when it lands.
+the card is a projection. **The role is the seat on record, not the template
+(ent#811/#814):** the seat this agent serves *for the viewer*; the relationship line is
+the viewer's assignment kind (`kinds_for`).
+
+**Plain words (ent#843).** The objectives block is owned-first ("What this agent is
+responsible for"), with supported objectives folded under "Also contributes to · N"
+(headings and one neutral "Tracked by another agent" note each, only when another of the
+owner's agents declares the number). Metrics read by label — declared, agreed across the
+owner's other agents' declarations, or the code name in words — and warning colour is kept for
+stale, behind/off target and unread files. `role_card.portal_objective` adds
+`client_heading` and a candidate `tracked_elsewhere`; `apply_declarations_elsewhere`
+(one owner-scoped read, `db.metric_declarations_elsewhere`) confirms it and sets every
+metric's `label` before the card is served.
 
 ## Flow
 
@@ -20,10 +31,16 @@ Info rail ──► PortalAgentRole.vue ──► GET /api/enterprise/client-por
                                           │    (never raises — a refused read is a 200 without objectives)
                                           ▼
                                     client_portal/role_card.build_role_card(admit_objectives=…)
-                                          │  docker state  ── not running → {unavailable, readiness(stamp)}
+                                          │  _relationship → seat_decision_service.reader_kind → provider.kinds_for
+                                          │    (DB only; answered for a stopped agent too)
+                                          │  docker state  ── not running → {unavailable, readiness(stamp), relationship}
                                           │  agent door (get_agent_client):
-                                          │    read_file template.yaml   → x-role {role, status, seat}, x-canon.clone_path
-                                          │    read_file <canon>/roles/<id>.yaml
+                                          │    read_file template.yaml   → x-canon.clone_path, x-role.status (readiness claim only)
+                                          │  assignment_provider.resolve_served_seat(agent, viewer)
+                                          │    → {role_id, source: holds|person|primary|none}
+                                          │    no seat AND no x-canon AND no x-role → no card
+                                          │    no seat → role.error = no_seat (objectives still read)
+                                          │    read_file <canon>/roles/<seat>.yaml
                                           │  db.get_agent_role_readiness (the owner's stamp)
                                           │  admit_objectives() — only here, after the role file; any earlier
                                           │    return (no role, stopped, role-file error) spends nothing
@@ -35,7 +52,7 @@ Info rail ──► PortalAgentRole.vue ──► GET /api/enterprise/client-por
                                           ▼
                                     portal_objective / portal_metric / objectives_error / finding_codes
                                           ▼
-                                    PortalRoleCard {role, seat, objectives[metrics], objectives_error,
+                                    PortalRoleCard {role, seat_source, objectives[metrics], objectives_error,
                                                     finding_codes, readiness, walkthrough, relationship,
                                                     can_flip_readiness}
 
@@ -50,9 +67,17 @@ owner ──► Mark ready (ConfirmDialog) ──► POST …/role/readiness {st
 - **Never a second store.** Nothing about the role is cached or copied platform-side;
   every read goes through the agent's own server, so the card can never disagree with
   the file — and a failed read is *named* (`role.error`), never rendered as an empty
-  role. No `x-role` → no card at all: the panel is byte-identical for every agent that
-  has no role.
-- **Author-controlled input is bounded.** `x-role.role` and `x-canon.clone_path` reach
+  role. No seat, no canon and no `x-role` → no card at all: the panel is byte-identical
+  for every agent that has none of them.
+- **The seat on record, never the template (ent#811/#814, live check 2026-10-06).** The
+  card used to take its role from `x-role.role` and its "Seat ·" line from
+  `x-role.seat` (an email), so a shared companion's card said `sales-lead` while the
+  Access tab said Head of Sales. It now asks `resolve_served_seat(agent, viewer)` — the
+  same answer the agent's prompt gets: the seat it holds, else the viewer's own seat,
+  else its primary's. `seat_source` tells the viewer which, in words, never a person.
+  `x-role` survives only as the template's readiness claim and as a reason to show
+  the card at all (so a legacy companion keeps its readiness control).
+- **Author-controlled input is bounded.** The seat id and `x-canon.clone_path` reach
   a file read, so both are validated before any path is built — the role id by `_ID_RE`,
   the canon path by the join's own `canon_root` (one validator, not a copy); text fields
   are capped. The objective bounds (scan 100 files, 20 objectives, 12 metrics each) are
@@ -67,8 +92,10 @@ owner ──► Mark ready (ConfirmDialog) ──► POST …/role/readiness {st
   role file's `review_by` only (framework §3.5 governs files, not metrics). The import is
   function-local, so no portal suite loads the metrics stack.
 - **What a client sees is an allowlist (TD-4).** `portal_objective` and `portal_metric`
-  PICK fields: `id, statement, horizon, status, owned` and `name, type, unit, target,
-  actual, last_point_at, stale, freshness, gap.status, finding.code`. The operator's
+  PICK fields: `id, statement, horizon, status, owned` and `name, role, type, unit, target,
+  actual, last_point_at, stale, freshness, gap.status, finding.code`. `role` crosses as
+  the fixed value `guard` | `primary` only; a guard row shows a neutral "Guard" badge
+  (ent#731). The operator's
   sentences ("call `refresh_metric_definitions`"), objective file paths and `owner: role:<id>` stay
   on the operator door (the #78 auth-path invariant); a finding crosses as its code and
   `PortalAgentRole.vue` holds the client sentence for each. Card-level findings cross as
@@ -175,6 +202,15 @@ ent#689: `tests/unit/test_ent689_readiness_gate.py` (the verdict, every fail-ope
 endpoint, the rollout source, `brief_held`, the seed on both tracks against real SQLite) and
 `tests/scheduler_tests/test_ent689_readiness_gate.py` (held → skipped row + event, never
 dispatched; manual / webhook / non-seat not asked; every error fires).
+
+ent#843: `tests/unit/test_ent843_role_card_plain_words.py` — readable names (words
+fallback, declared label wins, the join's code-name fallback ignored), `apply_declarations_elsewhere`
+(agreed label, words, a failed lookup), `declarations_elsewhere` on a real database (owner scope, agreement,
+conflict, blank, retired rows), "tracked elsewhere" once per objective, never named, and
+only when another agent really declares the number, and `client_heading` through the join. `portalAgentRole.spec.js`
+adds owned-first, the collapsed supported group (headings only, one neutral note, no
+warning colour), the plain heading, "this quarter", no snake_case on the card, and the
+group folding again on an agent switch.
 
 ## Related Flows
 

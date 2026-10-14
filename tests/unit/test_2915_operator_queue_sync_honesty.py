@@ -1063,7 +1063,8 @@ class TestRound2AcknowledgementReachesTheRow:
         resp = c.post("/api/operator-queue/op-2/respond",
                       json={"response": "approve", "acknowledge_divergence": True})
         assert resp.status_code == 200, resp.text
-        assert recorded == {"divergence_acknowledged": True}
+        # #2372: an agent's own ask is not terminal on answer.
+        assert recorded == {"divergence_acknowledged": True, "terminal": False}
 
     def test_the_portal_answer_records_the_acknowledgement_on_the_row(self, real_db, monkeypatch):
         import client_portal.service as portal_service

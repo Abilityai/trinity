@@ -93,6 +93,7 @@
             loading-label="Unassigning…"
             :title="`Removes the members ${set.name} alone brought; skills also assigned on their own or by another set stay`"
             :data-testid="`set-unassign-${set.name}`"
+            data-destructive
             @click="store.unassignSet(set.name)"
           >Unassign set</BaseButton>
         </div>

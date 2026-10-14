@@ -39,9 +39,10 @@ from typing import Any, Dict, NamedTuple, Optional
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.routing import APIRoute
 
 from database import db
-from dependencies import AuthorizedAgentByName, get_current_user, get_user_or_anonymous
+from dependencies import AuthorizedAgentByName, get_current_user, get_user_or_anonymous, agent_may_reach
 from models import A2ACallRequest, A2ACallResponse, A2ATaskRequest, User
 from routers.public import _get_client_ip
 from services import (
@@ -54,8 +55,13 @@ from services import (
     rate_limiter,
 )
 from services.a2a_card_service import generate_a2a_card, with_payment_extension
+from services.aauth import config as aauth_config
+from services.aauth import httpsig as aauth_httpsig
+from services.aauth import inbound as aauth_inbound
+from services.aauth import verifier as aauth_verifier
 from services.a2a_client import A2ACallError
 from services.a2a_outbound_service import (
+    A2AAAuthRefused,
     A2AEndpointNotFound,
     A2AOutboundDisabled,
 )
@@ -79,10 +85,69 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["a2a"])
 
+#: The JSON-RPC task route, the only route AAuth can authenticate (ent#623).
+_A2A_RPC_PATH = "/a2a/{agent_name}"
+
+
+class _A2AServerRoute(APIRoute):
+    """Routes an AAuth-signed task request around the bearer dependency (ent#623).
+
+    `POST /a2a/{name}` authenticates a bearer MCP key through
+    `Depends(get_current_user)`, which 401s any request without one before the
+    handler runs. An AAuth caller carries no bearer, so the dependency cannot
+    simply be made conditional: FastAPI resolves every declared dependency.
+    Instead, a request that carries `Signature-Key` while AAuth is live takes a
+    separate entry point (`_a2a_aauth_jsonrpc`); every other request — including
+    every request while the flag is off — goes through the untouched route
+    handler, so the bearer path, its 401s and its dependency overrides are
+    byte-identical to before. Detection keys on `Signature-Key` only: other
+    RFC 9421 senders (e.g. Web Bot Auth) do not send it.
+
+    While AAuth is live, a bearer-less 401 also advertises how to sign
+    (`Accept-Signature`, `AAuth-Requirement`) — a caller discovers the scheme
+    from the challenge rather than out of band.
+    """
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+        if self.path != _A2A_RPC_PATH or "POST" not in (self.methods or ()):
+            return handler
+
+        async def route(request: Request):
+            if "signature-key" in request.headers:
+                issuer = aauth_config.active_issuer()
+                if issuer:
+                    return await _a2a_aauth_jsonrpc(request, issuer)
+            try:
+                response = await handler(request)
+            except HTTPException as exc:
+                if (
+                    exc.status_code == 401
+                    and "authorization" not in request.headers
+                    and aauth_config.active_issuer()
+                ):
+                    exc.headers = {**(exc.headers or {}), **_AAUTH_CHALLENGE_HEADERS}
+                raise
+            # Since ent#679 the bearer-less 401 is a response the handler RETURNS
+            # (`_not_authenticated`, byte-identical to before) rather than one the
+            # dependency raises — the challenge rides on it the same way, and only
+            # while AAuth is live.
+            if (
+                getattr(response, "status_code", None) == 401
+                and "authorization" not in request.headers
+                and aauth_config.active_issuer()
+            ):
+                for name, value in _AAUTH_CHALLENGE_HEADERS.items():
+                    response.headers[name] = value
+            return response
+
+        return route
+
+
 # ent#157: the public A2A inbound server (well-known card + JSON-RPC task
 # endpoint). Separate router (no /api prefix) so external orchestrators reach
 # the spec-shaped `/a2a/{name}/.well-known/agent-card.json` + `POST /a2a/{name}`.
-a2a_server_router = APIRouter(tags=["a2a-server"])
+a2a_server_router = APIRouter(tags=["a2a-server"], route_class=_A2AServerRoute)
 
 
 def _base_url_from_request(request: Request, *,
@@ -190,6 +255,32 @@ async def _fetch_template_data(agent_name: str, container) -> dict:
     return label_fallback
 
 
+#: Hosts already warned about, so the check below costs one log line, not one
+#: per card fetch.
+_AAUTH_HOST_WARNED: set = set()
+
+
+def _warn_issuer_card_mismatch(issuer: str, base_url: str) -> None:
+    """A card served under a different host than the AAuth issuer is unusable.
+
+    The caller signs `@authority` from the card's `url`; the callee verifies it
+    against its configured issuer host. If `PUBLIC_CHAT_URL` / `FRONTEND_URL`
+    and `aauth_issuer` name different hosts, every signed call fails
+    `invalid_signature` and nothing says why (ent#623).
+    """
+    from urllib.parse import urlsplit
+
+    card_host = (urlsplit(base_url).hostname or "").lower()
+    issuer_host = aauth_config.issuer_host(issuer)
+    if card_host and card_host != issuer_host and card_host not in _AAUTH_HOST_WARNED:
+        _AAUTH_HOST_WARNED.add(card_host)
+        logger.warning(
+            "[aauth] served card host %s != aauth_issuer host %s — signed calls to "
+            "this instance will fail invalid_signature until they agree "
+            "(set PUBLIC_CHAT_URL to the issuer origin)", card_host, issuer_host,
+        )
+
+
 def _card_with_exposed_skills(
     agent_name: str,
     template_data: dict,
@@ -207,10 +298,16 @@ def _card_with_exposed_skills(
     OSS builds register no provider, so this is the identity function and the
     card is byte-identical to before ent#180.
     """
+    issuer = aauth_config.active_issuer()
+    if issuer and base_url:
+        _warn_issuer_card_mismatch(issuer, base_url)
     card = generate_a2a_card(
         agent_name=agent_name,
         template_data=template_data,
         base_url=base_url,
+        aauth_resource_metadata_url=(
+            f"{issuer}/.well-known/aauth-resource.json" if issuer else None
+        ),
     )
     card["skills"] = a2a_gate.filter_exposed_skills(agent_name, card.get("skills") or [])
     return _priced(agent_name, card, base_url)
@@ -416,7 +513,8 @@ def _a2a_state_for(status: str) -> str:
     return {"success": "completed", "cancelled": "canceled"}.get(status, "failed")
 
 
-def _a2a_idem_scope(agent_name: str, current_user: User) -> str:
+def _a2a_idem_scope(agent_name: str, current_user: Optional[User],
+                    aauth: Optional["aauth_verifier.VerifiedAgent"] = None) -> str:
     """Dedup scope for an inbound A2A `messageId`: per (agent, caller principal).
 
     `messageId` is a **peer-controlled** protocol field that A2A SDKs generate
@@ -432,6 +530,9 @@ def _a2a_idem_scope(agent_name: str, current_user: User) -> str:
     keys all resolve to the same owner user — the key id is what distinguishes
     two agents calling on the same owner's behalf.
     """
+    if aauth is not None:
+        # ent#623: an AAuth caller's namespace is its verified agent identity.
+        return f"a2a:{agent_name}:aauth|{aauth.identity}"
     principal = (
         getattr(current_user, "mcp_key_id", None)
         or getattr(current_user, "username", None)
@@ -485,7 +586,7 @@ async def a2a_well_known_card(agent_name: str, request: Request):
     return card
 
 
-async def _parse_rpc_envelope(request: Request):
+async def _parse_rpc_envelope(request: Request, *, raw: Optional[bytes] = None):
     """Cap, parse and validate the JSON-RPC envelope → (method, params, rpc_id).
 
     Returns a `JSONResponse` instead when the envelope is unusable. Shared by
@@ -498,8 +599,13 @@ async def _parse_rpc_envelope(request: Request):
     `await request.json()` lets one caller pin memory. nginx caps at 25m, but
     :8000 may be reachable directly. On the paying path it also runs before any
     token extraction, so an oversized body never reaches the facilitator.
+
+    `raw` (ent#623): the AAuth door has already consumed the stream — reading
+    and digest-checking the body before anything is parsed — and hands the
+    exact bytes in; the same cap and the same four refusals apply to them.
     """
-    raw = await request.body()
+    if raw is None:
+        raw = await request.body()
     if len(raw) > _MAX_RPC_BODY_BYTES:
         return _rpc_error(None, _RPC_INVALID_REQUEST, "Request body too large")
     try:
@@ -524,14 +630,14 @@ def _authorize_inbound(current_user: User, agent_name: str) -> None:
     HTTPException(403) when the caller is off the per-agent allow-list."""
     if not db.get_a2a_exposed(agent_name):
         raise HTTPException(status_code=404, detail="Not found")
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=404, detail="Not found")
     caller_identity = getattr(current_user, "email", None) or current_user.username
     if not a2a_gate.check_inbound_allowed(agent_name, caller_identity):
         raise HTTPException(status_code=403, detail="Caller not on the agent's A2A inbound allow-list")
 
 
-async def _run_a2a_task(agent_name: str, text: str, current_user: User):
+async def _run_a2a_task(agent_name: str, text: str, current_user: Optional[User]):
     """Bridge one inbound A2A message into the Trinity execution stack.
 
     #2524: goes through `dispatch_and_await_terminal`, not `execute_task`
@@ -1017,7 +1123,7 @@ async def _bound_task_rpc(agent_name: str, method: str, exec_id: str,
     return _rpc_result(rpc_id, _task_object(exec_id, "canceled"))
 
 
-@a2a_server_router.post("/a2a/{agent_name}")
+@a2a_server_router.post(_A2A_RPC_PATH)
 async def a2a_jsonrpc(
     agent_name: str,
     request: Request,
@@ -1039,6 +1145,10 @@ async def a2a_jsonrpc(
     connector key outside its scope, a fenced ephemeral key — is re-raised, so
     a credential Trinity recognised and then REFUSED can never slide onto the
     payment path and buy its way in.
+
+    An AAuth-signed request (ent#623) never reaches this function — see
+    `_A2AServerRoute` and `_a2a_aauth_jsonrpc`; all three doors share the
+    JSON-RPC method table in `_dispatch_jsonrpc`.
     """
     if current_user is None:
         return await _anonymous_jsonrpc(agent_name, request)
@@ -1048,6 +1158,169 @@ async def a2a_jsonrpc(
     parsed = await _parse_rpc_envelope(request)
     if isinstance(parsed, JSONResponse):
         return parsed
+    return await _dispatch_jsonrpc(agent_name, request, parsed, current_user=current_user)
+
+
+# ---------------------------------------------------------------------------
+# ent#623 — AAuth agent identity on the task endpoint (prototype, flag OFF)
+# ---------------------------------------------------------------------------
+
+#: What a bearer-less 401 advertises while AAuth is live.
+_AAUTH_CHALLENGE_HEADERS = {
+    "Accept-Signature": "sig=(" + " ".join(
+        f'"{c}"' for c in aauth_httpsig.components_for("POST")
+    ) + ")",
+    "Accept-Signature-Scheme": "jwt",
+    "AAuth-Requirement": "requirement=agent-token",
+}
+
+A2A_AAUTH_RATE_LIMIT = 60     # signed task requests per IP
+A2A_AAUTH_RATE_WINDOW = 60
+
+
+def _aauth_problem(exc: "aauth_verifier.AAuthError") -> JSONResponse:
+    """RFC 9457 problem details; `Signature-Error` is the interoperable carrier."""
+    headers = {}
+    if exc.status == 401:
+        headers["Signature-Error"] = f"error={exc.code}"
+        if exc.code in ("invalid_input", "unsupported_scheme"):
+            headers["Accept-Signature"] = _AAUTH_CHALLENGE_HEADERS["Accept-Signature"]
+            headers["Accept-Signature-Scheme"] = "jwt"
+    return JSONResponse(
+        status_code=exc.status,
+        media_type="application/problem+json",
+        headers=headers,
+        content={
+            "type": f"urn:ietf:params:sig-error:{exc.code}",
+            "error": exc.code,
+            "detail": exc.detail,
+        },
+    )
+
+
+def _aauth_request_facts(request: Request) -> "aauth_verifier.InboundRequest":
+    # The signature base's `@path` is the request target as sent, still encoded
+    # (`raw_path`); the routed `scope["path"]` is the fallback. `request.url` is
+    # rebuilt from the Host header and is never read here (#3102).
+    raw_path = request.scope.get("raw_path") or request.scope["path"].encode("utf-8")
+    if isinstance(raw_path, bytes):
+        raw_path = raw_path.decode("latin-1")
+    headers: Dict[str, str] = {}
+    for name, value in request.headers.items():   # repeated fields joined, RFC 9110 §5.3
+        headers[name] = f"{headers[name]}, {value}" if name in headers else value
+    declared = request.headers.get("content-length")
+    return aauth_verifier.InboundRequest(
+        method=request.method,
+        raw_path=raw_path.split("?", 1)[0],
+        headers=headers,
+        content_length=int(declared) if declared and declared.isdigit() else None,
+    )
+
+
+async def _a2a_aauth_jsonrpc(request: Request, issuer: str):
+    """`POST /a2a/{name}` for a caller authenticated by AAuth agent identity.
+
+    Refused before the body is parsed as JSON-RPC, like a bearer failure. The
+    caller never becomes a Trinity `User`: access is exposure + an EXPLICIT
+    allow-list entry for its verified identity (fail-closed), and no owner role
+    travels with it.
+    """
+    agent_name = request.path_params["agent_name"]
+    caller_ip = request.client.host if request.client else None
+
+    # Limit first: everything below costs at least a DB read, and the caller is
+    # still an unauthenticated stranger here.
+    try:
+        rate_limiter.enforce(
+            f"a2a_aauth_ip:{_get_client_ip(request)}",
+            A2A_AAUTH_RATE_LIMIT,
+            A2A_AAUTH_RATE_WINDOW,
+            detail="Too many signed A2A requests from this address.",
+        )
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail},
+                            headers=exc.headers)
+    if not db.get_a2a_exposed(agent_name):
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+    identities = a2a_gate.explicit_inbound_identities(agent_name)
+
+    async def _read_body() -> bytes:
+        chunks, total = [], 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > _MAX_RPC_BODY_BYTES:
+                raise aauth_verifier.AAuthError("invalid_input", "request body too large",
+                                                status=413, trusted=True)
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    try:
+        verified, raw = await aauth_verifier.verify_request(
+            _aauth_request_facts(request),
+            expected_authority=aauth_config.issuer_host(issuer),
+            trusted_identities=identities or [],
+            read_body=_read_body,
+            max_body_bytes=_MAX_RPC_BODY_BYTES,
+        )
+    except aauth_verifier.AAuthError as exc:
+        # Only refusals past the trusted-issuer pre-gate are audited: before it,
+        # the caller is an unauthenticated stranger and an audit row per request
+        # would hand them the audit table.
+        logger.info("[aauth] refused signed A2A request for %s: %s (%s)",
+                    agent_name, exc.code, exc.identity or "unidentified")
+        if exc.trusted:
+            await platform_audit_service.log(
+                event_type=AuditEventType.AUTHENTICATION, event_action="a2a_aauth_refused",
+                source="a2a", actor_external_id=exc.identity, actor_ip=caller_ip,
+                target_type="agent", target_id=agent_name, endpoint=request.scope["path"],
+                details=aauth_inbound.audit_details(
+                    None, identity=exc.identity, issuer=exc.issuer,
+                    verification="failed", allowlist="not_evaluated", error=exc.code,
+                ),
+            )
+        return _aauth_problem(exc)
+
+    if not aauth_inbound.is_listed(verified.identity, identities):
+        await platform_audit_service.log(
+            event_type=AuditEventType.AUTHORIZATION, event_action="a2a_aauth_denied",
+            source="a2a", actor_external_id=verified.identity, actor_ip=caller_ip,
+            target_type="agent", target_id=agent_name, endpoint=request.scope["path"],
+            details=aauth_inbound.audit_details(verified, allowlist="denied"),
+        )
+        await aauth_inbound.record_activity(agent_name, verified, allowlist="denied",
+                                            error="caller not on the agent's A2A inbound allow-list")
+        return JSONResponse(status_code=403,
+                            content={"detail": "Caller not on the agent's A2A inbound allow-list"})
+
+    # The body was read (and its digest verified) above — parse those exact bytes.
+    parsed = await _parse_rpc_envelope(request, raw=raw)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    return await _dispatch_jsonrpc(agent_name, request, parsed, current_user=None, aauth=verified)
+
+
+def _audit_actor(current_user: Optional[User], aauth) -> Dict[str, Any]:
+    if aauth is not None:
+        return {"actor_external_id": aauth.identity}
+    return {"actor_user": current_user}
+
+
+async def _dispatch_jsonrpc(
+    agent_name: str,
+    request: Request,
+    parsed,
+    *,
+    current_user: Optional[User],
+    aauth: Optional["aauth_verifier.VerifiedAgent"] = None,
+):
+    """The JSON-RPC method table, shared by every door onto `POST /a2a/{name}`.
+
+    `parsed` is `_parse_rpc_envelope`'s `(method, params, rpc_id)`. The caller
+    is exactly one of: a bearer principal (`current_user`) or a verified AAuth
+    agent identity (`aauth`, ent#623). With `aauth` unset every line below
+    behaves as it did before ent#623.
+    """
     method, params, rpc_id = parsed
 
     caller_ip = request.client.host if request.client else None
@@ -1065,7 +1338,9 @@ async def a2a_jsonrpc(
         # with the same messageId must not double-execute. messageId absent →
         # dedup disabled (fail-open).
         message_id = message.get("messageId")
-        decision = idempotency_service.begin(_a2a_idem_scope(agent_name, current_user), message_id)
+        decision = idempotency_service.begin(
+            _a2a_idem_scope(agent_name, current_user, aauth=aauth),
+            message_id)
         if decision.replay and not decision.in_flight and decision.snapshot:
             # A streaming client can't parse a bare JSON body — replay in the
             # transport it asked for.
@@ -1077,6 +1352,11 @@ async def a2a_jsonrpc(
                               "A task for this messageId is already in progress", data={"retryable": True})
 
         if method == "message/stream":
+            if aauth is not None:
+                # ent#623: AAuth callers get message/send only (stated prototype scope).
+                idempotency_service.fail(decision)
+                return _rpc_error(rpc_id, _A2A_UNSUPPORTED,
+                                  "message/stream is not supported for AAuth callers; use message/send")
             return await _stream_task(agent_name, text, current_user, rpc_id, decision, caller_ip)
 
         try:
@@ -1100,12 +1380,21 @@ async def a2a_jsonrpc(
             error=result.error if state == "failed" else None,
         )
         idempotency_service.complete(decision, result.execution_id, task)
+        details = {"execution_id": result.execution_id, "state": state}
+        if aauth is not None:
+            aauth_inbound.remember_execution(result.execution_id, aauth.identity)
+            details.update(aauth_inbound.audit_details(aauth, allowlist="allowed"))
+            await aauth_inbound.record_activity(
+                agent_name, aauth, allowlist="allowed",
+                execution_id=result.execution_id, state=state,
+                error=None if state == "completed" else f"task {state}",
+            )
         await platform_audit_service.log(
             event_type=AuditEventType.EXECUTION, event_action="a2a_task", source="a2a",
-            actor_user=current_user, actor_ip=caller_ip,
+            **_audit_actor(current_user, aauth), actor_ip=caller_ip,
             target_type="agent", target_id=agent_name,
             endpoint=request.scope["path"],
-            details={"execution_id": result.execution_id, "state": state},
+            details=details,
         )
         return _rpc_result(rpc_id, task)
 
@@ -1114,6 +1403,8 @@ async def a2a_jsonrpc(
         exec_id = params.get("id")
         if not isinstance(exec_id, str) or not exec_id:
             return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params.id is required")
+        if aauth is not None and not aauth_inbound.execution_owned_by(exec_id, aauth.identity):
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
         row = db.get_execution(exec_id)
         # db.get_execution returns a ScheduleExecution object (not a dict) —
         # read via _exec_field so both the model and a dict work.
@@ -1135,6 +1426,8 @@ async def a2a_jsonrpc(
         exec_id = params.get("id")
         if not isinstance(exec_id, str) or not exec_id:
             return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params.id is required")
+        if aauth is not None and not aauth_inbound.execution_owned_by(exec_id, aauth.identity):
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
         row = db.get_execution(exec_id)
         if not row or _exec_field(row, "agent_name") != agent_name:
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
@@ -1160,11 +1453,15 @@ async def a2a_jsonrpc(
             return _rpc_error(rpc_id, _A2A_TASK_NOT_CANCELABLE,
                               "Task could not be canceled")
 
+        cancel_details = {"execution_id": exec_id}
+        if aauth is not None:
+            cancel_details.update(aauth_inbound.audit_details(aauth, allowlist="allowed"))
         await platform_audit_service.log(
             event_type=AuditEventType.EXECUTION, event_action="a2a_cancel", source="a2a",
-            actor_user=current_user, actor_ip=caller_ip,
+            **_audit_actor(current_user, aauth), actor_ip=caller_ip,
             target_type="agent", target_id=agent_name,
-            endpoint=request.scope["path"], details={"execution_id": exec_id},
+            endpoint=request.scope["path"],
+            details=cancel_details,
         )
         return _rpc_result(rpc_id, _task_object(exec_id, "canceled"))
 
@@ -1189,7 +1486,7 @@ def _replay_stream(rpc_id: Any, task: Dict[str, Any]) -> StreamingResponse:
     return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
-async def _stream_task(agent_name: str, text: str, current_user: User,
+async def _stream_task(agent_name: str, text: str, current_user: Optional[User],
                        rpc_id: Any, decision, caller_ip: Optional[str]) -> StreamingResponse:
     """message/stream via SSE. Emits a `working` status event, runs the task,
     then a terminal task event. Non-incremental (the agent turn is atomic), but
@@ -1237,7 +1534,8 @@ async def _stream_task(agent_name: str, text: str, current_user: User,
         await platform_audit_service.log(
             event_type=AuditEventType.EXECUTION, event_action="a2a_task_stream", source="a2a",
             actor_user=current_user, actor_ip=caller_ip,
-            target_type="agent", target_id=agent_name, details={"execution_id": result.execution_id},
+            target_type="agent", target_id=agent_name,
+            details={"execution_id": result.execution_id},
         )
         final = {"jsonrpc": "2.0", "id": rpc_id, "result": {**task, "final": True}}
         yield f"data: {json.dumps(final)}\n\n"
@@ -1379,6 +1677,7 @@ async def call_a2a_agent(
             context_id=body.context_id,
             task_id=body.task_id,
             execution_id=body.execution_id,
+            caller_agent_name=current_user.agent_name,
         )
     except A2AOutboundDisabled:
         raise HTTPException(status_code=404, detail="Not found")
@@ -1399,6 +1698,9 @@ async def call_a2a_agent(
         raise HTTPException(status_code=422, detail={"reason": "effect_unguarded", "message": str(exc)})
     except EffectInProgressError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    except A2AAAuthRefused as exc:
+        raise HTTPException(status_code=exc.status_code,
+                            detail={"reason": exc.reason, "message": exc.detail})
     except A2ACallError as exc:
         raise _map_call_error(exc)
 
@@ -1453,6 +1755,7 @@ async def get_a2a_task(
             agent_name=agent_name,
             endpoint_ref=body.endpoint,
             task_id=body.task_id,
+            caller_agent_name=current_user.agent_name,
         )
     except A2AOutboundDisabled:
         raise HTTPException(status_code=404, detail="Not found")
@@ -1462,6 +1765,9 @@ async def get_a2a_task(
             detail={"reason": "endpoint_not_found",
                     "message": "No outbound A2A endpoint is registered under that name."},
         )
+    except A2AAAuthRefused as exc:
+        raise HTTPException(status_code=exc.status_code,
+                            detail={"reason": exc.reason, "message": exc.detail})
     except A2ACallError as exc:
         raise _map_call_error(exc)
 

@@ -110,6 +110,24 @@ export class ApiError extends Error {
 }
 
 /**
+ * The operator floor's refusal (trinity-enterprise#837): a Workspace-only
+ * account is refused on operator routes with `403 {detail: {code:
+ * "workspace_only"}}`. A read that degrades to "none" on failure must pass this
+ * one through, or the caller reports a missing permission or a missing agent
+ * instead of the account's real situation.
+ */
+export function isWorkspaceOnlyRefusal(err: unknown): boolean {
+  if (!(err instanceof ApiError) || err.status !== 403) return false;
+  try {
+    const parsed = JSON.parse(err.body) as { detail?: unknown };
+    const d = (parsed?.detail ?? parsed) as { code?: unknown } | null;
+    return d?.code === "workspace_only";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Default trigger set for the #914 `/chat` recovery lookup.
  *
  * Deliberately NOT widened to cover `/task` (#2661). `/chat` never produces a
@@ -118,6 +136,41 @@ export class ApiError extends Error {
  * `/chat` sits queued, and the `/chat` abort would then attribute it. The
  * trigger set is a per-call-site argument for exactly this reason.
  */
+/** The filters `GET /api/operator-queue` takes (trinity-enterprise#815). */
+export interface OperatorQueueListParams {
+  status?: string;
+  type?: string;
+  priority?: string;
+  agent_name?: string;
+  since?: string;
+  limit?: number;
+  offset?: number;
+  /** Narrowing only: one `agent_names` query parameter per name. */
+  agent_names?: string[];
+  /** Keyset walk: "start", then each page's `next_cursor`. */
+  cursor?: string;
+}
+
+/**
+ * The request target (path + query) `listOperatorQueue` sends. Exported so the
+ * tool can measure the exact request before it sends it and refuse one too
+ * large for an HTTP request line (trinity-enterprise#815).
+ */
+export function operatorQueueListTarget(params: OperatorQueueListParams = {}): string {
+  const sp = new URLSearchParams();
+  if (params.status) sp.set("status", params.status);
+  if (params.type) sp.set("type", params.type);
+  if (params.priority) sp.set("priority", params.priority);
+  if (params.agent_name) sp.set("agent_name", params.agent_name);
+  if (params.since) sp.set("since", params.since);
+  if (params.limit !== undefined) sp.set("limit", String(params.limit));
+  if (params.offset !== undefined) sp.set("offset", String(params.offset));
+  for (const name of params.agent_names ?? []) sp.append("agent_names", name);
+  if (params.cursor !== undefined) sp.set("cursor", params.cursor);
+  const qs = sp.toString();
+  return `/api/operator-queue${qs ? `?${qs}` : ""}`;
+}
+
 export const CHAT_RECOVERY_TRIGGERS = ["mcp", "agent"] as const;
 
 /** #2661: `/task` additionally sees `self_task` rows (SELF-EXEC-001). */
@@ -292,6 +345,27 @@ export function extractIdempotencyExecutionId(body: string): string | undefined 
 }
 
 /**
+ * #3245: a body the backend REPLAYED from an idempotency snapshot, marked.
+ *
+ * The backend says so in `X-Idempotent-Replay: true`, a header the model never
+ * sees. A replayed receipt names a run that is live, succeeded or may still
+ * report back (a run that ended failed/cancelled is no longer replayed, so an
+ * identical re-send starts a new one) — the caller can tell "this is the run I
+ * already started" from "this is a new run" only by this field. Present only
+ * as positive evidence: its absence does not prove a fresh dispatch (the
+ * client's own timeout-recovery receipts carry none).
+ */
+export type Replayable<T> = T & { idempotent_replay?: true };
+
+export function markIdempotentReplay<T>(response: Response, body: T): Replayable<T> {
+  const replayed = response.headers.get("X-Idempotent-Replay") === "true";
+  if (!replayed || body === null || typeof body !== "object" || Array.isArray(body)) {
+    return body as Replayable<T>;
+  }
+  return { ...body, idempotent_replay: true } as Replayable<T>;
+}
+
+/**
  * #2806: the backend refused an agent-to-agent hop past the chain-depth limit
  * (403, `detail.error === "inter_agent_depth_exceeded"`). Returned as a RESULT
  * rather than thrown, so the calling model reads "stop, do not retry or
@@ -308,6 +382,86 @@ export interface DepthRefusal {
 }
 
 export const INTER_AGENT_DEPTH_EXCEEDED = "inter_agent_depth_exceeded";
+
+/**
+ * #3244: a 429 from `/chat` that is NOT the admission refusal. Only
+ * `X-Trinity-Error-Code: capacity` proves nothing was dispatched; the usage /
+ * rate-limit 429 is raised after the agent ran the turn and its row was written
+ * `failed`, so "wait and re-send" would repeat what the partial run did. A
+ * RESULT that names that row, or — when the response names none — says the run
+ * may have started.
+ */
+export interface RateLimitedRun {
+  status: "rate_limited";
+  agent: string;
+  /** `X-Trinity-Error-Code` (e.g. `billing`); absent when the 429 carried none. */
+  code?: string;
+  /** The failed run, from `X-Trinity-Execution-Id`. */
+  execution_id?: string;
+  /** The agent's own error text. */
+  error?: string;
+  retryable: false;
+  message: string;
+}
+
+export const CAPACITY_ERROR_CODE = "capacity";
+
+/** An id safe to quote into a tool call the model is told to make. */
+const EXECUTION_ID_SHAPE = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * #3244: build the `RateLimitedRun` for a non-capacity 429. Never throws, and
+ * never passes on the backend's own "Please retry." (the auto-switch body).
+ */
+export function parseRateLimitedRun(
+  errorCode: string | null,
+  executionId: string | null,
+  body: string,
+  agent: string,
+): RateLimitedRun {
+  let error: string | undefined;
+  let switched = false;
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    const d = (parsed as { detail?: unknown })?.detail ?? parsed;
+    if (typeof d === "string") {
+      error = d;
+    } else if (d && typeof d === "object") {
+      const e = (d as { error?: unknown }).error;
+      if (typeof e === "string") error = e;
+      // #3470's exhausted-walk 429 carries `auto_switch: walk.summary()` — a
+      // non-empty dict whose `switched` is false — so the key's presence alone
+      // does not mean a switch happened. Read `switched` when the body says it;
+      // fall back to presence only for bodies that predate the key.
+      const autoSwitch = (d as { auto_switch?: unknown }).auto_switch;
+      const switchedFlag = (autoSwitch as { switched?: unknown } | null | undefined)?.switched;
+      switched = typeof switchedFlag === "boolean" ? switchedFlag : Boolean(autoSwitch);
+    }
+  } catch {
+    // not JSON (a proxy's 429): nothing to quote
+  }
+  const id = executionId && EXECUTION_ID_SHAPE.test(executionId) ? executionId : undefined;
+  return {
+    status: "rate_limited",
+    agent,
+    ...(errorCode ? { code: errorCode } : {}),
+    ...(id ? { execution_id: id } : {}),
+    ...(error ? { error } : {}),
+    retryable: false,
+    message: id
+      ? `The run on '${agent}' started and then failed on a usage or rate limit; it is recorded as failed. ` +
+        `Part of the work may already be done, so do not re-send this message as it is. ` +
+        (switched ? "The agent's subscription was switched after the failure. " : "") +
+        `Read what happened with get_execution_result(agent_name="${agent}", execution_id="${id}") and decide from that.`
+      : `'${agent}' answered with a rate limit (HTTP 429) that is not a queue-full refusal, so the run may have started. ` +
+        `Do not re-send yet: look for your exact message in list_recent_executions(agent_name="${agent}") ` +
+        `and read that run with get_execution_result.`,
+  };
+}
+
+export function isRateLimitedRun(value: unknown): value is RateLimitedRun {
+  return (value as { status?: unknown })?.status === "rate_limited";
+}
 
 /**
  * #2806: a `DepthRefusal` from a non-2xx response, or undefined for anything
@@ -373,7 +527,13 @@ export interface GateResult {
   request_id?: string;
   skills?: string[];
   approver_role?: string;
+  /** trinity-enterprise#848: what the approver shows as — a kind's name, or a
+   * canon role's ("Head of sales"). Absent from an older backend. */
+  approver_label?: string;
   expires_at?: string | null;
+  /** trinity#3233: how the backend will tell this caller the outcome —
+   * `agent_task`, `inbox`, or `none` (absent from an older backend = none). */
+  outcome_delivery?: string;
   retryable: false;
   message: string;
 }
@@ -393,6 +553,9 @@ export function parseGateResult(
   try {
     const parsed = JSON.parse(body) as Record<string, unknown>;
     if (status === 202 && parsed?.status === "pending_approval") {
+      const delivery = typeof parsed.outcome_delivery === "string" ? parsed.outcome_delivery : undefined;
+      // trinity#3233: promise a delivery only when the backend says it makes one.
+      const delivered = delivery === "agent_task" || delivery === "inbox";
       return {
         status: "pending_approval",
         agent,
@@ -400,11 +563,16 @@ export function parseGateResult(
         request_id: typeof parsed.request_id === "string" ? parsed.request_id : undefined,
         skills: Array.isArray(parsed.skills) ? (parsed.skills as string[]) : undefined,
         approver_role: typeof parsed.approver_role === "string" ? parsed.approver_role : undefined,
+        approver_label: typeof parsed.approver_label === "string" ? parsed.approver_label : undefined,
         expires_at: typeof parsed.expires_at === "string" ? parsed.expires_at : null,
+        outcome_delivery: delivery,
         retryable: false,
         message:
           `${typeof parsed.message === "string" ? parsed.message : "Not run: this needs approval."} ` +
-          "Do not retry or route it through another agent — the outcome will be sent to you.",
+          (delivered
+            ? "Do not retry or route it through another agent — the outcome will be sent to you."
+            : "Do not retry or route it through another agent. To learn the outcome, look for a " +
+              `new run with list_recent_executions(agent_name="${agent}") later.`),
       };
     }
     const d = ((parsed?.detail ?? parsed) as Record<string, unknown>) || {};
@@ -732,7 +900,8 @@ export class TrinityClient {
         owner: agent.owner || "unknown",
         is_shared: agent.is_shared || false,
       };
-    } catch {
+    } catch (err) {
+      if (isWorkspaceOnlyRefusal(err)) throw err;
       return null;
     }
   }
@@ -809,15 +978,32 @@ export class TrinityClient {
   /**
    * Get permitted agents for a source agent (Phase 9.10)
    * Returns list of agent names that the source agent can communicate with
+   *
+   * `strict` (trinity-enterprise#815): asks the backend for `?strict=true` —
+   * a 503 when Docker cannot be read instead of an answer with no peers — and
+   * THROWS on any failure. A caller that must not mistake an error for "no
+   * peers" (a broad queue read deciding completeness) uses it. Without the
+   * option the read keeps its fail-closed `[]`, as every other caller expects.
    */
-  async getPermittedAgents(sourceAgent: string): Promise<string[]> {
+  async getPermittedAgents(
+    sourceAgent: string,
+    options: { strict?: boolean } = {},
+  ): Promise<string[]> {
+    if (options.strict) {
+      const response = await this.request<{ permitted_agents: Array<{ name: string }> }>(
+        "GET",
+        `/api/agents/${encodeURIComponent(sourceAgent)}/permissions?strict=true`
+      );
+      return response.permitted_agents.map((a) => a.name);
+    }
     try {
       const response = await this.request<{ permitted_agents: Array<{ name: string }> }>(
         "GET",
         `/api/agents/${encodeURIComponent(sourceAgent)}/permissions`
       );
       return response.permitted_agents.map((a) => a.name);
-    } catch {
+    } catch (err) {
+      if (isWorkspaceOnlyRefusal(err)) throw err;
       return [];
     }
   }
@@ -825,9 +1011,23 @@ export class TrinityClient {
   /**
    * Check if source agent is permitted to call target agent (Phase 9.10)
    */
+  /**
+   * May `sourceAgent` call `targetAgent`? Decided by the backend from the
+   * database — the permission edge or the spawn record — never from the
+   * Docker-filtered permissions list, so a target with no container, a spawned
+   * child, or a Docker read fault no longer reads as "not permitted"
+   * (trinity-enterprise#629). Fails closed: any error is `false`.
+   */
   async isAgentPermitted(sourceAgent: string, targetAgent: string): Promise<boolean> {
-    const permitted = await this.getPermittedAgents(sourceAgent);
-    return permitted.includes(targetAgent);
+    try {
+      const response = await this.request<{ reachable: boolean }>(
+        "GET",
+        `/api/agents/${encodeURIComponent(sourceAgent)}/reach/${encodeURIComponent(targetAgent)}`
+      );
+      return response.reachable === true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -1036,7 +1236,8 @@ export class TrinityClient {
    * @param sourceAgent - Optional source agent name for agent-to-agent collaboration tracking
    * @param mcpKeyInfo - Optional MCP key info for execution origin tracking (AUDIT-001)
    *
-   * Returns ChatResponse on success, or a queue status object if agent is busy (429).
+   * Returns ChatResponse on success, a queue status object if admission refused
+   * the call (429 `capacity`), or a RateLimitedRun for any other 429 (#3244).
    */
   async chat(
     name: string,
@@ -1046,11 +1247,12 @@ export class TrinityClient {
     idempotencyKey?: string,
     turn?: string
   ): Promise<
-    | ChatResponse
+    | Replayable<ChatResponse>
     | { error: string; queue_status: "busy" | "queue_full"; retry_after: number; agent: string; details?: Record<string, unknown> }
-    | { status: "queued_timeout"; agent: string; execution_id: string; message: string }
+    | Replayable<{ status: "queued_timeout"; agent: string; execution_id: string; message: string }>
     | DepthRefusal
     | GateResult
+    | RateLimitedRun
   > {
     // Prepare headers
     const headers: Record<string, string> = {
@@ -1160,6 +1362,22 @@ export class TrinityClient {
     const gate = await readGateResult(response, name);
     if (gate) return gate;
 
+    // #3244: only the admission refusal (#2919 `capacity`) is "agent busy" —
+    // nothing was dispatched. Every other 429 fails toward "the run may have
+    // started": the post-run usage limit (which names its failed row), and one
+    // with no code at all (a proxy, or a backend that sent none), since
+    // "nothing ran, retry" is the one answer that is unsafe when wrong.
+    if (response.status === 429 && response.headers.get("x-trinity-error-code") !== CAPACITY_ERROR_CODE) {
+      const limited = parseRateLimitedRun(
+        response.headers.get("x-trinity-error-code"),
+        response.headers.get("x-trinity-execution-id"),
+        await response.text(),
+        name,
+      );
+      debugLog(`[chat] 429 on '${name}' is not an admission refusal (code=${limited.code ?? "none"}, execution_id=${limited.execution_id ?? "none"}) (#3244)`);
+      return limited;
+    }
+
     // Handle 429 Too Many Requests (agent queue full)
     if (response.status === 429) {
       let details: Record<string, unknown> = {};
@@ -1199,7 +1417,8 @@ export class TrinityClient {
       throw new Error(`API error (${response.status}): ${error}`);
     }
 
-    return (await response.json()) as ChatResponse;
+    // #3245: a 200 replay of a stored snapshot says so.
+    return markIdempotentReplay(response, (await response.json()) as ChatResponse);
   }
 
   /**
@@ -1322,11 +1541,11 @@ export class TrinityClient {
     turn?: string
   ): Promise<
     | GateResult
-    | ChatResponse
-    | { status: "accepted"; execution_id: string; agent_name: string; message: string; async_mode: true }
+    | Replayable<ChatResponse>
+    | Replayable<{ status: "accepted"; execution_id: string; agent_name: string; message: string; async_mode: true }>
     // #2661: sync mode may answer with the gateway-timeout receipt (same shape
     // chat() returns for #914) instead of a completed ChatResponse.
-    | { status: "queued_timeout"; agent: string; execution_id: string; message: string }
+    | Replayable<{ status: "queued_timeout"; agent: string; execution_id: string; message: string }>
     | DepthRefusal
   > {
     // Prepare headers
@@ -1483,7 +1702,8 @@ export class TrinityClient {
       throw new Error(`API error (${response.status}): ${error}`);
     }
 
-    return (await response.json()) as ChatResponse;
+    // #3245: a 200 replay of a stored snapshot says so.
+    return markIdempotentReplay(response, (await response.json()) as ChatResponse);
   }
 
   /**
@@ -1499,7 +1719,7 @@ export class TrinityClient {
   private inFlightReplayReceipt(
     name: string,
     executionId: string,
-  ): { status: "queued_timeout"; agent: string; execution_id: string; message: string } {
+  ): { status: "queued_timeout"; agent: string; execution_id: string; message: string; idempotent_replay: true } {
     return {
       status: "queued_timeout",
       agent: name,
@@ -1507,6 +1727,8 @@ export class TrinityClient {
       message:
         `This exact call was already dispatched to '${name}' and has no result to replay yet. ` +
         `${readNotResend(name, executionId)} A reworded re-send would dispatch a SECOND execution (#2661).`,
+      // #3245: a 409 is a replay of the in-flight claim, not a new dispatch.
+      idempotent_replay: true,
     };
   }
 
@@ -2451,31 +2673,14 @@ export class TrinityClient {
 
   /**
    * List operator-queue (Operating Room) items with optional filters. The
-   * backend applies owner-level accessible-agent filtering; the MCP tool layer
-   * additionally gates agent-scoped keys down to agent_permissions.
+   * backend applies owner-level accessible-agent filtering, narrows an
+   * agent-scoped key to {self} ∪ permitted, and intersects `agent_names`
+   * (trinity-enterprise#815); the MCP tool layer still gates agent-scoped keys.
    */
-  async listOperatorQueue(params: {
-    status?: string;
-    type?: string;
-    priority?: string;
-    agent_name?: string;
-    since?: string;
-    limit?: number;
-    offset?: number;
-  } = {}): Promise<OperatorQueueListResponse> {
-    const sp = new URLSearchParams();
-    if (params.status) sp.set("status", params.status);
-    if (params.type) sp.set("type", params.type);
-    if (params.priority) sp.set("priority", params.priority);
-    if (params.agent_name) sp.set("agent_name", params.agent_name);
-    if (params.since) sp.set("since", params.since);
-    if (params.limit !== undefined) sp.set("limit", String(params.limit));
-    if (params.offset !== undefined) sp.set("offset", String(params.offset));
-    const qs = sp.toString();
-    return this.request<OperatorQueueListResponse>(
-      "GET",
-      `/api/operator-queue${qs ? `?${qs}` : ""}`,
-    );
+  async listOperatorQueue(
+    params: OperatorQueueListParams = {},
+  ): Promise<OperatorQueueListResponse> {
+    return this.request<OperatorQueueListResponse>("GET", operatorQueueListTarget(params));
   }
 
   /**
@@ -2975,6 +3180,10 @@ export class TrinityClient {
       { email, agent, message },
       Number(process.env.MCP_CHAT_TIMEOUT_MS || 25000)
     );
+    // trinity#3274: a gated skill answers like it does on the other tiers —
+    // checked first, so a named refusal (even a 403) keeps its code.
+    const gate = await readGateResult(response, agent);
+    if (gate) return gate;
     if (response.status === 403) {
       throw new Error(`You do not have access to "${agent}".`);
     }
@@ -3723,6 +3932,7 @@ export class TrinityClient {
       clear_credentials?: boolean;
       /** `payment_token` makes the credential ride as x402 payment (#3185). */
       credential_kind?: "api_key" | "payment_token";
+      auth_scheme?: "bearer" | "aauth"; // ent#862
     },
   ): Promise<{ endpoint?: unknown; enabled?: boolean; hint?: string }> {
     return this.request<{ endpoint?: unknown; enabled?: boolean; hint?: string }>(
@@ -3825,6 +4035,35 @@ export class TrinityClient {
     return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/a2a/task`, body);
   }
 
+  /**
+   * Obtain (or resume obtaining) a person token for a resource as `name`
+   * (trinity-enterprise#878). Own-key only on the backend; the response never
+   * carries the token. Same bounded fetch as the A2A hop: the backend waits on
+   * the person server for up to `wait` + 8 s.
+   */
+  async requestPersonToken(
+    name: string,
+    body: {
+      resource: string;
+      pending_handle?: string;
+      wait?: number;
+      execution_id?: string;
+      trigger_source?: "mcp" | "api" | "script";
+    },
+  ): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/aauth/person-token`, body);
+  }
+
+  /**
+   * Call an allow-listed AAuth resource as `name`, or resume a pending call by
+   * its handle (trinity-enterprise#879). Own-key only on the backend; the
+   * response never carries a token. Same bounded fetch as the A2A hop: the
+   * backend's own budget is 25 s, under the 40 s gateway deadline.
+   */
+  async callAAuthResource(name: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/aauth/resource-call`, body);
+  }
+
   // --- Credential vault (trinity-enterprise#279) ----------------------------
   // Agent-facing discovery + fetch. Both are agent-scoped-key-only on the
   // backend; `request()` throws a typed `ApiError` on any non-2xx so the tool
@@ -3912,6 +4151,16 @@ export class TrinityClient {
 
   async setProjectHealth(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", this.projectPath(projectId, "/health"), turn, body);
+  }
+
+  /** trinity-enterprise#588: create a project on the agent's OWNER's behalf (projects.manage). */
+  async createProjectAsAgent(body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", "/api/enterprise/projects/agent/projects", turn, body);
+  }
+
+  /** trinity-enterprise#588: import one of the agent's OWN folder projects (projects.manage). */
+  async importProjectAsAgent(path: string, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", "/api/enterprise/projects/agent/projects/import", turn, { path });
   }
 
   // --- Role assignments (trinity-enterprise#500) ----------------------------

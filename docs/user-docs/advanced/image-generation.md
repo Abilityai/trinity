@@ -11,7 +11,7 @@ Platform image generation via a two-step Gemini pipeline: prompt refinement then
 3. **Step 2 -- Image Generation**: Gemini generates the image from the refined prompt.
 4. The image is returned as base64 (`image_base64`, `mime_type`) together with the `refined_prompt`, the `original_prompt` and the `model_used`.
 
-Generation needs a Gemini key — saved in **Settings → Integrations** ([Platform Keys](../credentials/platform-keys.md#gemini)) or set as `GEMINI_API_KEY`. Without one the endpoint answers **501**; a generation the provider rejects answers **422** with the reason and the refined prompt that was tried.
+Generation needs a Gemini key — saved in **Settings → Integrations** ([Platform Keys](../credentials/platform-keys.md#gemini)) or set as `GEMINI_API_KEY`. Settings accepts Google AI Studio keys that start with `AIza` or `AQ.`. Without one the endpoint answers **501**; a generation the provider rejects answers **422** with the reason and the refined prompt that was tried.
 
 Used internally for [agent avatars](agent-avatars.md) and other platform features.
 

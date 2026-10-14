@@ -76,6 +76,16 @@ services:
       # gap here cannot make the feature unreachable — but the env leg still has to
       # be forwarded or an operator setting it in .env silently does nothing.
       - A2A_OUTBOUND_ENABLED=${A2A_OUTBOUND_ENABLED:-false}
+      # AAuth prototype (trinity-enterprise#623 / #878 / #879). Default OFF and
+      # fail-closed: system_settings wins, but the env leg must be forwarded or
+      # the .env levers silently do nothing (#1056 class).
+      # ent#862: the graduated agent identity (Flows 1-4). Empty default, so an
+      # unset variable reads as unset and the Settings switch stays authoritative.
+      - AAUTH_ENABLED=${AAUTH_ENABLED:-}
+      - AAUTH_PROTOTYPE_ENABLED=${AAUTH_PROTOTYPE_ENABLED:-false}
+      - AAUTH_ISSUER=${AAUTH_ISSUER:-}
+      - AAUTH_PERSON_SERVER=${AAUTH_PERSON_SERVER:-}
+      - AAUTH_RESOURCE_ALLOWLIST=${AAUTH_RESOURCE_ALLOWLIST:-}
       # Nevermined x402 facilitator concurrency (ent#679). The bound is enforced at
       # these defaults whether or not they are wired, so a gap here is an inert
       # tuning lever rather than a dead feature — but this service uses an explicit
@@ -602,6 +612,9 @@ services:
       # gate (the backend reads the same key only for feature-flags observability).
       # Must be wired here or the flag is un-flippable on deploy (#1056/#1039 class).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #3232 report-back kill switch (default on): false stops every
+      # chat_with_* call from sending parent_execution_id, default or typed.
+      - MCP_REPORT_BACK_ENABLED=${MCP_REPORT_BACK_ENABLED:-true}
       # #848 inline email auth — THIS is the session-tier gate: with it OFF a
       # keyless MCP connection is refused outright and no login tools register.
       # The backend reads the same key to gate /api/internal/mcp-auth/*. Both

@@ -7,8 +7,8 @@ serialized; the grammar, lifecycle and evidence live in
 
 Readers: the principal's own seat always; the agent's OWNER (creator /
 infra owner — `role_card._is_owner`, never an assignment kind) every seat,
-writable; a stakeholder the assignment provider recognises on the agent
-(`kinds_for`) every seat read-only. Writes: own seat, or the owner on a named
+writable. An assignment kind does not widen the read (#3660; per-role
+stakeholder reads are #3381). Writes: own seat, or the owner on a named
 seat. An external portal principal (`is_platform=False`) is never an owner.
 """
 from __future__ import annotations

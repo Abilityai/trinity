@@ -1,0 +1,50 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-13",
+  "mode": "daily",
+  "scope": "diff",
+  "issue": "abilityai/trinity#3653",
+  "pr": 3657,
+  "phases_run": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    9,
+    12,
+    13,
+    14
+  ],
+  "findings": [],
+  "hypotheses": [
+    {
+      "category": "channel-context-provenance",
+      "owasp_2025": "A01",
+      "asi": "ASI03",
+      "title": "An agent citing another client's concurrently running turn addresses the outcome reply to that client's thread",
+      "note": "parity with the residual documented on _inherited_channel_context"
+    },
+    {
+      "category": "outcome-text-relay",
+      "asi": "ASI09",
+      "title": "A rejecting approver's note can be repeated by the requesting agent in an external client's conversation",
+      "note": "product decision, stated in the PR"
+    }
+  ],
+  "coverage_gaps": [
+    "phases 3,4,5,8: no changed files in scope",
+    "no Docker pass or live exploit attempt",
+    "no independent verifier: no finding passed the gate"
+  ],
+  "supply_chain_summary": {
+    "scanner": "not run (no dependency changes)"
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "counts_as_full_run": false
+}

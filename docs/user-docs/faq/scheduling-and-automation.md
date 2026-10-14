@@ -4,7 +4,7 @@
 
 ## How do I schedule a recurring task for an agent?
 
-Open the agent's detail page, go to the Schedules section, and click **Create Schedule**. Give it a name, a cron expression (for example `0 9 * * 1-5` for weekdays at 9 AM), the message or task to send, a timezone, and an optional description. You can also pick a model override (Opus, Sonnet, Haiku, Sonnet 5, Fable 5.1, or custom) per schedule. Each time the schedule fires, it creates an execution record with status, duration, response, and cost. See [Scheduling](../automation/scheduling.md).
+Open the agent's detail page, go to the Schedules section, and click **Create Schedule**. Give it a name, a cron expression (for example `0 9 * * 1-5` for weekdays at 9 AM), the message or task to send, a timezone, and an optional description. You can also pick a model override per schedule from the **Model** picker (Claude Opus 5.5, Fable 5.1, Sonnet 5, Haiku 4.5 and older models, or any model id you type); left empty, it uses the platform default. Each time the schedule fires, it creates an execution record with status, duration, response, and cost. See [Scheduling](../automation/scheduling.md).
 
 ## Can I set a timezone for my schedule?
 
@@ -56,7 +56,7 @@ Yes, with post-run validation. Set `validation_enabled: true` on the schedule ov
 
 ## What happens to the execution history if I delete a schedule?
 
-Deleting a schedule is a soft delete: it stops firing immediately, but the schedule row and all its execution records are preserved. An admin can recover a soft-deleted schedule, and if it was enabled it rejoins the scheduler shortly after recovery. Soft-deleted schedules are permanently purged after a retention period (30 days by default). See [Scheduling](../automation/scheduling.md).
+Deleting a schedule is a soft delete: it stops firing immediately, but the schedule row and all its execution records are preserved. An admin can recover a soft-deleted schedule, and if it was enabled it rejoins the scheduler shortly after recovery. Soft-deleted schedules are permanently purged after a retention period: 5 days on a fresh install, 30 days on an install upgraded from before those defaults, and an admin can change it. See [Scheduling](../automation/scheduling.md).
 
 ## Can my agent skip a scheduled run when there's nothing to do?
 
@@ -124,7 +124,7 @@ Use fan-out: it dispatches 1–50 independent tasks to an agent concurrently (up
 
 ## What are skills and playbooks, and how do I run one?
 
-A skill is a reusable capability packaged in the platform's skills library — one or more GitHub repositories synced to Trinity. Each skill is a folder built around a `SKILL.md` instruction file, optionally bundled with supporting scripts, templates, and resources. When a skill is assigned to an agent, it becomes a playbook: the agent's **Playbooks** tab lists assigned skills with a **Run** button that sends the skill as a task, and in the **Chat** tab you can type `/` to autocomplete a playbook command with ghost text showing the syntax and argument hints. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+A skill is a reusable capability packaged in the platform's skills library — one or more GitHub repositories synced to Trinity. Each skill is a folder built around a `SKILL.md` instruction file, optionally bundled with supporting scripts, templates, and resources. The agent's **Skills** tab lists its own skills under **Own skills** and the ones assigned to it from the library under **Shared skills**, each with a **Run** button that sends the skill as a task, and in the **Chat** tab you can type `/` to autocomplete a skill command with ghost text showing the syntax and argument hints. That tab used to be called **Playbooks**; API names such as `run_playbook` keep the old word. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
 
 
 ## How do I find out which agents already have a given skill?
@@ -135,13 +135,17 @@ The **Library** page's Skills tab (`/library?tab=skills`) shows, for every skill
 
 Yes. Each skill card on the Library's Skills tab has an **Assign to…** control listing the agents you may still assign it to — agents you own (an admin sees every agent), minus those that already hold it. Pick one and click **Assign**; the delivery note appears under the control: *Assigned and delivered — available now*, *applies on next start*, or a named failure. The **×** on an agent chip unassigns the skill from that agent, and it appears only where you're allowed to make the change — an agent merely shared with you shows as a holder but carries no control. Both surfaces write the same per-agent assignment, so it doesn't matter whether you start from the skill or from the agent's **Skills** tab. There is no Sync button on the Library; to retry a failed delivery, assign the same agent again. See [Skills and Playbooks](../automation/skills-and-playbooks.md#from-the-library).
 
+## What happens if I assign a skill the library marked deprecated?
+
+It works. A deprecated skill stays listed, assignable and injected; Trinity flags it rather than hiding it. The Library card and the agent's Skills tab show a **deprecated** badge and, when the library named one, a *Superseded by …* line, and the assign or save shows a warning line naming the successor. An agent that already holds the skill keeps it unchanged until the library deletes it, after which it shows under **Assigned but no longer in the library**. See [Skills and Playbooks](../automation/skills-and-playbooks.md#deprecated-skills).
+
 ## Can a skill be a whole folder of files instead of a single markdown file?
 
 Yes. A skill is a full-directory package, not just one markdown file: alongside the `SKILL.md` instructions it can carry scripts, templates, and any resource files the capability needs. When the skill is assigned, Trinity injects the entire directory into the agent, versioned by the folder's content so re-syncs only push real changes. This lets a skill ship helper code and assets, not only prose. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
 
 ## Why does my playbook say "No description available"?
 
-The Playbooks tab, the `/` popup, and the chat empty state take a skill's description from the `description:` field in its `SKILL.md` frontmatter, so first check that the field is there. On an agent running an older base image, one unreadable frontmatter field blanked the whole record — most often Claude Code's comma-separated `allowed-tools: Read, Bash` — and the skill showed only its folder name. Current agent images read each field on its own, accept both the comma-separated and the list form of `allowed-tools`, and drop only the bad field, with one warning in the agent log naming the file and field. To pick that up on an existing agent, rebuild or re-pull the agent base image and start the agent cold. See [Skills and Playbooks](../automation/skills-and-playbooks.md#skill-frontmatter-and-dependency-checks).
+The agent's Skills tab, the `/` popup, and the chat empty state take a skill's description from the `description:` field in its `SKILL.md` frontmatter, so first check that the field is there; a card without one reads *No description* (the Playbooks tab it replaced said *No description available*). On an agent running an older base image, one unreadable frontmatter field blanked the whole record — most often Claude Code's comma-separated `allowed-tools: Read, Bash` — and the skill showed only its folder name. Current agent images read each field on its own, accept both the comma-separated and the list form of `allowed-tools`, and drop only the bad field, with one warning in the agent log naming the file and field. To pick that up on an existing agent, rebuild or re-pull the agent base image and start the agent cold. See [Skills and Playbooks](../automation/skills-and-playbooks.md#skill-frontmatter-and-dependency-checks).
 
 ## Does a skill's `allowed-tools` frontmatter limit what the agent can do?
 
@@ -149,15 +153,23 @@ Not in Trinity. The agent reads the field — in Claude Code's comma-separated f
 
 ## How do I assign skills to an agent, and do I need to restart it?
 
-No restart. Open the agent's **Skills** tab, tick the skills, and click **Save assignments** — the save delivers straight away to a running agent, and the note beside the button says what happened: *delivered — available now*, *the agent is stopped, so it applies on next start*, *still installing* (a large package outlived the 20-second wait and continues in the background), or a named failure. Each skill lands as a whole directory under `~/.claude/skills/<name>/`, so its scripts and resources come too, and the per-skill result tells you honestly whether it's missing a declared binary or environment variable. **Sync now** is the repair action for a delivery that didn't land, not a required step, and every assignment change refreshes the open **Playbooks** tab and `/` autocomplete without a reload. Admins manage the *sources* the library syncs from in **Settings → Agents**; skills themselves are edited in their GitHub repository, not in Trinity. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+No restart. Open the agent's **Skills** tab, click **Assign skills**, tick the skills, and click **Save assignments** — the save delivers straight away to a running agent, and the note under the button says what happened: *delivered — available now*, *the agent is stopped, so it applies on next start*, *still installing* (a large package outlived the 20-second wait and continues in the background), or a named failure. Each skill lands as a whole directory under `~/.claude/skills/<name>/`, so its scripts and resources come too, and the per-skill result tells you honestly whether it's missing a declared binary or environment variable. **Sync now** is the repair action for a delivery that didn't land, not a required step, and every assignment change refreshes the open **Skills** tab and `/` autocomplete without a reload. Admins manage the *sources* the library syncs from in **Settings → Agents**; skills themselves are edited in their GitHub repository, not in Trinity. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
 
 ## Why does a library skill show "name conflict" instead of installing?
 
-The agent already has its own `.claude/skills/<name>/` directory that the platform did not create — usually a skill the agent wrote itself. Trinity never overwrites it: the agent's copy stays and is the one that runs, and **Sync now** does not change that. To keep the agent's skill, click **Unassign library skill** on the Skills tab. To use the library version, rename or remove the agent's directory and sync again. See [Skills and Playbooks](../automation/skills-and-playbooks.md#from-the-agents-skills-tab).
+The agent already has its own `.claude/skills/<name>/` directory that the platform did not create — usually a skill the agent wrote itself. Trinity never overwrites it: the agent's copy stays and is the one that runs, and **Sync now** does not change that. To keep the agent's skill, open the note on the skill's card under **Shared skills** on the Skills tab and click **Unassign library skill**. To use the library version, rename or remove the agent's directory and sync again. See [Skills and Playbooks](../automation/skills-and-playbooks.md#from-the-agents-skills-tab).
 
 ## Why is my orchestrator agent refused with `skill_management_not_permitted`?
 
-Changing an agent's skills — another agent's or its own — is a separate permission, and no agent holds it by default. An admin grants it in **Settings → Agents → Skill managers**; only a person at the UI can grant or revoke it. People who own the agent, admins and the system agent are not affected. A granted agent still reaches only its owner's agents. See [Skills and Playbooks](../automation/skills-and-playbooks.md#who-can-change-an-agents-skills).
+Changing an agent's skills — another agent's or its own — is a separate permission, and no agent holds it by default. An admin grants it in **Settings → Agents → Skill managers**, or with the **Change skills** toggle on the agent's Settings tab; only a person at the UI can grant or revoke it. People who own the agent, admins and the system agent are not affected. A granted agent still reaches only its owner's agents. The same kind of named refusal covers other agents' schedules, instructions and agent management, each with its own permission. See [Skills and Playbooks](../automation/skills-and-playbooks.md#who-can-change-an-agents-skills) and [Permissions to Change Itself](../agents/agent-configuration.md#permissions-to-change-itself).
+
+## How do I make a skill wait for someone's approval before it runs?
+
+Open the agent's **Skills** tab and, as its owner or an admin, turn on **Requires approval** on the skill's card and pick who approves (the primary contact, or an approver role where your install offers one). From then on any request that names the skill — from a person, another agent, a schedule or a channel — is held before the agent sees it, and the approver gets a card to approve or reject. When the approver asks for it themselves, it runs at once and is marked *Ran without approval*. Gates are per agent, and can also be set over the API or with the `set_skill_gate` MCP tool. See [Skills and Playbooks → Requiring approval for a skill](../automation/skills-and-playbooks.md#requiring-approval-for-a-skill).
+
+## What happens after a gated skill request is approved?
+
+The request runs once, exactly as it appeared on the card, as a new execution on the agent. An agent that asked gets a notice when the request is decided and a second when the approved run ends, with its status and a short quote of the reply or error; a person gets the same two notices in their Workspace Inbox. Each notice opens with the outcome (*Approved, now running*, *Finished successfully*, *Failed*, …). Schedules, channel users and public-link visitors get only the request id up front. A rejection, an expiry or a cancellation runs nothing. See [Approvals → Gated-skill approvals](../automation/approvals.md#gated-skill-approvals).
 
 ## How can I see whether a schedule is actually performing well?
 
@@ -189,7 +201,7 @@ Because skills carry executable scripts, and with fleet re-inject on, a source t
 
 ## The add-project-management plugin installs nothing — where did it go?
 
-It's deprecated: it stays in the marketplace for one release as a pointer stub, and its skill now lives in agent-dev as `/agent-dev:add-project-management`. The five runtime skills it installs — `/project-init`, `/project-task`, `/project-steward`, `/project-reconcile` and `/project-intake` — are also standalone in the agent-dev plugin (now 30 skills) and mirrored into the bundled community skills catalog, so on Trinity you can assign them to a deployed agent from the Library without running the installer at all; `/project-init` materializes the project standard itself on first run. Also new in agent-dev: `/agent-dev:commit` doubles as a plain save — with no issue claimed it becomes a checkpoint commit of the agent-state files (memory, outputs, skills, `CLAUDE.md`, `template.yaml` — never `.env` or anything credential-shaped). See [Abilities Marketplace](../automation/abilities-marketplace.md#deprecated-add-project-management-v130).
+It's deprecated: it stays in the marketplace for one release as a pointer stub, and its skill now lives in agent-dev as `/agent-dev:add-project-management`. The runtime skills it installs — `/project-init`, `/project-task`, `/project-steward`, `/project-reconcile`, `/project-intake` and, since agent-dev 1.22, `/project-status` — are also standalone in the agent-dev plugin (now 31 skills) and mirrored into the bundled community skills catalog, so on Trinity you can assign them to a deployed agent from the Library without running the installer at all; `/project-init` materializes the project standard itself on first run. Also new in agent-dev: `/agent-dev:commit` doubles as a plain save — with no issue claimed it becomes a checkpoint commit of the agent-state files (memory, outputs, skills, `CLAUDE.md`, `template.yaml` — never `.env` or anything credential-shaped). See [Abilities Marketplace](../automation/abilities-marketplace.md#deprecated-add-project-management-v130).
 
 ## Do I need to install the trinity plugin inside my agent before it can run /trinity skills?
 
@@ -206,6 +218,42 @@ Ideally a single line that invokes one of the agent's skills by name — `/daily
 ## My scheduled skill hangs every run and burns its whole timeout — why?
 
 The skill almost certainly asks a question at one of its decision points. On an unattended cron there is nobody to answer, so every run blocks on the prompt until the execution times out with nothing committed. The fix belongs in the skill, not in the schedule message: give it a headless run mode — the abilities convention is a `--autonomous` argument, so the schedule message becomes `/<skill> --autonomous` — in which the skill never prompts, takes the safe default at each gate, never takes a destructive path a gate was protecting, and records any non-trivial decision as a `needs-attention` line instead of guessing. The orchestrator bundle's gated skills already ship this mode. See [Abilities Marketplace](../automation/abilities-marketplace.md#playbook-calls--the-unit-of-inter-agent-work).
+
+## Can an agent trigger a schedule to get around the agent-to-agent chain limit?
+
+No. When an agent triggers a schedule with its own key, for example with `trigger_agent_schedule`, the run counts as one more hop in that agent's call chain, just like `chat_with_agent`. A trigger past the limit (8 hops by default) is refused with `403 inter_agent_depth_exceeded` before anything runs, and a retry of that run keeps its depth. Cron fires, webhook fires and **Run now** from the UI start a new chain. See [Scheduling](../automation/scheduling.md#run-now-and-chain-depth).
+
+## How do I stop a webhook sender's retries from firing my schedule twice?
+
+Send an `Idempotency-Key` header with each delivery, using a value that stays the same when the sender retries the same event. A repeat with the same key within 24 hours returns the first result with `X-Idempotent-Replay: true` instead of firing again, or `409` while the first delivery is still running. A call without the header fires every time, so a plain ping-to-trigger is never swallowed. See [Webhook Triggers](../api-reference/webhook-triggers.md#schedule-webhook-triggers).
+
+## What does "Something else" on an approval do?
+
+It tells the agent that none of its options is approved and gives it your own instruction instead. Every approval an agent raises offers it, on the Operations page, the mobile admin and the Workspace. The instruction is required (up to 4,000 characters), and the agent carries out none of the listed options and re-plans from what you wrote. Approvals the platform raised itself offer only their own options. See [Approvals](../automation/approvals.md#how-it-works).
+
+## Why was my agent's ask refused with `too_many_options` or `title_too_long`?
+
+Trinity keeps each ask to one decision a person can take at a glance. By default an approval may offer at most 5 options (Something else not counted), each at most 60 characters, with a title of at most 120 characters, and an option that imitates **Something else** is refused as `invalid_options`. `ask_operator` returns the code and the limit in force; a queue-file entry over a limit is held in the file with its id listed under `platform.ingestion` until the agent fixes it. Split two decisions into two asks and move the reasoning into the question. See [Approvals](../automation/approvals.md#authoring-limits).
+
+## Can I talk an ask through with the agent before I answer it?
+
+Yes, in the Workspace. Click **Discuss** on an approval or a question to open a chat with the agent about that ask; the ask heads the chat and stays pending until you answer it on its own card. Clicking again shows **Continue discussion** and reopens the same chat. If you answer after discussing and the owner has turned on the wake, the agent's result is posted into that chat. See [Approvals](../automation/approvals.md#asks-addressed-to-a-workspace-user).
+
+## How do I tell an agent its ask doesn't need a decision?
+
+Click **Dismiss** on the ask in the Workspace. It ends without an answer, after a 5-second **Undo** window and with no confirmation. The agent reads it as `dismissed` with an empty answer and is told not to raise the same ask again straight away; if its owner turned on the wake, it is woken once. Alerts have no Dismiss: acknowledge them with **Got it**. See [Approvals](../automation/approvals.md#asks-addressed-to-a-workspace-user).
+
+## Why does an expired approval say "whether the action went ahead is unknown"?
+
+Because the agent, not Trinity, held that action. When an agent asks for approval and nobody answers before the deadline, the ask expires as *not approved*, but Trinity cannot see whether the agent went ahead anyway. The Resolved tab, the queue detail and the mobile admin say so, and the agent reads `disposition_reason: "outcome_unknown"`. An expired approval for a gated skill never says this: the platform held that request, so nothing ran. See [Approvals](../automation/approvals.md#concepts).
+
+## Why does a heads-up in the Operations queue say "seen 5 times" instead of filing new rows?
+
+Some platform heads-ups describe a condition, such as a subscription low on headroom or a refused skills-library URL. Trinity keeps one pending row per condition and updates it with each new reading, so the card counts how often it was seen and when last. When the condition clears, the platform ends the row itself (**Ended by the platform — the condition cleared**); otherwise it expires 14 days after its last reading. After you end one, the same reading files nothing for 7 days unless its priority rises. See [Approvals](../automation/approvals.md#how-it-works).
+
+## Why did my agent get a "queue flood" heads-up?
+
+The agent has too many open asks or is raising them too fast. Each agent may have 25 pending asks of its own and create 60 per minute by default; over that, new asks are refused (`429 queue_full` or `rate_limited`) or, from the queue file, held and admitted later. Trinity files one queue-flood heads-up per episode, and the platform's own heads-ups never count toward the agent's 25. Answer or cancel some of the agent's open asks, and fix whatever makes it ask so often. See [Approvals](../automation/approvals.md#authoring-limits).
 
 ## Can I use a legacy timezone name like `US/Eastern` in a schedule?
 

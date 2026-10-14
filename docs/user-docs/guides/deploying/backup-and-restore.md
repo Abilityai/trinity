@@ -12,7 +12,7 @@ Trinity backs up its own database; this page covers what that gives you, the man
 ## Pre-flight
 
 - [ ] Know where your data directory is: the `trinity_trinity-data` volume (dev compose) or `TRINITY_DATA_PATH` (default `./trinity-data` in the checkout; `/opt/trinity/trinity-data` on a DigitalOcean Droplet) for prod and hosted installs. Inside the backend container it is always `/data`.
-- [ ] Know your backend: SQLite (`trinity.db`) unless `DATABASE_URL` points at PostgreSQL.
+- [ ] Know your backend. A hosted install that started fresh after PostgreSQL was bundled runs on the `trinity-postgres` container (its data in the `postgres-data` named volume, not in the data directory). Every other install is SQLite (`trinity.db`) unless `DATABASE_URL` points at PostgreSQL. `grep '^DATABASE_URL' .env` tells you: a `postgresql://` URL is PostgreSQL, an empty value or no line (dev, prod) is SQLite.
 - [ ] For a restore: enough free disk for the artifact plus the live database, and a maintenance window — both writers (backend and scheduler) are stopped.
 
 ## Automatic Backups (Built In)
@@ -24,13 +24,15 @@ Trinity backs up its own database; this page covers what that gives you, the man
 | SQLite | `trinity-backup-YYYYMMDD.db` — a consistent online copy via SQLite's backup API (never a raw file copy) |
 | PostgreSQL | `trinity-backup-YYYYMMDD.dump` — `pg_dump -Fc` (custom format, restorable with `pg_restore`) |
 | Pre-migration | `pre-migration-YYYYMMDD-HHMMSS.db` — an extra safety copy taken automatically at boot when a schema migration is about to run (SQLite) |
-| Retention | `backup_retention_days` (default **14**, bounds 1–3650) — set via `PUT /api/settings/ops/config` (the Retention tab in Settings does not list it). The newest **3** artifacts are always kept, regardless of age. Like every retention window, it is stored per install and does not change on upgrade. |
+| Retention | `backup_retention_days` (default **14**, bounds 1–3650) — set via `PUT /api/settings/ops/config` (the **Database backups** card on the Retention tab shows it, read-only). The newest **3** artifacts are always kept, regardless of age. Like every retention window, it is stored per install and does not change on upgrade. |
 | Default | **Enabled.** Disable with `DB_BACKUP_ENABLED=false` in `.env` — this turns off both the nightly job and the boot-time pre-migration copy |
 | Failure visibility | A failed or skipped backup raises an item in Operations → Needs Response, and a "backups are stale" alarm re-fires weekly while the newest success is older than 3 days |
 
 ### Checking backup status (no shell needed)
 
-As an admin:
+As an admin, open **Settings → Retention**. The **Database backups** card shows one state badge — **Healthy**, **Stale**, **Last backup failed**, **Skipped — not enough disk space**, **No backup yet** or **Off** — and the last successful backup (relative time, exact time on hover), the number and total size of recovery points, the backup folder with the same-disk caveat, the nightly schedule, and how long backups are kept. A failed or skipped attempt outranks an older success, so a failing install never reads **Healthy**; the last good backup is still listed. The badge stays empty while the page loads, and a backend too old to report backups, or one that could not read the status, says so instead of showing a state.
+
+Or over the API:
 
 ```bash
 curl -s -H "Authorization: Bearer <token>" \
@@ -69,8 +71,8 @@ disabling backups is `DB_BACKUP_ENABLED=false`, never "keep forever").
 
 | Component | Back up? | Where it lives | Notes |
 |---|---|---|---|
-| Database | **Automatic** | `/data/backups/` (see above) | Agents, schedules, chat history, credentials metadata, audit log |
-| `.env` file | **Yes — manually** | Host filesystem | **Not in git.** Losing it means losing `CREDENTIAL_ENCRYPTION_KEY` (all encrypted credentials become unrecoverable) and `AGENT_AUTH_SECRET` (every agent's in-container token). A database backup alone does not cover this. |
+| Database | **Automatic** | `/data/backups/` (see above) | Agents, schedules, chat history, credentials metadata, audit log. On the bundled PostgreSQL the live data is in the `postgres-data` volume; the automatic `pg_dump` artifacts still land in `/data/backups/`. |
+| `.env` file | **Yes — manually** | Host filesystem | **Not in git.** Losing it means losing `CREDENTIAL_ENCRYPTION_KEY` (all encrypted credentials become unrecoverable), `AGENT_AUTH_SECRET` (every agent's in-container token) and, on a hosted install, `POSTGRES_PASSWORD` (the only password that opens the existing `postgres-data` volume). A database backup alone does not cover this. |
 | Backup artifacts (off-host) | Recommended | Copy of `/data/backups/` | Same-disk artifacts do not survive disk loss — ship them off-host for DR. |
 | Agent code | Not separately | Git repositories | Each agent's code lives in a git repo — already versioned there. |
 | Agent runtime data | Optional | Agent workspace volumes | Use the per-agent data export (`POST /api/agents/{name}/data/export`). |
@@ -124,7 +126,7 @@ the prefix differs — check with `docker volume ls | grep trinity`.
 **PostgreSQL** (`DATABASE_URL` set):
 
 ```bash
-# Bundled dev container
+# Bundled container (hosted installs, or dev with --profile postgres)
 docker exec trinity-postgres pg_dump -U trinity -Fc trinity \
   > ~/backups/trinity-pg-$(date +%Y%m%d-%H%M%S).dump
 # Managed/external PostgreSQL: use your provider's snapshot tooling,
@@ -211,7 +213,8 @@ curl -s http://localhost:8000/health
 ### PostgreSQL
 
 Restore a `-Fc` dump with `pg_restore` into an **empty** database, services
-stopped:
+stopped (on a hosted install add `-f docker-compose.hosted.yml` to each
+`docker compose` command):
 
 ```bash
 docker compose stop backend scheduler
@@ -226,8 +229,8 @@ docker compose start backend scheduler
 
 For managed PostgreSQL, use `pg_restore -d <conninfo>` against your provider.
 
-> **Version note:** the bundled `pg_dump` is v17 and dumps servers up to its
-> own major. If your managed PostgreSQL is ever newer than the client shipped
+> **Version note:** the backend image's `pg_dump` is v17 and dumps servers up to its
+> own major (the bundled hosted server is PostgreSQL 16). If your managed PostgreSQL is ever newer than the client shipped
 > in the backend image, backups fail loudly (operator alarm) rather than
 > silently — upgrade the image, or dump with your provider's tooling.
 

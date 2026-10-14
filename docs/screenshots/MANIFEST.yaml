@@ -142,9 +142,9 @@ screenshots:
   - file: agent-skills.png
     title: Agent Detail — Skills tab
     route: /agents/{name}?tab=skills
-    shows: Assigned skills with the library browse/assign surface.
+    shows: Own and shared skills as cards, with Run and (for the owner) Requires approval.
     sources:
-      - src/frontend/src/components/SkillsPanel.vue
+      - src/frontend/src/components/skills/SkillsTab.vue
       - src/frontend/src/components/skills
     captured_at: 2026-08-09
     captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b

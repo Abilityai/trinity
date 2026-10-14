@@ -1,0 +1,108 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-07",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/753-skill-gate-map",
+  "issue": "abilityai/trinity-enterprise#753",
+  "base": "a51549772",
+  "audited": "working tree vs base (pre-commit)",
+  "counts_as_full_run": false,
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_not_applicable": {
+    "3": "no dependency change",
+    "4": "no workflow change",
+    "5": "no Docker/compose change",
+    "6": "no webhook/integration change"
+  },
+  "stack_cve_quicklist": [
+    {
+      "component": "all rows",
+      "verdict": "not touched by diff"
+    }
+  ],
+  "attack_surface": {
+    "new_endpoints": 3,
+    "new_mcp_tools": 3,
+    "new_exec": "marker force-write, constant argv",
+    "census": "AGENT_CALLABLE x3"
+  },
+  "checks": [
+    {
+      "check": "secret prefixes / emails in added lines",
+      "result": "none"
+    },
+    {
+      "check": "enterprise-docs-guard PATTERN on added doc lines",
+      "result": "none"
+    },
+    {
+      "check": "invisible Unicode in changed files",
+      "result": "none"
+    },
+    {
+      "check": "request.url.path in new fences",
+      "result": "none (path_params / principal only)"
+    },
+    {
+      "check": "guards",
+      "result": "test_2996, test_186, test_293, test_1310_* green"
+    },
+    {
+      "check": "mutation battery",
+      "result": "27 mutations across write paths, auth bounds, marker ordering, drop gating; each red"
+    }
+  ],
+  "findings": [
+    {
+      "id": 1,
+      "severity": "LOW",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "info-disclosure",
+      "owasp_2025": "A01",
+      "asi": "ASI03",
+      "llm": "LLM02",
+      "phase": 7,
+      "file": "src/backend/services/skill_gate_map_service.py",
+      "symbol": "_public / list_gates",
+      "title": "Gate list returns set_by (an email for email-login users) to agent keys",
+      "exploit": "An email-login admin sets a gate on another user's agent; that agent's key calls list_skill_gates and reads the admin's email.",
+      "recommendation": "Withhold set_by from non-person principals on read and write responses (the #715 projection).",
+      "resolution": "fixed in-branch with a test",
+      "verifier": "independent agent (PARTIAL: only non-owner writers are new)"
+    }
+  ],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "no Docker pass (diff mode, no image change)",
+    "pg-migrations upgrade head not run locally"
+  ],
+  "supply_chain_summary": {
+    "scanner": "n/a (no dependency change)"
+  },
+  "filter_stats": {
+    "candidates": 3,
+    "reported": 1
+  },
+  "totals": {
+    "CRITICAL": 0,
+    "HIGH": 0,
+    "MEDIUM": 0,
+    "LOW": 1
+  },
+  "trend": "new surface; no prior report"
+}

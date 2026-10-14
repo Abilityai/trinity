@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { setBaseTitle } from '@/utils/tabTitle'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { isWorkspaceOnlyRole, landingAfterSignIn, operatorRouteRedirect } from '../utils/workspaceOnly'
 import { useSessionsStore } from '../stores/sessions'
 import { useAgentsStore } from '../stores/agents'
 
@@ -70,7 +71,16 @@ export const routes = [
     component: () => import('../views/AgentDetail.vue'),
     // #1418 — the :name param IS the canonical agent identifier in Trinity.
     // #1643 — the rendered tab title resolves to the display name (slug fallback).
-    meta: { requiresAuth: true, title: (to) => agentTabTitle(to.params.name) }
+    // #3446 — hideHelpLauncherOnTabs: the floating help launcher sits in the
+    // Chat composer's corner and covered Send. Only that tab, and only the
+    // launcher: the rest of the page keeps help, and an open help conversation
+    // is not torn down by a tab click. Reads `?tab=`, which the page keeps
+    // current (#2900).
+    meta: {
+      requiresAuth: true,
+      title: (to) => agentTabTitle(to.params.name),
+      hideHelpLauncherOnTabs: ['chat'],
+    }
   },
   {
     // ent#438 — the per-agent workspace is retired. It was a voice orb beside a
@@ -334,7 +344,9 @@ export const routes = [
     path: '/m',
     name: 'MobileAdmin',
     component: () => import('../views/MobileAdmin.vue'),
-    meta: { requiresAuth: false, title: 'Mobile' }  // handles its own inline auth
+    // Handles its own inline auth, so not `requiresAuth` — but an operator
+    // surface all the same (trinity-enterprise#837): see the guard below.
+    meta: { requiresAuth: false, operatorSurface: true, title: 'Mobile' }
   },
   // Catch-all redirect to dashboard
   {
@@ -380,6 +392,17 @@ async function checkSetupStatus() {
   }
 }
 
+// trinity-enterprise#837 — the role the guard routes on. The STORED role, never
+// the `role` getter (it reports 'user' while the profile loads); a stored `user`
+// is confirmed with the server first, so an account raised to `operator` since
+// its last sign-in is not bounced on a stale cache. Only that case waits.
+async function confirmedRole(authStore) {
+  if (isWorkspaceOnlyRole(authStore.user?.role) && !authStore.profileVerified) {
+    await authStore.fetchUserProfile()
+  }
+  return authStore.user?.role
+}
+
 // Navigation guard
 // Vue Router 5 deprecated the `next` callback; guards now signal intent by
 // returning a value (true/undefined = proceed, a location = redirect).
@@ -416,9 +439,24 @@ router.beforeEach(async (to, from) => {
     }
   }
 
+  // trinity-enterprise#837 review: the mobile admin signs in by itself, outside
+  // `requiresAuth`, but every call it makes refuses a Workspace-only member —
+  // a signed-in member goes to the Workspace instead of a dead app.
+  if (to.meta.operatorSurface && authStore.isAuthenticated) {
+    const toWorkspace = operatorRouteRedirect(to, await confirmedRole(authStore))
+    if (toWorkspace) return toWorkspace
+  }
+
   // Check if route requires authentication
   if (to.meta.requiresAuth) {
     if (authStore.isAuthenticated) {
+      // trinity-enterprise#837 — the operator UI starts at `operator`. A
+      // Workspace-only member who opens an operator URL lands in the Workspace
+      // (an agent page opens that agent's conversation). The API refuses them
+      // regardless; this only spares them the wall.
+      const toWorkspace = operatorRouteRedirect(to, await confirmedRole(authStore))
+      if (toWorkspace) return toWorkspace
+
       // #847 — enterprise entitlement guard.
       // Two modes:
       //   * `meta.requiresEntitlement: '<id>'` — gate on the named
@@ -450,8 +488,8 @@ router.beforeEach(async (to, from) => {
     }
   } else if (to.path === '/login' && authStore.isAuthenticated) {
     // User is authenticated but trying to access login page
-    // Redirect to dashboard
-    return '/'
+    // Redirect to dashboard — the Workspace for a Workspace-only member (ent#837)
+    return landingAfterSignIn(undefined, await confirmedRole(authStore))
   } else {
     // Public route, allow access
     return true

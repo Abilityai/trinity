@@ -19,7 +19,7 @@ Click any agent to open its detail page. The page lands on the **Overview** tab 
 | **Canvas** | `canvas` | The surface the agent keeps current -- see [Agent Canvas](agent-canvas.md) |
 | **Schedules** | `schedules` | Cron-based automation -- see [Scheduling](../automation/scheduling.md) |
 | **Loops** | `loops` | Sequential bounded task runs -- see [Agent Loops](../automation/agent-loops.md) |
-| **Playbooks** | `playbooks` | Reusable command templates |
+| **Skills** | `skills` | The agent's own skills and those shared from the library, each with **Run**; owners also set approval and assign skills -- see [Skills](../automation/skills-and-playbooks.md) |
 | **Credentials** | `credentials` | Credential injection and export |
 | **Payments** | `nevermined` | Paid access configuration |
 | **Access** | `access` | Operator access roster (owners only) |
@@ -29,13 +29,12 @@ Click any agent to open its detail page. The page lands on the **Overview** tab 
 | **Git** | `git` | Git sync controls — only for GitHub-synced agents |
 | **Files** | `files` | Workspace file browser |
 | **Folders** | `folders` | Shared folder configuration (owners only) |
-| **Skills** | `skills` | Assign skills from the library (owners only) -- see [Skills](../automation/skills-and-playbooks.md) |
 | **Settings** | `settings` | Per-agent configuration (owners only) -- see [Agent Configuration](agent-configuration.md) |
 | **Info** | `info` | Template metadata and capabilities |
 
 Tabs marked *owners only* are hidden from users an agent is merely shared with, and are never shown on the system agent. **Dashboard**, **Brain**, **Git**, and **A2A** appear only when that agent or instance supports them.
 
-Every visible tab is deep-linkable with `?tab=` — including the conditional ones. A `?tab=` value naming a tab you cannot see falls back to Overview. Two legacy links still resolve: `?tab=guardrails` opens **Settings**, and `?tab=session` redirects to that agent's [Workspace](../sharing-and-access/workspace.md) conversation.
+Every visible tab is deep-linkable with `?tab=` — including the conditional ones. The URL follows the tab you pick, so a reload keeps you on that tab, you can copy the address to link to it, and the browser's Back button steps back through the tabs you visited before it leaves the page. Returning to an agent page through a link that names no tab (from the Dashboard, say) keeps the tab you were on, as long as that agent has it. A `?tab=` value naming a tab you cannot see falls back to Overview, and the address is corrected to match. Three legacy links still resolve: `?tab=guardrails` opens **Settings**, `?tab=playbooks` opens **Skills**, and `?tab=session` redirects to that agent's [Workspace](../sharing-and-access/workspace.md) conversation.
 
 When the window is too narrow to fit every tab, the trailing tabs collapse into a **More ▾** menu at the end of the tab strip. If the active tab is inside the menu, the More button carries the active highlight. Deep links via `?tab=` work either way.
 
@@ -93,7 +92,11 @@ Restrictions: system agents cannot be renamed. Only owners and admins have permi
 
 ### Delete
 
-Use the Delete button on the Agent Detail page. A confirmation dialog is required. Deletion cleans up the container, network, sharing records, schedules, activities, and event subscriptions.
+Use the Delete button on the Agent Detail page. A confirmation dialog is required.
+
+Deletion is a soft delete. The container is stopped and removed at once, and the agent's schedules stop firing. Its workspace volumes, schedules, chat history, sharing records, permissions and credentials are kept until a retention sweep purges them (`agent_soft_delete_retention_days`, default 180 days). Until then the name stays reserved, and an admin can recover the agent with `POST /api/admin/soft-deleted/agents/{name}/recover` (list them with `GET /api/admin/soft-deleted/agents`). Recovery restores the record but not the container, so start the agent afterwards.
+
+Volume clean-up stays inside this Trinity installation. Each agent volume carries the installation's id, so when two Trinity stacks share one Docker daemon, neither the purge nor the sweep for orphaned agent volumes touches the other stack's volumes. The orphan sweep never reclaims a volume created before that label existed; unattached ones of those are named in a warning in the backend log for a person to review.
 
 - **API:** `DELETE /api/agents/{name}`
 - **MCP:** `delete_agent(name)`
@@ -102,13 +105,13 @@ Use the Delete button on the Agent Detail page. A confirmation dialog is require
 
 The agent header displays status (Running/Stopped), CPU and memory usage, network I/O, and uptime. Telemetry auto-refreshes every 10 seconds.
 
-Fleet-wide monitoring is available at `GET /api/monitoring/fleet-health`. Health levels, from best to worst: healthy, degraded, unhealthy, critical, unknown.
+Fleet-wide health for the agents you can access is at `GET /api/monitoring/status`; one agent's is at `GET /api/monitoring/agents/{name}`. Admins also have `GET /api/ops/fleet/health` — see [Monitoring](../operations/monitoring.md). Health levels, from best to worst: healthy, degraded, unhealthy, critical, unknown.
 
 - **MCP:** `get_agent_health(name)`, `get_fleet_health()` (includes each agent's git `sync` block), `get_fleet_sync_audit()`, `trigger_health_check()`
 
 ### Resource Allocation
 
-Configure per-agent memory and CPU limits from the agent header: click the gear button ("Configure resources") to open the resource modal. Limits are enforced at the container level and take effect on the next restart -- see [Agent Configuration](agent-configuration.md#resource-allocation) for valid values and fleet-wide defaults.
+Configure per-agent memory and CPU limits from the agent header: click the gear button ("Configure resources") to open the resource modal. Limits are enforced at the container level and take effect on the next restart. A CPU limit above the host's CPU count is capped to that count -- see [Agent Configuration](agent-configuration.md#resource-allocation) for valid values and fleet-wide defaults.
 
 Execution timeout is configurable per agent (range: 60--7200 seconds, default: 3600 seconds / 60 minutes).
 

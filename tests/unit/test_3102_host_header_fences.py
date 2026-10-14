@@ -22,10 +22,17 @@ pytestmark = pytest.mark.unit
 BACKEND = pathlib.Path(__file__).resolve().parents[2] / "src" / "backend"
 
 
+def _agent_params(path: str) -> dict:
+    """The path parameter the router binds on an agent route (`/api/agents/{name}/...`)."""
+    parts = path.split("/")
+    return {"name": parts[3]} if path.startswith("/api/agents/") and len(parts) > 3 else {}
+
+
 def _crafted(method: str, routed: str, shown: str) -> Request:
     """A request routed to `routed` whose Host makes `request.url.path == shown`."""
     req = Request({
         "type": "http", "method": method, "path": routed, "root_path": "",
+        "path_params": _agent_params(routed),
         "query_string": b"", "scheme": "http", "server": ("backend", 8000),
         "headers": [(b"host", f"backend{shown}?".encode())],
     })
@@ -36,6 +43,7 @@ def _crafted(method: str, routed: str, shown: str) -> Request:
 def _honest(method: str, path: str) -> Request:
     return Request({
         "type": "http", "method": method, "path": path, "root_path": "",
+        "path_params": _agent_params(path),
         "query_string": b"", "scheme": "http", "server": ("backend", 8000),
         "headers": [(b"host", b"backend:8000")],
     })

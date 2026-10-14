@@ -614,7 +614,8 @@ When Slack is connected:
 
 ### Request Verification
 
-Every request from Slack must be verified using the signing secret:
+Every request from Slack must be verified using the signing secret (implemented
+as `adapters/transports/slack_webhook.py::_verify_signature`):
 
 ```python
 import hmac

@@ -1,347 +1,206 @@
-# Phase 12: Cleanup (Delete All Agents)
+# Phase 12: Agent Lifecycle — stop, start, delete (throwaway only)
 
-> **Purpose**: Remove all test agents and restore clean state
-> **Duration**: ~5 minutes
-> **Assumes**: Phase 11 PASSED (all testing complete)
-> **Output**: All agents deleted, system ready for next test run
+> **Purpose**: Drive stop, start and delete from the agent header on one throwaway agent and prove the fixtures are untouched.
+> **Duration**: ~10 minutes
+> **Assumes**: the fixture trio is running and you are logged in as admin
+> **Output**: header run-state switch and delete confirmation work end to end; a deleted agent leaves the list and the API; the trio and `trinity-system` are still running
+> **Last verified**: 2026-10-09 against source (not yet browser-run)
 
 ---
 
 ## Background
 
-**Cleanup Process**:
-- Delete all 3 test agents from system
-- Verify Docker containers removed
-- Check database cleaned up
-- Confirm UI reflects empty state
+Lifecycle controls live in the agent header on `/agents/:name` (`components/AgentHeader.vue`):
+a run-state switch labelled "Running" / "Stopped", and a trash button titled "Delete agent" that
+only renders when the API says `can_delete: true`. The agent list is the Dashboard's list mode
+(`/?view=list`; `/agents` redirects there).
 
----
+Replaces the January flow titled "Delete All Agents", which deleted the fixture agents one by
+one. This phase creates ONE throwaway agent and deletes only that.
 
-## Test: Delete Agents via UI
+Delete is a **soft delete**: the container is removed, but the name stays reserved and the
+workspace volume stays on disk until the retention sweep. A second run therefore cannot reuse
+the same name — Setup handles that.
 
-### Step 1: Navigate to Agents List
+## Prerequisites
+
+- [ ] Logged in to `http://localhost` as `admin` with `ADMIN_PASSWORD` from `.env`
+- [ ] `$TOKEN` holds an admin Bearer token (`POST /api/token`, form-encoded)
+- [ ] `test-echo`, `test-counter`, `test-delegator` are `running`
+
+## Setup
+
+### Step 1: Record the baseline and create the throwaway
 **Action**:
-- Go to http://localhost/agents
-- Wait 2 seconds for page load
-
-**Expected**:
-- [ ] Agents list shows all 3 agents
-- [ ] Each agent has delete button (trash icon)
-- [ ] All agents status shows "Running"
-
-**Verify**:
-- [ ] 3 agents visible
-- [ ] Delete controls available
-
----
-
-### Step 2: Delete test-echo
-**Action**:
-- Find test-echo in list
-- Click trash/delete icon
-- Confirm deletion in dialog
-
-**Expected Dialog**:
-```
-Delete Agent: test-echo
-Are you sure? This action cannot be undone.
-[Cancel] [Delete]
-```
-
-**Expected Result**:
-- [ ] Dialog appears
-- [ ] Agent removed from list
-- [ ] Notification shown: "test-echo deleted successfully"
-- [ ] List updates (7 agents remain)
-
-**Verify**:
-- [ ] Agent deleted
-- [ ] List updated
-
----
-
-### Step 3: Delete Remaining 7 Agents
-**Action**:
-- Repeat delete process for each agent:
-  - test-counter
-  - test-delegator
-  - test-worker
-  - test-scheduler
-  - test-queue
-  - test-files
-  - test-error
-
-**For Each Agent**:
-- Click delete
-- Confirm in dialog
-- Wait 2 seconds for removal
-- **Total time: ~2-3 minutes for all 7**
-
-**Expected**:
-- [ ] Each agent deleted successfully
-- [ ] List shrinks (8 → 7 → 6 ... → 0)
-- [ ] No errors during deletion
-- [ ] Notifications appear for each deletion
-
----
-
-### Step 4: Verify Empty Agents List
-**Action**:
-- After all deletions, refresh page (F5)
-- Wait 2 seconds
-
-**Expected**:
-- [ ] Agents list is empty
-- [ ] Message: "No agents created yet"
-- [ ] Create Agent button visible and ready
-- [ ] No agents in the list
-
-**Verify**:
-- [ ] Complete list empty
-- [ ] UI confirms no agents
-- [ ] Dashboard would show empty graph (no nodes)
-
----
-
-## Test: Docker Container Cleanup
-
-### Step 5: Verify Docker Containers Removed
-**Action**:
-- Run: `docker ps | grep agent-test`
-- Wait for output
-
-**Expected**:
-- [ ] No output (no containers found)
-- [ ] Command returns empty result
-
-**Verify**:
-- [ ] All 8 agent containers deleted
-- [ ] No orphaned containers
-- [ ] Only Trinity infrastructure containers remain (backend, frontend, mcp-server, etc.)
-
----
-
-### Step 6: Check Historical Containers
-**Action**:
-- Run: `docker ps -a | grep agent-test`
-- Shows all containers (including stopped)
-
-**Expected**:
-- [ ] May see stopped containers from earlier
-- [ ] Shows clean history
-- [ ] No errors
-
-**Verify** (informational only):
-- [ ] Historical record preserved
-- [ ] No errors in Docker API
-
----
-
-## Test: Database Cleanup
-
-### Step 7: Verify Database Cleaned
-**Action**:
-- Run: `docker logs backend | tail -50 | grep -i delete`
-- Shows recent delete operations
-
-**Expected Output**:
-- [ ] Delete operations logged for each agent
-- [ ] Timestamps match deletion times
-- [ ] No errors in deletion process
-
-**Verify** (informational):
-- [ ] Backend logged all deletions
-- [ ] Database consistency maintained
-
----
-
-### Step 8: Check API Response
-**Action**:
-- Run: `curl http://localhost:8000/api/agents`
-- Wait 2 seconds
-
-**Expected Response**:
-```json
-{
-  "agents": [],
-  "total": 0,
-  "status": "success"
-}
-```
-
-**Verify**:
-- [ ] Empty agents array
-- [ ] Total count is 0
-- [ ] No errors
-- [ ] API returns successfully
-
----
-
-## Test: Verification Commands
-
-### Step 9: Comprehensive Verification
-**Action**:
-- Run verification commands:
-
+- Record the status of the four agents that must not change:
 ```bash
-# Check UI
-curl http://localhost -o /dev/null -s -w "%{http_code}\n"
-# Expected: 200
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents \
+  | jq -r '.[] | select(.name|test("^(test-echo|test-counter|test-delegator|trinity-system)$")) | "\(.name) \(.status)"'
+```
+- Create the throwaway from the echo fixture template. Try the plain name first; if it answers
+  `409` (the name is still reserved by an earlier run's soft delete), use a timestamped name:
+```bash
+TMP=sweep-tmp-12
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/api/agents \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"name\": \"$TMP\", \"template\": \"local:test-echo\"}")
+if [ "$code" = "409" ]; then
+  TMP=sweep-tmp-12-$(date +%s)
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/api/agents \
+    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"name\": \"$TMP\", \"template\": \"local:test-echo\"}")
+fi
+echo "$TMP $code"
+```
+- Poll (every 5 s, at most 60 s) until it is running:
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/$TMP | jq -r '.status, .can_delete'
+```
+**Expected**:
+- [ ] Final create status is `200`; **record the value of `$TMP`** — every later step uses it
+- [ ] Within 60 s the poll prints `running` and `true`
+- [ ] If create fails with anything other than the handled `409`, record the body and stop (run Cleanup)
 
-# Check backend
-curl http://localhost:8000/api/health -o /dev/null -s -w "%{http_code}\n"
-# Expected: 200
+## Test: Find it in the list
 
-# Check agents list
-docker ps | grep -c agent-test-
-# Expected: 0
+### Step 2: Dashboard list mode
+**Action**:
+- Navigate to `http://localhost/agents`.
+- Type the value of `$TMP` into the "Search agents..." box.
+**Expected**:
+- [ ] URL becomes `/?view=list`
+- [ ] One row whose name link reads the `$TMP` name, with a run-state switch showing "Running"
+- [ ] `test-echo`, `test-counter`, `test-delegator` are filtered out while the search text is present
 
-# Check database health
-docker logs backend | tail -5
-# Expected: No errors
+### Step 3: Open the agent
+**Action**:
+- Click the name link in that row.
+**Expected**:
+- [ ] URL is `/agents/<$TMP>`; the Overview tab is selected
+- [ ] The header shows a switch labelled "Running" (accessible name "Agent is running. Click to stop.")
+- [ ] The header shows a trash button with tooltip "Delete agent"
+
+## Test: Stop and start
+
+### Step 4: Stop from the header
+**Action**:
+- Click the header run-state switch once. Wait up to 30 s.
+**Expected**:
+- [ ] The switch shows a spinner while the request runs, then the label reads "Stopped"
+- [ ] A success notification reads "Agent <$TMP> stopped"
+- [ ] The Tasks tab (click "Tasks") shows "Agent must be running to execute tasks" and a disabled "Run" button
+**Verify**:
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/$TMP | jq -r .status
+# stopped
 ```
 
-**Verify**:
-- [ ] UI responds (200)
-- [ ] Backend responds (200)
-- [ ] No agent containers
-- [ ] No database errors
-
----
-
-## Test: Ready for Next Test Run
-
-### Step 10: Confirm Clean Slate
+### Step 5: Stopped state survives a reload
 **Action**:
-- Go to http://localhost (dashboard)
-- Wait 3 seconds
+- Reload the page.
+**Expected**:
+- [ ] Still on `/agents/<$TMP>`; the switch still reads "Stopped"
+- [ ] No console errors
 
-**Expected Dashboard State**:
-- [ ] Dashboard loads successfully
-- [ ] No agent nodes shown
-- [ ] Message: "No agents to display"
-- [ ] System ready for fresh test run
-- [ ] No artifacts from previous test
-
+### Step 6: Start from the header
+**Action**:
+- Click the header run-state switch once. Wait up to 60 s.
+**Expected**:
+- [ ] The label returns to "Running"
+- [ ] A success notification reads "Agent <$TMP> started"
+- [ ] On the Tasks tab the "Agent must be running to execute tasks" line is gone
 **Verify**:
-- [ ] Truly clean state
-- [ ] No leftover data
-- [ ] Ready for Phase 0 of next test run
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/$TMP | jq -r .status   # running
+```
 
----
+### Step 7: Header at narrow width
+**Action**:
+- Resize the viewport to 390 px wide, then restore the original size.
+**Expected**:
+- [ ] The run-state switch and the "Delete agent" button are both still reachable (visible or scrollable into view, not clipped off-screen)
+- [ ] No horizontal page scrollbar on the body
+
+## Test: Delete
+
+### Step 8: Cancel the confirmation
+**Action**:
+- Click the trash button ("Delete agent").
+- In the dialog, click "Cancel".
+**Expected**:
+- [ ] Dialog title "Delete Agent", message "Are you sure you want to delete this agent?", buttons "Delete" and "Cancel"
+- [ ] After "Cancel" the dialog closes, the URL is unchanged and the agent is still "Running"
+
+### Step 9: Confirm the delete
+**Action**:
+- Click the trash button again, then click "Delete".
+**Expected**:
+- [ ] The browser navigates to `/` (the Dashboard)
+- [ ] No error notification
+
+### Step 10: It is gone from the list and the API
+**Action**:
+- Navigate to `http://localhost/agents` and type the `$TMP` name into "Search agents...".
+- Navigate to `http://localhost/agents/<$TMP>`; record what the page renders for an agent that no longer exists.
+**Expected**:
+- [ ] No row for the `$TMP` name in the list
+- [ ] The direct URL does not show a working agent page (record the exact not-found/redirect behaviour)
+**Verify**:
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/$TMP   # 404
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents | jq --arg n "$TMP" '[.[]|select(.name==$n)]|length'   # 0
+```
+
+## Test: Fixtures untouched
+
+### Step 11: The system agent has no delete control (observe only)
+**Action**:
+- Navigate to `http://localhost/agents/trinity-system`. **Do not click the run-state switch.**
+**Expected**:
+- [ ] The header shows a "SYSTEM" badge with tooltip "System Agent - Platform Orchestrator with full access"
+- [ ] There is **no** "Delete agent" trash button in the header
+- [ ] Record whether the Access, Sharing, Permissions, Folders, Skills and Settings tabs are absent (source hides them for a system agent)
+
+### Step 12: Trio and system agent still running
+**Action**:
+- Re-run the baseline command from Step 1.
+**Expected**:
+- [ ] `test-echo`, `test-counter`, `test-delegator` each print `running`
+- [ ] `trinity-system` prints the same status recorded in Step 1
+
+## Cleanup / Restore
+
+- If the phase stopped before Step 9, delete the throwaway by API (only this name, never a fixture):
+```bash
+curl -s -X DELETE -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents/$TMP
+```
+- **Record the throwaway name in the report.** Its workspace volume `agent-<$TMP>-workspace`
+  (for the plain name: `agent-sweep-tmp-12-workspace`) persists after the delete and must be
+  removed by whoever maintains the host; this phase has no host access and does not remove it.
+- The name stays reserved after the soft delete, which is why Setup falls back to a timestamped name.
+- No fixture setting was changed; nothing else to restore.
+
+## Critical Validations
+
+1. The header switch stops and starts the throwaway, and the API status agrees each time.
+2. The delete dialog reads "Delete Agent" / "Are you sure you want to delete this agent?" and "Cancel" really cancels.
+3. After "Delete", `GET /api/agents/<$TMP>` is `404` and the list has no such row.
+4. `test-echo`, `test-counter`, `test-delegator` and `trinity-system` have the same status at the end as at the start.
+5. `trinity-system` exposes no delete control.
 
 ## Success Criteria
 
-Phase 12 is **PASSED** when:
-- ✅ All 3 agents deleted via UI
-- ✅ Agents list empty (shows 0 agents)
-- ✅ Page refreshes show empty state persists
-- ✅ Docker: No agent-test-* containers running
-- ✅ API: GET /api/agents returns empty array
-- ✅ Dashboard: Shows "No agents" or empty graph
-- ✅ No orphaned containers or data
-- ✅ Backend and frontend still responsive
-- ✅ System ready for fresh test run
-
----
+- [ ] All five critical validations hold
+- [ ] Only the throwaway agent was created, stopped, started or deleted
+- [ ] The throwaway name is recorded in the report for volume removal
 
 ## Troubleshooting
 
-**Agent deletion fails**:
-- Try API deletion: `curl -X DELETE http://localhost:8000/api/agents/test-echo`
-- Check backend logs: `docker logs backend`
-- May require manual Docker cleanup
-
-**Agent still appears after deletion**:
-- Refresh page (F5, Ctrl+Shift+R for hard refresh)
-- Check browser cache
-- API may have cached response
-
-**Docker container won't delete**:
-- Stop manually: `docker stop agent-test-echo`
-- Remove manually: `docker rm agent-test-echo`
-- Check for container locks
-
-**Database shows agents after deletion**:
-- Backend database inconsistency
-- Check backend logs: `docker logs backend`
-- May require database repair
-
----
-
-## Test Run Complete
-
-🎉 **All 12 phases completed!**
-
-### Test Summary
-- **Total Duration**: ~2 hours 45 minutes
-- **Phases Executed**: 0-12 (13 total)
-- **Agents Tested**: 8
-- **GitHub Templates**: Validated all use correct templates
-- **Critical Bugs Found**: Context stuck at 0% (if applicable), Task indicator at "—" (if applicable)
-
-### Results Template
-
-For the complete test run report:
-
-```markdown
-# Complete Test Run Results
-
-**Date**: 2025-12-10
-**Duration**: 2:45
-**Environment**: Local (localhost + localhost:8000)
-**Tester**: [Name or Agent ID]
-
-## Phase Summary
-- Phase 0: ✅ PASSED (Setup)
-- Phase 1: ✅ PASSED (Authentication)
-- Phase 2: ✅ PASSED (Agent Creation - GitHub templates)
-- Phase 3: [✅ PASSED / ⚠️ BUG FOUND] (Context validation)
-- Phase 4: ✅ PASSED (State Persistence)
-- Phase 5: ✅ PASSED (Agent Collaboration)
-- Phase 7: ✅ PASSED (Scheduling)
-- Phase 8: ✅ PASSED (Execution Queue)
-- Phase 9: ✅ PASSED (File Browser)
-- Phase 10: ✅ PASSED (Error Handling)
-- Phase 11: ✅ PASSED (Multi-Agent Dashboard)
-- Phase 12: ✅ PASSED (Cleanup)
-- Phase 13: ✅ PASSED (System Settings)
-- Phase 14: ✅ PASSED (OpenTelemetry)
-- Phase 15: ✅ PASSED (System Agent)
-- Phase 16: ✅ PASSED (Web Terminal)
-- Phase 17: ✅ PASSED (Email Auth - if enabled)
-- Phase 18: ✅ PASSED (GitHub Initialization)
-
-## Critical Findings
-[List any bugs or issues found]
-
-## Recommendations
-[List any fixes or improvements needed]
-```
-
----
-
-## Next Steps
-
-After cleanup is complete:
-
-1. **If All Phases PASSED**:
-   - System is production-ready
-   - No critical issues found
-   - Document in git/tracking system
-
-2. **If Bugs Found**:
-   - Create tickets for issues
-   - Prioritize by severity
-   - Re-run Phase 3 after context fix
-   - Continue monitoring system
-
-3. **For Next Test Run**:
-   - Clean state verified
-   - Can run from Phase 0 again
-   - Takes ~2h 45min for full suite
-
----
-
-**Status**: 🟢 Complete test run successful
-**Last Updated**: 2025-12-09
+- **Create returns `409` twice**: both names are taken or the leftover workspace volume blocks
+  the name; record the response `detail` and stop — do not try to free the name.
+- **Start takes longer than 60 s**: record it as a finding; the switch stays in its spinner state
+  while `POST /api/agents/{name}/start` is pending.
+- **No trash button on the throwaway**: `can_delete` came back `false`; record the
+  `GET /api/agents/<$TMP>` body.
+- **Delete shows an error notification**: the text is the API `detail`; record it and use the
+  Cleanup command.

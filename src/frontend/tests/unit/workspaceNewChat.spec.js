@@ -208,7 +208,7 @@ describe('#2579 — Main is listed from the first visit', () => {
     // ent#621: the guard still comes first, and it now forwards the options bag —
     // a recursive retry after the leave-call confirm that dropped
     // `lastOpenSessionId` would land somewhere else than the key asked for.
-    expect(fn[0]).toMatch(/^function landOnAgent\(name, \{[^)]*\} = \{\}\) \{\s*if \(!name\) return\s*if \(guardLeaveCall\(\(\) => landOnAgent\(name, \{ lastOpenSessionId, focus \}\)\)\) return/)
+    expect(fn[0]).toMatch(/^function landOnAgent\(name, \{[^)]*\} = \{\}\) \{\s*if \(!name\) return\s*if \(guardLeaveCall\(\(\) => landOnAgent\(name, \{ lastOpenSessionId, focus, replace \}\)\)\) return/)
     // T4: the landed chat keeps `/workspace/a/:name`, so a reload or a copied
     // link still names the agent. No escape to bare `/workspace` here.
     expect(fn[0]).not.toMatch(/escapeStage|router\.push/)
@@ -294,7 +294,7 @@ describe('#2579 — the title settle cycle', () => {
     // does, so it must seed agent recency the same way or an unranked agent
     // stays unranked for as long as the cycle keeps overwriting the list.
     const s = src()
-    expect(s).toMatch(/threads\.value = decorate\(list\)\s*store\.seedAgentRecency\(threads\.value\)/)
+    expect(s).toMatch(/threads\.value = decorate\(applyArchiveOverrides\(list, archiveGuard\.live\(archiveToken\)\)\)\s*store\.seedAgentRecency\(threads\.value\)/)
   })
 
   it('a vanished row stops the cycle WITHOUT a verdict', () => {

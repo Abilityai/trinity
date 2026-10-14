@@ -12,6 +12,8 @@ from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, is_interactive_principal
 from services.agent_auth import agent_httpx_client
 from services import (
+    agent_skills_listing,
+    canon_roles_service,
     metric_access_service,
     metric_read_service,
     objective_join_service,
@@ -21,6 +23,7 @@ from services import (
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 from services.agent_service import (
+    agent_reach_logic,
     get_agent_permissions_logic,
     set_agent_permissions_logic,
     add_agent_permission_logic,
@@ -39,6 +42,7 @@ from services.agent_service import (
     set_file_sharing_status_logic,
 )
 from models import (
+    CanonRolesRead,
     CreateFolderRequest,
     FileUpdateRequest,
     ObjectiveJoinRead,
@@ -78,44 +82,25 @@ METRICS_READ_RATE_WINDOW = 60  # seconds
 @router.get("/{agent_name}/playbooks")
 async def get_agent_playbooks_endpoint(
     agent_name: AuthorizedAgentByName,
-    request: Request
+    request: Request,
+    last_known: bool = Query(
+        False,
+        description="trinity-enterprise#754: when the agent is stopped or "
+                    "unreachable, answer with its last successful listing, "
+                    "labelled `last_known: {captured_at, reason}`",
+    ),
 ):
     """
     Get available skills (playbooks) from an agent's .claude/skills/ directory.
 
-    Returns skill metadata parsed from SKILL.md YAML frontmatter.
+    Returns skill metadata parsed from SKILL.md YAML frontmatter. Every live
+    answer is also kept as the agent's last-known listing; `last_known=true`
+    opts into it for a stopped agent (`services/agent_skills_listing.py`).
     """
-    import httpx
-
-    container = get_agent_container(agent_name)
-    if not container:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    await container_reload(container)
-
-    if container.status != "running":
-        raise HTTPException(
-            status_code=503,
-            detail="Agent is not running. Start the agent to view playbooks."
-        )
-
     try:
-        agent_url = f"http://agent-{agent_name}:8000/api/skills"
-        async with agent_httpx_client(agent_name, timeout=10.0) as client:
-            response = await client.get(agent_url)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Agent returned error: {response.text}"
-                )
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Agent is starting up, please try again")
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Could not connect to agent")
-    except HTTPException:
-        raise
+        return await agent_skills_listing.list_skills(agent_name, last_known=last_known)
+    except agent_skills_listing.SkillsListUnavailable as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch playbooks: {str(e)}")
 
@@ -284,10 +269,29 @@ async def create_agent_folder_endpoint(
 async def get_agent_permissions(
     agent_name: str,
     request: Request,
+    strict: bool = Query(
+        False,
+        description=(
+            "503 when Docker cannot be read, instead of an answer with no peers "
+            "(trinity-enterprise#815)."
+        ),
+    ),
     current_user: User = Depends(get_current_user)
 ):
     """Get permissions for an agent."""
-    return await get_agent_permissions_logic(agent_name, current_user)
+    return await get_agent_permissions_logic(agent_name, current_user, strict=strict)
+
+
+@router.get("/{agent_name}/reach/{target}")
+async def get_agent_reach(
+    agent_name: str,
+    target: str,
+    current_user: User = Depends(get_current_user),
+):
+    """May `agent_name` call `target` — the edge or the spawn record, decided
+    from the database, never from the container list (trinity-enterprise#629).
+    The MCP layer's agent-to-agent gate reads this."""
+    return agent_reach_logic(agent_name, target, current_user)
 
 
 @router.put("/{agent_name}/permissions")
@@ -456,6 +460,31 @@ async def get_agent_metrics(
             detail="metric_store_unavailable",
             headers={"Retry-After": "30"},
         )
+
+
+@router.get("/{agent_name}/canon/roles", response_model=CanonRolesRead)
+async def get_agent_canon_roles(
+    agent_name: AuthorizedAgentByName,
+    current_user: User = Depends(get_current_user),
+):
+    """The seats this agent's canon defines — `<canon>/roles/*.yaml` with each
+    file's id, `title` and `updated` stamp (trinity-enterprise#817).
+
+    Read from the agent's own container through the same door as its objectives,
+    and drawing on the same per-agent budget (`objectives_read_budget`), because
+    it is the same kind of fan-out against the same container. An agent key reads
+    only its own canon. OSS-core (operator ruling 2026-10-06).
+    """
+    if current_user.agent_name and current_user.agent_name != agent_name:
+        raise HTTPException(
+            status_code=403,
+            detail="Agent-scoped key may only read its own canon",
+        )
+    objectives_read_budget.enforce(
+        agent_name,
+        detail="Canon read rate limit exceeded for this agent.",
+    )
+    return await canon_roles_service.read_canon_roles(agent_name)
 
 
 @router.get("/{agent_name}/objectives", response_model=ObjectiveJoinRead)
@@ -825,18 +854,18 @@ async def share_agent_file(
     agent_name matches the path. User-scoped MCP keys of non-owners
     are rejected.
     """
-    # Owner gate (the agent's owner always passes)
-    assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can share files from this agent.")
-
-    # Defense in depth: if this is an agent-scoped key, it must be for
-    # the same agent. Prevents Agent A's key from being used to share
-    # files from Agent B's volume even when both are owned by the same user.
+    # An agent-scoped key may share only from its OWN volume. Checked first so
+    # the refusal names the rule; the owner gate below (narrowed to the agent's
+    # reach since ent#629) would refuse a sibling too, less specifically.
     actor_agent = getattr(current_user, "agent_name", None)
     if actor_agent and actor_agent != agent_name:
         raise HTTPException(
             status_code=403,
             detail="Agent-scoped MCP key cannot share files for a different agent.",
         )
+
+    # Owner gate (the agent's owner always passes)
+    assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can share files from this agent.")
 
     try:
         result = await create_share(

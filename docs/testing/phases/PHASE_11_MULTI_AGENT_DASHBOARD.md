@@ -1,427 +1,259 @@
-# Phase 11: Multi-Agent Dashboard (All 8 Agents)
+# Phase 11: Dashboard: Timeline, Grid, List
 
-> **Purpose**: Validate dashboard, agent coordination, and system-wide monitoring
-> **Duration**: ~10 minutes
-> **Assumes**: Phase 10 PASSED (all 3 agents created and tested individually)
-> **Output**: Multi-agent dashboard and coordination verified
+> **Purpose**: Verify the Dashboard's three view modes, its header stats and controls, the `?view=` and `/agents` entry points, and the keyboard shortcuts.
+> **Duration**: ~15 minutes
+> **Assumes**: the fixture trio is running and you are logged in as admin
+> **Output**: Timeline, Grid and List each render the fleet (trio + system agent) with working, non-destructive controls, and the user's saved view preference is respected
+> **Last verified**: 2026-10-09 against source (not yet browser-run)
 
 ---
 
 ## Background
 
-**System-Wide View**:
-- Dashboard shows all 3 agents in coordinated view
-- Agent relationships and communication visible
-- System health and metrics
-- Context usage across all agents
+The Dashboard (`/`, `views/Dashboard.vue`) is the fleet home and the only place agents are listed. It has three modes, in this order: **Timeline** (default), **Grid**, **List** (`utils/viewModes.js`). There is no graph mode. The old Agents page is the List mode: `/agents` redirects to `/?view=list`.
 
----
+A click on the mode switcher is saved in the browser (`localStorage` key `trinity-dashboard-view`). `?view=<mode>` is a one-shot instruction: it is applied, then stripped from the URL, and it does **not** overwrite the saved choice.
 
-## Test: Dashboard Overview
+Replaces the January flow that expected eight agents, a node graph with communication edges and a `Timeline`/`Graph` toggle.
 
-### Step 1: Navigate to Dashboard
+This phase is observe-only. It sends no messages and never clicks a row's `Running`, `AUTO`/`Manual` or `Read-Only`/`Editable` toggle, `Create Agent`, `Tidy up`, `Reset`, or any bulk-tag control.
+
+## Prerequisites
+
+- [ ] Logged in as `admin` with `ADMIN_PASSWORD` from `.env`
+- [ ] `test-echo`, `test-counter`, `test-delegator` exist; `trinity-system` exists
+- [ ] Viewport 1280 × 800
+
+## Setup
+
+### Step 1: Record the saved preferences
 **Action**:
-- Go to http://localhost/ (home/dashboard)
-- Wait 3 seconds for page load
+- Navigate to `http://localhost/`
+- In the browser console evaluate:
+  `[localStorage.getItem('trinity-dashboard-view'), localStorage.getItem('trinity-dashboard-time-range')]`
+- Note the title of the theme button in the top bar (`Light mode (click to switch)`, `Dark mode (click to switch)` or `System theme (click to switch)`)
 
 **Expected**:
-- [ ] Dashboard loads
-- [ ] Agent network graph visible
-- [ ] 8 agent nodes displayed
-- [ ] No loading errors
-- [ ] Layout stable (not jumping around)
-
-**Verify**:
-- [ ] All 3 agents visible:
-  - test-echo
-  - test-counter
-  - test-delegator
-  - test-worker
-  - test-scheduler
-  - test-queue
-  - test-files
-  - test-error
+- [ ] Record the two values as `VIEW_ORIGINAL` and `RANGE_ORIGINAL` (either may be `null`: view then defaults to timeline, range to 24) and the theme title as `THEME_ORIGINAL`
 
 ---
 
-### Step 2: Verify Agent Status in Dashboard
+## Test: Header
+
+### Step 2: Stats cluster and host telemetry
 **Action**:
-- Look at each agent node in the graph
-- Check status indicator for each
+- Look at the left side of the header strip under the top nav
 
 **Expected**:
-- [ ] test-echo: Running (green)
-- [ ] test-counter: Running (green)
-- [ ] test-delegator: Running (green)
-- [ ] test-worker: Running (green)
-- [ ] test-scheduler: Running (green)
-- [ ] test-queue: Running (green)
-- [ ] test-files: Running (green)
-- [ ] test-error: Running (green)
+- [ ] `R/T agents` where T is the total agent count and R the running count (T ≥ 4)
+- [ ] `N working now`
+- [ ] `N messages (Hh)` where H is the selected time range in hours
+- [ ] Host telemetry: `CPU` with a percentage, `Mem` with used/total, `Disk` with a percentage (it appears a moment after load)
 
-**Verify**:
-- [ ] All agents show green (running)
-- [ ] Status icons consistent
-- [ ] No agents showing red (stopped) or orange (error)
-
----
-
-### Step 3: Check Agent Details on Hover
+### Step 3: Controls
 **Action**:
-- Hover mouse over test-echo node
-- Wait 2 seconds for tooltip
-
-**Expected Tooltip**:
-```
-test-echo
-Status: Running
-Context: [X]%
-Created: [date]
-Template: local:test-echo
-```
-
-**Verify**:
-- [ ] Agent name shown
-- [ ] Status shown
-- [ ] Context % shown
-- [ ] Creation date shown
-- [ ] Template shown as local:test-echo
-
----
-
-## Test: Agent Communication Edges
-
-### Step 4: Verify Communication Edges
-**Action**:
-- Look at lines (edges) connecting agent nodes
-- Trace connections from test-delegator to others
+- Look at the right side of the same strip
 
 **Expected**:
-- [ ] Edge from test-delegator → test-echo (from Phase 5)
-- [ ] Edge from test-delegator → test-counter (from Phase 5)
-- [ ] Label on edge showing message count (e.g., "2x")
-- [ ] Visual flow animation if active
-
-**Verify**:
-- [ ] Delegation relationships shown
-- [ ] Message counts accurate
-- [ ] Line thickness may vary by traffic
-- [ ] Colors indicate direction
+- [ ] A `Create Agent` button (do not click)
+- [ ] A button showing `/` with title `Filter agents (press /)`
+- [ ] A time-range select with options `1h`, `6h`, `24h`, `3d`, `7d`
+- [ ] A small dot titled `Connected` (red and titled `Disconnected` is a failure)
+- [ ] A button titled `Refresh`
+- [ ] Last in the row, a switcher titled `Switch view (press v to cycle)` with three buttons: `Timeline`, `Grid`, `List`; exactly one is highlighted
+- [ ] A `Tags` button and an `All Owners` select appear only when the fleet has tags / more than one owner — record which are present
 
 ---
 
-### Step 5: Check Agent Context Distribution
+## Test: Timeline mode
+
+### Step 4: Timeline layout
 **Action**:
-- Look at context % displayed for each agent
-- Compare values across all 3 agents
-
-**Expected Context Distribution** (approximate):
-```
-test-echo: 5-15% (from Phase 3 + Phase 5 delegation)
-test-counter: 8-18% (from Phase 4 + Phase 5 delegation)
-test-delegator: 15-25% (from Phase 5 delegation operations)
-test-worker: 10-20% (from Phase 5 delegation target)
-test-scheduler: 12-22% (from Phase 7 schedule execution)
-test-queue: 15-25% (from Phase 8 queue processing)
-test-files: 10-20% (from Phase 9 file operations)
-test-error: 10-20% (from Phase 10 error handling)
-```
-
-**Verify**:
-- [ ] Each agent has context % shown
-- [ ] No context % is 0% (all have been used)
-- [ ] test-delegator has highest (delegated to others)
-- [ ] Reasonable distribution across agents
-- [ ] No agent exceeds 100% (>200K tokens)
-
----
-
-## Test: System Metrics
-
-### Step 6: Check System Metrics Panel
-**Action**:
-- Look for metrics panel or sidebar
-- Check overall system statistics
-
-**Expected Metrics**:
-- [ ] Total agents: 8
-- [ ] Running agents: 8
-- [ ] Total context used: [sum of all %]
-- [ ] Average context: [mean]
-- [ ] System uptime: [time since start]
-
-**Verify**:
-- [ ] Counts accurate (3 agents total)
-- [ ] All running (no stopped agents)
-- [ ] Context sum makes sense
-- [ ] Uptime reasonable
-
----
-
-## Test: Agent Coordination Scenario
-
-### Step 7: Trigger Multi-Agent Workflow
-**Action**:
-- Go to dashboard
-- Identify test-delegator node
-- Trigger a delegation workflow:
-  - In test-delegator chat: "coordinate all agents: tell echo to repeat, tell counter to add, tell worker to plan"
-  - Press Enter
-  - **Wait 45 seconds** (coordination takes time)
-
-**Expected Response**:
-```
-Coordinating multi-agent workflow...
-
-Step 1: Delegating to test-echo
-  Response: Echo: coordinate all agents...
-
-Step 2: Delegating to test-counter
-  Response: Counter: 16 (was 11)
-
-Step 3: Delegating to test-worker
-  Response: Task received and acknowledged
-
-All agents coordinated successfully
-```
-
-**Verify**:
-- [ ] Multiple delegation calls made
-- [ ] All agents respond
-- [ ] No agents timeout or error
-- [ ] Results show in order
-
----
-
-### Step 8: Watch Dashboard Update
-**Action**:
-- Keep dashboard visible while coordination happens
-- Watch for edge activations and context changes
+- Click `Timeline`
 
 **Expected**:
-- [ ] Edges light up as messages flow
-- [ ] Context % for test-delegator increases
-- [ ] Context % for target agents increases
-- [ ] Animation shows message flow
-- [ ] Updates happen in near-real-time
+- [ ] Left of the timeline bar: buttons titled `Zoom out` and `Zoom in` around a slider titled `Zoom level`, a percentage, and a checkbox `Active only`
+- [ ] Right: a legend listing `Manual`, `MCP`, `Scheduled`, `Agent-Triggered`, `Paid`, `Public`, `Next Run`; then `Live` with a pulsing dot; then `N events`
+- [ ] One row per agent: `test-echo`, `test-counter`, `test-delegator`, and `trinity-system` carrying a `SYS` badge
+- [ ] Each row shows either task count and success percentage, or `No tasks`
+- [ ] The system agent's row has no autonomy toggle; the others do
 
-**Verify**:
-- [ ] Dashboard updates during activity
-- [ ] Refresh rate reasonable (1-2 second updates)
-- [ ] No stale data shown
-
----
-
-## Test: Agent Health Overview
-
-### Step 9: Check Agent Health Indicators
+### Step 5: Zoom
 **Action**:
-- Look at all agent nodes
-- Check for any error indicators or warnings
+- Record the zoom percentage. Click `Zoom in` once, then `Zoom out` once.
 
 **Expected**:
-- [ ] No red nodes (all running)
-- [ ] No warning icons
-- [ ] All status indicators green
-- [ ] No "unresponsive" labels
+- [ ] `Zoom in` raises the percentage by 50 (e.g. `1200%` → `1250%`); `Zoom out` returns it to the recorded value
+- [ ] Agent labels stay pinned at the left while the timeline is scrolled horizontally
 
-**Verify**:
-- [ ] System health good across all agents
-- [ ] No failures or crashes
-- [ ] No communication breakdowns
-
----
-
-## Test: Timeline View
-
-### Step 10: Switch to Timeline View
+### Step 6: Time range
 **Action**:
-- Click "Timeline" button (next to "Graph" button)
-- Wait 2 seconds for timeline to render
+- Select `1h`, then `7d`, then set the select back to the value it had
 
 **Expected**:
-- [ ] Timeline view loads
-- [ ] Agent rows visible (one row per agent)
-- [ ] Time scale visible (x-axis)
-- [ ] Legend shows 4 execution types
+- [ ] The header stat reads `messages (1h)`, then `messages (168h)`
+- [ ] The `N events` count and the bars change with the range without a page reload
+- [ ] Hovering a bar in the `test-echo` row shows a tooltip beginning with one of `Manual Task`, `MCP Task`, `Agent-Triggered Task`, `Public Task`, `Scheduled`, `Task`, `Execution` — record which
 
-**Verify Legend Colors**:
-- [ ] 🟢 Manual (green #22c55e) - Manual task executions
-- [ ] 🩷 MCP (pink #ec4899) - MCP executions via Claude Code
-- [ ] 🟣 Scheduled (purple #8b5cf6) - Scheduled task executions
-- [ ] 🩵 Agent-Triggered (cyan #06b6d4) - Agent-to-agent calls
-
----
-
-### Step 11: Verify Timeline Execution Bars
+### Step 7: Active only
 **Action**:
-- Look for colored bars on agent rows
-- Hover over bars to see tooltips
-
-**Expected Bar Colors**:
-- Green bars = Manual tasks (triggered from UI Tasks tab)
-- Pink bars = MCP tasks (triggered via Claude Code MCP client)
-- Purple bars = Scheduled tasks (triggered by cron schedules)
-- Cyan bars = Agent-triggered tasks (agent-to-agent delegation)
-
-**Expected Tooltips**:
-- "Manual Task - Xs" for manual executions
-- "MCP Task - Xs" for MCP executions
-- "Scheduled: [name] - Xs" for scheduled executions
-- "Agent-Triggered Task - Xs" for delegation executions
-
-**Verify**:
-- [ ] At least one execution bar visible (from previous tests)
-- [ ] Bar colors match legend
-- [ ] Tooltips show correct prefix
-- [ ] Hover shows duration
-
----
-
-### Step 12: Test Zoom Controls
-**Action**:
-- Use zoom slider or +/- buttons
-- Zoom in and out
+- Record the `Active only` checkbox state, toggle it, observe, toggle it back
 
 **Expected**:
-- [ ] Zoom in shows more detail (wider bars)
-- [ ] Zoom out shows more time range
-- [ ] Zoom level indicator updates (e.g., "100%", "50%")
-- [ ] Timeline remains responsive
+- [ ] Ticked: rows with no activity in the range are hidden; unticked: all four agents are listed again
+- [ ] The checkbox ends in the recorded state
 
 ---
 
-## Test: Historical Data and Trends
+## Test: Grid mode
 
-### Step 13: Check Historical Metrics (if available)
+### Step 8: Grid layout
 **Action**:
-- Look for historical graph or trend view
-- Check context % growth over time
-
-**Expected** (if feature available):
-- [ ] Graph shows context growth
-- [ ] X-axis: time progression
-- [ ] Y-axis: context % per agent
-- [ ] Trend upward (context increases with usage)
-
-**Verify** (or skip if not implemented):
-- [ ] Historical data collected
-- [ ] Trends visible
-- [ ] No anomalies
-
----
-
-## Test: Dynamic Updates
-
-### Step 11: Refresh Dashboard While Agent Active
-**Action**:
-- Go to test-echo agent detail page
-- Type: "do something that takes 30 seconds"
-- Press Enter
-- Immediately go back to dashboard
-- Watch for updates
+- Click `Grid`
 
 **Expected**:
-- [ ] Dashboard shows test-echo actively running
-- [ ] Context % for test-echo increases live
-- [ ] Progress visible
-- [ ] Updates without manual refresh
+- [ ] `Tidy up` and `Reset` buttons appear immediately left of the switcher (do not click them); the switcher itself does not move
+- [ ] A tile exists for each of `test-echo`, `test-counter`, `test-delegator` and `trinity-system`; the system tile carries a `SYSTEM` badge
+- [ ] Each tile shows the agent name, a state word, and a `Details` button
+- [ ] Canvas controls titled `Zoom in`, `Zoom out`, `Fit view` with a percentage, and buttons `Zones` and `Lines`
+- [ ] If tiles show only a name (zoomed far out), record it, click the canvas `Zoom in` until `Details` is visible, and click `Zoom out` the same number of times before leaving Grid
 
-**Verify**:
-- [ ] Real-time updates working
-- [ ] WebSocket or polling active
-- [ ] No need to refresh manually
+### Step 9: Click-through from a tile
+**Action**:
+- Click `Details` on the `test-echo` tile; go back; click `Details` on the `trinity-system` tile; go back
+
+**Expected**:
+- [ ] First click lands on `/agents/test-echo` with the Overview tab active
+- [ ] Second click lands on `/agents/trinity-system`
+- [ ] After each Back, the Dashboard is in Grid mode with the tiles where they were
 
 ---
+
+## Test: List mode
+
+### Step 10: List layout
+**Action**:
+- Click `List`
+
+**Expected**:
+- [ ] Toolbar: input with placeholder `Search agents...`; a three-way filter `All` / `Running` / `Stopped`; a sort select with `Newest First`, `Oldest First`, `Name (A-Z)`, `Name (Z-A)`, `Running First`, `Success Rate`
+- [ ] Column header `Name`, `Status`, `Controls`, `Success`, `Exec / Sched` — shown only when the list area itself is at least ~1088 px wide. At 1280 px with the left views sidebar open it is not shown; collapse the sidebar (button titled `Collapse sidebar`) or widen the window to 1600 px to see it, then put the sidebar/window back. Record which layout you saw.
+- [ ] One row per agent with a checkbox, a status dot and the name as a link; the system agent's row carries `SYSTEM`
+- [ ] `Tidy up` and `Reset` are gone
+
+### Step 11: List search, status filter and sort
+**Action**:
+- Type `test-` in `Search agents...`
+- Replace it with `zzz-no-such-agent`
+- Click `Clear all filters`
+- Click `Running`, then `All`
+- Choose `Name (A-Z)` in the sort select, then choose `Newest First`
+
+**Expected**:
+- [ ] `test-`: only rows whose name contains `test-` remain; a counter `X/T` and a `Clear` button appear in the toolbar
+- [ ] `zzz-no-such-agent`: a card reads `No matching agents` / `Try adjusting your filters.` with a `Clear all filters` button
+- [ ] After clearing: all rows return and the counter disappears
+- [ ] `Running`: only running agents are listed
+- [ ] `Name (A-Z)`: rows are in ascending name order
+- [ ] Clicking the `test-echo` name link opens `/agents/test-echo` (go back afterwards)
+
+---
+
+## Test: Shortcuts and entry points
+
+### Step 12: `/` type-to-filter
+**Action**:
+- Click an empty part of the page so no input has focus, then press `/`
+- Type `echo`; then replace it with `zzz-no-such-agent`; then press `Esc`
+- Click the `/` button in the header twice
+
+**Expected**:
+- [ ] A floating search pill opens with placeholder `Filter agents…`, focused
+- [ ] `echo`: only `test-echo` remains in the current mode
+- [ ] `zzz-no-such-agent`: an overlay reads `No agents match "zzz-no-such-agent" — Esc to clear` with a `Clear filter` button
+- [ ] `Esc`: the pill closes and every agent is listed again
+- [ ] The header `/` button opens the pill on the first click and closes it on the second
+- [ ] Pressing `/` while the cursor is inside `Search agents...` types a slash instead of opening the pill
+
+### Step 13: `v` cycles the mode
+**Action**:
+- Click `Timeline`. With no input focused press `v` three times.
+
+**Expected**:
+- [ ] The mode goes Timeline → Grid → List → Timeline, and the highlighted switcher button follows
+
+### Step 14: `?view=` and `/agents`
+**Action**:
+- Click `Timeline` (this saves timeline as the preference)
+- Navigate to `http://localhost/?view=grid`, wait for the page, then reload
+- Navigate to `http://localhost/agents`
+- Navigate to `http://localhost/?view=bogus`
+
+**Expected**:
+- [ ] `/?view=grid`: Grid is shown and the address bar becomes `http://localhost/` (the parameter is stripped)
+- [ ] After the reload: **Timeline** is shown — the query did not overwrite the saved choice
+- [ ] `/agents`: the address bar ends at `http://localhost/` and **List** is shown
+- [ ] `/?view=bogus`: record which mode is shown (an unknown mode degrades to Timeline) and whether anything in the left views sidebar changed
+
+---
+
+## Test: Narrow width and themes
+
+### Step 15: 390 px
+**Action**:
+- Resize to 390 × 844. Visit Timeline, Grid and List in turn. Restore 1280 × 800.
+
+**Expected**:
+- [ ] The `R/T agents` stat stays visible; `working now`, `messages` and the host meters may drop away one by one as space runs out, but nothing is half-clipped
+- [ ] The controls wrap onto further lines instead of running off the right edge; `Create Agent` shrinks to an icon (its `aria-label` is still `Create Agent`)
+- [ ] The mode switcher is still fully visible and clickable
+- [ ] Timeline: the legend is hidden at this width; `Live` and `N events` remain
+- [ ] List: rows switch to a stacked layout and the column header row is not shown
+- [ ] `document.documentElement.scrollWidth <= window.innerWidth` in all three modes — record any mode where it is not
+
+### Step 16: Light and dark
+**Action**:
+- Click the theme button until dark is active; visit Timeline, Grid and List; click until light is active and repeat; then click until the title equals `THEME_ORIGINAL`
+
+**Expected**:
+- [ ] In both themes the highlighted switcher button, the legend labels, timeline bars, the `SYS` / `SYSTEM` badges and List row text are legible
+
+---
+
+## Cleanup / Restore
+
+Original values: `VIEW_ORIGINAL`, `RANGE_ORIGINAL`, `THEME_ORIGINAL` from Step 1.
+
+- View: click the switcher button matching `VIEW_ORIGINAL` (`Timeline` if it was `null`).
+- Time range: set the select to `RANGE_ORIGINAL` hours (`24h` if `null`; 72 = `3d`, 168 = `7d`).
+- Theme: the button title equals `THEME_ORIGINAL`.
+- List sort is `Newest First`, status filter `All`, search box empty, type-to-filter pill closed, `Active only` as found.
+
+## Manual-only (not run unattended)
+
+- `Tidy up` / `Reset`, dragging tiles, `Zones`, `Lines` and department assignment — these rewrite the saved grid layout.
+- Bulk tag add/remove from List selection — changes agent tags.
+- Row toggles in List (`Running`, `AUTO`/`Manual`, `Read-Only`/`Editable`) — change agent state.
+- The red `Disconnected` indicator and the `Couldn't load timeline data.` / `Couldn't load agents` + `Retry` states — need the backend to be down.
 
 ## Critical Validations
 
-### GitHub Templates Verified
-**Validation**: All 3 agents use correct templates
-
-```bash
-# Quick validation script
-for agent in test-echo test-counter test-delegator test-worker test-scheduler test-queue test-files test-error; do
-  template=$(docker inspect agent-$agent --format='{{index .Config.Labels "trinity.template"}}')
-  echo "$agent: $template"
-  # All should show: local:test-*
-done
-```
-
-### Context % Tracking
-**Validation**: Context increases across all agents
-
-- [ ] No agent shows 0% (unless unused)
-- [ ] Delegator has highest context
-- [ ] Distribution reasonable
-- [ ] No anomalies (e.g., sudden drops)
-
-### System Stability
-**Validation**: All agents remain responsive
-
-```bash
-# Check all agents running
-docker ps | grep agent-test | wc -l
-# Should show: 8
-```
-
----
+1. The switcher offers exactly Timeline, Grid, List, in that order, and each renders the trio plus the system agent.
+2. `/agents` lands on the Dashboard in List mode.
+3. `?view=` applies once, is stripped from the URL, and does not change the saved preference.
+4. The timeline legend lists the seven labels in Step 4.
+5. `/` and `v` work when no input is focused and are ignored inside inputs.
+6. No horizontal page scroll at 390 px in any mode.
 
 ## Success Criteria
 
-Phase 11 is **PASSED** when:
-- ✅ Dashboard loads with all 3 agents visible
-- ✅ All 3 agents show "Running" status (green)
-- ✅ Each agent displays context % (non-zero)
-- ✅ Communication edges visible between delegator and others
-- ✅ Edge labels show message counts
-- ✅ System metrics panel shows 8/3 agents running
-- ✅ Multi-agent coordination workflow completes successfully
-- ✅ Dashboard updates in real-time during activity
-- ✅ All agents remain responsive
-- ✅ All agents use local templates (local:test-*)
-- ✅ No agent shows errors or warnings
-- ✅ Context distribution reasonable across all agents
-
----
+- [ ] Tile and list-row click-through reach `/agents/<name>`
+- [ ] Search, status filter, sort and the two empty states in List behave as stated
+- [ ] Shortcuts and entry points behave as stated
+- [ ] Saved view, time range and theme are restored
 
 ## Troubleshooting
 
-**Dashboard doesn't load**:
-- Clear browser cache (Ctrl+Shift+Delete)
-- Check backend running: `docker ps | grep backend`
-- Check frontend running: `docker ps | grep frontend`
-- Browser console errors: F12 → Console tab
-
-**Missing agent nodes**:
-- Agent may not be running: `docker ps | grep test-XXX`
-- Restart missing agent
-- Refresh dashboard (F5)
-
-**Context % all zero**:
-- This is Phase 3 critical bug
-- If stuck across all agents, likely system issue
-- Check Phase 3 CONTEXT_VALIDATION.md
-
-**Edges not showing**:
-- Dashboard visualization may be broken
-- Check browser console for errors
-- Try different browser
-- Verify agents are communicating: check logs
-
-**Real-time updates not working**:
-- WebSocket connection may be broken
-- Check backend logs: `docker logs backend`
-- Try manual refresh (F5)
-
----
-
-## Next Phase
-
-Once Phase 11 is **PASSED**, proceed to:
-- **Phase 12**: Cleanup (delete all agents)
-
----
-
-**Status**: 🟢 Multi-agent dashboard & coordination validated
-**Last Updated**: 2026-01-15
+- **A fixture row is missing in Timeline**: `Active only` is ticked, or an owner/tag filter or the `/` filter is applied — clear them.
+- **`v` or `/` does nothing**: focus is inside an input, select or textarea, or a modal is open. Click an empty area first.
+- **Zoom percentage differs from the example**: the starting zoom is derived from the time range (half the range in hours, as a multiplier), so only the ±50 step is asserted.

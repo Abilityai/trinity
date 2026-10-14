@@ -25,14 +25,47 @@ never dropped, never defaulted to "whoever".
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 from database import db
+from services.assignment_provider import ROLE_ID_RE  # one regex: the seam validates with it too
 
 logger = logging.getLogger(__name__)
 
 ROLES = ("primary", "approver", "viewer", "operator")
+
+#: trinity-enterprise#848: a skill gate's approver may be a canon role, stored
+#: as ``role:<id>`` beside the kinds. Only the gate speaks this form — ``ROLES``
+#: and :func:`resolve` (what an agent's ask / report / message may address) do
+#: not know it, so an agent cannot address a role id.
+ROLE_ID_PREFIX = "role:"
+
+
+def parse_role_id(value: Any) -> Optional[str]:
+    """The lower-cased id in a ``role:<id>`` value, or ``None`` for anything
+    else (a kind, a bare id, a malformed one). Matched with ``fullmatch`` so a
+    trailing newline is not an id; lower-cased because the stored value is the
+    gate's identity (`mixed_approvers` compares the string) and canon ids are
+    written in either case."""
+    if not isinstance(value, str) or not value.startswith(ROLE_ID_PREFIX):
+        return None
+    raw = value[len(ROLE_ID_PREFIX):]
+    return raw.lower() if ROLE_ID_RE.fullmatch(raw) else None
+
+
+def role_label(value: Any) -> str:
+    """What a stored approver shows as. A kind is its own name; a role id is
+    humanised (``role:head-of-sales`` → "Head of sales") until canon titles
+    are cached platform-side. Anything else is shown as given. The output of a
+    regex-validated id carries no markup."""
+    role_id = parse_role_id(value)
+    if role_id is None:
+        return str(value)
+    words = " ".join(re.split(r"[._-]+", role_id)).split()
+    text = " ".join(words)
+    return text[:1].upper() + text[1:]
 
 
 class RoleRefused(Exception):
@@ -52,6 +85,9 @@ class Resolution:
 
     ``people`` — every resolved email (lower-case, de-duplicated, in order).
     ``single`` — the one addressee when exactly one person resolved, else None.
+    A caller decides what several people mean: a report or a message has one
+    reader and refuses (``role_resolves_to_several``); an ask is delivered to
+    every one of them (trinity-enterprise#816).
     ``resolved`` — False when the role fell back to the operators (no primary
     assigned, or an owner without an email); True for ``operator`` itself.
     """
@@ -104,6 +140,27 @@ def resolve(
     raise RoleRefused(
         "role_unassigned", role,
         f"Nobody fills the {role} role for this agent yet.",
+    )
+
+
+def resolve_role_id(agent_name: str, role_id: str) -> Resolution:
+    """Resolve canon role ``role_id`` (the parsed, lower-cased id) for
+    ``agent_name`` — the skill gate's rule for a ``role:<id>`` approver
+    (trinity-enterprise#848). Raises ``RoleRefused``.
+
+    Only the assignments provider answers (``resolve_role_id_people``); there
+    is no owner or operator fallback for a role id, so no provider, no answer
+    and "nobody" all refuse ``role_unassigned`` — the fail-closed direction.
+    """
+    from services import assignment_provider
+
+    role = f"{ROLE_ID_PREFIX}{role_id}"
+    people = assignment_provider.resolve_role_id_people(agent_name, role_id)
+    if people:
+        return Resolution(role, people, people[0] if len(people) == 1 else None, True)
+    raise RoleRefused(
+        "role_unassigned", role,
+        f"Nobody fills the {role_label(role)} role for this agent yet.",
     )
 
 

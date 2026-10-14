@@ -188,7 +188,9 @@
         <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">Outbound endpoints</h4>
         <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
           External A2A endpoints this agent may call (for the outbound <code class="font-mono">call_a2a_agent</code> tool).
-          Credentials are stored encrypted and never shown again.
+          Credentials are stored encrypted and never shown again. An endpoint on a private network or
+          on plain <code class="font-mono">http://</code> is accepted only when an admin has put its host
+          on the outbound endpoint allowlist.
         </p>
         <div v-if="config.outbound_endpoints.length" class="space-y-2 mb-3">
           <div
@@ -284,8 +286,8 @@ const newEndpoint = ref({ name: '', url: '', credentials: '' })
 
 // The canonical A2A discovery URL an external orchestrator fetches (the public,
 // unauthenticated well-known route served by the inbound server, ent#157).
-const cardUrl = computed(
-  () => `${window.location.origin}/a2a/${props.agentName}/.well-known/agent-card.json`
+const cardUrl = computed(() =>
+  `${window.location.origin}/a2a/${props.agentName}/.well-known/agent-card.json`
 )
 
 // Transient "Copied!" affordance.
@@ -379,8 +381,12 @@ async function onToggle(enabled) {
   try {
     config.value = await agentsStore.setA2aExposure(props.agentName, enabled)
     notifyUser(enabled ? 'Agent exposed over A2A.' : 'No longer exposed over A2A.', 'success')
-    if (enabled) loadSkills()
-    else skills.value = []
+    // #3702: load() fetches capabilities only for an agent exposed at mount, so
+    // exposing from here must fetch them too or "Choose…" stays hidden.
+    if (enabled) {
+      loadSkills()
+      loadCapabilities()
+    } else skills.value = []
   } catch (e) {
     notifyUser(e.response?.data?.detail || `Failed to toggle A2A exposure: ${e.message}`, 'error')
     await load()  // reflect actual state

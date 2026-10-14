@@ -67,7 +67,13 @@ AgentNotReachableError = agent_client.AgentNotReachableError
 AgentConnectionDroppedError = agent_client.AgentConnectionDroppedError
 AgentClientError = agent_client.AgentClientError
 _client_pool = _http_pool._client_pool
-_get_http_client = _http_pool._get_http_client
+
+
+def _get_http_client(base_url):
+    """The pooled client for ``base_url`` (``_acquire_client`` minus the pooled flag)."""
+    return _http_pool._acquire_client(base_url)[0]
+
+
 close_all_clients = agent_client.close_all_clients
 is_circuit_failure = agent_client.is_circuit_failure
 

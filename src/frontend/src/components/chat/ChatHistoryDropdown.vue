@@ -74,6 +74,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../../stores/auth'
+import { storedChatMessage } from '../../utils/skillGate'
 
 const props = defineProps({
   token: { type: String, required: true },
@@ -122,7 +123,7 @@ const selectSession = async (session) => {
     const response = await axios.get(`/api/public/sessions/${props.token}/${session.id}`, {
       headers: authStore.authHeader,
     })
-    const messages = (response.data.messages || []).map(m => ({
+    const messages = (response.data.messages || []).map(storedChatMessage).map(m => ({
       role: m.role,
       content: m.content,
     }))

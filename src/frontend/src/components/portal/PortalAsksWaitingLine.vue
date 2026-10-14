@@ -7,14 +7,14 @@
        pinned Inbox row count. -->
   <p v-if="waiting" class="min-w-0 truncate text-xs" :data-testid="`${testidPrefix}-waiting-line`">
     {{ waiting.label }} ·
-    <router-link :to="waiting.to" :class="INBOX_LINK" :data-testid="`${testidPrefix}-open-inbox`">Open in Inbox</router-link>
+    <router-link :to="waiting.to" :class="INBOX_LINK_CLASS" :data-testid="`${testidPrefix}-open-inbox`">Open in Inbox</router-link>
   </p>
 </template>
 
 <script setup>
 import { computed } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
-import { asksHomeRoute, asksWaitingLabel } from './portalUtils'
+import { asksHomeRoute, asksWaitingLabel, INBOX_LINK_CLASS } from './portalUtils'
 
 const props = defineProps({
   agentNames: { type: Array, default: () => [] },
@@ -34,8 +34,4 @@ const waiting = computed(() => {
     to: asksHomeRoute(agents.size === 1 ? asks[0].agent_name : null),
   }
 })
-
-// A 44px target on a touch screen and the design-system ring (A2 round 1's rule;
-// round 2: keyed on the pointer, not the width — a tablet is touch too).
-const INBOX_LINK = 'inline-flex items-center max-sm:min-h-11 [@media(pointer:coarse)]:min-h-11 text-action-primary-600 dark:text-action-primary-400 hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40'
 </script>

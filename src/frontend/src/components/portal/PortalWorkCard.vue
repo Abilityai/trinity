@@ -44,7 +44,27 @@
       <BaseBadge variant="neutral" class="ml-auto shrink-0">{{ kindWord }}</BaseBadge>
     </div>
 
-    <p class="mt-1.5 text-gray-800 dark:text-gray-100 line-clamp-2 break-words" data-testid="portal-work-title">{{ item.title }}</p>
+    <!-- The title clamps to two lines; when it is actually clipped, a toggle
+         reads the whole sentence in place (trinity#3520: platform notices are
+         one long sentence, and the clamp hid what they said). The toggle sits
+         under the text, so the text opens downward and the control stays put. -->
+    <p
+      :id="titleId"
+      ref="titleEl"
+      class="mt-1.5 text-gray-800 dark:text-gray-100 break-words"
+      :class="titleOpen ? '' : 'line-clamp-2'"
+      data-testid="portal-work-title"
+    >{{ item.title }}</p>
+    <BaseButton
+      v-if="titleClipped || titleOpen"
+      variant="ghost"
+      size="sm"
+      class="-ml-2.5 mt-0.5"
+      :aria-expanded="titleOpen ? 'true' : 'false'"
+      :aria-controls="titleId"
+      data-testid="portal-work-title-toggle"
+      @click="titleOpen = !titleOpen"
+    >{{ titleOpen ? 'Show less' : 'Show more' }}</BaseButton>
     <p v-if="showAgent && item.agent_name" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400 truncate">{{ item.agent_name }}</p>
     <p v-else-if="showAgent && !item.agent_name" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">another agent</p>
 
@@ -145,7 +165,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import { createActivityLineQueue } from '@/utils/workActivity'
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -186,6 +206,32 @@ defineEmits(['stop', 'open-work', 'ask-about-it'])
 
 const live = computed(() => isLive(props.item))
 
+// ---- the title's fold (trinity#3520) -------------------------------------------
+// Offered only when the two-line clamp actually hides text — measured, and
+// re-measured when the card's width or the title changes. Open survives a
+// refresh of the same item (principle 5) and resets for a different one.
+const titleEl = ref(null)
+const titleOpen = ref(false)
+const titleClipped = ref(false)
+const titleId = computed(() => `portal-work-title-${props.item.id}`)
+function measureTitle() {
+  const el = titleEl.value
+  if (!el || titleOpen.value) return   // open: the toggle stays, so "Show less" is reachable
+  titleClipped.value = el.scrollHeight > el.clientHeight + 1
+}
+let _titleObserver = null
+onMounted(() => {
+  measureTitle()
+  if (typeof ResizeObserver !== 'undefined' && titleEl.value) {
+    _titleObserver = new ResizeObserver(() => measureTitle())
+    _titleObserver.observe(titleEl.value)
+  }
+})
+watch(() => props.item.title, () => nextTick(measureTitle))
+watch(() => props.item.id, () => { titleOpen.value = false; nextTick(measureTitle) })
+watch(titleOpen, (open) => { if (!open) nextTick(measureTitle) })
+onBeforeUnmount(() => { if (_titleObserver) _titleObserver.disconnect() })
+
 // ---- the activity row's motion (#620) ------------------------------------------
 // A burst of tool calls becomes a calm sequence: each line holds for
 // ACTIVITY_MIN_DISPLAY_MS, only the latest pending line is kept, and the
@@ -208,7 +254,8 @@ onBeforeUnmount(() => { if (_tick) clearInterval(_tick) })
 const statusWord = computed(() => workStatusLabel(props.item))
 const kindWord = computed(() => kindLabel(props.item.kind))
 const clock = computed(() => (live.value ? formatElapsed(props.elapsedSeconds) : null))
-const steps = computed(() => stepsLine(props.item.steps))
+// #3357: the live activity line and "could not be read" never share a card.
+const steps = computed(() => stepsLine(props.item.steps, { liveSignal: !!shownStep.value }))
 // #3001: `pending` and `none` say nothing — only stages or "could not be read".
 const stepsSilent = computed(() => steps.value.kind === 'pending' || steps.value.kind === 'none')
 const stages = computed(() => stageRows(props.item.steps))

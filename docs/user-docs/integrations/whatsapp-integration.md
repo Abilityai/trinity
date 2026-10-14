@@ -208,7 +208,7 @@ curl -X POST http://localhost:8000/api/agents/my-agent/whatsapp/test \
 - **One Twilio account per agent** — Each agent can only have one WhatsApp binding. Multiple agents cannot share the same Twilio account.
 - **Sandbox requires opt-in** — Every tester must send the join keyword before messaging. The sandbox sender is shared across all Twilio users, so keywords help route to your account.
 - **No SMS** — The binding is WhatsApp-only. SMS on the same Twilio number is not available from Trinity in this release.
-- **Proactive messaging** — WhatsApp is not included in the automatic channel fallback (`auto`). Agents sending proactive messages must specify `channel="whatsapp"` explicitly and the recipient must have a verified email linked to a prior WhatsApp conversation.
+- **No proactive messages** — An agent cannot start a WhatsApp conversation. `send_message` and `POST /api/agents/{name}/messages` accept `auto`, `telegram`, `slack` or `web` only, and `auto` never falls back to WhatsApp. Agents reply to WhatsApp users inline only; there is no completion report-back on WhatsApp as there is on Slack and Telegram.
 
 ## Troubleshooting
 

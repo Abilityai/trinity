@@ -1,13 +1,13 @@
 # Trinity CLI
 
-Command-line interface for managing Trinity agents from your terminal. Provides the same capabilities as the MCP server but invoked via shell commands.
+Command-line interface for Trinity, the operating system for the AI-native company. Manage agents from your terminal with shell commands — a subset of what the [MCP server](../integrations/mcp-server.md) offers (see Limitations).
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
 ## Installation
 
 ```bash
-# PyPI (recommended)
+# PyPI (recommended; Python 3.10+)
 pip install trinity-cli
 
 # Homebrew (macOS/Linux)
@@ -77,7 +77,8 @@ trinity agents list
 # Get agent details
 trinity agents get my-agent
 
-# Create from GitHub template
+# Create from GitHub template (created as an agent: a working branch with
+# auto-sync when your own token can push to your own repo, else pull-only)
 trinity agents create my-agent --template github:user/repo
 
 # Start/stop agents
@@ -106,7 +107,9 @@ trinity deploy . --name my-agent
 trinity deploy --repo user/repo
 ```
 
-The CLI creates `.trinity-remote.yaml` to track deployments, enabling idempotent redeploys.
+A directory deploy packages the folder (in a git repo, tracked files plus untracked files `.gitignore` does not exclude; always leaving out `.git`, `node_modules`, virtualenvs, and `.env`, `.env.local`, `.env.production`), adds an integrity manifest, and uploads it — the archive must stay under 50 MB. The agent name comes from `--name`, then `template.yaml`'s `name`, then the directory name. The first deploy writes `.trinity-remote.yaml`, so later deploys from the same directory update the same agent; if that file points at a different instance than your current profile, the CLI asks before deploying. An agent deployed from local files has no repository behind it and no auto-sync.
+
+`--repo` creates the agent from `github:user/repo` as a **deployment** — pull-only, tracking the branch, never pushing back. To give an agent a working branch on your own repo, use `trinity agents create … --template github:user/repo` instead. A private repo needs a GitHub token on the instance that can read it.
 
 ### Chat and Logs
 
@@ -117,8 +120,8 @@ trinity chat my-agent "Hello, what can you do?"
 # View chat history
 trinity history my-agent
 
-# View container logs
-trinity logs my-agent
+# View container logs (default: last 50 lines)
+trinity logs my-agent --tail 200
 ```
 
 ### Health Monitoring
@@ -166,6 +169,8 @@ trinity agents list
 # JSON output (for scripting)
 trinity agents list --format json
 ```
+
+`--format` is an option on each listing or read command, not a global flag.
 
 ## Environment Variables
 

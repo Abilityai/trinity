@@ -458,13 +458,14 @@ def agent_executions(client, name: str) -> List[dict]:
 
 
 def agent_activities(client, name: str, activity_type: Optional[str] = None) -> List[dict]:
-    params = f"?activity_type={activity_type}" if activity_type else ""
-    resp = client.get(f"/api/agents/{name}/activities{params}")
+    # #3434: the per-agent activities route is gone; read the live cross-agent
+    # timeline and keep this agent's rows (the MCP get_agent_activity_summary shape).
+    params = "?limit=500" + (f"&activity_types={activity_type}" if activity_type else "")
+    resp = client.get(f"/api/activities/timeline{params}")
     assert resp.status_code == 200, (
         f"listing activities of '{name}' answered {resp.status_code}: {resp.text[:300]}"
     )
-    body = resp.json()
-    return body.get("activities", body) if isinstance(body, dict) else body
+    return [a for a in resp.json().get("activities", []) if a.get("agent_name") == name]
 
 
 @pytest.fixture(scope="module")

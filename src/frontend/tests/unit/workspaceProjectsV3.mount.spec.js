@@ -10,8 +10,10 @@
  *   - "I steward" lists what needs the steward and opens the project.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { defineComponent, h } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
+import { createRouter, createMemoryHistory } from 'vue-router'
 
 vi.mock('@/stores/auth', () => ({
   useAuthStore: () => ({ isAuthenticated: true, authHeader: {}, logout: vi.fn() }),
@@ -33,8 +35,27 @@ vi.mock('axios', () => {
 
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { useProjectsStore } from '@/stores/projects'
-import ProjectHub from '@/components/portal/projects/ProjectHub.vue'
+import ProjectHealthCard from '@/components/portal/projects/ProjectHealthCard.vue'
+import ProjectRollupCard from '@/components/portal/projects/ProjectRollupCard.vue'
+import ProjectMetricsCard from '@/components/portal/projects/ProjectMetricsCard.vue'
+import ProjectNeedsYouCard from '@/components/portal/projects/ProjectNeedsYouCard.vue'
 import ProjectsStewarding from '@/components/portal/projects/ProjectsStewarding.vue'
+
+// #3694 split the hub into four cards the page places itself; these tests are
+// about each card's behaviour, so a render-function wrapper mounts the four
+// together with the hub's old props and events.
+const ProjectHub = defineComponent({
+  props: { project: { type: Object, required: true }, myEmail: { type: String, default: '' } },
+  emits: ['open-tasks', 'open-thread'],
+  setup(props, { emit }) {
+    return () => h('div', { 'data-testid': 'project-hub' }, [
+      h(ProjectHealthCard, { project: props.project, myEmail: props.myEmail }),
+      h(ProjectRollupCard, { project: props.project, onOpenTasks: () => emit('open-tasks') }),
+      h(ProjectMetricsCard, { project: props.project }),
+      h(ProjectNeedsYouCard, { project: props.project, onOpenThread: (t) => emit('open-thread', t) }),
+    ])
+  },
+})
 
 globalThis.ResizeObserver = globalThis.ResizeObserver || class {
   observe() {}
@@ -176,11 +197,17 @@ describe('needs you', () => {
       { id: 'q1', agent_name: 'scout', kind: 'question', title: 'Mine here', question: '?', status: 'pending', created_at: '2026-09-30T10:00:00Z' },
       { id: 'q9', agent_name: 'scout', kind: 'question', title: 'Mine elsewhere', question: '?', status: 'pending', created_at: '2026-09-30T10:00:00Z' },
     ]
-    mount(ProjectHub, { props: { project: project({ asks: { mine: ['q1'], others_open: 2 } }) }, attachTo: document.body })
+    // #3574: a row is a router-link into the Inbox, so the hub mounts with a router.
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/:p(.*)*', component: { template: '<div/>' } }] })
+    await router.push('/workspace/projects/prj_1')
+    mount(ProjectHub, { props: { project: project({ asks: { mine: ['q1'], others_open: 2 } }) }, global: { plugins: [router] }, attachTo: document.body })
     await flushPromises()
     const card = byTestId('project-needs-you').textContent
     expect(card).toContain('Mine here')
     expect(card).not.toContain('Mine elsewhere')
+    // #3574: a list row, not the ask card — the body is behind Answer.
+    expect(byTestId('project-ask-row-q1')).not.toBeNull()
+    expect(byTestId('portal-ask-q1')).toBeNull()
     expect(byTestId('project-asks-others').textContent).toContain('2 asks are waiting on other people')
   })
 

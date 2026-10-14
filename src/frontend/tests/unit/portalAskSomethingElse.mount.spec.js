@@ -108,10 +108,33 @@ describe('PortalAsks — Something else (#3242)', () => {
     expect(answer).toHaveBeenCalledWith('a4', expect.objectContaining({ response: 'Yes', responseText: 'ok' }))
   })
 
-  it('an approval decided by its options has no chip, and typing never arms Send', async () => {
+  it('an approval decided by its options has no chip, and typing never sends', async () => {
+    const answer = vi.spyOn(store, 'answerAsk').mockResolvedValue({})
     const w = mountAsks([ask('a5', { decided_by_options: true })])
     expect(tid(w, 'portal-ask-something-else-a5').exists()).toBe(false)
     await tid(w, 'portal-ask-note-a5').setValue('anything')
-    expect(tid(w, 'portal-ask-send-a5').attributes('disabled')).toBeDefined()
+    // trinity#3527: no Send — the option is the decision — and Enter in the
+    // note never sends on its own.
+    expect(tid(w, 'portal-ask-send-a5').exists()).toBe(false)
+    const ev = new KeyboardEvent('keydown', { key: 'Enter', cancelable: true, bubbles: true })
+    tid(w, 'portal-ask-note-a5').element.dispatchEvent(ev)
+    expect(ev.defaultPrevented).toBe(true)
+    await flushPromises()
+    expect(answer).not.toHaveBeenCalled()
+  })
+
+  it('trinity#3527: a gate option sends in one click, with the note typed first', async () => {
+    const answer = vi.spyOn(store, 'answerAsk').mockResolvedValue({})
+    const w = mountAsks([ask('a6', { decided_by_options: true })])
+    await tid(w, 'portal-ask-option-a6').trigger('click')
+    await flushPromises()
+    expect(answer).toHaveBeenCalledTimes(1)
+    expect(answer).toHaveBeenCalledWith('a6', expect.objectContaining({ response: 'Yes', responseText: null }))
+
+    const w2 = mountAsks([ask('a7', { decided_by_options: true })])
+    await tid(w2, 'portal-ask-note-a7').setValue('wrong customer')
+    await tid(w2, 'portal-ask-option-a7').trigger('click')
+    await flushPromises()
+    expect(answer).toHaveBeenLastCalledWith('a7', expect.objectContaining({ response: 'Yes', responseText: 'wrong customer' }))
   })
 })
