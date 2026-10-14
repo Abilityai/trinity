@@ -67,7 +67,7 @@ A project can live at two visibility levels and use one of two tracking modes. T
 
 On Trinity the same six skills can be [assigned from the skills library](../automation/skills-and-playbooks.md) — `/project-init` then materializes the standard itself on first run.
 
-**Platform mode.** On a Trinity instance with Projects enabled, the project skills work against the platform's project record, so the project people see in the Workspace is the one the skills manage. Each run checks once whether the platform answers; off Trinity, on an instance without Projects, or with `platform: off` in the standard, every skill runs as described above.
+**Platform mode.** On a Trinity instance with Projects enabled, the project skills work against the platform's project record, so the project people see in the Workspace is the one the skills manage (the person's side of it — the page, Continue, tasks and the steward — is in [Workspace Projects](../sharing-and-access/workspace-projects.md)). Each run checks once whether the platform answers; off Trinity, on an instance without Projects, or with `platform: off` in the standard, every skill runs as described above.
 
 - **New projects.** `/project-init` also creates the project on the platform. An external project is *linked*: its tasks stay GitHub issues and the epic is its tracker link. With `--internal` the project is *platform-tracked*: its tasks live in the platform's task list instead of a `tasks/` folder. `--no-platform` keeps a new project off the platform.
 - **Existing projects.** `/project-init platform <slug>` brings a folder project onto the platform in one import. After that the platform is the project's home, and nothing syncs back to the folder.
