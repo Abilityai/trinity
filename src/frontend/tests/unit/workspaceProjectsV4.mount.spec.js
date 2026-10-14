@@ -46,6 +46,7 @@ import { useProjectsStore } from '@/stores/projects'
 import ProjectPage from '@/components/portal/projects/ProjectPage.vue'
 import ProjectTasks from '@/components/portal/projects/ProjectTasks.vue'
 import ProjectLog from '@/components/portal/projects/ProjectLog.vue'
+import PortalProjects from '@/components/portal/projects/PortalProjects.vue'
 
 globalThis.ResizeObserver = globalThis.ResizeObserver || class {
   observe() {}
@@ -157,7 +158,7 @@ describe('#3694 — one two-column layout for the whole Overview', () => {
   it('places every card deliberately in the main or the side stack, in a fixed order', async () => {
     await page(project())
     expect(ids(byTestId('project-overview-main'))).toEqual([
-      'project-continue', 'project-rollup', 'project-work-on-it', 'project-metrics', 'project-my-chats',
+      'project-continue', 'project-how-it-moves', 'project-rollup', 'project-work-on-it', 'project-metrics', 'project-my-chats',
     ])
     expect(ids(byTestId('project-overview-side'))).toEqual([
       'project-steward', 'project-health', 'project-needs-you', 'project-members', 'project-agents',
@@ -222,9 +223,11 @@ describe('ent#896 — Continue leads the Overview', () => {
     expect(byTestId('project-continue').textContent).toContain('Add one in Members & access')
   })
 
-  it('Continue is the first focusable control of the Overview', async () => {
+  it('Continue is the first focusable control of the Overview, even while the how-it-moves line still shows', async () => {
     await page(project())
     const overview = byTestId('project-overview')
+    // The line's "Got it" button lives inside the Overview, after Continue — never ahead of it.
+    expect(overview.contains(byTestId('project-how-it-moves-dismiss'))).toBe(true)
     const first = overview.querySelector('button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
     expect(first.getAttribute('data-testid')).toBe('project-continue-primary')
   })
@@ -306,6 +309,40 @@ describe('ent#896 — the Steward card', () => {
     await page(project({ steward: { kind: 'person', ref: 'bob@example.com' } }))
     expect(byTestId('project-steward').textContent).toContain('bob@example.com')
     expect(byTestId('project-steward-open-stewarding')).toBeNull()
+  })
+})
+
+describe('ent#896 — "Open I steward" reaches the list', () => {
+  it('sends the person steward to the list on the I steward tab, and opening a project resets it', async () => {
+    projects.fetchProject = vi.fn()
+    projects.fetchList = vi.fn()
+    projects.fetchStewarding = vi.fn()
+    projects.pageState = vi.fn(() => ({ data: project(), loaded: true, loading: false, error: null, notFound: false }))
+    portal.isPlatformSession = true
+    const w = mount(PortalProjects, {
+      props: { projectId: 'prj_1', myEmail: ME },
+      global: { plugins: [router] },
+      attachTo: document.body,
+    })
+    await flushPromises()
+    byTestId('project-steward-open-stewarding').click()
+    await flushPromises()
+    // The stage asks the shell to leave the page…
+    expect(w.emitted('navigate')).toEqual([[null]])
+    // …and the list it then shows opens on "I steward", not the default tab.
+    await w.setProps({ projectId: null })
+    await flushPromises()
+    expect(byTestId('projects-stewarding')).not.toBeNull()
+    expect(projects.fetchStewarding).toHaveBeenCalled()
+    // Opening a project from that list hands the id up and drops the filter back to the default.
+    w.findComponent({ name: 'ProjectsList' }).vm.$emit('open', 'prj_2')
+    expect(w.emitted('navigate').at(-1)).toEqual(['prj_2'])
+    await w.setProps({ projectId: 'prj_2' })
+    await flushPromises()
+    await w.setProps({ projectId: null })
+    await flushPromises()
+    expect(byTestId('projects-stewarding')).toBeNull()
+    expect(byTestId('projects-list')).not.toBeNull()
   })
 })
 
