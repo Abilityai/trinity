@@ -194,10 +194,18 @@ class TestProcessFileUploads:
             b"\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
         )
         raw = self._make_raw(name="img.png", mimetype="image/png", data=png)
-        descs, udir, failed, imgs = await _svc.process_file_uploads(
-            raw_files=[raw], agent_name="a", container=container,
-            session_id="s1", uploader="u"
-        )
+        # Images now persist their original bytes before becoming vision blocks.
+        # Patch the consumer directly: another test may have imported it before
+        # this module's optional dependency stubs were installed.
+        with (
+            patch.object(_svc, "container_exec_run", new=AsyncMock(return_value=(0, b""))),
+            patch.object(_svc, "container_put_archive", new=AsyncMock(return_value=True)),
+            patch.object(_svc.platform_audit_service, "log", new=AsyncMock()),
+        ):
+            descs, udir, failed, imgs = await _svc.process_file_uploads(
+                raw_files=[raw], agent_name="a", container=container,
+                session_id="s1", uploader="u"
+            )
         assert len(imgs) == 1
         assert imgs[0]["media_type"].startswith("image/")
         assert udir is not None
