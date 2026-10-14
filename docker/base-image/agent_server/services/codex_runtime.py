@@ -945,9 +945,10 @@ def _process_codex_event(event: dict, state: _CodexParseState) -> None:
     elif event_type == "turn.failed":
         error = event.get("error") or {}
         state.metadata.error_type = "turn_failed"
+        message = error.get("message") if isinstance(error, dict) else str(error)
         state.metadata.error_message = (
-            error.get("message") if isinstance(error, dict) else str(error)
-        ) or "Codex turn failed"
+            message if isinstance(message, str) and message.strip() else "Codex turn failed"
+        )
 
     elif event_type == "error":
         state.metadata.error_type = "error"
@@ -1046,20 +1047,24 @@ def _classify_codex_failure(
     auth → 503, rate-limit → 429, everything else → 500 (runtime-unavailable).
     Crucially a generic runtime failure is 500, NOT 503 — 503 is the backend's
     AUTH signal and the dispatch breaker counts AUTH only (#1187 decision 3)."""
-    haystack = " ".join(
+    # turn.failed is the terminal provider verdict. Stderr can contain older
+    # retries and warnings; those must not turn a final model/transport error
+    # into AUTH or mask a final authentication failure with an earlier 429.
+    terminal = metadata.error_type == "turn_failed"
+    haystack = (metadata.error_message or "Codex turn failed") if terminal else " ".join(
         s for s in (stderr or "", metadata.error_message or "") if s
     )
+    detail = haystack if terminal else (stderr.strip() or metadata.error_message or "see agent logs")
     haystack_lower = haystack.lower()
     if _RATE_STATUS_PATTERN.search(haystack) or any(
         marker in haystack_lower for marker in _RATE_MARKERS
     ):
-        return 429, f"Codex rate limit: {(stderr or metadata.error_message or '')[:300]}"
+        return 429, f"Codex rate limit: {detail[:300]}"
     if any(pattern.search(haystack) for pattern in _AUTH_PATTERNS):
         return 503, (
-            f"Codex authentication failure: {(stderr or metadata.error_message or '')[:300]}. "
+            f"Codex authentication failure: {detail[:300]}. "
             "Check OPENAI_API_KEY."
         )
-    detail = stderr.strip() or metadata.error_message or "see agent logs"
     return 500, f"Codex execution failed (exit code {return_code}): {detail[:300]}"
 
 
