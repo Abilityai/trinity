@@ -17,7 +17,7 @@ path can read, and the private-`required` false pass stays closed.
 Sections:
   * helpers (checkpoint A, GREEN): `resolve_github_pat_candidates`,
     `probe_anonymous_ref`, `probe_tokened_repo_access`, `GitHubError.status`.
-  * the raw reader + 401/403 classifier (checkpoint B, strict xfail until then).
+  * the raw reader + 401/403 classifier (checkpoint B, GREEN).
   * the chain driven through the real `_resolve_template` (checkpoint C, strict
     xfail until then), plus the rows that already hold today and must keep
     holding (green now, never xfail).
@@ -47,7 +47,6 @@ SHA = "a" * 40
 USER_PAT = "user-pat-3725"
 PLATFORM_PAT = "platform-pat-3725"
 
-CHECKPOINT_B = pytest.mark.xfail(strict=True, reason="checkpoint B")
 CHECKPOINT_C = pytest.mark.xfail(strict=True, reason="checkpoint C")
 
 
@@ -289,7 +288,6 @@ class TestGitHubErrorStatus:
 # ---------------------------------------------------------------------------
 
 class TestRawReader:
-    @CHECKPOINT_B
     def test_reads_by_sha_without_any_authorization_header(self, monkeypatch):
         seen = {}
 
@@ -313,7 +311,60 @@ class TestRawReader:
         assert seen["url"] == f"https://raw.githubusercontent.com/o/r/{SHA}/template.yaml"
         assert not any(k.lower() == "authorization" for k in seen["headers"])
 
-    @CHECKPOINT_B
+    @pytest.mark.parametrize("repo,sha", [
+        ("o/..", SHA), ("../r", SHA), ("o/.", SHA), ("o/r/x", SHA),
+        ("o", SHA), ("o/r?x=1", SHA), ("o/r", "main"), ("o/r", SHA[:39]),
+        ("o/r", "g" * 40), ("o/r", None),
+    ])
+    def test_refuses_bad_repo_or_sha_without_a_request(self, monkeypatch, repo, sha):
+        def _boom(*a, **k):
+            raise AssertionError("no request may be made")
+
+        monkeypatch.setattr(ts.httpx, "Client", _boom)
+        metadata, reason = ts._fetch_template_yaml_raw_result(repo, sha)
+        assert metadata == {} and reason in ("invalid repo", "invalid sha")
+
+    @pytest.mark.parametrize("status,text,expected", [
+        (404, "", "HTTP 404"), (500, "", "HTTP 500"),
+        (200, "a: 1\na: 2\n", "template_duplicate_key: "),
+    ])
+    def test_non_200_and_hardened_refusal_reasons(self, monkeypatch, status, text, expected):
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def get(self, url, headers=None, **k):
+                return types.SimpleNamespace(status_code=status, text=text)
+
+        monkeypatch.setattr(ts.httpx, "Client", _Client)
+        metadata, reason = ts._fetch_template_yaml_raw_result("o/r", SHA)
+        assert metadata == {} and reason.startswith(expected)
+
+    def test_transport_error_is_named(self, monkeypatch):
+        import httpx
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def get(self, *a, **k):
+                raise httpx.ReadTimeout("slow")
+
+        monkeypatch.setattr(ts.httpx, "Client", _Client)
+        assert ts._fetch_template_yaml_raw_result("o/r", SHA) == ({}, "ReadTimeout: slow")
+
     @pytest.mark.parametrize("reason,rejected", [
         ("HTTP 401", True), ("HTTP 403", True), ("HTTP 404", False),
         ("HTTP 500", False), (None, False), ("ReadTimeout: x", False),
