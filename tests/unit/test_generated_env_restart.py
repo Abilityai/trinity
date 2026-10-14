@@ -1,4 +1,4 @@
-"""Generated template .env is a seed, not a restart-time credential authority.
+"""Regression for #3710. Generated template .env is a seed, not a restart-time credential authority.
 
 Run the actual startup credential-import shell block with only its fixed paths
 redirected into tmp_path; no Docker, provider credentials or startup services.
