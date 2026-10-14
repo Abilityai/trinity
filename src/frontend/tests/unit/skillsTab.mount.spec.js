@@ -230,6 +230,42 @@ describe('Requires approval', () => {
     expect(api.put).toHaveBeenCalledWith(`/api/agents/${A}/skill-gates/pay-invoice`, { approver: 'approver' })
   })
 
+  it('canon roles follow the kinds in their own group; a role nobody fills cannot be picked (trinity-enterprise#848)', async () => {
+    respond({ map: MAP({ approvers: [
+      { kind: 'primary', reachable: true, viewer_fills: false, label: null, role_id: null },
+      { kind: 'role:finance', reachable: true, viewer_fills: false, label: 'Finance', role_id: 'finance' },
+      { kind: 'role:head-of-sales', reachable: false, viewer_fills: false, label: 'Head of sales', role_id: 'head-of-sales' },
+    ] }) })
+    const { w } = await mountTab()
+    const select = tid(w, 'skill-approver-pay-invoice')
+    const top = select.element.querySelectorAll(':scope > option')
+    expect([...top].map((o) => o.value)).toEqual(['primary'])
+    const group = select.find('optgroup')
+    expect(group.attributes('label')).toBe('Roles')
+    const roles = group.findAll('option')
+    expect(roles.map((o) => o.element.value)).toEqual(['role:finance', 'role:head-of-sales'])
+    expect(roles.map((o) => o.text())).toEqual(['Finance', 'Head of sales (nobody yet)'])
+    expect(roles[1].element.disabled).toBe(true)
+
+    api.put.mockResolvedValue({ data: { gate: {}, warnings: [] } })
+    await select.setValue('role:finance')
+    await flush()
+    expect(api.put).toHaveBeenCalledWith(`/api/agents/${A}/skill-gates/pay-invoice`, { approver: 'role:finance' })
+  })
+
+  it('a stored role this agent no longer lists still shows what it is, unpickable', async () => {
+    respond({ map: MAP({ gates: [{ skill_name: 'pay-invoice', approver: 'role:legal', approver_reachable: false, origin: 'set' }],
+      approvers: [{ kind: 'primary', reachable: true, viewer_fills: false }] }) })
+    const { w } = await mountTab()
+    const stale = tid(w, 'skill-approver-pay-invoice').find('optgroup').findAll('option')
+    expect(stale.map((o) => [o.element.value, o.text(), o.element.disabled])).toEqual([['role:legal', 'Legal (nobody yet)', true]])
+  })
+
+  it('without roles there is no empty Roles group (OSS)', async () => {
+    const { w } = await mountTab()
+    expect(tid(w, 'skill-approver-pay-invoice').find('optgroup').exists()).toBe(false)
+  })
+
   it('a refused write is named on that card', async () => {
     api.put.mockRejectedValue({ response: { status: 422, data: { detail: { message: 'Gates are not set on ephemeral agents.' } } } })
     const { w } = await mountTab()

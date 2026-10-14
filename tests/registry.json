@@ -5998,6 +5998,39 @@
         "reliability"
       ],
       "description": "No activity created or owned by a terminal path stays `started` (#1804 class; the invariant is a scoped DB query, never a call-shape mock): the three cancel sites record the execution_cancelled EVENT created+completed in one breath via _record_cancel_event (fail-open, ordered after the real closes; already_finished labelled and pinned); the queued-cancel site runs the #1804 owner close so the #2329 metadata companions close (a queued row has no dispatch activity); the watchdog claim closes direct-dispatch collaboration/self-task companions from the PERSISTED row — state+instant row-derived, so a failure-style lost CAS stamps the standing terminal (e.g. a cancel's CANCELLED), never the lost envelope's FAILED — counts into report.activities_closed_on_recovery AND the startup stats, lets an authoritative close upgrade a provisional FAILED companion (the lookup agrees with the CAS), and keeps row/activity completed_at in agreement even when retained_at is unreadable."
+    },
+    {
+      "file": "unit/test_ent848_role_id_seam.py",
+      "feature": "abilityai/trinity-enterprise#848",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "trinity-enterprise#848: backend seam: parse_role_id (fullmatch, lower-cased), role_label, resolve_role_id (provider only, role_unassigned fails closed), resolve_role_id_people / resolve_approver_roles (None for every degraded answer, [] real, regex-filtered, de-duplicated, capped), ROLE_ID_RE parity with the enterprise ROLE_ID_PATTERN."
+    },
+    {
+      "file": "unit/test_ent848_enforce_and_hook.py",
+      "feature": "abilityai/trinity-enterprise#848",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "trinity-enterprise#848: enforce + hook for role:<id> approvers: a seated person self-approves exactly as approver_people says; anyone else raises one ask with to_role role:<id> and the pre-resolved addressees (T10, kinds too); 202 body carries approver_label, the sentence names no role; unfilled / no provider refuses role_unassigned; an agent addressing role:<id> is still invalid_to; check_invocation honours the self_approved record for a role-gated skill and refuses other runs."
+    },
+    {
+      "file": "unit/test_ent848_gate_map_roles.py",
+      "feature": "abilityai/trinity-enterprise#848",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "trinity-enterprise#848: gate map API for role:<id> approvers: PUT saved lower-cased when this agent's roster names the role; unknown_role / approver_unavailable (OSS, no roster answer) / invalid_approver refused with nothing written; named-but-unfilled saved with approver_unassigned; deadline-only PUT on a stored role gate passes on OSS; GET lists roles after kinds with label + role_id through the response model, booleans only; viewer_fills agrees with enforce; stored role gates report reach via approver_people; the MCP set_skill_gate regex accepts exactly what the backend parses."
     }
   ]
 }

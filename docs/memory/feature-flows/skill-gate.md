@@ -60,6 +60,8 @@ request → entry point
   │  + find_gated_invocations(context_text, gates)   scanned apart, never joined (#3274)
   │      none → ungated → dispatch as today
   ├─ approvers = role_addressing.resolve(agent, role)   none → 422 role_unassigned
+  │      role:<id> (trinity-enterprise#848) → resolve_role_id: the assignments provider only,
+  │      no owner fallback; no provider / nobody → 422 role_unassigned naming the role's label
   ├─ proven person ∈ approvers?  ── yes → self-approved → dispatch (+ audit, :641)
   ├─ refuse_only (voice)?         ── yes → 403 approval_not_available_here
   ├─ sanitised text > 6000 JSON bytes?  ── yes → 422 request_too_long
@@ -71,10 +73,14 @@ request → entry point
   ├─ fingerprints (:521; docker exec as root, python3 -I -S) → 409 unreadable/missing/ambiguous
   ├─ create skill_gate_requests row (pending)  ← BEFORE the ask   (db/skill_gate_requests.py:85)
   ├─ ask_service.raise_ask(raised_by="gate", approval, Approve/Reject, to=role)   (_ask_body :362)
+  │      gate-only addressees=approvers + to_role_override=role (ent#848, kinds too): the ask
+  │      goes to the list self-approval was decided with — the provider is read once, not twice
   │      the card carries the WHOLE request (what Approve runs) + a 500-char preview
   │      raise failed → record refused, 503 approval_unavailable (no pending record left)
-  └─ raise SkillApprovalRequired → 202 {status: pending_approval, request_id, …}
+  └─ raise SkillApprovalRequired → 202 {status: pending_approval, request_id, approver_label, …}
 ```
+
+The 202's notice sentence stays role-free (#3274: the requester is told it waits, not who decides); `approver_label` ("Finance", or the kind) rides the body beside it. An agent still cannot address `role:<id>` in its own `ask_operator` (`invalid_to`): `addressees` / `to_role_override` raise `ValueError` for any raise that is not the gate's.
 
 **What is read.** The gate reads everything a requester put in front of the executor, and nothing the platform composed around it. Producers that compose a message pass `request_text` explicitly:
 
@@ -182,7 +188,7 @@ claude --print (2.1.281)  PreToolUse Skill | Agent | Task
 
 ### 6. The gate map (trinity-enterprise#753)
 
-**Storage** — `agent_skill_gates` (`db/skill_gates.py` `SkillGateOperations`), PK `(agent_name, skill_name)`, `skill_name` lowercased (ASCII names; every matcher casefolds). Columns `approver` (`primary` | `approver`), `deadline_hours` (1–168, NULL → 24h), `origin`, `set_by`, `set_by_agent` (R29 provenance), `set_at`. `origin`:
+**Storage** — `agent_skill_gates` (`db/skill_gates.py` `SkillGateOperations`), PK `(agent_name, skill_name)`, `skill_name` lowercased (ASCII names; every matcher casefolds). Columns `approver` (`primary` | `approver` | `role:<id>` — a canon role, stored lower-cased, trinity-enterprise#848; no migration, same column), `deadline_hours` (1–168, NULL → 24h), `origin`, `set_by`, `set_by_agent` (R29 provenance), `set_at`. `origin`:
 
 | origin | Written by | Gates? | Leaves when |
 |---|---|---|---|
@@ -200,7 +206,7 @@ claude --print (2.1.281)  PreToolUse Skill | Agent | Task
 5. If anything changed, re-sync from the map (`sync_marker_locked`): written while gates remain, removed only after the last is gone.
 Then the audit (best-effort, after the lock). A failed re-sync on a running agent still saves the gate and returns `warnings: ["marker_not_written"]`.
 
-- `set_gate` — the merge with the stored row (an omitted field keeps its value) happens inside the DB write, under `lock_agent_rows`, so two partial PUTs never drop each other's field. Validates the name (`SKILL_NAME_RE`; any well-formed name may be gated, decision 6), the approver (`approver` only where an assignments provider is registered — `approver_kinds()`), the deadline (`type(v) is int`, 1–168), refuses a ghost (409 `ephemeral_agent`, decision 2). An omitted field keeps its stored value; an explicit null deadline resets. `warnings: ["approver_unassigned"]` when the kind reaches nobody (`role_addressing.resolve`; the default admin has no email, so `primary` can reach nobody and every gated request would be refused `role_unassigned`).
+- `set_gate` — the merge with the stored row (an omitted field keeps its value) happens inside the DB write, under `lock_agent_rows`, so two partial PUTs never drop each other's field. Validates the name (`SKILL_NAME_RE`; any well-formed name may be gated, decision 6), the approver (`approver` only where an assignments provider is registered — `approver_kinds()`; `role:<id>` (trinity-enterprise#848) only when the provider's roster for THIS agent names the role — `assignment_provider.resolve_approver_roles`: no answer or no provider → `approver_unavailable`, not on the roster → `unknown_role`, malformed → `invalid_approver`; a deadline-only PUT on a stored role gate is not re-validated), the deadline (`type(v) is int`, 1–168), refuses a ghost (409 `ephemeral_agent`, decision 2). An omitted field keeps its stored value; an explicit null deadline resets. `warnings: ["approver_unassigned"]` when the kind or role reaches nobody (a named-but-unfilled role saves; `approver_people`, the function `enforce` decides with; `role_addressing.resolve`; the default admin has no email, so `primary` can reach nobody and every gated request would be refused `role_unassigned`).
 - `clear_gate` — idempotent; a name that is library-assigned AND recommended (or the library is unreadable) becomes a `cleared` tombstone so the default is not re-applied; any other clear deletes, so a later recommendation can still apply.
 - `reconcile_library_gates(agent, add=True, drop_defaults=None)` — state-driven. `add` inserts `library_default` (`primary`) for every assigned recommended name with no row (agents that held the skill before it was recommended included — the backfill), and runs BEFORE a package is delivered (`_sync_gates` ahead of `_deliver_assigned_skills`; before injection on start, Sync and the sweep). `cleared` tombstones of unassigned skills always go. A `library_default` of an unassigned skill goes only when `drop_defaults` allows it: the names the route's own removal reported `removed`/`not_present` (`packages_gone`), or `AllExcept(keep)` after the start path's / Sync's / sweep's prune (`drop_after_prune`; a name the prune could not remove, or an unmanaged own copy, is kept). A deferred or failed removal keeps the default — the files may still be on the agent. Never removes a default because the metadata changed (tighten-only). The library read runs off the event loop; an unreadable library inserts nothing and is retried by the next reconcile. Ghosts get no default. Never raises.
 - `drop_explicit_gates_on_unassign` — only from `_sync_gates` when a **person** unassigned (PUT replace, DELETE skill, DELETE set) AND the route's removal reported the package gone: deletes the `set` rows for names still unassigned when the write runs, except names whose library row was `delivery_status = conflict` (the agent's own skill of that name runs, so the gate is the own skill's — decision 1). An agent's unassign (a `skills.manage` holder, itself or a sibling), the system key, a deferred removal, Sync, start and the sweep keep explicit gates and report `gates_kept`, so unassign-then-reassign cannot launder a gate away.
@@ -208,7 +214,7 @@ Then the audit (best-effort, after the lock). A failed re-sync on a running agen
 **Who may** (`routers/skill_gate.py`):
 - Read — `set_by` (a username: an email for email-login users) is withheld (null) from any non-person principal, on the read and the PUT response (#715 people stay with people). `get_skill_gate_readable_agent_by_name`: a person or the system key, anything they can access (uniform 404); an agent key, its OWN gates, or (holding `skills.manage`) an agent its owner owns; connector / other / no scope → 403 `skill_gates_not_readable` on the principal alone.
 - Read, the Skills tab's fields (trinity-enterprise#754, `skill_gate_map_service.approver_status` / `hook_status`):
-  - `approvers: [{kind, reachable, viewer_fills}]` for every kind in `approver_kinds()`, booleans only. `viewer_fills` is decided by the enforce path's own functions (`requester_from_principal`, then `approver_people`, which is `_approvers` without the refusal), so it is false for an agent, connector or system principal (a person's user-scoped MCP key is that person, as in `enforce`);
+  - `approvers: [{kind, reachable, viewer_fills, label, role_id}]` for every kind in `approver_kinds()`, then (trinity-enterprise#848) one entry per canon role on this agent's roster (`kind: "role:<id>"`, `label` the provider's title else the humanised id, `role_id`; kinds carry `label`/`role_id` null). Only `primary` / `approver` rows seated in the role fill it. Reach and `viewer_fills` are booleans, never a person. `approver_kinds` stays kinds. `viewer_fills` is decided by the enforce path's own functions (`requester_from_principal`, then `approver_people`, which is `_approvers` without the refusal), so it is false for an agent, connector or system principal (a person's user-scoped MCP key is that person, as in `enforce`);
   - `?probe=true` adds `hook`: the agent's `/health → skill_gate_hook` (`ok` / `missing` / `not_root_owned` / `writable` / `unsupported_runtime`), `predates` for a 200 without the field, or `unknown` for no answer. It is one direct `/health` read (3 s, no circuit-breaker bookkeeping), honoured only for a person who may manage the agent's skills (`can_manage_agent_skills`); everyone else gets `hook: null`. See [skills-tab.md](skills-tab.md).
 - Write — `require_person_or_capability("skills.manage", self_person_only=True)` (the shared helper from #3236; its holder reach bound is `_refuse_unless_owners_agent`) then `get_owned_agent_by_name`: a person (session or own user key) who owns the agent or is an admin; an agent key holding `skills.manage`, only on an agent its owner OWNS (owner equality, never the admin short-circuit; 404 otherwise) and never on itself (403 `person_required`). The system key is refused.
 
@@ -228,6 +234,7 @@ operator_queue row (raised_by = gate, type = approval)
        state         the record's state
        execution_id* the approved run
        waiting_on[]  resolved_to, each as the account name, else the address (only name_approvers)
+       waiting_role  {value: to_role, label} for every viewer — a kind, or a canon role's name (ent#848)
        can_decide    viewer ∈ resolved_to
        (* only with_run_ids)
   ├─ routers/operator_queue._for_principal   a person's row: gate (run ids and approvers on)
@@ -236,7 +243,8 @@ operator_queue row (raised_by = gate, type = approval)
 components/operator/GatedSkillRequest.vue   (utils/skillGateCard.js)
   Agent · Skill(s) + description · Input (proposal.input, folded past 600 chars / 8 lines)
   Also sent (when set) · Requested by (+ "from this run") · Raised · Deadline
-  Waiting on (viewer cannot decide) · "Approve runs it once…" (viewer can decide)
+  Waiting on (viewer cannot decide: the names, else waiting_role through skillCards.kindOptionLabel)
+  · "Approve runs it once…" (viewer can decide)
   outcome line: badge + sentence + "Open the run"
   the hosts do not draw the ask's question on a gate card: the card says it once
   drawn by PortalAsks (Inbox pane, chat card), QueueCard, ResolvedCard, MobileAdmin
@@ -294,6 +302,8 @@ All responses go through the app handler `error_handlers.skill_gate_error` (`src
 | Retry after the decision | 409 `request_<state>` | the decision, never "pending" |
 | Gate map writes (trinity-enterprise#753) — bad name / approver / deadline | 422 `invalid_skill_name` / `invalid_approver` / `invalid_deadline` | nothing written (`HTTPException`, `{code, message}`, `X-Trinity-Error-Code`) |
 | …`approver` on an install with no assignments provider | 422 `approver_unavailable` | only `primary` is offered (`approver_kinds`) |
+| …`role:<id>` with no provider, or the roster could not be read (trinity-enterprise#848) | 422 `approver_unavailable` | retryable; OSS offers kinds only |
+| …`role:<id>` that no assignment on this agent names | 422 `unknown_role` | seat the role first, then gate |
 | …on an ephemeral agent | 409 `ephemeral_agent` | after the access check (an inaccessible ghost is the uniform 404) |
 | …an agent key without `skills.manage` | 403 `skill_management_not_permitted` | audited `capability_refused` |
 | …an agent key on itself, or a system / connector / other key | 403 `person_required` | on the principal alone, before any lookup |
@@ -433,7 +443,11 @@ These are covered by unit tests:
 | `tests/unit/test_ent753_assignment_hooks.py` | the AST guard (every `agent_skills` writer reaches the reconcile; mutation-checked) and the behaviour through `routers/skills.py`, the start path and the sweep |
 | `tests/unit/test_ent753_approval_metadata.py` | `approval:` parsing (YAML bool/date/mapping never raise) and its listing |
 | `tests/unit/test_ent754_gate_map_viewer_and_hook.py`, `test_ent754_execution_self_approved.py`, `test_ent754_workspace_self_approved.py` | The read's `approvers` / `hook`, and the "ran without approval" marker (trinity-enterprise#754; [skills-tab.md](skills-tab.md)) |
-| `src/mcp-server/src/tools/skill-gates.test.ts` | the three MCP tools: routes, only-sent fields, the zod schema, policy rows, description cap |
+| `src/mcp-server/src/tools/skill-gates.test.ts` | the three MCP tools: routes, only-sent fields, the zod schema (incl. `role:<id>`), policy rows, description cap |
+| `tests/unit/test_ent848_role_id_seam.py` | `parse_role_id` / `role_label` / `resolve_role_id`; the two optional seam readers (no provider → None, malformed dropped, `[]` is real, capped) |
+| `tests/unit/test_ent848_enforce_and_hook.py` | a role gate through `enforce` (self-approve, refuse, the pre-resolved addressees), the hook's `check_invocation` on its self-approved record, `card_view.waiting_role` |
+| `tests/unit/test_ent848_gate_map_roles.py` | the PUT codes (`unknown_role`, `approver_unavailable`, `invalid_approver`), roles in `approvers[]`, `viewer_fills` == enforce parity, the TS/Python role-id regex parity |
+| `src/frontend/tests/unit/skillsTab.mount.spec.js`, `skillCards.spec.js`, `gatedSkillCard.mount.spec.js` | the "Roles" optgroup (unfilled disabled, stale stored role), the label chain, the Inbox card's role line (ent#848) |
 
 ### Status
 

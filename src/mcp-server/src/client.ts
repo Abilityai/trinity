@@ -527,6 +527,9 @@ export interface GateResult {
   request_id?: string;
   skills?: string[];
   approver_role?: string;
+  /** trinity-enterprise#848: what the approver shows as — a kind's name, or a
+   * canon role's ("Head of sales"). Absent from an older backend. */
+  approver_label?: string;
   expires_at?: string | null;
   /** trinity#3233: how the backend will tell this caller the outcome —
    * `agent_task`, `inbox`, or `none` (absent from an older backend = none). */
@@ -560,6 +563,7 @@ export function parseGateResult(
         request_id: typeof parsed.request_id === "string" ? parsed.request_id : undefined,
         skills: Array.isArray(parsed.skills) ? (parsed.skills as string[]) : undefined,
         approver_role: typeof parsed.approver_role === "string" ? parsed.approver_role : undefined,
+        approver_label: typeof parsed.approver_label === "string" ? parsed.approver_label : undefined,
         expires_at: typeof parsed.expires_at === "string" ? parsed.expires_at : null,
         outcome_delivery: delivery,
         retryable: false,

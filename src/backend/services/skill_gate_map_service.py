@@ -1,7 +1,8 @@
 """The per-agent skill gate map — every write to it (trinity-enterprise#753).
 
 The map says, per agent, which skills need approval before they run and which
-kind of person approves (`primary` | `approver`). The dispatch check (#751) and
+kind of person approves (`primary` | `approver`, or a canon role as
+`role:<id>` — trinity-enterprise#848). The dispatch check (#751) and
 the in-container hook (#752) read it through `skill_gate_service.list_skill_gates`;
 this module is the only thing that writes it.
 
@@ -126,10 +127,12 @@ def _public(row: Mapping[str, Any]) -> Dict[str, Any]:
 def _reachable(agent_name: str, kind: str) -> bool:
     """Does `kind` reach anyone on this agent right now? The default admin often
     has no email, so `primary` can reach nobody — every gated request is then
-    refused `role_unassigned` (skill_gate_service._approvers)."""
+    refused `role_unassigned` (skill_gate_service._approvers). Asked through
+    `approver_people`, the list `enforce` decides with, so a canon role
+    (`role:<id>`, trinity-enterprise#848) is answered the way a run would be."""
     try:
-        return bool(role_addressing.resolve(agent_name, kind).people)
-    except Exception:  # noqa: BLE001 — RoleRefused or an unreadable lookup: nobody, as far as we can tell
+        return bool(skill_gate_service.approver_people(agent_name, kind))
+    except Exception:  # noqa: BLE001 — an unreadable lookup: nobody, as far as we can tell
         return False
 
 
@@ -167,16 +170,33 @@ def approver_status(agent_name: str, principal) -> List[Dict[str, Any]]:
     data leaves the server."""
     requester = skill_gate_service.requester_from_principal(principal)
     me = requester.email.strip().casefold() if requester.is_person and requester.email else ""
+    # trinity-enterprise#848: the canon roles this agent's roster names follow
+    # the kinds, each judged by the same function (`role:<id>` is the value a
+    # gate stores). None — no provider, or no answer — lists kinds only.
+    # ponytail: one provider read per role; a request-scoped memo if rosters grow (D3).
+    entries: List[Tuple[str, Optional[str], Optional[str]]] = [(k, None, None) for k in approver_kinds()]
+    for role in _roster_roles(agent_name) or []:
+        value = role_addressing.ROLE_ID_PREFIX + role["id"]
+        entries.append((value, role["title"] or role_addressing.role_label(value), role["id"]))
     out = []
-    for kind in approver_kinds():
+    for kind, label, role_id in entries:
         try:
             people = skill_gate_service.approver_people(agent_name, kind)
         except Exception:  # noqa: BLE001 — a read never fails on one kind's lookup
             logger.warning("[skill_gate_map] approver lookup failed for %s/%s", agent_name, kind,
                            exc_info=True)
             people = []
-        out.append({"kind": kind, "reachable": bool(people), "viewer_fills": bool(me) and me in people})
+        out.append({"kind": kind, "reachable": bool(people), "viewer_fills": bool(me) and me in people,
+                    "label": label, "role_id": role_id})
     return out
+
+
+def _roster_roles(agent_name: str) -> Optional[List[Dict[str, Optional[str]]]]:
+    """The canon role ids `agent_name`'s roster names (`[{"id", "title"}]`,
+    ids lower-cased), or None when role ids are not available on this install
+    (trinity-enterprise#848). Per agent: another team's roles are never listed."""
+    from services import assignment_provider
+    return assignment_provider.resolve_approver_roles(agent_name)
 
 
 def self_approved_flags(agent_name: str, execution_ids: Iterable[str],
@@ -300,20 +320,25 @@ def _validate_name(skill_name: str) -> str:
     return skill_name.lower()
 
 
-def _validate_changes(changes: Mapping[str, Any]) -> Dict[str, Any]:
+def _validate_changes(agent_name: str, changes: Mapping[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     if "approver" in changes:
         approver = changes["approver"]
         if approver is None:
             approver = "primary"
-        if not isinstance(approver, str) or approver not in APPROVER_KINDS:
+        role_id = role_addressing.parse_role_id(approver)
+        if role_id is not None:
+            out["approver"] = _validate_role(agent_name, role_id)
+        elif not isinstance(approver, str) or approver not in APPROVER_KINDS:
             raise SkillGateMapRefused(
-                422, "invalid_approver", "The approver is 'primary' or 'approver'.")
-        if approver not in approver_kinds():
+                422, "invalid_approver",
+                "The approver is 'primary', 'approver' or a canon role as 'role:<id>'.")
+        elif approver not in approver_kinds():
             raise SkillGateMapRefused(
                 422, "approver_unavailable",
                 "Only the agent's primary can approve on this install.")
-        out["approver"] = approver
+        else:
+            out["approver"] = approver
     if "deadline_hours" in changes:
         hours = changes["deadline_hours"]
         if hours is not None and not (type(hours) is int
@@ -325,6 +350,26 @@ def _validate_changes(changes: Mapping[str, Any]) -> Dict[str, Any]:
                 "default.")
         out["deadline_hours"] = hours
     return out
+
+
+def _validate_role(agent_name: str, role_id: str) -> str:
+    """trinity-enterprise#848: `role:<id>` is accepted when this agent's roster
+    names the role (any kind), and stored lower-cased — the gate's identity. A
+    role named but filled by nobody is saved with `approver_unassigned`, like a
+    kind (set_gate's warnings)."""
+    value = role_addressing.ROLE_ID_PREFIX + role_id
+    roles = _roster_roles(agent_name)
+    if roles is None:
+        raise SkillGateMapRefused(
+            422, "approver_unavailable",
+            "Canon roles can't approve on this install right now: they need the assignments "
+            "module. Pick an approver kind the gate map lists.")
+    if role_id not in {r["id"] for r in roles}:
+        raise SkillGateMapRefused(
+            422, "unknown_role",
+            f"No one on {agent_name}'s roster is assigned the {role_addressing.role_label(value)} "
+            "role. Pick a role the gate map lists.")
+    return value
 
 
 def _refuse_ghost(agent_name: str) -> None:
@@ -447,7 +492,7 @@ async def set_gate(agent_name: str, skill_name: str, *, changes: Mapping[str, An
     well-formed name may be gated — one the agent does not have gates nothing
     until a skill answers to it (decision 6)."""
     key = _validate_name(skill_name)
-    fields = _validate_changes(changes)
+    fields = _validate_changes(agent_name, changes)
     _refuse_ghost(agent_name)
     set_by, set_by_agent = _who(ctx)
 

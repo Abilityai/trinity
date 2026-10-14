@@ -240,7 +240,7 @@ class TestRaisesAnApproval:
         _gated(gate)
         agent = "fin-751-r5e"
 
-        def _refuse(agent_name, ask):
+        def _refuse(agent_name, ask, **audience):   # ent#848: the gate hands the sink its audience
             raise ask_svc.AskRejected(409, "already_pending", "dup", request_id="x-1")
         monkeypatch.setattr(gate.svc, "_raise_ask", _refuse)
         with pytest.raises(gate.svc.SkillGateRefused) as info:
