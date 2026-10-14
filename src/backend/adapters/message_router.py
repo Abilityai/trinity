@@ -1381,7 +1381,10 @@ class ChannelMessageRouter:
         if not upload_dir:
             return
         try:
-            await container_exec_run(container, f"rm -rf {upload_dir}", user="developer")
+            exit_code, _ = await container_exec_run(container, f"rm -rf {upload_dir}", user="developer")
+            if exit_code != 0:
+                logger.warning("[ROUTER] Upload cleanup returned a nonzero exit status")
+                return
             logger.debug(f"[ROUTER] Cleaned up {upload_dir}")
         except Exception as e:
             logger.warning(f"[ROUTER] Upload cleanup failed: {e}")

@@ -181,8 +181,13 @@ async def process_file_uploads(
                 continue
             except Exception:
                 break
-        if not cleanup.cancelled() and cleanup.exception() is not None:
-            logger.warning("Upload cleanup failed after interrupted preparation")
+        if not cleanup.cancelled():
+            if cleanup.exception() is not None:
+                logger.warning("Upload cleanup failed after interrupted preparation")
+            else:
+                exit_code, _ = cleanup.result()
+                if exit_code != 0:
+                    logger.warning("Upload cleanup returned a nonzero exit status")
         raise
 
 

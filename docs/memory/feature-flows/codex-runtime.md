@@ -234,7 +234,7 @@ execution returns or raises (including cancellation and spawn failure).
 The shared upload service retains original image bytes alongside vision data.
 Prompt descriptions contain the actual saved path. Each dispatch gets its own
 UUID directory under `/home/developer/uploads`, preventing filename collisions
-and cross-dispatch cleanup. The channel router removes that exact directory after
+and cross-dispatch cleanup. The channel router attempts to remove that exact directory after
 known terminal execution outcomes, including failed response delivery, post-send
 hooks and cancellation during delivery. Preparation cancellation waits for the
 upload producer to settle before removing its directory, so a late Docker write
@@ -242,7 +242,9 @@ cannot recreate it. Cancellation after dispatch, a waiter timeout with an active
 execution, or unreadable execution state deliberately retains originals: losing
 the waiter is not proof that the agent stopped reading. These exceptional retained
 directories require operator cleanup after confirming the execution is terminal;
-there is no automatic reaper or restart-recovery guarantee. Web, public and
+there is no automatic reaper or restart-recovery guarantee. Container cleanup
+errors or nonzero exit statuses are logged without masking the original outcome;
+they may also retain files. Web, public and
 session callers retain completed workspace uploads as before. A
 failed original write is explicit and does not queue a vision-only success.
 Existing upload authorization, size/MIME checks and audit events still apply.

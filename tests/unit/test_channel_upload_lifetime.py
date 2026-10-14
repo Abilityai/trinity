@@ -195,3 +195,24 @@ async def test_live_dispatch_keeps_uploads_until_terminal(flow):
     release.set()
     await request
     cleanup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_router_cleanup_nonzero_is_reported_without_raw_output(monkeypatch, caplog):
+    monkeypatch.setattr(router_module, 'container_exec_run', AsyncMock(return_value=(1, b'synthetic-private-output')))
+    await router_module.ChannelMessageRouter._cleanup_uploads(object(), '/home/developer/uploads/example')
+    assert 'nonzero exit status' in caplog.text
+    assert 'synthetic-private-output' not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_preparation_cleanup_nonzero_preserves_original_failure(monkeypatch, caplog):
+    from services import upload_service
+    failure = RuntimeError('synthetic producer failure')
+    monkeypatch.setattr(upload_service, '_write_file_uploads', AsyncMock(side_effect=failure))
+    monkeypatch.setattr(upload_service, 'container_exec_run', AsyncMock(return_value=(1, b'synthetic-private-output')))
+    with pytest.raises(RuntimeError) as error:
+        await upload_service.process_file_uploads([], 'agent', object(), 'session', 'user')
+    assert error.value is failure
+    assert 'nonzero exit status' in caplog.text
+    assert 'synthetic-private-output' not in caplog.text
