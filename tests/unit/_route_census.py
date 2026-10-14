@@ -526,6 +526,15 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
         "terminal result delivery; authenticates the agent's own key and path self-match (#1083)"),
     "routers/reports.py::create_report": (
         "POST /api/agents/{name}/reports", "structured output an agent publishes about itself (self-check)"),
+    "routers/aauth_person.py::request_person_token": (
+        "POST /api/agents/{agent_name}/aauth/person-token",
+        "a USE of the agent's AAuth identity (trinity-enterprise#878): the handler refuses every principal "
+        "but the agent's OWN key (403 aauth_agent_only) — a human may not make the backend sign as the agent"),
+    "routers/aauth_resource.py::call_aauth_resource": (
+        "POST /api/agents/{agent_name}/aauth/resource-call",
+        "a USE of the agent's AAuth identity (trinity-enterprise#879): the same own-key gate as the person-token "
+        "route — every principal but the agent's OWN key is refused (403 aauth_agent_only) before the allow-list "
+        "is consulted, so a human may neither make the backend sign as the agent nor probe the allow-list"),
     "routers/notifications.py::create_notification": (
         "POST /api/notifications", "an agent raises a notification; agent name comes from its key (NOTIF-001)"),
     # MCP schedule tools — the agent's own use; autonomy (person-only) bounds cron firing.
@@ -635,6 +644,13 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
     "routers/public.py::tls_allowed": ("GET /api/public/tls-allowed", "unauthenticated by design (reverse-proxy on-demand TLS probe)"),
     "routers/a2a.py::a2a_well_known_card": ("GET /a2a/{agent_name}/.well-known/agent-card.json", "unauthenticated by design (A2A discovery card)"),
     "routers/a2a.py::a2a_jsonrpc": ("POST /a2a/{agent_name}", "ent#679: a Trinity MCP key OR an x402 payment token; decided in-handler (get_user_or_anonymous → 401 unless exposed AND priced)"),
+    # trinity-enterprise#623: AAuth discovery documents. Anonymous by design —
+    # a peer fetches them from the issuer origin before it holds any credential;
+    # they carry only public material (issuer, JWKS public keys, signature
+    # requirements) and answer a uniform 404 while the prototype flag is off.
+    "routers/aauth.py::aauth_agent_metadata": ("GET /.well-known/aauth-agent.json", "unauthenticated by design (AAuth agent-provider metadata; 404 unless the prototype flag is on)"),
+    "routers/aauth.py::aauth_jwks": ("GET /.well-known/aauth-jwks.json", "unauthenticated by design (AAuth JWKS, public keys only; 404 unless the prototype flag is on)"),
+    "routers/aauth.py::aauth_resource_metadata": ("GET /.well-known/aauth-resource.json", "unauthenticated by design (AAuth resource metadata; 404 unless the prototype flag is on)"),
     "routers/mcp_keys.py::validate_mcp_api_key_http_endpoint": ("POST /api/mcp/validate", "validates the presented MCP key itself (MCP server auth)"),
     "main.py::health_check": ("GET /health", "unauthenticated by design (health probe)"),
     "routers/slack.py::handle_slack_event": ("POST /api/public/slack/events", "Slack request signature"),

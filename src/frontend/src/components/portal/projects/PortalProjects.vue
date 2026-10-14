@@ -28,13 +28,15 @@
         @back="$emit('navigate', null)"
         @open-thread="$emit('open-thread', $event)"
         @open-room="$emit('open-room', $event)"
+        @open-stewarding="openStewarding"
       />
-      <ProjectsList v-else @open="$emit('navigate', $event)" />
+      <ProjectsList v-else :initial-filter="listFilter" @open="openFromList" />
     </div>
   </div>
 </template>
 
 <script setup>
+import { ref } from 'vue'
 import ProjectPage from './ProjectPage.vue'
 import ProjectsList from './ProjectsList.vue'
 
@@ -42,5 +44,17 @@ defineProps({
   projectId: { type: String, default: null },
   myEmail: { type: String, default: '' },
 })
-defineEmits(['open-menu', 'navigate', 'open-thread', 'open-room'])
+const emit = defineEmits(['open-menu', 'navigate', 'open-thread', 'open-room'])
+
+// ent#896: the page's Steward card sends a person steward to the list's
+// "I steward" tab; opening a project from the list resets it to the default.
+const listFilter = ref('all')
+function openStewarding() {
+  listFilter.value = 'steward'
+  emit('navigate', null)
+}
+function openFromList(id) {
+  listFilter.value = 'all'
+  emit('navigate', id)
+}
 </script>

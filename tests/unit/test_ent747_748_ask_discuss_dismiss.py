@@ -815,7 +815,7 @@ class TestResumeAudience:
         base = dict(agent_name="agent-747", status="running", triggered_by="operator_response",
                     source_channel="portal", source_channel_chat_id="ps_discussion",
                     source_channel_thread=None, source_channel_agent=None,
-                    source_channel_client=email, source_user_email=email)
+                    source_channel_client=email, source_user_email=None)  # ent#886
         base.update(over)
         return SimpleNamespace(**base)
 

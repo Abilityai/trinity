@@ -136,13 +136,14 @@ Gate line (`gateLineFor`, `skillCards.js:120-134`). It names a **kind**, never a
 |---|---|---|
 | Gated, `approvers[kind].viewer_fills` | lock | Needs approval: you approve this |
 | Gated, the kind reaches nobody (`reachable: false`; with no `approvers` row, the gate's own `approver_reachable`) | warning | Needs approval from <kind>: nobody fills it yet |
-| Gated | lock | Needs approval from <kind> (`primary` → "the primary contact", `approver` → "an approver") |
+| Gated | lock | Needs approval from <kind> (`primary` → "the primary contact", `approver` → "an approver", `role:<id>` → the entry's `label`, else the humanised id — trinity-enterprise#848) |
 | Not gated, `approval: recommended`, and the approval row is shown | warning | Author recommends approval: not gated |
 
 `recommended` reads the library entry's `approval` (Shared) or the agent server's `approval` field (both sections).
 
 Approval row (`SkillCard.vue:158-189`, `:219-248`):
 - the picker lists `approvers` (fallback: `primary`); a kind nobody fills is listed as `(nobody yet)` and cannot be selected; a gate whose kind the install no longer offers is appended, disabled;
+- canon roles (trinity-enterprise#848, `kind: "role:<id>"`) follow the kinds in an `<optgroup label="Roles">`, labelled by `utils/skillCards.kindOptionLabel` (a kind's own name, else the API's `label`, else the humanised id); the same "(nobody yet)" / disabled rule; a stored role no longer listed is appended to the group, disabled; with no roles (OSS) there is no group;
 - toggle on → `set-gate` with the shown kind: the gate's own, else the first reachable kind, else `primary` — never a bodiless PUT;
 - toggle off → `clear-gate`; changing the kind of a gated skill → `set-gate` with the new kind;
 - `SkillsTab.onSetGate` / `onClearGate` (`:536-544`) → `stores/skillGates.js::setGate` / `clearGate`.
@@ -274,7 +275,7 @@ list_skills(agent, last_known)          (the agent-page route only)     :131-155
 
 Auth is unchanged (`get_skill_gate_readable_agent_by_name`). Models: `SkillGateApproverStatus` / `SkillGateMapResponse` (`models.py:3877-3902`).
 
-- **`approvers: [{kind, reachable, viewer_fills}]`**, one entry per kind in `approver_kinds()` (`skill_gate_map_service.approver_status`, `:156-179`):
+- **`approvers: [{kind, reachable, viewer_fills, label, role_id}]`**, one entry per kind in `approver_kinds()`, then one per canon role on the agent's roster (trinity-enterprise#848; see [skill-gate.md](skill-gate.md) §6) (`skill_gate_map_service.approver_status`, `:156-179`):
   - `reachable`: the kind resolves to at least one person (`skill_gate_service.approver_people`, `skill_gate_service.py:311-319`, which is `_approvers` without the refusal);
   - `viewer_fills`: `requester_from_principal(caller)` (`skill_gate_service.py:658-681`) is a person and its casefolded email is in that list. These are the functions `enforce` uses to decide self-approval, so the card cannot say "you approve this" for a run the gate would hold. An agent key, a connector or the event loopback never fills a kind;
   - booleans only: no name or email.
@@ -345,7 +346,7 @@ A skipped field is warned once per `(file, field, value)` (`_SKIPPED_FIELD_WARNE
 | Agent answered non-200 | That status, "Agent returned error: …" — never masked by the copy (the public link: that status, "The agent could not list its skills") | `LoadFailed` with retry on first load; a failed refresh keeps the list |
 | Body not JSON | 500 "Failed to fetch playbooks: …" | `LoadFailed` |
 | Listing over 256 KB | 200 live; not kept, older copy dropped | Stopped later: no list |
-| Gate PUT/DELETE refused | 422 `invalid_skill_name` / `invalid_approver` / `invalid_deadline` / `approver_unavailable`; 409 `ephemeral_agent`; 403 `person_required` / `skill_management_not_permitted`; 404 | `InlineError` in that card's description slot |
+| Gate PUT/DELETE refused | 422 `invalid_skill_name` / `invalid_approver` / `invalid_deadline` / `approver_unavailable` / `unknown_role`; 409 `ephemeral_agent`; 403 `person_required` / `skill_management_not_permitted`; 404 | `InlineError` in that card's description slot |
 | Name can't carry a gate | (client-side, `SKILL_NAME_RE`) | Toggle disabled, reason on hover |
 | Run held | 202 `pending_approval` | Info toast, 8 s, no navigation |
 | Run refused by the gate | Named refusal + `X-Trinity-Error-Code` | Error toast until dismissed |
@@ -463,7 +464,6 @@ Implemented (2026-10-08).
 
 Known limits:
 - the Overview tab's "N skills" button counts library assignments only;
-- canon roles in the approver picker are follow-up trinity-enterprise#848;
 - a renamed agent that is stopped shows no own skills until it starts: rename clears the last-known copy under both names rather than moving it (PR review, deferred);
 - Shared cards show no file count or size, which the old rows did; both stay in the Assign dialog (PR review, kept).
 

@@ -169,7 +169,8 @@ def test_oss_lists_primary_only_and_the_owner_fills_it(env):
     body = _get(env, OWNER)
 
     assert body["approver_kinds"] == ["primary"]
-    assert _kinds(body) == {"primary": {"kind": "primary", "reachable": True, "viewer_fills": True}}
+    assert _kinds(body) == {"primary": {"kind": "primary", "reachable": True, "viewer_fills": True,
+                                        "label": None, "role_id": None}}
 
 
 def test_the_compare_is_casefolded_like_enforce(env):
@@ -193,7 +194,8 @@ def test_an_owner_without_an_email_reaches_nobody(env):
 
     k = _kinds(_get(env, OWNER))["primary"]
 
-    assert k == {"kind": "primary", "reachable": False, "viewer_fills": False}
+    assert k == {"kind": "primary", "reachable": False, "viewer_fills": False,
+                 "label": None, "role_id": None}
 
 
 def test_an_agent_key_never_fills_a_kind_even_for_its_owners_address(env):
@@ -210,8 +212,10 @@ def test_enterprise_lists_both_kinds_with_their_own_reach(env):
 
     assert body["approver_kinds"] == ["primary", "approver"]
     assert _kinds(body) == {
-        "primary": {"kind": "primary", "reachable": True, "viewer_fills": True},
-        "approver": {"kind": "approver", "reachable": False, "viewer_fills": False},
+        "primary": {"kind": "primary", "reachable": True, "viewer_fills": True,
+                    "label": None, "role_id": None},
+        "approver": {"kind": "approver", "reachable": False, "viewer_fills": False,
+                     "label": None, "role_id": None},
     }
 
 
@@ -240,7 +244,8 @@ def test_viewer_fills_agrees_with_what_enforce_does(env):
 def test_no_person_data_in_the_new_field(env):
     body = _get(env, OWNER)
 
-    assert set(body["approvers"][0]) == {"kind", "reachable", "viewer_fills"}
+    # trinity-enterprise#848 added `label` / `role_id` (null for a kind).
+    assert set(body["approvers"][0]) == {"kind", "reachable", "viewer_fills", "label", "role_id"}
     assert "example.com" not in str(body["approvers"]).lower()
 
 

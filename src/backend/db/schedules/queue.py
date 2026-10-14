@@ -219,6 +219,11 @@ class ScheduleQueueMixin:
                 schedule_executions.c.lease_expires_at,
                 schedule_executions.c.claimed_by_worker,
                 schedule_executions.c.redelivery_count,
+                # ent#814/ent#886: the served person is read off these three
+                # (`task_execution_service.served_person_for_row`).
+                schedule_executions.c.schedule_id,
+                schedule_executions.c.source_channel,
+                schedule_executions.c.source_channel_client,
             )
         )
         # A lost race on one conversation (#2843) raises IntegrityError on the

@@ -1,6 +1,8 @@
 /**
- * trinity-enterprise#610 PR A2, §3g L6 C1 — the Action tab's order is urgency,
- * not recency (Andrii 2026-09-29: a 24h bucket plus the A10 badge).
+ * trinity-enterprise#610 PR A2, §3g L6 C1 — the Action tab's URGENCY order
+ * (Andrii 2026-09-29: a 24h bucket plus the A10 badge). Since
+ * trinity-enterprise#856 it is the order on the sort switch, not the default
+ * (Newest is — `portalInboxSort.spec.js`); every case here passes 'urgency'.
  *
  * The round-1 seed had critical asks sitting at #10 and #20 of 21 because the
  * tab sorted newest-first. The order now:
@@ -20,7 +22,7 @@ const ask = (id, over = {}) => ({
   priority: 'medium', created_at: at(-2 * H), expires_at: null, status: 'pending', ...over,
 })
 
-describe('C1 — Action is ordered by urgency', () => {
+describe('C1 — Action under the Urgency sort', () => {
   it('expiring within 24h, then priority, then the oldest', () => {
     const rows = actionItems([
       ask('medium-new', { created_at: at(-1 * H) }),
@@ -28,7 +30,7 @@ describe('C1 — Action is ordered by urgency', () => {
       ask('medium-old', { created_at: at(-9 * H) }),
       ask('critical', { priority: 'critical', created_at: at(-1 * H) }),
       ask('low-1h', { priority: 'low', expires_at: at(1 * H), created_at: at(-1 * H) }),
-    ], NOW)
+    ], NOW, 'urgency')
     expect(rows.map((r) => r.id)).toEqual(['low-1h', 'critical', 'high', 'medium-old', 'medium-new'])
   })
 
@@ -37,7 +39,7 @@ describe('C1 — Action is ordered by urgency', () => {
       ask('in-20h', { expires_at: at(20 * H) }),
       ask('in-30h', { priority: 'critical', expires_at: at(30 * H) }),
       ask('in-2h', { priority: 'low', expires_at: at(2 * H) }),
-    ], NOW)
+    ], NOW, 'urgency')
     expect(rows.map((r) => r.id)).toEqual(['in-2h', 'in-20h', 'in-30h'])
   })
 
@@ -47,7 +49,7 @@ describe('C1 — Action is ordered by urgency', () => {
       ask('low', { priority: 'low', created_at: at(-9 * H) }),
       ask('weird', { priority: 'urgent-ish', created_at: at(-1 * H) }),
       ask('none', { priority: undefined, created_at: at(-2 * H) }),
-    ], NOW)
+    ], NOW, 'urgency')
     expect(rows.map((r) => r.id)).toEqual(['none', 'weird', 'low'])
   })
 

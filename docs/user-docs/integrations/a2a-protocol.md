@@ -278,7 +278,7 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
   http://localhost:8000/api/settings/a2a-endpoints/research-partner
 ```
 
-The URL must be **HTTPS** and must resolve to a public address; Trinity refuses anything pointing inside your network. It re-checks this on **every call**, not just at registration, so a hostname that later resolves somewhere internal stops working rather than being trusted because it was once accepted.
+The URL must be **HTTPS** and must resolve to a public address; Trinity refuses anything pointing inside your network. It re-checks this on **every call**, not just at registration, so a hostname that later resolves somewhere internal stops working rather than being trusted because it was once accepted. The one exception is a host an admin has put on the outbound endpoint allowlist — see [Between your own instances on a private network](#between-your-own-instances-on-a-private-network).
 
 > **⚠ Registering an endpoint is a trust decision, not a configuration step.**
 > Trinity removes the literal credential from anything the remote sends back. It **cannot** stop a remote that base64-encodes, splits or otherwise transforms it — and an agent under prompt injection can be talked into asking for exactly that. **Registering an endpoint grants that endpoint the ability to exfiltrate its own credential.** Register peers you would trust with the token you are handing them.
@@ -379,26 +379,23 @@ Register the remote instance's agent endpoint (`https://their-trinity.example.co
 
 ### Between your own instances on a private network
 
-When your Trinity instances share a private network (a tailnet or a VPN), they can call each other's agents over it, without the public internet and without exchanging keys. It takes one step on each side, after an admin declares the network once.
+When your Trinity instances share a private network (a tailnet or a VPN) and serve plain HTTP on it, their agents can call each other over it instead of the public internet. Every call still carries a key: the private network only changes which **addresses** Trinity will call, never who may call an agent.
 
-**1. Declare the network (admin, on both instances).** List the network's address range, the names your instances use on it, or both. Optionally set the address this instance has on that network, so internal agents advertise it on their card:
+**1. Allow the other instance's host (admin, on the calling instance).** Add the provider instance's name on the network, its address range, or both, to the outbound endpoint allowlist:
 
 ```bash
 curl -X PUT http://localhost:8000/api/settings/a2a-trusted-networks \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d '{"entries": ["100.64.0.0/10", "*.your-tailnet.ts.net"],
-       "internal_base_url": "http://this-instance.your-tailnet.ts.net"}'
+  -d '{"entries": ["100.64.0.0/10", "*.your-tailnet.ts.net"]}'
 ```
 
-The platform refuses entries that would trust its own Docker networks, loopback, link-local or reserved ranges, or anything broader than a /8.
+The platform refuses entries that would cover its own Docker networks, loopback, link-local or reserved ranges, or anything broader than a /8. The list is read only when **this** instance calls out; it never lets anyone call in.
 
-**2. Provider side:** in the agent's **A2A** settings, turn on **Expose over A2A** and choose **Our own networks only**. The agent now answers only callers whose address is in a declared range. Everyone else, including the public address, sees an unexposed agent. **No key needed on our networks** is on by default; turn it off to require a Trinity key even from the private network.
+**2. Provider side:** in the agent's **A2A** settings, turn on **Expose over A2A**, exactly as for any other caller.
 
-**3. Caller side:** register `http://<provider-instance>.<your-network>/a2a/<agent>` as an outbound endpoint, with no credential. Plain `http://` and private addresses are accepted only because the host matches a declared entry. The check runs again on every call, so a name that later resolves outside the declared ranges is refused.
+**3. Caller side:** register `http://<provider-instance>.<your-tailnet>/a2a/<agent>` as an outbound endpoint, with a **Trinity MCP API key from the provider instance** as the credential (see [Trinity → Trinity](#trinity--trinity)). Plain `http://` and a private address are accepted only because the host is on the allowlist. The check runs again on every call, so a name that later resolves outside the allowed ranges is refused.
 
-Keyless calls are rate-limited and recorded with the caller's address. A keyless caller can read and cancel only the tasks it started.
-
-> **Pair it with a network rule.** "No key on our network" trusts every machine on that network. If the network also carries laptops or other people's devices, add a network ACL that admits A2A traffic only between your Trinity instances.
+A call that arrives without a key gets `401`, whichever network it comes from.
 
 ### Troubleshooting
 
@@ -406,8 +403,8 @@ Keyless calls are rate-limited and recorded with the caller's address. A keyless
 |---|---|
 | `outbound_disabled` (404) | `A2A_OUTBOUND_ENABLED` is off |
 | `endpoint_not_found` (404) | No endpoint registered under that name — check spelling, or ask an admin |
-| `endpoint_not_https` (400) | The registered URL is `http://`. Re-register it as `https://` — Trinity refuses rather than silently upgrading, so a credential never travels in clear |
-| `endpoint_private_address` (400) | The hostname resolves inside your network |
+| `endpoint_not_https` (400) | The registered URL is `http://` and its host is not on the outbound endpoint allowlist. Re-register it as `https://` — Trinity refuses rather than silently upgrading, so a credential never travels in clear — or, for one of your own instances on a private network, ask an admin to allow its host |
+| `endpoint_private_address` (400) | The hostname resolves inside your network and is not on the outbound endpoint allowlist |
 | `card_origin_mismatch` (502) | The remote's agent card points somewhere other than the registered host. Trinity refuses: a card cannot redirect a credentialed call |
 | `endpoint_dns_failure` (400) | The hostname does not resolve. Trinity treats a DNS failure as fatal rather than retrying blindly |
 | `card_url_ambiguous` (502) | The remote's card declares a URL that doesn't unambiguously match what you registered. Register the origin, or a URL matching the card's declared `url` exactly |

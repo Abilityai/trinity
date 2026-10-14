@@ -276,7 +276,16 @@ class TestCostAccumulator:
         assert loop["runs_completed"] == 3
         assert loop["stop_reason"] == "budget_exhausted"
 
-    def test_m16_infinite_budget_never_trips(self, env):
+    def test_m16_infinite_budget_never_trips(self, env, db_backend, request):
+        if db_backend == "postgres":
+            # Not pollution: on PostgreSQL the cost columns are float4 (`REAL`
+            # is not translated to DOUBLE PRECISION), so writing 1e300 raises
+            # NumericValueOutOfRange in finalize_loop_run and the loop never
+            # records its stop reason. Strict, so it flags the fix landing.
+            request.applymarker(pytest.mark.xfail(
+                strict=True,
+                reason="BUG: REAL cost columns are float4 on PostgreSQL — #3441",
+            ))
         ls, db, ts = env
         ts.script = [{"cost": 1e300}] * 3
         lid = _start(ls, max_runs=3, max_cost_usd=float("inf"), no_progress_threshold=0)

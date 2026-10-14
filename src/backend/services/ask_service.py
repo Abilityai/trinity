@@ -466,9 +466,20 @@ def raise_ask(
     actor_user: Any = None,
     addressee: Optional[str] = None,
     platform_execution_id: Optional[str] = None,
+    addressees: Optional[List[str]] = None,
+    to_role_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Raise an ask through the platform and return its receipt
     (trinity-enterprise#611).
+
+    `addressees` + `to_role_override` (trinity-enterprise#848) are the gate's
+    pre-resolved audience: the very people `skill_gate_service.enforce` decided
+    self-approval with, and the approver value the ask is recorded `to_role`
+    as — a kind, or a canon role `role:<id>` the sink's own `to` vocabulary
+    (`ASK_ROLES`, an agent's input) deliberately does not accept. Given, role
+    resolution (`_address`) is skipped, so the gate's audience and the ask's
+    cannot diverge (no second resolve between the two). Gate raises only, like
+    `addressee`; an agent's raise passing either is a programming error.
 
     `platform_execution_id` (ent#661 v3) is the raising turn as the platform
     saw it — the MCP request's `X-Trinity-Execution-Id` (#2392). When it is one
@@ -552,6 +563,7 @@ def raise_ask(
     if (raised_by == "gate") != (channel == "gate"):
         raise ValueError(f"raise_ask: channel {channel!r} does not go with raised_by {raised_by!r}")
     named = _named_addressee(addressee, raised_by)
+    pre = _named_addressees(addressees, to_role_override, raised_by, named)
     norm = _validated_ask(ask, oqs, raised_by=raised_by)
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
@@ -567,8 +579,11 @@ def raise_ask(
     if norm["proposal"] is not None and predecessor is None:
         _refuse_unlinked_reask(agent_name, norm["proposal"], raised_by)
     target = _replace_target(agent_name, norm["replaces"])
+    to_role = to_role_override or norm["to"]
     if named:
         people, addressee, resolved = [named], named, True
+    elif pre is not None:
+        people, addressee, resolved = pre, (pre[0] if len(pre) == 1 else None), True
     else:
         people, addressee, resolved = _address(agent_name, norm["to"])
 
@@ -605,7 +620,7 @@ def raise_ask(
         max_pending=_max_pending() if raised_by == "agent" else None,
         channel=channel,
         raised_by=raised_by,
-        to_role=norm["to"],
+        to_role=to_role,
         resolved_to=people or None,
         proposal=norm["proposal"],
         supersedes_expired=predecessor["id"] if predecessor else None,
@@ -673,7 +688,7 @@ def raise_ask(
             "channel": channel,
             "raised_by": raised_by,
             "type": norm["type"],
-            "to_role": norm["to"],
+            "to_role": to_role,
             **({"replaces": replaced["id"]} if replaced else {}),
         },
     }]
@@ -1033,6 +1048,36 @@ def _named_addressee(addressee: Optional[str], raised_by: str) -> Optional[str]:
     if "@" not in email:
         raise ValueError("raise_ask: addressee must be an email")
     return email
+
+
+def _named_addressees(addressees: Optional[List[str]], to_role_override: Optional[str],
+                      raised_by: str, named: Optional[str]) -> Optional[List[str]]:
+    """The lower-cased, de-duplicated emails a gate raise pre-lists, or None
+    when it lists none (trinity-enterprise#848).
+
+    A programming error (`ValueError`), never a refusal: an agent's raise that
+    passes either, an override without the list it stands for, an empty list
+    (a gate never asks nobody — `enforce` refused `role_unassigned` first), a
+    non-email, or a list beside a single `addressee`.
+    """
+    if addressees is None and to_role_override is None:
+        return None
+    if raised_by != "gate":
+        raise ValueError("raise_ask: only a gate raise may pre-list its audience")
+    if addressees is None:
+        raise ValueError("raise_ask: to_role_override needs addressees")
+    if named is not None:
+        raise ValueError("raise_ask: addressee and addressees are exclusive")
+    out: List[str] = []
+    for value in addressees:
+        email = str(value).strip().lower()
+        if "@" not in email:
+            raise ValueError("raise_ask: every addressee must be an email")
+        if email not in out:
+            out.append(email)
+    if not out:
+        raise ValueError("raise_ask: a gate raise must address someone")
+    return out
 
 
 def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool]:

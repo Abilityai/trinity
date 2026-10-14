@@ -20,6 +20,20 @@
            route watcher is what closes the drawer everywhere else. -->
       <PortalInboxRow :needs="inbox.needs" :came="inbox.came" @click="$emit('open-inbox')" />
 
+      <!-- ent#661: the person's Projects list — shown only when the roster
+           says this principal has the capability (internal-only).
+           #3695 (operator ruling 2026-10-13): it sits directly under Inbox —
+           the two navigation DESTINATIONS together at the top, then the two
+           ACTIONS on the chat list (New chat, Search). Between New chat and
+           Search it read as a chat-list control rather than a place to go.
+           #3672 (operator ruling): NO placeholder holds its slot while the
+           roster is out. Most installs (every OSS one) are not entitled to
+           Projects, so a held slot appeared and then vanished there — a layout
+           shift on every load to spare a late pop-in on the few entitled
+           installs. The link renders once the roster says `projectsAvailable`;
+           without it Inbox is followed by New chat with nothing between. -->
+      <PortalSidebarProjectsLink v-if="projectsAvailable" :active="projectsActive" @open="$emit('open-projects')" />
+
       <!-- New chat -->
       <!-- ent#357: disabled with an empty roster. `newChat()` only resets
            conversation state, so with no agent to chat with every branch of it
@@ -34,10 +48,6 @@
         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
         New chat
       </button>
-
-      <!-- ent#661: the person's Projects list — shown only when the roster
-           says this principal has the capability (internal-only). -->
-      <PortalSidebarProjectsLink v-if="projectsAvailable" :active="projectsActive" @open="$emit('open-projects')" />
 
       <!-- Search -->
       <div class="relative">
@@ -90,20 +100,17 @@
 
         <!-- #2159: the roster load is the first thing that happens after
              sign-in and it is not instant on a large fleet. Without this the
-             block renders empty and the page reads as hung, not loading. Three
-             skeleton rows: enough to say "rows are coming", not so many that a
-             small roster jumps when they are replaced. -->
-        <div v-if="loadingRoster && !roster.length" class="px-2 py-1.5" aria-busy="true">
-          <div v-for="i in 3" :key="i" class="flex items-center gap-2.5 py-2 animate-pulse">
-            <div class="w-[26px] h-[26px] rounded-full bg-gray-200 dark:bg-gray-800 shrink-0"></div>
-            <div class="min-w-0 flex-1 space-y-1.5">
-              <div class="h-3 w-1/2 rounded bg-gray-200 dark:bg-gray-800"></div>
-              <div class="h-2.5 w-1/3 rounded bg-gray-100 dark:bg-gray-800/60"></div>
-            </div>
-          </div>
-          <span class="sr-only">Loading your agents…</span>
-        </div>
+             block renders empty and the page reads as hung, not loading.
+             #3672: held until the WHOLE list has a verdict (`settled`), not
+             just the roster — the rows re-order and grow a subtitle when the
+             chats land, and an asked agent joins past the collapse limit when
+             the asks land, so rendering on the roster alone made them jump.
+             The retry arm keeps #2159's "no roster on screen" case. -->
+        <PortalSkeleton v-if="!settled || (loadingRoster && !roster.length)" variant="sidebar-agents" />
 
+        <!-- #3672: everything the section shows once settled, in ONE wrapper
+             with the one fade — so the rows arrive together, never one by one. -->
+        <div v-else class="ws-fade-in" data-testid="sidebar-agents-content">
         <!-- ent#621: the row says it is the one you are in — by click as well as
              by key. `aria-current` rather than `aria-selected`: these are
              navigation destinations, not options in a listbox. -->
@@ -262,6 +269,7 @@
             No agents shared with you yet — ask whoever invited you to share one.
           </template>
         </div>
+        </div>
       </section>
 
       <!-- ============================ CHATS ============================= -->
@@ -302,7 +310,25 @@
         </button>
       </div>
 
-      <template v-else>
+      <!-- #3672: skeleton chat rows until the list's one verdict, then the
+           whole list in one pass with the same fade as the agents above. -->
+      <PortalSkeleton v-else-if="!settled" variant="sidebar-chats" />
+
+      <div v-else class="ws-fade-in" data-testid="sidebar-chats-content">
+        <!-- A failed chat-list read is said, never shown as "No chats yet"
+             (principle 15, #1926): the store keeps the last good list, which
+             on a failed FIRST read is an empty one. With rows on screen it is
+             the stale banner; with none, the same banner says nothing loaded. -->
+        <InlineError
+          v-if="threadsFailed && !failedDismissed"
+          class="mt-3"
+          :message="threadsFailedText"
+          retryable
+          data-testid="sidebar-chats-failed"
+          @retry="$emit('retry-threads')"
+          @dismiss="failedDismissed = true"
+        />
+
         <!-- Starred first, and LIFTED OUT of the date groups below (a starred
              chat appears exactly once — see partitionStarred). -->
         <div v-if="starred.length" class="mt-3">
@@ -361,7 +387,20 @@
             />
           </template>
         </div>
-      </template>
+
+        <!-- #3672: a list that turns out empty keeps a stable empty state
+             rather than collapsing to nothing (principle 16: it names the next
+             step). Not with an empty roster: the agents block above already
+             says the truer sentence, and saying it twice is noise (ent#402).
+             Only when the list is TRUSTED: an empty list from a failed read is
+             not "no chats" (the banner above says what happened). -->
+        <div
+          v-if="!threadsFailed && !activeThreads.length && !archived.length && roster.length"
+          class="mt-3 px-2 py-3 text-xs"
+          :class="META_INK"
+          data-testid="sidebar-chats-empty"
+        >No chats yet — open an agent above, or start a new chat.</div>
+      </div>
     </div>
 
     <!-- Footer: signed-in email + sign out -->
@@ -411,6 +450,8 @@ import PortalKeyCap from './PortalKeyCap.vue'
 import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
 import PortalInboxRow from './PortalInboxRow.vue'
+import PortalSkeleton from './PortalSkeleton.vue'
+import InlineError from '@/components/InlineError.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import DraftMark from '@/components/base/DraftMark.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
@@ -432,6 +473,7 @@ import { inboxCounts } from './portalInbox'
 // the day the map changes.
 import { keyHint, keyShortcutsFor, hostPlatform } from './portalKeymap'
 import { capCount } from '@/utils/tabTitle'
+import { staleBannerMessage } from '@/utils/loadingState'
 
 // ent#610 §3g B7a: the sidebar's meta ink, ONE string for every meta text
 // site. Bare gray-400 ink is 2.54:1 on white ("gray-400 is not text") and
@@ -466,6 +508,14 @@ const props = defineProps({
   projectsActive: { type: Boolean, default: false },
   // #2159: distinguishes "still loading" from "loaded, and you have none".
   loadingRoster: { type: Boolean, default: false },
+  // #3672: the list's ONE first-load verdict (`sidebarSettled`, latched by the
+  // shell). False → both sections hold skeleton rows. Defaults to true so a
+  // caller that never loads (a test, a static mount) renders as before.
+  settled: { type: Boolean, default: true },
+  // The last chat-list read failed (`store.sessionsFailed`). `threads` is then
+  // the last good list — empty on a failed first read — so the empty copy is
+  // withheld and a banner says the read failed instead.
+  threadsFailed: { type: Boolean, default: false },
   search: { type: String, default: '' },
   searching: { type: Boolean, default: false },
   searchResults: { type: Array, default: () => [] },
@@ -475,7 +525,7 @@ const props = defineProps({
 })
 const emit = defineEmits([
   'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star', 'open-inbox',
-  'update:search', 'sign-out', 'open-projects', 'open-keys',
+  'update:search', 'sign-out', 'open-projects', 'open-keys', 'retry-threads',
 ])
 
 const isSearching = computed(() => (props.search || '').trim().length >= 2)
@@ -522,6 +572,14 @@ const archived = computed(() => props.threads
   .filter((t) => t.archived_at)
   .sort((a, b) => String(b.archived_at).localeCompare(String(a.archived_at))))
 const archivedOpen = ref(false)
+
+// The failed-read banner: dismissible, and back on the NEXT failure (a
+// recovered read clears it on its own, since `threadsFailed` drops).
+const failedDismissed = ref(false)
+watch(() => props.threadsFailed, (failed) => { if (failed) failedDismissed.value = false })
+const threadsFailedText = computed(() => (props.threads.length
+  ? staleBannerMessage('your chats', null)
+  : "Couldn't load your chats. They'll appear here once the list loads."))
 const split = computed(() => partitionStarred(activeThreads.value))
 const starred = computed(() => split.value.starred)
 const grouped = computed(() => groupThreadsByDate(split.value.rest))

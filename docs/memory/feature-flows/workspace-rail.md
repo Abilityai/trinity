@@ -35,7 +35,9 @@ Portal.vue (shell)
 
 ## ent#547 — Info docks, and the contract grows a third shape
 
-The rail is **Work · Loops · Canvas · Files · Info** (State when #439 lands). Agent
+The rail was **Work · Loops · Canvas · Files · Info** at ent#547; since ent#892 the
+order is **Info · Canvas · Files · Projects · Asks · Work · Loops** (State when #439
+lands). Agent
 details was a SIBLING of the rail until 2026-09-07 (ruled 2026-09-05, on the grounds
 that the rail is participant-scoped with a fixed tab set and that details is dismissed
 rather than switched away from). The operator reversed that after testing `dev` — a
@@ -579,6 +581,34 @@ spoken name, the open strip's badge equal to the row's number, the collapsed
 button). Verified on the Docker frontend: light and dark, the overflow menu, the
 row landing on `/workspace/inbox?tab=action&from=acme-scout&item=ask:…` with the
 ask selected, the 390px strip and sheet; no console errors.
+
+### ent#892 — always present, and the order changes
+
+Operator ruling 2026-10-13: Asks no longer comes and goes. The `presence` rule and
+`asksTabPresent` are gone (and `tabPassesDoor` has no presence check left — Asks was
+its only user), so the tab passes on its `AGENT` door alone and Portal.vue no longer
+hands `askCounts` to `visibleTabs` (the counts still feed `asksSignalFrom`). With no
+tab driven by data, "last so nothing moves" no longer applies, and `RAIL_TAB_ORDER`
+reads **info, canvas, files, projects, asks, work, loops**; `RAIL_DEFAULT_TAB` stays
+`work`, so the rail still opens on Work and a remembered tab still wins.
+
+```
+PortalRailAsks
+├─ view = railAsksView({ participants, asksLoaded, asksAbsent, asksFailed, count })
+│     → feedView: loading (no verdict yet) · failed (first read failed) · empty · ready
+├─ loading → PortalSkeleton variant="rail"
+├─ failed  → LoadFailed "Couldn't load asks" · retry = portal.fetchAsks()
+├─ empty   → registry copy (railEmptyCopy): "No asks" · "Nothing from <agent> is waiting
+│            on you…" · BaseButton "Open the Inbox" → asksHomeRoute(agent) (room: no
+│            filter) and emits `open`, which closes the sheet
+└─ ready   → the waiting line + rows, as above
+```
+
+The registry entry now declares `empty` (title, body, action `Open the Inbox`, event
+`open-inbox`), the same shape as Loops, Canvas and Files. Tests:
+`portalRailAsks.spec.js` (always present, order, empty copy, `⌥.` walk, the verdict)
+and `portalRailAsks.mount.spec.js` (empty state + its link, skeleton before a verdict,
+failed first read).
 
 ## Residuals (stated)
 
