@@ -48,14 +48,25 @@ export function modeChip(automation) {
 const KIND_LABELS = Object.freeze({ primary: 'the primary contact', approver: 'an approver' })
 const KIND_OPTION_LABELS = Object.freeze({ primary: 'Primary contact', approver: 'Approver' })
 
-/** An approver kind as a sentence reads it. Never a person. */
-export function kindLabel(kind) {
-  return KIND_LABELS[kind] || kind
+/** A canon role (`role:<id>`, trinity-enterprise#848) as a person reads it —
+ *  "Head of sales" — the backend's `role_addressing.role_label`, for a value
+ *  the API sent no label for. Null for anything else. */
+export function roleLabel(value) {
+  if (typeof value !== 'string' || !value.startsWith('role:')) return null
+  const text = value.slice(5).toLowerCase().split(/[._-]+/).filter(Boolean).join(' ')
+  return text ? text[0].toUpperCase() + text.slice(1) : null
 }
 
-/** An approver kind as the picker lists it. */
-export function kindOptionLabel(kind) {
-  return KIND_OPTION_LABELS[kind] || kind
+/** An approver as a sentence reads it. Never a person. One chain with the
+ *  picker's: a kind's own name, else the API's `label` (a role's), else the
+ *  humanised role id. A kind first: the API labels a kind with its bare value. */
+export function kindLabel(kind, label) {
+  return KIND_LABELS[kind] || label || roleLabel(kind) || kind
+}
+
+/** An approver as the picker lists it. */
+export function kindOptionLabel(kind, label) {
+  return KIND_OPTION_LABELS[kind] || label || roleLabel(kind) || kind
 }
 
 const low = (s) => (typeof s === 'string' ? s.trim().toLowerCase() : '')
@@ -124,10 +135,11 @@ function gateLineFor({ gate, kinds, recommended, showApproval }) {
     // No approvers row for the kind (an older backend, or a kind this install
     // no longer offers): the gate entry's own `approver_reachable` decides.
     const reachable = kind ? kind.reachable : gate.approver_reachable !== false
+    const who = kindLabel(gate.approver, kind?.label)
     if (!reachable) {
-      return { tone: 'warn', text: `Needs approval from ${kindLabel(gate.approver)}: nobody fills it yet` }
+      return { tone: 'warn', text: `Needs approval from ${who}: nobody fills it yet` }
     }
-    return { tone: 'locked', text: `Needs approval from ${kindLabel(gate.approver)}` }
+    return { tone: 'locked', text: `Needs approval from ${who}` }
   }
   if (recommended && showApproval) return { tone: 'warn', text: 'Author recommends approval: not gated' }
   return null

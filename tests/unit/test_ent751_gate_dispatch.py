@@ -76,7 +76,7 @@ def gate(db_backend, monkeypatch):
         state.dispatched.append((record["request_id"], execution_id))
         return "admitted"
 
-    async def _wake(record, text):
+    async def _wake(record, text, **_):
         state.woken.append((record["source_agent"], text))
 
     monkeypatch.setattr(_GATE, "list_skill_gates",

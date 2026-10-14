@@ -82,18 +82,21 @@ describe('item keys', () => {
 })
 
 describe('Action (D8)', () => {
-  // ent#610 §3g C1 REVERSED "newest first": the order is urgency, and among
-  // equals the ask that has waited longest leads (portalInboxActionSort.spec.js).
-  it('pending only, the longest-waiting first among equals', () => {
-    const rows = actionItems([
+  // trinity-enterprise#856 (operator ruling 2026-10-09): Action opens Newest
+  // first; §3g C1's urgency order — the longest-waiting first among equals —
+  // is on the sort switch (portalInboxActionSort.spec.js, portalInboxSort.spec.js).
+  it('pending only, newest first by default; the longest-waiting first under urgency', () => {
+    const asks = [
       ask('old', { created_at: iso(5 * H) }),
       ask('done', { status: 'answered', ended_at: iso(0) }),
       ask('new', { created_at: iso(H) }),
       ask('exp', { status: 'expired' }),
-    ], NOW)
-    expect(rows.map((r) => r.key)).toEqual(['ask:old', 'ask:new'])
-    expect(rows[0]).toMatchObject({ type: 'ask', id: 'old', agent_name: 'scout', status: 'pending' })
-    expect(rows[0].ask.id).toBe('old')
+    ]
+    const rows = actionItems(asks, NOW)
+    expect(rows.map((r) => r.key)).toEqual(['ask:new', 'ask:old'])
+    expect(rows[0]).toMatchObject({ type: 'ask', id: 'new', agent_name: 'scout', status: 'pending' })
+    expect(rows[0].ask.id).toBe('new')
+    expect(actionItems(asks, NOW, 'urgency').map((r) => r.key)).toEqual(['ask:old', 'ask:new'])
   })
   it('tolerates junk', () => {
     expect(actionItems(null)).toEqual([])

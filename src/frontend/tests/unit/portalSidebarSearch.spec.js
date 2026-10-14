@@ -285,7 +285,7 @@ describe('what only source can answer — PortalSidebar.vue', () => {
   })
 
   it('keeps the skeleton and the empty-roster next action on their exact gates', () => {
-    expect(SIDEBAR).toMatch(/v-if="loadingRoster && !roster\.length"/)
+    expect(SIDEBAR).toMatch(/v-if="!settled \|\| \(loadingRoster && !roster\.length\)"/)
     expect(SIDEBAR).toMatch(/v-if="!roster\.length && !loadingRoster"/)
   })
 

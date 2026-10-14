@@ -75,9 +75,13 @@ class TestReadOnlyModeCRUD:
         assert isinstance(data["enabled"], bool)
         assert isinstance(data["config"], dict)
 
-    def test_get_read_only_status_default_is_disabled(self, api_client: TrinityApiClient, created_agent):
-        """Agents should default to read-only mode disabled."""
-        response = api_client.get(f"/api/agents/{created_agent['name']}/read-only")
+    def test_get_read_only_status_default_is_disabled(self, api_client: TrinityApiClient, isolated_agent):
+        """Agents should default to read-only mode disabled.
+
+        Uses its own fresh agent: sibling tests enable read-only mode on the
+        module-scoped `created_agent`, so a shuffled order breaks the default.
+        """
+        response = api_client.get(f"/api/agents/{isolated_agent['name']}/read-only")
 
         if response.status_code == 503:
             pytest.skip("Agent server not ready")

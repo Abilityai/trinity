@@ -69,10 +69,14 @@ class TestPaidAgentInfo:
     """Test the public payment info endpoint."""
 
     @pytest.mark.smoke
-    def test_info_no_config(self, api_client: TrinityApiClient, created_agent):
-        """GET /api/paid/{name}/info returns 404/501 when no Nevermined config."""
+    def test_info_no_config(self, api_client: TrinityApiClient, isolated_agent):
+        """GET /api/paid/{name}/info returns 404/501 when no Nevermined config.
+
+        Uses its own fresh agent: `_ensure_nvm_config` writes a config onto the
+        module-scoped `created_agent`, so a shuffled order breaks "no config".
+        """
         response = api_client.get(
-            f"/api/paid/{created_agent['name']}/info",
+            f"/api/paid/{isolated_agent['name']}/info",
             auth=False,
         )
         # 404 (no config) or 501 (SDK not installed)

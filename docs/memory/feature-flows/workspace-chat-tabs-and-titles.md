@@ -31,7 +31,8 @@ PortalConversation.vue
 - `portalUtils.agentChatTabs(threads, agentName)` is the whole rule: this
   user's **threads** with the active agent (rooms are not an agent's tabs;
   another agent's threads are not this agent's), most recent first
-  (`last_message_at` falling back to `created_at`), labelled through the same
+  (`last_message_at` falling back to `created_at`) **at arrival — then frozen
+  for the visit (ent#856, below)**, labelled through the same
   `threadTitle` the sidebar uses. It is a **slice of the sidebar's list** —
   `Portal.vue` passes the same `threads` it renders in the sidebar — so the
   two can never disagree and nothing is fetched twice.
@@ -516,6 +517,57 @@ every fact it carries, and two sibling PRs restructure this header band next).
   answer `unknown`, which shows nothing. Honest under-reporting; making it
   cross-worker means new Redis-shared state for a diagnostic.
 
+## The strip holds still (ent#856)
+
+Recency is the order you **arrive** to, not an order that re-sorts under the
+cursor (operator ruling 2026-10-09): while you are on an agent, a reply, a send
+or a poll changes a badge and never a position.
+
+```
+Portal.vue (shell)
+  stageAgent = the agent on stage, else null
+               (Inbox route · a room — by openRoom OR by /workspace/r/:id · the unreachable notice)
+  tabOrder   = { agent, ids } | null        ← ONE watcher on [stageAgent, threadListTrusted()]
+               new agent  → take tabOrderFrom(threads, agent)   (Main first, recency, archived rows ranked)
+               null       → clear
+               same agent → hold (a re-click on the row you are on changes nothing)
+               ids: null  → untaken (cold link); retaken ONCE when the list becomes trusted
+  ├─ closeChat  → agentChatTabs(..., { activeId, order: tabOrder })   close-next walks the frozen strip
+  └─ <PortalConversation :tab-order>
+        ├─ cycleChat         → agentChatTabs(..., { ..., order })      ⌥⇧↑/↓ walk the same strip
+        └─ <PortalChatTabs :order> → agentChatTabs(..., { ..., order })
+```
+
+- **One writer.** No door takes the snapshot; the watcher does, so the row, the
+  keys, a deep link, `/c/:id`, bootstrap, Undo, Reset and the return from the
+  Inbox or a room all go through one rule, and take and clear cannot run in the
+  wrong order. Leaving for a room or the Inbox clears it; coming back retakes it
+  — the chat that got busy while you were away now sits beside Main.
+- **The comparator** (`portalUtils.agentChatTabs` with `order`): Main first, then
+  the snapshot rank. An id the snapshot does not know (a chat born mid-visit)
+  sits directly after Main — the provisional tab's slot, so the born row takes
+  the place the "New chat" tab held — born chats among themselves by
+  `created_at`, never by recency, or two of them would swap on a reply. A
+  snapshot naming another agent (the `convKey` fallback) or untaken is ignored:
+  the strip is the arrival sort.
+- **Never pruned.** The snapshot ranks archived rows too, and the archive filter
+  runs at draw time: a closed chat drops out and the gap closes; Undo returns it
+  to its own slot; a deep-linked archived chat is drawn where it arrived.
+- **Landing (operator ruling 2026-10-13).** Arm **0** is the agent's most recent
+  unarchived chat with an unread answer (`agentUnreadLanding`, Main included);
+  arm **1** is the chat last open for that agent in this tab's session
+  (`lastOpen`, in memory, never persisted); then ent#784's fresh-session arms.
+  Every door passes `lastOpen` — including the `/workspace/a/:name` route
+  watcher, which therefore **replaces** that history entry with the chat it
+  lands on (`openThread(row, { replace: true })`): pushed, Back would return to
+  `/a/:name`, land on the same chat and push again. Closing a chat or a
+  thread-missing 404 calls `forgetLastOpen`.
+- **Behaviour change, intended.** Back to an agent, or a click on its sidebar
+  row, from one of its chats now returns to the chat last open in this session
+  where it used to open a fresh one — arm 1 of the 10-13 ruling.
+- **Not pinned by a test:** the visual "no layout shift on a reply" and the feel
+  of the hold are the operator's hand check.
+
 ## The BROWSER tab, not the chat tab (ent#557)
 
 The tab strip above names the chats inside the Workspace. The browser's own tab
@@ -603,6 +655,16 @@ never-opened chat count at all.
   return); `portalKeyHints.mount.spec.js` (the hints on the rows, the rail and
   the tabs). `portalRosterRow.spec.js` mounts the sidebar for the bound and the
   handed-down order — the lift's own regression.
+- **ent#856 — the strip holds still.** `portalChatTabsHold.spec.js` (pure:
+  `tabOrderFrom`, `agentChatTabs({order})` — a re-sort changes nothing, born
+  chats after Main by creation, an archived id drops and returns to its slot,
+  agent mismatch and untaken fall back); `portalAgentLandingUnread.spec.js`
+  (arm 0 before arm 1 before the drafts arm, `forgetLastOpen`);
+  `portalChatCycle.mount.spec.js` (a reply mid-walk: no skip, no repeat);
+  `portalAgentLandingStage.mount.spec.js` (retake on agent → room → agent, by
+  the sidebar and by URL, and agent → Inbox → agent; hold on a same-agent click;
+  a cold link retaken once and then held through polls);
+  `portalAgentLandingRemount.mount.spec.js` (the route-driven landing replaces).
 - `src/frontend/e2e/workspace-chat-tabs.spec.js` (**#2579**) — the geometry no
   node-env pin can execute: every visible tab exactly 192px (Main included), a
   long title clipped with its full text on `title=`, the counted "N more"

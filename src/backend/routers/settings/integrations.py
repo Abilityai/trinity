@@ -655,6 +655,7 @@ async def upsert_a2a_outbound_endpoint(
             body.url,
             credential,
             clear_credential=body.clear_credentials,
+            auth_scheme=body.auth_scheme,
             credential_kind=body.credential_kind,
         )
     except a2a_outbound.EndpointValidationError as e:
@@ -674,7 +675,9 @@ async def upsert_a2a_outbound_endpoint(
             "endpoint": record["name"],
             "url": record["url"],
             "credential_set": bool(credential),
-            "credential_cleared": bool(body.clear_credentials),
+            # ent#623: switching an endpoint to aauth drops its stored secret.
+            "credential_cleared": bool(body.clear_credentials) or body.auth_scheme == "aauth",
+            "auth_scheme": record["auth_scheme"],
             # The KIND, not the value — and the store's conclusion rather than
             # the request's, so the row says what was actually written when the
             # operator left the field out.
@@ -704,21 +707,19 @@ async def upsert_a2a_outbound_endpoint(
 def _trusted_networks_state() -> Dict[str, Any]:
     from services import a2a_trusted_networks as tn
 
-    return {
-        "entries": tn.get_entries(),
-        "internal_base_url": tn.internal_base_url(),
-    }
+    return {"entries": tn.get_entries()}
 
 
 @router.get("/a2a-trusted-networks")
 async def get_a2a_trusted_networks(
     current_user: User = Depends(get_current_user)
 ):
-    """The trusted internal networks for A2A (trinity-enterprise#838).
+    """The admin's outbound A2A endpoint allowlist (trinity-enterprise#838;
+    outbound-only since trinity-enterprise#885).
 
     Admin and human only, like the endpoint registry: declaring a network
-    "ours" relaxes the outbound address rule for it and lets an internal-scope
-    agent answer it without a key, so reading the list is part of the grant.
+    "ours" relaxes the outbound address rule for endpoints on it, so reading
+    the list is part of the grant. Nothing inbound reads it.
     """
     assert_admin(current_user)
     from dependencies import reject_agent_principal
@@ -732,7 +733,7 @@ async def set_a2a_trusted_networks(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """Replace the trusted networks list; optionally set the internal card origin.
+    """Replace the outbound allowlist.
 
     Refused (422, naming the entry and the rule): a CIDR overlapping the
     platform's own Docker networks, loopback / link-local / reserved ranges,
@@ -746,13 +747,9 @@ async def set_a2a_trusted_networks(
     from services import a2a_trusted_networks as tn
 
     try:
-        base = (tn.validate_internal_base_url(body.internal_base_url)
-                if body.internal_base_url is not None else None)
         entries = tn.set_entries(body.entries)
     except tn.TrustedNetworkError as e:
         raise HTTPException(status_code=422, detail=str(e))
-    if base is not None:
-        db.set_setting(tn.INTERNAL_BASE_URL_KEY, base)
 
     await platform_audit_service.log(
         event_type=AuditEventType.CONFIGURATION,
@@ -765,7 +762,6 @@ async def set_a2a_trusted_networks(
         details={
             "setting": tn.SETTING_KEY,
             "entries": entries,
-            "internal_base_url": base,
         },
     )
     return {"success": True, **_trusted_networks_state()}

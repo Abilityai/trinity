@@ -189,7 +189,8 @@ def audience_of(execution: Any) -> TurnAudience:
 def _is_delegated(execution: Any) -> bool:
     """An agent-to-agent child. It inherits its parent's channel context so that
     completion reports find their way back (ent#265), and `source_channel_agent`
-    is set by that inheritance and by nothing else — so non-NULL MEANS inherited,
+    is set by that inheritance and by a gated request's wake-up, which carries
+    its requester's context the same way (trinity#3653) — so non-NULL MEANS inherited,
     whoever it names. Comparing it to the executing agent would miss the two
     cases where they are equal: an agent tasking ITSELF, and A→B→A. In both, the
     inherited client was chosen through an agent-typed `parent_execution_id`;

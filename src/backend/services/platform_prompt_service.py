@@ -749,9 +749,12 @@ class ExecutionContext:
     pending_asks: Optional[List[dict]] = None
     pending_asks_total: Optional[int] = None
     # trinity-enterprise#814: the person a scheduled seat run is addressed to
-    # (ent#637 — the Workspace delivery address on the execution row). NEVER
-    # rendered: it only picks which seat `role_id` names. A chat turn uses
-    # `source_user_email` for the same purpose.
+    # (ent#637 — the Workspace delivery address on the execution row), or the
+    # addressee of a discussed-ask resume (ent#886 — the run carries no
+    # `source_user_email`). Read off the row by
+    # `task_execution_service.served_person_for_row`. NEVER rendered: it only
+    # picks which seat `role_id` names. A chat turn uses `source_user_email`
+    # for the same purpose.
     served_person_email: Optional[str] = None
     # trinity-enterprise#814: the seat THIS run serves when it is not the
     # primary's (a shared companion working for someone else, or an agent that

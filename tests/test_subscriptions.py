@@ -535,6 +535,23 @@ class TestSubscriptionAutoAssign:
             if not sub["name"].startswith(self.SUITE_PREFIX)
         ]
 
+    def _skip_if_foreign_subscriptions(self, api_client, what: str):
+        """Skip when operator-owned subscriptions would win the auto-assign.
+
+        Since #2409 a new agent goes to the subscription with the most cached
+        provider HEADROOM. An operator's real subscription has a reading and
+        the suite's fake tokens never do, so it outranks every one of them and
+        `what` cannot be observed. Same precondition and wording as
+        `test_create_agent_no_subscriptions` (#2420).
+        """
+        foreign = self._foreign_subscriptions(api_client)
+        if foreign:
+            pytest.skip(
+                "target instance has operator-owned subscriptions "
+                f"({len(foreign)}); {what} needs a disposable stack and this "
+                "suite will not delete them (#2420)"
+            )
+
     def test_create_agent_no_subscriptions(self, api_client: TrinityApiClient):
         """Agent created with no subscriptions uses platform API key."""
         # Clear the suite's OWN leftovers (prior tests may have left
@@ -584,6 +601,7 @@ class TestSubscriptionAutoAssign:
 
     def test_round_robin_distribution(self, api_client: TrinityApiClient):
         """Two subscriptions distribute agents evenly via round-robin."""
+        self._skip_if_foreign_subscriptions(api_client, "the round-robin precondition")
         sub_a_name = f"test-rr-a-{uuid.uuid4().hex[:8]}"
         sub_b_name = f"test-rr-b-{uuid.uuid4().hex[:8]}"
         sub_a_id = self._create_subscription(api_client, sub_a_name)
@@ -618,9 +636,12 @@ class TestSubscriptionAutoAssign:
 
     def test_alphabetical_tiebreak(self, api_client: TrinityApiClient):
         """Equal agent counts resolve by alphabetical subscription name."""
-        # Create in reverse alphabetical order to verify sorting
-        sub_beta = f"beta-tie-{uuid.uuid4().hex[:6]}"
-        sub_alpha = f"alpha-tie-{uuid.uuid4().hex[:6]}"
+        self._skip_if_foreign_subscriptions(api_client, "the tiebreak precondition")
+        # Create in reverse alphabetical order to verify sorting. Both carry the
+        # suite prefix so a concurrent test never mistakes them for the
+        # operator's (#2420); "test-alpha" still sorts before "test-beta".
+        sub_beta = f"{self.SUITE_PREFIX}beta-tie-{uuid.uuid4().hex[:6]}"
+        sub_alpha = f"{self.SUITE_PREFIX}alpha-tie-{uuid.uuid4().hex[:6]}"
         beta_id = self._create_subscription(api_client, sub_beta)
         alpha_id = self._create_subscription(api_client, sub_alpha)
 

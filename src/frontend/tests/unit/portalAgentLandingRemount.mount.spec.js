@@ -165,7 +165,7 @@ describe('ent#784 — landing on an agent page is idempotent against the thread 
     expect(showing(w).newChat).toBe(true)
   })
 
-  it('back to the agent page from a chat of the SAME agent still lands fresh (T4)', async () => {
+  it('back to the agent page from a chat of the SAME agent returns to that chat (ent#856 arm 1)', async () => {
     arm()
     const { w, router } = await boot('/workspace/a/scout')
     await router.push('/workspace/c/t1')
@@ -174,11 +174,18 @@ describe('ent#784 — landing on an agent page is idempotent against the thread 
     expect(showing(w).newChat).toBe(false)
 
     // Back. Arrives with `pendingSession` set — which is exactly why the guard
-    // must not key on it.
+    // must not key on it. trinity-enterprise#856: the landing passes the chat
+    // last open this session (arm 1), so it returns to t1 and REPLACES the
+    // `/a/:name` entry rather than pushing a second one (no Back loop).
+    const replace = vi.spyOn(router, 'replace')
+    const push = vi.spyOn(router, 'push')
     await router.push('/workspace/a/scout')
     await flushPromises()
-    expect(showing(w).newChat).toBe(true)
-    expect(showing(w).session).toBe(null)
+    expect(showing(w).newChat).toBe(false)
+    expect(showing(w).session).toBe('t1')
+    expect(router.currentRoute.value.path).toBe('/workspace/c/t1')
+    expect(replace).toHaveBeenCalledWith('/workspace/c/t1')
+    expect(push).not.toHaveBeenCalledWith('/workspace/c/t1')
   })
 
   it('one landing mounts one conversation, however often the list moves (T4)', async () => {
@@ -269,8 +276,10 @@ describe('ent#784 decision #13 — a landing during a live call asks before it w
     expect(dialog(w).props('visible')).toBe(false)
     const landed = showing(w)
     expect(landed.agent).toBe('scout')
-    expect(landed.newChat).toBe(true)
-    expect(landed.session).toBe(null)
+    // ent#856 arm 1: the deferred landing carries `lastOpenSessionId` through
+    // the confirm, so it returns to the chat that was open.
+    expect(landed.newChat).toBe(false)
+    expect(landed.session).toBe('t1')
   })
 
   it('cancelling leaves the call and the chat exactly as they were', async () => {

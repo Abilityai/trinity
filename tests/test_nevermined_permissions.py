@@ -41,10 +41,14 @@ class TestNeverminedOwnerAccess:
     """Verify owner/admin can perform all Nevermined operations."""
 
     @pytest.mark.smoke
-    def test_get_config_no_config(self, api_client: TrinityApiClient, created_agent):
-        """GET /api/nevermined/agents/{name}/config returns 404 when not configured."""
+    def test_get_config_no_config(self, api_client: TrinityApiClient, isolated_agent):
+        """GET /api/nevermined/agents/{name}/config returns 404 when not configured.
+
+        Uses its own fresh agent: `test_save_config` writes a config onto the
+        module-scoped `created_agent`, so a shuffled order breaks "no config".
+        """
         response = api_client.get(
-            f"/api/nevermined/agents/{created_agent['name']}/config"
+            f"/api/nevermined/agents/{isolated_agent['name']}/config"
         )
         # 404 = no config yet (not 403)
         assert_status(response, 404)

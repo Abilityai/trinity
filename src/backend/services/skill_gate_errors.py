@@ -38,11 +38,16 @@ class SkillApprovalRequired(SkillGateError):
 
     def __init__(self, *, request_id: str, agent_name: str, skills: List[str],
                  approver_role: str, expires_at: Optional[str],
-                 outcome_delivery: str = OUTCOME_DELIVERY_NONE):
+                 outcome_delivery: str = OUTCOME_DELIVERY_NONE,
+                 approver_label: Optional[str] = None):
         self.request_id = request_id
         self.agent_name = agent_name
         self.skills = list(skills)
         self.approver_role = approver_role
+        # trinity-enterprise#848: what `approver_role` shows as — a kind's own
+        # name, or a canon role's label (`role:head-of-sales` → "Head of
+        # sales"). Never a person. Optional so an older raiser's body is unchanged.
+        self.approver_label = approver_label
         self.expires_at = expires_at
         # Defaults to "none": an answer that does not know never promises.
         self.outcome_delivery = outcome_delivery
@@ -84,6 +89,8 @@ class SkillApprovalRequired(SkillGateError):
             "outcome_delivery": self.outcome_delivery,
             "message": self.message,
         }
+        if self.approver_label is not None:
+            body["approver_label"] = self.approver_label
         if self.chat_session_id:
             body["chat_session_id"] = self.chat_session_id
         return body
