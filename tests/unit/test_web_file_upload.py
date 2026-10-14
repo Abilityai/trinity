@@ -533,10 +533,10 @@ class TestPdfUploadPolicy:
         assert "saved to" in descriptions[0]
         put.assert_awaited_once()
 
-    def test_both_compose_backends_expose_disabled_default(self):
+    def test_3283_all_compose_backends_expose_disabled_default(self):
         import yaml
         root = _BACKEND.parents[1]
-        for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
+        for filename in ("docker-compose.yml", "docker-compose.prod.yml", "docker-compose.hosted.yml"):
             compose = yaml.safe_load((root / filename).read_text())
             assert "ALLOW_PDF_UPLOADS=${ALLOW_PDF_UPLOADS:-false}" in compose["services"]["backend"]["environment"]
         assert "ALLOW_PDF_UPLOADS=false" in (root / ".env.example").read_text()
