@@ -10,6 +10,23 @@
 
   The server answers a missing project and one I can't see identically, so the
   not-found copy never says which it was.
+
+  The Overview is ONE layout (#3694): a main stack spanning two of three
+  tracks and a side stack of one, `lg:items-start` on the wrapper (#3574) so
+  an opened ask grows only its own column. Cards stack within their column, so
+  a short card is simply followed by the next — no row-shaped gaps, and the
+  narrow column never switches sides. The assignment is deliberate and pinned
+  by `workspaceProjectsV4.mount.spec.js`:
+
+    main: Continue · Where it stands · Work on it · Metrics · My chats
+    side: Steward · Health · Needs you · Members · Agents & rooms
+
+  trinity-enterprise#896: the Overview leads with Continue (my newest linked
+  chat, or Start with the first agent, the others one click away — the first
+  focusable control after the tabs), one dismissable line says how a project
+  moves, and the Steward card replaces the bare header label. The goal, like
+  every other agent-written text in the Workspace, renders as markdown through
+  `PortalMarkdown` (#3692).
 -->
 <template>
   <div class="mx-auto w-full max-w-5xl px-4 sm:px-8 py-6" data-testid="project-page">
@@ -46,12 +63,15 @@
             <BaseBadge v-else variant="info">Guest</BaseBadge>
             <BaseBadge v-if="p.archived_at" variant="locked">Archived</BaseBadge>
           </div>
-          <p class="max-w-3xl text-sm text-gray-700 dark:text-gray-300 whitespace-pre-line">{{ p.goal }}</p>
+          <!-- #3692: the goal is markdown (people and agents write it so);
+               the shared renderer sanitizes it the way chat content is. -->
+          <div class="max-w-3xl text-sm text-gray-700 dark:text-gray-300" data-testid="project-goal">
+            <PortalMarkdown :content="p.goal || ''" />
+          </div>
           <p v-if="guest" class="text-xs text-gray-500 dark:text-gray-400" data-testid="project-guest-note">
             You've been invited to this project. You see your own chats and what's been shared with you.
           </p>
           <p v-else class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
-            <span>Steward · {{ stewardLabel }}</span>
             <span>Created by {{ p.created_by === myEmail ? 'you' : p.created_by }}</span>
             <a v-if="p.tracker_url" :href="p.tracker_url" target="_blank" rel="noopener noreferrer" class="text-action-primary-600 dark:text-action-primary-400 hover:underline">Tracker</a>
             <span :title="absolute(p.updated_at)">Updated {{ relative(p.updated_at) }}</span>
@@ -92,92 +112,145 @@
       <ProjectLog v-if="!guest && tab === 'log'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
       <ProjectMaterial v-if="!guest && tab === 'material'" :project="p" :my-email="myEmail" :agents="usableAgents" />
 
-      <ProjectHub
-        v-if="!guest && tab === 'overview'"
-        :project="p"
-        :my-email="myEmail"
-        @open-tasks="tab = 'tasks'"
-        @open-thread="(t) => $emit('open-thread', t)"
-      />
+      <!-- ent#896: how a project moves, said once. -->
+      <div
+        v-if="!guest && tab === 'overview' && !howItMovesDismissed"
+        class="flex items-start gap-3 rounded-lg border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-800 px-4 py-3 text-sm text-gray-700 dark:text-gray-300"
+        data-testid="project-how-it-moves"
+      >
+        <p class="min-w-0 flex-1">
+          Chats linked to this project build it up: every turn tells the agent which project it is in, agents record decisions, deliverables and blockers in the <strong class="font-medium text-gray-900 dark:text-gray-100">Log</strong>, and the steward checks on it.
+        </p>
+        <BaseButton size="sm" variant="ghost" data-testid="project-how-it-moves-dismiss" @click="dismissHowItMoves">Got it</BaseButton>
+      </div>
 
-      <div v-show="guest || tab === 'overview'" class="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <BaseCard class="lg:col-span-2">
-          <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Work on it</h2>
-          <p v-if="!options.length" class="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            No agent can work on this project yet. {{ p.can?.manage_agents ? 'Add one in Members & access.' : 'Ask its creator to add one.' }}
-          </p>
-          <ul class="mt-2 divide-y divide-gray-100 dark:divide-gray-750">
-            <li v-for="o in options" :key="o.agent" class="flex items-center gap-3 py-2.5 text-sm" :data-testid="`work-on-${o.agent}`">
-              <PortalAvatar :name="o.agent" :size="24" />
-              <div class="min-w-0 flex-1">
-                <p class="font-medium text-gray-900 dark:text-gray-100 truncate">{{ o.agent }}</p>
-                <p class="text-xs text-gray-500 dark:text-gray-400">{{ optionNote(o) }}</p>
+      <div v-show="guest || tab === 'overview'" class="grid grid-cols-1 gap-4 lg:grid-cols-3 lg:items-start" data-testid="project-overview">
+        <!-- ===================== main stack ===================== -->
+        <div class="min-w-0 space-y-4 lg:col-span-2" data-testid="project-overview-main">
+          <BaseCard data-testid="project-continue">
+            <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Continue</h2>
+            <template v-if="choice.primary">
+              <div class="mt-2 flex flex-wrap items-center gap-3">
+                <BaseButton
+                  :loading="starting === choice.primary.agent"
+                  loading-label="Opening…"
+                  data-testid="project-continue-primary"
+                  @click="workOn(choice.primary)"
+                >{{ choice.primary.kind === 'reopen' ? `Continue with ${choice.primary.agent}` : `Start with ${choice.primary.agent}` }}</BaseButton>
+                <p class="min-w-0 text-xs text-gray-500 dark:text-gray-400">{{ optionNote(choice.primary) }}</p>
               </div>
-              <BaseButton
-                v-if="o.kind === 'reopen' || o.kind === 'new'"
-                size="sm"
-                :variant="o === primaryOption ? 'primary' : 'secondary'"
-                :loading="starting === o.agent"
-                loading-label="Opening…"
-                @click="workOn(o)"
-              >{{ o.kind === 'reopen' ? 'Reopen' : 'New chat' }}</BaseButton>
-            </li>
-          </ul>
-        </BaseCard>
-
-        <BaseCard v-if="!guest">
-          <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Members</h2>
-          <ul class="mt-2 space-y-1.5 text-sm">
-            <li v-for="m in p.members" :key="m.email" class="flex items-center gap-2">
-              <span class="min-w-0 flex-1 truncate text-gray-900 dark:text-gray-100">{{ m.email === myEmail ? 'You' : m.email }}</span>
-              <BaseBadge>{{ m.role === 'creator' ? 'Creator' : 'Member' }}</BaseBadge>
-            </li>
-          </ul>
-        </BaseCard>
-
-        <BaseCard class="lg:col-span-2">
-          <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">My chats on this project</h2>
-          <p v-if="!p.my_chats.length" class="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            None yet. Use Work on it, or open a chat and choose "Add to project".
-          </p>
-          <ul class="mt-2 max-h-80 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-750">
-            <li v-for="c in p.my_chats" :key="c.id" class="flex items-center gap-3 py-2 text-sm">
-              <div class="min-w-0 flex-1">
-                <p class="truncate text-gray-900 dark:text-gray-100">{{ c.title || 'Untitled chat' }}</p>
-                <p class="text-xs text-gray-500 dark:text-gray-400">
-                  {{ c.agent_name }} · <span :title="absolute(c.last_message_at)">{{ relative(c.last_message_at) }}</span>
-                </p>
+              <p v-if="choice.primary.kind === 'new' && !p.my_chats.length" class="mt-2 text-sm text-gray-600 dark:text-gray-300" data-testid="project-continue-empty">
+                Start with {{ choice.primary.agent }}, and it will record what it does here.
+              </p>
+              <div v-if="choice.others.length" class="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                <span>Or with</span>
+                <BaseButton
+                  v-for="o in choice.others"
+                  :key="o.agent"
+                  size="sm"
+                  variant="secondary"
+                  :loading="starting === o.agent"
+                  loading-label="Opening…"
+                  :data-testid="`project-continue-other-${o.agent}`"
+                  @click="workOn(o)"
+                >{{ o.agent }}</BaseButton>
               </div>
-              <BaseButton size="sm" variant="secondary" @click="$emit('open-thread', { id: c.id, agent_name: c.agent_name })">Reopen</BaseButton>
-            </li>
-          </ul>
-          <p v-if="p.others_chat_count" class="mt-3 border-t border-gray-100 dark:border-gray-750 pt-3 text-xs text-gray-500 dark:text-gray-400" data-testid="others-chat-count">
-            Other members have <span class="tabular-nums">{{ p.others_chat_count }}</span> {{ p.others_chat_count === 1 ? 'chat' : 'chats' }} on this project. Chats are private: only the person who had a chat can see it.
-          </p>
-        </BaseCard>
+            </template>
+            <p v-else-if="!options.length" class="mt-2 text-sm text-gray-600 dark:text-gray-300">
+              No agent can work on this project yet. {{ p.can?.manage_agents ? 'Add one in Members & access.' : 'Ask its creator to add one.' }}
+            </p>
+            <p v-else class="mt-2 text-sm text-gray-600 dark:text-gray-300">
+              None of this project's agents is available to you yet — Work on it below says why.
+            </p>
+          </BaseCard>
 
-        <BaseCard>
-          <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Agents</h2>
-          <ul class="mt-2 space-y-1.5 text-sm">
-            <li v-for="a in p.agents" :key="a.agent_name" class="flex items-center gap-2">
-              <span class="min-w-0 flex-1 truncate text-gray-900 dark:text-gray-100">{{ a.agent_name }}</span>
-              <BaseBadge :variant="AGENT_BADGE[a.state] || 'neutral'">{{ agentStateLabel(a.state) }}</BaseBadge>
-            </li>
-          </ul>
-          <h2 class="mt-4 text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Rooms I'm in</h2>
-          <p v-if="!p.rooms.length" class="mt-1 text-sm text-gray-600 dark:text-gray-300">No rooms linked yet.</p>
-          <ul class="mt-1 space-y-1.5 text-sm">
-            <li v-for="r in p.rooms" :key="r.id">
-              <button type="button" class="text-action-primary-600 dark:text-action-primary-400 hover:underline" @click="$emit('open-room', r.id)">{{ r.name || 'Untitled room' }}</button>
-            </li>
-          </ul>
-        </BaseCard>
+          <ProjectRollupCard v-if="!guest" :project="p" @open-tasks="tab = 'tasks'" />
 
-        <!-- A guest's single view carries what was shared with them. -->
-        <div v-if="guest" class="lg:col-span-3">
-          <ProjectMaterial :project="p" guest :my-email="myEmail" />
+          <BaseCard data-testid="project-work-on-it">
+            <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Work on it</h2>
+            <p v-if="!options.length" class="mt-2 text-sm text-gray-600 dark:text-gray-300">
+              No agent can work on this project yet. {{ p.can?.manage_agents ? 'Add one in Members & access.' : 'Ask its creator to add one.' }}
+            </p>
+            <ul class="mt-2 divide-y divide-gray-100 dark:divide-gray-750">
+              <li v-for="o in options" :key="o.agent" class="flex items-center gap-3 py-2.5 text-sm" :data-testid="`work-on-${o.agent}`">
+                <PortalAvatar :name="o.agent" :size="24" />
+                <div class="min-w-0 flex-1">
+                  <p class="font-medium text-gray-900 dark:text-gray-100 truncate">{{ o.agent }}</p>
+                  <p class="text-xs text-gray-500 dark:text-gray-400">{{ optionNote(o) }}</p>
+                </div>
+                <BaseButton
+                  v-if="o.kind === 'reopen' || o.kind === 'new'"
+                  size="sm"
+                  variant="secondary"
+                  :loading="starting === o.agent"
+                  loading-label="Opening…"
+                  @click="workOn(o)"
+                >{{ o.kind === 'reopen' ? 'Reopen' : 'New chat' }}</BaseButton>
+              </li>
+            </ul>
+          </BaseCard>
+
+          <ProjectMetricsCard v-if="!guest" :project="p" />
+
+          <BaseCard data-testid="project-my-chats">
+            <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">My chats on this project</h2>
+            <p v-if="!p.my_chats.length" class="mt-2 text-sm text-gray-600 dark:text-gray-300">
+              None yet. Use Continue above, or open a chat and choose "Add to project".
+            </p>
+            <ul class="mt-2 max-h-80 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-750">
+              <li v-for="c in p.my_chats" :key="c.id" class="flex items-center gap-3 py-2 text-sm">
+                <div class="min-w-0 flex-1">
+                  <p class="truncate text-gray-900 dark:text-gray-100">{{ c.title || 'Untitled chat' }}</p>
+                  <p class="text-xs text-gray-500 dark:text-gray-400">
+                    {{ c.agent_name }} · <span :title="absolute(c.last_message_at)">{{ relative(c.last_message_at) }}</span>
+                  </p>
+                </div>
+                <BaseButton size="sm" variant="secondary" @click="$emit('open-thread', { id: c.id, agent_name: c.agent_name })">Reopen</BaseButton>
+              </li>
+            </ul>
+            <p v-if="p.others_chat_count" class="mt-3 border-t border-gray-100 dark:border-gray-750 pt-3 text-xs text-gray-500 dark:text-gray-400" data-testid="others-chat-count">
+              Other members have <span class="tabular-nums">{{ p.others_chat_count }}</span> {{ p.others_chat_count === 1 ? 'chat' : 'chats' }} on this project. Chats are private: only the person who had a chat can see it.
+            </p>
+          </BaseCard>
+        </div>
+
+        <!-- ===================== side stack ===================== -->
+        <div class="min-w-0 space-y-4" data-testid="project-overview-side">
+          <ProjectStewardCard v-if="!guest" :project="p" :my-email="myEmail" @open-stewarding="$emit('open-stewarding')" />
+          <ProjectHealthCard v-if="!guest" :project="p" :my-email="myEmail" />
+          <ProjectNeedsYouCard v-if="!guest" :project="p" @open-thread="(t) => $emit('open-thread', t)" />
+
+          <BaseCard v-if="!guest" data-testid="project-members">
+            <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Members</h2>
+            <ul class="mt-2 space-y-1.5 text-sm">
+              <li v-for="m in p.members" :key="m.email" class="flex items-center gap-2">
+                <span class="min-w-0 flex-1 truncate text-gray-900 dark:text-gray-100">{{ m.email === myEmail ? 'You' : m.email }}</span>
+                <BaseBadge>{{ m.role === 'creator' ? 'Creator' : 'Member' }}</BaseBadge>
+              </li>
+            </ul>
+          </BaseCard>
+
+          <BaseCard data-testid="project-agents">
+            <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Agents</h2>
+            <ul class="mt-2 space-y-1.5 text-sm">
+              <li v-for="a in p.agents" :key="a.agent_name" class="flex items-center gap-2">
+                <span class="min-w-0 flex-1 truncate text-gray-900 dark:text-gray-100">{{ a.agent_name }}</span>
+                <BaseBadge :variant="AGENT_BADGE[a.state] || 'neutral'">{{ agentStateLabel(a.state) }}</BaseBadge>
+              </li>
+            </ul>
+            <h2 class="mt-4 text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Rooms I'm in</h2>
+            <p v-if="!p.rooms.length" class="mt-1 text-sm text-gray-600 dark:text-gray-300">No rooms linked yet.</p>
+            <ul class="mt-1 space-y-1.5 text-sm">
+              <li v-for="r in p.rooms" :key="r.id">
+                <button type="button" class="text-action-primary-600 dark:text-action-primary-400 hover:underline" @click="$emit('open-room', r.id)">{{ r.name || 'Untitled room' }}</button>
+              </li>
+            </ul>
+          </BaseCard>
         </div>
       </div>
+
+      <!-- A guest's single view carries what was shared with them. -->
+      <ProjectMaterial v-if="guest" :project="p" guest :my-email="myEmail" />
     </div>
 
     <ProjectMembersModal
@@ -218,19 +291,25 @@ import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import PortalAvatar from '@/components/portal/PortalAvatar.vue'
+import PortalMarkdown from '@/components/portal/PortalMarkdown.vue'
 import ProjectMembersModal from './ProjectMembersModal.vue'
 import ProjectCreateModal from './ProjectCreateModal.vue'
 import ProjectTasks from './ProjectTasks.vue'
 import ProjectLog from './ProjectLog.vue'
 import ProjectMaterial from './ProjectMaterial.vue'
-import ProjectHub from './ProjectHub.vue'
+import ProjectHealthCard from './ProjectHealthCard.vue'
+import ProjectRollupCard from './ProjectRollupCard.vue'
+import ProjectMetricsCard from './ProjectMetricsCard.vue'
+import ProjectNeedsYouCard from './ProjectNeedsYouCard.vue'
+import ProjectStewardCard from './ProjectStewardCard.vue'
 import OverflowTabs from '@/components/OverflowTabs.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
-  STATUS_BADGE, statusLabel, visibilityLabel, agentStateLabel, workOnItOptions, projectErrorMessage,
+  STATUS_BADGE, statusLabel, visibilityLabel, agentStateLabel, workOnItOptions, continueChoice,
+  projectErrorMessage, HOW_IT_MOVES_KEY,
 } from './projectsUtils'
 
 const AGENT_BADGE = { active: 'success', pending: 'warning', declined: 'neutral' }
@@ -239,7 +318,7 @@ const props = defineProps({
   projectId: { type: String, required: true },
   myEmail: { type: String, default: '' },
 })
-const emit = defineEmits(['back', 'open-thread', 'open-room'])
+const emit = defineEmits(['back', 'open-thread', 'open-room', 'open-stewarding'])
 
 const store = useProjectsStore()
 const portal = useClientPortalStore()
@@ -268,13 +347,17 @@ const usableAgents = computed(() => (p.value.agents || [])
   .filter((a) => a.state === 'active' && rosterAgents.value.includes(a.agent_name)).map((a) => a.agent_name))
 const ownedAgents = computed(() => portal.agents.filter((a) => a.owned).map((a) => a.name))
 const options = computed(() => workOnItOptions(p.value, rosterAgents.value))
-const primaryOption = computed(() => options.value.find((o) => o.kind === 'reopen' || o.kind === 'new') || null)
-const stewardLabel = computed(() => {
-  const s = p.value.steward
-  if (!s) return 'not set'
-  if (s.kind === 'agent') return `${s.ref} (agent)`
-  return s.ref === props.myEmail ? 'you' : s.ref
-})
+const choice = computed(() => continueChoice(options.value))
+
+// A per-browser convenience, never state: the line is explanation, not data.
+function readDismissed() {
+  try { return localStorage.getItem(HOW_IT_MOVES_KEY) === '1' } catch { return false }
+}
+const howItMovesDismissed = ref(readDismissed())
+function dismissHowItMoves() {
+  howItMovesDismissed.value = true
+  try { localStorage.setItem(HOW_IT_MOVES_KEY, '1') } catch { /* private window: shown again next time */ }
+}
 
 function load() { return store.fetchProject(props.projectId) }
 watch(() => props.projectId, load, { immediate: true })

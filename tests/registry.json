@@ -73,6 +73,16 @@
       "description": "An approval the clock ended records whether the platform held its action (trinity-enterprise#844): on the real SQLite, mark_expired stamps disposition_reason='outcome_unknown' on an expired approval raised by an agent (native or file) or a legacy NULL-raiser row, never on a gate approval (the platform held the action; expiry ran nothing), a question or an alert; an approval answered in time is never marked; the #3247 replace path's in-transaction expiry writes the same marker; the expiry audit row carries outcome_unknown: true for exactly those rows, from BOTH timeout writers (the sweep and, driven through ask_service.raise_ask, the #3247 replace-path expiry). Mutation-proven."
     },
     {
+      "file": "../src/frontend/tests/unit/workspaceProjectsV4.mount.spec.js",
+      "feature": "#3692 #3694 abilityai/trinity-enterprise#896",
+      "added": "2026-10-13",
+      "categories": [
+        "frontend",
+        "workspace",
+        "projects"
+      ]
+    },
+    {
       "file": "../src/frontend/tests/unit/operatorQueueOutcomeUnknown.spec.js",
       "feature": "abilityai/trinity-enterprise#844",
       "added": "2026-10-10",
