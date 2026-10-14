@@ -350,7 +350,8 @@ export function usePortalFileDrop(upload, { disabled = () => false, discard = nu
    *   - refused / never started: nothing to delete;
    *   - queued: the batch loop sees `removed` and skips it;
    *   - in flight: deleted once it lands (the loop checks `removed` after);
-   *   - landed: deleted now.
+   *   - landed: deleted now;
+   *   - failed after part of a room landed: those copies are deleted now.
    * By identity, so a double click is one removal.
    */
   function remove(entry) {
@@ -358,7 +359,7 @@ export function usePortalFileDrop(upload, { disabled = () => false, discard = nu
     if (i === -1) return
     entries.value.splice(i, 1)
     entry.removed = true
-    if (entry.done) discardQuietly(entry)
+    if (entry.done || entry.receipt) discardQuietly(entry)
   }
 
   function removeAt(i) {
@@ -373,8 +374,10 @@ export function usePortalFileDrop(upload, { disabled = () => false, discard = nu
     if (!discard) return
     // The inbox overwrites by name, so a live chip with the same stored name
     // is the SAME file — deleting it here would take that chip's file too.
+    // Live means uploading (or queued to) or sent: a chip that failed or was
+    // refused before uploading holds no copy, so it must not keep this one.
     const name = entry.serverName || entry.name
-    if (entries.value.some((e) => !e.removed && (e.serverName || e.name) === name)) return
+    if (entries.value.some((e) => !e.removed && (e.uploading || e.done) && (e.serverName || e.name) === name)) return
     Promise.resolve()
       .then(() => discard(entry))
       .catch((err) => {

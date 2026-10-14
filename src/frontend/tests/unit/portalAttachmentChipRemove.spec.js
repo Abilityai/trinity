@@ -215,6 +215,20 @@ describe('#3738 usePortalFileDrop.remove', () => {
     expect(drop.entries.value).toHaveLength(1)
     expect(attachmentState(drop.entries.value[0])).toBe('sent')
   })
+
+  it('a failed chip of the same name never uploaded: removing the sent one still deletes it', async () => {
+    // The refused chip holds no inbox copy, so it cannot be "the same file".
+    const discard = vi.fn(async () => {})
+    const drop = usePortalFileDrop(async (f) => ({ filename: f.name }), { discard })
+    await drop.addFiles([file('a.pdf')])
+    await drop.addFiles([file('a.pdf', 0)])
+    expect(drop.entries.value.map(attachmentState)).toEqual(['sent', 'failed'])
+
+    drop.remove(drop.entries.value[0])
+    await flushPromises()
+    expect(discard).toHaveBeenCalledTimes(1)
+    expect(discard.mock.calls[0][0].serverName).toBe('a.pdf')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -403,6 +417,24 @@ describe('#3738 the room composer', () => {
     expect(store.carryableUploadsFor('ranger')).toEqual([])
     expect(warn).toHaveBeenCalledTimes(1)
     expect(warn.mock.calls[0]).toContain(429)
+  })
+
+  it('a chip that partly landed and failed, removed after the failure, deletes the copies that landed', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    store.deleteUpload = vi.fn(async () => {})
+    store.uploadDocument = vi.fn(async (agent, f) => {
+      if (agent === 'ranger') throw Object.assign(new Error('refused'), { response: { status: 413 } })
+      store.noteUploadForCarry(agent, f)
+      return { filename: `${agent}_${f.name}` }
+    })
+    await dropFile(file('a.pdf'))
+    expect(wrapper.find('[data-testid="portal-room-attachment-chip"]').exists()).toBe(true)
+
+    await wrapper.find('[data-testid="portal-room-attachment-chip-remove"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="portal-room-attachment-chip"]').exists()).toBe(false)
+    expect(store.deleteUpload.mock.calls).toEqual([['scout', 'scout_a.pdf']])
+    expect(store.carryableUploadsFor('scout')).toEqual([])
   })
 })
 
