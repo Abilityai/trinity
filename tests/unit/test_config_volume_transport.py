@@ -280,3 +280,25 @@ def test_3722_cleanup_removes_valid_private_staging(monkeypatch, tmp_path):
     monkeypatch.setattr(crud.tempfile, 'gettempdir', lambda: str(tmp_path))
     crud._cleanup_persistent_config_staging(target)
     assert not target.exists()
+
+
+def test_3722_archive_helper_is_never_started_and_is_removed_after_upload(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+    import docker
+    client = Mock()
+    volume = Mock()
+    def create(**kwargs):
+        volume.attrs = {'Labels': kwargs['labels']}
+        return volume
+    client.volumes.create.side_effect = create
+    client.volumes.get.side_effect = docker.errors.NotFound('absent')
+    monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
+    config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None)
+    client.containers.create.assert_called_once()
+    helper = client.containers.create.return_value
+    helper.put_archive.assert_called_once()
+    helper.start.assert_not_called()
+    client.containers.run.assert_not_called()
+    helper.remove.assert_called_once_with(force=True)
+    assert 'restart_policy' not in client.containers.create.call_args.kwargs
+    assert client.containers.create.call_args.kwargs['network_mode'] == 'none'

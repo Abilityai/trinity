@@ -307,8 +307,8 @@ def _load_crud(monkeypatch, docker_available=True):
     # Docker archive provisioning is covered with real Docker and focused
     # transport tests; this orchestration harness stubs all Docker effects.
     monkeypatch.setattr(crud, "create_config_volume", lambda client, name, *args:
-        crud.ConfigVolumeHandle(f"agent-{name}-config", "test-claim"))
-    monkeypatch.setattr(crud, "remove_created_config_volume", MagicMock())
+        crud.ConfigVolumeHandle(f"agent-{name}-config", "test-claim"), raising=False)
+    monkeypatch.setattr(crud, "remove_created_config_volume", MagicMock(), raising=False)
 
     # #1793: an unresolvable `local:` template is now a 404 instead of a
     # silent templateless creation. These cases exercise the local-template
@@ -1921,3 +1921,55 @@ async def test_3722_canceled_conflicting_worker_never_reclaims_foreign_container
     reclaim.assert_not_awaited()
     ctx['db'].delete_agent_mcp_api_key.assert_not_called()
     crud.remove_created_config_volume.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_3722_persistent_create_mounts_provisioned_config_without_host_staging_binds(crud_env, monkeypatch):
+    """The real create path must not bind backend-private /tmp files on the host.
+
+    Docker effects use the existing characterization boundary. On stock this
+    reaches successful container creation and fails on the actual mount map,
+    rather than failing because a new helper or database API is absent.
+    """
+    import shutil
+    import uuid
+    from types import SimpleNamespace
+    crud, ctx = crud_env
+    name = "config-proof-" + uuid.uuid4().hex
+    provision = MagicMock(return_value=SimpleNamespace(name=f"agent-{name}-config", claim="test-claim"))
+    monkeypatch.setattr(crud, "create_config_volume", provision, raising=False)
+    try:
+        await crud.create_agent_internal(_local_config(name), _user(), None)
+        mounts = _agent_run_kwargs(ctx)["volumes"]
+        assert mounts.get(f"agent-{name}-config") == {"bind": "/config", "mode": "ro"}, (
+            "persistent configuration must use its provisioned read-only Docker volume"
+        )
+        assert not any(spec["bind"].startswith("/config/") for spec in mounts.values()), (
+            "backend-private config files must not become daemon-host bind sources"
+        )
+        provision.assert_called_once()
+        assert provision.call_args.args[1] == name
+        assert provision.call_args.args[2].name == "agent-config.yaml"
+        assert provision.call_args.args[3].name == "credentials.json"
+    finally:
+        # Stock uses these unique synthetic paths; clean them after its expected
+        # behavioral failure. The patched path cleans its own private staging.
+        for suffix in (".yaml", "-credentials.json"):
+            Path(f"/tmp/agent-{name}{suffix}").unlink(missing_ok=True)
+        shutil.rmtree(Path(f"/tmp/agent-{name}-creds"), ignore_errors=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ephemeral", [None, {"ttl_seconds": 60}], ids=["persistent", "ephemeral"])
+async def test_2215_create_awaits_retry_wrapper(crud_env, monkeypatch, ephemeral):
+    """Both creation modes execute the retry wrapper, without an extra raw create."""
+    crud, ctx = crud_env
+    _entitle(monkeypatch, crud)
+    wrapper = AsyncMock(wraps=crud._run_agent_container_with_port_retry)
+    raw_create = AsyncMock(wraps=crud._create_agent_container)
+    monkeypatch.setattr(crud, "_run_agent_container_with_port_retry", wrapper)
+    monkeypatch.setattr(crud, "_create_agent_container", raw_create)
+    await crud.create_agent_internal(_local_config("retry-wiring", ephemeral=ephemeral), _user())
+    wrapper.assert_awaited_once()
+    raw_create.assert_awaited_once()
+    assert wrapper.await_args.args[0] is raw_create.await_args.args[0]

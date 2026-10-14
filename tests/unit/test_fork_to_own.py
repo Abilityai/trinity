@@ -514,7 +514,7 @@ def _load_crud(docker_available=True):
     db.get_shared_folder_config.return_value = None
     db.get_file_sharing_enabled.return_value = False
     db.grant_default_permissions.return_value = 0
-    db.register_agent_owner.return_value = None
+    db.register_agent_owner.return_value = True
 
     pkg = "services.agent_service"
     sibling_mocks = {}
@@ -566,8 +566,13 @@ def _load_crud(docker_available=True):
 
 
 @pytest.fixture
-def crud_env():
+def crud_env(monkeypatch):
     crud, ctx = _load_crud()
+    from services.agent_service.config_volume import ConfigVolumeHandle
+    monkeypatch.setattr(crud, "create_config_volume", MagicMock(
+        side_effect=lambda client, name, *args: ConfigVolumeHandle(f"agent-{name}-config", "test-claim")
+    ))
+    monkeypatch.setattr(crud, "remove_created_config_volume", MagicMock())
     try:
         yield crud, ctx
     finally:

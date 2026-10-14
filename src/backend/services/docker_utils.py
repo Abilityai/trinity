@@ -333,12 +333,12 @@ async def volume_remove(volume, force: bool = False) -> None:
 # Agent Volume Reclamation (#1581)
 # =============================================================================
 #
-# `agent-{name}-workspace|public|shared` volumes are created in the agent
+# `agent-{name}-workspace|public|shared|config` volumes are created in the agent
 # lifecycle but were removed by NOTHING — soft-delete keeps them (recovery
 # window), and the #834 retention hard-purge deleted the DB rows only, leaking
 # the volumes forever. These helpers are the missing teardown, DOUBLE-GUARDED so
 # a bug can never destroy a live/durable agent's data: a volume is removable for
-# `agent_name` only when its name is EXACTLY one of the three expected names AND
+# `agent_name` only when its name is EXACTLY one of the four expected names AND
 # its `trinity.agent-name` label matches AND its `trinity.platform` label is an
 # agent-data platform. Any mismatch/missing-label refuses (fail-closed).
 
@@ -347,7 +347,7 @@ _AGENT_VOLUME_PLATFORMS = frozenset(
     {"agent-workspace", "agent-public", "agent-shared", "agent-config"}
 )
 # Label key present on every agent data volume — the cheap list filter for the
-# orphan sweep (catches all three platforms in one call).
+# orphan sweep (catches all four platforms in one call).
 _AGENT_VOLUME_LABEL_KEY = "trinity.agent-name"
 # #3214: the stack that created the volume — this install's `installation_id`
 # (`instance_identity.get_instance_id`). Docker volumes are daemon-global, so a
@@ -429,7 +429,7 @@ def is_reclaimable_agent_volume(volume, volume_base: str, instance_id: Optional[
 
 
 async def remove_agent_volumes(volume_base: str, instance_id: Optional[str] = None) -> int:
-    """Remove the data volumes (workspace/public/shared) under ``volume_base``
+    """Remove the data volumes (workspace/public/shared/config) under ``volume_base``
     — #1581.
 
     Called at the retention hard-purge (the instant the agent becomes
