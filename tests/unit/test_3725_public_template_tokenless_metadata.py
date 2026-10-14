@@ -548,6 +548,9 @@ def test_a_swap_to_tokenless_is_regated_after_the_swap(chain):
     assert exc.value.status_code == 400
     text = json.dumps(exc.value.detail).lower()
     assert "saved github token" in text and "401" in text
+    assert ("update your github token in settings (or ask an admin to "
+            "configure the platform token), or create the agent in source "
+            "mode (pull-only)") in text
     assert USER_PAT not in text
 
 

@@ -41,7 +41,6 @@ from services.template_service import (
     fetch_template_metadata_result_for_create,
     get_github_template,
     is_catalog_github_template,
-    metadata_reason_is_token_rejection,
     metadata_reason_is_unreadable,
     _sanitize_for_warning,
     generate_credential_files,
@@ -795,8 +794,10 @@ def _gate_tokenless_request(
                 status_code=400,
                 detail=(
                     f"Bidirectional git sync requires write credentials, and "
-                    f"{label} was rejected by GitHub (HTTP 401) — update it in "
-                    f"Settings, or create the agent in source mode (pull-only)."
+                    f"{label} was rejected by GitHub (HTTP 401) — update your "
+                    f"GitHub token in Settings (or ask an admin to configure "
+                    f"the platform token), or create the agent in source mode "
+                    f"(pull-only)."
                 ),
             )
         raise HTTPException(
