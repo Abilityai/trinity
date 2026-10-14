@@ -183,16 +183,26 @@
         </form>
       </div>
 
-      <!-- Outbound endpoint registry -->
+      <!-- Outbound endpoints (ent#898): call_a2a_agent resolves only the
+           platform-wide registry in Settings › Integrations, so this tab no
+           longer registers endpoints — it points there, and lists rows left in
+           the per-agent table as not callable so they can be cleared. -->
       <div class="mt-5 pt-5 border-t border-gray-200 dark:border-gray-700">
         <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">Outbound endpoints</h4>
         <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
-          External A2A endpoints this agent may call (for the outbound <code class="font-mono">call_a2a_agent</code> tool).
-          Credentials are stored encrypted and never shown again. An endpoint on a private network or
-          on plain <code class="font-mono">http://</code> is accepted only when an admin has put its host
-          on the outbound endpoint allowlist.
+          The external A2A endpoints an agent may call with <code class="font-mono">call_a2a_agent</code> are
+          one platform-wide list, managed by an admin in
+          <router-link
+            to="/settings?tab=integrations"
+            data-testid="a2a-endpoints-settings-link"
+            class="text-action-primary-600 dark:text-action-primary-400 hover:underline"
+          >Settings › Integrations</router-link>.
         </p>
-        <div v-if="config.outbound_endpoints.length" class="space-y-2 mb-3">
+        <div v-if="config.outbound_endpoints.length" data-testid="a2a-legacy-endpoints" class="space-y-2">
+          <p class="text-xs text-status-warning-700 dark:text-status-warning-300">
+            Registered on this agent's tab before 1.0. These are not callable — <code class="font-mono">call_a2a_agent</code>
+            never reads them. Re-add any you need in Settings › Integrations, then remove them here.
+          </p>
           <div
             v-for="ep in config.outbound_endpoints"
             :key="ep.id"
@@ -203,12 +213,10 @@
               <div class="text-xs text-gray-500 dark:text-gray-400 font-mono truncate">{{ ep.url }}</div>
             </div>
             <div class="flex items-center gap-2 shrink-0">
-              <span
-                v-if="ep.has_credentials"
-                class="px-1.5 py-0.5 text-xs rounded bg-status-success-100 dark:bg-status-success-900/40 text-status-success-700 dark:text-status-success-300"
-              >🔒 credentialed</span>
+              <span class="px-1.5 py-0.5 text-xs rounded bg-status-warning-100 dark:bg-status-warning-900/40 text-status-warning-700 dark:text-status-warning-300">not callable</span>
               <button
                 type="button"
+                data-testid="a2a-legacy-endpoint-remove"
                 @click="removeEndpoint(ep.id)"
                 :disabled="busy"
                 class="text-status-danger-600 hover:text-status-danger-700 text-xs font-medium disabled:opacity-50"
@@ -216,33 +224,6 @@
             </div>
           </div>
         </div>
-        <div v-else class="text-sm text-gray-500 dark:text-gray-400 mb-3">No outbound endpoints registered.</div>
-        <form class="grid grid-cols-1 sm:grid-cols-2 gap-2" @submit.prevent="addEndpoint">
-          <input
-            v-model.trim="newEndpoint.name"
-            type="text"
-            placeholder="Label (e.g. acme-orchestrator)"
-            class="px-3 py-1.5 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-action-primary-500 focus:outline-none"
-          />
-          <input
-            v-model.trim="newEndpoint.url"
-            type="url"
-            placeholder="https://partner.example/a2a"
-            class="px-3 py-1.5 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-action-primary-500 focus:outline-none"
-          />
-          <input
-            v-model="newEndpoint.credentials"
-            type="password"
-            placeholder="Credential / token (optional)"
-            autocomplete="new-password"
-            class="px-3 py-1.5 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-action-primary-500 focus:outline-none"
-          />
-          <button
-            type="submit"
-            :disabled="busy || !newEndpoint.name || !newEndpoint.url"
-            class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50"
-          >Register endpoint</button>
-        </form>
       </div>
     </template>
   </div>
@@ -282,7 +263,6 @@ const skillsEditing = ref(false)
 const skillDraft = ref([])
 
 const newIdentity = ref('')
-const newEndpoint = ref({ name: '', url: '', credentials: '' })
 
 // The canonical A2A discovery URL an external orchestrator fetches (the public,
 // unauthenticated well-known route served by the inbound server, ent#157).
@@ -412,21 +392,6 @@ async function removeIdentity(id) {
     notifyUser('Identity removed.', 'success')
   } catch (e) {
     notifyUser(e.response?.data?.detail || `Failed to remove identity: ${e.message}`, 'error')
-  } finally {
-    busy.value = false
-  }
-}
-
-async function addEndpoint() {
-  if (!newEndpoint.value.name || !newEndpoint.value.url) return
-  busy.value = true
-  try {
-    await agentsStore.registerA2aEndpoint(props.agentName, { ...newEndpoint.value })
-    newEndpoint.value = { name: '', url: '', credentials: '' }
-    await load()
-    notifyUser('Outbound endpoint registered.', 'success')
-  } catch (e) {
-    notifyUser(e.response?.data?.detail || `Failed to register endpoint: ${e.message}`, 'error')
   } finally {
     busy.value = false
   }
