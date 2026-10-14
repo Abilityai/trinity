@@ -1537,6 +1537,9 @@ class TaskExecutionService:
         # splats straight into this signature — an unaccepted keyword here is a
         # TypeError on every Workspace turn, not a silently-dropped column.
         source_channel_client: Optional[str] = None,
+        # trinity#3653: the agent whose channel binding owns the context, for a
+        # row that is not that agent's direct turn (a gated request's wake-up).
+        source_channel_agent: Optional[str] = None,
         # ent#555 — which canvas the user had open when they sent this turn.
         open_canvas_id: Optional[str] = None,
         # #3114: the conversation this turn continues, e.g. "session:<key>".
@@ -1654,6 +1657,7 @@ class TaskExecutionService:
                     # persisting it would leave `_resolve_portal` failing closed on
                     # every row this branch creates — the sync Workspace turn.
                     source_channel_client=source_channel_client,
+                    source_channel_agent=source_channel_agent,
                     chain_depth=chain_depth,
                 ),
             )

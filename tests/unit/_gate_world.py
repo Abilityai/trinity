@@ -73,7 +73,7 @@ def build(monkeypatch, *, owner_name=None):
                             gates={"pay-invoice": _GATE.SkillGate(approver="primary")},
                             woken=[])
 
-    async def _wake(record, text):
+    async def _wake(record, text, **_):
         world.woken.append((record["source_agent"], text))
 
     monkeypatch.setattr(_GATE, "list_skill_gates", lambda agent: world.gates if agent == FIN else {})
