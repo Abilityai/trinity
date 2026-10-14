@@ -242,6 +242,23 @@ def test_unscoped_completion_does_not_guess_between_execution_owners():
     assert all(e["status"] == "running" for e in agent_state.session_activity["timeline"])
 
 
+def test_legacy_sequential_tool_id_reuse_completes_the_running_entry():
+    """Gemini passes no execution id and may reuse a tool id across sequential calls.
+
+    The completed earlier entry is not an ambiguity candidate; only the running one
+    is, so the second call completes and the session goes idle (base behaviour).
+    """
+    agent_state.tool_outputs = {}
+    at.start_tool_execution("call_0", "Read", {"n": 1})
+    at.complete_tool_execution("call_0", True, "first output")
+    at.start_tool_execution("call_0", "Read", {"n": 2})
+    assert agent_state.session_activity["status"] == "running"
+    at.complete_tool_execution("call_0", True, "second output")
+    assert [e["status"] for e in agent_state.session_activity["timeline"]] == ["completed", "completed"]
+    assert agent_state.session_activity["status"] == "idle"
+    assert agent_state.session_activity["active_tool"] is None
+
+
 def test_legacy_unscoped_activity_keeps_original_detail_id():
     agent_state.tool_outputs = {}
     at.start_tool_execution("legacy-id", "Read", {})

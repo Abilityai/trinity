@@ -89,15 +89,20 @@ def complete_tool_execution(
 ):
     """Complete only the owning execution's tool, preserving its detail output.
 
-    Legacy callers without an execution ID may resolve an unambiguous tool;
-    they must never guess between runs, including already completed runs.
+    Legacy callers without an execution ID may resolve an unambiguous RUNNING
+    tool; they must never guess between concurrently running executions. A
+    completed entry is not a candidate: a provider that reuses tool IDs
+    sequentially (Gemini has no execution scope) would otherwise leave every
+    later reuse stuck running, and a duplicate completion of an already
+    completed scoped entry must not overwrite its stored output either way.
     """
     candidates = [
         entry for entry in agent_state.session_activity["timeline"]
-        if entry.get("provider_tool_id", entry["id"]) == tool_id
+        if entry["status"] == "running"
+        and entry.get("provider_tool_id", entry["id"]) == tool_id
         and (execution_id is None or entry.get("execution_id") == execution_id)
     ]
-    if len(candidates) != 1 or candidates[0]["status"] != "running":
+    if len(candidates) != 1:
         return
     entry = candidates[0]
     now = datetime.now()
