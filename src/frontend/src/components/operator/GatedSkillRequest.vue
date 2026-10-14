@@ -122,6 +122,7 @@ import BaseBadge from '../base/BaseBadge.vue'
 import BaseButton from '../base/BaseButton.vue'
 import { gateOutcome, gateInputLong } from '../../utils/skillGateCard'
 import { formatLocalDateTime, formatRelativeTime } from '../../utils/timestamps'
+import { kindOptionLabel } from '../../utils/skillCards'
 
 const ROW = 'flex items-start gap-3'
 const TERM = 'flex-shrink-0 w-24 text-gray-500 dark:text-gray-400'
@@ -149,7 +150,7 @@ const outcome = computed(() => gateOutcome(props.item))
 // Who it is waiting on, for a viewer who cannot decide it — and only while it waits.
 const waiting = computed(() => (
   !outcome.value && props.item.status === 'pending' && gate.value.can_decide !== true
-    ? (gate.value.waiting_on || []).join(', ')
+    ? (gate.value.waiting_on || []).join(', ') || kindOptionLabel(gate.value.waiting_role?.value, gate.value.waiting_role?.label) || ''
     : ''
 ))
 

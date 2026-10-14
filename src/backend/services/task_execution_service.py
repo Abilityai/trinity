@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional, Tuple
+from types import SimpleNamespace
 
 import httpx
 
@@ -87,16 +88,66 @@ from db.write_params import ExecutionResult, TaskExecutionFields
 from db.skill_gate_requests import APPROVED_RUN_STATES
 
 
-def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str]) -> Optional[str]:
-    """The person a scheduled seat run is addressed to (ent#637), or None —
-    picks the seat the prompt names (trinity-enterprise#814). One row read, and
-    only for a schedule fire; fail-soft."""
+#: The resume turn a person answered (trinity-enterprise#329). Mirrors
+#: `operator_resume_service.TRIGGERED_BY`; not imported, to keep this module free
+#: of that service's import graph.
+_RESUME_TRIGGER = "operator_response"
+
+
+def served_person_for_row(row: Any) -> Optional[str]:
+    """The person a run serves, read off its execution row, or None — picks the
+    seat the prompt names (trinity-enterprise#814). Never rendered.
+
+    Two kinds of run serve one person: a scheduled seat run (ent#637, via
+    `schedule_seat_memory.seat_for_execution`) and the resume turn of an ask
+    the addressee discussed in the Workspace (ent#886). The resume row carries
+    no person column — who answered stays in the operator-queue row and the
+    audit row, never in the agent's prompt (ent#715) — so its served person is
+    the Workspace stamp `_workspace_destination` wrote, which exists only when
+    the responder IS the addressee. Read off the row so the push and the pull
+    composer agree: a pull claim rebuilds the turn from the row alone.
+
+    Accepts the ORM-ish row `db.get_execution` returns and the dict a pull claim
+    returns. Pure; fail-soft (any doubt is None, i.e. the primary's seat).
+    """
     from services import schedule_seat_memory
 
-    if not execution_id or (triggered_by or "").lower() not in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS:
+    if row is None:
+        return None
+
+    def field(name: str) -> Any:
+        if isinstance(row, dict):
+            return row.get(name)
+        return getattr(row, name, None)
+
+    trigger = (field("triggered_by") or "").lower()
+    if trigger in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS:
+        return schedule_seat_memory.seat_for_execution(SimpleNamespace(
+            triggered_by=field("triggered_by"),
+            schedule_id=field("schedule_id"),
+            source_channel=field("source_channel"),
+            source_channel_client=field("source_channel_client"),
+        ))
+    if trigger == _RESUME_TRIGGER:
+        if (field("source_channel") or "").lower() != schedule_seat_memory.PORTAL_SOURCE_CHANNEL:
+            return None
+        client = (field("source_channel_client") or "").strip().lower()
+        return client or None
+    return None
+
+
+def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str]) -> Optional[str]:
+    """`served_person_for_row` for the push composer: one row read, and only
+    for a trigger that can serve a person; fail-soft."""
+    from services import schedule_seat_memory
+
+    trigger = (triggered_by or "").lower()
+    if not execution_id or (
+        trigger not in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS and trigger != _RESUME_TRIGGER
+    ):
         return None
     try:
-        return schedule_seat_memory.seat_for_execution(db.get_execution(execution_id))
+        return served_person_for_row(db.get_execution(execution_id))
     except Exception as e:  # noqa: BLE001
         logger.debug(f"_served_person_for({execution_id}) failed: {e}")
         return None
@@ -1489,9 +1540,6 @@ class TaskExecutionService:
         # trinity#3653: the agent whose channel binding owns the context, for a
         # row that is not that agent's direct turn (a gated request's wake-up).
         source_channel_agent: Optional[str] = None,
-        # trinity-enterprise#838: a keyless trusted-network A2A caller's address,
-        # stamped on the row as its attribution.
-        source_host: Optional[str] = None,
         # ent#555 — which canvas the user had open when they sent this turn.
         open_canvas_id: Optional[str] = None,
         # #3114: the conversation this turn continues, e.g. "session:<key>".
@@ -1610,7 +1658,6 @@ class TaskExecutionService:
                     # every row this branch creates — the sync Workspace turn.
                     source_channel_client=source_channel_client,
                     source_channel_agent=source_channel_agent,
-                    source_host=source_host,
                     chain_depth=chain_depth,
                 ),
             )
@@ -1688,7 +1735,6 @@ class TaskExecutionService:
                         source_channel_chat_id=source_channel_chat_id,
                         source_channel_thread=source_channel_thread,
                         source_channel_client=source_channel_client,
-                        source_host=source_host,
                     ),
                 )
 

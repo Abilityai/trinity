@@ -120,8 +120,8 @@ agent_ownership = Table(
     Column("circuit_breaker_enabled", Integer),
     Column("mcp_exposed", Integer),
     Column("a2a_exposed", Integer),                # ent#157: A2A inbound-server exposure opt-in (default OFF)
-    Column("a2a_scope", Text, server_default="public"),          # ent#838: public | internal (trusted networks only)
-    Column("a2a_keyless_internal", Integer, server_default="1"),  # ent#838: trusted callers need no key (internal scope)
+    Column("a2a_scope", Text, server_default="public"),          # inert since ent#885; drop under #746
+    Column("a2a_keyless_internal", Integer, server_default="1"),  # inert since ent#885; drop under #746
     # ent#329: owner opt-in — an operator answer re-triggers the agent. Default OFF:
     # a dispatch on respond spends money, so it is never unconditional. Per-AGENT and
     # not per-request, so hosting asks cannot hand a client a spend button (ent#430 AC #3).

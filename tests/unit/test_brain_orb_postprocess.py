@@ -20,6 +20,22 @@ import pytest
 import services.brain_orb_postprocess as pp
 
 
+@pytest.fixture(autouse=True)
+def _import_execution_service_before_db_patch():
+    """Import the execution service BEFORE a test patches `database.db`.
+
+    `dispatch_postprocess` lazily imports `services.task_execution_service`,
+    and the unit conftest pops that module from sys.modules after every test.
+    So without this, the first import happens INSIDE the `patch("database.db",
+    SimpleNamespace(...))` window: the service's module-global `db` (and every
+    transitive `from database import db` first imported there) binds to the
+    stub and keeps it after the patch exits, breaking later tests that read
+    `tes.db` (e.g. test_ent814_served_seat).
+    """
+    import services.task_execution_service  # noqa: F401
+    yield
+
+
 class _FakeClientCM:
     def __init__(self, *, status=200, content=b"", exc=None):
         self._status = status

@@ -108,6 +108,19 @@ describe('the card itself', () => {
     expect(tid(w, 'gate-card-waiting-on').text()).toBe('Dana Reyes, sam@example.com')
   })
 
+  it('with no names to show, says which role it waits on — never a person (trinity-enterprise#848)', () => {
+    const w = card({ gate: gate({ can_decide: false, waiting_on: [],
+      waiting_role: { value: 'role:finance', label: 'Finance' } }) })
+    expect(tid(w, 'gate-card-waiting-on').text()).toBe('Finance')
+    const named = card({ gate: gate({ can_decide: false, waiting_on: ['Dana Reyes'],
+      waiting_role: { value: 'role:finance', label: 'Finance' } }) })
+    expect(tid(named, 'gate-card-waiting-on').text()).toBe('Dana Reyes')
+    expect(tid(card({ gate: gate({ waiting_role: { value: 'role:finance', label: 'Finance' } }) }),
+      'gate-card-waiting-on').exists()).toBe(false)                // the decider is not told
+    expect(tid(card({ gate: gate({ can_decide: false, waiting_on: [],
+      waiting_role: { value: 'primary', label: 'primary' } }) }), 'gate-card-waiting-on').text()).toBe('Primary contact')
+  })
+
   it.each([
     ['dispatched', 'Approved', true],
     ['succeeded', 'Ran', true],

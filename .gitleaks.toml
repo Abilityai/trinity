@@ -74,3 +74,16 @@ regexes = [
                                      # per the pre-scan note above a path block would stop
                                      # config/manifests being scanned for REAL secrets.
 ]
+
+# A separate block (not a regex in the one above) because it needs
+# regexTarget = "line": the generic-api-key "secret" it captures is only the
+# right-hand side, so the shape must be matched against the whole line. It
+# clears a typed Python dataclass attribute whose annotation is the Ed25519
+# private-key class and whose default is a repr-suppressed field: a declaration,
+# never a literal credential (the key object is loaded at runtime; ent#878).
+[[allowlists]]
+description = "Ed25519 private-key dataclass attribute declarations (ent#878)"
+regexTarget = "line"
+regexes = [
+  '''^\s*\w+\s*:\s*Ed25519PrivateKey\s*=\s*field\(repr=False\)\s*$''',
+]

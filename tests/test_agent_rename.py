@@ -9,6 +9,14 @@ import pytest
 from testkit.api_client import TrinityApiClient
 
 
+def _sanitized_rename_target(agent_name: str) -> str:
+    """The sanitized name `test_rename_agent_name_sanitization` renames to.
+
+    Derived from the fixture agent's unique suffix so the fixture's cleanup and
+    the test agree on it without sharing a fixed, run-to-run colliding name.
+    """
+    return f"test-agent-{agent_name.rsplit('-', 1)[-1]}-with-spaces"
+
 class TestAgentRename:
     """Test suite for agent rename functionality."""
 
@@ -35,7 +43,7 @@ class TestAgentRename:
             cleanup_names = [
                 agent_name,
                 f"{agent_name}-renamed",
-                "test-agent-with-spaces",  # From sanitization test
+                _sanitized_rename_target(agent_name),  # From sanitization test
             ]
             for name in cleanup_names:
                 try:
@@ -114,14 +122,15 @@ class TestAgentRename:
 
     def test_rename_agent_name_sanitization(self, api_client: TrinityApiClient, test_agent_name):
         """Test that new name is sanitized for Docker compatibility."""
-        # First, cleanup any leftover from previous failed test runs
-        try:
-            api_client.delete("/api/agents/test-agent-with-spaces", timeout=10)
-        except Exception:
-            pass
+        # The target is unique per run. A fixed target fails every run after the
+        # first: deleting the renamed agent soft-deletes its ownership row, which
+        # keeps reserving that name and its volume base by design (#1664/#1671),
+        # so the rename is refused with 409 rather than reused.
+        expected = _sanitized_rename_target(test_agent_name)
+        suffix = test_agent_name.rsplit("-", 1)[-1]
 
         # Name with spaces and special chars should be sanitized
-        new_name = "Test Agent With Spaces!"
+        new_name = f"Test Agent {suffix.upper()} With Spaces!"
 
         response = api_client.put(
             f"/api/agents/{test_agent_name}/rename",
@@ -132,7 +141,7 @@ class TestAgentRename:
         assert response.status_code == 200, f"Rename failed: {response.text}"
         data = response.json()
         # Should be sanitized to lowercase with hyphens
-        assert data["new_name"] == "test-agent-with-spaces"
+        assert data["new_name"] == expected
 
     def test_rename_to_existing_name_fails(self, api_client: TrinityApiClient, test_agent_name):
         """Test rename to an already existing agent name fails."""

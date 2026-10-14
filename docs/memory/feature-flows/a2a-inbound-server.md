@@ -366,33 +366,43 @@ The real facilitator (verify + settle) and what a duration-plan settle actually
 burns are **not** provable from the SDK source and are a live sandbox run before
 merge, not a unit test. Stated rather than hidden.
 
-## Trusted internal networks (trinity-enterprise#838)
+## Outbound endpoint allowlist (trinity-enterprise#838, outbound-only since trinity-enterprise#885)
 
 Requirements: `requirements/mcp.md` §32.7.
 
+The admin's "trusted networks" list (setting key `a2a_trusted_networks`, name
+kept) is read **only on the outbound side**. Nothing on this inbound server
+consults it: every inbound call needs a Trinity credential or an x402 payment,
+whatever network it arrives from.
+
 ```
 caller instance (agent → call_a2a_agent)                 provider instance
-  a2a_outbound_service.call_agent                          POST /a2a/{name}
-   └ validate_endpoint → validate_a2a_endpoint_url          │ anonymous → internal_source(request)
-       public-HTTPS rule refuses (http / CGNAT)             │   cached list; CF headers → public; X-Real-IP
-       └ _validate_trusted_a2a_url(entries)                 │   only from the proxy container
-           name entry or CIDR; never metadata/              │   none → _anonymous_jsonrpc (limiter first;
-           loopback/platform; addresses pinned              │          internal agent → 401, as unexposed)
-   http://inst.<tailnet>/a2a/{name}  ───────────────────►   │   trusted → per-source + per-agent limits
-                                                            │     _internal_gate: internal + keyless →
-                                                            │       dispatch(triggered_by="a2a", source_host)
-                                                            │ keyed → internal + untrusted → 404
+  a2a_outbound_service.register / call_agent               POST /a2a/{name}
+   └ validate_endpoint → validate_a2a_endpoint_url          │ no credential → _anonymous_jsonrpc
+       public-HTTPS rule refuses (http / CGNAT)             │   limiter first; free path → 401
+       └ _validate_trusted_a2a_url(entries)                 │   (x402 path unchanged, ent#679)
+           name entry or CIDR; never metadata/              │ Trinity key → _authorize_inbound
+           loopback/platform; addresses pinned              │   (exposure, allow-list, access)
+   http://inst.<tailnet>/a2a/{name}  + Bearer key ──────►   │     → dispatch(triggered_by="a2a")
 ```
 
 - **Storage**: `system_settings['a2a_trusted_networks']` (JSON list, typed
-  admin route only), `['a2a_internal_base_url']`; `agent_ownership.a2a_scope`
-  and `a2a_keyless_internal`; `schedule_executions.source_host`. SQLite
-  migration `a2a_internal_scope`, Alembic `0096_a2a_internal_scope`.
-- **Setter**: `PUT /api/enterprise/a2a/{agent}/exposure {enabled, scope?,
-  keyless?}` (entitled, owner, human only); `A2aPanel.vue` "Who can reach it".
-- **Why the proxy is named, not ranged**: agents share the Docker bridge with
-  the proxy, and an agent calls `backend:8000` directly. Reading `X-Real-IP` from
-  any bridge peer would let an agent claim a trusted source.
-- **Why the trusted list is cached**: the anonymous door reads it before its
-  rate limiter, to choose a budget; the ent#679 ordering forbids a DB read per
-  flood request.
+  admin route only, the generic `PUT /api/settings/{key}` refuses the key).
+- **Checked twice**: when an endpoint is registered and again on every call
+  (`a2a_client` re-validates and pins the resolved addresses), so a name that
+  later resolves outside the allowed set is refused at call time.
+- **Off the list**: the v0.9.5 refusal, unchanged — `endpoint_private_address`
+  for a private/CGNAT address, `endpoint_not_https` for `http://`.
+- **Removed before 1.0 (ent#885)**: the keyless door, the internal-only scope
+  (`_internal_gate`, the card's internal base URL, the `a2a_internal_base_url`
+  setting), the inbound source resolution (proxy-container `X-Real-IP` trust,
+  cloudflared header sniffing) and the `source_host` attribution. The columns
+  `agent_ownership.a2a_scope`, `a2a_keyless_internal` and
+  `schedule_executions.source_host` (SQLite migration `a2a_internal_scope`,
+  Alembic `0096_a2a_internal_scope`) stay in the DDL, unread and unwritten; an
+  rc-era `internal` row is now an ordinary exposed agent. The exposure setter
+  is `PUT /api/enterprise/a2a/{agent}/exposure {enabled}` again.
+- **Tests**: `tests/unit/test_ent838_a2a_trusted_networks.py`,
+  `tests/unit/test_ent885_outbound_allowlist.py`,
+  `tests/unit/test_ent885_keyless_refused.py`,
+  `src/frontend/tests/unit/a2aPanelNoScope.spec.js`.

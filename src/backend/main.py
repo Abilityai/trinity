@@ -116,6 +116,9 @@ from routers.users import router as users_router
 from routers.debug import router as debug_router  # #306 soak instrumentation
 from routers.a2a import router as a2a_router  # #737 A2A Agent Cards
 from routers.a2a import a2a_server_router  # ent#157 A2A inbound server (well-known + JSON-RPC)
+from routers.aauth import router as aauth_router  # ent#623 AAuth discovery documents (prototype, flag OFF)
+from routers.aauth_person import router as aauth_person_router  # ent#878 AAuth person token (own-key only, 404 unless live)
+from routers.aauth_resource import router as aauth_resource_router  # ent#879 AAuth resource call (own-key only, 404 unless live)
 from routers.admin_recovery import router as admin_recovery_router  # #834 Phase 1c
 from routers.messages import router as messages_router  # Proactive Messaging (#321)
 from routers.public_memory import router as public_memory_router  # MEM-001 write path (#888)
@@ -1422,6 +1425,9 @@ app.include_router(users_router)  # User Management (ROLE-001)
 app.include_router(debug_router)  # #306 soak dashboard
 app.include_router(a2a_router)  # A2A Agent Cards (#737)
 app.include_router(a2a_server_router)  # A2A inbound server: /a2a/{name}/.well-known + JSON-RPC (ent#157)
+app.include_router(aauth_router)  # AAuth /.well-known/aauth-* (ent#623, 404 unless the prototype flag is on)
+app.include_router(aauth_person_router)  # AAuth person token: POST /api/agents/{name}/aauth/person-token (ent#878)
+app.include_router(aauth_resource_router)  # AAuth resource call: POST /api/agents/{name}/aauth/resource-call (ent#879)
 app.include_router(admin_recovery_router)  # Soft-delete admin recovery (#834 Phase 1c)
 app.include_router(loops_agent_router)  # Sequential agent loops (#740)
 app.include_router(loops_loop_router)  # Sequential agent loops (#740)

@@ -527,6 +527,9 @@ export interface GateResult {
   request_id?: string;
   skills?: string[];
   approver_role?: string;
+  /** trinity-enterprise#848: what the approver shows as — a kind's name, or a
+   * canon role's ("Head of sales"). Absent from an older backend. */
+  approver_label?: string;
   expires_at?: string | null;
   /** trinity#3233: how the backend will tell this caller the outcome —
    * `agent_task`, `inbox`, or `none` (absent from an older backend = none). */
@@ -560,6 +563,7 @@ export function parseGateResult(
         request_id: typeof parsed.request_id === "string" ? parsed.request_id : undefined,
         skills: Array.isArray(parsed.skills) ? (parsed.skills as string[]) : undefined,
         approver_role: typeof parsed.approver_role === "string" ? parsed.approver_role : undefined,
+        approver_label: typeof parsed.approver_label === "string" ? parsed.approver_label : undefined,
         expires_at: typeof parsed.expires_at === "string" ? parsed.expires_at : null,
         outcome_delivery: delivery,
         retryable: false,
@@ -4028,6 +4032,35 @@ export class TrinityClient {
     body: { endpoint: string; task_id: string },
   ): Promise<unknown> {
     return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/a2a/task`, body);
+  }
+
+  /**
+   * Obtain (or resume obtaining) a person token for a resource as `name`
+   * (trinity-enterprise#878). Own-key only on the backend; the response never
+   * carries the token. Same bounded fetch as the A2A hop: the backend waits on
+   * the person server for up to `wait` + 8 s.
+   */
+  async requestPersonToken(
+    name: string,
+    body: {
+      resource: string;
+      pending_handle?: string;
+      wait?: number;
+      execution_id?: string;
+      trigger_source?: "mcp" | "api" | "script";
+    },
+  ): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/aauth/person-token`, body);
+  }
+
+  /**
+   * Call an allow-listed AAuth resource as `name`, or resume a pending call by
+   * its handle (trinity-enterprise#879). Own-key only on the backend; the
+   * response never carries a token. Same bounded fetch as the A2A hop: the
+   * backend's own budget is 25 s, under the 40 s gateway deadline.
+   */
+  async callAAuthResource(name: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/aauth/resource-call`, body);
   }
 
   // --- Credential vault (trinity-enterprise#279) ----------------------------
