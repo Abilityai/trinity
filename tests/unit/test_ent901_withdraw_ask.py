@@ -8,8 +8,9 @@ again. `ask_service.withdraw` ends the row `cancelled` / `disposed_by='agent'`
 compare-and-set the replace path (#3247) already owns — never over a person's
 answer, never a row the agent did not raise, never a gate's approval.
 
-Checkpoint A: the db ending door, the sink, the route. The MCP tool, the prompt
-twins and the Workspace / Operating Room readers are later checkpoints.
+Checkpoint A: the db ending door, the sink, the route. Checkpoint B: the prompt
+twins and the Pending asks advice (the MCP tool's own tests live in
+src/mcp-server). The Workspace / Operating Room readers are checkpoint C.
 
 Related flow: docs/memory/feature-flows/operating-room.md
 Requirement: docs/memory/requirements/security.md §26.9 / §26.10
@@ -701,3 +702,72 @@ class TestWithdrawRoute:
         key = "routers/operator_queue.py::withdraw_my_ask"
         assert key in rc.AGENT_CALLABLE
         assert rc.AGENT_CALLABLE[key][0] == "POST /api/agents/{name}/operator-queue/{request_id}/withdraw"
+
+
+# ===========================================================================
+# 5. The prompt contract (checkpoint B) — both authored twins carry the same
+#    "Withdraw what is moot." paragraph right after "Do not re-ask", and the
+#    Pending asks line offers the withdraw beside the replace.
+# ===========================================================================
+
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+WITHDRAW_LEAD = "**Withdraw what is moot.**"
+REASK_LEAD = "**Do not re-ask what is still pending.**"
+
+
+def _paragraphs(text):
+    return [p for p in text.split("\n\n") if p.strip()]
+
+
+class TestPromptContract:
+    def _meta(self):
+        with open(os.path.join(_REPO, "config/trinity-meta-prompt/prompt.md"), encoding="utf-8") as f:
+            return f.read()
+
+    def test_both_twins_carry_the_paragraph_byte_identically(self):
+        from services.platform_prompt_service import PLATFORM_INSTRUCTIONS
+        ours = [p for p in _paragraphs(PLATFORM_INSTRUCTIONS) if p.startswith(WITHDRAW_LEAD)]
+        theirs = [p for p in _paragraphs(self._meta()) if p.startswith(WITHDRAW_LEAD)]
+        assert len(ours) == 1 and ours == theirs
+
+    @pytest.mark.parametrize("which", ["platform", "meta"])
+    def test_the_paragraph_follows_do_not_reask(self, which):
+        from services.platform_prompt_service import PLATFORM_INSTRUCTIONS
+        paras = _paragraphs(PLATFORM_INSTRUCTIONS if which == "platform" else self._meta())
+        i = next(n for n, p in enumerate(paras) if p.startswith(REASK_LEAD))
+        assert paras[i + 1].startswith(WITHDRAW_LEAD)
+
+    def test_the_paragraph_names_the_tool_the_refusal_and_the_rule(self):
+        from services.platform_prompt_service import PLATFORM_INSTRUCTIONS
+        para = next(p for p in _paragraphs(PLATFORM_INSTRUCTIONS) if p.startswith(WITHDRAW_LEAD))
+        for token in ("`withdraw_ask`", "`request_id`", "`reason`", "`replaces`",
+                      "`ask_ended`", "`get_my_ask`", "queue-file entry cannot be withdrawn"):
+            assert token in para, token
+        assert "mcp__trinity__" not in para
+
+
+class TestPendingLineOffersWithdraw:
+    AGENT = "agent-901-line"
+
+    def _line(self, prompt):
+        return next((l for l in prompt.splitlines() if "Pending asks" in l), None)
+
+    def test_an_own_pending_ask_is_offered_the_withdraw(self, real_db):
+        from services.platform_prompt_service import ExecutionContext, compose_system_prompt
+        _native(real_db, self.AGENT, "line-own-1")
+        line = self._line(compose_system_prompt(
+            ExecutionContext(agent_name=self.AGENT, triggered_by="schedule")))
+        assert line is not None
+        assert "replace it (ask_operator, replaces)" in line
+        assert "if it is moot, withdraw it (withdraw_ask)" in line
+
+    def test_a_line_with_nothing_of_its_own_offers_no_withdraw(self, real_db):
+        """A NULL-raiser row is not the agent's to withdraw (the sink 404s it),
+        so a line of only such rows offers neither the replace nor the withdraw."""
+        from services.platform_prompt_service import ExecutionContext, compose_system_prompt
+        agent = "agent-901-line-legacy"
+        _filed(real_db, agent, "line-legacy-1")
+        line = self._line(compose_system_prompt(
+            ExecutionContext(agent_name=agent, triggered_by="schedule")))
+        assert line is not None and "line-legacy-1" in line
+        assert "withdraw" not in line

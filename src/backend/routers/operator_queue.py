@@ -1,4 +1,4 @@
-# mcp: operator_queue.ts (list_operator_queue, get_operator_queue_item, respond_to_operator_queue — a person-scoped key only; ask_operator → agent_router's raise; get_my_ask → agent_router's self-readback)
+# mcp: operator_queue.ts (list_operator_queue, get_operator_queue_item, respond_to_operator_queue — a person-scoped key only; ask_operator → agent_router's raise; get_my_ask → agent_router's self-readback; withdraw_ask → agent_router's self-withdraw, trinity-enterprise#901)
 """
 Operator Queue API Router (OPS-001).
 
