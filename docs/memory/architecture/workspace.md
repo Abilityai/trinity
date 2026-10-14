@@ -921,7 +921,10 @@ verdict. On phone nothing is previewed. The pinned sidebar row is its own compon
 feed — `portalInbox.inboxCanvasCount({tabs, canvases, agent})` over
 `stores/portalRailFeeds.canvases` for the selected item's agent, which the rail loads
 anyway — and shows only when that agent has a canvas and the Canvas tab is one this
-session has, on chats and asks alike (T6); it emits `open-canvas` → `openRailOn('canvas')`.
+session has, on chats only (#3714); it emits `open-canvas` → `openRailOn('canvas')`. An
+ask's header instead offers Open in chat via `portalInbox.askOriginThread` → `askThreadLink`
+(raised in a turn → its `chat_id`; a background ask → none), emitted as `open-thread` like
+the card's own link — so a chat the sidebar has not loaded still opens (#3140).
 
 **Reply to one message** (sign-off). Each agent message in the Inbox pane carries an arrow
 (not Copy): it opens the chat anchored at that message (`?anchor=m:<id>`, landed by

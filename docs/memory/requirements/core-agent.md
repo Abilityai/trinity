@@ -3927,8 +3927,10 @@ to localStorage in the clear.
   on the answered card; a second Enter while the answer is on its way sends nothing. In the
   Inbox pane the card's header carries the priority and the expiry (the row's badges), where
   the person decides — its context below the answer row does not repeat them.
-- **Open canvas (§3g C10)**: the pane offers "Open canvas" — on a chat or an ask — only when
-  the item's agent has a canvas this viewer can see; it opens the rail on that canvas.
+- **Open canvas (§3g C10)**: the pane offers "Open canvas" on a chat only, when the chat's
+  agent has a canvas this viewer can see; it opens the rail on that canvas. An ask's header
+  carries **Open in chat** for the chat whose turn raised it instead — none for a background
+  ask (#3714).
 - **Long tabs page (§3g SM / C4)**: every tab renders 50 rows, states "Showing 50 of 212", and
   offers "Show more" (50 at a time, focus to the first new row); the window resets when the tab
   changes, never on a refresh, and always includes the selected row.
