@@ -1,4 +1,5 @@
-"""
+"""Regression coverage includes #3712 execution-scoped tool identity.
+
 trinity-enterprise#620 — the agent server reports WHAT each running execution is
 doing, per execution, in its heartbeat.
 
