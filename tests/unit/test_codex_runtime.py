@@ -1885,7 +1885,7 @@ def test_classify_rate_status_pattern_is_linear_on_long_whitespace():
     ("401 Unauthorized", "WARNING: PATH unavailable " * 100, 503),
 ])
 def test_terminal_turn_failure_controls_status_and_detail(terminal, stderr, expected):
-    """A final provider failure must not be classified from a previous retry."""
+    """Regression #3715: a final provider failure must not be classified from a previous retry."""
     _, _, metadata, _ = parse_codex_jsonl([
         json.dumps({"type": "error", "message": "Earlier attempt: 401 Unauthorized"}),
         json.dumps({"type": "turn.failed", "error": {"message": terminal}}),
