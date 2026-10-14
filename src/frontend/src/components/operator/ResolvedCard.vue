@@ -63,8 +63,9 @@
             </svg>
             <AskMarkdown :text="decisionLabel(item.response)" inline data-testid="resolved-response" />
           </span>
-          <!-- The answer's note, or the operator's reason for cancelling. -->
-          <span v-if="note" class="text-xs text-gray-500 dark:text-gray-400">
+          <!-- The answer's note, the operator's reason for cancelling, or the
+               agent's reason for withdrawing it (trinity-enterprise#901). -->
+          <span v-if="note" class="text-xs text-gray-500 dark:text-gray-400" data-testid="resolved-note">
             &mdash; {{ note }}
           </span>
           <!-- When it ENDED — relative, absolute on hover. A row that ended
@@ -117,7 +118,10 @@ const endingText = computed(() => queueEndingText(ending.value))
 // (`replaced`), not a person's words.
 // trinity-enterprise#844: so is the clock's (`outcome_unknown`) — a timeout
 // carries no person's words.
+// trinity-enterprise#901: a withdraw's reason IS the agent's words (T3) — the
+// one agent ending whose reason is shown, as text.
 const note = computed(() => props.item.response_text
+  || (ending.value?.kind === 'withdrawn' ? ending.value.reason : null)
   || ((ending.value && (ending.value.who === 'the platform' || ending.value.kind === 'expired'))
     || props.item.disposed_by === 'agent'
     ? '' : props.item.disposition_reason) || '')
