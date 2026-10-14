@@ -64,6 +64,7 @@ connected and deliberately not absorbed.
 
 import base64
 import re
+import shlex
 from typing import Dict
 
 # The value registered in git config. NOT the filename — see the module
@@ -600,16 +601,13 @@ def probe_command() -> str:
 
 
 def scrub_command(git_dir: str) -> str:
-    """Shell command that installs the helper **then** scrubs token URLs.
+    """Sweep token URLs after a separately checked root helper installation.
 
-    One exec, in that order, because the strip must never run without the
-    replacement already in place. Run as **root**.
+    Ordinary maintenance runs as the workspace owner. Seed-bearing callers
+    must keep this command root-only because the seed travels in its environment.
     """
     payload = _b64(SCRUB_SCRIPT)
-    return (
-        f"({install_command()}) >/dev/null 2>&1; "
-        f"printf %s {payload} | base64 -d | sh -s -- {git_dir}"
-    )
+    return f"printf %s {payload} | base64 -d | sh -s -- {shlex.quote(git_dir)}"
 
 
 _REPORT_RE = re.compile(rf"{SCRUB_REPORT_PREFIX}\s+(?P<fields>[A-Za-z0-9_=\s]+)")

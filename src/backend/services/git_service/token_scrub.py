@@ -147,8 +147,8 @@ def _alarm_git_token_scrub_unreadable(agent_name: str) -> None:
     remediation simply did not run. Fail-soft.
 
     Reached only when the repository is unreachable, never when there simply is
-    no repository (#2930) — the caller splits those, so the capabilities
-    explanation below describes the case that actually fired.
+    no repository (#2930) — the caller splits those. Workspace ownership and
+    permissions can prevent either the owner sweep or a seeded root sweep.
     """
     try:
         from database import db
@@ -162,11 +162,8 @@ def _alarm_git_token_scrub_unreadable(agent_name: str) -> None:
             "question": (
                 f"The ent#615 credential sweep could not read {agent_name}'s "
                 "workspace, so it cannot say whether a git remote still carries "
-                "an embedded token — its all-clear is not evidence. This is the "
-                "expected result when the agent runs with reduced Linux "
-                "capabilities (Settings \u2192 agent full capabilities off), "
-                "which withholds DAC_OVERRIDE from the platform's maintenance "
-                "exec. Re-run with full capabilities, or check the agent's git "
+                "an embedded token — its all-clear is not evidence. Check the "
+                "workspace ownership and permissions, or check the agent's git "
                 "remotes by hand."
             ),
             "context": {"reason": "root_readable=0"},
@@ -185,12 +182,13 @@ async def scrub_git_remote_tokens(
 ) -> Dict[str, Any]:
     """Install the credential helper, then remove embedded credentials (ent#615).
 
-    Idempotent. One root ``docker exec`` of a base64-injected script (the
-    ``compatibility/collector.py`` precedent — it avoids the nested-quoting
-    hazard entirely), which:
+    Idempotent. A checked root exec installs and registers the helper, then a
+    base64-injected sweep runs as the workspace owner. Root without DAC_OVERRIDE
+    cannot traverse an owner's private home; changing capabilities or permissions
+    is unnecessary. A seed-bearing sweep remains root-only so the agent cannot
+    read its environment. The sweep:
 
-    1. installs and REGISTERS the helper, so a container on an older base image
-       is covered without a recreate;
+    1. uses the already installed helper, including on an older base image;
     2. proves the helper actually resolves a credential — **by exit code**,
        because ``git credential fill`` prints the credential on stdout and this
        exec's output reaches ``logger`` and ``GitInitResult.error``;
@@ -222,18 +220,29 @@ async def scrub_git_remote_tokens(
             git_dir = await gitignore._detect_git_dir(container_name)
         inner = git_credential_helper.scrub_command(git_dir)
         async with _scrub_semaphore:
+            installed = await execute_command_in_container(
+                container_name=container_name,
+                command=f"bash -c {shlex.quote(git_credential_helper.install_command())}",
+                timeout=SCRUB_TIMEOUT_S,
+                user="root",
+            )
+            if installed.get("timed_out") or installed.get("exit_code", 1) != 0:
+                # Never sweep after an unsuccessful replacement installation,
+                # and never echo installer output into operator-facing logs.
+                logger.warning("ent#615: credential helper install failed for %s", agent_name)
+                return report
             result = await execute_command_in_container(
                 container_name=container_name,
                 command=f"bash -c {shlex.quote(inner)}",
                 timeout=SCRUB_TIMEOUT_S,
-                user="root",
+                user="root" if seed_pat else "developer",
                 environment=(
                     {git_credential_helper.SEED_ENV_VAR: seed_pat}
                     if seed_pat else None
                 ),
             )
     except Exception as e:  # noqa: BLE001 — best-effort, container may be down
-        logger.warning("ent#615: remote-token sweep error for %s: %s", agent_name, e)
+        logger.warning("ent#615: remote-token sweep error for %s (%s)", agent_name, type(e).__name__)
         return report
 
     if result.get("timed_out"):
@@ -247,25 +256,16 @@ async def scrub_git_remote_tokens(
     if report["refused"]:
         _alarm_git_token_scrub_refused(agent_name, report)
     elif report["success"] and not report["root_readable"]:
-        # The sweep ran, exited 0, and reported all zeros — which is ALSO what a
-        # healthy, already-clean agent reports. The discriminator is whether it
-        # could see the tree at all. It could not on `agent_full_capabilities=
-        # false`: RESTRICTED_CAPABILITIES omits DAC_OVERRIDE, so root in the
-        # container cannot traverse the 0700 `developer`-owned home, `find`
-        # enumerates nothing and the probe fails. Nothing is destroyed — the
-        # token simply stays where it already was — but the remediation silently
-        # did not happen, on exactly the hardened installs that will act on the
-        # report. Alarmed, not logged: an INFO line indistinguishable from
-        # success is how #1638 shipped.
+        # A successful process with zero counts does not prove it inspected the
+        # repository. The historical `root_readable` field means the selected
+        # sweep caller could read ROOT's repository, not that it ran as root.
+        # Ordinary maintenance uses the workspace owner; a seed-bearing sweep
+        # remains root and can still be unable to traverse a private owner home
+        # without DAC_OVERRIDE. Preserve that uncertainty as an operator alert.
         #
-        # #2930: `root_readable=0` had ONE more cause, and it is the common one.
-        # An agent from a `local:` template has no repository at all, so the
-        # readability test fails on existence, not on permissions — every stock
-        # starter filed this alert on every fresh install, telling a first-time
-        # operator to loosen a capability setting that was not involved. "There
-        # is nothing to sweep" is not an operator's problem; "there is something
-        # I could not look at" still is, and the two are separated by asking
-        # about ROOT (the capability question) rather than about the repo.
+        # #2930: a readable workspace with no repository needs no remediation.
+        # Distinguish that case from an existing repository the caller could
+        # not inspect, using ROOT traversal and repository presence separately.
         if report["root_traversable"] and not report["git_present"]:
             logger.debug(
                 "ent#615: %s has no git repository — nothing to sweep", agent_name
