@@ -279,8 +279,9 @@ root_readable=0
 root_traversable=0
 git_present=0
 
-# `safe.directory=*`: this runs as root against a repo owned by `developer`.
-# Non-secret, and `-c` is protected configuration, so git honours it.
+# `safe.directory=*`: a seeded sweep runs as root against a repo owned by
+# `developer` (an unseeded one runs as `developer` itself, #3719, where this
+# is harmless). Non-secret, and `-c` is protected configuration, so git honours it.
 g() { git -c "safe.directory=*" "$@"; }
 
 # EXIT CODE ONLY. `git credential fill` PRINTS the credential on stdout, and

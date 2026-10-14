@@ -36,7 +36,7 @@ _SCRUB_ALARM_ID_PREFIX = "ent615-git-token-scrub-"
 
 # Same daily-stable-id discipline for the "could not look" alarm. A SEPARATE
 # family, not a variant of the refusal: the two need different operator action
-# (set a token vs. re-run with full capabilities), and sharing one id would let
+# (set a token vs. fix workspace ownership/permissions), and sharing one id would let
 # whichever fired first suppress the other for the rest of the day.
 _SCRUB_UNREADABLE_ALARM_ID_PREFIX = "ent615-git-token-scrub-unreadable-"
 
@@ -207,7 +207,9 @@ async def scrub_git_remote_tokens(
     ``seed_pat`` is a credential the CALLER already holds — the path that stops
     new orphans being created. It is tried before the URL harvest and only when
     nothing else resolves, and it travels in the exec ENVIRONMENT, never argv.
-    The exec runs as root so ``/proc/<pid>/environ`` is unreadable by the agent.
+    That seeded exec runs as root so ``/proc/<pid>/environ`` is unreadable by
+    the agent; an unseeded sweep carries no environment and runs as ``developer``
+    so it can inspect a 0700 developer-owned home without ``DAC_OVERRIDE`` (#3719).
 
     Returns the parsed report (counts only — never a URL, host or value) plus
     ``success``. Never raises.
@@ -299,7 +301,8 @@ async def scrub_git_remote_tokens(
 # sweep itself, rather than one per caller — because the caller that actually
 # needed it is not the obvious one: `propagate_github_pat` gathers over the
 # WHOLE FLEET with no bound of its own, and this change takes each agent from
-# one exec to three. On a 50-agent rotation that is 150 execs against 6 threads,
+# one exec to four (install check + sweep, #3719). On a 50-agent rotation that
+# is 200 execs against 6 threads,
 # each holding its thread for up to the in-container `timeout`.
 _SCRUB_CONCURRENCY = 3
 _scrub_semaphore = asyncio.Semaphore(_SCRUB_CONCURRENCY)
