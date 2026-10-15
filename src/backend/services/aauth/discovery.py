@@ -43,6 +43,11 @@ METADATA_PATH = "/.well-known/aauth-agent.json"
 #: the caches apply unchanged, keyed by ``(issuer, dwk)``.
 AGENT_DOCUMENT = "aauth-agent.json"
 RESOURCE_DOCUMENT = "aauth-resource.json"
+#: ent#928: an ACCESS server's document (four-party). Only its ``issuer`` is
+#: read — :func:`access_server_metadata` — never a key: the auth token an AS
+#: mints is inspected, not signature-checked (ent#879 T5), so the AS's JWKS
+#: has no consumer here and is not fetched.
+ACCESS_DOCUMENT = "aauth-access.json"
 KNOWN_DOCUMENTS = frozenset({AGENT_DOCUMENT, RESOURCE_DOCUMENT})
 MAX_DOCUMENT_BYTES = 64 * 1024
 DISCOVERY_DEADLINE = 8.0
@@ -65,7 +70,15 @@ class _Entry:
     error: Optional[DiscoveryError] = None
 
 
+@dataclass
+class _DocumentEntry:
+    fetched_at: float
+    document: Optional[Dict[str, Any]] = None
+    error: Optional[DiscoveryError] = None
+
+
 _cache: Dict[Tuple[str, str], _Entry] = {}
+_document_cache: Dict[Tuple[str, str], _DocumentEntry] = {}
 _locks: Dict[Tuple[str, str], asyncio.Lock] = {}
 
 
@@ -214,7 +227,77 @@ async def resolve_key(issuer: str, kid: str, *, now: Optional[float] = None,
     return found
 
 
+async def fetch_access_server_document(issuer: str, client_factory: Optional[Callable] = None) -> Dict[str, Any]:
+    """``{issuer}/.well-known/aauth-access.json``, validated: an object whose ``issuer`` is ``issuer``.
+
+    The same egress as every other discovery fetch (:func:`_get_json`: public
+    URL validation, IP pinning, no redirects, the 64 KB cap). Raises
+    :class:`DiscoveryError` — ``issuer_mismatch`` when the document names
+    another server, ``unknown_key`` for everything that could not be fetched
+    or read (the vocabulary the key path already uses).
+    """
+    from services import a2a_client
+
+    factory = client_factory or a2a_client._http_client
+    timeout = httpx.Timeout(DISCOVERY_DEADLINE, connect=5.0)
+    async with factory(timeout) as client:
+        metadata = await _get_json(client, f"{issuer}/.well-known/{ACCESS_DOCUMENT}")
+    if not isinstance(metadata, dict):
+        raise DiscoveryError("unknown_key", "access server metadata is not an object")
+    if "issuer" not in metadata:
+        raise DiscoveryError("issuer_missing", "access server metadata has no issuer")
+    if metadata.get("issuer") != issuer:
+        raise DiscoveryError("issuer_mismatch", "access server metadata names a different issuer")
+    return metadata
+
+
+async def access_server_metadata(issuer: str, *, now: Optional[float] = None,
+                                 fetcher: Optional[Callable] = None) -> Dict[str, Any]:
+    """An access server's published metadata (ent#928), from cache or a bounded fetch.
+
+    Same discipline as :func:`resolve_key`: one fetch per ``(issuer, document)``
+    at a time, positive results for ``CACHE_TTL``, failures for ``NEGATIVE_TTL``,
+    a malformed document negative-cached rather than refetched per request.
+    The caller (``resource_token``) treats any :class:`DiscoveryError` as
+    "not a discoverable access server".
+    """
+    clock = time.monotonic if now is None else (lambda: now)
+    fetch = fetcher or fetch_access_server_document
+    cache_key = (issuer, ACCESS_DOCUMENT)
+
+    def _from(entry: _DocumentEntry) -> Dict[str, Any]:
+        if entry.error is not None:
+            raise entry.error
+        return entry.document or {}
+
+    entry = _document_cache.get(cache_key)
+    if entry is not None and clock() - entry.fetched_at < (NEGATIVE_TTL if entry.error else CACHE_TTL):
+        return _from(entry)
+    lock = _locks.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        latest = _document_cache.get(cache_key)
+        if latest is not None and latest is not entry and clock() - latest.fetched_at < MIN_REFETCH_INTERVAL:
+            return _from(latest)   # someone refreshed while we waited
+        try:
+            document = await asyncio.wait_for(fetch(issuer), timeout=DISCOVERY_DEADLINE)
+            _document_cache[cache_key] = _DocumentEntry(fetched_at=clock(), document=document)
+        except asyncio.TimeoutError:
+            err = DiscoveryError("unknown_key", "access server metadata fetch timed out")
+            _document_cache[cache_key] = _DocumentEntry(fetched_at=clock(), error=err)
+            raise err from None
+        except DiscoveryError as err:
+            _document_cache[cache_key] = _DocumentEntry(fetched_at=clock(), error=err)
+            raise
+        except Exception:  # noqa: BLE001 — same reason as resolve_key: never an unbounded refetch
+            logger.warning("[aauth] access server discovery failed for %s", issuer, exc_info=True)
+            err = DiscoveryError("unknown_key", "access server metadata could not be read")
+            _document_cache[cache_key] = _DocumentEntry(fetched_at=clock(), error=err)
+            raise err from None
+    return document
+
+
 def reset_cache() -> None:
     """Tests only."""
     _cache.clear()
+    _document_cache.clear()
     _locks.clear()
