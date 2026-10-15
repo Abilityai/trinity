@@ -1296,18 +1296,29 @@ revision — the kind is a label inside the existing envelope.
   contacted, the `aa-resource+jwt` must verify under the resource's JWKS
   (`kid` resolves, Ed25519 signature, no forbidden header params) and bind to
   THIS exchange: `iss` = the resource, `dwk` = `aauth-resource.json`, `aud` =
-  our PS (three-party; a four-party `aud` naming an Access Server is refused
-  `unsupported_aud` — deferred), `agent_jkt` = the agent's current key
-  thumbprint, `ps` = our PS, `sub` + `presented_jti` = the token we just
-  presented, `exp` in the future, `iat` not in the future, lifetime ≤ 1 h
-  (WARN above 5 min). One red test per check; a failure is a named refusal
-  and a WARN "possible tampering", never a PS trip.
+  our PS (**three-party**) or a **discoverable access server** (**four-party**,
+  ent#928: a strict `https://host` identifier whose
+  `/.well-known/aauth-access.json` is fetchable through the pinned public-URL
+  egress and names itself as `issuer`, checked only AFTER the signature
+  verifies; any other `aud` — no document, issuer mismatch, private or
+  non-https address, port, path, malformed — is refused
+  `resource_token_invalid:aud` with no PS call), `agent_jkt` = the agent's
+  current key thumbprint, `ps` = our PS, `sub` + `presented_jti` = the token
+  we just presented, `exp` in the future, `iat` not in the future, lifetime
+  ≤ 1 h (WARN above 5 min). One red test per check; a failure is a named
+  refusal and a WARN "possible tampering", never a PS trip. The verified
+  token carries its mode (`as_url`: the AS, or none).
 - **FR-5 — Auth-token exchange + cache (Redis)**: a signed
   `POST {auth_token_endpoint}` `{resource_token, presented_token, justification,
-  capabilities: ["interaction"]}` with `Prefer: wait=10`; 200 → the
-  `aa-auth+jwt` is **inspected, not signature-verified** (`typ`, `iss` = the
-  resource token's `aud`, `aud` = the resource, `cnf` = the agent's key, `sub`
-  = the presented token's, `exp` ≤ the presented token's) and cached under
+  capabilities: ["interaction"]}` with `Prefer: wait=10` — in BOTH modes to
+  OUR person server; in four-party the PS federates with the access server
+  the resource token named, the agent never calls the AS (ent#928). 200 →
+  the `aa-auth+jwt` is **inspected, not signature-verified** (`typ`; `iss` =
+  the resource token's `aud` — the PS with `dwk` `aauth-person.json` in
+  three-party, the AS with `dwk` `aauth-access.json` in four-party, a token
+  from the other kind of server refused; `ps` = our PS in both; `aud` = the
+  resource, `cnf` = the agent's key, `sub` = the presented token's, `exp` ≤
+  the presented token's), held under its real issuer, and cached under
   `aauth:at:{sha256(issuer|ps|agent|key_thumbprint|resource|scope)}` with TTL
   `exp − 300` — a second call reuses it with **zero PS trips** (the AC); a
   cache that cannot be read is "not held", never an unsigned call. 202
@@ -1387,8 +1398,9 @@ revision — the kind is a label inside the existing envelope.
   present, step 8 prints a consent link instead of polling); `down` clears
   both settings keys. `senzing_check.py` works from a laptop with the agent's
   MCP key.
-- **Out of scope**: a four-party `aud` (Access Server) on the resource token;
-  the PS `interaction_endpoint` relay; pre-authorisation through the
+- **Out of scope**: verifying anything about a four-party access server beyond
+  its published metadata (the PS does the federation; the agent never dials
+  the AS — ent#928); the PS `interaction_endpoint` relay; pre-authorisation through the
   resource's `authorization_endpoint` (challenge-driven only, T8); signature
   components beyond `content-type` / `content-digest`; a relaxed (off-origin)
   resource `jwks_uri`; signature verification of the PS-issued auth token (T5,
