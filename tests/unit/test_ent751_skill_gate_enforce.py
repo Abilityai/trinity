@@ -46,6 +46,8 @@ def gate(monkeypatch):
     from services.rate_limiter import RateLimitResult
 
     state = {"gates": {}, "fingerprints": {}, "fp_calls": [], "rate_ok": True, "map_error": None}
+    # trinity-enterprise#881: approvers here can open the agent; reach is pinned in test_ent881.
+    monkeypatch.setattr(svc, "_can_open", lambda agent, email: True)
 
     class _Audit:
         async def log(self, **kw):

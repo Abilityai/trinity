@@ -311,29 +311,82 @@ async def enforce(
 # Steps
 # ---------------------------------------------------------------------------
 
-def _approvers(agent_name: str, role: str) -> List[str]:
-    """The casefolded emails `role` reaches on `agent_name`; refuses when it
-    reaches nobody (an `approver` with no assignments provider, an `operator`
-    role, an owner with no email, a canon role nobody is seated in).
+def _resolved_people(agent_name: str, role: str) -> List[str]:
+    """The casefolded emails `role` names on `agent_name`, before any check of
+    whether they can open the agent. `[]` when it names nobody.
 
     `role` is the stored approver: a kind (`primary` | `approver`), or a canon
     role `role:<id>` (trinity-enterprise#848) resolved through the assignments
     provider alone — no owner fallback, so no provider and "nobody" refuse
-    alike. The refusal names the role's label, never a person."""
+    alike."""
     role_id = role_addressing.parse_role_id(role)
     try:
         res = (role_addressing.resolve_role_id(agent_name, role_id) if role_id
                else role_addressing.resolve(agent_name, role))
     except role_addressing.RoleRefused:
         res = None
-    people = [p.casefold() for p in (res.people if res else []) if p]
+    return [p.casefold() for p in (res.people if res else []) if p]
+
+
+def _can_open(agent_name: str, email: str) -> bool:
+    """Can this person reach a gated approval on `agent_name`? (trinity-enterprise#881)
+
+    A decision is made in the Workspace (the agent on the person's roster:
+    owned or shared) or in Operations (an operator or admin with access to the
+    agent). A platform account is asked `can_user_access_agent` — owner, shared
+    or admin, which covers both doors; an email with no account only has the
+    Workspace, so the agent must be shared with it. Fails closed: an unreadable
+    lookup is "cannot open", which refuses by name rather than waits silently."""
+    try:
+        user = db.get_user_by_email(email)
+        if user:
+            return bool(db.can_user_access_agent(user["username"], agent_name))
+        from client_portal.service import agent_on_roster
+        return bool(agent_on_roster(agent_name, email, include_owned=False))
+    except Exception:  # noqa: BLE001
+        logger.warning("[SkillGate] could not tell whether an approver can open %s",
+                       agent_name, exc_info=True)
+        return False
+
+
+def _approvers(agent_name: str, role: str) -> List[str]:
+    """The casefolded emails `role` reaches on `agent_name`: the people it names
+    who can open the agent (trinity-enterprise#881). Refuses when it reaches
+    nobody — `role_unassigned` when it names nobody (an `approver` with no
+    assignments provider, an `operator` role, an owner with no email, a canon
+    role nobody is seated in), `approver_cannot_open_agent` when everyone it
+    names is outside the agent. An approval raised to people who can never see
+    it waits silently until it expires. The refusal names the role's label,
+    never a person."""
+    people = _resolved_people(agent_name, role)
     if not people:
         raise SkillGateRefused(
             422, "role_unassigned",
             f"Nobody fills the {role_addressing.role_label(role)} role for {agent_name}, "
             "so this gated request can't be approved. Ask the agent's owner to assign one.",
             role=role)
-    return people
+    reachable = [p for p in people if _can_open(agent_name, p)]
+    if not reachable:
+        raise SkillGateRefused(
+            422, "approver_cannot_open_agent",
+            f"The {role_addressing.role_label(role)} for {agent_name} can't open {agent_name}, "
+            "so they would never see this approval. Ask the agent's owner to share "
+            f"{agent_name} with them.", role=role)
+    return reachable
+
+
+def approver_reason(agent_name: str, role: str) -> Optional[str]:
+    """Why `role` reaches nobody on `agent_name`, for the Skills tab
+    (trinity-enterprise#881): `unfilled` (it names nobody), `not_shared`
+    (everyone it names is outside the agent), or None when it reaches someone.
+    Never raises; a failed lookup reads `unfilled`."""
+    try:
+        _approvers(agent_name, role)
+        return None
+    except SkillGateRefused as e:
+        return "not_shared" if e.code == "approver_cannot_open_agent" else "unfilled"
+    except Exception:  # noqa: BLE001
+        return "unfilled"
 
 
 def approver_people(agent_name: str, role: str) -> List[str]:
