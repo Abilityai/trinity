@@ -14,7 +14,7 @@ roster refresh cannot drift apart.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -116,3 +116,39 @@ def resolve_ws_identity(username: str) -> Optional[Dict[str, Any]]:
         return None
     return {"email": email, "is_admin": False, "accessible_agents": list(agents or []),
             "allowed_types": allowed_types, "allowed_fields": allowed_fields}
+
+
+def event_stream_roster(key_info: Dict[str, Any], user_data: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    """The ``/ws/events`` roster for an MCP key: ``(is_admin, accessible_agents)``.
+
+    Resolved at connect and again on the client's ``refresh`` command — the
+    only two points a ``/ws/events`` roster is ever computed. The dispatcher's
+    background refresh (``event_bus._maybe_invalidate_rosters``) re-resolves by
+    the OWNER's email and skips every ``SCOPE_SCOPED`` slot, which is what
+    ``/ws/events`` registers, so this function is the whole roster policy for
+    that surface.
+
+    An ``agent``-scoped key gets its reach (``dependencies.agent_fleet_reach``:
+    itself, its edges, the agents it spawned) with ``is_admin=False`` — never
+    its owner's roster. It carries the owner's role, so on an admin-owned
+    install the raw read used to answer it with every agent on the install
+    (trinity-enterprise#872). A nameless ``agent`` key gets the empty roster.
+    Every other scope is unchanged: the owner's roster, an admin unfiltered.
+    """
+    from database import db
+    from dependencies import agent_fleet_reach
+    from models import User
+
+    user_email = key_info.get("user_email")
+    if key_info.get("scope") == "agent":
+        principal = User(
+            id=int(user_data.get("id") or 0),
+            username=key_info.get("user_id") or user_data.get("username") or "",
+            email=user_email,
+            role=user_data.get("role") or "user",
+            mcp_scope="agent",
+            agent_name=key_info.get("agent_name"),
+        )
+        return False, sorted(agent_fleet_reach(principal) or set())
+    is_admin = user_data.get("role") == "admin"
+    return is_admin, db.get_accessible_agent_names(user_email, is_admin)

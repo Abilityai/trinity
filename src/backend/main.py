@@ -130,7 +130,7 @@ from routers.loops import (
 from services.loop_service import set_websocket_manager as set_loop_ws_manager
 from routers.webhooks import router as webhooks_router  # Webhook triggers (WEBHOOK-001, #291)
 from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#550)
-from services.ws_identity_service import accessible_agents_for, resolve_ws_identity  # ent#467
+from services.ws_identity_service import accessible_agents_for, event_stream_roster, resolve_ws_identity  # ent#467
 # Workspace / client portal — OSS core since ent#356 (was an entitled
 # enterprise module). Its own package rather than routers/: it moved
 # wholesale from the submodule, and keeping the vertical slice intact
@@ -1686,10 +1686,11 @@ async def websocket_events_endpoint(
     if owner_is_workspace_only(user_data):
         await websocket.close(code=4003, reason="This account works in the Workspace")
         return
-    is_admin = user_data and user_data.get("role") == "admin"
-
-    # Get list of accessible agents for this user
-    accessible_agents = db.get_accessible_agent_names(user_email, is_admin)
+    # The roster policy lives in `ws_identity_service.event_stream_roster`: an
+    # agent-scoped key is scoped to its reach, never its owner's roster
+    # (trinity-enterprise#872). The same helper serves "refresh" below, and the
+    # dispatcher's background refresh never touches a /ws/events slot.
+    is_admin, accessible_agents = event_stream_roster(key_info, user_data)
 
     await websocket.accept()
     await websocket.send_json({
@@ -1713,7 +1714,7 @@ async def websocket_events_endpoint(
                 await websocket.send_text("pong")
             elif data == "refresh":
                 # Refresh accessible agents list (e.g., after sharing changes)
-                accessible_agents = db.get_accessible_agent_names(user_email, is_admin)
+                _, accessible_agents = event_stream_roster(key_info, user_data)
                 filtered_manager.update_accessible_agents(websocket, accessible_agents)
                 await websocket.send_json({
                     "type": "refreshed",

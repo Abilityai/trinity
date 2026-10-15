@@ -411,6 +411,49 @@ _PREDICATES = {"can_user_access_agent", "can_user_share_agent"}
 #: `_may_reach_for_path` is files.py's reach plus the ent#596 skills-holder case.
 _REACH_HELPERS = {"agent_may_reach", "_may_reach_for_path"}
 
+# trinity-enterprise#872 — the two seams a fleet-level route resolves its roster
+# through, plus the raw db read under them. A function that calls one of these
+# AND branches on `role == "admin"` (or `!=`) around it is the shape that
+# answered an agent key with its owner's whole install; it passes only if it
+# also narrows through a reach builder.
+_FLEET_ACCESSORS = {"get_accessible_agents", "accessible_agent_names", "get_accessible_agent_names"}
+_FLEET_REACH = {"agent_fleet_reach", "_agent_fleet_reach", "agent_reach_set"}
+_FLEET_EXEMPT: dict = {}
+
+# trinity-enterprise#872 — db methods that take the caller's USERNAME and run
+# `can_user_share_agent`/`can_user_access_agent` on it themselves, so a router
+# that calls one with no gate of its own is open to an agent key (the owner's
+# username is the key's username). Satisfied by a reach helper, a person-only
+# gate, an imperative access check, or an agent-resolving dependency.
+_DB_USERNAME_PREDICATES = {"set_allow_proactive", "share_agent", "unshare_agent", "create_schedule"}
+_ROUTE_GATES = {"reject_agent_principal", "assert_agent_access", "assert_agent_owner",
+                "require_person", "require_interactive", "require_person_or_capability"}
+_DEPENDENCY_GATES = ("OwnedAgentByName", "AuthorizedAgentByName", "OwnedAgent", "AuthorizedAgent",
+                     "get_owned_agent", "get_authorized_agent", "require_person",
+                     "require_interactive", "require_person_or_capability")
+_DB_EXEMPT: dict = {}
+
+
+def _compares_to_admin(node) -> bool:
+    return (isinstance(node, ast.Compare)
+            and any(isinstance(op, (ast.Eq, ast.NotEq)) for op in node.ops)
+            and any(isinstance(c, ast.Constant) and c.value == "admin"
+                    for c in [node.left, *node.comparators]))
+
+
+def _dependency_gated(fn) -> bool:
+    """An argument annotated `OwnedAgentByName` / `Depends(get_*_agent*)` /
+    `Depends(require_person)` resolves the target or the person before the
+    body runs (D22)."""
+    args = fn.args
+    for arg, default in [*zip(args.args[::-1], [*args.defaults[::-1], *[None] * len(args.args)]),
+                         *zip(args.kwonlyargs, args.kw_defaults)]:
+        texts = [ast.unparse(arg.annotation) if arg.annotation else "",
+                 ast.unparse(default) if default is not None else ""]
+        if any(g in t for g in _DEPENDENCY_GATES for t in texts):
+            return True
+    return False
+
 
 def _offenders():
     out = []
@@ -433,11 +476,27 @@ def _offenders():
                      for n in ast.walk(sub)}
             own = [c for c in calls if id(c) not in inner
                    and getattr(c.func, "attr", None) in _PREDICATES]
-            if not own or names & _REACH_HELPERS:
-                continue
-            if (rel, fn.name) in _EXEMPT or (rel, "*") in _EXEMPT:
-                continue
-            out.append(f"{rel}::{fn.name}")
+            if own and not names & _REACH_HELPERS:
+                if not ((rel, fn.name) in _EXEMPT or (rel, "*") in _EXEMPT):
+                    out.append(f"{rel}::{fn.name}")
+            # (2) a fleet accessor behind a role branch, with no reach builder.
+            own_names = {getattr(c.func, "attr", getattr(c.func, "id", None))
+                         for c in calls if id(c) not in inner}
+            if own_names & _FLEET_ACCESSORS and not names & _FLEET_REACH:
+                branched = any(
+                    _compares_to_admin(n.test) and any(
+                        isinstance(m, ast.Return) or (isinstance(m, ast.Call) and
+                        getattr(m.func, "attr", getattr(m.func, "id", None)) in _FLEET_ACCESSORS)
+                        for part in (n.body, n.orelse) for stmt in part for m in ast.walk(stmt))
+                    for n in ast.walk(fn) if isinstance(n, ast.If) and id(n) not in inner)
+                if branched and (rel, fn.name) not in _FLEET_EXEMPT:
+                    out.append(f"{rel}::{fn.name} [fleet accessor behind a role branch]")
+            # (3) a username-keyed db predicate reached from a router with no gate.
+            if (rel.startswith("routers/") and own_names & _DB_USERNAME_PREDICATES
+                    and not names & (_ROUTE_GATES | _REACH_HELPERS | _FLEET_REACH)
+                    and not _dependency_gated(fn)
+                    and (rel, fn.name) not in _DB_EXEMPT):
+                out.append(f"{rel}::{fn.name} [ungated db-level username predicate]")
     return out
 
 
@@ -446,14 +505,16 @@ def test_every_inline_access_check_narrows_an_agent_key():
     assert not offenders, (
         "These call db.can_user_access_agent / can_user_share_agent without "
         "dependencies.agent_may_reach, so an agent key would reach any sibling its "
-        "owner holds (ent#629). AND the reach in, or add the function to _EXEMPT "
-        f"with the reason: {offenders}")
+        "owner holds (ent#629); or resolve a fleet roster behind a `role == \"admin\"` "
+        "branch with no reach builder, or reach a username-keyed db predicate from a "
+        "router with no gate of its own (trinity-enterprise#872). AND the reach in, or "
+        f"add the function to the matching exemption table with the reason: {offenders}")
 
 
 def test_every_exemption_still_exists():
     """A stale exemption would quietly re-open the door for a new function of
     the same name — so each listed function must still call a predicate."""
-    for (rel, fn_name), _ in _EXEMPT.items():
+    for (rel, fn_name), _ in {**_EXEMPT, **_FLEET_EXEMPT, **_DB_EXEMPT}.items():
         src = (_BACKEND / rel).read_text()
         if fn_name == "*":
             assert any(p in src for p in _PREDICATES), rel

@@ -204,19 +204,11 @@ async def get_fleet_status(
     Returns health status for all agents the user can access.
     Admins see all agents; regular users see owned and shared agents.
     """
-    # Get accessible agents
-    from services.docker_service import list_all_agents_fast
-
-    all_agents = list_all_agents_fast()
-    all_agent_names = [a.name for a in all_agents]
-
-    # Filter to accessible agents (unless admin)
-    if current_user.role != "admin":
-        accessible = get_accessible_agents(current_user)
-        accessible_names = {a["name"] for a in accessible}
-        agent_names = [n for n in all_agent_names if n in accessible_names]
-    else:
-        agent_names = all_agent_names
+    # The seam narrows for every principal: an admin person still gets every
+    # Docker-present agent, an agent key gets its reach (trinity-enterprise#872).
+    # The `role != "admin"` shortcut that used to sit here skipped the seam for
+    # exactly the principal that carries its owner's admin role.
+    agent_names = [a["name"] for a in get_accessible_agents(current_user)]
 
     if not agent_names:
         return FleetHealthStatus(

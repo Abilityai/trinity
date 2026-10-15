@@ -15,6 +15,8 @@ SPAWN, C with no edge, FOREIGN owned by another user.
 """
 from __future__ import annotations
 
+import ast
+import asyncio
 import sys
 from pathlib import Path
 
@@ -25,7 +27,7 @@ if _UNIT not in sys.path:  # the ent#629 fleet is the shared world
     sys.path.insert(0, _UNIT)
 
 from test_ent629_agent_reach import (  # noqa: F401 — `fleet` is a fixture
-    A, B, C, FOREIGN, OWNER, SPAWN, _agent_key, _human, _real_app, fleet,
+    A, B, C, FOREIGN, OTHER, OWNER, SPAWN, _agent_key, _human, _real_app, fleet,
 )
 
 from db_harness import db_backend  # noqa: E402,F401 — `fleet` needs it
@@ -187,3 +189,141 @@ def test_an_agent_key_reads_only_its_own_key_row(fleet, monkeypatch):
         assert (r.status_code, r.json()["detail"]) == (404, "MCP API key not found"), other
     person = _real_app(rk, user=_human)
     assert all(person.get(f"/api/mcp/keys/{k}").status_code == 200 for k in rows)
+
+
+# ---------------------------------------------------------------------------
+# Part D — the two sockets
+# ---------------------------------------------------------------------------
+#
+# `/ws` (T2): an agent key may not mint a ticket at all (Part C above) — the
+# dispatcher refreshes a `/ws` roster by the OWNER's email, so a reach-scoped
+# `/ws` slot would be re-widened on the next share change.
+#
+# `/ws/events` (T3): scoped to the reach, NOT refused — on the proof below that
+# the same refresh never touches a `/ws/events` slot. The handler registers a
+# SCOPE_SCOPED slot with no email, and the refresh skips exactly those, so the
+# roster really is the connect-time snapshot the contract says it is; the only
+# way it changes is the client's own "refresh" command, which re-resolves
+# through the same helper as connect.
+
+from services import event_bus as event_bus_mod  # noqa: E402
+from services.event_bus import SCOPE_SCOPED, StreamDispatcher  # noqa: E402
+
+_BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
+
+
+def _main_tree():
+    return ast.parse((_BACKEND / "main.py").read_text())
+
+
+def _events_slot(agents):
+    """A slot shaped as `FilteredWebSocketManager.connect` registers one for
+    `/ws/events`: SCOPE_SCOPED, no email (that shape is pinned below)."""
+    async def _send(_payload):  # pragma: no cover — never awaited here
+        return None
+    return event_bus_mod._ClientSlot(ws=object(), scope=SCOPE_SCOPED, send_func=_send,
+                                     is_admin=False, accessible_agents=set(agents))
+
+
+@pytest.mark.asyncio
+async def test_the_background_roster_refresh_never_re_widens_an_events_slot():
+    """T3 proof. The resolver answers with the OWNER's whole roster; the slot
+    must keep its reach and the resolver must never even be consulted."""
+    dispatcher = StreamDispatcher()
+    slot = _events_slot({A, B, SPAWN})
+    dispatcher._clients = {"events": slot}
+    asked = []
+    dispatcher.set_accessible_resolver(
+        lambda email: asked.append(email) or [A, B, C, SPAWN, FOREIGN])
+    for event in ("agent_shared", "agent_created", "agent_deleted", "agent_renamed"):
+        dispatcher._maybe_invalidate_rosters({"event": event, "data": {"name": C}})
+    await asyncio.gather(*list(dispatcher._refresh_tasks))
+    assert asked == []
+    assert slot.accessible_agents == {A, B, SPAWN}
+
+
+def test_events_slots_are_registered_outside_the_email_keyed_refresh():
+    """The pin under the proof: `/ws/events` registers SCOPE_SCOPED with no
+    email — the two things the refresh skips on. Either one changing would
+    put an agent slot back on the owner-email refresh path."""
+    cls = next(n for n in ast.walk(_main_tree())
+               if isinstance(n, ast.ClassDef) and n.name == "FilteredWebSocketManager")
+    connect = next(n for n in ast.walk(cls)
+                   if isinstance(n, ast.AsyncFunctionDef) and n.name == "connect")
+    register = next(c for c in ast.walk(connect) if isinstance(c, ast.Call)
+                    and getattr(c.func, "attr", None) == "register")
+    kw = {k.arg: ast.unparse(k.value) for k in register.keywords}
+    assert kw["scope"] == "SCOPE_SCOPED"
+    assert "email" not in kw
+
+
+def _key_info(scope="agent", agent=A, email=None):
+    return {"scope": scope, "agent_name": agent, "user_id": OWNER, "user_email": email}
+
+
+def test_the_event_stream_roster_of_an_agent_key_is_its_reach(fleet):
+    from services.ws_identity_service import event_stream_roster
+
+    owner = fleet.get_user_by_username(OWNER)
+    assert owner["role"] == "admin"
+    assert event_stream_roster(_key_info(), owner) == (False, sorted({A, B, SPAWN}))
+    # Scope first: a nameless agent key is never handed its owner's roster.
+    assert event_stream_roster(_key_info(agent=None), owner) == (False, [])
+
+
+def test_the_event_stream_roster_of_every_other_key_is_unchanged(fleet):
+    from services.ws_identity_service import event_stream_roster
+
+    owner = fleet.get_user_by_username(OWNER)
+    for scope in ("user", None):
+        assert event_stream_roster(_key_info(scope=scope, agent=None), owner) == (
+            True, fleet.get_accessible_agent_names(None, True))
+    other = fleet.get_user_by_username(OTHER)
+    assert event_stream_roster(_key_info(scope="user", agent=None, email="o@e.com"), other) == (
+        False, fleet.get_accessible_agent_names("o@e.com", False))
+
+
+def test_the_events_handler_resolves_both_rosters_through_the_helper():
+    """Connect and the client's "refresh" command both go through
+    `event_stream_roster`; the raw owner-roster read is gone from the handler."""
+    fn = next(n for n in ast.walk(_main_tree())
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "websocket_events_endpoint")
+    calls = [getattr(c.func, "attr", getattr(c.func, "id", None))
+             for c in ast.walk(fn) if isinstance(c, ast.Call)]
+    assert "get_accessible_agent_names" not in calls
+    assert calls.count("event_stream_roster") == 2
+
+
+# ---------------------------------------------------------------------------
+# Part E — the fleet health status (D21)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def health(containers, monkeypatch):
+    import routers.monitoring as rm
+    import services.agent_client as ac
+    import services.heartbeat_service as hs
+
+    class _Svc:
+        is_running = False
+
+    monkeypatch.setattr(rm, "get_monitoring_service", lambda: _Svc())
+    monkeypatch.setattr(rm.db, "get_all_latest_health_checks", lambda names, kind: {})
+    monkeypatch.setattr(rm.db, "get_health_summary", lambda names: {})
+    monkeypatch.setattr(rm, "_merge_sync_health", lambda agents, names: None)
+    monkeypatch.setattr(hs, "heartbeat_status_bulk", lambda names: {})
+    monkeypatch.setattr(ac, "get_all_circuit_states", lambda: {})
+    return rm
+
+
+def test_the_fleet_health_status_carries_only_the_reach(health):
+    """`routers/monitoring.py` short-circuited on `role != "admin"` BEFORE the
+    seam, so an admin-owned agent key never reached the narrowing at all."""
+    got = _real_app(health).get("/api/monitoring/status").json()
+    assert {a["name"] for a in got["agents"]} == {A, B, SPAWN}
+    assert got["summary"]["total_agents"] == 3
+
+
+def test_the_fleet_health_status_is_unchanged_for_an_admin_person(health):
+    got = _real_app(health, user=_human).get("/api/monitoring/status").json()
+    assert {a["name"] for a in got["agents"]} == {A, B, C, SPAWN, FOREIGN, "orphan"}
