@@ -68,10 +68,14 @@ _COPY_DURATION_WARN_SECONDS = 20.0
 TMP_MAX_AGE_SECONDS = 24 * 3600
 
 # Prune scans ONLY these patterns — never arbitrary files in the backup dir.
+# `pre-update-*.dump` is the fresh PostgreSQL dump `scripts/deploy/update.sh`
+# takes before every update (#3007, scripts/deploy/update-db.py); listing it
+# here is what puts it under the same retention as everything else.
 ARTIFACT_PATTERNS = (
     "trinity-backup-*.db",
     "trinity-backup-*.dump",
     "pre-migration-*.db",
+    "pre-update-*.dump",
 )
 
 

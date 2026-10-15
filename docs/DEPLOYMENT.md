@@ -45,6 +45,12 @@ one of them (`container-security.yml` → `verify-compose-file-sets`):
 | Production (source build) | `docker compose -f docker-compose.prod.yml up -d` (+ `-f docker-compose.prod.enterprise.yml` with the enterprise submodule) | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
 | Hosted (prebuilt GHCR images) | `./scripts/deploy/start.sh --hosted` — day-two: `docker compose -f docker-compose.hosted.yml …` | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
 
+**Updating any of these: `./scripts/deploy/update.sh`** (#3007). It reads which
+file set the host runs from the running backend's compose labels — including the
+enterprise overlay — so an update never recreates the backend from the wrong set.
+`--check` previews it and changes nothing; see
+[Upgrading](user-docs/guides/deploying/upgrading.md).
+
 **Never stack the dev file under prod or hosted** (`-f docker-compose.yml -f
 docker-compose.prod.yml`). Compose merges list-type keys by concatenation, so the
 combination either fails validation on the duplicated hardening entries (Compose
@@ -417,8 +423,9 @@ If you frequently pull `dev`, alias this to a single command in your
 shell — Trinity does not currently auto-detect the staleness on
 `start.sh` because the cost of doing so on every cold start is too high
 relative to how rarely the failure occurs (see #557 for the discussion).
-A future `scripts/deploy/upgrade.sh` will wrap backup + rebuild + start
-+ verify for the explicit upgrade path.
+For the explicit upgrade path, `./scripts/deploy/update.sh` wraps preflight +
+backup + checkout + rebuild + restart + published-URL verification, and
+rebuilds whichever platform images the update needs (#3007).
 
 **Redis connection errors**
 - Ensure Redis is running: `docker compose ps redis`

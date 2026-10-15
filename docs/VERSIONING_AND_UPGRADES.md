@@ -72,6 +72,14 @@ trinity-agent-base:dev        # Development builds
 
 ---
 
+## How to upgrade
+
+Run `./scripts/deploy/update.sh` on the host (or `trinity update`). It detects the
+install shape, preflights, backs up the database, updates, rebuilds what changed
+and verifies the published URL, with `--rollback` to undo. The procedures below
+describe what happens underneath; see
+[Upgrading](user-docs/guides/deploying/upgrading.md) for the full walkthrough.
+
 ## Upgrade Categories
 
 ### 1. Non-Breaking Updates (PATCH)

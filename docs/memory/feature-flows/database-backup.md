@@ -91,7 +91,7 @@ PG is deliberately excluded from the boot hook in v1 (Alembic DDL is transaction
 ## Data Layer
 
 - **No schema change** — status rides `system_settings`; config rides ops settings + env. No `db/migrations.py` entry, no Alembic revision.
-- Filesystem: `<db dir>/backups/` (= `/data/backups/`, created 0700). Artifacts: `trinity-backup-YYYYMMDD.db`, `trinity-backup-YYYYMMDD.dump`, `pre-migration-YYYYMMDD-HHMMSS.db`; in-flight tmps `<final>.tmp.<pid>`.
+- Filesystem: `<db dir>/backups/` (= `/data/backups/`, created 0700). Artifacts: `trinity-backup-YYYYMMDD.db`, `trinity-backup-YYYYMMDD.dump`, `pre-migration-YYYYMMDD-HHMMSS.db` (also written by `scripts/deploy/update.sh` on SQLite), `pre-update-YYYYMMDD-HHMMSS.dump` (the per-update PostgreSQL dump from `scripts/deploy/update-db.py`, #3007 — in `ARTIFACT_PATTERNS`, so the same prune applies); in-flight tmps `<final>.tmp.<pid>`.
 - Redis: `db_backup:running` (SETNX lease, TTL 2100s by default). Not `agent:*`-named, so the #1560 name-keyed registry doesn't apply.
 
 ## Side Effects

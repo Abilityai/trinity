@@ -2,6 +2,34 @@
 
 Apply a new Trinity release to a running instance. The procedure keeps agent containers running throughout — only the platform services are rebuilt (source installs) or re-pulled (hosted installs) and restarted.
 
+## The one command
+
+On the host, in the Trinity checkout:
+
+```bash
+./scripts/deploy/update.sh --check   # preflight only — changes nothing
+./scripts/deploy/update.sh           # update to the newest release tag
+./scripts/deploy/update.sh --to v1.0.0
+```
+
+(`trinity update` from the [CLI](../../../CLI.md) runs the same script.) It works out how the install was deployed — dev, source-built production (with or without the enterprise overlay) or hosted — from the running backend's own compose labels, so it never runs the wrong file set. Then it:
+
+1. **Preflights** before touching anything: Docker reachable, `CREDENTIAL_ENCRYPTION_KEY` set, no local edits to tracked files, enough free disk, the compose files render, and on an enterprise install the enterprise pin recorded by the target release is available. Any failure stops here with nothing changed.
+2. **Backs up the database** through the running backend (SQLite: a verified copy at `backups/pre-migration-<timestamp>.db`; PostgreSQL: a fresh `pg_dump` at `backups/pre-update-<timestamp>.dump`), and records the schema position — which migrations the database has applied.
+3. **Checks out** the target, and on an enterprise install the enterprise tree at the pin that release records.
+4. **Compares published ports** with what is running. If a host port would move (for example because a `.env` key such as `FRONTEND_PORT` now applies), it puts the checkout back and stops before any container changes — pass `--accept-port-change` once your proxy is updated.
+5. **Rebuilds and restarts** the platform services (hosted: pulls via `start.sh --hosted`). The agent base image is rebuilt only when the release changed it (`--rebuild-base` forces it); agents pick it up on their next cold stop/start.
+6. **Verifies the published URL** — `FRONTEND_URL` from `.env`, or `--url https://your-domain` — not just `localhost`: the page must be real HTML, its hashed UI bundle must load, and `/api/auth/mode` must answer through the same address. On an enterprise install it also confirms the enterprise modules registered.
+
+If verification fails it prints `./scripts/deploy/update.sh --rollback` (and offers it on a terminal). Rollback first checks whether a migration ran during the update:
+
+- **No migration ran** — the code, the enterprise tree and the hosted image tag return to the recorded version, are rebuilt and re-verified. The database is untouched.
+- **A migration ran** (or it cannot tell) — it **refuses** to roll back the code alone, because the older release cannot be assumed to run on the newer schema. It names the pre-update backup and prints the exact steps: stop `backend` and `scheduler`, restore the backup (the commands are printed for SQLite or PostgreSQL), then run `./scripts/deploy/update.sh --rollback --db-restored`. Restoring discards every write made since the backup, so it never happens automatically.
+
+`--verify` runs step 6 on its own at any time.
+
+The manual procedure below is what the command automates; use it when you need to run a step by hand.
+
 ## When to Run This
 
 - **Source install** (`docker-compose.yml` or `docker-compose.prod.yml`): after every `git pull` that includes changes to platform code (backend, frontend, MCP server, scheduler). Skip it for documentation-only changes.
