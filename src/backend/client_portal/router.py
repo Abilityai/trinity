@@ -50,6 +50,7 @@ from services import sync_waiter
 from services.pull_pilot import pull_queue_allowance
 
 from database import db
+from utils.client_ip import client_ip as resolve_client_ip
 from . import agent_page, chat_previews, role_card, seat_decisions, service
 from .models import (
     PortalSessionRename,
@@ -244,7 +245,7 @@ async def portal_auth_request(body: PortalAuthRequest, request: Request):
     """
     from services import rate_limiter
 
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = resolve_client_ip(request)
     email = (body.email or "").strip().lower()
     # Per-IP stops one host sweeping many addresses (to time or to mint codes);
     # per-email stops a targeted flood at one address. Both fail open (Redis
@@ -300,7 +301,7 @@ def portal_auth_verify(body: PortalAuthVerify, request: Request):
     from routers.auth import check_otp_rate_limit, record_otp_attempt
     from services import rate_limiter
 
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = resolve_client_ip(request)
     email = (body.email or "").strip().lower()
     otp_scope = f"portal:{email}"  # isolate from the platform `otp_attempts:{email}` bucket
 

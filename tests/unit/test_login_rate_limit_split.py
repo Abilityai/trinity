@@ -168,6 +168,13 @@ def auth_module(monkeypatch):
     audit_mod.AuditEventType = types.SimpleNamespace(AUTHENTICATION="authentication")
     stubs["services"] = services_pkg
     stubs["services.platform_audit_service"] = audit_mod
+    # auth.py imports `services.login_policy_gate` (#ent849). Without this stub
+    # the file only loads when an earlier test in the same process imported the
+    # real module, so running it alone errored on every test.
+    gate_mod = types.ModuleType("services.login_policy_gate")
+    gate_mod.email_code_allowed = lambda: True
+    services_pkg.login_policy_gate = gate_mod
+    stubs["services.login_policy_gate"] = gate_mod
 
     routers_pkg = types.ModuleType("routers")
     routers_pkg.__path__ = []

@@ -14,6 +14,7 @@ import redis
 from models import Token
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import login_policy_gate
+from utils.client_ip import client_ip as resolve_client_ip
 from config import (
     SECRET_KEY,
     ALGORITHM,
@@ -334,7 +335,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     bad attempts from locking out other users sharing the same egress IP.
     """
     # Get client IP for rate limiting
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = resolve_client_ip(request)
     account = (form_data.username or "").strip().lower()
 
     # Check rate limit before processing (#591)
@@ -644,7 +645,7 @@ async def verify_email_login_code(request: Request):
         )
 
     # Get client IP for rate limiting
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = resolve_client_ip(request)
 
     # Parse request first so we can scope rate-limit checks per-account (#591)
     body = await request.json()
@@ -830,7 +831,7 @@ async def request_access(request: Request):
         )
 
     # Rate limit by IP
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = resolve_client_ip(request)
     check_login_rate_limit(client_ip)
 
     # Parse request
