@@ -9,9 +9,11 @@ v0.1.1 by the time #2545 moved it.
 
 Four properties, none of them a literal that the next bump must edit:
 
-* **Floor, not literal.** The pin is at least v0.3.0 — the release that added
-  `update-dashboard`, the playbook the metrics tiles point users at (#3123;
-  #2545 had set the floor at v0.2.0, the `project-management` release). A floor
+* **Floor, not literal.** The pin is at least v0.5.0 — the release whose
+  `project-status` files asks under an id the platform accepts and whose
+  `add-pipeline` teaches the real 120-character escalation title cap (#3430;
+  #3123 had set the floor at v0.3.0, the `update-dashboard` release, and #2545
+  at v0.2.0, the `project-management` release). A floor
   fails on a regression (a bad merge or revert resetting the pin) and stays
   valid across every future bump; an exact-literal assertion would just be a
   change-detector.
@@ -49,8 +51,15 @@ _PIN_FILES = (
     "docs/user-docs/automation/skills-and-playbooks.md"
 )
 
-# Why v0.3.0 (#3123): it is the first catalog that lets an agent get, from the
-# Library, the `update-dashboard` playbook that
+# Why v0.5.0 (#3430): on v0.3.0/v0.4.0 two bundled skills fail against current
+# `dev` — `project-status` files its asks under an id the platform refuses
+# (`invalid_request_id`), so none is ever raised, and `add-pipeline` teaches a
+# 300-character escalation title cap where the platform's cap is 120, so a longer
+# escalation is refused and never filed. v0.5.0 fixes both and adds
+# `update-status` (40 skills, none dropped since v0.3.0).
+#
+# Why v0.3.0 (#3123, the previous floor): it is the first catalog that lets an
+# agent get, from the Library, the `update-dashboard` playbook that
 # `metric_read_service.EMPTY_METRIC_MESSAGE` and the Dashboard tile
 # (`DashboardPanel.vue`, "Run /update-dashboard playbook") name. That copy says
 # "if the agent has that playbook", so the floor is about availability, not a
@@ -58,19 +67,20 @@ _PIN_FILES = (
 # category.) Raise only when a later release becomes the new floor an install
 # cannot do without.
 #
-# The limit: this guards the VERSION, not whether `update-dashboard` is in the
-# tag. Before moving the pin, check membership against the real upstream tag —
-# it must print the path:
+# The limit: this guards the VERSION, not what is in the tag. Before moving the
+# pin, check membership against the real upstream tag — it must print all three
+# paths:
 #
 #   git clone --bare https://github.com/abilityai/trinity-skills /tmp/ts && \
-#     git -C /tmp/ts ls-tree --name-only -r <tag> skills/update-dashboard/SKILL.md
+#     git -C /tmp/ts ls-tree --name-only -r <tag> skills/update-dashboard/SKILL.md \
+#       skills/project-status/SKILL.md skills/update-status/SKILL.md
 #
 # And review what the new tag brings into a fleet (skills carry executables):
 #
 #   git -C /tmp/ts diff --stat <old> <new> -- ':!*.md'      # non-instruction files
 #   git -C /tmp/ts diff --name-status <old> <new>          # added / modified files
 #   git -C /tmp/ts diff <old> <new> | grep -E '^\+.*https?://'   # URLs in added lines
-_FLOOR = (0, 3, 0)
+_FLOOR = (0, 5, 0)
 
 
 def _config_default_ref() -> str:
@@ -103,9 +113,9 @@ def test_default_pin_is_at_least_the_floor_release():
     floor = "v" + ".".join(map(str, _FLOOR))
     assert _semver(ref) >= _FLOOR, (
         f"DEFAULT_SKILL_SOURCE_REF={ref!r} is below the floor {floor}. A fresh install "
-        "would seed a catalog without `update-dashboard`, the playbook "
-        "metric_read_service.EMPTY_METRIC_MESSAGE and the Dashboard tile send users to "
-        f"(#3123). Fix: move the pin in {_PIN_FILES} together, then re-run the "
+        "would seed a catalog whose `project-status` never raises an ask "
+        "(`invalid_request_id`) and whose `add-pipeline` teaches an escalation title "
+        "cap the platform refuses (#3430). Fix: move the pin in {_PIN_FILES} together, then re-run the "
         "membership check in the _FLOOR comment against the new tag."
     )
 
@@ -113,7 +123,7 @@ def test_default_pin_is_at_least_the_floor_release():
 def test_env_example_documents_the_same_default():
     assert _env_example_ref() == _config_default_ref(), (
         ".env.example's TRINITY_DEFAULT_SKILL_SOURCE_REF example is stale — the "
-        f"pin is bumped in {_PIN_FILES} together (#2545, #3123)"
+        f"pin is bumped in {_PIN_FILES} together (#2545, #3123, #3430)"
     )
 
 
@@ -126,7 +136,7 @@ def test_user_doc_states_the_same_default():
     assert refs[0] == _config_default_ref(), (
         f"{_USER_DOC.name} states the bundled pin as {refs[0]!r} but config.py "
         f"defaults to {_config_default_ref()!r} — the pin is bumped in {_PIN_FILES} "
-        "together (#3123)"
+        "together (#3123, #3430)"
     )
 
 
