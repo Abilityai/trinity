@@ -662,7 +662,13 @@ def a2a_client(monkeypatch):
         # ent#679: the inbound door asks whether the agent declares a price
         # first; this harness's agent does not (the test_157 stub).
         get_nevermined_config=lambda name: None,
-        get_nevermined_config_with_key=lambda name: None))
+        get_nevermined_config_with_key=lambda name: None,
+        # #3749: `message/send` pre-mints the execution row before dispatch.
+        create_task_execution=lambda **kw: SimpleNamespace(id="exec-a2a"),
+        get_agent_subscription_id=lambda name: None,
+        get_execution=lambda eid: None))
+    monkeypatch.setattr(a2a, "settings_service",
+                        SimpleNamespace(get_platform_default_model=lambda: "claude-test"))
     dispatch = AsyncMock(side_effect=_pending())
     monkeypatch.setattr(a2a, "dispatch_and_await_terminal", dispatch)
 

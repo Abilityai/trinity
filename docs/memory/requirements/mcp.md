@@ -308,6 +308,17 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
   error never blocks an authenticated caller — so it is a restriction
   layered on authentication, not a security boundary. The identity
   compared is the caller's account email (username fallback).
+- **FR-8 — A long turn answers `working`, never a timeout (#3749)**:
+  `message/send` holds the request for at most
+  `A2A_SEND_WORKING_AFTER_SECONDS` (25 s, strictly under the bundled client's
+  30 s `A2A_RPC_TIMEOUT`). A longer turn answers a `working` (or `submitted`)
+  Task carrying the execution id, which is minted before dispatch. The caller
+  polls `tasks/get`. The turn itself is never cancelled by the budget or by a
+  client disconnect, and the idempotency claim is completed once, at the
+  terminal. A re-send of the running `messageId` answers from the row.
+  `configuration.blocking` is honoured (`true` = whole turn, `false` = at the
+  mint, absent = budget). Inside the budget the response is byte-identical to
+  before. A gate-refused row (`skipped`) reads as `rejected`, never `working`.
 - **Front door**: nginx proxies `/a2a/` to the backend with SSE
   buffering off, so external clients reach Trinity through the same
   door as `/api/` rather than `:8000` directly.
@@ -961,6 +972,15 @@ revision — the kind is a label inside the existing envelope.
   wallet matches that execution's payment-log rows. Every mismatch — including
   payer A polling payer B's existing task — answers byte-identical "task not
   found", so the binding is not an existence oracle.
+- **FR-10a — The payer is bound before a `working` answer (#3749)**: on the
+  paid door the row is minted inside `execute()`, after verify, dedup and the
+  allow-list, so no unverified caller leaves a running row. When the turn
+  outlives the §32.2 FR-8 budget, a `verify` row carrying the execution id is
+  written for the admitted payer **before** the `working` answer, so FR-10's
+  binding holds mid-turn. The charge still settles only at a successful
+  terminal. A paid re-send while the turn runs keeps the `in_flight` refusal
+  (the payer polls the id it holds). A payer `tasks/cancel` mid-turn is never
+  settled and delivers no answer.
 - **FR-11 — A duration plan is configurable honestly**: `credits_per_request`
   accepts **0**. A Nevermined *duration* plan charges by time — Trinity sends no
   amount to the facilitator and the plan defines the burn — so the old `>= 1`

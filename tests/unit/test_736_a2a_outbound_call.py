@@ -224,6 +224,9 @@ def test_loopback_round_trip_against_trinitys_own_inbound_server(monkeypatch):
         can_user_access_agent=lambda user, name: True,
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=lambda eid, reason=None: False,
+        # #3749: message/send mints the row before dispatch.
+        create_task_execution=lambda **kw: types.SimpleNamespace(id="exec-minted-736"),
+        get_agent_subscription_id=lambda name: None,
         # ent#679: the card producer reads the payment config to decide whether
         # to declare a price. `remotebot` is not priced here — stub it
         # explicitly so the card this loopback fetches is the unpriced one
@@ -242,15 +245,18 @@ def test_loopback_round_trip_against_trinitys_own_inbound_server(monkeypatch):
     monkeypatch.setattr(a2a, "_fetch_template_data", _tmpl)
 
     class _Result:
-        execution_id = "exec-1"
         status = "success"
         response = "the remote agent answered"
         error = None
 
+        def __init__(self, execution_id):
+            # #3749: echo the id the inbound router minted.
+            self.execution_id = execution_id
+
     class _Svc:
         async def execute_task(self, **kwargs):
             state["last"] = kwargs
-            return _Result()
+            return _Result(kwargs.get("execution_id") or "exec-stream")
 
     # #2524: the inbound bridge goes through the sync edge adapter now (it is
     # `execute_task` plus a wait when the dispatch queues). Forwarding double, so
@@ -265,7 +271,10 @@ def test_loopback_round_trip_against_trinitys_own_inbound_server(monkeypatch):
     class _Idem:
         def begin(self, scope, key):
             return types.SimpleNamespace(enabled=False, replay=False, in_flight=False,
-                                         snapshot=None, key=None)
+                                         snapshot=None, key=None, execution_id=None)
+
+        def attach_execution(self, *a, **k):
+            return None
 
         def complete(self, *a, **k):
             return None
