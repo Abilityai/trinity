@@ -278,6 +278,7 @@ class _Dec:
         self.key, self.scope = key, scope
         self.replay, self.in_flight, self.snapshot = replay, in_flight, snapshot
         self.enabled = key is not None
+        self.execution_id = None
 
 
 class _Idem:
@@ -364,6 +365,10 @@ def client(monkeypatch):
         get_public_channel_model=lambda name: "claude-opus-5",
         nevermined_payer_owns_execution=lambda a, e, p: (a, e, p) in state["bindings"],
         log_nevermined_payment=lambda **kw: state["payment_log"].append(kw),
+        # #3749: the paid execute() mints the row before dispatch.
+        create_task_execution=lambda **kw: (
+            state.__setitem__("minted", kw), types.SimpleNamespace(id="exec-1"))[1],
+        get_agent_subscription_id=lambda name: None,
     )
     monkeypatch.setattr(a2a, "db", fake_db)
 
@@ -377,8 +382,9 @@ def client(monkeypatch):
     monkeypatch.setattr(a2a, "_fetch_template_data", _tmpl)
 
     class _Result:
-        def __init__(self):
-            self.execution_id = "exec-1"
+        def __init__(self, execution_id):
+            # #3749: echo the id the paid execute() minted.
+            self.execution_id = execution_id
             self.status = state["exec_status"]
             self.response = state["exec_response"]
             self.error = "boom" if state["exec_status"] == "failed" else None
@@ -387,7 +393,7 @@ def client(monkeypatch):
         state["last_dispatch"] = kwargs
         if state.get("exec_raises"):
             raise RuntimeError("agent unreachable")
-        return _Result()
+        return _Result(kwargs["execution_id"])
     monkeypatch.setattr(a2a, "dispatch_and_await_terminal", _adapter)
 
     async def _terminate(agent, eid):

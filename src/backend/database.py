@@ -3967,6 +3967,10 @@ class DatabaseManager:
             divergence_acknowledged=divergence_acknowledged, terminal=terminal,
         )
 
+    def withdraw_operator_queue_item(self, agent_name, item_id, *, reason):
+        # trinity-enterprise#901: the agent ends its own pending ask, no successor.
+        return self._operator_queue_ops.withdraw_item(agent_name, item_id, reason=reason)
+
     def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None,
                                    disposition="cancelled"):
         # trinity-enterprise#611: CAS + endings ledger; a lost race carries

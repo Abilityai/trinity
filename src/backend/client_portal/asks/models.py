@@ -37,7 +37,8 @@ class WorkspaceAsk(BaseModel):
     # How the ask ended, COARSE on purpose (trinity-enterprise#611): `ended_by`
     # is `you` | `operator` | `someone_else` (ent#816) | `platform` (#3246) |
     # `agent` | `timeout`, never an
-    # email (`agent`: the agent replaced it with a newer ask, #3247), and the operator's
+    # email (`agent`: the agent replaced it with a newer ask, #3247, or withdrew
+    # it, trinity-enterprise#901 — `agent_ending` says which), and the operator's
     # cancel reason never crosses. `ended_at` is when it ended — None when the
     # platform does not know (a row that ended before the ledger), never the
     # time the ask was filed.
@@ -94,6 +95,16 @@ class WorkspaceAsk(BaseModel):
     # addressee could already see that ask (`service._linked_request_id`).
     replaces: Optional[str] = None
     replaced_by: Optional[str] = None
+    # trinity-enterprise#901: which ending the agent authored — `replaced` |
+    # `withdrawn` | None — derived once server-side from the raw row
+    # (`ask_service.agent_ending_kind`), never inferred from `replaced_by`,
+    # which the projection withholds when the addressee cannot see the
+    # successor. `ending_reason` is the agent's one-line reason, set ONLY for
+    # a withdraw: agent text like `title`, for the person who was asked. The
+    # operator's cancel reason, a platform ending's token and a timeout never
+    # cross.
+    agent_ending: Optional[str] = None
+    ending_reason: Optional[str] = None
 
 
 class WorkspaceAskAnswer(BaseModel):

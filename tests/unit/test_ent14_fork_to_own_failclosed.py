@@ -35,6 +35,8 @@ test is driven with an explicit `asyncio.run`).
 import asyncio
 import types
 
+from unittest.mock import AsyncMock
+
 import pytest
 from fastapi import HTTPException
 
@@ -256,6 +258,18 @@ def github(monkeypatch):
 
     monkeypatch.setattr(ts, "_fetch_template_yaml_result", _fetch)
     monkeypatch.setattr(ts, "_get_github_pat", lambda: PLATFORM_PAT)
+    # #3725: the creation read now falls through to the remaining token
+    # tiers and a credential-free path when the preferred tier cannot read.
+    # Default every new seam to "nothing else can read either" so each test
+    # here keeps stating only the input it is about — and none reaches the
+    # network (the real probe is a `git ls-remote` against github.com).
+    state["ladder"] = []
+    monkeypatch.setattr(crud, "resolve_github_pat_candidates",
+                        lambda *a, **k: list(state["ladder"]))
+    monkeypatch.setattr(ts, "_fetch_template_yaml_raw_result",
+                        lambda repo, sha: ({}, "HTTP 500"))
+    monkeypatch.setattr(crud.git_service, "probe_anonymous_ref",
+                        AsyncMock(return_value=("transient", "")))
     ts._metadata_cache.clear()
 
     async def _ok(*a, **k):
@@ -273,6 +287,10 @@ def github(monkeypatch):
         def answers(self, **by_pat):
             """`answers(**{PLATFORM_PAT: ({}, "HTTP 404"), ...})`"""
             state["answers"].update(by_pat)
+
+        def ladder(self, *entries):
+            """#3725: the `(pat, tier)` tiers the chain may fall through to."""
+            state["ladder"] = list(entries)
 
         def catalog_for(self, repo="acme/second-brain"):
             """The catalog dict, built the way `GET /api/templates` builds it —
@@ -356,15 +374,26 @@ def test_a_poisoned_catalog_cache_does_not_block_a_creator_who_can_read(github):
 
 
 def test_an_outage_on_the_CREATION_read_still_refuses(github):
-    """The fail-closed property itself, unchanged — only its input moved."""
+    """The fail-closed property itself, unchanged — only its input moved.
+
+    Rewritten for #3725: a 403 on the creator's read no longer refuses by
+    itself, because another path may read the template (the remaining token
+    tiers, then an anonymous SHA-pinned read). The property that stays is
+    the one ent#14 S2 pinned: a template NO path can read refuses. So the
+    platform tier is unreadable too, and the credential-free path (stubbed
+    transient in the fixture) cannot prove the repo public.
+    """
+    github.ladder((CREATOR_PAT, "per_user"), (PLATFORM_PAT, "global"))
     github.answers(**{
-        PLATFORM_PAT: ({"display_name": "Fine"}, None),   # catalog looks healthy
+        PLATFORM_PAT: ({}, "HTTP 403"),                    # also unreadable
         CREATOR_PAT: ({}, "HTTP 403"),                     # the read that matters
     })
     with pytest.raises(HTTPException) as exc:
         github.create()
     assert exc.value.status_code == 503
     assert exc.value.detail["code"] == "TEMPLATE_METADATA_UNAVAILABLE"
+    assert [a["tier"] for a in exc.value.detail["attempts"]] == [
+        "per_user", "global", "anonymous"]
 
 
 def test_the_gate_costs_no_extra_github_calls(github):

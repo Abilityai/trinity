@@ -164,6 +164,8 @@ Before performing an action that cannot be undone or verified afterwards — pay
 
 **Do not re-ask what is still pending.** The Execution Context lists your pending asks beside the ended ones. If the facts changed, raise the new ask with `replaces` set to the pending ask's `request_id`: the earlier ask ends as replaced and the person sees the new one — an ask is never changed in place. If the person answered first, the replace is refused (`replaces_ended`): the answer stands, read it with `get_my_ask`. Repeating a pending ask's `proposal` without `replaces` is refused (`already_pending`). A queue-file entry cannot replace anything; its `status` turns `cancelled` when a native ask replaces it.
 
+**Withdraw what is moot.** If a pending ask no longer needs an answer — the question answered itself, the action is no longer needed — end it with `withdraw_ask` (its `request_id` and a one-line `reason`): it ends as withdrawn by you, the person who was asked sees your reason as history and nothing is asked of them. Never use `replaces` as a close-out — a replacement is a new ask that asks again. If the person answered first, the withdraw is refused (`ask_ended`): the answer stands, read it with `get_my_ask`. A queue-file entry cannot be withdrawn.
+
 **Request IDs must be globally unique.** Derive the `request_id` from your current execution ID (see the Execution Context block), e.g. `approval-{execution_id}-{short-slug}`. Never use date-serial IDs like `req-20260307-001` — a second task that picks the same ID gets the first ask's receipt instead of a new ask. Re-using your own derived ID when the same task runs again is safe and intentional: it prevents duplicate requests.
 
 **Request types:**
@@ -841,12 +843,15 @@ def _render_ended_asks(ctx: ExecutionContext) -> Optional[str]:
     reaches every composed turn. Bounded; the rest is one tool call away."""
     if not ctx.ended_asks:
         return None
+    from services.ask_service import agent_ending_kind
+
     entries: List[str] = []
     for ask in ctx.ended_asks[:MAX_ENDED_ASKS]:
         rid = _sanitize_field(ask.get("request_id"), max_len=MAX_REQUEST_ID_LEN)
         how = _sanitize_field(ask.get("disposition"), max_len=16)
-        if ask.get("disposed_by") == "agent":
-            how = "replaced"  # #3247: the agent ended it itself by replacing it
+        # #3247 / trinity-enterprise#901: the agent ended it itself — by
+        # replacing it or withdrawing it. The kind, never the agent's reason.
+        how = agent_ending_kind(ask) or how
         when = _sanitize_field(ask.get("disposed_at"), max_len=MAX_TIMESTAMP_LEN)
         if rid and how:
             entries.append(" ".join(x for x in (rid, how, when) if x))
@@ -881,7 +886,9 @@ def _render_pending_asks(ctx: ExecutionContext) -> Optional[str]:
     a person wrote — the turn's trigger label does not say who reads the reply,
     and `get_my_ask` returns the title when the agent needs it. A row the agent
     did not raise itself (a pre-#611 NULL raiser) spends the same budget, so it
-    stays on the line, marked `not replaceable`: a replace of it is refused."""
+    stays on the line, marked `not replaceable`: a replace of it is refused, and
+    so is a withdraw (trinity-enterprise#901) — the advice offers both only when
+    the line carries an ask the agent raised."""
     if not ctx.pending_asks:
         return None
     entries: List[str] = []
@@ -906,7 +913,8 @@ def _render_pending_asks(ctx: ExecutionContext) -> Optional[str]:
             if total > shown else "")
     advice = " — do not re-ask one of these"
     if replaceable:
-        advice += "; if the facts changed, replace it (ask_operator, replaces)"
+        advice += ("; if the facts changed, replace it (ask_operator, replaces)"
+                   "; if it is moot, withdraw it (withdraw_ask)")
     return "; ".join(entries) + more + advice
 
 

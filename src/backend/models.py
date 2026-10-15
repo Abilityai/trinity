@@ -3807,6 +3807,19 @@ class OperatorAskCreate(BaseModel):
     replaces: Optional[str] = None  # #3247 — one of the agent's own PENDING asks this one replaces
 
 
+class OperatorAskWithdraw(BaseModel):
+    """Body for an agent withdrawing one of its own pending asks
+    (trinity-enterprise#901): `POST /api/agents/{name}/operator-queue/{request_id}/withdraw`.
+
+    TYPES ONLY, like `OperatorAskCreate`: the reason's bound (1..500 after
+    trimming) is the ask sink's, so the refusal is a NAMED `invalid_reason`.
+    Unknown fields are refused — the ending is the platform's to record.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Any = None
+
+
 class SkillGateCheckRequest(BaseModel):
     """What the in-container skill-gate hook asks (trinity-enterprise#752):
     `POST /api/skill-gate/check`, with the agent's own key.
@@ -3866,6 +3879,8 @@ class SkillGateEntry(BaseModel):
     set_by_agent: Optional[str] = None
     set_at: Optional[str] = None
     approver_reachable: Optional[bool] = None
+    # trinity-enterprise#881: why nobody can approve — `unfilled` | `not_shared` — or null.
+    approver_unreachable: Optional[str] = None
 
 
 class SkillGateApproverStatus(BaseModel):
@@ -3882,6 +3897,9 @@ class SkillGateApproverStatus(BaseModel):
     viewer_fills: bool
     label: Optional[str] = None
     role_id: Optional[str] = None
+    # trinity-enterprise#881: why it reaches nobody — `unfilled` (nobody fills
+    # it) | `not_shared` (its people can't open the agent) — or null.
+    unreachable: Optional[str] = None
 
 
 class SkillGateMapResponse(BaseModel):
@@ -3907,7 +3925,9 @@ class SkillGateMapResponse(BaseModel):
 class SkillGateWriteResponse(BaseModel):
     """What `PUT .../skill-gates/{skill_name}` did. `warnings`:
     `approver_unassigned` (the approver kind reaches nobody now, so a gated
-    request would be refused) and `marker_not_written` (the running agent's
+    request would be refused), `approver_not_shared` (its people can't open
+    the agent, so they would never see the approval — trinity-enterprise#881)
+    and `marker_not_written` (the running agent's
     fail-closed marker could not be written; the check re-syncs it)."""
     agent_name: str
     skill_name: str

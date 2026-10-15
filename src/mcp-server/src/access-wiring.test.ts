@@ -555,3 +555,124 @@ describe("trinity-enterprise#611 ask_operator raises as the key's agent (real tr
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// trinity-enterprise#901 — withdraw_ask ends an ask as the KEY's own agent,
+// over the real transport. The stub backend RECORDS every withdraw, path and
+// body: the agent comes from the key, only {reason} travels, a key with no
+// agent identity never reaches the backend, and a named refusal reaches the
+// caller with its code.
+// ---------------------------------------------------------------------------
+
+describe("trinity-enterprise#901 withdraw_ask acts as the key's agent (real transport)", () => {
+  let backend: Server;
+  let mcpServer: { stop: () => Promise<void> };
+  let mcpUrl: URL;
+  const withdraws: Array<{ agent: string; requestId: string; body: Record<string, unknown> }> = [];
+
+  const KEYS: Record<string, { scope: string; agent_name?: string }> = {
+    "trinity_mcp_901_agent": { scope: "agent", agent_name: CALLER },
+    "trinity_mcp_901_user": { scope: "user" },
+  };
+  const REFUSAL = {
+    code: "ask_ended", message: "It was answered first.", request_id: "answered-1",
+    ask_status: "responded", disposition: "answered", disposed_by: "person",
+    disposed_at: "2026-10-14T10:00:00Z", replaced_by: null,
+  };
+
+  before(async () => {
+    backend = createHttpServer((req, res) => {
+      let raw = "";
+      req.on("data", (chunk) => { raw += chunk; });
+      req.on("end", () => {
+        const send = (status: number, payload: unknown) => {
+          res.writeHead(status, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(payload));
+        };
+        const url = req.url ?? "";
+        if (url === "/api/mcp/validate") {
+          const key = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
+          const row = KEYS[key];
+          if (!row) return send(401, { valid: false });
+          return send(200, {
+            valid: true, key_id: `id-${key}`, user_id: "owner",
+            user_email: "owner@example.com", key_name: key, ...row,
+          });
+        }
+        const hit = url.match(/^\/api\/agents\/([^/]+)\/operator-queue\/([^/]+)\/withdraw$/);
+        if (hit && req.method === "POST") {
+          const requestId = decodeURIComponent(hit[2]);
+          withdraws.push({ agent: decodeURIComponent(hit[1]), requestId, body: JSON.parse(raw || "{}") });
+          if (requestId === "answered-1") return send(409, { detail: REFUSAL });
+          return send(200, {
+            status: "withdrawn", id: "uuid-1", request_id: requestId, raised_by: "agent",
+            ask_status: "cancelled", disposition: "cancelled", disposed_by: "agent",
+            agent_ending: "withdrawn",
+          });
+        }
+        return send(200, {});
+      });
+    });
+    await new Promise<void>((r) => backend.listen(0, "127.0.0.1", () => r()));
+    const backendPort = (backend.address() as AddressInfo).port;
+    const probe = createHttpServer();
+    await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()));
+    const mcpPort = (probe.address() as AddressInfo).port;
+    await new Promise<void>((r) => probe.close(() => r()));
+    const { server } = await createServer({
+      trinityApiUrl: `http://127.0.0.1:${backendPort}`,
+      requireApiKey: true,
+      port: mcpPort,
+    });
+    await server.start({ transportType: "httpStream", httpStream: { port: mcpPort, host: "127.0.0.1" } });
+    mcpServer = server;
+    mcpUrl = new URL(`http://127.0.0.1:${mcpPort}/mcp`);
+  });
+
+  after(async () => {
+    await mcpServer?.stop();
+    await new Promise<void>((r) => backend.close(() => r()));
+  });
+
+  const callAs = async (key: string, args: Record<string, unknown>) => {
+    const client = new Client({ name: key, version: "1.0.0" });
+    const transport = new StreamableHTTPClientTransport(mcpUrl, {
+      requestInit: { headers: { Authorization: `Bearer ${key}` } },
+    });
+    await client.connect(transport);
+    const r: any = await client.callTool({ name: "withdraw_ask", arguments: args });
+    await client.close();
+    return JSON.parse(r.content.map((c: any) => c.text).join("\n"));
+  };
+
+  it("an agent key withdraws as its own agent, and only {reason} travels", async () => {
+    withdraws.length = 0;
+    const out = await callAs("trinity_mcp_901_agent", { request_id: "deploy-1", reason: "The build fixed itself." });
+    assert.equal(out.status, "withdrawn");
+    assert.equal(out.agent_ending, "withdrawn");
+    assert.deepEqual(withdraws, [{ agent: CALLER, requestId: "deploy-1", body: { reason: "The build fixed itself." } }]);
+  });
+
+  it("an agent_name argument can neither aim it at a sibling nor reach the backend", async () => {
+    withdraws.length = 0;
+    await callAs("trinity_mcp_901_agent", { request_id: "deploy-1", reason: "moot", agent_name: SIBLING })
+      .catch(() => undefined);
+    assert.ok(
+      withdraws.every((w) => w.agent === CALLER && Object.keys(w.body).join() === "reason"),
+      `a withdraw was aimed or carried more than the reason: ${JSON.stringify(withdraws)}`,
+    );
+  });
+
+  it("a person's user-scoped key is refused before the backend is asked anything", async () => {
+    withdraws.length = 0;
+    const out = await callAs("trinity_mcp_901_user", { request_id: "deploy-1", reason: "moot" });
+    assert.equal(out.success, false);
+    assert.match(out.error, /agent identity/);
+    assert.deepEqual(withdraws, []);
+  });
+
+  it("an answered ask's refusal reaches the caller with its code and extras", async () => {
+    const out = await callAs("trinity_mcp_901_agent", { request_id: "answered-1", reason: "moot" });
+    assert.deepEqual(out, { success: false, status: 409, ...REFUSAL });
+  });
+});

@@ -85,6 +85,15 @@
             </span>
 
             <span v-if="it.type === 'ask'" class="mt-0.5 block text-sm truncate" :class="secondary(it)">{{ it.title }}</span>
+            <!-- trinity-enterprise#901: the agent's reason for withdrawing it —
+                 its own clamped line (full text on hover), never in the badge. -->
+            <span
+              v-if="it.type === 'ask' && withdrawReason(it)"
+              class="mt-0.5 block text-[12.5px] truncate"
+              :class="meta(it)"
+              :title="withdrawReason(it)"
+              :data-testid="`inbox-row-ending-reason-${it.key}`"
+            >{{ withdrawReason(it) }}</span>
             <span v-else-if="it.type === 'mention'" class="mt-0.5 block text-sm truncate" :class="secondary(it)">Mentioned you {{ mentionWhere(it.mention) }}</span>
             <span v-else-if="it.latest && it.latest.excerpt" class="mt-0.5 block text-sm truncate" :class="secondary(it)">{{ it.latest.excerpt }}</span>
 
@@ -174,7 +183,7 @@ import { relativeTime } from './portalUtils'
 import { newLabel } from './portalInbox'
 import { mentionWhere } from './portalMentions'
 import { priorityBadge, expiresSoonLabel, needsExpiryTick, nextExpiryEntry, askKindIcon } from './portalAskUrgency'
-import { queueTypeLabel, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
+import { queueEnding, queueTypeLabel, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
 // trinity#3524: an answered approval's verdict on its row.
 import { workspaceOwnAnswer } from '@/utils/operatorQueue'
 import { formatLocalDateTime } from '@/utils/timestamps'
@@ -245,6 +254,13 @@ onBeforeUnmount(() => { stopTick(); stopEntry() })
 const expiry = (it) => expiresSoonLabel(it.ask && it.ask.expires_at, now.value)
 const kindLabel = (it) => queueTypeLabel(it.ask && it.ask.kind) || 'Ask'
 
+// trinity-enterprise#901: an ended ask the agent withdrew, and why.
+function withdrawReason(it) {
+  if (it.status === 'pending') return ''
+  const ending = queueEnding(it.ask)
+  return ending?.kind === 'withdrawn' ? ending.reason || '' : ''
+}
+
 function askStatusLabel(it) {
   const s = it.status
   if (s === 'answered') {
@@ -258,7 +274,8 @@ function askStatusLabel(it) {
     return 'Answered'
   }
   if (s === 'expired') return 'Expired'
-  // #3247: the agent replaced it — never read as the operator's cancel.
+  // #3247: the agent replaced it (trinity-enterprise#901: or withdrew it) —
+  // never read as the operator's cancel.
   if (s === 'cancelled' && it.ask?.ended_by === 'agent') return workspaceEndingText(it.ask)
   if (s === 'cancelled') return 'Cancelled'
   // trinity-enterprise#748: the addressee's own "no answer".

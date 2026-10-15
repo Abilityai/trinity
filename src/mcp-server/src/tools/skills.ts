@@ -584,7 +584,8 @@ export function createSkillsTools(
         "have gates nothing until it does. Refused by name: `invalid_skill_name`, " +
         "`invalid_approver`, `approver_unavailable`, `unknown_role` (no one on this agent's roster " +
         "has that role), `invalid_deadline`, `ephemeral_agent`. " +
-        "`warnings` may say `approver_unassigned` (nobody fills that approver yet). " +
+        "`warnings` may say `approver_unassigned` (nobody fills that approver yet) or " +
+        "`approver_not_shared` (the people who fill it can't open this agent: share it with them). " +
         "Needs the agent's owner or an admin; with an agent key, the skill-management permission, " +
         "only on an agent its owner owns, and never on the calling agent itself.",
       parameters: z.object({

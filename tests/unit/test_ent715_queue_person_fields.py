@@ -205,8 +205,12 @@ class TestTheMachineView:
         # boolean derived for the person's answer controls, never a column.
         # trinity-enterprise#755: and `gate`, the gated-skill approval card's
         # view, derived the same way (None on a row the gate did not raise).
-        assert set(row) == MACHINE_ROW_KEYS | WITHHELD | {"decided_by_options", "gate"}
+        # trinity-enterprise#901: and `agent_ending`, the ending the agent
+        # authored (replaced | withdrawn | None) — a derived enum, never a column
+        # and never PII; the agent reads it on its own readback, not this view.
+        assert set(row) == MACHINE_ROW_KEYS | WITHHELD | {"decided_by_options", "gate", "agent_ending"}
         assert row["gate"] is None
+        assert row["agent_ending"] is None
         assert (row["responded_by_email"], row["responded_by_id"], row["addressed_to_email"],
                 row["disposed_by_email"], row["resolved_to"]) == (
             OP_EMAIL, "7", FOR_EMAIL, OP_EMAIL, [RESOLVED_EMAIL])

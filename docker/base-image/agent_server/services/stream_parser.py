@@ -564,7 +564,7 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
                 ))
 
                 # Update session activity in real-time
-                complete_tool_execution(tool_id, not is_error, tool_output)
+                complete_tool_execution(tool_id, not is_error, tool_output, execution_id=execution_id)
                 logger.debug(f"Tool completed: {tool_name} ({tool_id}) - success={not is_error}")
 
             elif block_type == "text":

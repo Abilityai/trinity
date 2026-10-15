@@ -1042,16 +1042,9 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
-    async registerA2aEndpoint(name, { name: label, url, credentials }) {
-      const authStore = useAuthStore()
-      const body = { name: label, url }
-      if (credentials) body.credentials = credentials
-      const response = await axios.post(`/api/enterprise/a2a/${name}/endpoints`, body, {
-        headers: authStore.authHeader
-      })
-      return response.data
-    },
-
+    // ent#898: no registerA2aEndpoint — outbound endpoints are registered in
+    // the platform-wide registry (stores/a2aFederation.js), the only list
+    // call_a2a_agent resolves. Remove stays, to clear per-agent rows.
     async removeA2aEndpoint(name, endpointId) {
       const authStore = useAuthStore()
       const response = await axios.delete(`/api/enterprise/a2a/${name}/endpoints/${endpointId}`, {

@@ -24,6 +24,7 @@ import type {
   ActivityTimelineResponse,
   OperatorQueueAskReadback,
   OperatorAskCreate,
+  OperatorAskWithdraw,
   OperatorAskReceipt,
   OperatorQueueItem,
   OperatorQueueListResponse,
@@ -2723,6 +2724,23 @@ export class TrinityClient {
       false,
       undefined,
       turn ? { "X-Trinity-Execution-Id": turn } : undefined,
+    );
+  }
+
+  /**
+   * End one of the agent's OWN pending asks with a reason and no successor
+   * (trinity-enterprise#901). Proxies
+   * POST /api/agents/{name}/operator-queue/{request_id}/withdraw: the backend
+   * answers only the agent's own key (or the system key as trinity-system),
+   * 200 with the receipt (`status: "withdrawn"`, or `"replayed"` when this
+   * agent already withdrew it). A refusal (404 ask_not_found / 409 ask_ended /
+   * 422 invalid_reason) is thrown as an ApiError carrying the named code.
+   */
+  async withdrawAsk(agentName: string, requestId: string, body: OperatorAskWithdraw): Promise<OperatorAskReceipt> {
+    return this.request<OperatorAskReceipt>(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/operator-queue/${encodeURIComponent(requestId)}/withdraw`,
+      body,
     );
   }
 

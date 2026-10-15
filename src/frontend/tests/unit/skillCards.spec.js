@@ -157,6 +157,19 @@ describe('gate line — everyone sees it, it names a kind, never a person', () =
     expect(r.own[0].gateLine).toEqual({ tone: 'locked', text: 'Needs approval: you approve this' })
   })
 
+  // trinity-enterprise#881: filled, but its people can't open the agent — the
+  // remedy is a share, not an assignment.
+  it('an approver whose people cannot open the agent says to share it', () => {
+    const r = cards({ agentList: [live('pay')], gates: [gate('pay')],
+      approvers: [{ kind: 'primary', reachable: false, viewer_fills: false, unreachable: 'not_shared' }] })
+    expect(r.own[0].gateLine).toEqual({ tone: 'warn',
+      text: 'Needs approval from the primary contact: not shared with them' })
+    const fromGate = cards({ agentList: [live('pay')], approvers: PRIMARY_OTHER,
+      gates: [gate('pay', { approver: 'role:head-of-sales', approver_reachable: false,
+        approver_unreachable: 'not_shared' })] })
+    expect(fromGate.own[0].gateLine.text).toMatch(/: not shared with them$/)
+  })
+
   it('a kind nobody fills is a warning, not a lock', () => {
     const r = cards({ agentList: [live('pay')], gates: [gate('pay')],
       approvers: [{ kind: 'primary', reachable: false, viewer_fills: false }] })

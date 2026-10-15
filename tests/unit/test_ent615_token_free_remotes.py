@@ -1519,3 +1519,70 @@ class TestTheRootOwnershipClaimStaysHonest:
             "the passwordless-sudo grant is gone — re-check the root-ownership "
             "wording in security.md, the helper and the Dockerfile"
         )
+
+
+class TestOwnerMaintenance:
+    """Regression #3719: checked installation and owner-readable maintenance."""
+    def test_unseeded_sweep_uses_owner_after_checked_root_install(self, gs_with_exec):
+        import asyncio
+        gs = _git_service()
+        recorder = gs_with_exec()
+        report = asyncio.run(gs.scrub_git_remote_tokens("a1", git_dir="/home/developer/private"))
+        assert report["success"] is True
+        assert [call["user"] for call in recorder.calls] == ["root", "developer"]
+        assert all(call["timeout"] == gs.SCRUB_TIMEOUT_S for call in recorder.calls)
+        assert all(not call["environment"] for call in recorder.calls)
+
+    @pytest.mark.parametrize("timed_out", [False, True])
+    def test_failed_install_never_runs_a_sweep(self, gs_with_exec, monkeypatch, timed_out):
+        import asyncio
+        gs = _git_service()
+        gs_with_exec()
+        calls = []
+        async def execute(**kwargs):
+            calls.append(kwargs)
+            return {"exit_code": 124 if timed_out else 1, "timed_out": timed_out,
+                    "output": "private installation output"}
+        monkeypatch.setattr(gs.token_scrub, "execute_command_in_container", execute)
+        report = asyncio.run(gs.scrub_git_remote_tokens("a1", git_dir="/home/developer/private"))
+        assert report["success"] is False
+        assert len(calls) == 1
+        assert "sh -s" not in calls[0]["command"]
+
+    def test_seed_only_reaches_root_sweep_environment(self, gs_with_exec):
+        import asyncio
+        gs = _git_service()
+        recorder = gs_with_exec()
+        report = asyncio.run(gs.scrub_git_remote_tokens("a1", git_dir="/home/developer", seed_pat="synthetic-seed"))
+        assert report["success"] is True
+        assert [call["user"] for call in recorder.calls] == ["root", "root"]
+        assert recorder.calls[0]["environment"] is None
+        assert recorder.calls[1]["environment"] == {"TRINITY_SEED_PAT":"synthetic-seed"}
+        assert "synthetic-seed" not in recorder.commands
+
+    def test_sweep_command_passes_path_as_one_literal_argument(self, tmp_path, monkeypatch):
+        import subprocess
+        from services import git_credential_helper as helper
+        marker = tmp_path / "injected"
+        path = str(tmp_path / "space name") + "; touch " + str(marker)
+        monkeypatch.setattr(helper, "SCRUB_SCRIPT", 'printf "%s" "$1"')
+        monkeypatch.setattr(helper, "install_command", lambda: "true")
+        result = subprocess.run(["bash", "-c", helper.scrub_command(path)],
+                                text=True, capture_output=True, timeout=10)
+        assert result.returncode == 0
+        assert result.stdout == path
+        assert not marker.exists()
+
+
+    def test_seed_exec_exception_never_logs_environment_payload(self, gs_with_exec, monkeypatch, caplog):
+        import asyncio
+        gs = _git_service()
+        gs_with_exec()
+        async def execute(**kwargs):
+            if kwargs.get("environment"):
+                raise RuntimeError("synthetic-private-seed exec environment")
+            return {"exit_code":0,"output":""}
+        monkeypatch.setattr(gs.token_scrub, "execute_command_in_container", execute)
+        report = asyncio.run(gs.scrub_git_remote_tokens("a1", git_dir="/home/developer", seed_pat="synthetic-private-seed"))
+        assert report["success"] is False
+        assert "synthetic-private-seed" not in caplog.text

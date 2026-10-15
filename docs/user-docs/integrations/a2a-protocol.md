@@ -5,7 +5,7 @@ Trinity speaks the open **[A2A (Agent-to-Agent) protocol](https://a2a-protocol.o
 This guide covers both directions:
 
 - **Inbound** — expose one of your agents so external clients can discover its Agent Card and task it.
-- **Outbound** — register external A2A endpoints your agent may call.
+- **Outbound** — call external A2A agents from a platform-wide list of endpoints an admin registers.
 
 > **Availability.** The two directions are not gated alike.
 >
@@ -22,7 +22,7 @@ This guide covers both directions:
 | **Well-known URL** | The public, unauthenticated discovery URL: `{base}/a2a/{agent}/.well-known/agent-card.json`. This is what you hand to an external client. |
 | **JSON-RPC endpoint** | `POST {base}/a2a/{agent}` — the A2A task endpoint (spec v0.3.x): `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`. |
 | **Inbound allow-list** | Optional per-agent list of caller account emails permitted to task the agent. Empty = any authenticated owner/shared caller. |
-| **Outbound endpoints** | External A2A endpoints (+ optional credentials) your agent may call. |
+| **Outbound endpoints** | External A2A endpoints (+ optional credentials) agents may call — one platform-wide list, managed in **Settings › Integrations**. |
 
 ---
 
@@ -40,7 +40,7 @@ Open the agent's detail page and select the **A2A** tab.
    ![The Agent Card URL section — the public discovery URL with a one-click Copy button.](../../screenshots/a2a-card-url.png)
 3. **Review the advertised skills** — exactly what an external caller sees on the card (derived from the agent's `template.yaml` capabilities).
 4. **Manage the inbound allow-list** (optional) — add the account emails of callers that may task the agent. Leave it empty to allow any authenticated owner/shared caller.
-5. **Register outbound endpoints** (optional) — external A2A endpoints, with credentials stored encrypted (never shown again). Read the note under *[Outbound endpoints](#outbound-endpoints)* before you rely on this panel: it is a **separate, per-agent registry**, and in this build `call_a2a_agent` resolves the platform-wide list of [Part 3](#register-an-endpoint-admin-human-only) instead.
+5. **Outbound endpoints** are not registered here. The tab links to **Settings › Integrations**, where an admin manages the platform-wide list `call_a2a_agent` reads — see *[Outbound endpoints](#outbound-endpoints)*.
 
 ### Using MCP (drive it from an agent / automation)
 
@@ -90,7 +90,7 @@ Issue an MCP key from **Settings → MCP Keys** (or the API) and share it with t
 
 ### 3. Task — JSON-RPC 2.0
 
-**Synchronous (`message/send`):**
+**Send (`message/send`):**
 
 ```bash
 curl -s -X POST http://localhost/a2a/new_cool_agent \
@@ -115,11 +115,33 @@ Returns an A2A **Task**:
 }}
 ```
 
-**Streaming (`message/stream`, Server-Sent Events):** same params, `method: "message/stream"`. You receive a `working` status event, then a final `completed` task event.
+**Long turns come back `working`.** `message/send` holds the request for up to
+**25 seconds**. A turn that finishes inside that window returns the completed
+Task above. A longer turn returns early with the same Task id and
+`"status": { "state": "working" }` (or `"submitted"` while the agent's queue
+has not started it yet) and no artifacts. The agent keeps working. Poll
+`tasks/get` with that id until the state is terminal. The 25 seconds sit
+under the 30-second read timeout of Trinity's own A2A client, so a caller
+always gets the id before it gives up. Before this, a long turn surfaced as a
+timeout and the id was lost.
 
-**Poll / cancel:** `tasks/get` and `tasks/cancel` take `{ "id": "<taskId>" }` — the `taskId` is the id from the send response.
+You can choose the behaviour per call with the A2A
+`params.configuration.blocking` flag:
 
-> **Idempotency.** Re-sending the same `messageId` returns the original task **without re-executing** — safe to retry on a dropped connection.
+| `blocking` | `message/send` answers |
+|---|---|
+| absent (default) | the completed Task, or `working` + id after 25 s |
+| `true` | only at the terminal, however long the turn takes (your client must wait that long) |
+| `false` | at once, with `working`/`submitted` + id; poll for the result |
+
+A client that disconnects does **not** cancel the turn. It still runs to the
+end, and the result is waiting on `tasks/get`.
+
+**Streaming (`message/stream`, Server-Sent Events):** same params, `method: "message/stream"`. You receive a `working` status event, then a final `completed` task event. Streaming ignores `blocking`.
+
+**Poll / cancel:** `tasks/get` and `tasks/cancel` take `{ "id": "<taskId>" }`. The `taskId` is the id from the send response, including a `working` one. A task the agent refused to run (a gated skill, for example) reads as `rejected` with the reason. It never stays `working`.
+
+> **Idempotency.** Re-sending the same `messageId` returns the original task **without re-executing** — safe to retry on a dropped connection. While that task is still running, the re-send returns it as `working` with the same id. Once it has finished, the re-send returns the completed Task. **Poll; don't re-send under a new `messageId`**, which would run the work twice.
 
 ---
 
@@ -179,12 +201,21 @@ what a call burns; `0` says that honestly rather than claiming a per-call price
 nothing will charge. The card then advertises the cost as plan-defined. (A
 negative number is rejected.)
 
-**Retrieving a paid result.** If you hold the task id, the payer can poll
-`tasks/get` with the same token — a task is bound to the wallet that paid for
-it, and any other caller gets the ordinary "task not found". If your HTTP client
-timed out before it read the task id, re-send the identical message with the
-same token: that replays the completed result instead of re-running (and
-re-charging) the work.
+**Retrieving a paid result.** A paid `message/send` follows the 25-second rule
+in [Task](#3-task--json-rpc-20): a long turn answers `working` with the task id.
+The task is bound to the paying wallet **before** that answer is sent, so the
+payer can poll `tasks/get` with the same token straight away, mid-turn
+included. Any other caller gets the ordinary "task not found". The charge
+settles when the turn completes, not at the `working` answer.
+
+- **Don't re-send while it runs.** An identical paid message sent while the
+  turn is still running returns the retryable `in_flight` error ("still being
+  processed"). Poll the id you already have.
+- **Cancelling mid-turn.** The payer may `tasks/cancel` a running paid task.
+  A cancelled turn is **never charged** and delivers no answer.
+- **If your client lost the id.** Re-send the identical message with the same
+  token after the turn has finished. That replays the completed result instead
+  of re-running (and re-charging) the work.
 
 **Refusals, and what they mean:**
 
@@ -215,9 +246,9 @@ an error event, because a status code cannot be sent once the stream has opened.
 
 ## Outbound endpoints
 
-Register the external A2A endpoints your agent is allowed to call (name + URL + optional credential). Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one (`🔒 credentialed`).
+The external A2A endpoints agents may call (name + URL + optional credential) are **one platform-wide list**, the one `call_a2a_agent` resolves. An admin manages it in **Settings › Integrations**, with the routes in [Part 3](#register-an-endpoint-admin-human-only), or with `register_a2a_endpoint`; all three address the same list. Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one.
 
-> **Which list does `call_a2a_agent` actually read?** Trinity resolves an outbound target through a provider seam, and in this build the resolver is the **platform-wide** list you manage in [Part 3](#register-an-endpoint-admin-human-only) — not this per-agent panel. If you register a target here and your agent answers `endpoint_not_found`, that is why: register it in Part 3 — either with the routes shown there or with `register_a2a_endpoint`, which address the same list. This per-agent panel is a separate registry; it becomes the resolver on a build that registers a provider for it, in which case it takes precedence.
+> **Endpoints registered on an agent's A2A tab before 1.0.** Earlier builds had a register form on the agent's A2A tab. It wrote a separate per-agent list that `call_a2a_agent` never read, so those endpoints answered `endpoint_not_found`. The form is gone. If any such rows remain, the tab lists them as **not callable** with a **Remove** button: re-add the ones you need in Settings › Integrations, then remove them from the tab.
 
 ---
 
@@ -246,7 +277,7 @@ curl -X PUT http://localhost:8000/api/settings/a2a_outbound_enabled \
 
 Once a stored setting exists it wins in both directions, and the environment variable is ignored until you clear the row with `DELETE /api/settings/a2a_outbound_enabled`. If `.env` says `true` and the feature still looks off, that stored row is why.
 
-There is **no settings panel** for the endpoint registry — it is an API-only surface. Don't go hunting for it next to the per-agent A2A tab.
+The endpoint registry has a panel in **Settings › Integrations** (admin), beside the routes below.
 
 ### Register an endpoint (admin, human-only)
 
@@ -349,7 +380,7 @@ call_a2a_agent(
 
 `dedup_label` is **required**, and it must differ for each distinct question you ask in one turn. Calls are deduplicated on the endpoint and the conversation — never on the message text — so reusing a label returns the *earlier* answer instead of asking the new question.
 
-If the remote replies with `state: "working"` or `"submitted"`, it is still thinking. Poll it:
+If the remote replies with `state: "working"` or `"submitted"`, it is still thinking. A Trinity remote answers this way for any turn longer than 25 seconds. The reply carries `task_id`. **Poll it; never re-send the message**, which would ask the question again:
 
 ```
 get_a2a_task(agent_name="my-agent", endpoint="research-partner", task_id="<task_id from the call>")
@@ -359,7 +390,7 @@ get_a2a_task(agent_name="my-agent", endpoint="research-partner", task_id="<task_
 
 | Field | Meaning |
 |---|---|
-| `state` | `completed`, `working`, `submitted`, `failed`, `canceled`, … |
+| `state` | `completed`, `working`, `submitted`, `failed`, `canceled`, `rejected`, … (`working`/`submitted` = still running; poll `task_id`) |
 | `text` | The remote's answer (capped at 32 KB, truncation marked) |
 | `task_id` / `context_id` | Handles for polling or continuing the conversation |
 | `protocol_version` | The A2A dialect negotiated from the remote's card |
@@ -413,13 +444,15 @@ A call that arrives without a key gets `401`, whichever network it comes from.
 | `payment_rejected` (502) | A payment token you stored was refused by the remote (spent, expired, or out of credit). Store a fresh one |
 | `rpc_forbidden` (502) | The remote answered 403 for a reason of its own — check the credential and your access with that provider. Never Trinity's own 403 |
 | `message_too_long` (422) | The message exceeds 100,000 characters |
-| `timeout` (504) | The remote took too long. If it accepted a task, poll with `get_a2a_task` |
+| `timeout` (504) | The remote did not answer in time. If it accepted a task, poll with `get_a2a_task`. A Trinity remote answers a long turn with `working` + `task_id` instead of timing out |
 | 409 | The same labelled call is already in flight — use a distinct `dedup_label` |
 | 429 | Too many outbound calls: the limit is **30 per minute per agent** and **120 per minute fleet-wide** |
 
 ### Timeouts, and what "it failed" actually means
 
 A single call is bounded at **30 seconds** for the remote's reply and **45 seconds** wall-clock including the card fetch. The MCP tool gives up on its own side a little earlier (`MCP_A2A_TIMEOUT_MS`, 40 seconds by default) so it can hand the agent a structured receipt instead of an opaque network error.
+
+A long turn on a **Trinity** remote is not a timeout. The remote answers `working` with a `task_id` after 25 seconds, well inside those bounds, and you poll `get_a2a_task` for the result. A timeout now means the remote (or the network to it) did not answer at all.
 
 That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: true`. The remote may well have accepted and run the task. **Do not simply re-send** — poll with `get_a2a_task` if you have a `task_id`, or reuse the same `dedup_label`, which replays the earlier answer rather than paying for the work twice.
 
@@ -466,7 +499,7 @@ The two agent routes return `404` while outbound calling is off. The three setti
 
 | Method | Purpose |
 |--------|---------|
-| `message/send` | Send a message, get a Task (synchronous) |
+| `message/send` | Send a message, get a Task (the result, or `working` + id after 25 s; `configuration.blocking` overrides) |
 | `message/stream` | Same, streamed over SSE |
 | `tasks/get` | Fetch a task's current state |
 | `tasks/cancel` | Cancel a running task |

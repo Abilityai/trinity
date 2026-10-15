@@ -61,6 +61,10 @@ from .provisioning import (  # noqa: F401
     probe_push_access,
     reserve_and_generate_instance_id,
 )
+from .ref_probes import (  # noqa: F401  (#3725)
+    probe_anonymous_ref,
+    probe_tokened_repo_access,
+)
 from .remotes import (  # noqa: F401
     ContainerGitState,
     RebindResult,
