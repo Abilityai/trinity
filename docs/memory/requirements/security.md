@@ -28,7 +28,7 @@
   - `routers/agents.py` emits audit rows after successful create / start / stop / delete
   - 5 integration-shape tests asserting the exact field layout produced by the handlers
 - **Phase 2b Delivery**:
-  - `auth.py` — login_success / login_failed (admin + email)
+  - `auth.py` — login_success / login_failed (admin + email); `actor_ip` is the proxy-aware client address (`utils/client_ip.py`, trinity-enterprise#873 — see `auth.md` §2.1), not the proxy peer
   - `sharing.py` — share / unshare
   - `credentials.py` — inject / export / import (CRED-002 file-injection ops)
   - `settings.py` — settings_change

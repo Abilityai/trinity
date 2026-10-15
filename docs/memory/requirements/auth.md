@@ -12,12 +12,14 @@
 - **Key Features**: 2-step verification, admin-managed whitelist, auto-whitelist on agent sharing, rate limiting (IP-based + per-email OTP lockout after 5 failures)
 - **Security**: OTP brute-force prevented by dual rate limits — `login_attempts:{ip}` (shared with admin login) and `otp_attempts:{email}` (max 5 failures → 10-min lockout). Both `POST /api/auth/email/verify` and `POST /api/public/verify/confirm` are protected. (pentest 3.1.5 / #176)
 - **Enumeration-safety (#186)**: `POST /api/auth/email/request` returns an **identical body + status** regardless of whitelist membership (`{"success": true, "message": "If your email is registered, you'll receive a code shortly"}` — no distinct message, no `expires_in_seconds`). The rate-limit path returns the **same generic 200** (never a 429 differential; suppression is WARN-logged server-side), and the verification email is dispatched **fire-and-forget** so the whitelisted path's latency matches the non-whitelisted/rate-limited paths — closing the body, status, and timing membership oracles (pentest 3.3.3).
+- **Client address behind a proxy (trinity-enterprise#873)**: the per-IP sign-in bucket and the audit `actor_ip` on `login_success` / `login_failed` are keyed by the client address from `utils/client_ip.py::client_ip` — never the raw TCP peer, which is the bundled proxy for every browser user. Forwarded headers are honoured only when the peer is a trusted proxy: loopback, the bundled proxy containers resolved by name (`TRUSTED_PROXY_HOSTS`), or `TRUSTED_PROXIES` (default RFC-1918) **minus the two Trinity subnets** — an agent-network address is trusted only by name, and a bridge gateway is never a trusted peer (it may only be skipped as an opt-in `TRUSTED_PROXY_HOPS` entry). A direct caller or an agent cannot choose the address it is bucketed and audited under; forwarded tokens that are not valid addresses are never used as a key. Same resolver for the Workspace sign-in buckets (`client_portal/router.py`) and every public-link limiter.
 - **Flow**: `docs/memory/feature-flows/email-authentication.md`
 
 ### 2.2 Admin Password Login
 - **Status**: ✅ Implemented
 - **Description**: Password-based fallback for admin user
 - **Key Features**: Bcrypt hashing, first-time setup wizard
+- **Rate limiting & audit IP**: shares `login_attempts_ip:{ip}` with §2.1; the IP is the proxy-aware client address of §2.1 (trinity-enterprise#873).
 
 ### 2.3 Session Persistence
 - **Status**: ✅ Implemented
