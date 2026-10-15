@@ -129,6 +129,14 @@ describe("#736 — the schema is the security boundary", () => {
     assert.match(tools.call_a2a_agent.description, /PRE-REGISTERED/);
     assert.match(tools.call_a2a_agent.description, /cannot supply a URL/);
   });
+
+  it("tells the agent a 'working' answer after 25 s is polled, never re-sent (#3749)", () => {
+    const text = makeTools([]).call_a2a_agent.description;
+    assert.match(text, /25 s/);
+    assert.match(text, /'working'.*task_id/);
+    assert.match(text, /poll get_a2a_task/);
+    assert.match(text, /NEVER re-send/);
+  });
 });
 
 describe("#736 — agent-scoped gate is SELF-ONLY", () => {

@@ -149,6 +149,78 @@ breaker, activity rows, and cost tracking like any other trigger.
 | `_VALID_TRIGGERS` | `routers/executions.py` | listed | an unlisted value degrades to **no filter**, so `?triggered_by=a2a` would return every execution on the install |
 | `_AUTONOMOUS_TRIGGERS` | `services/task_execution_service.py` | listed | **the judgement call.** The set means "no human is watching the reply", so an unresolved slash-command run earns an Operating Room alert (#1410). A2A is dispatched by a remote *machine* caller — structurally the same as `agent`, which is already in the set — so nobody on this install sees the "Unknown command" text come back. The interactive-ish triggers deliberately left out (`manual`, `mcp`, `public`, `chat`, `session`) all have a person reading the reply. |
 
+## Long turns: `working` + poll (#3749)
+
+`message/send` used to hold the HTTP request for the whole agent turn. The
+bundled client's 30 s read timeout (`A2A_RPC_TIMEOUT`, `services/a2a_client.py`)
+then turned any longer turn into a 504, and the caller never learned the
+execution id. The request is now bounded and the turn is not:
+
+1. **Mint.** `_mint_a2a_execution` creates the execution row *before* dispatch.
+   The row is created `running`, with `model_used` resolved (`execute_task`
+   stamps it only on rows it creates itself) and `subscription_id`
+   best-effort. `execute_task(execution_id=...)` then skips its own row
+   creation. This is the pre-created-row contract `/chat` uses. The
+   idempotency claim is attached to the id at once (`attach_execution`). If
+   the mint fails, the claim is released with `fail()` and the caller gets
+   `-32603`. There is no fallback to an un-minted dispatch.
+2. **Detach + hold.** `_finish_send` holds the pre-#3749 tail unchanged:
+   terminal Task, `complete()` with the snapshot, AAuth ownership and activity,
+   the single `a2a_task` audit row. It runs as an `asyncio` task, kept alive by
+   a strong reference in `_INFLIGHT_SENDS` (#1968). `_hold_turn` waits with
+   `asyncio.wait`, never `wait_for`, under `A2A_SEND_WORKING_AFTER_SECONDS =
+   25.0`. That value is strictly under the client's 30 s and leaves room for a
+   10 s cold card fetch inside the MCP tool's 40 s outer limit.
+   `test_budget_is_below_client_rpc_timeout` pins both inequalities. Inside the
+   budget, the response and the snapshot are byte-identical to before.
+3. **Early answer.** Past the budget, the router answers from the **row**
+   (`_task_from_row`): `queued` → `submitted`, `running`/`pending_retry` →
+   `working`, a terminal row → the terminal Task (the turn ended at the
+   deadline), and `skipped` → `rejected`. It writes no snapshot and no audit
+   row. The claim is completed exactly once, by the tail, at the terminal.
+   AAuth: `remember_execution` (now `bool`) is written **before** the id is
+   disclosed. If it returns `False`, the request keeps holding, because the
+   id would 404 on that caller's `tasks/get`.
+4. **`configuration.blocking`** (A2A v0.3 `MessageSendConfiguration`). `true`
+   holds the whole turn (the old behaviour). `false` answers right after the
+   mint. Absent or non-bool uses the budget. `message/stream` ignores it.
+5. **Replay.** A re-send of a running `messageId` (`in_flight` with an attached
+   `execution_id`, scoped to the caller principal and checked against
+   `agent_name`) is answered from the row, so it gets `working` while the turn
+   runs and the terminal Task once the row has finished. That holds even
+   before the tail completes the claim, and after a restart mid-turn. A claim
+   with no id keeps the retryable `-32603`.
+
+**Paid door.** The mint happens inside `execute()`, after verify, dedup and
+the allow-list, so an unverified stranger never leaves a `running` row behind.
+The id travels back through `_TurnHandle.minted`. At the deadline with no id
+yet, the request waits for the mint or the terminal, whichever comes first.
+Before it answers `working`, it writes a `verify` row carrying the id for the
+admitted payer (captured by `run_a2a_paid_turn(on_verified=...)`), so
+`payer_owns_execution` is true mid-turn. That is the third `verify` row for
+the turn and is accepted (T6). A paid re-send while the turn runs keeps the
+shared orchestrator's `IN_FLIGHT` refusal (T2). The payer may `tasks/cancel`
+mid-turn: the turn is never settled and delivers no answer (T5).
+
+**The caller went away.** A client disconnect cancels the request handler but
+not the detached turn. The turn runs to its terminal, completes the claim and
+writes its audit row. On a pull pilot this changes one documented behaviour.
+`dispatch_and_await_terminal`'s claim phase leaves a queued row CANCELLED when
+"a caller that went away" cancels the waiter
+([execution.md](../architecture/execution.md), Interactive turns on a pilot).
+The A2A waiter is now the detached turn, which no disconnect reaches. A queued
+A2A turn whose caller left is therefore still claimed and run, bounded by
+`claim_budget` as before, and its result waits on `tasks/get`. A loop-shutdown
+`CancelledError` inside the tail re-raises **without** `fail()`. The container
+may still be running the turn, and the row is what a replay answers from.
+
+Residual, stated: a backend restart mid-turn loses that turn's `a2a_task`
+audit row, as it did before, while the row, `tasks/get` and replay still
+answer. Tests: `tests/unit/test_3749_a2a_working_task.py` (drives
+`_dispatch_jsonrpc` / `_send_paid_task` under `asyncio.run` with an
+Event-gated dispatch stub, because `TestClient` request loops would kill a
+detached task).
+
 ## Schema / migration
 
 `agent_ownership.a2a_exposed INTEGER DEFAULT 0` — dual-track (Invariant #3):
@@ -292,10 +364,13 @@ oracle. The binding is written **when the turn's result exists, before the
 settle**: `run_paid_turn` logs a `verify` row carrying the execution id as soon
 as `execute()` returns, because when only the `settle` / `settle_failed` rows
 carried the pair, a payer was locked out of a finished task while its settle was
-still running, and for good when a concurrent settle wrote no row. It is **not**
-written mid-turn — `execute()` returns at the terminal, so a poll during the
-turn reads as not-found and a payer's `tasks/cancel` can only answer "already in
-a terminal state". No schema change; those columns were already on the row.
+still running, and for good when a concurrent settle wrote no row. Since #3749
+it is **also** written mid-turn when the turn outlives the `message/send`
+budget: the router writes the same `verify` row for the admitted payer before
+it answers `working` (see [Long turns](#long-turns-working--poll-3749)). A
+poll during the turn then reads `working`, and a payer's `tasks/cancel`
+cancels the turn, with no settle and no answer. No schema change; those
+columns were already on the row.
 
 **A refusal is classified once, rendered twice.** `routers/a2a.py`'s
 `_classify_paid_refusal` is the single table, consumed by `message/send` (which

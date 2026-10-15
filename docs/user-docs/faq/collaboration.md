@@ -145,7 +145,7 @@ Yes — this is the outbound direction, and it's off by default. An admin turns 
 
 ## An outbound A2A call timed out — should I just try again?
 
-No, not blindly. A timeout means Trinity gave up waiting, not that the remote agent didn't run the task — the response says `possibly_delivered` for exactly this reason. If you have a task id, poll it with `get_a2a_task`. Otherwise re-send with the **same** dedup label: that replays the original answer if the call already completed, rather than triggering the work a second time. See [A2A Protocol](../integrations/a2a-protocol.md).
+No, not blindly. A timeout means Trinity gave up waiting, not that the remote agent didn't run the task — the response says `possibly_delivered` for exactly this reason. (A long turn on a Trinity remote is not a timeout: the remote answers `working` with a `task_id` after 25 seconds, and you poll that.) If you have a task id, poll it with `get_a2a_task`. Otherwise re-send with the **same** dedup label: that replays the original answer if the call already completed, rather than triggering the work a second time. See [A2A Protocol](../integrations/a2a-protocol.md).
 
 ## Can my agent message me proactively instead of waiting for me to ask?
 
