@@ -2271,10 +2271,27 @@ class VoiceReplyRequest(BaseModel):
 
     ``text`` is spoken as a voice note on the channel the ``execution_id`` came from.
     ``dedup_label`` lets an agent intentionally send two voice notes in one turn.
+
+    An address — ``to`` (a role, ent#606) or, deprecated, ``recipient_email``,
+    never both — plus ``channel`` sends the note to a person instead: the
+    proactive path a scheduled run uses (abilityai/trinity-enterprise#700).
+    ``channel`` comes with an address or not at all. ``execution_id`` stays
+    required: it is the caller check and the #1084 dedup scope on both paths.
     """
     text: str = Field(min_length=1, max_length=4096)
     execution_id: str = Field(min_length=1)
     dedup_label: str = ""
+    recipient_email: Optional[EmailStr] = None
+    to: Optional[Literal["primary", "approver", "viewer"]] = None
+    channel: Optional[Literal["telegram", "slack", "whatsapp"]] = None
+
+    @model_validator(mode="after")
+    def _address_is_whole(self):
+        if self.to and self.recipient_email:
+            raise ValueError("address a voice note with `to` (a role) or recipient_email, not both")
+        if bool(self.to or self.recipient_email) != bool(self.channel):
+            raise ValueError("an addressed voice note needs a channel, and a channel needs an address")
+        return self
 
 
 class PublicChannelModelUpdate(BaseModel):

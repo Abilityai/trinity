@@ -31,6 +31,17 @@ Set the ElevenLabs key under **Settings → General → Voice (ElevenLabs)** (st
 
 During a channel turn, the agent calls `send_voice_reply` to speak that specific reply. The backend resolves the channel destination from the current execution, checks the agent-level enable plus the per-channel flag, synthesizes the audio, and delivers it. If any check fails, it reports "not delivered" and the agent sends text instead.
 
+### 4. Agent — speak to someone proactively (scheduled briefs)
+
+A scheduled run, loop, or reminder has no conversation to reply into, so a plain `send_voice_reply` call there is refused with guidance. To send a voice note from such a run, the agent also passes who to speak to — a role with `to` (`primary`, `approver` or `viewer`; the platform picks the person) or an email with `recipient_email` — and a `channel` (`telegram` or `whatsapp`). This works like `send_message`:
+
+- The person must be **linked** on that channel (verified email) and must have **opted in to proactive messages** from the agent (or be its owner).
+- The **per-person hourly limit** for proactive messages applies, and voice and text share it.
+- Every send is recorded in the audit log.
+- The agent-level voice setting and the channel's voice flag still apply.
+
+Keep proactive voice notes short. Text longer than the cap (`TTS_MAX_CHARS`, 1500 characters by default) is refused with `text_too_long`, so a daily brief should be a short spoken summary followed by the detail in text.
+
 ### Per-Channel Delivery
 
 | Channel | Delivery format |
@@ -54,7 +65,7 @@ MCP tool:
 
 | Tool | Description |
 |------|-------------|
-| `send_voice_reply` | Speak the current channel reply as a voice note. Backend resolves the destination from the execution, gates on the agent + per-channel flags, and returns fail-soft so the agent can fall back to text |
+| `send_voice_reply` | Speak the current channel reply as a voice note. Backend resolves the destination from the execution, gates on the agent + per-channel flags, and returns fail-soft so the agent can fall back to text. Pass `to` (a role) or `recipient_email`, plus `channel` (telegram or whatsapp), to speak to a person from a scheduled or other non-chat run; consent and rate limits apply as for `send_message` |
 
 See [Backend API Docs](http://localhost:8000/docs) for full request/response schemas.
 
@@ -62,6 +73,7 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 
 - Voice replies cover the messaging channels (Telegram, Slack, WhatsApp) — not the Agent Detail chat or public links. The [Workspace](../sharing-and-access/workspace.md) has its own speaker toggle (**Speak replies aloud**) that reads replies with the same agent voice; it is a viewer-side choice, not something the agent opts into.
 - Voice is per-reply — the agent decides each time; there is no way to force every reply to be spoken.
+- Proactive (addressed) voice notes reach Telegram and WhatsApp only; Slack is not supported yet. WhatsApp's 24-hour session window applies as it does to proactive text.
 - The voice is an ElevenLabs voice; it is unrelated to the Gemini voice used for [Voice Chat](voice-chat.md) and [VoIP calls](voip-telephony.md).
 - Synthesis cost accrues on your ElevenLabs account per character spoken.
 

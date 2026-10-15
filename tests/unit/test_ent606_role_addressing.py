@@ -394,12 +394,12 @@ def route(ra, monkeypatch):
     svc_db.get_whatsapp_binding.return_value = {"id": 1}
     svc_db.get_whatsapp_chat_link_by_verified_email.return_value = None
     monkeypatch.setattr(pms, "db", svc_db)
-    monkeypatch.setattr(pms.proactive_message_service, "_check_rate_limit", lambda *a: True)
+    monkeypatch.setattr(pms.proactive_message_service, "check_rate_limit", lambda *a: True)
 
     async def _no_audit(*a, **k):
         return None
 
-    monkeypatch.setattr(pms.proactive_message_service, "_audit_send", _no_audit)
+    monkeypatch.setattr(pms.proactive_message_service, "audit_send", _no_audit)
 
     app = FastAPI()
     app.include_router(messages.router)

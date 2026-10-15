@@ -1509,6 +1509,45 @@ async def send_voice_reply_endpoint(
     if not execution or execution.agent_name != agent_name:
         return {"delivered": False, "reason": "execution_not_found"}
 
+    # ent#700: an explicit address is the proactive path — any trigger (a
+    # schedule, a loop, a delegated child) may use it, because the service puts
+    # it through the proactive-text gates (consent, rate limit, audit). It is
+    # decided before the conversation-based branches below, which exist only
+    # because the in-session route has no consent check of its own.
+    if body.recipient_email or body.to:
+        from services import role_addressing
+
+        try:
+            recipient = role_addressing.resolve_single_recipient(
+                agent_name,
+                to=body.to,
+                recipient_email=str(body.recipient_email) if body.recipient_email else None,
+                noun="voice note",
+                surface="voice",
+                by_agent_key=bool(current_user.agent_name),
+            )
+        except role_addressing.RecipientRefused as e:
+            # Fail-soft like every other voice refusal; names the role, never a person.
+            return {
+                "delivered": False,
+                "channel": body.channel,
+                "reason": e.detail["code"],
+                "role": e.detail.get("role"),
+                "guidance": e.detail["message"] + " No voice note was sent; reply with text.",
+            }
+        try:
+            result = await voice_reply_service.send_proactive_voice(
+                agent_name,
+                recipient,
+                body.channel,
+                body.text,
+                execution_id=body.execution_id,
+                dedup_label=body.dedup_label or "",
+            )
+        except idempotency_service.EffectInProgressError:
+            raise HTTPException(status_code=409, detail="A voice note to this recipient is already being sent")
+        return _voice_result(result)
+
     # Only user-facing channel turns have a deliverable voice destination.
     channel = execution.source_channel or execution.triggered_by
     # #3232: a delegated child carries its parent's channel context only so its
@@ -1561,7 +1600,19 @@ async def send_voice_reply_endpoint(
             ),
         }
     if channel not in ("telegram", "slack", "whatsapp"):
-        return {"delivered": False, "channel": channel, "reason": "not_a_channel_turn"}
+        # trinity#2999 AC 3: name the constraint and the way out, not just the trigger.
+        return {
+            "delivered": False,
+            "channel": channel,
+            "reason": "not_a_channel_turn",
+            "guidance": (
+                "This turn has no Telegram, Slack or WhatsApp conversation to reply into, "
+                "so the voice note has nowhere to go. To speak to a specific person, call "
+                "send_voice_reply again "
+                "with recipient_email and channel (telegram or whatsapp); they must have "
+                "opted in to proactive messages from you. Otherwise reply with text."
+            ),
+        }
     if not execution.source_channel_chat_id:
         return {"delivered": False, "channel": channel, "reason": "no_destination"}
 
@@ -1578,7 +1629,18 @@ async def send_voice_reply_endpoint(
     except idempotency_service.EffectInProgressError:
         raise HTTPException(status_code=409, detail="A voice note for this turn is already being sent")
 
-    return {"delivered": result.delivered, "channel": result.channel, "reason": result.reason}
+    return _voice_result(result)
+
+
+def _voice_result(result) -> dict:
+    """The voice-reply wire shape: ``{delivered, channel, reason}`` plus
+    ``guidance`` / ``max_chars`` only when the service set them."""
+    out = {"delivered": result.delivered, "channel": result.channel, "reason": result.reason}
+    if getattr(result, "guidance", None):
+        out["guidance"] = result.guidance
+    if getattr(result, "max_chars", None):
+        out["max_chars"] = result.max_chars
+    return out
 
 
 # ============================================================================

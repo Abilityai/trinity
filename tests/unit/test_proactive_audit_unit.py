@@ -1,11 +1,11 @@
 """
 Regression test for #374 — proactive message audit logging.
 
-Pre-fix: `proactive_message_service._audit_send` called
+Pre-fix: `proactive_message_service.audit_send` called
 `platform_audit_service.log_event(...)` which does not exist; the warning
 was swallowed and no audit row was ever written for proactive messages.
 
-Post-fix: `_audit_send` is async, awaits `platform_audit_service.log(...)`
+Post-fix: `audit_send` is async, awaits `platform_audit_service.log(...)`
 with the correct kwargs (`actor_agent_name` instead of `actor_type`/`actor_id`).
 """
 
@@ -26,7 +26,7 @@ if _backend_path not in sys.path:
 @pytest.fixture
 def proactive_service(monkeypatch):
     # #1895: patch the audit references IN PLACE on the already-imported
-    # proactive_message_service module — do NOT del + reimport it. `_audit_send`
+    # proactive_message_service module — do NOT del + reimport it. `audit_send`
     # reads `platform_audit_service`/`AuditEventType` as module globals (via its
     # __globals__), so monkeypatch.setattr on the module reaches it. The old
     # approach re-imported the module under a stubbed audit and left that fresh
@@ -44,7 +44,7 @@ def proactive_service(monkeypatch):
     fake_service.log = AsyncMock(return_value="evt-1")
     monkeypatch.setattr(pms, "platform_audit_service", fake_service)
     monkeypatch.setattr(pms, "AuditEventType", _AuditEventType)
-    # db is only used by other methods, not _audit_send; stub it in place too so
+    # db is only used by other methods, not audit_send; stub it in place too so
     # the constructor never touches a real DB.
     monkeypatch.setattr(pms, "db", MagicMock())
 
@@ -52,10 +52,10 @@ def proactive_service(monkeypatch):
 
 
 def test_audit_send_invokes_platform_audit_log(proactive_service):
-    """_audit_send must call platform_audit_service.log with actor_agent_name kwarg."""
+    """audit_send must call platform_audit_service.log with actor_agent_name kwarg."""
     service, audit = proactive_service
     asyncio.run(
-        service._audit_send(
+        service.audit_send(
             agent_name="research-bot",
             recipient_email="alice@example.com",
             channel="telegram",
@@ -85,7 +85,7 @@ def test_audit_send_swallows_exceptions(proactive_service):
 
     # Should not raise.
     asyncio.run(
-        service._audit_send(
+        service.audit_send(
             agent_name="bot",
             recipient_email="x@example.com",
             channel="web",
@@ -99,7 +99,7 @@ def test_audit_send_truncates_long_preview(proactive_service):
     service, audit = proactive_service
     long_text = "x" * 500
     asyncio.run(
-        service._audit_send(
+        service.audit_send(
             agent_name="bot",
             recipient_email="x@example.com",
             channel="web",
@@ -114,7 +114,7 @@ def test_audit_send_truncates_long_preview(proactive_service):
 def test_send_message_success_path_writes_success_audit(proactive_service, monkeypatch):
     """End-to-end: send_message → successful delivery → audit with success=True.
 
-    Guards against regressions where the success-branch `await self._audit_send(...)`
+    Guards against regressions where the success-branch `await self.audit_send(...)`
     at the end of `send_message` silently drops (e.g. if made sync again, or if
     the call site forgets to await).
     """
@@ -126,8 +126,8 @@ def test_send_message_success_path_writes_success_audit(proactive_service, monke
     fake_db.can_agent_message_email = MagicMock(return_value=True)
 
     # 2. Rate limit passes (both helpers are sync; stub them).
-    monkeypatch.setattr(service, "_check_rate_limit", lambda a, e: True)
-    monkeypatch.setattr(service, "_increment_rate_limit", lambda a, e: None)
+    monkeypatch.setattr(service, "check_rate_limit", lambda a, e: True)
+    monkeypatch.setattr(service, "increment_rate_limit", lambda a, e: None)
 
     # 3. Delivery succeeds.
     from services.proactive_message_service import DeliveryResult
