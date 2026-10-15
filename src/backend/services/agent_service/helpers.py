@@ -237,6 +237,13 @@ def visible_agent_names(current_user: User) -> Optional[set]:
     }
 
 
+def _agent_fleet_reach(current_user: User) -> Optional[set]:
+    """`dependencies.agent_fleet_reach`, imported late (dependencies is the
+    auth layer above this module)."""
+    from dependencies import agent_fleet_reach
+    return agent_fleet_reach(current_user)
+
+
 def get_accessible_agents(current_user: User) -> list:
     """
     Get list of all agents accessible to the current user.
@@ -246,7 +253,13 @@ def get_accessible_agents(current_user: User) -> list:
 
     OPTIMIZED: Uses batch query to fetch all metadata in 2 queries total
     instead of 8-10 queries per agent (N+1 problem fix).
+
+    An agent-scoped key keeps only the agents in its reach
+    (`dependencies.agent_reach_set`, trinity-enterprise#872): it carries its
+    owner's role, so the admin answer below would be every agent on the install.
     """
+    reach = _agent_fleet_reach(current_user)
+
     # Fast Docker call (no stats) - avoids slow Docker API calls
     all_agents = list_all_agents_fast()
 
@@ -271,8 +284,9 @@ def get_accessible_agents(current_user: User) -> list:
 
         # Handle orphaned agents (exist in Docker but not in DB)
         if not metadata:
-            # Only admin can see orphaned agents
-            if not is_admin:
+            # Only admin can see orphaned agents — never an agent key: an
+            # orphan has no owner, so it is in no agent's reach.
+            if not is_admin or reach is not None:
                 continue
             # Show with minimal info
             agent_dict["owner"] = None
@@ -294,6 +308,8 @@ def get_accessible_agents(current_user: User) -> list:
 
         # Skip if no access (not admin, not owner, not shared)
         if not (is_admin or is_owner or is_shared):
+            continue
+        if reach is not None and agent_name not in reach:
             continue
 
         # Populate agent dict from batch metadata
@@ -327,7 +343,12 @@ def accessible_agent_names(current_user: User) -> Optional[List[str]]:
     Returns None for admins (no filter — see every agent).
     Returns a list (possibly empty) for non-admins.
     Used by fleet-level endpoints that filter schedule_executions by agent_name.
+    An agent-scoped key always gets a list — its reach — never None
+    (trinity-enterprise#872).
     """
+    reach = _agent_fleet_reach(current_user)
+    if reach is not None:
+        return sorted(reach)
     if current_user.role == "admin":
         return None
     return [a["name"] for a in get_accessible_agents(current_user)]

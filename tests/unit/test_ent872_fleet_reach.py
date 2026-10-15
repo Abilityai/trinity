@@ -78,7 +78,6 @@ def containers(fleet, monkeypatch):
     return running
 
 
-@pytest.mark.xfail(strict=True, reason="CP2: seam narrowing")
 def test_accessible_agent_names_narrows_an_agent_key(containers):
     from services.agent_service.helpers import accessible_agent_names
 
@@ -93,7 +92,6 @@ def test_accessible_agent_names_is_unchanged_for_everyone_else(containers):
     assert accessible_agent_names(_user_key()) is None
 
 
-@pytest.mark.xfail(strict=True, reason="CP2: seam narrowing")
 def test_get_accessible_agents_narrows_an_agent_key(containers):
     from services.agent_service.helpers import get_accessible_agents
 
@@ -113,7 +111,6 @@ def test_get_accessible_agents_is_unchanged_for_an_admin_person(containers):
 # Part C — the routes, through the real routers
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="CP2: seam narrowing")
 def test_the_fleet_execution_list_carries_only_the_reach(containers):
     from db_harness import seed_execution
     import routers.executions as rex
@@ -122,7 +119,10 @@ def test_the_fleet_execution_list_carries_only_the_reach(containers):
         seed_execution(f"s-{name}", agent_name=name, exec_id=f"e-{name}")
     got = {r["agent_name"] for r in _real_app(rex).get("/api/executions?hours=0").json()}
     assert got == {A}
-    assert _real_app(rex).get(f"/api/executions?hours=0&agent={C}").json() == []
+    # A no-arg principal: `_agent_key(agent=...)` would bind `?agent=` itself.
+    key = _real_app(rex, user=lambda: _agent_key())
+    assert key.get(f"/api/executions?hours=0&agent={C}").json() == []
+    assert {r["agent_name"] for r in key.get(f"/api/executions?hours=0&agent={A}").json()} == {A}
 
 
 def test_the_fleet_execution_list_is_unchanged_for_an_admin_person(containers):
@@ -133,6 +133,18 @@ def test_the_fleet_execution_list_is_unchanged_for_an_admin_person(containers):
         seed_execution(f"s-{name}", agent_name=name, exec_id=f"e-{name}")
     got = {r["agent_name"] for r in _real_app(rex, user=_human).get("/api/executions?hours=0").json()}
     assert got == {A, C}
+
+
+def test_the_fleet_event_list_is_filtered_to_the_reach_in_sql(fleet, monkeypatch):
+    import routers.event_subscriptions as res
+
+    seen = []
+    monkeypatch.setattr(res.db, "list_agent_events",
+                        lambda **kw: seen.append(kw["agent_names"]) or [])
+    assert _real_app(res).get("/api/events").status_code == 200
+    assert _real_app(res, user=_human).get("/api/events").status_code == 200
+    assert seen == [sorted({A, B, SPAWN}), None]
+    assert _real_app(res).get(f"/api/events?source_agent={C}").status_code == 403
 
 
 @pytest.mark.xfail(strict=True, reason="CP3: consent is a person's own record")
