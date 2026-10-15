@@ -4225,6 +4225,18 @@
       "description": "POST /api/agents/{name}/aauth/resource-call through TestClient over the real ladder and the scripted resource + person server: uniform 404 while inert for every body shape, the agent's OWN key only (human, sibling, system → 403 aauth_agent_only) BEFORE the allow-list is consulted, the discriminated call-XOR-resume body with bounded fields, no request or response field can carry a token (token_kind is a three-word Literal; field sets pinned); a result through the full chain with status/body/budget/token_kind/challenges and an audit row whose details name the outcome and never a token, the body, the justification or an id; the second call reuses the auth token with zero PS trips; the same dedup_label replays the snapshot without a second send (body is not identity); a pending outcome RELEASES the effect claim so the post-consent retry runs for real; resume by handle polls the PS with Prefer: wait and re-sends the STORED body outside the guard, then handle_unknown is an expired outcome; denied / approval-pending are 200 outcomes with do_not_retry; refusals are mapped errors (403 resource_not_allowed, 409 person_server_unconfigured, 503 state_unavailable as AUTHORIZATION rows before egress; 402 / 429 + retry_after / 502 unsupported_requirement as EXECUTION rows after it); a POST timeout is 504 with possibly_executed; an in-flight duplicate is 409; a missing execution id runs unguarded or is refused 422 on a pull agent; GET sends no body and the justification is INFO-logged not audited; snapshot round-trip; registered in main.py after the person-token router with the # mcp: header; the path resolves beside the agent catch-all; the gate helpers are the person-token router's."
     },
     {
+      "file": "unit/test_ent928_aauth_four_party.py",
+      "feature": "abilityai/trinity-enterprise#928",
+      "added": "2026-10-15",
+      "categories": [
+        "backend",
+        "security",
+        "a2a",
+        "unit"
+      ],
+      "description": "AAuth four-party resources (resource token aud = access server), no network: verify_resource_token accepts a four-party aud only when it is a strict https://host server identifier whose /.well-known/aauth-access.json is fetchable and names itself as issuer — the fetch runs only AFTER the resource's signature verifies, a three-party aud never dials anything, every refusal (no document, issuer mismatch, issuer missing, private address, timeout, non-https / port / path / IP / malformed aud) is the named check `aud` with no person-server call; discovery.access_server_metadata document rules, the outbound public-URL validator on its path, positive and negative caches; inspect_auth_token per mode (four-party: iss = the AS, dwk = aauth-access.json; three-party: iss = PS, dwk = aauth-person.json; ps must be ours in both; cross-mode tokens refused; HeldAuthToken.iss is the real issuer); the ladder end to end: the resource token goes to OUR PS's auth_token_endpoint carrying the AS aud, the AS receives only its metadata fetch, the AS-minted token is held under its issuer and reused on the second call with no PS trip, a PS-minted token answering a four-party exchange is refused and nothing held, a pending (202) record carries as_url and the poll holds the same rule, an older record without as_url stays three-party, snapshot/replay and audit details carry auth_mode + access_server and never a token."
+    },
+    {
       "file": "mcp-server/src/tools/aauth.test.ts",
       "feature": "abilityai/trinity-enterprise#878, abilityai/trinity-enterprise#879",
       "added": "2026-10-13",
