@@ -202,15 +202,14 @@ the turn and is accepted (T6). A paid re-send while the turn runs keeps the
 shared orchestrator's `IN_FLIGHT` refusal (T2). The payer may `tasks/cancel`
 mid-turn: the turn is never settled and delivers no answer (T5).
 
-**The caller went away.** A client disconnect cancels the request handler but
-not the detached turn. The turn runs to its terminal, completes the claim and
-writes its audit row. On a pull pilot this changes one documented behaviour.
-`dispatch_and_await_terminal`'s claim phase leaves a queued row CANCELLED when
-"a caller that went away" cancels the waiter
-([execution.md](../architecture/execution.md), Interactive turns on a pilot).
-The A2A waiter is now the detached turn, which no disconnect reaches. A queued
-A2A turn whose caller left is therefore still claimed and run, bounded by
-`claim_budget` as before, and its result waits on `tasks/get`. A loop-shutdown
+**The caller went away.** The app's HTTP middleware does not cancel a handler
+on client disconnect ([execution.md](../architecture/execution.md), Interactive
+turns on a pilot). Whether or not the handler is ever cancelled, the detached
+turn is not: it runs to its terminal, completes the claim and writes its audit
+row. The waiter inside `dispatch_and_await_terminal` is the detached turn, so
+its "caller went away" branch (a queued row left CANCELLED) can only fire at
+loop shutdown. A queued A2A turn whose caller left is claimed and run, bounded
+by `claim_budget`, and its result waits on `tasks/get`. A loop-shutdown
 `CancelledError` inside the tail re-raises **without** `fail()`. The container
 may still be running the turn, and the row is what a replay answers from.
 

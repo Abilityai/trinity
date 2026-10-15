@@ -393,13 +393,48 @@ def test_tasks_get_maps_skipped_to_rejected(h):
     assert task["status"]["message"]["parts"][0]["text"] == "Not run: skill refused"
 
 
+def test_tasks_cancel_treats_skipped_as_terminal(h, monkeypatch):
+    """Review I3: a row that polls `rejected` is terminal for `tasks/cancel` too —
+    the same not-cancelable answer as any other terminal state, no signal sent."""
+    terminated = []
+
+    async def _terminate(agent_name, exec_id):
+        terminated.append(exec_id)
+        return True
+    monkeypatch.setattr(a2a, "terminate_execution_on_agent", _terminate)
+    h.state["executions"]["e"] = {"agent_name": AGENT, "status": "skipped",
+                                  "response": None, "error": "Not run: skill refused"}
+
+    resp = asyncio.run(a2a._dispatch_jsonrpc(
+        AGENT, h.request, ("tasks/cancel", {"id": "e"}, "c"), current_user=h.user))
+    body = json.loads(resp.body)
+
+    assert body["error"]["code"] == a2a._A2A_TASK_NOT_CANCELABLE
+    assert body["error"]["message"] == "Task is already in a terminal state"
+    assert terminated == [] and h.state["audit"] == []
+
+
+def _mcp_a2a_timeout_seconds() -> float:
+    """The MCP tool's default outer limit, `MCP_A2A_TIMEOUT_MS`, read from the
+    TypeScript source it lives in (Python cannot import it) — so a change there
+    re-runs this bound instead of leaving a stale literal behind."""
+    import re
+    client_ts = _BACKEND.parent / "mcp-server" / "src" / "client.ts"
+    m = re.search(r"MCP_A2A_TIMEOUT_MS\s*\|\|\s*(\d+)", client_ts.read_text())
+    assert m, "MCP_A2A_TIMEOUT_MS default not found in client.ts"
+    return int(m.group(1)) / 1000
+
+
+MCP_A2A_TIMEOUT_SECONDS = _mcp_a2a_timeout_seconds()
+
+
 def test_budget_is_below_client_rpc_timeout():
     from services import a2a_client
     budget = a2a.A2A_SEND_WORKING_AFTER_SECONDS
     assert budget < a2a_client.A2A_RPC_TIMEOUT
-    # The MCP tool's default outer limit (`MCP_A2A_TIMEOUT_MS`, 40 s) must fit a
-    # cold card fetch in front of the send.
-    assert a2a_client.A2A_CARD_FETCH_TIMEOUT + budget < 40
+    # The MCP tool's default outer limit must fit a cold card fetch in front of
+    # the send.
+    assert a2a_client.A2A_CARD_FETCH_TIMEOUT + budget < MCP_A2A_TIMEOUT_SECONDS
 
 
 # --------------------------------------------------------------------------- #
@@ -486,8 +521,9 @@ def test_failed_mint_fails_the_claim_and_never_dispatches(h, monkeypatch, mint):
 # The detached turn outlives the request
 # --------------------------------------------------------------------------- #
 def test_client_disconnect_does_not_cancel_the_turn(h):
-    """Starlette cancels the handler when the client goes away; the turn it
-    detached must run on to its terminal, complete the claim and audit once."""
+    """Even if the handler is cancelled (the app's middleware does not cancel
+    on disconnect, but loop shutdown can), the turn it detached must run on to
+    its terminal, complete the claim and audit once."""
     async def run():
         h.state["gate"] = asyncio.Event()
         handler = asyncio.create_task(h.send())
@@ -797,3 +833,33 @@ def test_paid_fast_turn_writes_no_early_binding(p):
         assert body["result"]["status"]["state"] == "completed"
         assert [r.get("execution_id") for r in _verify_rows(p.state)] == [None, MINTED]
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# `remember_execution` — the real body (review I7): the router keeps holding on
+# False, so both return values must mean what they say.
+# --------------------------------------------------------------------------- #
+class _FakeRedis:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.sets = []
+
+    def set(self, key, value, ex=None):
+        if self.fail:
+            raise ConnectionError("redis down")
+        self.sets.append((key, value, ex))
+
+
+@pytest.mark.parametrize("client", ["ok", "none", "raises"])
+def test_remember_execution_returns_whether_the_owner_was_recorded(monkeypatch, client):
+    from services import rate_limiter
+    from services.aauth import inbound
+    fake = None if client == "none" else _FakeRedis(fail=client == "raises")
+    monkeypatch.setattr(rate_limiter, "_get_redis", lambda: fake)
+
+    recorded = inbound.remember_execution("exec-9", "agent:peer")
+
+    assert recorded is (client == "ok")
+    if client == "ok":
+        assert fake.sets == [(inbound._EXEC_KEY.format("exec-9"), "agent:peer",
+                              inbound.EXECUTION_OWNER_TTL)]

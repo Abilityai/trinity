@@ -136,6 +136,8 @@ describe("#736 — the schema is the security boundary", () => {
     assert.match(text, /'working'.*task_id/);
     assert.match(text, /poll get_a2a_task/);
     assert.match(text, /NEVER re-send/);
+    // The guidance is useless past Claude Code's 2,048-character cut (#3234).
+    assert.ok(text.length <= 2048, `description is ${text.length} chars`);
   });
 });
 

@@ -544,6 +544,11 @@ _ROW_STATE = {
     "running": "working", "queued": "submitted", "skipped": "rejected",
 }
 
+#: Row statuses `tasks/cancel` treats as terminal — exactly the ones `_ROW_STATE`
+#: maps to a terminal A2A state, so a task that polls `rejected` is not
+#: cancelable either (#3749, review I3).
+_TERMINAL_ROW_STATUSES = ("success", "failed", "cancelled", "skipped")
+
 
 def _task_from_row(exec_id: str, row: Any) -> Dict[str, Any]:
     """The A2A Task an execution row reads as, through the full status map.
@@ -629,11 +634,14 @@ async def _hold_turn(turn: "asyncio.Task", blocking: Optional[bool]) -> bool:
 
 
 def _detach_turn(coro, execution_id: Optional[str], agent_name: str) -> "asyncio.Task":
+    """`execution_id` is `None` on the paid door, whose id is minted inside the
+    turn — the log line then names the agent only."""
     turn = asyncio.create_task(coro)
     _INFLIGHT_SENDS.add(turn)
     turn.add_done_callback(_INFLIGHT_SENDS.discard)
+    label = f"{execution_id} " if execution_id else ""
     turn.add_done_callback(
-        lambda t: logger.info("a2a: detached turn %s for %s finished", execution_id, agent_name)
+        lambda t: logger.info("a2a: detached turn %sfor %s finished", label, agent_name)
         if not t.cancelled() else None)
     return turn
 
@@ -1319,7 +1327,7 @@ async def _bound_task_rpc(agent_name: str, method: str, exec_id: str,
     if method == "tasks/get":
         return _rpc_result(rpc_id, _task_from_row(exec_id, row))
 
-    if status in ("success", "failed", "cancelled"):
+    if status in _TERMINAL_ROW_STATUSES:
         return _rpc_error(rpc_id, _A2A_TASK_NOT_CANCELABLE,
                           "Task is already in a terminal state")
     if status == "queued":
@@ -1697,7 +1705,7 @@ async def _dispatch_jsonrpc(
         # task is still queued means it drains minutes later, runs, bills, and
         # performs side effects the caller believed were cancelled.
         status = _exec_field(row, "status")
-        if status in ("success", "failed", "cancelled"):
+        if status in _TERMINAL_ROW_STATUSES:
             return _rpc_error(rpc_id, _A2A_TASK_NOT_CANCELABLE,
                               "Task is already in a terminal state")
 
