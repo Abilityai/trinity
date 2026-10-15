@@ -1217,9 +1217,13 @@ if [ "$HOSTED" != "1" ] && [ "$_hosted_db" = "1" ] && [ "$_dev_volume" = "0" ]; 
     echo "   one stays in ${_data_abs} — and Redis is shared between the two stacks, so you" >&2
     echo "   would get a half-migrated install rather than a clean one." >&2
     echo "" >&2
-    echo "   This is a production or hosted install. Bring it up with the file set it" >&2
-    echo "   was installed with:" >&2
+    echo "   This is a production or hosted install. To UPDATE it, use the update command —" >&2
+    echo "   it detects which file set this host runs (enterprise overlay included) (#3007):" >&2
+    echo "       ./scripts/deploy/update.sh            # or: ./scripts/deploy/update.sh --check" >&2
+    echo "   To just bring it up, use the file set it was installed with:" >&2
     echo "       docker compose -f docker-compose.prod.yml up -d    # source-built production" >&2
+    echo "       docker compose -f docker-compose.prod.yml -f docker-compose.prod.enterprise.yml up -d" >&2
+    echo "                                                          # ... with the enterprise submodule" >&2
     echo "       ./scripts/deploy/start.sh --hosted                  # prebuilt GHCR images" >&2
     echo "   (docker-compose.prod.yml is a complete standalone file — never stack it on" >&2
     echo "    docker-compose.yml with two -f flags; the merge does not validate.)" >&2

@@ -215,6 +215,10 @@ def test_dev_stack_refusal_names_prod_as_well_as_hosted(tmp_path: Path) -> None:
     assert "docker compose -f docker-compose.prod.yml up -d" in proc.stderr, (
         "a source-built production host needs the prod invocation as a remedy, not only --hosted"
     )
+    # #3007: the prod remedy alone drops the enterprise overlay — the refusal
+    # must name the overlay invocation and the shape-detecting update command.
+    assert "-f docker-compose.prod.yml -f docker-compose.prod.enterprise.yml up -d" in proc.stderr
+    assert "./scripts/deploy/update.sh" in proc.stderr
     assert "installed with --hosted, and" not in proc.stderr, (
         "the refusal must not assert the install was hosted — a prod source build produces the same state"
     )

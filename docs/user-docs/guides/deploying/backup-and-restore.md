@@ -23,7 +23,8 @@ Trinity backs up its own database; this page covers what that gives you, the man
 | Where | `/data/backups/` inside the backend container — the `trinity-data` volume (dev) or `${TRINITY_DATA_PATH}/backups` (prod and hosted) |
 | SQLite | `trinity-backup-YYYYMMDD.db` — a consistent online copy via SQLite's backup API (never a raw file copy) |
 | PostgreSQL | `trinity-backup-YYYYMMDD.dump` — `pg_dump -Fc` (custom format, restorable with `pg_restore`) |
-| Pre-migration | `pre-migration-YYYYMMDD-HHMMSS.db` — an extra safety copy taken automatically at boot when a schema migration is about to run (SQLite) |
+| Pre-migration | `pre-migration-YYYYMMDD-HHMMSS.db` — an extra safety copy taken automatically at boot when a schema migration is about to run (SQLite), and by `scripts/deploy/update.sh` before every update |
+| Pre-update (PostgreSQL) | `pre-update-YYYYMMDD-HHMMSS.dump` — a fresh `pg_dump -Fc` that `scripts/deploy/update.sh` takes before every update |
 | Retention | `backup_retention_days` (default **14**, bounds 1–3650) — set via `PUT /api/settings/ops/config` (the **Database backups** card on the Retention tab shows it, read-only). The newest **3** artifacts are always kept, regardless of age. Like every retention window, it is stored per install and does not change on upgrade. |
 | Default | **Enabled.** Disable with `DB_BACKUP_ENABLED=false` in `.env` — this turns off both the nightly job and the boot-time pre-migration copy |
 | Failure visibility | A failed or skipped backup raises an item in Operations → Needs Response, and a "backups are stale" alarm re-fires weekly while the newest success is older than 3 days |

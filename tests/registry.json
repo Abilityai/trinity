@@ -6099,6 +6099,17 @@
         "auth"
       ],
       "description": "trinity-enterprise#901 checkpoint A: an agent withdraws its own pending ask with a reason and no successor. The shared compare-and-set (`_end_own_pending`) ends the row cancelled/agent/reason with replaced_by NULL and no deadline clause (a pending row past its deadline is withdrawn, like a person's cancel); a person's answer, cancel or the sweep wins and nothing is written; NULL-raiser, gate and another agent's rows are not_own; replace still runs through the shared writer. `agent_ending_kind` tells replaced from withdrawn by the link, never the reason's text. The sink: uniform 404 ask_not_found (unknown / another's / gate / platform / about-a-person), 409 ask_ended with ids+enums only, 200 replayed on a repeat (differs on a changed reason), 422 invalid_reason, agent-keyed `withdrawn` audit row without the text, one thin trigger, no wake. The route: get_self_acting_agent 403 for every other principal, receipt and readback redacted and carrying agent_ending; the #2996 census lists it as agent-callable."
+    },
+    {
+      "file": "unit/test_3007_update_command.py",
+      "feature": "#3007",
+      "added": "2026-10-15",
+      "categories": [
+        "deploy",
+        "unit",
+        "bash"
+      ],
+      "description": "#3007 scripts/deploy/update.sh, executed under bash with stub docker/curl against a real throwaway upstream repository (two release tags plus a pre-release, an enterprise gitlink into a second repository). Shape is read from the running backend's compose label and every compose call of a prod-enterprise update carries the overlay; a label without the overlay while the enterprise tree is present is put back on it; an ambiguous host is refused naming --shape. Preflight (missing CREDENTIAL_ENCRYPTION_KEY, dirty checkout, unreachable enterprise pin, missing enterprise tree) fails with no backup/build/up and the checkout unmoved. A published-port change is refused before any build with checkout and enterprise tree put back; an unrenderable comparison fails closed. The published URL must serve HTML, a hashed asset and JSON from /api/auth/mode; the enterprise registration line must be in the boot log. Failed backup stops the run; base image rebuilt only when the range touched docker/base-image; rollback restores code and enterprise pin; hosted pins TRINITY_IMAGE_TAG, checks out the matching tag, delegates to start.sh --hosted and restores both on failure. Also: the stdlib backup helper against a real SQLite file (pruned artifact name, no tmp residue, never creates a DB) and the CLI locator. Rollback across a migration: the update records a schema position (hash of applied migrations) and --rollback refuses code-only rollback when it moved, cannot be read, or was never recorded, naming the backup and printing stop/restore/--db-restored steps (the SQLite restore payload is executed against a temp /data); --db-restored skips the check. update-db.py: SQLite position moves on a migration row, not on ordinary writes; PostgreSQL takes a fresh pre-update-*.dump (in ARTIFACT_PATTERNS, password via PGPASSWORD never argv, driver suffix dropped, PGDMP-verified) and reads alembic_version + the enterprise table via psql. --rebuild-base forces the agent base image; hosted refuses a branch target."
     }
   ]
 }
