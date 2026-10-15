@@ -63,7 +63,7 @@
         <dt :class="TERM">Requested by</dt>
         <dd :class="VALUE" data-testid="gate-card-requester">
           {{ requester.label || 'A caller' }}
-          <template v-if="requester.execution_id && requester.agent">
+          <template v-if="canOpenRuns && requester.execution_id && requester.agent">
             ·
             <router-link
               :to="runPath(requester.agent, requester.execution_id)"
@@ -106,7 +106,7 @@
       <BaseBadge :variant="outcome.variant">{{ outcome.label }}</BaseBadge>
       <span>{{ outcome.text }}</span>
       <router-link
-        v-if="outcome.ran && gate.execution_id"
+        v-if="canOpenRuns && outcome.ran && gate.execution_id"
         :to="runPath(item.agent_name, gate.execution_id)"
         :class="LINK"
         data-testid="gate-card-run"
@@ -123,6 +123,8 @@ import BaseButton from '../base/BaseButton.vue'
 import { gateOutcome, gateInputLong } from '../../utils/skillGateCard'
 import { formatLocalDateTime, formatRelativeTime } from '../../utils/timestamps'
 import { kindOptionLabel } from '../../utils/skillCards'
+import { isWorkspaceOnlyRole } from '../../utils/workspaceOnly'
+import { useAuthStore } from '../../stores/auth'
 
 const ROW = 'flex items-start gap-3'
 const TERM = 'flex-shrink-0 w-24 text-gray-500 dark:text-gray-400'
@@ -157,6 +159,15 @@ const waiting = computed(() => (
 const deciding = computed(() => (
   !outcome.value && props.item.status === 'pending' && gate.value.can_decide === true
 ))
+
+// trinity#3708: an execution page is an operator route. A Workspace-only
+// member is sent back to the Workspace and an external client has no platform
+// account, so the run links are drawn only for a known role that can open them.
+const authStore = useAuthStore()
+const canOpenRuns = computed(() => {
+  const role = authStore.user?.role
+  return !!role && !isWorkspaceOnlyRole(role)
+})
 
 const runPath = (agent, executionId) =>
   `/agents/${encodeURIComponent(agent)}/executions/${encodeURIComponent(executionId)}`

@@ -84,6 +84,18 @@ def _resolved_people(item: dict) -> List[str]:
     return out
 
 
+def _platform_username(email: Optional[str]) -> Optional[str]:
+    """The platform account behind a Workspace platform principal's email, for
+    the gate card's run links (trinity#3708). None when it cannot be read: the
+    card then shows no link, never a broken one."""
+    if not email:
+        return None
+    try:
+        return (db.get_user_by_email(email) or {}).get("username")
+    except Exception:  # noqa: BLE001 — a link is a nicety; never fail the ask
+        return None
+
+
 def _is_shared(item: dict) -> bool:
     """An ask to a role several people fill (trinity-enterprise#816): ONE row,
     delivered to each of them; the first answer wins."""
@@ -282,8 +294,11 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         sync=_coarse_sync(item),
         aging=bool(is_aged(item)),
         decided_by_options=ask_service.decided_by_options(item),
-        gate=skill_gate_service.card_view(item, viewer_email=viewer_email,
-                                          with_run_ids=is_platform),
+        gate=skill_gate_service.card_view(
+            item, viewer_email=viewer_email,
+            # trinity#3708: a run link only for a platform user who can open it;
+            # an external client has no platform account to open it with.
+            run_viewer=_platform_username(viewer_email) if is_platform else None),
         replaces=_linked_request_id(item, "replaces", viewer_email),
         replaced_by=_linked_request_id(item, "replaced_by", viewer_email),
         # trinity-enterprise#901: the agent's reason crosses for a WITHDRAW only.
