@@ -5,7 +5,7 @@ import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Annotated
+from typing import Optional, Annotated, Set
 from fastapi import Depends, HTTPException, status, Request, Path
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -1556,10 +1556,52 @@ def _capability_admitted(current_user, target_agent: str) -> bool:
     return isinstance(reach, set) and target_agent in reach
 
 
-def _is_agent_principal(current_user) -> bool:
+def is_agent_principal(current_user) -> bool:
     """An agent-scoped key (the principal a capability bound applies to)."""
     agent = getattr(current_user, "agent_name", None)
     return getattr(current_user, "mcp_scope", None) == "agent" and isinstance(agent, str) and bool(agent)
+
+
+def agent_reach_set(current_user, owner_names: Set[str], *, is_admin: bool) -> Set[str]:
+    """The set form of `agent_may_reach` (trinity-enterprise#629, #872) — the
+    one builder every fleet-level roster narrows an agent key with: itself and
+    its edges directly — the same `{self} ∪ permitted` the MCP layer reads —
+    and, of the rest of its owner's agents, the ones it spawned. A non-admin
+    owner's accessible set still bounds it; an admin owner can access every
+    agent, so an edge needs no ownership row to count. Both reads fail closed."""
+    me = current_user.agent_name
+    try:
+        permitted = set(db.get_permitted_agents(me) or [])
+    except Exception:
+        logger.warning("[ent#629] edge list for %s failed; treating as no edges", me)
+        permitted = set()
+    reach = {me} | permitted
+    if not is_admin:
+        reach &= owner_names | {me}
+    try:  # one query, not two lookups per held agent; same key-id rule as the gate
+        key = db.get_agent_mcp_api_key(me)
+        spawned = set(db.list_agents_spawned_by_key(me, key.id)) if key else set()
+    except Exception:
+        logger.warning("[ent#629] spawned list for %s failed; treating as none", me)
+        spawned = set()
+    return reach | (spawned & owner_names)
+
+
+def agent_fleet_reach(current_user) -> Optional[Set[str]]:
+    """A fleet-level roster for an agent-scoped key, or None for every other
+    principal (trinity-enterprise#872).
+
+    An agent key carries its owner's role, so a fleet list that short-circuits
+    on `role == "admin"` answered it with every agent on the install. Keyed on
+    the SCOPE first: an `agent`-scoped key with no `agent_name` gets the empty
+    set — never the owner's roster (fail closed)."""
+    if getattr(current_user, "mcp_scope", None) != "agent":
+        return None
+    if not is_agent_principal(current_user):
+        return set()
+    is_admin = current_user.role == "admin"
+    owner_names = set(db.get_accessible_agent_names(current_user.email or "", is_admin=is_admin))
+    return agent_reach_set(current_user, owner_names, is_admin=is_admin)
 
 
 def _admit_capability_reach(current_user, target_agent: str) -> None:
@@ -2265,7 +2307,7 @@ def can_manage_agent_skills(current_user: User, agent_name: str) -> bool:
         return False
     if capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is not None:
         return False
-    if _is_agent_principal(current_user) and not owner_owns_agent(current_user, agent_name):
+    if is_agent_principal(current_user) and not owner_owns_agent(current_user, agent_name):
         # The same bound as the write fence: a holder reaches only agents its
         # owner OWNS — `can_user_share_agent` is True for any agent when the
         # owner is admin (#3346 review).
@@ -2447,7 +2489,7 @@ async def get_skill_managed_agent_by_name(
     await enforce_agent_capability(
         request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
     )
-    if _is_agent_principal(current_user):
+    if is_agent_principal(current_user):
         # The bound every capability fence applies (trinity-enterprise#629 ×
         # #596): the owner must OWN the target, then the request's reach admits
         # it. One mechanism — the owner fence below is the narrowed one.

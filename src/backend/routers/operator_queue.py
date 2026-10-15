@@ -26,6 +26,7 @@ from models import (
 
 from database import db
 from dependencies import (
+    agent_reach_set,
     get_current_user,
     get_self_acting_agent,
     is_person_principal,
@@ -76,32 +77,8 @@ def _accessible_set(current_user: User) -> Optional[Set[str]]:
     is_admin = current_user.role == "admin"
     names = set(db.get_accessible_agent_names(user_email, is_admin=is_admin))
     if is_agent:
-        return _agent_reach_set(current_user, names, is_admin=is_admin)
+        return agent_reach_set(current_user, names, is_admin=is_admin)
     return names
-
-
-def _agent_reach_set(current_user: User, owner_names: Set[str], *, is_admin: bool) -> Set[str]:
-    """An agent key's queue scope (trinity-enterprise#629): itself and its
-    edges directly — the same `{self} ∪ permitted` the MCP layer reads — and,
-    of the rest of its owner's agents, the ones it spawned. A non-admin owner's
-    accessible set still bounds it; an admin owner can access every agent, so
-    an edge needs no ownership row to count. The edge read fails closed."""
-    me = current_user.agent_name
-    try:
-        permitted = set(db.get_permitted_agents(me) or [])
-    except Exception:
-        logger.warning("[ent#629] edge list for %s failed; treating as no edges", me)
-        permitted = set()
-    reach = {me} | permitted
-    if not is_admin:
-        reach &= owner_names | {me}
-    try:  # one query, not two lookups per held agent; same key-id rule as the gate
-        key = db.get_agent_mcp_api_key(me)
-        spawned = set(db.list_agents_spawned_by_key(me, key.id)) if key else set()
-    except Exception:
-        logger.warning("[ent#629] spawned list for %s failed; treating as none", me)
-        spawned = set()
-    return reach | (spawned & owner_names)
 
 
 def _owned_set(current_user: User) -> Optional[Set[str]]:
