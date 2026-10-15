@@ -152,9 +152,12 @@ No frontend changes. File handling is entirely backend (Slack → adapter → ro
 - [x] Image upload via Slack → agent describes image content
 - [x] Text file via API → agent reads and summarizes
 - [x] Text message without files → works unchanged
-- [x] PDF upload → disabled by default; with `ALLOW_PDF_UPLOADS=true`, unchanged bytes delivered to the per-session workspace; parsing/extraction remains agent-owned
+- [x] PDF upload → rejected with user message (historical default-off behavior)
+- [ ] Opt-in PDF delivery via Slack with `ALLOW_PDF_UPLOADS=true` → unchanged bytes delivered to the per-session workspace; parsing/extraction remains agent-owned
 
-**Last Tested**: 2026-03-31
+The new opt-in policy has automated upload-service coverage; the enabled Slack end-to-end check above remains unverified.
+
+**Last Tested**: 2026-03-31 (historical checks above)
 **Status**: ✅ Working
 
 ## Related Flows

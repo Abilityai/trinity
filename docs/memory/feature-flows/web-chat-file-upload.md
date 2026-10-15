@@ -3,7 +3,7 @@
 ## Overview
 Adds drag-and-drop / file-picker to authenticated chat (ChatPanel.vue) and public chat (PublicChat.vue), encoding files as base64 in the JSON request body and reusing the same validation/write infrastructure as the Telegram/Slack/WhatsApp channel adapters.
 
-PDF delivery is opt-in: `ALLOW_PDF_UPLOADS=false` is the backend default in both Compose files and `.env.example`. Set it to `true` explicitly and recreate the backend to enable original-file delivery across web and external channels. Missing, false, empty or invalid values do not enable PDFs. The disabled policy also recognizes a PDF header anywhere within the first 1024 bytes, including preamble-bearing files sent as text or generic binary when MIME detection is unavailable. No per-agent policy or extraction service is added.
+PDF delivery is opt-in: `ALLOW_PDF_UPLOADS=false` is the backend default in all three Compose profiles (`docker-compose.yml`, `docker-compose.prod.yml` and `docker-compose.hosted.yml`) and `.env.example`. Set it to `true` explicitly and recreate the backend to enable original-file delivery across web and external channels. Missing, false, empty or invalid values do not enable PDFs. The disabled policy also recognizes a PDF header anywhere within the first 1024 bytes, including preamble-bearing files sent as text or generic binary when MIME detection is unavailable. No per-agent policy or extraction service is added.
 
 ## User Story
 As a user chatting with an agent, I want to attach files to my message so that the agent can visually analyze images or read text/CSV/JSON files I provide.
