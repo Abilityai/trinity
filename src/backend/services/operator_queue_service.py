@@ -418,6 +418,12 @@ def narrow_to_agent_key(current_user, accessible):
     which maps a system key to `trinity-system` and would narrow the system
     agent. Pure DB (`agent_permissions`, the ent#727 precedent): no Docker read,
     so a Docker fault cannot shrink the set.
+
+    trinity-enterprise#872: every OTHER fleet-level roster narrows an agent key
+    with `dependencies.agent_reach_set`, which also admits the agents the key
+    spawned. This set is deliberately the smaller ent#815 one, so the two reach
+    definitions differ by the spawned set on this surface alone — unify on
+    `agent_reach_set` when this file is next opened (DEBT_INBOX D-DEBT-1).
     """
     if getattr(current_user, "mcp_scope", None) != "agent":
         return accessible

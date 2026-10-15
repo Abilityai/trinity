@@ -497,6 +497,22 @@
   `ensure-default` writes the same `key_create` audit row as `POST /api/mcp/keys`,
   so every mint is attributable. Guard:
   `tests/unit/test_mcp_key_creation_requires_session.py`.
+- **An agent-scoped key's fleet-level reach (trinity-enterprise#629, #872)**: an
+  agent key resolves to its owner carrying the owner's role, so a fleet-level
+  route — a collection read or a fleet-level write that takes no single agent in
+  the path — must narrow it to the same reach the per-agent gates enforce:
+  itself, its `agent_permissions` edge targets, and the agents it spawned with
+  the key it holds (`dependencies.agent_reach_set`, asked first via
+  `agent_fleet_reach` inside the two roster seams `get_accessible_agents` /
+  `accessible_agent_names`). A nameless `agent` key gets the empty set; every
+  other principal is unchanged and an admin person's answers are identical. No
+  route may test the role before the seam. `/ws` refuses the key at the ticket
+  (its roster is refreshed by the owner's identity, so a scoped slot would
+  re-widen); `/ws/events` scopes it at connect and on `refresh` (its slots are
+  never background-refreshed). A person's consent record is written by a person
+  only; a key reads only its own key row. Guards:
+  `tests/unit/test_ent872_fleet_reach.py` and the fleet-accessor + db-level
+  scans in `test_ent629_agent_reach.py`.
 
 ---
 
