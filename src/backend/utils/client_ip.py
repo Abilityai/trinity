@@ -237,3 +237,22 @@ def client_ip(request) -> str:
     if real is not None and not _skippable(real):
         return str(real)
     return peer_str
+
+
+def check_uvicorn_proxy_trust() -> bool:
+    """False (and one ERROR line) when uvicorn is told to trust forwarded
+    headers from every peer. uvicorn then rewrites `request.client.host` from a
+    caller-chosen `X-Forwarded-For` before this module sees it, so no peer check
+    here can hold. Reported, not refused: refusing to boot on upgrade would
+    take an install down over a setting it may have carried for months."""
+    raw = os.environ.get("FORWARDED_ALLOW_IPS", "")
+    entries = {e.strip() for e in raw.split(",")}
+    if entries & {"*", "0.0.0.0/0", "::/0"}:
+        logger.error(
+            "FORWARDED_ALLOW_IPS=%s trusts forwarded headers from any peer, so any caller "
+            "can choose the address it is rate-limited and audited under. Unset it (the "
+            "backend resolves the client address itself) or list your proxy's address.",
+            raw.strip(),
+        )
+        return False
+    return True

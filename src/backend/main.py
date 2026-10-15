@@ -181,6 +181,11 @@ from logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
 
+# trinity-enterprise#873: a wildcard uvicorn proxy trust defeats the client
+# address resolver's peer check — say so once per worker.
+from utils import client_ip as _client_ip  # noqa: E402
+_client_ip.check_uvicorn_proxy_trust()
+
 
 # Redis Streams event bus replaces the old in-process broadcast. Legacy manager
 # classes are kept as thin shims so the 33 existing broadcast call sites don't

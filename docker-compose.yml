@@ -277,6 +277,11 @@ services:
       # Public access / OAuth callbacks
       - PUBLIC_CHAT_URL=${PUBLIC_CHAT_URL:-}
       - FRONTEND_URL=${FRONTEND_URL:-}
+      # Client address behind a proxy (trinity-enterprise#873) — read by
+      # utils/client_ip.py. Empty = built-in defaults; see .env.example.
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+      - TRUSTED_PROXY_HOSTS=${TRUSTED_PROXY_HOSTS-trinity-frontend,frontend,trinity-cloudflared,cloudflared}
+      - TRUSTED_PROXY_HOPS=${TRUSTED_PROXY_HOPS:-}
       # Backend's own public origin — used to build OAuth redirect URIs
       # ({BACKEND_URL}/api/oauth/{provider}/callback, read by config.py). Without
       # this line the .env value is inert (the #1039 packaging-gap class) and

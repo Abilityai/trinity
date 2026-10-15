@@ -219,5 +219,9 @@ USER trinity
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header", "--proxy-headers", "--forwarded-allow-ips=*"]
+# --proxy-headers with uvicorn's default trust (loopback only). Never a
+# wildcard --forwarded-allow-ips: port 8000 is published, so any caller could name its
+# own address. The client address behind the bundled proxy is resolved by
+# utils/client_ip.py (trinity-enterprise#873).
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header", "--proxy-headers"]
 
