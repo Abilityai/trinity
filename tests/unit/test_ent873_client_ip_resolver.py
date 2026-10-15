@@ -240,3 +240,56 @@ class TestNameResolution:
         cip.client_ip(_req("1.2.3.4"))
         cip.client_ip(_req("1.2.3.4"))
         assert _isolated == [1]
+
+
+class TestPortedFromRootFile:
+    """The unit half of `tests/test_ip_rate_limit_fix.py` (#181), which the
+    unit island never collected. Re-stated against the resolver: the default
+    still trusts an operator's RFC-1918 proxy (e.g. `172.17.0.2`), XFF now wins
+    over X-Real-IP, and a forwarded token that is not an address is never
+    returned (it stops the walk at the peer)."""
+
+    def test_direct_connection_ignores_xff(self):
+        assert cip.client_ip(_req("1.2.3.4", xff="10.0.0.99")) == "1.2.3.4"
+
+    def test_behind_trusted_proxy_both_headers(self):
+        req = _req("172.17.0.2", xff=BROWSER, real_ip=BROWSER)
+        assert cip.client_ip(req) == BROWSER
+
+    def test_behind_trusted_proxy_xff_only(self):
+        assert cip.client_ip(_req("172.17.0.2", xff="9.10.11.12")) == "9.10.11.12"
+
+    def test_rightmost_untrusted_wins(self):
+        req = _req("172.17.0.2", xff=f"1.1.1.1, {BROWSER}, 172.17.0.3")
+        assert cip.client_ip(req) == BROWSER
+
+    def test_non_address_token_is_never_returned(self):
+        req = _req("172.17.0.2", xff="spoofed.1.1.1, real.client.1.2, 172.17.0.3")
+        assert cip.client_ip(req) == "172.17.0.2"
+
+
+class TestPublicRouterDelegates:
+    """Every `public.py` limiter and the five routers importing
+    `_get_client_ip` from it (a2a, aauth, files, setup, webhooks) use the
+    resolver itself — no second copy of the trust decision."""
+
+    def test_names_are_the_resolver(self):
+        import routers.public as pub
+
+        assert pub._get_client_ip is cip.client_ip
+        assert pub._is_trusted_proxy is cip.is_trusted_proxy
+        assert pub._get_trusted_networks is cip.trusted_networks
+        assert not hasattr(pub, "_trusted_proxy_networks")
+
+    def test_importers_get_the_resolver(self):
+        import routers.setup as setup
+        import routers.webhooks as webhooks
+
+        assert setup._get_client_ip is cip.client_ip
+        assert webhooks._get_client_ip is cip.client_ip
+
+    def test_public_limiter_keys_on_the_forwarded_client(self):
+        import routers.public as pub
+
+        assert pub._get_client_ip(_req(NGINX, xff=BROWSER)) == BROWSER
+        assert pub._get_client_ip(_req(AGENT, xff="9.9.9.9")) == AGENT
