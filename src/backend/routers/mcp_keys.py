@@ -189,7 +189,11 @@ async def get_mcp_api_key_endpoint(
     """Get details of a specific MCP API key."""
     key = db.get_mcp_api_key(key_id, current_user.username)
 
-    if not key:
+    # An agent key resolves to its owner, so the owner filter alone handed it
+    # every key its owner holds; it reads its own row only, and any other row
+    # reads like one that does not exist (trinity-enterprise#872).
+    me = getattr(current_user, "agent_name", None)
+    if not key or (isinstance(me, str) and me and key.agent_name != me):
         raise HTTPException(status_code=404, detail="MCP API key not found")
 
     return key

@@ -179,7 +179,6 @@
   "routers/mcp_keys.py::revoke_mcp_api_key_endpoint": "POST /api/mcp/keys/{key_id}/revoke",
   "routers/messages.py::get_proactive_shares": "GET /api/agents/{agent_name}/shares/proactive",
   "routers/messages.py::send_proactive_message": "POST /api/agents/{agent_name}/messages",
-  "routers/messages.py::update_proactive_setting": "PUT /api/agents/{agent_name}/shares/proactive",
   "routers/metric_points.py::record_metric_points": "POST /api/agents/{name}/metrics/points",
   "routers/monitoring.py::get_agent_health": "GET /api/monitoring/agents/{agent_name}",
   "routers/monitoring.py::get_agent_health_history": "GET /api/monitoring/agents/{agent_name}/history",

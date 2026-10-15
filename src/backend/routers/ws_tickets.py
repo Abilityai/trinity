@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from dependencies import get_current_user, workspace_route
+from dependencies import get_current_user, reject_agent_principal, workspace_route
 from models import User
 from services.ws_ticket_service import mint_ticket
 
@@ -28,7 +28,12 @@ async def create_ws_ticket(current_user: User = Depends(get_current_user)) -> di
     this endpoint immediately before opening the WebSocket; if the
     ticket isn't consumed within 30 seconds it expires and a new one
     must be requested.
+
+    An agent key is refused (trinity-enterprise#872): the ticket identity is
+    the username, so it would open its owner's `/ws` roster. Agents take live
+    events over `/ws/events`.
     """
+    reject_agent_principal(current_user)
     try:
         ticket = mint_ticket(current_user.username, scope="user")
     except RuntimeError as exc:

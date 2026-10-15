@@ -147,20 +147,19 @@ def test_the_fleet_event_list_is_filtered_to_the_reach_in_sql(fleet, monkeypatch
     assert _real_app(res).get(f"/api/events?source_agent={C}").status_code == 403
 
 
-@pytest.mark.xfail(strict=True, reason="CP3: consent is a person's own record")
 def test_an_agent_key_cannot_record_a_persons_proactive_consent(fleet):
     import routers.messages as rm
 
     body = {"email": "client@example.com", "allow_proactive": True}
-    for who in (_agent_key, _user_key):
+    r = _real_app(rm).put(f"/api/agents/{A}/shares/proactive", json=body)
+    assert r.status_code == 403, r.text
+    # A person — `require_person` counts a person's own user-scoped key as one —
+    # is unchanged: no such share reads 404, as before.
+    for who in (_human, _user_key):
         r = _real_app(rm, user=who).put(f"/api/agents/{A}/shares/proactive", json=body)
-        assert r.status_code == 403, (who.__name__, r.text)
-    # A person is unchanged: no such share reads 404, as before.
-    r = _real_app(rm, user=_human).put(f"/api/agents/{A}/shares/proactive", json=body)
-    assert r.status_code == 404, r.text
+        assert r.status_code == 404, (who.__name__, r.text)
 
 
-@pytest.mark.xfail(strict=True, reason="CP3: agent keys never mint a /ws ticket")
 def test_an_agent_key_cannot_mint_a_ws_ticket(fleet, monkeypatch):
     import routers.ws_tickets as rw
 
@@ -168,3 +167,23 @@ def test_an_agent_key_cannot_mint_a_ws_ticket(fleet, monkeypatch):
     assert _real_app(rw).post("/api/ws/ticket").status_code == 403
     for who in (_human, _user_key):
         assert _real_app(rw, user=who).post("/api/ws/ticket").status_code == 200
+
+
+def test_an_agent_key_reads_only_its_own_key_row(fleet, monkeypatch):
+    from datetime import datetime, timezone
+    from db_models import McpApiKey
+    import routers.mcp_keys as rk
+
+    rows = {kid: McpApiKey(id=kid, name=kid, key_prefix="trinity_mcp_x",
+                           created_at=datetime.now(timezone.utc), user_id=1,
+                           username=OWNER, agent_name=agent,
+                           scope="agent" if agent else "user")
+            for kid, agent in (("k-a", A), ("k-b", B), ("k-user", None))}
+    monkeypatch.setattr(rk.db, "get_mcp_api_key", lambda kid, username: rows.get(kid))
+    key = _real_app(rk)
+    assert key.get("/api/mcp/keys/k-a").status_code == 200
+    for other in ("k-b", "k-user", "k-missing"):     # uniform 404, like a missing key
+        r = key.get(f"/api/mcp/keys/{other}")
+        assert (r.status_code, r.json()["detail"]) == (404, "MCP API key not found"), other
+    person = _real_app(rk, user=_human)
+    assert all(person.get(f"/api/mcp/keys/{k}").status_code == 200 for k in rows)
