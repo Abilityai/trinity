@@ -262,6 +262,7 @@ class ScheduleExecution(BaseModel):
     source_agent_name: Optional[str] = None    # Calling agent (for agent-to-agent)
     source_mcp_key_id: Optional[str] = None    # MCP API key ID (for mcp/agent triggers)
     source_mcp_key_name: Optional[str] = None  # MCP API key name (denormalized)
+    source_mcp_scope: Optional[str] = None     # Scope of that key at write time (ent#693)
     # Session resume support (EXEC-023)
     claude_session_id: Optional[str] = None    # Claude Code session ID for --resume
     # Model selection (MODEL-001)

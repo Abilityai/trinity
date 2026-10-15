@@ -28,6 +28,7 @@ from dependencies import (
     get_skill_managed_agent_by_name,
     can_manage_agent_skills,
     acting_agent_name,
+    assignment_author,
     is_person_principal,
 )
 from database import db
@@ -589,7 +590,7 @@ async def update_agent_skills(
         try:
             await asyncio.to_thread(
                 skill_set_service.replace,
-                agent_name, list(set_names), current_user.username, acting_agent_name(current_user))
+                agent_name, list(set_names), assignment_author(current_user), acting_agent_name(current_user))
         except skill_set_service.SetError as e:
             raise HTTPException(status_code=e.status_code, detail=e.detail)
     if added_sets:
@@ -602,7 +603,7 @@ async def update_agent_skills(
             for name in new_sets:
                 await asyncio.to_thread(
                     skill_set_service.assign,
-                    agent_name, name, current_user.username, acting_agent_name(current_user))
+                    agent_name, name, assignment_author(current_user), acting_agent_name(current_user))
         except skill_set_service.SetError as e:
             raise HTTPException(status_code=e.status_code, detail=e.detail)
 
@@ -617,7 +618,7 @@ async def update_agent_skills(
     count = db.set_agent_skills(
         agent_name=agent_name,
         skill_names=skill_names,
-        assigned_by=current_user.username,
+        assigned_by=assignment_author(current_user),
         assigned_by_agent=acting_agent_name(current_user),  # ent#596, R29
         set_resolver=skill_set_service.set_resolver(lib),
         result=written,
@@ -712,7 +713,7 @@ async def assign_skill(
         )
 
     result = db.assign_skill(
-        agent_name, skill_name, current_user.username,
+        agent_name, skill_name, assignment_author(current_user),
         assigned_by_agent=acting_agent_name(current_user),  # ent#596, R29
     )
     if result is None:
@@ -857,7 +858,7 @@ async def assign_skill_set(
     try:
         result = await asyncio.to_thread(
             skill_set_service.assign,
-            agent_name, set_name, current_user.username, acting_agent_name(current_user))
+            agent_name, set_name, assignment_author(current_user), acting_agent_name(current_user))
     except skill_set_service.SetError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     # ent#753: gated before delivered. This route removes no package, so a gate
@@ -895,7 +896,7 @@ async def unassign_skill_set(
     if not validate_skill_name(set_name):
         raise HTTPException(status_code=422, detail=f"invalid_set_name: {set_name!r}")
     conflict = _conflict_names(agent_name)
-    result = await asyncio.to_thread(skill_set_service.unassign, agent_name, set_name, current_user.username)
+    result = await asyncio.to_thread(skill_set_service.unassign, agent_name, set_name, assignment_author(current_user))
     removal = None
     if result["removed"]:
         removal = await _remove_unassigned_skills(agent_name, result["removed"], current_user, request)

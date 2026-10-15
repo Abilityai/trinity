@@ -6099,6 +6099,17 @@
         "auth"
       ],
       "description": "trinity-enterprise#901 checkpoint A: an agent withdraws its own pending ask with a reason and no successor. The shared compare-and-set (`_end_own_pending`) ends the row cancelled/agent/reason with replaced_by NULL and no deadline clause (a pending row past its deadline is withdrawn, like a person's cancel); a person's answer, cancel or the sweep wins and nothing is written; NULL-raiser, gate and another agent's rows are not_own; replace still runs through the shared writer. `agent_ending_kind` tells replaced from withdrawn by the link, never the reason's text. The sink: uniform 404 ask_not_found (unknown / another's / gate / platform / about-a-person), 409 ask_ended with ids+enums only, 200 replayed on a repeat (differs on a changed reason), 422 invalid_reason, agent-keyed `withdrawn` audit row without the text, one thin trigger, no wake. The route: get_self_acting_agent 403 for every other principal, receipt and readback redacted and carrying agent_ending; the #2996 census lists it as agent-callable."
+    },
+    {
+      "file": "unit/test_ent693_controller_scope_key.py",
+      "feature": "abilityai/trinity-enterprise#693",
+      "added": "2026-10-15",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "abilityai/trinity-enterprise#693: controller-scoped MCP key through the real gates. A controller key resolves via get_current_user as mcp_scope=controller with its key id, no agent_name; suspension 401s it. Reach: require_role('creator') and capability_refusal admit it, demotion removes it; require_admin/assert_admin refuse it with controller_route_not_admitted unless the route opts in with allow_scopes={'controller'} (role==admin still enforced). Grant surfaces (key minting, permissions/roles, credential values, system teardown, agent delete) refused at the auth entry point with controller_grant_refused + surface, read on the routed path; use surfaces pass; user keys untouched; every fence entry pinned to a live route. Minting: admin session only. Attribution: audit actor_type=controller/actor_id=key id with owner as actor_email; executions record source_mcp_scope resolved in the INSERT, surviving key deletion. Both migration tracks present, single Alembic head. Skill-assignment history records controller:<key id>:<key name> (driven through the real assign route). A live-route-table guard fails any grant-shaped route with neither a refusing gate nor a fence entry."
     }
   ]
 }

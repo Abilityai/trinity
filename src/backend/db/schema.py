@@ -275,6 +275,7 @@ TABLES = {
             source_agent_name TEXT,
             source_mcp_key_id TEXT,
             source_mcp_key_name TEXT,
+            source_mcp_scope TEXT,
             claude_session_id TEXT,
             queued_at TEXT,
             backlog_metadata TEXT,

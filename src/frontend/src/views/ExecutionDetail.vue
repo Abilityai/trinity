@@ -197,7 +197,8 @@
           </div>
           <!-- MCP Key (for MCP calls) -->
           <div v-if="execution.source_mcp_key_name">
-            <span class="text-gray-500 dark:text-gray-400">MCP Key:</span>
+            <!-- abilityai/trinity-enterprise#693: a controller-started run names the controller. -->
+            <span class="text-gray-500 dark:text-gray-400">{{ execution.source_mcp_scope === 'controller' ? 'Controller:' : 'MCP Key:' }}</span>
             <span class="ml-2 text-gray-900 dark:text-white font-medium">{{ execution.source_mcp_key_name }}</span>
             <span v-if="execution.source_mcp_key_id" class="ml-1 text-xs text-gray-500 dark:text-gray-400 font-mono">({{ execution.source_mcp_key_id.substring(0, 8) }}...)</span>
           </div>

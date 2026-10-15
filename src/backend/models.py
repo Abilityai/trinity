@@ -4181,6 +4181,9 @@ class ExecutionResponse(BaseModel):
     source_agent_name: Optional[str] = None
     source_mcp_key_id: Optional[str] = None
     source_mcp_key_name: Optional[str] = None
+    # abilityai/trinity-enterprise#693: the started-by key's scope — a
+    # `controller` run is shown as the controller, not as its owner.
+    source_mcp_scope: Optional[str] = None
     # Session resume - EXEC-023
     claude_session_id: Optional[str] = None
     # Model selection - MODEL-001

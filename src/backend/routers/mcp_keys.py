@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from models import User
 from database import db, McpApiKeyCreate, McpApiKey, McpApiKeyWithSecret
 from dependencies import (
+    CONTROLLER_SCOPE,
     OPS_SCOPE,
     PORTAL_DELEGATE_SCOPE,
     _reject_connector_principal,
@@ -41,12 +42,14 @@ async def create_mcp_api_key_endpoint(
     """
     requested_scope = (getattr(key_data, "scope", None) or "user").strip()
     if requested_scope != "user":
-        if requested_scope not in (PORTAL_DELEGATE_SCOPE, OPS_SCOPE):
+        if requested_scope not in (PORTAL_DELEGATE_SCOPE, OPS_SCOPE, CONTROLLER_SCOPE):
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported key scope '{requested_scope}'",
             )
-        if requested_scope == OPS_SCOPE:
+        # ent#693: a controller key is a grant exactly as an ops key is — the
+        # same session-only allowlist guard, then admin below.
+        if requested_scope in (OPS_SCOPE, CONTROLLER_SCOPE):
             # #2323 — minting a credential is a GRANT, and the guards used for
             # `portal_delegate` below are the wrong shape for this one: both
             # `reject_agent_principal` and `assert_admin`'s named rejections are
