@@ -382,8 +382,9 @@ def client(monkeypatch):
     monkeypatch.setattr(a2a, "_fetch_template_data", _tmpl)
 
     class _Result:
-        def __init__(self):
-            self.execution_id = "exec-1"
+        def __init__(self, execution_id):
+            # #3749: echo the id the paid execute() minted.
+            self.execution_id = execution_id
             self.status = state["exec_status"]
             self.response = state["exec_response"]
             self.error = "boom" if state["exec_status"] == "failed" else None
@@ -392,7 +393,7 @@ def client(monkeypatch):
         state["last_dispatch"] = kwargs
         if state.get("exec_raises"):
             raise RuntimeError("agent unreachable")
-        return _Result()
+        return _Result(kwargs["execution_id"])
     monkeypatch.setattr(a2a, "dispatch_and_await_terminal", _adapter)
 
     async def _terminate(agent, eid):

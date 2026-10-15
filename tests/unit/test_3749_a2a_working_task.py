@@ -400,3 +400,391 @@ def test_budget_is_below_client_rpc_timeout():
     # The MCP tool's default outer limit (`MCP_A2A_TIMEOUT_MS`, 40 s) must fit a
     # cold card fetch in front of the send.
     assert a2a_client.A2A_CARD_FETCH_TIMEOUT + budget < 40
+
+
+# --------------------------------------------------------------------------- #
+# `configuration.blocking` (A2A v0.3 MessageSendConfiguration, ruling T4)
+# --------------------------------------------------------------------------- #
+def test_blocking_true_holds_the_whole_turn_past_the_budget(h, monkeypatch):
+    arm = _slow(h, monkeypatch)
+
+    async def run():
+        await arm()
+        send = asyncio.create_task(h.send(configuration={"blocking": True}))
+        # Five budgets later the request is still holding — no `working` answer.
+        await asyncio.sleep(0.05)
+        assert not send.done()
+        await h.drain()
+        body = await send
+        assert body["result"]["status"]["state"] == "completed"
+        assert body["result"]["artifacts"][0]["parts"][0]["text"] == "hello from bot"
+        [(eid, snap)] = h.idem.completed
+        assert eid == MINTED and snap == body["result"]
+    asyncio.run(run())
+
+
+def test_blocking_false_answers_at_the_mint(h):
+    """The real 25 s budget is left in place: `blocking: false` must not wait
+    for it — the answer is built from the row the moment it exists."""
+    assert a2a.A2A_SEND_WORKING_AFTER_SECONDS == 25.0
+
+    async def run():
+        h.state["gate"] = asyncio.Event()
+        body = await asyncio.wait_for(h.send(configuration={"blocking": False}), timeout=5)
+        assert body["result"]["status"]["state"] == "working"
+        assert body["result"]["id"] == MINTED
+        assert h.idem.completed == []
+        await h.drain()
+        assert [eid for eid, _ in h.idem.completed] == [MINTED]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("configuration", [None, {}, {"blocking": "yes"}])
+def test_blocking_absent_or_non_bool_uses_the_budget(h, monkeypatch, configuration):
+    arm = _slow(h, monkeypatch)
+
+    async def run():
+        await arm()
+        send = asyncio.create_task(h.send(configuration=configuration))
+        body = await asyncio.wait_for(send, timeout=5)
+        assert body["result"]["status"]["state"] == "working"
+        await h.drain()
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# Mint failure: fail the claim, answer -32603, never dispatch un-minted
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("mint", ["raises", "returns_none", "returns_no_id"])
+def test_failed_mint_fails_the_claim_and_never_dispatches(h, mint):
+    def _bad(**kw):
+        if mint == "raises":
+            raise RuntimeError("db is locked")
+        return None if mint == "returns_none" else types.SimpleNamespace(id=None)
+    a2a.db.create_task_execution = _bad
+    body = asyncio.run(h.send(message_id="m-mint"))
+    assert body["error"]["code"] == -32603
+    assert body["error"]["message"] == "Task execution failed"
+    # The claim is released so the caller's retry runs; nothing was attached.
+    assert h.idem.failed == [(f"a2a:{AGENT}:k1", "m-mint")]
+    assert h.idem.attached == [] and h.idem.completed == []
+    # Never the pre-#3749 path: no un-minted dispatch, no detached turn.
+    assert h.state["dispatched"] == []
+    assert a2a._INFLIGHT_SENDS == set()
+
+
+# --------------------------------------------------------------------------- #
+# The detached turn outlives the request
+# --------------------------------------------------------------------------- #
+def test_client_disconnect_does_not_cancel_the_turn(h):
+    """Starlette cancels the handler when the client goes away; the turn it
+    detached must run on to its terminal, complete the claim and audit once."""
+    async def run():
+        h.state["gate"] = asyncio.Event()
+        handler = asyncio.create_task(h.send())
+        while not h.state["dispatched"]:
+            await asyncio.sleep(0)
+        handler.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await handler
+        [turn] = list(a2a._INFLIGHT_SENDS)
+        assert not turn.done() and not turn.cancelled()
+        await h.drain()
+        assert not turn.cancelled()
+        [(eid, snap)] = h.idem.completed
+        assert eid == MINTED and snap["status"]["state"] == "completed"
+        assert h.idem.failed == []
+        assert [a["details"]["state"] for a in h.state["audit"]] == ["completed"]
+        assert h.state["executions"][MINTED]["status"] == "success"
+    asyncio.run(run())
+
+
+def test_terminal_at_the_deadline_answers_the_terminal_task(h, monkeypatch):
+    """The row reached its terminal but the tail has not returned yet when the
+    budget fires — the early answer reads the row, so it is the terminal Task,
+    never a stale `working`."""
+    arm = _slow(h, monkeypatch)
+    inner = a2a.dispatch_and_await_terminal
+
+    async def _finished_row_then_wait(**kwargs):
+        row = h.state["executions"][kwargs["execution_id"]]
+        row.update(status="success", response="done already")
+        return await inner(**kwargs)
+    monkeypatch.setattr(a2a, "dispatch_and_await_terminal", _finished_row_then_wait)
+
+    async def run():
+        await arm()
+        h.state["exec_response"] = "done already"
+        body = await h.send()
+        assert body["result"]["status"]["state"] == "completed"
+        assert body["result"]["artifacts"][0]["parts"][0]["text"] == "done already"
+        # The tail still owns the claim + audit, exactly once.
+        assert h.idem.completed == []
+        await h.drain()
+        assert len(h.idem.completed) == 1 and len(h.state["audit"]) == 1
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# AAuth: an id the caller could not poll is never disclosed
+# --------------------------------------------------------------------------- #
+def test_aauth_remember_false_keeps_holding_and_discloses_no_id(h, monkeypatch):
+    arm = _slow(h, monkeypatch)
+    inbound = a2a.aauth_inbound
+    monkeypatch.setattr(inbound, "remember_execution", lambda eid, ident: False)
+    monkeypatch.setattr(inbound, "audit_details", lambda verified, allowlist: {})
+
+    async def _activity(agent_name, verified, **kw):
+        return None
+    monkeypatch.setattr(inbound, "record_activity", _activity)
+    aauth = types.SimpleNamespace(identity="https://caller.example")
+
+    async def run():
+        await arm()
+        send = asyncio.create_task(h.send(aauth=aauth))
+        await asyncio.sleep(0.05)
+        # Past the budget, but the owner map could not be written: no `working`.
+        assert not send.done()
+        await h.drain()
+        body = await send
+        assert body["result"]["status"]["state"] == "completed"
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# Paid door (ent#679): the payer is bound before `working`, polls, may cancel
+# --------------------------------------------------------------------------- #
+PAYER = "0xPayer3749"
+
+
+@pytest.fixture()
+def p(monkeypatch):
+    """`_send_paid_task` over the REAL `run_a2a_paid_turn` / `run_paid_turn`,
+    with a fake facilitator and a fake db whose payer binding is computed from
+    the payment-log rows, exactly as `nevermined_payer_owns_execution` is."""
+    from services import a2a_gate, a2a_payment_gate
+    state = {"executions": {}, "payment_log": [], "settles": [], "gate": None,
+             "dispatched": [], "minted": [], "terminated": [], "audit": [],
+             "exec_status": "success"}
+
+    def _mint(**kw):
+        state["minted"].append(kw)
+        state["executions"][MINTED] = {"agent_name": kw["agent_name"], "status": "running",
+                                       "response": None, "error": None}
+        return types.SimpleNamespace(id=MINTED)
+
+    def _owns(agent, eid, payer):
+        return any(r.get("execution_id") == eid and r.get("subscriber_address") == payer
+                   and r["agent_name"] == agent for r in state["payment_log"])
+
+    monkeypatch.setattr(a2a, "db", types.SimpleNamespace(
+        get_execution=lambda eid: state["executions"].get(eid),
+        create_task_execution=_mint,
+        get_agent_subscription_id=lambda name: None,
+        get_public_channel_model=lambda name: "claude-public",
+        log_nevermined_payment=lambda **kw: state["payment_log"].append(kw),
+        nevermined_payer_owns_execution=_owns,
+        cancel_queued_execution=lambda eid, reason=None: False,
+    ))
+    monkeypatch.setattr(a2a, "build_public_channel_caller_prompt", lambda name: "PUBLIC")
+
+    async def _dispatch(**kwargs):
+        state["dispatched"].append(kwargs)
+        if state["gate"] is not None:
+            await state["gate"].wait()
+        row = state["executions"][kwargs["execution_id"]]
+        if row["status"] == "running":
+            row["status"] = state["exec_status"]
+            row["response"] = "paid answer" if row["status"] == "success" else None
+        return types.SimpleNamespace(execution_id=kwargs["execution_id"], status=row["status"],
+                                     response=row["response"], error=None)
+    monkeypatch.setattr(a2a, "dispatch_and_await_terminal", _dispatch)
+
+    async def _terminate(agent, eid):
+        state["terminated"].append((agent, eid))
+        state["executions"][eid]["status"] = "cancelled"
+        state["gate"].set()
+        return True
+    monkeypatch.setattr(a2a, "terminate_execution_on_agent", _terminate)
+
+    class _Audit:
+        async def log(self, **kwargs):
+            state["audit"].append(kwargs)
+    monkeypatch.setattr(a2a, "platform_audit_service", _Audit())
+
+    class _Payments:
+        async def verify_payment(self, **kw):
+            return types.SimpleNamespace(success=True, payer=PAYER, error=None,
+                                         agent_request_id="req-1", retryable=False)
+
+        async def settle_payment_once(self, **kw):
+            state["settles"].append(kw.get("execution_id"))
+            return types.SimpleNamespace(success=True, error=None, tx_hash="0xtx",
+                                         remaining_balance="1", credits_redeemed="2")
+    monkeypatch.setattr(a2a, "get_nevermined_payment_service", lambda: _Payments())
+
+    class _PaidDec:
+        def __init__(self, scope, key, in_flight=False):
+            self.scope, self.key = scope, key
+            self.replay = self.in_flight = in_flight
+            self.snapshot, self.execution_id, self.enabled = None, None, True
+
+    class _PaidIdem:
+        """Pending claims are tracked, so a re-send while running is in-flight."""
+        def __init__(self):
+            self.pending, self.attached, self.failed = set(), [], []
+
+        @staticmethod
+        def derive_payment_key(token, body):
+            return f"{token}:{body!r}"
+
+        def begin(self, scope, key):
+            if (scope, key) in self.pending:
+                return _PaidDec(scope, key, in_flight=True)
+            self.pending.add((scope, key))
+            return _PaidDec(scope, key)
+
+        def attach_execution(self, decision, execution_id):
+            self.attached.append(execution_id)
+
+        def complete(self, decision, execution_id, snapshot):
+            self.pending.discard((decision.scope, decision.key))
+
+        def upgrade_snapshot(self, scope, key, snapshot):
+            pass
+
+        def fail(self, decision):
+            self.failed.append(decision.key)
+            self.pending.discard((decision.scope, decision.key))
+    idem = _PaidIdem()
+    monkeypatch.setattr(a2a, "idempotency_service", idem)
+    a2a_gate.clear_provider()
+
+    priced = a2a_payment_gate.PricedAgent(
+        config=types.SimpleNamespace(agent_name=AGENT, enabled=True, credits_per_request=2,
+                                     nvm_environment="sandbox", nvm_plan_id="plan-1",
+                                     nvm_agent_id="agent-1"),
+        nvm_api_key="sandbox:jwt")
+    request = types.SimpleNamespace(scope={"path": f"/a2a/{AGENT}"})
+
+    async def _send(blocking=None):
+        resp = await a2a._send_paid_task(AGENT, "hi", priced, "tok", "http://t", 1,
+                                         "203.0.113.9", request, blocking=blocking)
+        return json.loads(resp.body)
+
+    async def _task_rpc(method, exec_id):
+        if not await a2a._payer_for_task(AGENT, exec_id, priced, "tok", "http://t"):
+            return {"error": {"code": a2a._A2A_TASK_NOT_FOUND}}
+        resp = await a2a._bound_task_rpc(AGENT, method, exec_id, "g", "203.0.113.9")
+        return json.loads(resp.body)
+
+    async def _drain():
+        if state["gate"] is not None:
+            state["gate"].set()
+        pending = list(a2a._INFLIGHT_SENDS)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    return types.SimpleNamespace(state=state, idem=idem, send=_send, rpc=_task_rpc,
+                                 drain=_drain)
+
+
+def _verify_rows(state):
+    return [r for r in state["payment_log"] if r["action"] == "verify"]
+
+
+def test_paid_slow_turn_binds_the_payer_before_working(p, monkeypatch):
+    monkeypatch.setattr(a2a, "A2A_SEND_WORKING_AFTER_SECONDS", 0.01)
+
+    async def run():
+        p.state["gate"] = asyncio.Event()
+        body = await p.send()
+        assert body["result"]["status"]["state"] == "working"
+        assert body["result"]["id"] == MINTED
+        # The bound verify row (agent, execution id, payer) exists BEFORE the
+        # answer — and nothing has settled.
+        assert {"agent_name": AGENT, "action": "verify", "success": True,
+                "subscriber_address": PAYER, "execution_id": MINTED} in p.state["payment_log"]
+        assert p.state["settles"] == []
+        # payer_owns_execution is true mid-turn: the token polls `working`.
+        mid = await p.rpc("tasks/get", MINTED)
+        assert mid["result"]["status"]["state"] == "working"
+        await p.drain()
+        done = await p.rpc("tasks/get", MINTED)
+        assert done["result"]["status"]["state"] == "completed"
+        assert done["result"]["artifacts"][0]["parts"][0]["text"] == "paid answer"
+        assert p.state["settles"] == [MINTED]
+        # T6: the plain verify row, our bound one, and run_paid_turn's own
+        # post-execute bound row — three, tolerated (nothing aggregates them).
+        rows = _verify_rows(p.state)
+        assert len(rows) == 3
+        assert [r.get("execution_id") for r in rows] == [None, MINTED, MINTED]
+        # `model_used` on the paid row is the public-channel model the turn runs on.
+        [mint] = p.state["minted"]
+        assert mint["fields"].model_used == "claude-public"
+        assert mint["fields"].source_user_id is None
+        assert p.state["dispatched"][0]["model"] == "claude-public"
+    asyncio.run(run())
+
+
+def test_paid_resend_while_running_keeps_in_flight(p, monkeypatch):
+    """T2: the payer already holds the id — a re-send is refused IN_FLIGHT, it
+    neither re-dispatches nor re-charges."""
+    monkeypatch.setattr(a2a, "A2A_SEND_WORKING_AFTER_SECONDS", 0.01)
+
+    async def run():
+        p.state["gate"] = asyncio.Event()
+        first = await p.send()
+        assert first["result"]["status"]["state"] == "working"
+        again = await p.send()
+        assert again["error"]["code"] == -32603
+        assert again["error"]["data"] == {"code": "in_flight", "retryable": True}
+        assert len(p.state["dispatched"]) == 1 and len(p.state["minted"]) == 1
+        await p.drain()
+        assert p.state["settles"] == [MINTED]
+    asyncio.run(run())
+
+
+def test_paid_cancel_mid_turn_is_no_charge_and_no_answer(p, monkeypatch):
+    """T5: the early binding lets the payer cancel mid-turn; a cancelled paid
+    turn is never settled and delivers no answer."""
+    monkeypatch.setattr(a2a, "A2A_SEND_WORKING_AFTER_SECONDS", 0.01)
+
+    async def run():
+        p.state["gate"] = asyncio.Event()
+        body = await p.send()
+        assert body["result"]["status"]["state"] == "working"
+        cancel = await p.rpc("tasks/cancel", MINTED)
+        assert cancel["result"]["status"]["state"] == "canceled"
+        assert p.state["terminated"] == [(AGENT, MINTED)]
+        await p.drain()
+        assert p.state["settles"] == [], "a cancelled paid turn must never be charged"
+        after = await p.rpc("tasks/get", MINTED)
+        assert after["result"]["status"]["state"] == "canceled"
+        assert "artifacts" not in after["result"]
+        assert not any(r["action"].startswith("settle") for r in p.state["payment_log"])
+    asyncio.run(run())
+
+
+def test_paid_another_wallet_cannot_poll_the_bound_turn(p, monkeypatch):
+    monkeypatch.setattr(a2a, "A2A_SEND_WORKING_AFTER_SECONDS", 0.01)
+
+    async def run():
+        p.state["gate"] = asyncio.Event()
+        await p.send()
+        for row in p.state["payment_log"]:
+            row["subscriber_address"] = "0xSomeoneElse"
+        stranger = await p.rpc("tasks/get", MINTED)
+        assert stranger["error"]["code"] == a2a._A2A_TASK_NOT_FOUND
+        await p.drain()
+    asyncio.run(run())
+
+
+def test_paid_fast_turn_writes_no_early_binding(p):
+    """Inside the budget the paid answer is the terminal Task, and only the two
+    pre-#3749 verify rows are written."""
+    async def run():
+        body = await p.send()
+        assert body["result"]["status"]["state"] == "completed"
+        assert [r.get("execution_id") for r in _verify_rows(p.state)] == [None, MINTED]
+    asyncio.run(run())

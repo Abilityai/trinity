@@ -111,8 +111,11 @@ def client(monkeypatch):
 
     # Fake task-execution service → deterministic success.
     class _Result:
-        def __init__(self):
-            self.execution_id = "exec-123"
+        def __init__(self, execution_id=None):
+            # #3749: echo the id the router minted (a stub that returned its own
+            # literal would make every id assertion below prove nothing); the
+            # stream path, which does not mint, keeps the literal.
+            self.execution_id = execution_id or "exec-stream"
             self.status = "success"
             self.response = "hello from bot"
             self.error = None
@@ -120,7 +123,7 @@ def client(monkeypatch):
     class _Svc:
         async def execute_task(self, **kwargs):
             state["last_execute"] = kwargs
-            return _Result()
+            return _Result(kwargs.get("execution_id"))
 
     # NOTE: the unit harness loads a duplicate `services.*` module, so patching
     # `services.task_execution_service` directly does NOT reach the router. We
