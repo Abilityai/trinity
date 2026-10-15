@@ -1894,8 +1894,31 @@ def _person_label(email: str) -> str:
     return " ".join(str((user or {}).get("name") or "").split())[:DECIDER_NAME_MAX_CHARS] or email
 
 
+def _openable_run(viewer: Optional[str], agent_name: Optional[str],
+                  execution_id: Optional[str]) -> Optional[str]:
+    """`execution_id` when `viewer` can open its page, else None (trinity#3708).
+
+    The page is `/agents/{agent}/executions/{id}`: an operator route, so a
+    Workspace-only role is sent away from it, and its API is `AuthorizedAgent`,
+    so a viewer without access to THAT agent gets a 404. The requester's run is
+    on another agent than the gated one, which is why each id is checked
+    against its own agent. Fails closed: an unreadable user hides the link.
+    """
+    if not (viewer and agent_name and execution_id):
+        return None
+    from dependencies import is_workspace_only_role
+    try:
+        user = db.get_user_by_username(viewer)
+        if not user or is_workspace_only_role(user.get("role")):
+            return None
+        return execution_id if db.can_user_access_agent(viewer, agent_name) else None
+    except Exception:  # noqa: BLE001 — a link is a nicety; never fail the card
+        return None
+
+
 def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
-              with_run_ids: bool = False, name_approvers: bool = False) -> Optional[Dict[str, Any]]:
+              run_viewer: Optional[str] = None,
+              name_approvers: bool = False) -> Optional[Dict[str, Any]]:
     """What the approval card shows beside the ask's frozen `proposal`: the
     skills with their descriptions, who asked, the context lines the agent was
     also sent, who it is waiting on, whether this viewer may decide, and how
@@ -1905,8 +1928,9 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
     `proposal`, which any agent can write — so only a real gated request gets
     the card. `state` is the record's: `pending` | `dispatching` | `dispatched`
     | `succeeded` | `failed` | `denied` | `expired` | `cancelled` | `stale` |
-    `not_run` | `unknown`. Execution ids only `with_run_ids` (a platform
-    viewer, who can open them), and the approvers' names only `name_approvers`
+    `not_run` | `unknown`. Each execution id only when `run_viewer` (a
+    platform username) can open that run's page — its role and its access to
+    that agent (`_openable_run`) — and the approvers' names only `name_approvers`
     (the operator's queue, whose reader already sees `resolved_to`; a Workspace
     addressee is not told who else was asked). None when there is no such record.
     """
@@ -1934,7 +1958,8 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
             "kind": record.get("requester_kind"),
             "label": proposal.get("requester"),
             "agent": record.get("source_agent"),
-            "execution_id": record.get("requester_execution_id") if with_run_ids else None,
+            "execution_id": _openable_run(run_viewer, record.get("source_agent"),
+                                          record.get("requester_execution_id")),
         },
         "also_sent": _also_sent(item.get("question"), record["agent_name"],
                                 str(proposal.get("input") or ""), record.get("requester_kind")),
@@ -1943,7 +1968,8 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
         # (what Approve runs) stays below. None when there was no history.
         "request": _typed_request(str(proposal.get("input") or ""), record.get("requester_kind")),
         "state": record.get("state"),
-        "execution_id": record.get("dispatched_execution_id") if with_run_ids else None,
+        "execution_id": _openable_run(run_viewer, record["agent_name"],
+                                      record.get("dispatched_execution_id")),
         "waiting_on": [_person_label(p) for p in people] if name_approvers else [],
         # trinity-enterprise#848: the approver the ask went to, as a value and
         # a label — a kind's name, or a canon role's ("Head of sales"). Shown
