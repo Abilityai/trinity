@@ -572,13 +572,12 @@ def _mint_a2a_execution(agent_name: str, text: str, current_user: Optional[User]
     `/chat` precreate's is. A failure to create the row raises — the caller
     releases its idempotency claim and answers an error, never falls back to an
     un-minted dispatch that would hand the caller a Task with no pollable id.
+    A settings read failure raises too, before the row exists: `execute_task`
+    resolves the same default for a `None` model and would fail the turn a
+    moment later, leaving a RUNNING row with no terminal writer.
     """
     if model is None:
-        try:
-            model = settings_service.get_platform_default_model()
-        except Exception:  # noqa: BLE001 — a NULL model is a column, not a lost turn
-            logger.warning("a2a: platform default model unavailable while minting", exc_info=True)
-            model = None
+        model = settings_service.get_platform_default_model()
     try:
         subscription_id = db.get_agent_subscription_id(agent_name)
     except Exception:  # noqa: BLE001

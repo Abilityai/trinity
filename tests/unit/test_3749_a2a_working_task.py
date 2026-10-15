@@ -455,19 +455,28 @@ def test_blocking_absent_or_non_bool_uses_the_budget(h, monkeypatch, configurati
 # --------------------------------------------------------------------------- #
 # Mint failure: fail the claim, answer -32603, never dispatch un-minted
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("mint", ["raises", "returns_none", "returns_no_id"])
-def test_failed_mint_fails_the_claim_and_never_dispatches(h, mint):
-    def _bad(**kw):
-        if mint == "raises":
-            raise RuntimeError("db is locked")
-        return None if mint == "returns_none" else types.SimpleNamespace(id=None)
-    a2a.db.create_task_execution = _bad
+@pytest.mark.parametrize("mint", ["raises", "returns_none", "returns_no_id", "settings_raises"])
+def test_failed_mint_fails_the_claim_and_never_dispatches(h, monkeypatch, mint):
+    if mint == "settings_raises":
+        # Review I1: a settings read failure must not be swallowed into a NULL
+        # model — `execute_task` re-resolves it and fails, stranding the row.
+        def _settings_down():
+            raise RuntimeError("settings unavailable")
+        monkeypatch.setattr(a2a.settings_service, "get_platform_default_model", _settings_down)
+    else:
+        def _bad(**kw):
+            if mint == "raises":
+                raise RuntimeError("db is locked")
+            return None if mint == "returns_none" else types.SimpleNamespace(id=None)
+        a2a.db.create_task_execution = _bad
     body = asyncio.run(h.send(message_id="m-mint"))
     assert body["error"]["code"] == -32603
     assert body["error"]["message"] == "Task execution failed"
     # The claim is released so the caller's retry runs; nothing was attached.
     assert h.idem.failed == [(f"a2a:{AGENT}:k1", "m-mint")]
     assert h.idem.attached == [] and h.idem.completed == []
+    if mint == "settings_raises":
+        assert h.state["minted"] == [] and h.state["executions"] == {}  # no stranded row
     # Never the pre-#3749 path: no un-minted dispatch, no detached turn.
     assert h.state["dispatched"] == []
     assert a2a._INFLIGHT_SENDS == set()
