@@ -30,6 +30,7 @@
     "_2201_note": "#2201: HostTelemetry.vue raw_gray 7 -> 4. The three meter separators are decoration (now aria-hidden) and their one class string is hoisted to a constant instead of repeated three times; the no-data placeholder gained a dark half it was missing. Edited by hand, not regenerated.",
     "_ent738_note": "2026-10-01, trinity-enterprise#738: components/portal/PortalAgentBubble.vue raw_gray 9 -> 10 (+1). The message action row's Copy and the new Reply now share one button recipe (ACTION_BUTTON), at the ink of the rating thumbs beside them: gray-500 light / gray-400 dark. Copy was gray-400 in light with no dark half, 2.54:1 on white, under the 3:1 an icon needs; the +1 is that dark half (text-gray-400 -> text-gray-500 is one-for-one). Gray is the neutral ink ladder; there is no semantic token to move to. The Inbox pane's reply arrow moved into the bubble with it (PortalInboxPane.vue has no baseline entry). raw_nongray stays 0. Edited by hand for this one entry, not regenerated.",
     "_3164_note": "#3164: two entries move DOWN, scoped by hand. BindRepoPanel.vue raw_gray 46 -> 41 and CreateAgentModal.vue raw_gray 135 -> 126: each hand-rolled GitHub-token input moved into the shared SavedGithubTokenField.vue (new, 0 raw_nongray, off the baseline where the guard holds it to zero). Not regenerated: a wholesale run drops this block and absorbs unrelated drift.",
+    "_3738_note": "#3738: components/portal/PortalConversation.vue raw_gray 90 -> 85 (-5, a shrink). Its attachment chip moved into the shared components/portal/PortalAttachmentChip.vue (new; 0 raw_nongray, off the baseline where the guard holds it to zero). The chip's new × adds no colour: its glyph is text-current and its hover ground is a black/white overlay, which the scanner does not count. components/portal/PortalRoom.vue raw_gray 47 -> 42 (-5) for the same reason, in the room composer's checkpoint. Edited by hand for these two entries, not regenerated.",
     "_ent754_note": "2026-10-08, trinity-enterprise#754: components/PlaybooksPanel.vue (4 raw_nongray, 48 raw_gray) and components/SkillsPanel.vue (0 / 63) are DELETED — the two tabs merged into one Skills tab. Their entries are removed by hand (a missing file would read as a stale ceiling); totals are left as they were, since the ratchet never reads them. The new files (components/skills/SkillsTab.vue, SkillCard.vue, SkillAssignModal.vue, SkillDetailsModal.vue, ExecutionGateMarker.vue) carry 0 raw_nongray and stay off the baseline, where the guard holds them to zero. Not regenerated: a wholesale run drops this block and absorbs unrelated drift."
   },
   "files": {
@@ -40,7 +41,7 @@
     },
     "src/frontend/src/components/A2aPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 104,
+      "raw_gray": 87,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/AccessPanel.vue": {
@@ -650,7 +651,7 @@
     },
     "src/frontend/src/components/portal/PortalConversation.vue": {
       "raw_nongray": 0,
-      "raw_gray": 90,
+      "raw_gray": 85,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalDeliverables.vue": {
@@ -710,7 +711,7 @@
     },
     "src/frontend/src/components/portal/PortalRoom.vue": {
       "raw_nongray": 0,
-      "raw_gray": 47,
+      "raw_gray": 42,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalSidebar.vue": {

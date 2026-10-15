@@ -1118,6 +1118,7 @@ class TestSelfReadback:
         "disposition", "disposed_at", "disposed_by", "disposition_reason",
         "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
         "replaces", "replaced_by",  # #3247
+        "agent_ending",  # trinity-enterprise#901 — replaced | withdrawn | None
     }
 
     def test_an_agent_reads_its_own_ask_through_a_redacted_projection(self, routes, agent_exists):

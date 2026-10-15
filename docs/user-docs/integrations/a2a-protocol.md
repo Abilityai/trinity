@@ -5,7 +5,7 @@ Trinity speaks the open **[A2A (Agent-to-Agent) protocol](https://a2a-protocol.o
 This guide covers both directions:
 
 - **Inbound** — expose one of your agents so external clients can discover its Agent Card and task it.
-- **Outbound** — register external A2A endpoints your agent may call.
+- **Outbound** — call external A2A agents from a platform-wide list of endpoints an admin registers.
 
 > **Availability.** The two directions are not gated alike.
 >
@@ -22,7 +22,7 @@ This guide covers both directions:
 | **Well-known URL** | The public, unauthenticated discovery URL: `{base}/a2a/{agent}/.well-known/agent-card.json`. This is what you hand to an external client. |
 | **JSON-RPC endpoint** | `POST {base}/a2a/{agent}` — the A2A task endpoint (spec v0.3.x): `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`. |
 | **Inbound allow-list** | Optional per-agent list of caller account emails permitted to task the agent. Empty = any authenticated owner/shared caller. |
-| **Outbound endpoints** | External A2A endpoints (+ optional credentials) your agent may call. |
+| **Outbound endpoints** | External A2A endpoints (+ optional credentials) agents may call — one platform-wide list, managed in **Settings › Integrations**. |
 
 ---
 
@@ -40,7 +40,7 @@ Open the agent's detail page and select the **A2A** tab.
    ![The Agent Card URL section — the public discovery URL with a one-click Copy button.](../../screenshots/a2a-card-url.png)
 3. **Review the advertised skills** — exactly what an external caller sees on the card (derived from the agent's `template.yaml` capabilities).
 4. **Manage the inbound allow-list** (optional) — add the account emails of callers that may task the agent. Leave it empty to allow any authenticated owner/shared caller.
-5. **Register outbound endpoints** (optional) — external A2A endpoints, with credentials stored encrypted (never shown again). Read the note under *[Outbound endpoints](#outbound-endpoints)* before you rely on this panel: it is a **separate, per-agent registry**, and in this build `call_a2a_agent` resolves the platform-wide list of [Part 3](#register-an-endpoint-admin-human-only) instead.
+5. **Outbound endpoints** are not registered here. The tab links to **Settings › Integrations**, where an admin manages the platform-wide list `call_a2a_agent` reads — see *[Outbound endpoints](#outbound-endpoints)*.
 
 ### Using MCP (drive it from an agent / automation)
 
@@ -215,9 +215,9 @@ an error event, because a status code cannot be sent once the stream has opened.
 
 ## Outbound endpoints
 
-Register the external A2A endpoints your agent is allowed to call (name + URL + optional credential). Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one (`🔒 credentialed`).
+The external A2A endpoints agents may call (name + URL + optional credential) are **one platform-wide list**, the one `call_a2a_agent` resolves. An admin manages it in **Settings › Integrations**, with the routes in [Part 3](#register-an-endpoint-admin-human-only), or with `register_a2a_endpoint`; all three address the same list. Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one.
 
-> **Which list does `call_a2a_agent` actually read?** Trinity resolves an outbound target through a provider seam, and in this build the resolver is the **platform-wide** list you manage in [Part 3](#register-an-endpoint-admin-human-only) — not this per-agent panel. If you register a target here and your agent answers `endpoint_not_found`, that is why: register it in Part 3 — either with the routes shown there or with `register_a2a_endpoint`, which address the same list. This per-agent panel is a separate registry; it becomes the resolver on a build that registers a provider for it, in which case it takes precedence.
+> **Endpoints registered on an agent's A2A tab before 1.0.** Earlier builds had a register form on the agent's A2A tab. It wrote a separate per-agent list that `call_a2a_agent` never read, so those endpoints answered `endpoint_not_found`. The form is gone. If any such rows remain, the tab lists them as **not callable** with a **Remove** button: re-add the ones you need in Settings › Integrations, then remove them from the tab.
 
 ---
 
@@ -246,7 +246,7 @@ curl -X PUT http://localhost:8000/api/settings/a2a_outbound_enabled \
 
 Once a stored setting exists it wins in both directions, and the environment variable is ignored until you clear the row with `DELETE /api/settings/a2a_outbound_enabled`. If `.env` says `true` and the feature still looks off, that stored row is why.
 
-There is **no settings panel** for the endpoint registry — it is an API-only surface. Don't go hunting for it next to the per-agent A2A tab.
+The endpoint registry has a panel in **Settings › Integrations** (admin), beside the routes below.
 
 ### Register an endpoint (admin, human-only)
 

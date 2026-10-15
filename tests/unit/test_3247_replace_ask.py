@@ -382,7 +382,8 @@ OWNER = "owner-3247@example.com"
 RECEIPT_KEYS = {"status", "id", "request_id", "raised_by", "channel", "type", "to_role",
                 "resolved", "ask_status", "disposition", "disposed_at", "expires_at",
                 "wakes_on_ending", "supersedes_expired",
-                "replaces", "replaced_by", "disposed_by"}
+                "replaces", "replaced_by", "disposed_by",
+                "agent_ending"}  # trinity-enterprise#901 — replaced | withdrawn | None
 
 
 class _Rejected:

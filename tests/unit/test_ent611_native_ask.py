@@ -277,7 +277,8 @@ OWNER = "owner-611b@example.com"
 RECEIPT_KEYS = {"status", "id", "request_id", "raised_by", "channel", "type", "to_role",
                 "resolved", "ask_status", "disposition", "disposed_at", "expires_at",
                 "wakes_on_ending", "supersedes_expired",
-                "replaces", "replaced_by", "disposed_by"}  # #3247
+                "replaces", "replaced_by", "disposed_by",  # #3247
+                "agent_ending"}  # trinity-enterprise#901 — replaced | withdrawn | None
 
 
 def _in(minutes):

@@ -120,6 +120,14 @@
           class="mt-0.5 block"
           :data-testid="`${tid.prefix}-answer-note-${ask.id}`"
         >Your note: “{{ ask.answer_note }}”</span>
+        <!-- trinity-enterprise#901: the agent's reason for withdrawing it,
+             its own clamped line (full text on hover). -->
+        <span
+          v-if="withdrawReason(ask)"
+          class="mt-0.5 block truncate"
+          :title="withdrawReason(ask)"
+          :data-testid="`${tid.prefix}-ending-reason`"
+        >{{ withdrawReason(ask) }}</span>
       </p>
       <!-- #3247: the agent's replacement names the ask it replaced, by
            request_id only — there is no deep link to a single item. -->
@@ -561,6 +569,11 @@ function endingLine(ask) {
   // trinity#3524: an ask the viewer answered says WHICH answer, not just "by you".
   const text = workspaceOwnAnswer(ask)?.text || workspaceEndingText(ask)
   return ending.when ? `${text} · ${formatRelativeTime(ending.when)}` : text
+}
+// trinity-enterprise#901: the agent's reason, for an ask it withdrew only.
+function withdrawReason(ask) {
+  const ending = queueEnding(ask)
+  return ending?.kind === 'withdrawn' ? ending.reason || '' : ''
 }
 const endedAtAbsolute = (ask) => {
   const when = queueEnding(ask)?.when

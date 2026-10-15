@@ -3807,6 +3807,19 @@ class OperatorAskCreate(BaseModel):
     replaces: Optional[str] = None  # #3247 — one of the agent's own PENDING asks this one replaces
 
 
+class OperatorAskWithdraw(BaseModel):
+    """Body for an agent withdrawing one of its own pending asks
+    (trinity-enterprise#901): `POST /api/agents/{name}/operator-queue/{request_id}/withdraw`.
+
+    TYPES ONLY, like `OperatorAskCreate`: the reason's bound (1..500 after
+    trimming) is the ask sink's, so the refusal is a NAMED `invalid_reason`.
+    Unknown fields are refused — the ending is the platform's to record.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Any = None
+
+
 class SkillGateCheckRequest(BaseModel):
     """What the in-container skill-gate hook asks (trinity-enterprise#752):
     `POST /api/skill-gate/check`, with the agent's own key.
