@@ -88,6 +88,9 @@ def b(monkeypatch):
         can_user_access_agent=lambda user, name: True,
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=lambda eid, reason=None: False,
+        # #3749: message/send mints the row before dispatch.
+        create_task_execution=lambda **kw: types.SimpleNamespace(id="exec-1"),
+        get_agent_subscription_id=lambda name: None,
     ))
     monkeypatch.setattr(a2a, "get_agent_container",
                         lambda name: types.SimpleNamespace(status="running", labels={}))
@@ -109,7 +112,11 @@ def b(monkeypatch):
     class _Idem:
         def begin(self, scope, key):
             state.setdefault("scopes", []).append(scope)
-            return types.SimpleNamespace(replay=False, in_flight=False, snapshot=None, key=None)
+            return types.SimpleNamespace(replay=False, in_flight=False, snapshot=None, key=None,
+                                         execution_id=None)
+
+        def attach_execution(self, *a):
+            pass
 
         def complete(self, *a):
             pass
