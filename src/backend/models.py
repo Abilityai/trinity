@@ -1522,10 +1522,6 @@ class CredentialImportResponse(BaseModel):
     message: str
 
 
-class InternalDecryptInjectRequest(BaseModel):
-    """Request for internal decrypt-and-inject (startup.sh)."""
-    agent_name: str
-
 # ============================================================================
 # Guided Credential Setup (trinity-enterprise#127)
 # ============================================================================
