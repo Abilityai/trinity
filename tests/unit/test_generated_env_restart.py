@@ -16,16 +16,23 @@ def _restart(home, generated):
     source = (_ROOT / "docker/base-image/startup.sh").read_text()
     block = source.split("# Copy generated credential files (", 1)[1]
     block = "# Copy generated credential files (" + block.split("# === Codex runtime setup", 1)[0]
-    block = block.replace("/home/developer", str(home)).replace("/generated-creds", str(generated))
+    block = block.replace("/home/developer", str(home))
+    block = block.replace("/config/generated-creds", str(home.parent / "volume-seeds"))
+    block = block.replace("/generated-creds", str(home.parent / "legacy-seeds"))
     subprocess.run(["bash", "-c", block], check=True, capture_output=True, timeout=5)
 
 
-@pytest.fixture
-def workspace(tmp_path):
-    home, generated = tmp_path / "home", tmp_path / "generated"
+@pytest.fixture(params=["legacy", "volume"])
+def workspace(tmp_path, request):
+    home = tmp_path / "home"
+    generated = tmp_path / ("volume-seeds" if request.param == "volume" else "legacy-seeds")
     home.mkdir()
     generated.mkdir()
     (generated / ".env").write_text("EXAMPLE_SERVICE_TOKEN=\n")
+    if request.param == "volume":
+        legacy = tmp_path / "legacy-seeds"
+        legacy.mkdir()
+        (legacy / ".env").write_text("EXAMPLE_SERVICE_TOKEN=unused-legacy-seed\n")
     return home, generated
 
 

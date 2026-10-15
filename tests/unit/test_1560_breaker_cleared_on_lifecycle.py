@@ -305,7 +305,7 @@ def test_create_path_clears_breakers_before_the_container_exists():
     # test_1484_create_agent_characterization.py::test_case6_* (order == clear→run).
     orch = src[src.index("async def create_agent_internal("):]
     assert orch.index("clear_agent_breakers(config.name)") < orch.index(
-        "await _run_agent_container_with_port_retry("
+        "_run_agent_container_with_port_retry("
     ), "clear_agent_breakers must run before the container-create phase"
 
 

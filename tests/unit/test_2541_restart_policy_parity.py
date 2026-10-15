@@ -90,6 +90,9 @@ _TRANSIENT_CREATE_ALLOWLIST = {
     # deploy.py: an alpine:3.20 workspace pre-pop helper that runs one chown and
     # is torn down in `finally: transient.remove(force=True)`.
     "services/agent_service/deploy.py",
+    # Archive-only helper is never started; finally removes it after upload.
+    # test_config_volume_transport pins no start, success/failure teardown.
+    "services/agent_service/config_volume.py",
 }
 
 # The scheduler tree ships its own client and creates no containers.

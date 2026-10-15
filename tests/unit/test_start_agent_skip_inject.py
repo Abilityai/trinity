@@ -276,6 +276,8 @@ class TestRecoverRecreate1559:
     def test_recreate_missing_container_reconstructs_spec_from_volume(self):
         _mock_db.get_agent_owner.return_value = {"owner_username": "bob"}
         _mock_db.get_resource_limits.return_value = {}
+        # These existing recovery cases describe legacy pre-volume agents.
+        _mock_db.get_agent_config_storage_format.return_value = None
         _mock_db.create_agent_mcp_api_key.return_value = Mock(api_key="trinity_mcp_x")
         # #1665: never renamed -> the pin is NULL and the base IS the name.
         # (Stub it: an unstubbed MagicMock attribute is truthy and would be
@@ -317,6 +319,8 @@ class TestRecoverRecreate1559:
         #1169 data_paths) stranded under the old base."""
         _mock_db.get_agent_owner.return_value = {"owner_username": "bob"}
         _mock_db.get_resource_limits.return_value = {}
+        # These existing recovery cases describe legacy pre-volume agents.
+        _mock_db.get_agent_config_storage_format.return_value = None
         _mock_db.create_agent_mcp_api_key.return_value = Mock(api_key="trinity_mcp_x")
         _mock_db.get_volume_base_name.side_effect = (
             lambda n: "old-name" if n == "new-name" else n

@@ -186,7 +186,7 @@ def _load_crud(monkeypatch):
     db.get_shared_folder_config.return_value = None
     db.get_file_sharing_enabled.return_value = False
     db.grant_default_permissions.return_value = 0
-    db.register_agent_owner.return_value = None
+    db.register_agent_owner.return_value = True
     db.get_agent_ephemeral_info.return_value = None
     db.get_user_by_username.return_value = {"id": 7}
     db.get_agent_mcp_api_key.return_value = None
@@ -259,6 +259,13 @@ def _load_crud(monkeypatch):
         if (key == "services" or key.startswith("services.")) and key not in mocks:
             monkeypatch.delitem(sys.modules, key, raising=False)
     import services.agent_service.crud as crud
+    # Config provisioning is a separate Docker boundary. Keep real local
+    # template path resolution/staging under test, and model its success.
+    from services.agent_service.config_volume import ConfigVolumeHandle
+    monkeypatch.setattr(crud, "create_config_volume", MagicMock(
+        side_effect=lambda client, name, *args: ConfigVolumeHandle(f"agent-{name}-config", "test-claim")
+    ))
+    monkeypatch.setattr(crud, "remove_created_config_volume", MagicMock())
 
     return crud, {
         "patcher": patcher,
