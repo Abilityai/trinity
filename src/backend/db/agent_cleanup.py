@@ -213,6 +213,8 @@ AGENT_REFS: List[AgentRef] = [
     # keeps its historical name on the rows it wrote; the parity-test regex
     # does not match the column, which is that same distinction.
     AgentRef("agent_capability_grants",      "agent_name",        Policy.CASCADE),  # ent#596
+    AgentRef("agent_peer_skill_grants",      "caller_agent",      Policy.CASCADE),  # ent#662
+    AgentRef("agent_peer_skill_grants",      "target_agent",      Policy.CASCADE),  # ent#662
     AgentRef("agent_tags",                   "agent_name",        Policy.CASCADE),
     # #668 — latest compatibility snapshot (transient/recomputable): wipe on
     # delete, re-key on rename via this registry.

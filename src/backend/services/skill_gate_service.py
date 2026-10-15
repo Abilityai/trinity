@@ -40,7 +40,7 @@ from config import PORTAL_SOURCE_CHANNEL
 from database import db
 from db.skill_gates import ORIGIN_CLEARED
 from models import TaskExecutionStatus
-from services import rate_limiter, role_addressing
+from services import peer_skill_policy, rate_limiter, role_addressing
 from services.skill_gate_errors import (  # noqa: F401 — re-exported for entries and tests
     APPROVAL_PENDING_CODE,
     OUTCOME_DELIVERY_AGENT_TASK,
@@ -193,7 +193,15 @@ async def enforce(
     It is scanned on its own (never joined to the request, which could spell a
     name neither part holds), shown on the card when it is what matched, and
     never stored as the request or replayed.
+
+    abilityai/trinity-enterprise#662 runs first: a PEER agent invoking a
+    library-assigned skill it holds no grant for is refused here, by name, on
+    every agent — gated or not (`peer_skill_policy`).
     """
+    await peer_skill_policy.enforce(
+        agent_name, requester=requester, request_text=request_text,
+        context_text=context_text,
+        execution_id=origin_execution_id or requester.execution_id)
     if triggered_by == SKILL_GATE_TRIGGER:
         return GateDecision()
     gates = dict(gates) if gates is not None else read_gates(agent_name)

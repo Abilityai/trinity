@@ -453,7 +453,12 @@ export function createSkillsTools(
         "null otherwise. `via_sets` names the assigned skill sets that bring a skill, and " +
         "`individual` is false when a skill is present ONLY through a set (unassigning that " +
         "set removes it). `sets` lists the agent's assigned sets. These rows are assignments " +
-        "only — whether a held skill is deprecated is on its list_skills entry.",
+        "only — whether a held skill is deprecated is on its list_skills entry. " +
+        "`peer_needs_grant` (abilityai/trinity-enterprise#662): a peer may run the skills an agent " +
+        "declares itself; what was assigned from the library — individually or through a set — needs a " +
+        "per-skill grant an instance admin gives beside the permission edge. Without it another agent's " +
+        "call is refused with `skill_not_granted`; the agent itself and its schedules are unaffected. " +
+        "A `conflict` row is the agent's own copy, so it needs no grant.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent"),
       }),
@@ -503,6 +508,8 @@ export function createSkillsTools(
             // ent#530: why the skill is present.
             individual: s.individual ?? true,
             via_sets: s.via_sets ?? [],
+            // ent#662: a library skill is not on the default peer-callable surface.
+            peer_needs_grant: s.delivery_status !== "conflict",
           }))
         }, null, 2);
       },
