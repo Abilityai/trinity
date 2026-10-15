@@ -175,6 +175,12 @@ Sign-in / reload on bare /workspace
                 [Reply][Open in chat] — volatile actions leftmost; stacked [Back][title] …
                 [Open in chat][More ▾ → Mark read · Reply] (a disclosure: Esc returns focus),
                 and the Inbox's title, subtitle and tabs are hidden over the pane
+              ask header (#3714): split [title] … [Open in chat] when a chat turn raised it;
+                stacked [Back][title] … [Open in chat] — no More (never an empty menu);
+                a background ask: no actions (the header keeps its reserved height)
+              ask's Open in chat → portalInbox.askOriginThread(item) → askThreadLink(item.ask)
+                             → $emit('open-thread', {id: chat_id, agent_name}) — the card's
+                               own path → Portal.openNewThread (lands at the chat's bottom)
               Open in chat → /workspace/c/:id?anchor=m:<first_unread> | d:<report>
                              → PortalConversation + composables/useConversationAnchor.js
                                (data-message-id / data-report-id, useStickToBottom.detach(),
@@ -200,7 +206,7 @@ Sign-in / reload on bare /workspace
         agent switch on a URL that does not name the chat); the Inbox path survives its own
         navigation because the /c/:id handler sets pendingSession in the remounting tick
               Open canvas  → shown when inboxCanvasCount({tabs: railTabs, canvases: the rail feed
-                             store, agent}) > 0 — on chats AND asks (T6); split: leftmost of
+                             store, agent}) > 0 — thread items only (#3714); split: leftmost of
                              the actions; stacked: in More → open-canvas → openRailOn('canvas')
                              (§3g C10)
     Mark N chats read (ghost; Unread + All only — §3g A9) → k > 1: ConfirmDialog (variant info,

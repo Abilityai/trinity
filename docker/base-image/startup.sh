@@ -537,10 +537,12 @@ if [ -d "/generated-creds" ]; then
         cp /generated-creds/.mcp.json . 2>/dev/null || true
     fi
 
-    # Copy .env with real credentials
+    # Seed .env only: credential injection updates the workspace after creation.
+    # Restarting must not replace those values (or an intentionally empty file)
+    # with the template seed. No-clobber also leaves existing symlinks untouched.
     if [ -f "/generated-creds/.env" ]; then
-        echo "  Copying .env (with credentials)..."
-        cp /generated-creds/.env . 2>/dev/null || true
+        echo "  Seeding .env if absent..."
+        cp -n /generated-creds/.env . 2>/dev/null || true
     fi
 
     # Copy any other generated config files (preserving directory structure)

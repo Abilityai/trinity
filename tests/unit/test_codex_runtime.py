@@ -626,11 +626,13 @@ def test_is_read_only_unreadable_fails_open_and_logs(tmp_path, monkeypatch, capl
     assert any("unreadable" in r.getMessage() for r in caplog.records)
 
 
-# ===========================================================================
+# ====================================================================
+
 # Added coverage (#1187 follow-up): pure helpers, getters, parser branches,
 # the execute() chat path, and the _execute_codex orchestration body — all
 # previously exercised only indirectly or not at all.
-# ===========================================================================
+# ====================================================================
+
 
 import threading  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -2053,3 +2055,87 @@ async def test_cancelled_image_execution_terminates_before_removing_files(tmp_pa
         assert not paths[0].exists()
     finally:
         stopped.set()
+
+
+@pytest.mark.parametrize("terminal,stderr,expected", [
+    ("The requested model does not exist", "Earlier attempt: 401 Unauthorized", 500),
+    ("401 Unauthorized", "Earlier attempt: HTTP 429", 503),
+    ("HTTP 429 Too Many Requests", "Earlier attempt: 401 Unauthorized", 429),
+    ("401 Unauthorized", "WARNING: PATH unavailable " * 100, 503),
+])
+def test_terminal_turn_failure_controls_status_and_detail(terminal, stderr, expected):
+    """Regression #3715: a final provider failure must not be classified from a previous retry."""
+    _, _, metadata, _ = parse_codex_jsonl([
+        json.dumps({"type": "error", "message": "Earlier attempt: 401 Unauthorized"}),
+        json.dumps({"type": "turn.failed", "error": {"message": terminal}}),
+    ])
+    status, detail = codex_runtime._classify_codex_failure(1, stderr, metadata)
+    assert status == expected
+    assert terminal in detail
+    assert "Earlier attempt" not in detail
+
+
+@pytest.mark.parametrize("error", [None, {}, {"message": ""}, {"message": 7}, {"message": {"code": "unauthorized"}}])
+def test_empty_terminal_failure_does_not_resurrect_stderr_auth(error):
+    _, _, metadata, _ = parse_codex_jsonl([
+        json.dumps({"type": "turn.failed", "error": error}),
+    ])
+    status, detail = codex_runtime._classify_codex_failure(1, "Earlier attempt: 401 Unauthorized", metadata)
+    assert status == 500
+    assert "Codex turn failed" in detail
+
+
+def test_nonterminal_error_keeps_stderr_fallback():
+    _, _, metadata, _ = parse_codex_jsonl([
+        json.dumps({"type": "error", "message": "transport failed"}),
+    ])
+    assert codex_runtime._classify_codex_failure(1, "HTTP 429", metadata)[0] == 429
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_count", [1, 2])
+async def test_timeout_cleanup_cancellation_preserves_images(tmp_path, monkeypatch, cancel_count):
+    import asyncio
+    import threading
+    from pathlib import Path
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(CodexRuntime, "is_available", lambda self: True)
+    registry = _install_fake_codex(monkeypatch, result_text=None, stdout_events=[])
+    fake_popen = codex_runtime.subprocess.Popen
+    entered, release = threading.Event(), threading.Event()
+    paths = []
+    def spawn(cmd, **kwargs):
+        paths.append(Path(cmd[cmd.index("--image") + 1]))
+        return fake_popen(cmd, **kwargs)
+    real_wait_for = asyncio.wait_for
+
+    async def timeout(awaitable, **kwargs):
+        awaitable.cancel()
+        raise asyncio.TimeoutError()
+    def terminate(*args, **kwargs):
+        entered.set()
+        release.wait(5)
+    monkeypatch.setattr(codex_runtime.subprocess, "Popen", spawn)
+    monkeypatch.setattr(codex_runtime.asyncio, "wait_for", timeout)
+    monkeypatch.setattr(codex_runtime, "_terminate_process_group", terminate)
+    task = asyncio.create_task(CodexRuntime().execute_headless(prompt="x", execution_id="timeout-cancel", images=[{"media_type":"image/png", "data":"YQ=="}]))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        for _ in range(cancel_count):
+            task.cancel()
+            for _ in range(10):
+                await asyncio.sleep(0)
+        assert paths[0].exists(), "Image removed while timeout termination is still blocked"
+        assert not registry.unregistered
+        assert not task.done()
+    finally:
+        release.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # Restore before pytest-asyncio shuts down this test's runner.
+            monkeypatch.setattr(asyncio, "wait_for", real_wait_for)
+    assert not paths[0].exists()
+    assert registry.unregistered == ["timeout-cancel"]

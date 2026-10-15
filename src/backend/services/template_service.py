@@ -161,6 +161,58 @@ def metadata_reason_is_unreadable(reason: Optional[str]) -> bool:
     return not reason.startswith("HTTP 404")
 
 
+def metadata_reason_is_token_rejection(reason: Optional[str]) -> bool:
+    """Did GitHub refuse the TOKEN that asked, rather than the request? (#3725)
+
+    401 (bad/revoked token) and 403 (rate limit, SSO, insufficient scope) say
+    nothing about whether the repo is readable by another identity, so the
+    creation path may retry with the next tier or the credential-free read.
+    """
+    return bool(reason) and reason.startswith(("HTTP 401", "HTTP 403"))
+
+
+# Same shape `crud._GITHUB_REPO_PATH_RE` accepts; kept local because crud
+# imports this module.
+_RAW_REPO_PATH_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_RAW_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _fetch_template_yaml_raw_result(repo: str, sha: str) -> tuple:
+    """Credential-free template.yaml read, pinned to a commit SHA (#3725).
+
+    `raw.githubusercontent.com` serves public repos without a token and outside
+    the REST API's anonymous 60/h cap, so a public template stays readable when
+    every tier's token is rejected. Never sends an Authorization header. `sha`
+    must be the 40-hex commit an anonymous `ls-remote` resolved, so the read
+    sees the same tree the clone will. Same `(metadata, reason)` contract as
+    `_fetch_template_yaml_result`.
+    """
+    if (
+        not isinstance(repo, str)
+        or not _RAW_REPO_PATH_RE.match(repo)
+        or any(seg in (".", "..") for seg in repo.split("/"))
+    ):
+        return {}, "invalid repo"
+    if not isinstance(sha, str) or not _RAW_SHA_RE.match(sha):
+        return {}, "invalid sha"
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(
+                f"https://raw.githubusercontent.com/{repo}/{sha}/template.yaml",
+                headers={},
+            )
+
+        if resp.status_code != 200:
+            return {}, f"HTTP {resp.status_code}"
+
+        # ent#314: author-controlled, so the hardened loader, as above.
+        return (parse_template_yaml(resp.text) or {}), None
+    except HardenedYamlError as e:
+        return {}, f"{e.code}: {e}"
+    except Exception as e:
+        return {}, f"{type(e).__name__}: {e}"
+
+
 def fetch_template_metadata_result_for_create(
     repo: str, pat: Optional[str] = None, ref: Optional[str] = None
 ) -> tuple:

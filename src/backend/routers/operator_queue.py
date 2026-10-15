@@ -1,4 +1,4 @@
-# mcp: operator_queue.ts (list_operator_queue, get_operator_queue_item, respond_to_operator_queue — a person-scoped key only; ask_operator → agent_router's raise; get_my_ask → agent_router's self-readback)
+# mcp: operator_queue.ts (list_operator_queue, get_operator_queue_item, respond_to_operator_queue — a person-scoped key only; ask_operator → agent_router's raise; get_my_ask → agent_router's self-readback; withdraw_ask → agent_router's self-withdraw, trinity-enterprise#901)
 """
 Operator Queue API Router (OPS-001).
 
@@ -19,6 +19,7 @@ from models import (
     BulkCancelRequest,
     ClearResolvedRequest,
     OperatorAskCreate,
+    OperatorAskWithdraw,
     OperatorCancel,
     OperatorResponse,
 )
@@ -174,7 +175,10 @@ def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict
         return [{**item, "decided_by_options": ask_service.decided_by_options(item),
                  "gate": skill_gate_service.card_view(
                      item, viewer_email=current_user.email, with_run_ids=True,
-                     name_approvers=True)}
+                     name_approvers=True),
+                 # trinity-enterprise#901: which ending the agent authored
+                 # (replaced | withdrawn | None), derived once server-side.
+                 "agent_ending": ask_service.agent_ending_kind(item)}
                 for item in items]
     # #715: the platform's heads-ups ABOUT a person (a client's complaint, the
     # client addresses behind a shared inbox) are the operator's, not a machine's.
@@ -643,4 +647,33 @@ async def get_my_ask(
     # #3247: the replace link, both ways, the same way.
     readback["replaces"] = ask_service.request_id_of(item.get("replaces"))
     readback["replaced_by"] = ask_service.request_id_of(item.get("replaced_by"))
+    # trinity-enterprise#901: which ending the agent authored (replaced |
+    # withdrawn | None), derived once server-side, never inferred from the link.
+    readback["agent_ending"] = ask_service.agent_ending_kind(item)
     return readback
+
+
+@agent_router.post("/{name}/operator-queue/{request_id}/withdraw")
+async def withdraw_my_ask(
+    request_id: str,
+    body: OperatorAskWithdraw,
+    name: str = Depends(get_self_acting_agent),
+    current_user: User = Depends(get_current_user),
+):
+    """The agent ends one of its OWN pending asks with a reason and no successor
+    (trinity-enterprise#901) — the question answered itself, the action is no
+    longer needed. The calling agent only, as itself (`get_self_acting_agent`;
+    deliberately NOT `reject_non_person_principal` — this door is agent-only).
+    200 with the receipt (`status: "withdrawn"`), or `status: "replayed"` when
+    this agent already withdrew it. Refusals carry named codes: 404
+    `ask_not_found` (uniform — unknown, another agent's, a gate's, the
+    platform's), 409 `ask_ended` (a person answered or ended it first; the
+    answer stands), 422 `invalid_reason`.
+    """
+    try:
+        return ask_service.withdraw(name, request_id, body.reason, actor_user=current_user)
+    except ask_service.AskRejected as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail={"code": e.code, "message": e.message, **e.extra},
+        )

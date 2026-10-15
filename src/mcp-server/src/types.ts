@@ -549,6 +549,16 @@ export interface OperatorQueueAskReadback {
   supersedes_expired?: string | null;
   replaces?: string | null;      // #3247: the ask this one replaced (request_id on get_my_ask)
   replaced_by?: string | null;   // #3247: the ask that replaced this one
+  agent_ending?: "replaced" | "withdrawn" | null;  // trinity-enterprise#901: which ending the agent authored
+}
+
+/**
+ * trinity-enterprise#901: the body of an agent withdrawing one of its own
+ * pending asks (POST /api/agents/{name}/operator-queue/{request_id}/withdraw).
+ * The backend refuses any other key (`extra="forbid"`).
+ */
+export interface OperatorAskWithdraw {
+  reason: string;
 }
 
 /**
@@ -576,7 +586,7 @@ export interface OperatorAskCreate {
  * ask went to, never a person's email. `differs` is present on a replay only.
  */
 export interface OperatorAskReceipt {
-  status: "created" | "replayed";
+  status: "created" | "replayed" | "withdrawn";   // withdrawn: trinity-enterprise#901
   id: string;
   request_id: string;
   raised_by: "agent" | "gate" | null;   // null: a replay of a row older than the column
@@ -593,6 +603,7 @@ export interface OperatorAskReceipt {
   replaces?: string | null;      // #3247: request_id of the ask this one replaced
   replaced_by?: string | null;   // #3247: request_id of the ask that replaced this one
   disposed_by?: string | null;
+  agent_ending?: "replaced" | "withdrawn" | null;  // trinity-enterprise#901
   differs?: string[];
 }
 

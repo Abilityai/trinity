@@ -40,6 +40,7 @@ vi.mock('axios', () => {
 
 import { useClientPortalStore } from '@/stores/clientPortal'
 import PortalInbox from '@/components/portal/PortalInbox.vue'
+import PortalInboxPane from '@/components/portal/PortalInboxPane.vue'
 
 globalThis.ResizeObserver = globalThis.ResizeObserver || class { observe() {} unobserve() {} disconnect() {} }
 
@@ -902,21 +903,47 @@ describe('the pane header (§3g L5: stacked chrome, split order)', () => {
   })
 })
 
-describe('Open canvas (§3g C10, T6)', () => {
+describe('Open canvas is a chat action; an ask opens its own chat (§3g C10, #3714)', () => {
   const headerIds = (w) => w.find('[data-testid="inbox-pane"] header').findAll('[data-testid]')
     .map((el) => el.attributes('data-testid'))
-    .filter((id) => /^inbox-pane-(heading|open-canvas|mark-read|reply|open|more)$/.test(id))
+    .filter((id) => /^inbox-pane-(back|heading|open-canvas|mark-read|reply|open|more)$/.test(id))
+  // The fixture's ask defaults to `chat_id: null` and no `raised_in_turn`, so a
+  // positive case must set both or it is green for the wrong reason.
+  const fromChat = { chat_id: 's9', raised_in_turn: true }
 
-  it('split: leftmost of the actions on a chat, and on an ask; it asks the shell for the canvas', async () => {
-    store.asks = [ask('q1')]
-    store.asksLoaded = true
+  it('split: leftmost of the actions on a chat; it asks the shell for the canvas', async () => {
     const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], canvasCount: 2 }, { query: { tab: 'unread', item: 'thread:t1' } })
     expect(headerIds(w)).toEqual(['inbox-pane-heading', 'inbox-pane-open-canvas', 'inbox-pane-mark-read', 'inbox-pane-reply', 'inbox-pane-open'])
     await w.find('[data-testid="inbox-pane-open-canvas"]').trigger('click')
     expect(w.emitted('open-canvas')).toHaveLength(1)
-    await router.replace({ path: '/workspace/inbox', query: { tab: 'action', item: 'ask:q1' } })
-    await flushPromises()
-    expect(has(w, 'inbox-pane-open-canvas')).toBe(true)
+  })
+
+  it('split, an ask raised in a chat: no Open canvas — Open in chat sends the card\'s `open-thread`', async () => {
+    store.asks = [ask('q1', fromChat)]
+    store.asksLoaded = true
+    const w = await mountInbox({ canvasCount: 2 }, { query: { tab: 'action', item: 'ask:q1' } })
+    expect(headerIds(w)).toEqual(['inbox-pane-heading', 'inbox-pane-open'])
+    await w.find('[data-testid="inbox-pane-open"]').trigger('click')
+    expect(w.emitted('open-thread')?.at(-1)).toEqual([{ id: 's9', agent_name: 'scout' }])
+    expect(w.emitted('open-chat')).toBeUndefined()
+  })
+
+  it.each(['approval', 'question', 'alert'])('split, a %s ask: never Open canvas', async (kind) => {
+    store.asks = [ask('q1', { kind, ...fromChat })]
+    store.asksLoaded = true
+    const w = await mountInbox({ canvasCount: 2 }, { query: { tab: 'action', item: 'ask:q1' } })
+    expect(has(w, 'inbox-pane-open-canvas')).toBe(false)
+    expect(has(w, 'inbox-pane-open')).toBe(true)
+  })
+
+  it('split, a background ask: no actions at all, and the header keeps its reserved height', async () => {
+    store.asks = [ask('q1', { chat_id: 'main1', raised_in_turn: false })]
+    store.asksLoaded = true
+    const w = await mountInbox({ canvasCount: 2 }, { query: { tab: 'action', item: 'ask:q1' } })
+    expect(has(w, 'inbox-pane-actions')).toBe(false)
+    expect(has(w, 'inbox-pane-open-canvas')).toBe(false)
+    expect(has(w, 'inbox-pane-open')).toBe(false)
+    expect(w.find('[data-testid="inbox-pane"] header').classes()).toContain('min-h-[3.25rem]')
   })
 
   it('absent with no canvas', async () => {
@@ -924,7 +951,7 @@ describe('Open canvas (§3g C10, T6)', () => {
     expect(has(w, 'inbox-pane-open-canvas')).toBe(false)
   })
 
-  it('stacked: it lives in More', async () => {
+  it('stacked: on a chat it lives in More', async () => {
     phone = true
     stubMatchMedia()
     const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], canvasCount: 1 }, { query: { tab: 'unread' } })
@@ -933,6 +960,45 @@ describe('Open canvas (§3g C10, T6)', () => {
     expect(headerIds(w)).not.toContain('inbox-pane-open-canvas')
     await w.find('[data-testid="inbox-pane-more"]').trigger('click')
     expect(w.find('[data-testid="inbox-pane-more-menu"] [data-testid="inbox-pane-open-canvas"]').exists()).toBe(true)
+  })
+
+  it('stacked, an ask raised in a chat: [Back] … [Open in chat] and no More — never an empty menu', async () => {
+    phone = true
+    stubMatchMedia()
+    store.asks = [ask('q1', fromChat)]
+    store.asksLoaded = true
+    const w = await mountInbox({ canvasCount: 1 }, { query: { tab: 'action' } })
+    await w.find('[data-testid="inbox-row-ask:q1"]').trigger('click')
+    await flushPromises()
+    expect(headerIds(w)).toEqual(['inbox-pane-back', 'inbox-pane-heading', 'inbox-pane-open'])
+    expect(has(w, 'inbox-pane-open-canvas')).toBe(false)
+    await w.find('[data-testid="inbox-pane-open"]').trigger('click')
+    expect(w.emitted('open-thread')?.at(-1)).toEqual([{ id: 's9', agent_name: 'scout' }])
+  })
+
+  it('stacked, a background ask: no More and no Open in chat', async () => {
+    phone = true
+    stubMatchMedia()
+    store.asks = [ask('q1')]
+    store.asksLoaded = true
+    const w = await mountInbox({ canvasCount: 1 }, { query: { tab: 'action' } })
+    await w.find('[data-testid="inbox-row-ask:q1"]').trigger('click')
+    await flushPromises()
+    expect(has(w, 'inbox-pane-more')).toBe(false)
+    expect(has(w, 'inbox-pane-open')).toBe(false)
+  })
+
+  it('a mention: no Open canvas either — it is a person\'s tag, not the agent\'s (T2)', async () => {
+    store.openMention = vi.fn(async () => ({
+      id: 'm1', agent_name: 'scout', state: 'unread', created_at: iso(3), tagged_by: 'Alice Archer',
+      conversation: { kind: 'room', id: null, label: 'Pricing review' },
+      can_see: false, message: null, context: [], can_let_you_in: [],
+    }))
+    const item = { key: 'mention:m1', type: 'mention', id: 'm1', agent_name: 'scout',
+      mention: { id: 'm1', tagged_by: 'Alice Archer', conversation: { kind: 'room', label: 'Pricing review' } } }
+    wrapper = mount(PortalInboxPane, { props: { item, canvasCount: 1 }, global: { plugins: [router] }, attachTo: document.body })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="inbox-pane-open-canvas"]').exists()).toBe(false)
   })
 })
 
