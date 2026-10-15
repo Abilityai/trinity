@@ -4166,6 +4166,26 @@ def _migrate_execution_turn_integrity(cursor, conn):
     conn.commit()
 
 
+def _migrate_execution_source_mcp_scope(cursor, conn):
+    """abilityai/trinity-enterprise#693 — an execution names the KIND of key that
+    started it.
+
+    One nullable column, ``source_mcp_scope``, on ``schedule_executions``: the
+    scope of ``source_mcp_key_id`` (``user``, ``agent``, ``controller``, ...),
+    resolved at write time so a controller-started run stays attributed to the
+    controller after its key is deleted. Additive, no backfill: old rows stay
+    NULL. Mirrored by Alembic ``0099_execution_source_mcp_scope``.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "source_mcp_scope",
+        "ALTER TABLE schedule_executions ADD COLUMN source_mcp_scope TEXT",
+        log_msg="Adding source_mcp_scope column to schedule_executions...",
+    )
+    conn.commit()
+
+
 def _migrate_agent_canvases_table(cursor, conn):
     """Create agent_canvases (ent#438).
 
@@ -5708,4 +5728,5 @@ MIGRATIONS = [
     ("a2a_internal_scope", _migrate_a2a_internal_scope),
     ("operator_queue_replace", _migrate_operator_queue_replace),
     ("proactive_consent_not_asked", _migrate_proactive_consent_not_asked),
+    ("execution_source_mcp_scope", _migrate_execution_source_mcp_scope),
 ]

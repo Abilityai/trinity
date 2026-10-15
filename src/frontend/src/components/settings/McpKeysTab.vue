@@ -136,6 +136,14 @@
                         title="Read-only machine credential — fleet health, telemetry, execution and subscription reads only">
                     Ops (read-only)
                   </span>
+                  <!-- abilityai/trinity-enterprise#693: a non-human principal
+                       for a remote controller. Badged so it never reads as the
+                       owner's own key. -->
+                  <span v-else-if="key.scope === 'controller'"
+                        class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-accent-purple-100 dark:bg-accent-purple-900/50 text-accent-purple-800 dark:text-accent-purple-300"
+                        title="Machine credential for a remote controller — creator-tier, recorded as the controller, refused on grant surfaces">
+                    Controller
+                  </span>
                   <span v-else-if="key.scope === 'system'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-status-urgent-100 dark:bg-status-urgent-900/50 text-status-urgent-800 dark:text-status-urgent-300">
                     System
                   </span>
@@ -286,6 +294,23 @@
                       account: if your admin role is removed or the account is
                       suspended, the key stops working, so mint it under an account
                       that is not offboarded with a person.
+                    </span>
+                  </span>
+                </label>
+
+                <label class="flex items-start gap-2 cursor-pointer">
+                  <input type="radio" value="controller" v-model="newKey.scope" class="mt-0.5 text-action-primary-600 focus:ring-action-primary-500" />
+                  <span class="text-sm scope-label">
+                    Controller
+                    <span class="scope-hint">
+                      Machine credential for a remote controller: it can create,
+                      deploy and operate agents (creator tier), and everything it
+                      does is recorded as the controller, not as you. Admin-only
+                      routes, minting keys, changing roles or permissions, reading
+                      or setting credential values, deleting agents and system teardown are
+                      refused.
+                      It stays bound to this account, so mint it under a dedicated
+                      service account.
                     </span>
                   </span>
                 </label>

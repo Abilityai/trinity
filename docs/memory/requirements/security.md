@@ -498,6 +498,88 @@
   so every mint is attributable. Guard:
   `tests/unit/test_mcp_key_creation_requires_session.py`.
 
+### 20.11 Controller-Scoped MCP Key (abilityai/trinity-enterprise#693)
+- **Status**: ✅ Implemented (backend REST surface); MCP tool exposure deferred.
+- **What it is for**: a **remote controller** — fleet-facing automation that
+  provisions and operates an instance from outside it — needs a principal that is
+  *not a person*. A `user` key IS the person (admitted at every admin gate on an
+  admin owner, and every write it makes is recorded as that human); an `agent`
+  key is refused at admin gates and is bound to one container. `controller` is
+  the fourth machine scope: creator-tier reach, attributable to itself, refused
+  where authority is widened.
+- **Minting**: `POST /api/mcp/keys` with `scope: "controller"`. Admin-only AND
+  signed-in-session-only (`require_interactive` + `assert_admin`), exactly like
+  `ops` — minting a credential is a grant. The key is minted against the caller's
+  own account; mint it under a dedicated service account. Never carries an
+  `agent_name` (the `_USER_CREATABLE_SCOPES` invariant).
+- **Reach — creator-tier, not admin-blanket**:
+  - Passes `require_role("creator")` (create agent, deploy / restart a system) and
+    the owner/access tier on whatever its owner may reach — so the owning service
+    account's role decides the fleet it sees (admin: the whole fleet; creator:
+    owned ∪ shared).
+  - Passes the agent-capability gates (`skills.manage`, `schedules.manage`, …):
+    the controller ships at the Operator tier, ungated inside the instance.
+  - **Not** in `ADMIN_GATE_SCOPES`: every admin-gated route refuses it by default
+    with the named code `controller_route_not_admitted`. A route admits it only by
+    opting in per route — `assert_admin(..., allow_scopes={"controller"})` or
+    `Depends(require_admin_allowing("controller"))`, the existing #2323
+    mechanism. The opt-in admits the scope; `role == "admin"` still runs after it.
+  - Refused on the other allowlisted human-only rules it is not a member of:
+    `require_person` / `require_interactive`, ask endings, `/ws/events`.
+- **Refused on grant surfaces — named code `controller_grant_refused`**, enforced at
+  the single auth entry point (`get_current_user`) beside the other key fences,
+  before any route gate runs. Each refusal carries a `surface`:
+  - `key_minting` — `/api/mcp/keys/**`, `/api/agents/{name}/mcp-key/**`;
+  - `permissions` — agent-to-agent permission writes, agent sharing, capability
+    grants, user role changes, email-whitelist changes, canvas share links;
+  - `credential_values` — credential inject / export / import, the credential
+    encryption key, GitHub PAT writes (agent and user), subscription-token
+    registration, Nevermined config writes and deletes, webhook signing-secret
+    mint / revoke. A controller may *name* a credential (status, requirements);
+    it may never read or set a value;
+  - `system_teardown` — whole-system teardown;
+  - `destructive_delete` — `DELETE /api/agents/{name}` (a soft-delete whose
+    workspace, shared and public volumes are purged after the retention window).
+    Anchored on the agent itself; its sub-resources stay reachable.
+- **Why a denylist (and its backstop)**: the controller ships at the Operator
+  tier — ungated inside the instance — so the reach is deliberately broad and an
+  allowlist would be the whole API. The fence names the grant surfaces; the
+  allowlisted human-only primitives (`require_person` / `require_interactive`)
+  and the admin allowlist refuse a controller on any route they gate; and a guard
+  walks the **live** route table and fails any grant-shaped route (key,
+  permission, credential-value shapes) that has neither such a gate nor a fence
+  entry — so a new grant route is a reviewed choice, not a silent opening.
+  Source registration is deliberately **not** in this set (companion
+  abilityai/trinity-enterprise#692).
+- **Attributable**:
+  - Audit: a row written for a controller principal records
+    `actor_type = "controller"`, `actor_id = <key id>`, `mcp_scope = "controller"`
+    and the key name, with the owning account riding as `actor_email` — never
+    `actor_type = "user"`, so the owner's own activity view does not show the
+    controller's acts as theirs.
+  - Skill-assignment history: `agent_skills.assigned_by` and
+    `agent_skill_sets.assigned_by` record `controller:<key id>:<key name>`
+    (`dependencies.assignment_author`) instead of the owner's username, on every
+    assignment write (single, bulk replace, set assign / replace / unassign).
+    Every other principal keeps its username; no schema change.
+  - Executions: every execution row records `source_mcp_scope`, the scope of the
+    key that started it, resolved at write time from the presented key id (so it
+    survives the key's later deletion). The execution ledger shows a controller
+    origin as **Controller: <key name>** rather than a bare MCP key.
+- **Bound to its owner**: suspending the owning account kills the key at the auth
+  entry point (#995); demoting it below `creator` removes its reach; an admin
+  route opted in still needs an admin owner. A controller is a narrowing of its
+  owner, never a decoupling.
+- **Zero-config**: no existing principal changes behaviour; an install that mints
+  no controller key is unaffected apart from the additive nullable
+  `schedule_executions.source_mcp_scope` column.
+- **Deferred**: MCP tool exposure (`OPERATOR_SCOPES` / `access.ts` — the key gets
+  no MCP tools until then, fail-closed), `/ws/events` admission, the agent-key
+  verify verdict for a controller key found in an agent's `.mcp.json`, and
+  controller attribution in **agent activity** rows (accepted as a partial
+  AC 2: audit, execution and assignment-history rows name the controller).
+- **Guard**: `tests/unit/test_ent693_controller_scope_key.py`.
+
 ---
 
 ## 26. Operator Queue & Operating Room (OPS-001)

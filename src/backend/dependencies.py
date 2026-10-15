@@ -834,6 +834,10 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
             # check would otherwise treat it as that human.
             if scope == OPS_SCOPE:
                 _enforce_ops_key_fence(request)
+            # abilityai/trinity-enterprise#693 — a controller key is refused on
+            # grant surfaces here, before any route gate, for the same reason.
+            if scope == CONTROLLER_SCOPE:
+                _enforce_controller_key_fence(request)
             return User(
                 id=user["id"],
                 username=user["username"],
@@ -1252,6 +1256,147 @@ def _enforce_ops_key_fence(request: Request) -> None:
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Ops keys are read-only and limited to fleet health, telemetry, execution and subscription reads",
     )
+
+
+# --------------------------------------------------------------------------- #
+# abilityai/trinity-enterprise#693 — the `controller` scope: a non-human
+# principal with creator-tier reach, attributable, refused on grant surfaces.
+# --------------------------------------------------------------------------- #
+# What it is FOR: a remote controller — fleet-facing automation that provisions
+# and operates an instance from outside it. A `user` key IS the person (admitted
+# at every admin gate on an admin owner, and every write recorded as that human);
+# an `agent` key is refused at admin gates and bound to one container. Neither is
+# a controller.
+#
+# Three properties, each enforced by an existing mechanism rather than a new one:
+#
+#   1. REACH — creator-tier, not admin-blanket. The key resolves to its owner
+#      carrying the owner's role, so `require_role("creator")` and the owner /
+#      access tier answer as they would for the owner, and `capability_refusal`
+#      admits it (it ships at the Operator tier). It is NOT in
+#      `ADMIN_GATE_SCOPES`: every admin gate refuses it by default, and a route
+#      admits it only with `assert_admin(..., allow_scopes={"controller"})` /
+#      `require_admin_allowing("controller")` — the #2323 opt-in, with the same
+#      "additional gate, never a substitute" rule (`role == "admin"` still runs).
+#   2. ATTRIBUTABLE — `platform_audit_service` records `actor_type="controller"`
+#      for it, and every execution row records `source_mcp_scope`.
+#   3. REFUSED ON GRANT SURFACES — the fence below, at the single auth entry
+#      point, beside the connector / ephemeral / portal_delegate / ops fences —
+#      plus the volume-destroying agent delete.
+#
+# THE FENCE IS A DENYLIST, unlike the ops fence, because the reach above is
+# deliberately broad; listing every route a controller MAY reach would be the
+# whole API. It is not the only layer: the human-only primitives
+# (`require_person`, `require_interactive`, ask endings) are allowlists the
+# controller is not a member of, so a NEW grant route classified under #2996
+# refuses it without anyone editing this list. The entries here are the grant
+# surfaces that a controller would otherwise pass — owner-tier routes guarded only
+# by `reject_agent_principal`, which names agent keys — plus the admin- and
+# session-gated ones named by the issue, so every refusal on those four surfaces
+# carries the same machine-readable code. Each entry is anchored, method-scoped
+# and must match a live route (`test_ent693_controller_scope_key.py`), because a
+# stale entry in a deny-fence fails OPEN. The same file walks the live route
+# table and fails any grant-shaped route (key, permission, credential-value
+# shapes) that neither carries a gate the controller is refused by nor appears
+# here — the backstop that makes "a new grant route" a reviewed choice.
+#
+# Source registration is deliberately NOT here (companion
+# abilityai/trinity-enterprise#692: sources are controller work).
+CONTROLLER_SCOPE = "controller"
+
+CONTROLLER_GRANT_REFUSED_CODE = "controller_grant_refused"
+
+_CONTROLLER_SURFACE_MESSAGES = {
+    "key_minting": "Controller keys cannot mint, list, rotate or revoke credentials",
+    "permissions": "Controller keys cannot change roles, permissions, sharing or capability grants",
+    "credential_values": (
+        "Controller keys may name a credential but never read or set its value"
+    ),
+    "system_teardown": "Controller keys cannot tear down a whole system",
+    "destructive_delete": (
+        "Controller keys cannot delete an agent: deletion schedules its "
+        "workspace volume for destruction"
+    ),
+}
+
+_CONTROLLER_REFUSED_ROUTES = (
+    # Key minting — every MCP-key lifecycle route, and per-agent key rotation.
+    (frozenset({"GET", "POST", "DELETE"}), re.compile(r"^/api/mcp/keys(/.*)?$"), "key_minting"),
+    (frozenset({"GET", "POST"}), re.compile(r"^/api/agents/[^/]+/mcp-key(/.*)?$"), "key_minting"),
+    # Role / permission changes.
+    (frozenset({"PUT"}), re.compile(r"^/api/agents/[^/]+/permissions$"), "permissions"),
+    (frozenset({"POST", "DELETE"}), re.compile(r"^/api/agents/[^/]+/permissions/[^/]+$"), "permissions"),
+    (frozenset({"POST"}), re.compile(r"^/api/agents/[^/]+/share$"), "permissions"),
+    (frozenset({"DELETE"}), re.compile(r"^/api/agents/[^/]+/share/[^/]+$"), "permissions"),
+    (frozenset({"PUT"}), re.compile(r"^/api/agents/[^/]+/capability-grants/[^/]+$"), "permissions"),
+    (frozenset({"PUT"}), re.compile(r"^/api/users/[^/]+/role$"), "permissions"),
+    (frozenset({"POST"}), re.compile(r"^/api/settings/email-whitelist$"), "permissions"),
+    (frozenset({"DELETE"}), re.compile(r"^/api/settings/email-whitelist/.+$"), "permissions"),
+    (frozenset({"POST"}), re.compile(r"^/api/agents/[^/]+/canvas/[^/]+/share$"), "permissions"),
+    # Credential values — reading or setting one, never naming one.
+    (frozenset({"POST"}), re.compile(r"^/api/agents/[^/]+/credentials/(inject|export|import)$"), "credential_values"),
+    (frozenset({"GET"}), re.compile(r"^/api/credentials/encryption-key$"), "credential_values"),
+    (frozenset({"PUT", "DELETE"}), re.compile(r"^/api/agents/[^/]+/github-pat$"), "credential_values"),
+    (frozenset({"PUT", "DELETE"}), re.compile(r"^/api/users/me/github-pat$"), "credential_values"),
+    (frozenset({"POST"}), re.compile(r"^/api/subscriptions$"), "credential_values"),
+    (frozenset({"POST", "DELETE"}), re.compile(r"^/api/nevermined/agents/[^/]+/config$"), "credential_values"),
+    # A webhook signing secret is minted, returned once in plaintext, rotated
+    # and revoked here — a credential value.
+    (frozenset({"POST", "DELETE"}), re.compile(r"^/api/agents/[^/]+/schedules/[^/]+/webhook/secret$"), "credential_values"),
+    # Whole-system teardown (served by a separately licensed module; refused here
+    # first so the controller gets the named code whether or not it is mounted).
+    (frozenset({"DELETE"}), re.compile(r"^/api/enterprise/system-teardown/[^/]+$"), "system_teardown"),
+    # Volume-destroying delete (the Operator ruling's edge gate). Agent delete is
+    # a soft-delete whose workspace / shared / public volumes are purged after
+    # the retention window — the controller may stop an agent, not destroy it.
+    # Anchored on the agent itself: `DELETE /api/agents/{name}/<sub-resource>`
+    # stays reachable.
+    (frozenset({"DELETE"}), re.compile(r"^/api/agents/[^/]+$"), "destructive_delete"),
+)
+
+
+def controller_grant_refusal(surface: str) -> HTTPException:
+    """The named 403 a controller key gets on a grant surface (quality bar #6)."""
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "code": CONTROLLER_GRANT_REFUSED_CODE,
+            "surface": surface,
+            "message": _CONTROLLER_SURFACE_MESSAGES[surface],
+        },
+    )
+
+
+def assignment_author(current_user) -> str:
+    """Who an assignment-history row (`agent_skills` / `agent_skill_sets`
+    `.assigned_by`) names (abilityai/trinity-enterprise#693).
+
+    A controller key is recorded as ITSELF — `controller:<key id>:<key name>`,
+    the scope, the stable id (joins to `mcp_api_keys` and to the audit row's
+    `actor_id`) and the name (survives the key's deletion) — never as the owner
+    whose role it carries. Every other principal keeps its username, so existing
+    rows and readers are unchanged; an agent key additionally stamps
+    `assigned_by_agent` (ent#596). The key id never contains `:`, so
+    `split(":", 2)` recovers the three parts.
+    """
+    if (getattr(current_user, "mcp_scope", None) == CONTROLLER_SCOPE
+            and getattr(current_user, "mcp_key_id", None)):
+        return (f"{CONTROLLER_SCOPE}:{current_user.mcp_key_id}:"
+                f"{getattr(current_user, 'mcp_key_name', None) or ''}")
+    return current_user.username
+
+
+def _enforce_controller_key_fence(request: Request) -> None:
+    """Grant-surface refusal for `controller`-scoped keys (ent#693).
+
+    Reads only the method and the ROUTED path (#3102) — no DB, no Redis, nothing
+    that can fail open.
+    """
+    method = request.method.upper()
+    path = request.scope["path"]
+    for methods, pattern, surface in _CONTROLLER_REFUSED_ROUTES:
+        if method in methods and pattern.fullmatch(path):
+            raise controller_grant_refusal(surface)
 
 
 def reject_agent_principal(current_user: User) -> None:
@@ -1701,6 +1846,10 @@ def require_admin_allowing(*allow_scopes: str):
 # fence already forbids every route that has one, so this clause is unreachable in
 # normal operation — it fires only if that fence is ever holed. Which is the point.
 #
+# `ops` (#2323) and `controller` (ent#693) are absent BY DESIGN: both are bounded
+# machine scopes, admitted at an admin route only by that route's own
+# `allow_scopes` opt-in.
+#
 # NULL/empty scope columns are double-coerced to "user" (`db/mcp_keys.py` and
 # `get_current_user` below), so no legacy row is stranded outside the set.
 #
@@ -1747,6 +1896,19 @@ def _reject_scope_at_admin_gate(
             detail="Principal carries no mcp_scope; cannot satisfy an admin gate",
         )
     if scope not in permitted:
+        if scope == CONTROLLER_SCOPE:
+            # ent#693 — the same refusal, named, so a controller can tell "this
+            # admin route has not admitted controllers" from a bad credential.
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "controller_route_not_admitted",
+                    "message": (
+                        "This admin route has not admitted controller keys; an "
+                        "admin route admits them only by opting in per route"
+                    ),
+                },
+            )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This key scope cannot satisfy an admin gate",
@@ -2191,6 +2353,10 @@ def capability_refusal(current_user, capability: str) -> Optional[tuple]:
     if scope is _SCOPE_ABSENT:
         return code, "Principal carries no mcp_scope; cannot satisfy a capability gate."
     if scope in ADMIN_GATE_SCOPES:
+        return None
+    if scope == CONTROLLER_SCOPE:
+        # ent#693 — a controller ships at the Operator tier: ungated inside the
+        # instance. Its owner fence still applies on every capability route.
         return None
     if scope == "agent":
         agent = getattr(current_user, "agent_name", None)

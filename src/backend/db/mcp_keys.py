@@ -109,7 +109,9 @@ class McpKeyOperations:
     # #2323: `ops` is a bounded read-only machine credential. Admin-gated AND
     # human-only at the router; refused here too so a bad value can never reach
     # the column by another path.
-    _USER_CREATABLE_SCOPES = ("user", "portal_delegate", "ops")
+    # abilityai/trinity-enterprise#693: `controller` — creator-tier machine
+    # principal for a remote controller. Admin-gated AND human-only at the router.
+    _USER_CREATABLE_SCOPES = ("user", "portal_delegate", "ops", "controller")
 
     # #2323 INVARIANT — every scope this creator can mint (`_USER_CREATABLE_SCOPES`
     # above) must leave `agent_name` NULL. Three separate sweeps filter on

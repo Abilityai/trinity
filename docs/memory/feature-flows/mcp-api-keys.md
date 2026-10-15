@@ -15,6 +15,7 @@ MCP API Keys enable authentication for the Trinity MCP server, allowing Claude C
 | MCP-005 | As a user, I want to copy my MCP configuration so that I can easily configure Claude Code | Implemented |
 | MCP-006 | As a first-time user, I want a default key created automatically so that I can start using MCP immediately | Implemented |
 | MCP-007 | As an operator, I want a **read-only machine credential** for monitoring and ops tooling, so that enabling enforced 2FA does not cost me observability and I never have to hand a dashboard an unlimited admin key (#2323) | Implemented |
+| MCP-008 | As an operator, I want a **controller credential** for a remote controller that creates and operates agents, so that what it does is recorded as the controller rather than as me, and it cannot widen its own authority (abilityai/trinity-enterprise#693) | Implemented (REST; MCP tools deferred) |
 
 ## Key scopes — and which one is a machine identity (#2323)
 
@@ -24,6 +25,7 @@ A key's `scope` decides what it can reach. The two an operator mints by hand:
 |---|---|---|
 | `user` | **The owner's full role.** On an admin owner that is every admin gate in the platform, plus every write. Never expires. Already exempt from interactive 2FA — the MFA gate sits on the two login routes and key validation never passes through it | any user, for themselves |
 | `ops` | **Read-only, route-fenced**: fleet health, host/container telemetry, the agent roster and capacity, execution history and the live log relay, subscription reads. Every write 403s | admin only, and human-only (an interactive session — a key cannot mint one) |
+| `controller` | **Creator-tier, attributable, refused on grant surfaces** (abilityai/trinity-enterprise#693): passes `require_role("creator")`, the owner/access tier and the agent-capability gates; refused at every admin gate (`controller_route_not_admitted`) unless the route opts in with `allow_scopes={"controller"}`; refused on key minting, role/permission changes, credential values, system teardown and agent delete (`controller_grant_refused`, with a `surface`) at the auth entry point. Audit rows record `actor_type="controller"`, execution rows `source_mcp_scope="controller"`, skill-assignment history `assigned_by="controller:<key id>:<key name>"`. No MCP tools yet | admin only, and human-only |
 
 Trinity always had a machine identity for admin/ops surfaces: `user` is one. What
 it lacked was bounds, attribution and expiry, so the only 2FA-surviving option was

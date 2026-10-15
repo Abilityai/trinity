@@ -10,6 +10,7 @@ from sqlalchemy import select, insert, update, and_, func, or_
 from ..engine import get_engine
 from ..query_helpers import latest_per_group, viewer_scope
 from ..tables import (
+    mcp_api_keys,
     schedule_executions,
 )
 from db_models import ScheduleExecution
@@ -30,6 +31,26 @@ logger = logging.getLogger(__name__)
 # when Phase 3 fails an execution. Used to scope the residual-race WARNING log
 # below so it doesn't misfire on other legitimate FAILED→SUCCESS transitions
 # (e.g. Phase 0 auto-terminate, Phase 1 stale cleanup, startup recovery).
+
+
+def _source_scope(key_id: Optional[str]):
+    """The scope of the key that started a run, for `source_mcp_scope`
+    (abilityai/trinity-enterprise#693).
+
+    A scalar subquery evaluated inside the INSERT, so the scope is read from the
+    key row in the same statement that records the key id — no extra round trip,
+    and the value is persisted, so a controller-started run stays attributed to
+    the controller after its key is deleted. No key → NULL (a JWT human, the
+    scheduler, the platform). Callers never pass the scope: it is derived from
+    the presented key, the one trustworthy answer (#2323).
+    """
+    if not key_id:
+        return None
+    return (
+        select(mcp_api_keys.c.scope)
+        .where(mcp_api_keys.c.id == key_id)
+        .scalar_subquery()
+    )
 
 
 class ScheduleExecutionsMixin:
@@ -63,6 +84,7 @@ class ScheduleExecutionsMixin:
             source_agent_name=row["source_agent_name"] if "source_agent_name" in row_keys else None,
             source_mcp_key_id=row["source_mcp_key_id"] if "source_mcp_key_id" in row_keys else None,
             source_mcp_key_name=row["source_mcp_key_name"] if "source_mcp_key_name" in row_keys else None,
+            source_mcp_scope=row["source_mcp_scope"] if "source_mcp_scope" in row_keys else None,
             # Session resume support (EXEC-023)
             claude_session_id=row["claude_session_id"] if "claude_session_id" in row_keys else None,
             # Model selection (MODEL-001)
@@ -168,6 +190,7 @@ class ScheduleExecutionsMixin:
                     message=message,
                     triggered_by=triggered_by,
                     **f,
+                    source_mcp_scope=_source_scope(f.get("source_mcp_key_id")),
                 )
             )
 
@@ -235,6 +258,7 @@ class ScheduleExecutionsMixin:
                     message=message,
                     triggered_by=triggered_by,
                     **f,
+                    source_mcp_scope=_source_scope(f.get("source_mcp_key_id")),
                 )
             )
 

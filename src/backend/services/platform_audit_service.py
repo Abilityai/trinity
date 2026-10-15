@@ -60,6 +60,9 @@ class AuditActorType(str, Enum):
     MCP_CLIENT = "mcp_client"  # external client via MCP API key
     SYSTEM = "system"      # platform itself (scheduler, system agent)
     EXTERNAL_AGENT = "external_agent"  # a non-Trinity principal verified by protocol (AAuth, ent#623)
+    # abilityai/trinity-enterprise#693: a controller-scoped MCP key. Its own actor
+    # type — never `user` — so a controller's acts are not filed as its owner's.
+    CONTROLLER = "controller"
 
 
 class PlatformAuditService:
@@ -228,11 +231,23 @@ class PlatformAuditService:
     ) -> tuple:
         """Determine (actor_type, actor_id, actor_email) from inputs.
 
-        Precedence: user > agent > external agent > mcp_scope=='system' > mcp_client.
+        Precedence: controller > user > agent > external agent >
+        mcp_scope=='system' > mcp_client.
         Returns ('system', 'trinity-system', None) for system events with no
         identifiable actor — never returns all-None so the NOT NULL
         actor_type column is satisfied.
+
+        ent#693: a controller-scoped key is recorded as itself — the key id is the
+        actor — whether it arrives as `actor_user` or as keyed fields; the owning
+        account rides as `actor_email`, so the row still joins back to the
+        accountable owner without being filed as that person's own act.
         """
+        if mcp_scope == AuditActorType.CONTROLLER.value and mcp_key_id:
+            return (
+                AuditActorType.CONTROLLER.value,
+                str(mcp_key_id),
+                getattr(actor_user, "email", None) if actor_user is not None else None,
+            )
         if actor_user is not None:
             return (
                 AuditActorType.USER.value,

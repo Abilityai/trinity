@@ -276,6 +276,9 @@ schedule_executions = Table(
     Column("source_agent_name", Text),
     Column("source_mcp_key_id", Text),
     Column("source_mcp_key_name", Text),
+    # abilityai/trinity-enterprise#693 — the scope of the key that started the
+    # run, resolved at write time so it survives the key's deletion.
+    Column("source_mcp_scope", Text),
     Column("claude_session_id", Text),
     Column("queued_at", Text),
     Column("backlog_metadata", Text),

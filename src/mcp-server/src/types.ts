@@ -120,7 +120,11 @@ export interface McpAuthContext extends Record<string, unknown> {
   // "user-scoped keys see all accessible agents" branch. Keep this union
   // exhaustive against `mcp_api_keys.scope`; anything not listed must be
   // treated as least-privileged, never as `user`.
-  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops";
+  // abilityai/trinity-enterprise#693: `controller` is a backend-minted scope for a
+  // remote controller. It is NOT in `OPERATOR_SCOPES`, so it gets no MCP tools
+  // until its MCP surface is designed — listed here only to keep the union
+  // exhaustive against the column.
+  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops" | "controller";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
   // #2392: X-Trinity-Execution-Id of THIS request (turn id or "manual"); wins over an agent-supplied execution_id.
   executionId?: string;
