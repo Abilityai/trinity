@@ -135,6 +135,13 @@ def _recipient(agent_name: str, request: SendMessageRequest, current_user: User 
     fill, is refused by name — a message has one recipient, and silently picking
     one of several is exactly what the ruling forbids. `recipient_email` still
     works for two releases and is logged as deprecated.
+
+    trinity-enterprise#904: `primary` with no seat written falls back to the
+    agent's owner HERE, on the message surface only. The resolver keeps the
+    ent#606 rule (asks go to the operators, a gate approval refuses), because
+    the same resolver decides who may approve a gated skill; this is an address,
+    not a grant. Without the stand-in, an agent on a fresh enterprise install has
+    no sanctioned way to message a person.
     """
     if not request.to:
         # Same condition as reports: only an agent key choosing a person by
@@ -152,6 +159,15 @@ def _recipient(agent_name: str, request: SendMessageRequest, current_user: User 
             "code": "role_resolves_to_several", "role": request.to, "count": len(r.people),
             "message": f"{len(r.people)} people fill the {request.to} role and a message has "
                        "one recipient — message primary, or raise an ask."})
+    if not r.single and request.to == "primary":
+        owner = role_addressing.owner_email(agent_name)
+        if owner:
+            return owner
+        raise HTTPException(status_code=422, detail={
+            "code": "role_unassigned", "role": request.to,
+            "message": "Nobody fills the primary role for this agent yet, and its owner has "
+                       "no email address. An admin can assign a primary in the agent's "
+                       "Access tab."})
     if not r.single:
         raise HTTPException(status_code=422, detail={
             "code": "role_unassigned", "role": request.to,
