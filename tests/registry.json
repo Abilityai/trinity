@@ -6158,6 +6158,16 @@
         "unit"
       ],
       "description": "The agent server's PUT/mkdir/DELETE/list refuse a link that changes a path's class, keep same-class links, never write through a final link, delete a link as itself, never descend a link in the list (node cap), use resolved-path containment (#3032), CAS without following links, survive a crashed tmp file, keep file mode, refuse nested/bare git metadata, report the link count on reads, and still serve every platform writer."
+    },
+    {
+      "file": "unit/test_ent926_agent_route_census.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "security"
+      ],
+      "description": "Every route that names an agent declares the tier it enforces (ent#926). Static AST census over routers/ against tests/unit/agent_route_tiers.json: an agent-naming route with no row fails (the default is owner tier); a row with no live route fails; a row declared owner must show an owner/admin gate in the handler or its named helper, an accessor row must not; accessor rows tagged legacy are a shrink-only ratchet. Scanner self-tests on a synthetic router. Eight mutations (new undeclared route, owner dependency dropped, accessor given an owner gate, renamed handler, baseline raised, baseline left above reality, stale row path, gate regex emptied) each turn it red."
     }
   ]
 }
