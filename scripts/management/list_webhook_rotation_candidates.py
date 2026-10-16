@@ -32,8 +32,8 @@ SELECT s.id            AS schedule_id,
        s.agent_name    AS agent,
        s.name          AS schedule,
        COALESCE(u.username, '(unknown, owner_id=' || COALESCE(CAST(s.owner_id AS TEXT), 'NULL') || ')') AS creator,
-       CASE WHEN s.webhook_token IS NOT NULL AND s.webhook_token <> '' THEN 'yes' ELSE 'no' END AS has_token,
-       CASE WHEN s.webhook_secret_encrypted IS NOT NULL AND s.webhook_secret_encrypted <> '' THEN 'yes' ELSE 'no' END AS has_secret
+       CASE WHEN s.webhook_token IS NOT NULL AND s.webhook_token <> '' THEN 'yes' ELSE 'no' END AS url_minted,
+       CASE WHEN s.webhook_secret_encrypted IS NOT NULL AND s.webhook_secret_encrypted <> '' THEN 'yes' ELSE 'no' END AS hmac_on
   FROM agent_schedules s
   LEFT JOIN users u ON u.id = s.owner_id
  WHERE ((s.webhook_token IS NOT NULL AND s.webhook_token <> '')
@@ -90,11 +90,10 @@ def main(argv=None) -> int:
     for r in rows:
         who = ", ".join(shares.get(r["agent"], [])) or "(not shared today)"
         print(f"- agent={r['agent']}  schedule={r['schedule']!r}  id={r['schedule_id']}")
-        # Only the fact that a token / secret exists is printed, as constant text:
-        # no value from a credential column reaches the output.
-        has_token = "yes" if r["has_token"] == "yes" else "no"
-        has_secret = "yes" if r["has_secret"] == "yes" else "no"
-        print(f"    creator: {r['creator']}   token: {has_token}   signing secret: {has_secret}")
+        # Only whether a URL / HMAC signing is set up is printed, as constant text.
+        url_set = "yes" if r["url_minted"] == "yes" else "no"
+        hmac_set = "yes" if r["hmac_on"] == "yes" else "no"
+        print(f"    creator: {r['creator']}   url: {url_set}   signing: {hmac_set}")
         print(f"    shared with: {who}")
     print("\nRotate each URL (and its signing secret, if one is set): Schedules tab -> Webhook -> Rotate URL.")
     return 0
