@@ -353,6 +353,44 @@ def accessible_agent_names(current_user: User) -> Optional[List[str]]:
     return [a["name"] for a in get_accessible_agents(current_user)]
 
 
+def viewer_own_rows(current_user: User) -> tuple:
+    """`(own_rows_user_id, own_rows_exempt_agents)` for a fleet-level read of
+    executions or activity (trinity-enterprise#875).
+
+    The fleet routes span every agent the caller can reach, and the answer is
+    per agent: on an agent the caller OWNS (or as an admin) every row is theirs
+    to see; on any other agent they can reach, just the rows they started.
+
+    The rule is written as an EXEMPTION list, not a list of the agents to narrow:
+    narrowing is the default and only an agent the caller provably owns escapes
+    it. An agent that is reachable but missing from the owned list (a stale
+    roster, a metadata gap) is therefore narrowed, never shown in full — the
+    failure direction is "too few rows", not "everyone's rows".
+
+    * `(None, None)` — no narrowing: an admin person, and agent/system/ops/
+      connector keys (ent#875 ruling: an agent reading executions stays full; the
+      fleet-wide default is ent#926).
+    * `(uid, [owned names])` — narrow every agent except those the caller owns.
+    * `(uid, [])` — narrow on EVERY agent: a principal this module does not list
+      as a key (fails closed, like `viewer_principal_kind`'s "other").
+
+    `uid` is `NO_ROWS_USER_ID` when the principal has no usable id, which
+    matches no row — a missing id never reads as "no filter"."""
+    from dependencies import NO_ROWS_USER_ID, viewer_principal_kind
+
+    kind = viewer_principal_kind(current_user)
+    if kind == "key":
+        return None, None
+    uid = getattr(current_user, "id", None)
+    uid = uid if isinstance(uid, int) and not isinstance(uid, bool) and uid > 0 else NO_ROWS_USER_ID
+    if kind == "other":
+        return uid, []
+    if current_user.role == "admin":
+        return None, None
+    owned = [a["name"] for a in get_accessible_agents(current_user) if a.get("is_owner")]
+    return uid, owned
+
+
 def narrow_to_agent(
     agent_names: Optional[List[str]], agent: Optional[str]
 ) -> Optional[List[str]]:

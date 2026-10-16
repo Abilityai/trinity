@@ -555,6 +555,7 @@ For Stop-hook authoring guidance to avoid the orphan-killer slow path, see [`TRI
 
 | Date | Changes |
 |------|---------|
+| 2026-10-16 | **Below the owner tier a caller ends only their own turn** (trinity-enterprise#875): `POST /api/agents/{name}/executions/{id}/terminate` resolves BOTH `execution_id` and `task_execution_id` before the service is called; for a share holder each must be a row of this agent whose `source_user_id` is theirs, and a missing row is a refusal, not a pass (uniform 404 `Execution not found in agent`). Owner, admin and agent keys are unchanged. See [security.md §5d](../architecture/security.md). |
 | 2026-03-22 | Fix: `/api/chat` path now passes `execution_id` to agent (was only `/api/task`). Added `execution_id` to `ChatRequest` model, `execute()` runtime interface, and backend chat payload. Terminate endpoint defaults `task_execution_id` to `execution_id` for DB update. |
 | 2026-01-13 | Added "Live" button entry point (lines 213-232) - green badge with pulsing dot for running tasks, navigates to Execution Detail page for real-time monitoring |
 | 2026-01-13 | Updated: Unified execution ID flow (backend passes to agent), status preservation in error handlers, frontend polling improvements, cancelled status styling |

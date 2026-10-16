@@ -4107,6 +4107,11 @@ class ScheduleResponse(BaseModel):
     # it the field is silently dropped from every response — `ScheduleResponse`
     # is built with `**schedule.model_dump()`, and pydantic ignores extra keys.
     deliver_to_workspace_email: Optional[str] = None
+    # ent#875: whether THIS caller may mint, rotate, revoke or read the schedule's
+    # webhook (its creator, the agent owner, an admin). Computed server-side by
+    # the same predicate the webhook routes enforce — the client has no numeric
+    # user id to compare an owner id against, and the creator's id is not exposed.
+    can_manage_webhook: bool = True
 
     class Config:
         from_attributes = True

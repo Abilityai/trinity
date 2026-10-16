@@ -354,12 +354,17 @@ class ScheduleStatsMixin:
         search: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        own_rows_user_id: Optional[int] = None,
+        own_rows_exempt_agents: Optional[List[str]] = None,
     ) -> List[Dict]:
         """Cross-fleet execution list for the Unified Executions Dashboard.
 
-        Returns summary rows (no large text fields: response, tool_calls,
-        execution_log). The error column is truncated to 200 chars for the
-        failed-row one-liner.
+        `own_rows_user_id` (trinity-enterprise#875) narrows the list to the rows
+        that user started, on EVERY agent except `own_rows_exempt_agents` (the
+        agents the caller owns, which keep every row). Narrowing is the default
+        and the exemption the exception, so an agent missing from the list is
+        narrowed, never shown in full. In the WHERE, so it applies before the
+        LIMIT/OFFSET and the `search` LIKE cannot reach another person's text.
 
         agent_names=None → admin path, no agent_name filter applied.
         agent_names=[]   → non-admin with zero accessible agents, returns [].
@@ -375,6 +380,18 @@ class ScheduleStatsMixin:
             keys = [f"an{i}" for i in range(len(agent_names))]
             conditions.append("agent_name IN (%s)" % ",".join(f":{k}" for k in keys))
             bind.update(dict(zip(keys, agent_names)))
+
+        if own_rows_user_id is not None:
+            if own_rows_exempt_agents:
+                xkeys = [f"ox{i}" for i in range(len(own_rows_exempt_agents))]
+                conditions.append(
+                    "(agent_name IN (%s) OR source_user_id = :own_uid)"
+                    % ",".join(f":{k}" for k in xkeys)
+                )
+                bind.update(dict(zip(xkeys, own_rows_exempt_agents)))
+            else:
+                conditions.append("source_user_id = :own_uid")
+            bind["own_uid"] = own_rows_user_id
 
         if status:
             conditions.append("status = :status")
