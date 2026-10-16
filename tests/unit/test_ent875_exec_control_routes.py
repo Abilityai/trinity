@@ -446,9 +446,17 @@ def test_the_queue_is_untouched_for_everyone_else(who):
 
 def _own_rows(monkeypatch, owned=("a-owned",), shared=("a-shared",)):
     from services.agent_service import helpers
-    monkeypatch.setattr(helpers, "get_accessible_agents", lambda u: (
+    fake = lambda u: (
         [{"name": n, "is_owner": True, "is_shared": False} for n in owned]
-        + [{"name": n, "is_owner": False, "is_shared": True} for n in shared]))
+        + [{"name": n, "is_owner": False, "is_shared": True} for n in shared])
+    # The fleet router binds `viewer_own_rows` at import. When another test in the
+    # run reloads the helpers module, `helpers` here and the function the route
+    # holds are different module objects, so patch the globals of every copy the
+    # code under test can reach (CI orders tests differently from a local run).
+    monkeypatch.setattr(helpers, "get_accessible_agents", fake)
+    for fn in (helpers.viewer_own_rows, getattr(executions, "viewer_own_rows", None)):
+        if fn is not None:
+            monkeypatch.setitem(fn.__globals__, "get_accessible_agents", fake)
     return helpers
 
 
