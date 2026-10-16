@@ -503,6 +503,8 @@ _EXPECTED_READ_ONLY = (
     # ent#820 review: fixed-name credential files a share holder must not read
     ".netrc", ".git-credentials", ".docker/config.json", ".config/gh/hosts.yml",
     ".gemini/oauth_creds.json",
+    # ent#926: on-disk conversation history is owner-tier read
+    ".claude/projects/*.jsonl", ".claude/history.jsonl", ".codex/sessions/*", ".gemini/tmp/*/chats/*",
     "*.key", "*.pem", "*.p12", "*.pfx",
 )
 

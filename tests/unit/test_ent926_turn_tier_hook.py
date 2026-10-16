@@ -25,17 +25,23 @@ _HOOKS = _REPO / "docker/base-image/hooks"
 _BACKEND_POLICY = _REPO / "src/backend/services/file_path_policy.py"
 
 
+def _load(name, path):
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 @pytest.fixture(scope="module")
 def hook():
-    sys.path.insert(0, str(_HOOKS))
-    try:
-        spec = importlib.util.spec_from_file_location("_turn_tier_guard", str(_HOOKS / "turn-tier-guard.py"))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        yield mod
-    finally:
-        sys.path.remove(str(_HOOKS))
-        sys.modules.pop("file_path_policy", None)
+    """The hook as the image runs it. Its `lib` and `file_path_policy` imports are
+    served from the repo copies for the length of the module only: monkeypatch
+    puts back whatever was in sys.modules, so nothing leaks into other tests."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.syspath_prepend(str(_HOOKS))
+        mp.setitem(sys.modules, "lib", _load("lib", _HOOKS / "lib.py"))
+        mp.setitem(sys.modules, "file_path_policy", _load("file_path_policy", _HOOKS / "file_path_policy.py"))
+        yield _load("_turn_tier_guard", _HOOKS / "turn-tier-guard.py")
 
 
 def run(hook, monkeypatch, tool, tool_input, *, run_id="exec-1", tier="share"):
