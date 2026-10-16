@@ -498,7 +498,13 @@ def test_the_agent_receives_the_path_that_was_checked(monkeypatch, fn, path, for
 
 # The only owner-tier read patterns that are NOT write-denied. Pinned as a
 # literal: a new read-only entry is a reviewed decision, not a side effect.
-_EXPECTED_READ_ONLY = (".kube/config", ".config/gcloud/*", "*.key", "*.pem", "*.p12", "*.pfx")
+_EXPECTED_READ_ONLY = (
+    ".kube/config", ".config/gcloud/*",
+    # ent#820 review: fixed-name credential files a share holder must not read
+    ".netrc", ".git-credentials", ".docker/config.json", ".config/gh/hosts.yml",
+    ".gemini/oauth_creds.json",
+    "*.key", "*.pem", "*.p12", "*.pfx",
+)
 
 
 def test_the_read_only_owner_tier_patterns_are_the_reviewed_set():
