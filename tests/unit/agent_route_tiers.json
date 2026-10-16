@@ -458,6 +458,12 @@
   "reason": "the agent's own MCP key only (authorize_heartbeat)",
   "tier": "self"
  },
+ "agents.py::agent_execution_turn_tier": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/executions/{execution_id}/turn-tier",
+  "reason": "the agent's own MCP key only (authorize_heartbeat); asked by the in-container guard hook",
+  "tier": "self"
+ },
  "agents.py::agent_heartbeat": {
   "method": "POST",
   "path": "/api/agents/{agent_name}/heartbeat",

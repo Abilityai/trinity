@@ -80,6 +80,13 @@ SECRET_FILE_CLASS_PATTERNS = (
     ".docker/config.json",
     ".config/gh/hosts.yml",
     ".gemini/oauth_creds.json",
+    # Conversation history the runtimes keep on disk (ent#926): every person's
+    # turns with the agent, so a share holder reads only their own through the
+    # session routes. Project memory under `.claude/projects` stays readable.
+    ".claude/projects/*.jsonl",
+    ".claude/history.jsonl",
+    ".codex/sessions/*",
+    ".gemini/tmp/*/chats/*",
     "*.key",
     "*.pem",
     "*.p12",

@@ -1656,6 +1656,29 @@ def _jittered_retry_after(base_seconds: int) -> int:
     return max(1, int(random.uniform(base * 0.5, base * 1.5)))
 
 
+@router.get("/{agent_name}/executions/{execution_id}/turn-tier")
+async def agent_execution_turn_tier(agent_name: str, execution_id: str, request: Request):
+    """Which tier a running turn acts for (trinity-enterprise#926).
+
+    Asked by the guard hook inside the agent container before a file tool
+    reaches a path the shared policy keeps at owner tier. Same auth as the
+    heartbeat: the agent's OWN agent-scoped MCP key, nothing else. A turn that
+    is not found, or belongs to another agent, answers 404.
+    """
+    from services import turn_tier_service
+
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Turn tier requires the agent's own MCP key")
+    res = db.validate_mcp_api_key(auth_header[7:], track_usage=False)
+    if not heartbeat_service.authorize_heartbeat(res, agent_name):
+        raise HTTPException(status_code=403, detail="Turn tier requires the agent's own MCP key")
+    tier = turn_tier_service.turn_tier(db, agent_name, execution_id)
+    if tier == turn_tier_service.UNKNOWN:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    return {"tier": tier}
+
+
 @router.post("/{agent_name}/executions/{execution_id}/result")
 async def agent_execution_result(
     agent_name: str,

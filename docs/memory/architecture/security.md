@@ -88,6 +88,16 @@ The accessor check (`can_user_access_agent`: admin | owner | shared) answers "ma
 
 The table is read against the code. A row declared `owner` must show an owner/admin gate in the handler or in the helper named in `via`; a row declared `accessor` must not. Rows with no live route fail, so a renamed handler is re-declared. Accessor rows tagged `legacy` are the pre-existing debt: a shrink-only ratchet (`LEGACY_ACCESSOR_BASELINE`), lowered whenever a route is tightened. A new accessor route needs a real reason, not `legacy`. Tightening a route is one PR per router, each a ruling of its own.
 
+### 5g. A shared person's turn is held to the same paths as the API (trinity-enterprise#926)
+
+An agent acts for whoever chats with it, and it holds full access to its own files. Without a fence of its own, whatever the Files API refuses a person the agent is shared with, they could ask the agent to do: rewrite its instruction files, or read other people's past conversations.
+
+`docker/base-image/hooks/turn-tier-guard.py` closes the file-tool half. It is registered in the root-owned `managed-settings.d/60-turn-tier-guard.json` (its own drop-in, so a bad entry can never void the GUARD-002 file) for `Write`/`Edit`/`MultiEdit`/`NotebookEdit` and `Read`/`NotebookRead`/`Grep`/`Glob`, and uses the Files API's own policy (`file_path_policy.py`, a byte-identical third copy under a parity test). A path the policy allows a shared person costs nothing: no lookup. An owner-tier path asks the platform which tier the running turn acts for (`GET /api/agents/{name}/executions/{id}/turn-tier`, the agent's own key only, answered from the execution row by `services/turn_tier_service.py`). Owner proceeds; a shared person, an unknown execution or no answer is refused. The turn is identified by `TRINITY_EXECUTION_ID` in the claude process's launch environment, which the agent cannot change once running. No id means no platform turn (a terminal or manual shell) and the hook allows.
+
+Turns with no platform user count as owner tier only when the owner configured them (schedules, reminders, loops, webhooks, events); a public link, a channel, a paid call, voice or another agent is an outside caller and gets the restricted tier. On-disk conversation history (`.claude/projects/*.jsonl`, `history.jsonl`, `.codex/sessions`, `.gemini` chats) is owner-tier read in the shared policy, so the API and the hook agree.
+
+**What this does not cover** (stated, not hidden): a shell command can reach files the file tools never see, so a determined shared person prompting `cat` is not stopped here; the Bash guardrail and the container's permissions are the only fence. Gemini and Codex runtimes do not run Claude Code hooks. The agent's MCP key is the agent's, so reads of execution history through MCP are not yet narrowed to the person whose turn it is.
+
 ### 5b. Outbound endpoint allowlist for A2A (trinity-enterprise#838, outbound-only since trinity-enterprise#885)
 
 The one admin-declared relaxation of the A2A address rules (`services/a2a_trusted_networks.py`, setting key `a2a_trusted_networks`, requirements `mcp.md` §32.7):

@@ -6168,6 +6168,26 @@
         "security"
       ],
       "description": "Every route that names an agent declares the tier it enforces (ent#926). Static AST census over routers/ against tests/unit/agent_route_tiers.json: an agent-naming route with no row fails (the default is owner tier); a row with no live route fails; a row declared owner must show an owner/admin gate in the handler or its named helper, an accessor row must not; accessor rows tagged legacy are a shrink-only ratchet. Scanner self-tests on a synthetic router. Eight mutations (new undeclared route, owner dependency dropped, accessor given an owner gate, renamed handler, baseline raised, baseline left above reality, stale row path, gate regex emptied) each turn it red."
+    },
+    {
+      "file": "unit/test_ent926_turn_tier.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "security"
+      ],
+      "description": "Which tier a running turn acts for and who may ask (ent#926). turn_tier_service decides from the execution row: owner or admin and owner-configured turns (schedule, reminder, loop, webhook, event) act at owner tier; a shared person, a missing user row, a garbage user id and outside callers with no user (public link, paid, voice, another agent) act at share tier; an unknown execution or another agent's is unknown. The turn-tier route answers only the agent's own key (user, system, sibling-agent and missing keys 403 before any lookup) and 404s an unknown execution. Mutations: promoting a shared person, trusting a missing user row, counting a public trigger as owner configured and accepting any key each turn it red."
+    },
+    {
+      "file": "unit/test_ent926_turn_tier_hook.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-16",
+      "categories": [
+        "agent",
+        "security"
+      ],
+      "description": "The in-container guard holds a shared person's turn to the Files API's paths (ent#926). Driven as Claude Code drives a hook: an ordinary path is allowed with no lookup; instruction files, skills, shell startup files, the Python user-site, transcripts and credentials are refused for share, unknown and unreachable and allowed for owner; project memory stays readable; Grep/Glob aimed at owner-only paths are refused; tilde, dotdot and double-slash spellings and a link into an owner-only path are judged by where they land; no execution id means no platform turn. The lookup is exercised over real HTTP (key, route, percent-encoded ids, 404/403/500/garbage/unknown tier/unreachable). Hook policy copy byte-identical to the backend's; drop-in registers the guard in exec form; the image ships hook, policy and drop-in root-owned. Mutations: policy check skipped, fail-open on unreachable, fail-open on share/unknown, links not followed, no-run-id denied and policy copy drift each turn it red."
     }
   ]
 }
