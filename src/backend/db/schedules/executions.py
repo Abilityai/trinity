@@ -532,14 +532,21 @@ class ScheduleExecutionsMixin:
             )
             return result.rowcount > 0
 
-    def get_schedule_executions(self, schedule_id: str, limit: int = 50) -> List[ScheduleExecution]:
-        """Get execution history for a schedule."""
+    def get_schedule_executions(
+        self, schedule_id: str, limit: int = 50, *, source_user_id: Optional[int] = None
+    ) -> List[ScheduleExecution]:
+        """Get execution history for a schedule.
+
+        `source_user_id` (trinity-enterprise#875): only that user's runs, before
+        the LIMIT; a scheduled run carries no user and is not a share holder's."""
         stmt = (
             select(schedule_executions)
             .where(schedule_executions.c.schedule_id == schedule_id)
             .order_by(schedule_executions.c.started_at.desc())
             .limit(limit)
         )
+        if source_user_id is not None:
+            stmt = stmt.where(schedule_executions.c.source_user_id == source_user_id)
         with get_engine().connect() as conn:
             return [
                 self._row_to_schedule_execution(row)
@@ -618,8 +625,17 @@ class ScheduleExecutionsMixin:
         exclude_triggers: Optional[frozenset] = None,
         scope_to_viewer: bool = False,
         viewer_email: Optional[str] = None,
+        source_user_id: Optional[int] = None,
     ) -> List[Dict]:
         """Get execution summaries for list view - excludes large text fields.
+
+        `source_user_id` (trinity-enterprise#875) keeps only the executions that
+        user started: a share holder's own turns. Like the other filters it is
+        part of the WHERE, so it applies BEFORE the LIMIT and another person's
+        busy day cannot push the caller's own rows off the list. `=` against a
+        NULL `source_user_id` is never true, so scheduled, channel and legacy
+        rows with no user are hidden (fail closed) — never write this as an
+        IS NOT DISTINCT comparison.
 
         `scope_to_viewer` (#3139) keeps only what a Workspace client can account
         for — `query_helpers.viewer_scope(viewer_email)` — and, like
@@ -688,6 +704,8 @@ class ScheduleExecutionsMixin:
             ))
         if scope_to_viewer:
             stmt = stmt.where(viewer_scope(schedule_executions, viewer_email))
+        if source_user_id is not None:
+            stmt = stmt.where(schedule_executions.c.source_user_id == source_user_id)
         with get_engine().connect() as conn:
             rows = []
             for row in conn.execute(stmt).mappings():
@@ -716,7 +734,8 @@ class ScheduleExecutionsMixin:
     )
 
     def get_fan_out_executions(
-        self, agent_name: str, fan_out_id: str, limit: int = 200
+        self, agent_name: str, fan_out_id: str, limit: int = 200,
+        *, source_user_id: Optional[int] = None,
     ) -> List[dict]:
         """Every execution row of one fan-out batch, oldest first (#2670).
 
@@ -757,6 +776,10 @@ class ScheduleExecutionsMixin:
             .order_by(schedule_executions.c.started_at.asc())
             .limit(limit)
         )
+        # trinity-enterprise#875: a share holder reads back only the rows they
+        # dispatched (in the WHERE; the platform's own callers pass nothing).
+        if source_user_id is not None:
+            stmt = stmt.where(schedule_executions.c.source_user_id == source_user_id)
         with get_engine().connect() as conn:
             rows = []
             for row in conn.execute(stmt).mappings():
