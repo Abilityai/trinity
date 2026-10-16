@@ -75,6 +75,11 @@ TRINITY_CREDENTIAL_COPY_PATTERNS = (
 SECRET_FILE_CLASS_PATTERNS = (
     ".kube/config",
     ".config/gcloud/*",
+    ".netrc",
+    ".git-credentials",
+    ".docker/config.json",
+    ".config/gh/hosts.yml",
+    ".gemini/oauth_creds.json",
     "*.key",
     "*.pem",
     "*.p12",
@@ -102,8 +107,13 @@ SKILLS_DIR = ".claude/skills"
 PUBLISHED_LIST_DIRS = (".trinity/pipelines", ".trinity/pipeline-state")
 # Files the shell, git or PATH run on the agent's behalf (ent#820): editing one
 # runs code outside the file guardrails, on the platform's own git sync too.
-RUNS_CODE_FILES = (".gitconfig", ".bashrc", ".bash_profile", ".profile", ".zshrc")
-RUNS_CODE_DIRS = (".config/git", ".local/bin")
+RUNS_CODE_FILES = (
+    ".gitconfig", ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile",
+    ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout",
+)
+# `.local/lib` is the Python user-site (`pip install --user` in the base image):
+# a `.pth` or `usercustomize.py` there runs at the next `python3` the agent starts.
+RUNS_CODE_DIRS = (".config/git", ".local/bin", ".local/lib")
 
 # The agent server's platform floor: what its routes never write or delete,
 # for every caller, the platform included (it cannot tell callers apart). By

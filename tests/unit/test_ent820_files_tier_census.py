@@ -123,6 +123,14 @@ ROWS = [
     (".gitconfig", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
     (".config/git/config", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
     (".local/bin/git", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
+    # the Python user-site runs as the agent at the next `python3` (review of #3776)
+    (".local/lib/python3.13/site-packages/zz.pth", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
+    (".local/lib/python3.13/site-packages/usercustomize.py", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
+    (".zshenv", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
+    (".zprofile", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
+    (".zlogin", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
+    (".bash_login", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
+    (".bash_logout", policy.WRITE, None, policy.OWNER_TIER, policy.PROTECTED),
     (".local", policy.DELETE, None, policy.OWNER_TIER, policy.PROTECTED),
     (".env", policy.WRITE, policy.PROTECTED, policy.PROTECTED, policy.PROTECTED),
     (".credentials.enc", policy.DELETE, policy.PROTECTED, policy.PROTECTED, policy.PROTECTED),
@@ -134,6 +142,11 @@ ROWS = [
     ("workspace/r.git/hooks/post-update", policy.WRITE, policy.PROTECTED, policy.PROTECTED, policy.PROTECTED),
     ("", policy.WRITE, policy.PROTECTED, policy.PROTECTED, policy.PROTECTED),
     (".env", policy.READ, None, policy.OWNER_TIER, policy.PERSON_REQUIRED),
+    (".netrc", policy.READ, None, policy.OWNER_TIER, policy.PERSON_REQUIRED),
+    (".git-credentials", policy.READ, None, policy.OWNER_TIER, policy.PERSON_REQUIRED),
+    (".docker/config.json", policy.READ, None, policy.OWNER_TIER, policy.PERSON_REQUIRED),
+    (".config/gh/hosts.yml", policy.READ, None, policy.OWNER_TIER, policy.PERSON_REQUIRED),
+    (".gemini/oauth_creds.json", policy.READ, None, policy.OWNER_TIER, policy.PERSON_REQUIRED),
     ("CLAUDE.md", policy.READ, None, None, None),
     ("/home/developer", policy.LIST, None, None, None),
     ("workspace", policy.LIST, None, None, None),
@@ -237,7 +250,8 @@ MUTATIONS = ("update_agent_file_logic", "create_agent_folder_logic", "delete_age
 
 
 _OWNER_TIER_PATHS = ["CLAUDE.md", ".claude/agents/a.md", ".claude/skills/x/SKILL.md",
-                     ".bashrc", ".local/bin/tool"]
+                     ".bashrc", ".local/bin/tool", ".zshenv",
+                     ".local/lib/python3.13/site-packages/zz.pth"]
 # CLAUDE.md is deletable by no one (test_no_one_deletes_claude_md_through_the_routes)
 _OWNER_TIER_CASES = [(fn, p) for fn in MUTATIONS for p in _OWNER_TIER_PATHS
                      if not (fn == "delete_agent_file_logic" and p == "CLAUDE.md")]
