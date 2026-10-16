@@ -140,7 +140,7 @@ A chat per topic, a conversation rail, a live Work card while the agent runs, de
   </tr>
   <tr>
     <td width="50%"><a href="docs/screenshots/workspace-project-detail.webp"><img src="docs/screenshots/workspace-project-detail.webp" alt="One Workspace project: overview, steward and health"/></a><br/><sub><b>One project</b> (Enterprise) - the goal, where it stands, the steward that keeps it moving, and its health.</sub></td>
-    <td width="50%"><a href="docs/screenshots/workspace-start-chat.webp"><img src="docs/screenshots/workspace-start-chat.webp" alt="Start a chat with one or several agents" height="420"/></a> <a href="docs/screenshots/workspace-files-rail.webp"><img src="docs/screenshots/workspace-files-rail.webp" alt="The Files rail" height="420"/></a><br/><sub><b>Several agents, one conversation</b> - pick the agents a chat should share; the rail keeps the files that went each way.</sub></td>
+    <td width="50%"><a href="docs/screenshots/workspace-start-chat.webp"><img src="docs/screenshots/workspace-start-chat.webp" alt="Start a chat with one or several agents" height="420"/></a><br/><sub><b>Several agents, one conversation</b> - pick the agents a chat should share.</sub></td>
   </tr>
 </table>
 
@@ -176,10 +176,10 @@ Then open `http://localhost`, claim the admin account, and connect a model in th
 
 **One click, in your own cloud account** - the image brings itself up behind HTTPS in about ninety seconds:
 
-[![Deploy to DigitalOcean](https://www.deploytodo.com/do-btn-blue.svg)](https://marketplace.digitalocean.com/apps/trinity?refcode=d1f053807871&action=deploy)
+[![Deploy to DigitalOcean](https://www.deploytodo.com/do-btn-blue.svg)](https://marketplace.digitalocean.com/apps/trinity?refcode=d1f053807871&action=deploy) [![Launch on AWS Marketplace](https://img.shields.io/badge/Launch_on-AWS_Marketplace-FF9900?style=for-the-badge)](https://aws.amazon.com/marketplace/pp/prodview-q6f3biwa662o2)
 
 - **DigitalOcean** - [Marketplace](https://marketplace.digitalocean.com/apps/trinity?refcode=d1f053807871&action=deploy) or the guided [`trinity-do-create.sh`](https://docs.ability.ai/getting-started/deploying/digitalocean)
-- **AWS** - CloudFormation + AMI, see [packer/aws/README.md](packer/aws/README.md) <!-- at tag: Launch Stack button once the template URL + AMI are public (#3004) -->
+- **AWS** - [Marketplace](https://aws.amazon.com/marketplace/pp/prodview-q6f3biwa662o2), or build the AMI and CloudFormation stack yourself with [packer/aws/README.md](packer/aws/README.md)
 - **Vultr** - [Marketplace image](scripts/deploy/vultr-marketplace.md)
 - **Any server you can SSH into** - `/trinity:deploy-new-instance` from the [abilities](https://github.com/abilityai/abilities) marketplace
 
