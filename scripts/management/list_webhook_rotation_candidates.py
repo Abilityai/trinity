@@ -90,7 +90,11 @@ def main(argv=None) -> int:
     for r in rows:
         who = ", ".join(shares.get(r["agent"], [])) or "(not shared today)"
         print(f"- agent={r['agent']}  schedule={r['schedule']!r}  id={r['schedule_id']}")
-        print(f"    creator: {r['creator']}   token: {r['has_token']}   signing secret: {r['has_secret']}")
+        # Only the fact that a token / secret exists is printed, as constant text:
+        # no value from a credential column reaches the output.
+        has_token = "yes" if r["has_token"] == "yes" else "no"
+        has_secret = "yes" if r["has_secret"] == "yes" else "no"
+        print(f"    creator: {r['creator']}   token: {has_token}   signing secret: {has_secret}")
         print(f"    shared with: {who}")
     print("\nRotate each URL (and its signing secret, if one is set): Schedules tab -> Webhook -> Rotate URL.")
     return 0
