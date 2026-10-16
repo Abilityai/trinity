@@ -2545,6 +2545,122 @@ def assert_agent_owner(current_user: User, agent_name: str, *, detail: str = "No
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
+# ---------------------------------------------------------------------------
+# Viewer tier on an agent's executions (trinity-enterprise#875)
+#
+# `can_user_access_agent` (admin | owner | shared) means "may chat with this
+# agent". The execution and control routes read it as "may read and steer
+# everyone's turns". These helpers name the three callers those routes have to
+# tell apart, so each route asks one question instead of re-spelling it:
+#
+#   owner  a PERSON who owns the agent, or an admin: sees every row.
+#   share  any other PERSON with access (a JWT, or their own user-scope key):
+#          sees only the executions they started.
+#   key    an agent, system, ops or connector key: unchanged (ent#875 ruling —
+#          an agent reading its own executions stays full; that residual and
+#          the fleet-wide default are ent#926).
+#
+# An ALLOWlist both ways, for the reason `is_person_principal` is one:
+# `mcp_api_keys.scope` is free text, so every scope this module has not heard
+# of (portal_delegate, a sixth one a future PR invents) resolves to SHARE and is
+# filtered — it never inherits the unfiltered `key` view by default.
+# ---------------------------------------------------------------------------
+
+VIEWER_OWNER = "owner"
+VIEWER_SHARE = "share"
+VIEWER_KEY = "key"
+
+_VIEWER_KEY_SCOPES = frozenset({"agent", "system"})
+
+
+def viewer_principal_kind(current_user: User) -> str:
+    """"person" | "key" | "other" — which kind of caller this is, before any
+    agent is named. "other" is every non-person principal this module does not
+    list as a key (fail closed: it is filtered like a share holder)."""
+    if is_person_principal(current_user) and not getattr(
+        current_user, "vouched_source_agent", None
+    ):
+        return "person"
+    scope = getattr(current_user, "mcp_scope", "__missing__")
+    agent = getattr(current_user, "agent_name", None)
+    connector = getattr(current_user, "connector_agent", None)
+    if (
+        (isinstance(agent, str) and agent)
+        or (isinstance(connector, str) and connector)
+        or scope in _VIEWER_KEY_SCOPES
+        or scope == OPS_SCOPE
+    ):
+        return "key"
+    return "other"
+
+
+def agent_viewer_tier(current_user: User, agent_name: str) -> str:
+    """The caller's tier on `agent_name`'s executions: owner, share or key.
+
+    OWNER is the `assert_agent_owner` predicate (the owner or an admin, with
+    the ent#629 reach bound), evaluated here without raising."""
+    kind = viewer_principal_kind(current_user)
+    if kind == "key":
+        return VIEWER_KEY
+    if kind == "person" and db.can_user_share_agent(
+        current_user.username, agent_name
+    ) and agent_may_reach(current_user, agent_name, manage=True):
+        return VIEWER_OWNER
+    return VIEWER_SHARE
+
+
+# What a share holder is told when a route returns the container's SINGLE shared
+# state (its in-memory conversation, live tool activity, raw log): it holds every
+# user's turns together, so it cannot be narrowed to one person's. Fixed text, no
+# names or ids, so the refusal discloses nothing (Invariant #8).
+SHARED_STATE_OWNER_TIER_DETAIL = {
+    "code": "owner_tier_path",
+    "message": (
+        "This shows every user's activity on the agent, so only the agent's "
+        "owner or an admin can open it. Your own conversations are under "
+        "chat history."
+    ),
+}
+
+
+def assert_not_share_viewer(current_user: User, agent_name: str) -> None:
+    """403 a SHARE-tier caller on a route that returns the container's shared
+    state; owner, admin and key tiers pass unchanged (trinity-enterprise#875)."""
+    if agent_viewer_tier(current_user, agent_name) == VIEWER_SHARE:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=dict(SHARED_STATE_OWNER_TIER_DETAIL),
+        )
+
+
+# Matches no row: every real `users.id` is positive. Returned for a share-tier
+# caller whose principal carries no usable id, so a missing id fails CLOSED
+# instead of reading as "no filter".
+NO_ROWS_USER_ID = -1
+
+
+def viewer_row_scope(current_user: User, agent_name: str) -> Optional[int]:
+    """The user id whose executions the caller may see on `agent_name`, or None
+    when they may see every row (owner, admin, key tier)."""
+    if agent_viewer_tier(current_user, agent_name) != VIEWER_SHARE:
+        return None
+    uid = getattr(current_user, "id", None)
+    return uid if isinstance(uid, int) and not isinstance(uid, bool) and uid > 0 else NO_ROWS_USER_ID
+
+
+def row_is_viewers(scope_user_id: Optional[int], source_user_id) -> bool:
+    """Whether a row whose `source_user_id` is given is visible under
+    `viewer_row_scope`. The column is INTEGER but the in-memory queue carries
+    the id as a string, so both sides are compared as integers; a NULL or
+    unparseable owner never matches (fail closed)."""
+    if scope_user_id is None:
+        return True
+    try:
+        return source_user_id is not None and int(source_user_id) == scope_user_id
+    except (TypeError, ValueError):
+        return False
+
+
 def assert_owns_or_admin(current_user: User, owner_id: int, *, detail: str = "Not authorized") -> None:
     """Imperative strict-self-OR-admin gate for a resource keyed by a user id
     (a session/preview ``user_id``). 403 unless the caller IS the owner OR an

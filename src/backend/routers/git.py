@@ -30,6 +30,7 @@ from models import (
 )
 from database import db
 from dependencies import (
+    assert_agent_owner,
     capability_fence,
     get_current_user,
     reject_agent_principal,
@@ -351,6 +352,17 @@ async def pull_from_github(
     - stash_reapply: Stash local changes, pull, then reapply stash
     - force_reset: Discard local changes and reset to remote
     """
+    # trinity-enterprise#875: force_reset discards the workspace's uncommitted
+    # state for everyone who uses the agent, so it takes the owner tier. A clean
+    # or stash_reapply pull stays open to anyone with access (ruling 5 names the
+    # force-pull). The access check above ran first, so this 403 is not an
+    # existence oracle.
+    if body.strategy == "force_reset":
+        assert_agent_owner(
+            current_user, agent_name,
+            detail="Only the agent's owner or an admin can discard its workspace with a force reset.",
+        )
+
     # Import here to avoid circular imports
     from services.docker_service import get_agent_container
 

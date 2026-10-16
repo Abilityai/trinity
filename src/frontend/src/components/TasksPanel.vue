@@ -169,10 +169,13 @@
         </svg>
         <p class="mt-2 text-gray-500 dark:text-gray-400">No tasks yet</p>
         <p class="text-sm text-gray-400 dark:text-gray-400">Run a task above or configure schedules</p>
+        <OwnRowsNote v-if="ownRowsOnly" what="tasks" class="mt-1" />
       </div>
 
       <!-- Task List with vertical scroll (#1500: fills the card, no fixed cap) -->
       <div v-else data-testid="task-list" class="divide-y divide-gray-200 dark:divide-gray-700 flex-1 min-h-0 overflow-y-auto">
+        <!-- ent#875: below the owner tier the list is the viewer's own executions. -->
+        <OwnRowsNote v-if="ownRowsOnly" what="tasks" class="px-4 py-1.5" />
         <div
           v-for="task in allTasks"
           :key="task.id"
@@ -562,6 +565,7 @@ import { useAuthStore } from '../stores/auth'
 import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import ModelSelector from './ModelSelector.vue'
 import LoadFailed from './LoadFailed.vue'
+import OwnRowsNote from './OwnRowsNote.vue'  // trinity-enterprise#875
 import ExecutionGateMarker from './skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
 import { apiErrorMessage } from '../utils/apiError'
 import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
@@ -585,6 +589,12 @@ const props = defineProps({
   initialMessage: {
     type: String,
     default: ''
+  },
+  // ent#875: true when the viewer holds only a share on this agent, so the list
+  // is their own executions and the panel says so.
+  ownRowsOnly: {
+    type: Boolean,
+    default: false
   }
 })
 

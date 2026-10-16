@@ -29,6 +29,10 @@ from models import (
 from dependencies import (
     agent_may_reach,
     capability_fence,
+    agent_viewer_tier,
+    VIEWER_SHARE,
+    row_is_viewers,
+    viewer_row_scope,
     get_current_user,
     get_authorized_agent,
     AuthorizedAgent,
@@ -131,11 +135,50 @@ def _enforce_timeout_below_agent_cap(agent_name: str, requested_seconds: int) ->
         )
 
 
+def _can_manage_webhook(schedule, agent_name: str, current_user: User) -> bool:
+    """Who may mint, rotate, revoke or read a schedule's webhook (ent#875).
+
+    A webhook URL is a bearer credential that triggers the schedule with the
+    agent's own authority, so it is held by the schedule's creator or the agent
+    owner (an admin included) — not by everyone the agent is merely shared with.
+    The owner, admin and key tiers are unchanged (a key still meets the
+    `schedules.manage` capability fence on the route); a share holder needs to
+    be the creator (`agent_schedules.owner_id`). A schedule with no recorded
+    creator is the owner's alone."""
+    if agent_viewer_tier(current_user, agent_name) != VIEWER_SHARE:
+        return True
+    uid = getattr(current_user, "id", None)
+    owner_id = getattr(schedule, "owner_id", None)
+    return isinstance(uid, int) and owner_id is not None and owner_id == uid
+
+
+# One sentence for every webhook route a non-creator share holder is refused on.
+_WEBHOOK_FORBIDDEN_DETAIL = {
+    "code": "webhook_owner_or_creator",
+    "message": "Only the schedule's creator or the agent's owner can manage its webhook.",
+}
+
+
+def _assert_can_manage_webhook(schedule, agent_name: str, current_user: User) -> None:
+    if not _can_manage_webhook(schedule, agent_name, current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(_WEBHOOK_FORBIDDEN_DETAIL))
+
+
+def _schedule_response(schedule, agent_name: str, current_user: User) -> ScheduleResponse:
+    """The response, with `can_manage_webhook` computed by the same predicate the
+    webhook routes enforce, so the Schedules panel hides exactly the controls the
+    server would refuse (ent#875) — the client has no numeric user id to compare."""
+    return ScheduleResponse(
+        **schedule.model_dump(),
+        can_manage_webhook=_can_manage_webhook(schedule, agent_name, current_user),
+    )
+
+
 @router.get("/{name}/schedules", response_model=List[ScheduleResponse])
-async def list_agent_schedules(name: AuthorizedAgent):
+async def list_agent_schedules(name: AuthorizedAgent, current_user: User = Depends(get_current_user)):
     """List all schedules for an agent."""
     schedules = db.list_agent_schedules(name)
-    return [ScheduleResponse(**s.model_dump()) for s in schedules]
+    return [_schedule_response(s, name, current_user) for s in schedules]
 
 
 def _enforce_delivery_target_authority(current_user, name: str, email) -> None:
@@ -251,7 +294,7 @@ async def create_schedule(
     # Dedicated scheduler syncs from database automatically
     # No need to notify it directly - it will pick up new schedules on next sync cycle
 
-    return ScheduleResponse(**schedule.model_dump())
+    return _schedule_response(schedule, name, current_user)
 
 
 @router.get(
@@ -336,7 +379,8 @@ async def get_agent_schedules_summary(
 @router.get("/{name}/schedules/{schedule_id}", response_model=ScheduleResponse)
 async def get_schedule(
     name: AuthorizedAgent,
-    schedule_id: str
+    schedule_id: str,
+    current_user: User = Depends(get_current_user),
 ):
     """Get a specific schedule."""
     schedule = db.get_schedule(schedule_id)
@@ -346,7 +390,7 @@ async def get_schedule(
             detail="Schedule not found"
         )
 
-    return ScheduleResponse(**schedule.model_dump())
+    return _schedule_response(schedule, name, current_user)
 
 
 @router.put("/{name}/schedules/{schedule_id}", response_model=ScheduleResponse, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
@@ -435,7 +479,7 @@ async def update_schedule(
     # Dedicated scheduler syncs from database automatically
     # It will detect the update on next sync cycle
 
-    return ScheduleResponse(**updated_schedule.model_dump())
+    return _schedule_response(updated_schedule, name, current_user)
 
 
 @router.delete("/{name}/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
@@ -697,6 +741,8 @@ async def generate_webhook(
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
 
+    _assert_can_manage_webhook(schedule, name, current_user)
+
     # #1445: defense-in-depth — never mint a token for a schedule whose agent
     # has no live ownership row (that token would 404 at trigger time). Runs
     # AFTER the AuthorizedAgent uniform-404 access gate (#186), so it's not a
@@ -734,6 +780,7 @@ async def get_webhook_status(
     name: AuthorizedAgent,
     schedule_id: str,
     request: Request,
+    current_user: User = Depends(get_current_user),
 ):
     """Get webhook configuration for a schedule.
 
@@ -743,6 +790,8 @@ async def get_webhook_status(
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    # ent#875: this read returns the live token URL, a bearer credential.
+    _assert_can_manage_webhook(schedule, name, current_user)
 
     status_data = db.get_webhook_status(schedule_id)
     if status_data is None:
@@ -787,6 +836,7 @@ async def generate_webhook_secret(
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    _assert_can_manage_webhook(schedule, name, current_user)
 
     if not schedule.webhook_token:
         raise HTTPException(
@@ -833,6 +883,7 @@ async def disable_webhook_secret(
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    _assert_can_manage_webhook(schedule, name, current_user)
 
     db.clear_webhook_secret(schedule_id)
     logger.info(
@@ -864,6 +915,7 @@ async def revoke_webhook(
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    _assert_can_manage_webhook(schedule, name, current_user)
 
     db.revoke_webhook_token(schedule_id)
     logger.info(f"Webhook token revoked for schedule {schedule_id} by {current_user.username}")
@@ -875,9 +927,13 @@ async def revoke_webhook(
 async def get_schedule_executions(
     name: AuthorizedAgent,
     schedule_id: str,
-    limit: int = 50
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
 ):
-    """Get execution history for a schedule."""
+    """Get execution history for a schedule.
+
+    A share holder sees only the runs they started (trinity-enterprise#875);
+    the owner, an admin and agent keys see every run."""
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(
@@ -885,7 +941,11 @@ async def get_schedule_executions(
             detail="Schedule not found"
         )
 
-    executions = db.get_schedule_executions(schedule_id, limit=limit)
+    scope = viewer_row_scope(current_user, name)
+    if scope is None:
+        executions = db.get_schedule_executions(schedule_id, limit=limit)
+    else:
+        executions = db.get_schedule_executions(schedule_id, limit=limit, source_user_id=scope)
     return [ExecutionResponse(**e.model_dump()) for e in executions]
 
 
@@ -909,7 +969,14 @@ async def get_agent_executions(
     Note: The AuthorizedAgent dependency validates both agent existence (via db.get_agent_owner)
     and user access. This returns 404 if agent not found, 403 if no access, or execution list.
     """
-    executions = db.get_agent_executions_summary(name, limit=limit)
+    # trinity-enterprise#875: a share holder's list is their own executions,
+    # filtered in SQL before the LIMIT. The kwarg is passed only when it applies,
+    # so the owner's and an agent key's call is byte-for-byte the old one.
+    scope = viewer_row_scope(current_user, name)
+    if scope is None:
+        executions = db.get_agent_executions_summary(name, limit=limit)
+    else:
+        executions = db.get_agent_executions_summary(name, limit=limit, source_user_id=scope)
     # trinity-enterprise#754: "ran without approval" — one batch read for the page.
     flags = skill_gate_map_service.self_approved_flags(
         name, [e.get("id") for e in executions], current_user)
@@ -926,7 +993,13 @@ async def get_execution(
 ):
     """Get details of a specific execution."""
     execution = db.get_execution(execution_id)
-    if not execution or execution.agent_name != name:
+    if (
+        not execution
+        or execution.agent_name != name
+        # ent#875: a row that is not the share holder's answers the same 404 as
+        # an id that does not exist, so it cannot be told apart from one.
+        or not row_is_viewers(viewer_row_scope(current_user, name), execution.source_user_id)
+    ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Execution not found"
@@ -942,7 +1015,8 @@ async def get_execution(
 @router.get("/{name}/executions/{execution_id}/log")
 async def get_execution_log(
     name: AuthorizedAgent,
-    execution_id: str
+    execution_id: str,
+    current_user: User = Depends(get_current_user),
 ):
     """
     Get the full execution log for a specific execution.
@@ -951,7 +1025,11 @@ async def get_execution_log(
     This includes all tool calls, thinking, and responses.
     """
     execution = db.get_execution(execution_id)
-    if not execution or execution.agent_name != name:
+    if (
+        not execution
+        or execution.agent_name != name
+        or not row_is_viewers(viewer_row_scope(current_user, name), execution.source_user_id)
+    ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Execution not found"
