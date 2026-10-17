@@ -112,7 +112,7 @@ Injection accepts a curated set of credential file types, not just `.env`. Anyth
 
 - **Export** creates an encrypted `.credentials.enc` file for backup. It captures the **full injected credential set** — every allow-listed credential file present in the agent (discovered live), text and binary alike — not just `.env` and `.mcp.json`.
 - **Import** decrypts and injects credentials from an encrypted file. The archive is re-validated against the same path policy on the way in.
-- **Auto-import on startup is not currently available.** The agent's startup script still tries to import a `.credentials.enc` it finds without a `.env`, but the internal route it calls no longer exists, so the attempt is logged as "Could not auto-import credentials" and the agent starts without them. Use **Import** from the Credentials tab (or the import endpoint) instead.
+- **A committed `.credentials.enc` is not imported on startup.** An agent that starts with a `.credentials.enc` and no `.env` runs without those credentials, and its startup log says so: "Found .credentials.enc but no .env: encrypted credentials are not imported at startup." Decrypting the file is the owner's step: use **Import from Git** on the Credentials tab (or the `import_credentials` MCP tool) once, and the credentials persist from then on.
 
 ### Rotating the Encryption Key
 
