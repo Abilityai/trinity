@@ -208,6 +208,7 @@
       :disabled="voiceCallActive"
       :draft="newChat || bornHere"
       :draft-keys="drafts.keys"
+      :order="tabOrder"
       :busy="sending"
       :close-error="closeError"
       @select="(t) => emit('open-thread', t)"
@@ -360,6 +361,7 @@
               <div
                 v-if="t.role === 'user'"
                 class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-2 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white"
+                :class="BUBBLE_WRAP_CLASS"
               >{{ t.content }}</div>
               <div v-else class="max-w-[85%]">
                 <PortalAgentBubble :content="t.content" />
@@ -402,8 +404,12 @@
             />
             <div
               class="rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap"
-              :class="item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white'"
+              :class="[BUBBLE_WRAP_CLASS, item.message.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white']"
             >{{ item.message.content }}</div>
+            <!-- trinity-enterprise#631: who this message tagged, and whether
+                 each has read it (the server's marks — only ever the reader's
+                 own, since a thread is its owner's). -->
+            <PortalTagMarks :tags="item.message.tags || []" data-testid="portal-message-tags" />
             <!-- ent#551: a task the agent ran during a voice call lands as an
                  ordinary turn (it was not spoken, so it is not in the block);
                  the caption is the attribution. -->
@@ -467,6 +473,14 @@
                 :initial-rating="item.message.myRating"
               />
             </PortalAgentBubble>
+            <!-- trinity-enterprise#754: this turn went through without approval
+                 because the person who asked IS the approver (server-decided). -->
+            <ExecutionGateMarker
+              class="mt-1"
+              variant="line"
+              :self-approved="!!item.message.selfApproved"
+              :by-viewer="!!item.message.selfApprovedByViewer"
+            />
           </div>
         </div>
         </div>
@@ -483,7 +497,7 @@
           <PortalWorkCard
             :item="liveCardItem"
             :live-step="liveStepLine"
-            :elapsed-seconds="elapsed"
+            :elapsed-seconds="cardElapsedSeconds"
             :children="liveChildren"
             :can-stop="canCancelTurn"
             :stopping="cancelling"
@@ -608,22 +622,26 @@
              rejected file names itself and the limit it broke. -->
         <p v-if="batchNotice" class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300">{{ batchNotice }}</p>
         <div v-if="attachments.length" class="mb-2 flex flex-wrap gap-1.5">
-          <span
+          <PortalAttachmentChip
             v-for="(f, i) in attachments"
             :key="i"
-            class="inline-flex items-center gap-1 text-xs rounded-full pl-2.5 pr-1.5 py-1"
-            :class="f.error
-              ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
-              : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'"
-            :title="f.error || f.name"
-            data-testid="portal-attachment-chip"
-          >
-            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
-            <span class="max-w-[10rem] truncate">{{ f.name }}</span>
-            <svg v-if="attachmentState(f) === 'uploading'" class="w-3 h-3 animate-spin text-gray-400" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-            <span v-else-if="attachmentState(f) === 'failed'" class="max-w-[16rem] truncate opacity-90">· {{ f.error }}</span>
-          </span>
+            :entry="f"
+            :locked="escalatingNow || settlingUploads || handedOff"
+            testid="portal-attachment-chip"
+            @remove="removeAttachment(f)"
+          />
         </div>
+        <!-- #3460: the server bounds a message, so the composer says so FIRST —
+             a count for the last stretch, then a named refusal with Send held.
+             Before this the limit was first mentioned by a 422, after the words
+             had left the composer. One line, mutually exclusive ink arms. -->
+        <p
+          v-if="messageLimit.near"
+          class="mb-2 text-xs tabular-nums"
+          :class="messageLimit.over ? 'text-status-danger-700 dark:text-status-danger-400' : META_INK_CLASS"
+          :role="messageLimit.over ? 'alert' : undefined"
+          data-testid="portal-message-limit"
+        >{{ messageLimit.message }}</p>
         <!-- ent#534: the composer is visible but inert while a call is on —
              the orb has the conversation; typing resumes the moment it ends. -->
         <!-- ent#547: the inert class moved off the <form> and onto the WRAPPER
@@ -746,6 +764,7 @@
               <PortalTypeahead
                 v-if="typeaheadOpen"
                 :kind="typeaheadKind"
+                :title="typeaheadTitle"
                 :rows="typeaheadRows"
                 :active-index="activeIndex"
                 :overflow="typeaheadBound.overflow"
@@ -868,8 +887,8 @@
                     v-else
                     type="submit"
                     class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 disabled:hover:bg-action-primary-600 transition"
-                    :disabled="sending || !input.trim() || voiceCallActive"
-                    title="Send"
+                    :disabled="sending || !input.trim() || voiceCallActive || messageLimit.over"
+                    :title="messageLimit.over ? messageLimit.message : 'Send'"
                   >
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
                   </button>
@@ -892,15 +911,17 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, useId } fro
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { agentDisplayName } from '@/utils/agentName'
 import PortalAgentBubble from './PortalAgentBubble.vue'
+import { BUBBLE_WRAP_CLASS } from './portalBubble'
+import { messageLimitState, messageRefusalReason } from './portalMessageLimit'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
-import { askAboutItPrefill, childrenForChat, clockRestartsAt, itemById, pendingTurnOutcome, previewTitle } from './portalWork'
+import { askAboutItPrefill, childrenForChat, clockRestartsAt, itemById, liveElapsedSeconds, pendingTurnOutcome, previewTitle } from './portalWork'
 import { activityFromStreamEvent, resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags } from './portalUtils'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
@@ -909,7 +930,8 @@ import { replyExcerpt as excerptForReply } from './portalInbox'
 import { chatTurnAsks, placeAsksInThread, askTileMode, askHistoryLine, isDiscussedIn } from './portalChatAsks'
 import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import { formatLocalDateTime } from '@/utils/timestamps'
-import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
+import { usePortalFileDrop } from '@/composables/usePortalFileDrop'
+import PortalAttachmentChip from './PortalAttachmentChip.vue'
 import PortalMessageAttachments from './PortalMessageAttachments.vue'
 import { sentAttachments, attachmentsForRequest } from './portalMessageAttachments'
 import { useStickToBottom } from '@/composables/useStickToBottom'
@@ -919,6 +941,9 @@ import { useComposerDraft } from '@/composables/useComposerDraft'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { draftKeyFor, shouldAutoFocusComposer } from './portalDrafts'
 import PortalTypeahead from './PortalTypeahead.vue'
+import { usePeoplePicker } from '@/composables/usePeoplePicker'
+import PortalTagMarks from './PortalTagMarks.vue'
+import { noOneCalled, peopleRows, personToken, typeaheadHeading } from './portalMentions'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import PortalAsks from './PortalAsks.vue'
 import PortalReplyChip from './PortalReplyChip.vue'
@@ -926,6 +951,7 @@ import PortalDeliverables from './PortalDeliverables.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import { workSignalFrom } from './portalRail'
 import PortalRating from './PortalRating.vue'
+import ExecutionGateMarker from '../skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
 import {
   deliveryFailureReason,
   mentionedAgents,
@@ -1000,6 +1026,9 @@ const props = defineProps({
   // (an ElevenLabs key resolves) — a different fact from `voice_available`,
   // which additionally needs an effective voice to speak WITH.
   agent: { type: Object, required: true },      // {name, owner, avatar_url, description, playbooks, voice_available, stt_available}
+  // trinity-enterprise#856: the shell's arrival snapshot `{ agent, ids }` —
+  // the strip and the chat keys both walk it, so neither re-sorts on a reply.
+  tabOrder: { type: Object, default: null },
   roster: { type: Array, default: () => [] },
   sessionId: { type: String, default: null },   // current thread, or null for a new chat
   // ent#451: a null `sessionId` alone cannot say WHICH kind of "no thread" this
@@ -1131,6 +1160,8 @@ const draftKey = computed(() => draftKeyFor({
 }))
 const { restored: draftRestored } = useComposerDraft({ key: draftKey, input })
 const sending = ref(false)
+// #3460: measured on what `send()` sends — the trimmed text.
+const messageLimit = computed(() => messageLimitState(input.value.trim()))
 // ent#523 — Reset, offered on Main only.
 const resetting = ref(false)
 // ent#523 AC 10 — the same pure rule the sidebar chip and the details header
@@ -1421,8 +1452,18 @@ const {
   addFiles,
   clear: clearAttachments,
   settled: attachmentsSettled,
+  remove: removeAttachment,
   handlers: dropHandlers,
-} = usePortalFileDrop((file) => store.uploadDocument(props.agent.name, file))
+} = usePortalFileDrop(
+  // #3738: the agent is captured at upload time, so a chip removed after the
+  // person switched agents is deleted from the inbox it actually landed in.
+  async (file) => {
+    const agent = props.agent.name
+    const res = await store.uploadDocument(agent, file)
+    return { ...res, agent }
+  },
+  { discard: (e) => store.discardComposerUpload(e.receipt?.agent || props.agent.name, e.serverName || e.name, e.file) },
+)
 // #3265: a sent message's thumbnails and downloads read the upload back
 // through the same authenticated route the Files tab uses.
 const loadUploadBlob = (agentName, filename) => store.fetchUploadBlob(agentName, filename)
@@ -1578,9 +1619,7 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
   // stop — without the id, `canCancelTurn` stayed false after every reload.
   activeExecutionId.value = executionId || null
   liveStreamActivity.value = null
-  elapsed.value = 0
-  clearInterval(elapsedTimer)
-  elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
+  startElapsedClock()
   // The baseline is what is on screen right now: this client reloaded INTO a
   // running turn, so every assistant message it can see predates that turn.
   // Passing nothing made the poll's comparison false on every poll, so the
@@ -1613,7 +1652,9 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
     if (data?.response) {
       // #2580: `id` + `myRating` from the persisted row, so a reattached reply is
       // rateable the moment it lands rather than on the next load.
-      messages.value.push({ ...assistantRow({ content: data.response, id: data.id, my_rating: data.myRating }), at: data.at || null })
+      messages.value.push({ ...assistantRow({ content: data.response, id: data.id, my_rating: data.myRating,
+        ...turnGateFlags(data) }),
+      at: data.at || null })
       refreshAsksAfterTurn()
       // A reattached reply is still a reply the user just watched land, so it
       // has to announce itself like `deliver()` does. Without this the thread
@@ -1665,7 +1706,7 @@ watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
 })
 
 watch(() => props.prefill, (v) => {
-  if (v) { input.value = v; resetTypeahead(); nextTick(() => { autoGrow(); textarea.value?.focus() }) }
+  if (v) { handedOff.value = false; input.value = v; resetTypeahead(); nextTick(() => { autoGrow(); textarea.value?.focus() }) }
 })
 
 onMounted(async () => {
@@ -1729,6 +1770,7 @@ function onViewportResize() {
 }
 
 onBeforeUnmount(() => {
+  clearInterval(elapsedTimer)
   window.removeEventListener('online', onNet)
   window.removeEventListener('offline', onNet)
   document.removeEventListener('click', onDocClick)
@@ -1811,7 +1853,33 @@ const typeaheadResult = computed(() => {
   }
 })
 
-const typeaheadBound = computed(() => boundCandidates(typeaheadResult.value?.items || []))
+// trinity-enterprise#631: `@` also tags a PERSON — a colleague on this
+// instance who can reach this agent, read from the server once there is a
+// query (never a directory). Independent of the rooms capability: a tag is a
+// pointer to a person, not a second agent in the conversation, so it never
+// escalates. An external client's first lookup answers 403 and the picker
+// stays agents-only from then on.
+const peoplePicker = usePeoplePicker({ fetch: (q) => store.fetchChatPeople(props.agent?.name, q) })
+watch(() => (typeaheadTrigger.value?.kind === '@' ? typeaheadTrigger.value.query : null), (q) => {
+  if (q === null) peoplePicker.clear()
+  else peoplePicker.lookup(q)
+})
+const peopleOffered = computed(() => !peoplePicker.unavailable.value && !!props.agent?.name)
+
+const typeaheadCandidates = computed(() => {
+  const r = typeaheadResult.value
+  if (!r) return []
+  if (r.kind === '/') return r.items
+  const agents = r.enabled === false ? [] : r.items.map((a) => ({ ...a, kind: 'agent' }))
+  const q = (typeaheadTrigger.value?.query || '').trim()
+  const people = q && peoplePicker.answeredFor.value === q ? peopleRows(peoplePicker.people.value) : []
+  return [...agents, ...people]
+})
+const typeaheadTitle = computed(() => (typeaheadKind.value === '@'
+  ? typeaheadHeading({ people: peopleOffered.value })
+  : ''))
+
+const typeaheadBound = computed(() => boundCandidates(typeaheadCandidates.value))
 // #2213: rows the popup could not RENDER are `typeaheadBound.overflow`; skills that
 // never reached the client at all are this. Two different omissions, so the popup
 // is told about them separately rather than adding them into one misleading number.
@@ -1833,8 +1901,14 @@ const typeaheadHidden = computed(() => {
 const typeaheadEmpty = computed(() => {
   const t = typeaheadTrigger.value
   const r = typeaheadResult.value
-  if (!t || !r || r.items.length || t.query !== '') return null
-  return typeaheadEmptyMessage(r.kind, r)
+  if (!t || !r || typeaheadCandidates.value.length) return null
+  if (t.query === '') return typeaheadEmptyMessage(r.kind, r)
+  // trinity-enterprise#631: the named refusal — only once the server answered
+  // "no one" for exactly this query, and no agent matched either.
+  if (r.kind === '@' && peopleOffered.value && peoplePicker.answeredFor.value === t.query.trim()) {
+    return noOneCalled(t.query, [props.agent?.name])
+  }
+  return null
 })
 
 // A computed, not an imperative ref: it self-heals when the roster refreshes,
@@ -1842,13 +1916,17 @@ const typeaheadEmpty = computed(() => {
 const typeaheadOpen = computed(() => {
   const t = typeaheadTrigger.value
   const r = typeaheadResult.value
-  if (!t || !r || r.enabled === false) return false
+  if (!t || !r) return false
+  // #2128: with no rooms substrate an @mention of an AGENT is ordinary text;
+  // the popup still opens for a PERSON (trinity-enterprise#631).
+  if (r.enabled === false && !(r.kind === '@' && peopleOffered.value)) return false
   if (isSuppressed(dismissed.value, t)) return false
   return typeaheadBound.value.visible.length > 0 || !!typeaheadEmpty.value
 })
 
 const typeaheadRows = computed(() => typeaheadBound.value.visible.map((c, i) => (
-  typeaheadKind.value === '/'
+  c.kind === 'person' ? c
+  : typeaheadKind.value === '/'
     ? { key: `pb-${i}-${c.title}`, primary: c.title, secondary: c.description || '' }
     // The slug rides along beside the label: it IS the token, and teaching it is
     // half of why this exists.
@@ -1865,7 +1943,7 @@ watch(typeaheadBound, (b) => { activeIndex.value = clampActiveIndex(activeIndex.
 // promising something the build cannot do is the #2128 dead end in text form.
 const composerPlaceholder = computed(() => {
   if (listening.value) return 'Listening…'
-  const base = `Message ${agentDisplayName(props.agent)}…  ·  / for playbooks`
+  const base = `Message ${agentDisplayName(props.agent)}…  ·  / for skills`
   return store.multiAgentChatAvailable ? `${base}  ·  @ to add an agent` : base
 })
 
@@ -1976,7 +2054,11 @@ function acceptActive(index) {
   const t = typeaheadTrigger.value
   const row = typeaheadBound.value.visible[index]
   if (!t || !row) return                  // never insert `@undefined`
-  const insert = t.kind === '/' ? starterFor(row) : buildMentionToken(row.name)
+  // trinity-enterprise#631: a person's token is their name; who they are
+  // travels beside the text (`peoplePicker.picked`), never parsed out of it.
+  if (row.kind === 'person') peoplePicker.pick(row.person)
+  const insert = row.kind === 'person' ? personToken(row.person)
+    : t.kind === '/' ? starterFor(row) : buildMentionToken(row.name)
   const { value, caret } = applyTypeaheadInsert(input.value, t, insert)
   input.value = value
   closeTypeahead()
@@ -2011,13 +2093,27 @@ let elapsedTimer = null
 // ent#525: the card renders the clock (`formatElapsed`); the three-tier
 // "Thinking… / Working on it… / Still working…" label went with the dots.
 const elapsed = ref(0)
+// #3431: the instant the feed's `elapsed_seconds` was true, advanced from it by
+// the same 1 s tick, so the card re-reads the row's age exactly the way the
+// Work tab and Rooms do (`liveElapsedSeconds`), and one turn shows one age on
+// every surface. `elapsed` above stays the pending placeholder's clock: while
+// the feed has not read the turn there is no anchor but the page's own load,
+// and a page cannot know a run's age.
+const clockMs = ref(Date.now())
+const cardElapsedSeconds = computed(() =>
+  liveElapsedSeconds(liveCardItem.value, { fetchedAtMs: workStore.fetchedAt, nowMs: clockMs.value })
+    ?? elapsed.value)
+function startElapsedClock() {
+  elapsed.value = 0
+  clockMs.value = Date.now()
+  clearInterval(elapsedTimer)
+  elapsedTimer = setInterval(() => { elapsed.value += 1; clockMs.value = Date.now() }, 1000)
+}
 
-async function deliver(text, { replyId = null, attachments = null } = {}) {
+async function deliver(text, { replyId = null, attachments = null, tags = null } = {}) {
   terminalOutcome.value = null
   sending.value = true
-  elapsed.value = 0
-  clearInterval(elapsedTimer)
-  elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
+  startElapsedClock()
   const startedNew = currentSessionId.value === null
   try {
     // ent#286: stream the turn so tool activity is visible while it runs.
@@ -2046,7 +2142,9 @@ async function deliver(text, { replyId = null, attachments = null } = {}) {
                                               // ent#610 — the message this replies to.
                                               replyToMessageId: replyId,
                                               // #3265 — what the message carries.
-                                              attachments: attachmentsForRequest(attachments) })
+                                              attachments: attachmentsForRequest(attachments),
+                                              // trinity-enterprise#631 — who it tags.
+                                              tags })
     } catch (dispatchErr) {
       // Nothing was created, so a retry is safe — but only retry when the
       // ROUTE is what failed. A 404/405 means an older backend without this
@@ -2067,7 +2165,8 @@ async function deliver(text, { replyId = null, attachments = null } = {}) {
                                           // context silently depends on streaming working.
                                           openCanvasId: openCanvasId.value,
                                           replyToMessageId: replyId,
-                                          attachments: attachmentsForRequest(attachments) })
+                                          attachments: attachmentsForRequest(attachments),
+                                          tags })
     }
 
     if (started) {
@@ -2153,6 +2252,9 @@ async function deliver(text, { replyId = null, attachments = null } = {}) {
         content: data.response || '(no response)',
         id: data.id || data.message_id,
         my_rating: data.myRating,
+        // trinity-enterprise#754: read off the persisted reply, like the id —
+        // either spelling, since the synchronous body is snake_case.
+        ...turnGateFlags(data),
       }),
       at: data.at || null,
     })
@@ -2179,8 +2281,16 @@ async function deliver(text, { replyId = null, attachments = null } = {}) {
     // …and the rail's half of the same set (#2794 follow-up): this turn has
     // gone out, so nothing sent before it is still pending.
     store.markUploadsCarried(props.agent?.name)
+    // trinity-enterprise#631: who this message tagged, as the server stored it.
+    if (tags && tags.length) void showOwnTags(text)
     return true
   } catch (err) {
+    // #3460: a validation refusal (a 422 carrying Pydantic's list) is said in
+    // words, never as a status code. It is also the one failure a Retry cannot
+    // fix — the same words earn the same answer — so the draft goes back to
+    // the composer to be edited instead (`settleDelivery`).
+    const refused = messageRefusalReason(err)
+    if (refused) return { error: refused, retryable: false, restoreText: text }
     return { error: deliveryFailureReason(err) }
   } finally {
     sending.value = false
@@ -2471,10 +2581,19 @@ const escalatingNow = ref(false)
 // turn alongside the first. Its own flag for the reason `escalatingNow` is;
 // released when `send()` returns, by which time `sending` has taken over.
 const settlingUploads = ref(false)
+// #3738: set once the chips have been handed to the shell for a room. They stay
+// standing until this component unmounts, and a × in that window would delete
+// the origin agent's copy while the shell carries it. Released when the shell
+// hands the text back after a failed escalation (the `prefill` watcher).
+const handedOff = ref(false)
 
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value || escalatingNow.value || settlingUploads.value) return
+  // #3460: over the server's limit, the message stays where it can be edited.
+  // Checked HERE as well as on the button — Enter reaches `send()` directly —
+  // and before anything below clears the composer.
+  if (messageLimit.value.over) return
   // The composer is about to be cleared programmatically, which fires no input
   // event — so the popup and its Esc sentinel are cleared here rather than left
   // armed against a message that no longer exists.
@@ -2516,7 +2635,11 @@ async function send() {
           agents: [props.agent.name, ...others],
           message: text,
           attachments: attachments.value.slice(),
+          // trinity-enterprise#631: the people this message tags go with it.
+          tags: peoplePicker.tagsFor(text),
         })
+        handedOff.value = true
+        peoplePicker.reset()
       } finally {
         // Released even on the success path: the emit is synchronous and this
         // component is not unmounted until the route change renders, so a flag
@@ -2552,7 +2675,8 @@ async function send() {
       clearAttachments()
     }
     await submitUserText(text, { replyId: reply?.messageId || null, replyExcerpt: reply?.excerpt || '',
-                                 attachments: carried })
+                                 attachments: carried, tags: peoplePicker.tagsFor(text) })
+    peoplePicker.reset()
   } finally {
     settlingUploads.value = false
   }
@@ -2563,7 +2687,7 @@ async function send() {
 // be a second conversation wearing the same thread, which is the whole thing
 // this feature exists not to be. Returns the outcome so a caller that is not a
 // person watching the screen — the voice loop — can decide what to do next.
-async function submitUserText(text, { replyId = null, replyExcerpt = '', attachments: carried = null } = {}) {
+async function submitUserText(text, { replyId = null, replyExcerpt = '', attachments: carried = null, tags = null } = {}) {
   // ent#491: the user's own activity is the ordering signal, so the bump happens
   // HERE — on send — and not when a reply lands. Any agent this message wakes
   // counts, mirroring the room fan-out (`unreadByAgent`): if you @mention two
@@ -2581,6 +2705,9 @@ async function submitUserText(text, { replyId = null, replyExcerpt = '', attachm
     replyTo: replyId ? { messageId: replyId, excerpt: replyExcerpt } : null,
     // #3265: what the message carried, shown on it from the moment it is sent.
     attachments: carried && carried.length ? carried : null,
+    // trinity-enterprise#631: who it tags — Retry resends them; the reload
+    // brings the server's delivered/read marks.
+    tagEmails: tags && tags.length ? tags : null,
     // trinity-enterprise#610: sent from here — placed at the newest server time
     // before it, so an ask this turn raises lands below it without the browser's
     // clock taking part (`placeAsksInThread`); the reload brings the server's time.
@@ -2592,7 +2719,7 @@ async function submitUserText(text, { replyId = null, replyExcerpt = '', attachm
   await pinToBottom()
   // A stale "couldn't stop the turn" must not outlive the turn it described.
   cancelError.value = ''
-  const res = await deliver(text, { replyId, attachments: carried })
+  const res = await deliver(text, { replyId, attachments: carried, tags })
   return settleDelivery(index, text, res)
 }
 
@@ -2615,6 +2742,22 @@ watch(sending, async (isSending) => {
 // on the other caller, the exact defect this change exists to remove — and a
 // refused cancel's error stayed pinned above the composer across every later
 // turn because only `send()` cleared it.
+// trinity-enterprise#631: the tagger sees the tag land without a reload — one
+// narrow history read, only for a message that tagged someone, copying the
+// server's marks from the stored row onto the one on screen. Best-effort: a
+// failure leaves the marks to the next history read.
+async function showOwnTags(text) {
+  try {
+    const data = await store.fetchHistory(props.agent.name, currentSessionId.value || null, { limit: REPLY_POLL_ROWS })
+    const rows = Array.isArray(data?.messages) ? data.messages : []
+    const row = [...rows].reverse().find((m) => m && m.role === 'user' && m.content === text && Array.isArray(m.tags))
+    const msg = [...messages.value].reverse().find((m) => m && m.role === 'user' && m.content === text)
+    if (row && msg) msg.tags = row.tags
+  } catch {
+    // the next history read brings them
+  }
+}
+
 function settleDelivery(index, text, res) {
   if (res === true) return { ok: true }
   // #2320: `retryable` when `deliver` decided it (a server verdict, or a
@@ -2641,6 +2784,12 @@ function settleDelivery(index, text, res) {
   // AFTER `markFailed` deliberately: `turnCancel.spec.js` pins the adjacency of
   // the cancel check to `markFailed`, and that rule is the more important one.
   clearModelChoiceOnFailure(res)
+  // #3460: a message the server refused as invalid is handed back to edit.
+  // `restoreDraft` prepends, so anything typed meanwhile is kept.
+  if (res?.restoreText) {
+    input.value = restoreDraft(res.restoreText, input.value)
+    autoGrowAfterUpdate()
+  }
   terminalOutcome.value = { category: res?.category || (res?.lost ? 'lost' : 'failed'),
                             message: res?.error || 'Something went wrong.',
                             retryable: res?.retryable ?? !res?.lost, execution_id: lastDeliveredExecutionId.value }
@@ -2663,8 +2812,11 @@ async function retry(i) {
   // A stale "couldn't stop the turn" must not outlive the turn it described —
   // and `retry` is a new turn, so it clears it for the same reason `send` does.
   cancelError.value = ''
+  // trinity-enterprise#631: a retry tags the same people — the server dedupes
+  // on the stored row, so a retried turn is still one item per person.
   const res = await deliver(content, { replyId: msg.replyTo?.messageId || null,
-                                       attachments: msg.attachments || null })
+                                       attachments: msg.attachments || null,
+                                       tags: msg.tagEmails || null })
   settleDelivery(i, content, res)
 }
 
@@ -3108,6 +3260,7 @@ function cycleChat(delta) {
     activeId: currentSessionId.value,
     draft: props.newChat || bornHere.value,
     draftKeys: drafts.keys,
+    order: props.tabOrder,
   })
   if (tabs.length < 2) return
   // The strip's EFFECTIVE selection, the same expression `PortalChatTabs` binds:

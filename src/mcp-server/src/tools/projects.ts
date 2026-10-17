@@ -4,7 +4,9 @@
  * A project links the Workspace chats and rooms where a piece of work happens.
  * An agent's turn in a linked chat carries a one-line "[Project] …" note with
  * the project id; these tools let the agent read what that project is for.
- * Agents never create or restructure a project. Since v2 they read the log and
+ * Agents never restructure a project (members, visibility). Since ent#588 an agent
+ * holding `projects.manage` can START one — on its owner's behalf, stewarding it —
+ * and import one of its own folder projects. Since v2 they read the log and
  * tasks, record outcomes in the log, keep tasks current, and put their own
  * files / reports / decisions on the project — only on projects they are
  * ACTIVE on (the backend answers anything else with a uniform 404).
@@ -331,6 +333,53 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         try {
           const projects = await getClient(context?.session).getStewardDigest(turnOf(context));
           return JSON.stringify({ success: true, count: projects.length, projects }, null, 2);
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ================================================================ ent#588
+    create_project: {
+      name: "create_project",
+      description:
+        "Start a Workspace project for your owner (/project-init on Trinity): a name and the goal in " +
+        "a sentence or two. Your owner becomes its creator and first member, you become its steward " +
+        "and the agent on it, and only its members can see it — adding people or changing who can " +
+        "see it stays your owner's. Needs the project-management permission an instance admin grants; " +
+        "without it the call is refused with `project_management_not_permitted` and nothing is created. " +
+        "Returns the project; work on it with the task and log tools.",
+      parameters: z.object({
+        name: z.string().min(1).max(200).describe("Short project name, e.g. 'Q4 launch'."),
+        goal: z.string().min(1).max(2000).describe("What done looks like, in a sentence or two."),
+        tracker_url: z.string().max(2000).optional().describe("An external tracker for its tasks, if it has one."),
+      }),
+      execute: async (p: { name: string; goal: string; tracker_url?: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          const body: Record<string, unknown> = { name: p.name, goal: p.goal };
+          if (p.tracker_url) body.tracker_url = p.tracker_url;
+          return ok({ project: await getClient(context?.session).createProjectAsAgent(body, turnOf(context)) });
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    import_project: {
+      name: "import_project",
+      description:
+        "Bring one of your own folder projects onto the platform, once (/project-init adopt on " +
+        "Trinity): `project_files/<slug>` or `<canon>/projects/<slug>` with its project.md, task " +
+        "files, log and decisions. Afterwards the platform is its home and nothing syncs back; a " +
+        "second import of the same folder is refused. Needs the project-management permission; " +
+        "your owner becomes the project's creator, you its steward.",
+      parameters: z.object({
+        path: z.string().min(1).max(300).describe("The project folder in your files, e.g. 'project_files/q4-launch'."),
+      }),
+      execute: async (p: { path: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          return ok({ project: await getClient(context?.session).importProjectAsAgent(p.path, turnOf(context)) });
         } catch (e) {
           return fail(e);
         }

@@ -30,8 +30,14 @@ coverage debt is queryable rather than rediscovered.
 | **J17** | A fact that lands at the wrong agent reaches the agent that owns it, and I hold a receipt. | user | local | live-stack | **no** | `tests/system_chains/test_j17_fact_routing_chain.py` | — | abilityai/trinity-enterprise#794 |
 | **J18** | A change I make to a library skill reaches every agent that holds it, and an agent without the permission cannot change skills. | operator | local | live-stack | **no** | `tests/system_chains/test_j18_library_change_chain.py` | SK-01, SK-02, SK-03 | abilityai/trinity-enterprise#794 |
 | **J19** | My agent's objective reaches me: the number it records shows against the target, and reads stale when it stops. | user | local | live-stack | **no** | `tests/system_chains/test_j19_objective_to_person_chain.py` | L-02 | abilityai/trinity-enterprise#794 |
+| **J20** | I can tell a colleague about the work from inside the conversation, and they are told — without being given anything they could not already see. | user | local | live-stack | **no** | `tests/journeys/test_j20_colleague_tagged_journey.py` | — | abilityai/trinity-enterprise#630 |
+| **J21** | A business action my agent asks another agent for runs only after the right person approves it, exactly once, and my agent is told how it ended. | user | local | live-stack | **no** | `tests/system_chains/test_j21_approval_chain.py` | — | abilityai/trinity-enterprise#795 |
+| **J22** | A project is worked by agents and people from open to close: an agent cannot close its own task, a person verifies it, and anyone on the project can read who did what. | user | local | live-stack | **no** | `tests/system_chains/test_j22_project_chain.py` | — | abilityai/trinity-enterprise#795 |
+| **J23** | My project's record shows an action approved inside it: who approved it and how it ended. | user | local | live-stack | **no** | `tests/system_chains/test_j23_approved_action_in_project_chain.py` | — | abilityai/trinity-enterprise#795 |
 
-**0 of 19 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
+**0 of 23 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
+
+_Harnesses not present in `tests/registry.json`: J20, J21, J22, J23._
 
 ## Variants
 

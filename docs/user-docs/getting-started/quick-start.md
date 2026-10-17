@@ -69,7 +69,7 @@ Details: [Creating Agents](../agents/creating-agents.md).
 
 ### Interacting With Your Agent
 
-The agent detail page has tabs for **Overview**, **Tasks**, **Chat**, **Reports**, **Canvas**, **Schedules**, **Loops**, **Playbooks**, **Credentials**, **Payments**, **Files** and **Info**. Owners and admins also see **Access / Sharing / Permissions**, **Folders**, **Skills** and **Settings**; **Git** appears when the agent has a repository binding, and **Dashboard**, **Brain** and **A2A** when the agent or your install enables them.
+The agent detail page has tabs for **Overview**, **Tasks**, **Chat**, **Reports**, **Canvas**, **Schedules**, **Loops**, **Skills**, **Credentials**, **Payments**, **Files** and **Info**. Owners and admins also see **Access / Sharing / Permissions**, **Folders** and **Settings**; **Git** appears when the agent has a repository binding, and **Dashboard**, **Brain** and **A2A** when the agent or your install enables them.
 
 - **Chat tab** -- Each message runs as a new agent session; the last 20 messages are included for context. **Continue in Workspace →** (top of the tab) or the **Workspace** button in the agent header opens the continuous conversation, where memory, tool results and reasoning carry across turns. Opening an agent there starts a new chat — on a desktop, with the cursor already in the message field — or returns you to a chat holding an unsent draft; earlier chats stay in the chat list. The header's **Talk** button starts a voice call there.
 - **Tasks tab** -- Send one-off tasks and view execution history.

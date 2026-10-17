@@ -270,6 +270,39 @@ def test_put_reports_the_switch_as_on_when_an_admin_has_flipped_it(
     assert r.json()["enabled"] is True
 
 
+def test_switching_an_endpoint_to_aauth_audits_the_dropped_credential(
+    app_client, oss_store, monkeypatch
+):
+    """ent#623 / #3644 review C1: the settings-change audit row says the store
+    dropped the secret when a bearer endpoint is switched to `aauth`. The dev
+    merge kept both parents' `credential_cleared` lines and Python's last-key-
+    wins made the row say `false` for exactly that event."""
+    from utils.url_validation import ValidatedPublicUrl
+
+    # `aauth` refuses a non-443 port, so the stub must carry the real one.
+    monkeypatch.setattr(
+        "utils.url_validation.validate_a2a_endpoint_url",
+        lambda url: ValidatedPublicUrl(url=url, hostname="peer.example.com", port=443,
+                                       addresses=("93.184.216.34",)),
+    )
+    first = app_client.http.put(
+        "/api/settings/a2a-endpoints",
+        json={"name": "partner", "url": "https://peer.example.com/a2a", "credentials": "tok"},
+    )
+    assert first.status_code == 200, first.text
+    assert app_client.audit.entries[-1]["details"]["credential_cleared"] is False
+
+    switched = app_client.http.put(
+        "/api/settings/a2a-endpoints",
+        json={"name": "partner", "url": "https://peer.example.com/a2a", "auth_scheme": "aauth"},
+    )
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["endpoint"]["has_credentials"] is False
+    details = app_client.audit.entries[-1]["details"]
+    assert details["auth_scheme"] == "aauth"
+    assert details["credential_cleared"] is True, details
+
+
 def test_register_list_resolve_remove_with_no_provider_registered(app_client, oss_store):
     """AC1's mechanism: the store the MCP tools write is the store the call path
     resolves, on a build with no resolver provider registered at all."""

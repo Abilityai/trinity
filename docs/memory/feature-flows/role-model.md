@@ -3,17 +3,19 @@
 ## Overview
 Expands the user role system from 2 tiers (admin/user) to 4 tiers: admin > creator > operator > user. Adds server-side role enforcement via a `require_role()` dependency factory, new user management API endpoints, and a Settings UI section for admins to change user roles.
 
-**Implementation Status**: Complete (ROLE-001, GitHub Issue #143)
+**Implementation Status**: Complete (ROLE-001, GitHub Issue #143). Since trinity-enterprise#837 the `user` rung is **Workspace-only**: `get_current_user` refuses it on every operator route with 403 `workspace_only` — see [workspace-only-role.md](workspace-only-role.md).
 
 ## Revision History
 | Date | Changes |
 |------|---------|
+| 2026-10-12 | trinity-enterprise#837 PR 2 — the role route refuses every key (`reject_non_interactive_principal`) and audits `role_change` (from → to); the Access tab's rows carry a role select (every change confirmed) next to Settings → User Management. |
+| 2026-10-09 | trinity-enterprise#837 — `user` is Workspace-only (the operator floor in `get_current_user`; `role_level` / `is_workspace_only_role` beside `ROLE_HIERARCHY`, shared with `require_role`). Settings: role pickers read "user — Workspace only", the whitelist form takes a role, User Management counts and filters the Workspace-only accounts. Corrected the stale `creator` default (#314 made it the whitelist row's role, `user` when none). |
 | 2026-03-20 | Initial documentation |
 
 ## User Story
-As a platform admin, I want to assign fine-grained roles to users so that I can control who can create agents, who can only operate existing agents, and who can only access public links.
+As a platform admin, I want to assign fine-grained roles to users so that I can control who can create agents, who can only operate existing agents, and who works with agents in the Workspace only.
 
-As a whitelisted user signing up via email, I get the `creator` role by default so that I can immediately create and manage agents without requiring additional admin action.
+As a whitelisted user signing up via email, I get the role recorded on my whitelist row (`user` — Workspace only — unless the admin picked another).
 
 ---
 
@@ -24,7 +26,7 @@ As a whitelisted user signing up via email, I get the `creator` role by default 
 | admin | Password login | Yes | Full platform control |
 | creator | Whitelisted email signup | Yes | Create and manage own agents |
 | operator | Whitelisted email, role manually set | No | Run existing agents only |
-| user | Public links | No | Public link interactions only |
+| user | Whitelisted email (the default), single sign-on, public self-signup | No | **Workspace only** — refused on operator routes (403 `workspace_only`, trinity-enterprise#837) |
 
 **Hierarchy** (lowest to highest): `user` < `operator` < `creator` < `admin`
 
@@ -32,8 +34,9 @@ As a whitelisted user signing up via email, I get the `creator` role by default 
 
 ## Entry Points
 - **UI**: `src/frontend/src/views/Settings.vue:796-866` - User Management section with role dropdowns
+- **UI**: `src/frontend/src/components/AccessPanel.vue` - Agent Detail › Access: a role select on each other Active person's row, every change confirmed (trinity-enterprise#837)
 - **API**: `GET /api/users` - List all users (admin-only)
-- **API**: `PUT /api/users/{username}/role` - Change a user's role (admin-only)
+- **API**: `PUT /api/users/{username}/role` - Change a user's role (admin, interactive session only; audited)
 
 ---
 
@@ -163,7 +166,7 @@ async def deploy_local_agent(
 ):
 ```
 
-### 3. New Email Users Default to `creator`
+### 3. New Email Users Take Their Whitelist Row's Role (#314; this section's original `creator` default is historical)
 
 **File**: `src/backend/db/email_auth.py:246-248`
 
@@ -200,18 +203,24 @@ async def list_users(current_user: User = Depends(require_admin)):
     ]
 ```
 
-**PUT /api/users/{username}/role** (lines 46-77) — change role, admin-only:
+**PUT /api/users/{username}/role** — change role, an interactive admin only, audited:
 ```python
 @router.put("/{username}/role")
-async def update_user_role(username: str, body: UserRoleUpdate,
+async def update_user_role(username: str, body: UserRoleUpdate, request: Request,
         current_user: User = Depends(require_admin)):
+    reject_non_interactive_principal(current_user)   # ent#837: no key, trinity-system's included
     if username == current_user.username:
         raise HTTPException(status_code=400, detail="Cannot change your own role")
     if body.role not in VALID_ROLES:
         raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: ...")
+    previous = db.get_user_by_username(username)          # 404 if missing
+    if previous.get("email"):   # the whitelist row may never rank above the account
+        db.cap_whitelist_default_role(previous["email"], body.role)   # lowered, never raised
     updated = db.update_user_role(username, body.role)
     if not updated:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    if previous_role != updated["role"]:
+        await platform_audit_service.log(event_action="role_change", details={"from": ..., "to": ...}, ...)
     return {"username": updated["username"], "role": updated["role"]}
 ```
 
@@ -370,7 +379,7 @@ Admin-only. Returns all platform users without password hashes.
 
 ### PUT /api/users/{username}/role
 
-Admin-only. Changes the role of the specified user.
+Admin, from an interactive session (any API key gets 403). Changes the role of the specified user — first capping their whitelist row (if any) at the new role, lowered never raised — and records a `role_change` audit row (from → to); a no-op writes none.
 
 **Request Body:**
 ```json

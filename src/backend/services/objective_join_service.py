@@ -184,15 +184,37 @@ def canon_root(template: Any) -> Optional[str]:
     return raw
 
 
-def objective_concerns(obj: dict, role_id: Optional[str],
-                       agent_name: str) -> bool:
-    """An objective belongs to this agent when its role owns it or it supports it.
+def owned_seat_ids(role_id: Any) -> Tuple[str, ...]:
+    """The seat ids an agent owns objectives through, as a tuple of valid ids.
+
+    trinity-enterprise#812: an agent owns through the seat it HOLDS, or — a
+    companion — the seats its assigned people hold (a shared companion owns the
+    union). Callers pass one id, a sequence of ids, or None; invalid ids drop.
+    """
+    if role_id is None:
+        return ()
+    values = [role_id] if isinstance(role_id, str) else list(role_id)
+    out: List[str] = []
+    for v in values:
+        sid = _safe_id(v)
+        if sid and sid not in out:
+            out.append(sid)
+    return tuple(out)
+
+
+def objective_concerns(obj: dict, role_id: Any, agent_name: str) -> bool:
+    """An objective belongs to this agent when one of its seats owns it or it
+    supports it.
 
     Framework §3.4: `owner: role:<id>`, `supporting_agents: [<agent name>]`.
-    An agent with no `x-role` has no owned objectives — it can still support.
+    `role_id` is one seat id or several (see `owned_seat_ids`). An agent with no
+    seat has no owned objectives — it can still support.
+
+    `supporting_agents` is read as before but FROZEN (trinity-enterprise#812):
+    it puts Trinity agent names into canon, and nothing new is built on it.
     """
     owner = _text(obj.get("owner"), 128) or ""
-    if role_id and owner == f"role:{role_id}":
+    if any(owner == f"role:{sid}" for sid in owned_seat_ids(role_id)):
         return True
     return agent_name in (obj.get("supporting_agents") or [])
 
@@ -455,6 +477,10 @@ def parse_objective(
         "path": path,
         "schema_version": _text(doc.get("schema_version"), 16),
         "statement": _text(doc.get("statement")),
+        # ent#843: an optional plain-language heading for client screens. The
+        # canon `statement` is written for the team; the Workspace card uses
+        # this when present and falls back to the statement.
+        "client_heading": _text(doc.get("client_heading"), 160),
         "horizon": _text(doc.get("horizon"), 16),
         "status": _text(doc.get("status"), 32),
         "owner": _text(doc.get("owner"), 128),
@@ -470,7 +496,7 @@ def parse_objective(
 def select_objectives(
     objectives: List[Dict[str, Any]],
     *,
-    role_id: Optional[str],
+    role_id: Any,
     agent_name: str,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     """(the ones this agent answers for, truncated) — active only, capped last.
@@ -510,7 +536,7 @@ def join_objectives(
     latest_by_name: Dict[str, Dict[str, Any]],
     *,
     agent_name: str,
-    role_id: Optional[str],
+    role_id: Any,
     served: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """The pure join. Every unit test drives this; nothing here does I/O.
@@ -530,6 +556,7 @@ def join_objectives(
     through here and there is no second one to disagree with it.
     """
     by_name = {d["name"]: d for d in definitions if d.get("name")}
+    owned_owners = {f"role:{sid}" for sid in owned_seat_ids(role_id)}
     findings: List[Dict[str, Any]] = []
     rows_out: List[Dict[str, Any]] = []
     summary = _new_summary()
@@ -547,7 +574,7 @@ def join_objectives(
         else:
             seen_ids[obj_id] = obj["path"]
 
-        owned = bool(role_id) and (obj.get("owner") or "") == f"role:{role_id}"
+        owned = (obj.get("owner") or "") in owned_owners
         supporting = agent_name in (obj.get("supporting_agents") or [])
 
         metrics_out = []
@@ -583,6 +610,7 @@ def join_objectives(
             "path": obj["path"],
             "schema_version": obj.get("schema_version"),
             "statement": obj.get("statement"),
+            "client_heading": obj.get("client_heading"),
             "horizon": obj.get("horizon"),
             "status": obj.get("status") or ACTIVE_STATUS,
             "owner": obj.get("owner"),
@@ -849,6 +877,11 @@ async def _read_yaml(client, path: str, *,
     status = getattr(response, "status_code", 0)
     if status == 404:
         return None, "not_found"
+    if status == 403:
+        # trinity-enterprise#819: a linked file is not opened; name it in the log.
+        from services.agent_client import client as agent_client_module
+        agent_client_module._warn_if_link_refusal(
+            getattr(client, "agent_name", None), path, response)
     if status != 200:
         return None, "unreadable"
     try:
@@ -860,8 +893,9 @@ async def _read_yaml(client, path: str, *,
 
 
 async def _list_objective_files(
-        client, root: str) -> Tuple[List[str], List[str], str]:
-    """(file names, refused names, source code) for `<root>/objectives`.
+        client, root: str, subdir: str = "objectives") -> Tuple[List[str], List[str], str]:
+    """(file names, refused names, source code) for `<root>/<subdir>` —
+    `objectives` here, `roles` for `canon_roles_service` (trinity-enterprise#817).
 
     The agent-server listing is RECURSIVE with no depth cap, so only top-level
     `type: file` entries are taken; nested folders are ignored. A 404 is
@@ -875,7 +909,7 @@ async def _list_objective_files(
     fetch".
     """
     response = await _agent_get(
-        client, f"/api/files?path=/home/developer/{root}/objectives")
+        client, f"/api/files?path=/home/developer/{root}/{subdir}")
     if response is None:
         return [], [], "unreadable"
     status = getattr(response, "status_code", 0)
@@ -1213,30 +1247,43 @@ async def read_objective_join(
                 agent_name, now, source=source,
                 message=(
                     "template.yaml could not be read from this agent "
-                    f"({terr}) — it is where `x-role` and `x-canon` say which "
-                    "role this agent fills and where its canon lives"))
+                    f"({terr}) — it is where `x-canon` says where this agent's "
+                    "canon lives"))
     else:
         source["template"] = "read"
 
-    xrole = template.get("x-role") if isinstance(template, dict) else None
+    # trinity-enterprise#812 (operator ruling 2026-10-06): the canon
+    # declaration alone enables the join. `x-role` is neither required nor read;
+    # the seat comes from Trinity's record — the one the agent HOLDS, or the
+    # seats its assigned people hold (a companion).
     has_canon = isinstance(template, dict) and "x-canon" in template
     findings: List[Dict[str, Any]] = []
 
-    if not isinstance(xrole, dict) and not has_canon:
-        # Zero config: no role, no canon, nothing to join — and NO store read.
+    if not has_canon:
+        # Zero config: no canon, nothing to join — and NO store read.
         return _empty(
             agent_name, now, source=source,
-            message=("no `x-role` or `x-canon` in template.yaml — nothing to "
-                     "join. An objective is a canon file that names a metric; "
-                     "declare the role this agent fills to read them here."))
+            message=("no `x-canon` in template.yaml — nothing to join. An "
+                     "objective is a canon file that names a metric; declare "
+                     "where this agent's canon lives to read them here."))
 
-    role_id = _safe_id(xrole.get("role")) if isinstance(xrole, dict) else None
-    if isinstance(xrole, dict) and xrole.get("role") and not role_id:
+    from services.assignment_provider import resolve_seat
+
+    seat = resolve_seat(agent_name)
+    if seat["case"] == "holds":
+        owned = owned_seat_ids(seat["role_id"])
+    else:
+        owned = owned_seat_ids([seat["role_id"]] + list(seat["seats"])
+                               if seat["role_id"] else seat["seats"])
+    role_id = owned[0] if owned else None
+    if not owned:
         findings.append(_finding(
-            "role_id_invalid",
-            f"`x-role.role` in template.yaml is not a valid id, so no owned "
-            f"objective can be matched for `{agent_name}` — ids are letters, "
-            "digits, dot, dash and underscore.",
+            "no_seat",
+            f"`{agent_name}` neither holds a seat nor serves a person who holds "
+            "one, so it owns no objective — assign its primary (with the seat "
+            "they hold) on the agent's Access tab, or record the seat the "
+            "agent holds itself. Objectives that name it in "
+            "`supporting_agents` still show.",
         ))
 
     root = canon_root(template)
@@ -1249,17 +1296,19 @@ async def read_objective_join(
         ))
         return _empty(
             agent_name, now, source=source, findings=findings,
-            role={"id": role_id, "path": None},
+            role={"id": role_id, "path": None, "case": seat["case"], "seats": list(owned)},
             message=("`x-canon.clone_path` is not a readable path — fix it in "
                      "template.yaml"))
 
     role = {
         "id": role_id,
         "path": f"{root}/roles/{role_id}.yaml" if role_id else None,
+        "case": seat["case"],
+        "seats": list(owned),
     }
 
     files = await read_objective_files(
-        client, root, agent_name=agent_name, role_id=role_id)
+        client, root, agent_name=agent_name, role_id=owned)
     source.update(files["source"])
     findings.extend(files["findings"])
 
@@ -1305,7 +1354,7 @@ async def read_objective_join(
 
     joined = join_objectives(
         objectives, definitions, latest,
-        agent_name=agent_name, role_id=role_id, served=served)
+        agent_name=agent_name, role_id=owned, served=served)
 
     return {
         "agent_name": agent_name,

@@ -14,6 +14,30 @@ import api from '../api'
 // clobbers this full-fleet list) plus the utils/websocket.js handlers that
 // merge agent_created / agent_label_changed rows in. The sort comparator
 // itself lives in utils/agentSort.js (pure function — no store access).
+// trinity-enterprise#819: the file routes answer a refusal with a structured
+// `detail` ({code, message, path}). The download and preview calls read the
+// body as text and as a blob, so turn it back into `{detail: <message>, code,
+// path}` — every consumer renders `err.response.data.detail` as a string. A
+// string detail stays a string; an unparseable body is left alone.
+export async function normalizeFileErrorBody (err) {
+  const res = err?.response
+  if (!res || res.data == null) return err
+  let body = res.data
+  try {
+    if (typeof Blob !== 'undefined' && body instanceof Blob) body = await body.text()
+    if (typeof body === 'string') body = JSON.parse(body)
+  } catch {
+    return err
+  }
+  const detail = body?.detail
+  if (detail && typeof detail === 'object') {
+    res.data = { detail: detail.message, code: detail.code, path: detail.path }
+  } else if (typeof detail === 'string') {
+    res.data = { detail }
+  }
+  return err
+}
+
 export const useAgentsStore = defineStore('agents', {
   state: () => ({
     agents: [],
@@ -552,6 +576,36 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // abilityai/trinity-enterprise#662: what each edge of this agent exposes —
+    // the library skills on its permitted targets and which it may run.
+    async getAgentPeerSkills(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/peer-skills`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // The honest upgrade (admin): agent-to-agent calls that used a library
+    // skill in the last 30 days and are now refused for want of a grant.
+    async getPeerSkillDrift() {
+      const authStore = useAuthStore()
+      const response = await axios.get('/api/skills/peer-grants/drift', {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // Grant (or revoke) one library skill on `target` to caller `name` (admin).
+    async setAgentPeerSkillGrant(name, target, skill, granted) {
+      const authStore = useAuthStore()
+      const url = `/api/agents/${name}/peer-skills/${encodeURIComponent(target)}/${encodeURIComponent(skill)}`
+      const response = granted
+        ? await axios.put(url, {}, { headers: authStore.authHeader })
+        : await axios.delete(url, { headers: authStore.authHeader })
+      return response.data
+    },
+
     // ent#84: one gated read for the fleet permissions matrix — returns both
     // axes (accessible, non-system agents) and every caller→target grant edge
     // among them with provenance (granted_by / granted_at). Entitlement-gated
@@ -767,12 +821,16 @@ export const useAgentsStore = defineStore('agents', {
 
     async downloadAgentFile(name, filePath) {
       const authStore = useAuthStore()
-      const response = await axios.get(`/api/agents/${name}/files/download`, {
-        params: { path: filePath },
-        headers: authStore.authHeader,
-        responseType: 'text'
-      })
-      return response.data
+      try {
+        const response = await axios.get(`/api/agents/${name}/files/download`, {
+          params: { path: filePath },
+          headers: authStore.authHeader,
+          responseType: 'text'
+        })
+        return response.data
+      } catch (err) {
+        throw await normalizeFileErrorBody(err)
+      }
     },
 
     async deleteAgentFile(name, filePath) {
@@ -807,11 +865,16 @@ export const useAgentsStore = defineStore('agents', {
 
     async getFilePreviewBlob(name, filePath) {
       const authStore = useAuthStore()
-      const response = await axios.get(`/api/agents/${name}/files/preview`, {
-        params: { path: filePath },
-        headers: authStore.authHeader,
-        responseType: 'blob'
-      })
+      let response
+      try {
+        response = await axios.get(`/api/agents/${name}/files/preview`, {
+          params: { path: filePath },
+          headers: authStore.authHeader,
+          responseType: 'blob'
+        })
+      } catch (err) {
+        throw await normalizeFileErrorBody(err)
+      }
       // Return blob URL for media elements
       return {
         url: URL.createObjectURL(response.data),
@@ -983,11 +1046,9 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
-    // ent#838: `extra` may carry `scope` ('public' | 'internal') and `keyless`;
-    // omitted, each keeps its current value on the server.
-    async setA2aExposure(name, enabled, extra = {}) {
+    async setA2aExposure(name, enabled) {
       const authStore = useAuthStore()
-      const response = await axios.put(`/api/enterprise/a2a/${name}/exposure`, { enabled, ...extra }, {
+      const response = await axios.put(`/api/enterprise/a2a/${name}/exposure`, { enabled }, {
         headers: authStore.authHeader
       })
       return response.data
@@ -1011,16 +1072,9 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
-    async registerA2aEndpoint(name, { name: label, url, credentials }) {
-      const authStore = useAuthStore()
-      const body = { name: label, url }
-      if (credentials) body.credentials = credentials
-      const response = await axios.post(`/api/enterprise/a2a/${name}/endpoints`, body, {
-        headers: authStore.authHeader
-      })
-      return response.data
-    },
-
+    // ent#898: no registerA2aEndpoint — outbound endpoints are registered in
+    // the platform-wide registry (stores/a2aFederation.js), the only list
+    // call_a2a_agent resolves. Remove stays, to clear per-agent rows.
     async removeA2aEndpoint(name, endpointId) {
       const authStore = useAuthStore()
       const response = await axios.delete(`/api/enterprise/a2a/${name}/endpoints/${endpointId}`, {

@@ -8,19 +8,51 @@ import asyncio
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from ..models import ChatRequest, ModelRequest, ParallelTaskRequest
 from ..state import agent_state
 from ..services.claude_code import get_execution_lock
+from ..services.execution_env import AUTH_OVERRIDE_HEADER
 from ..services.runtime_adapter import get_runtime
 from ..services.process_registry import get_process_registry, PENDING_CHAT_TIMEOUT_SECONDS
 from ..services import result_callback
 from ..services import retained_results
+from ..utils.credential_sanitizer import add_credential_value
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _accept_auth_override(request, runtime):
+    """The request's per-spawn credential (#3470), or None when this runtime
+    cannot honour one. Stages the value for log redaction. Never logs it."""
+    override = getattr(request, "auth_override", None)
+    if override is None or override.kind() is None:
+        return None
+    if not getattr(runtime, "supports_auth_override", False):
+        logger.info("[#3470] auth_override ignored: runtime does not take a Claude credential")
+        return None
+    add_credential_value(override.secret())
+    return override
+
+
+def _stamp_auth_override(response: Response, override) -> None:
+    """Tell the backend the override WAS applied. A 429 body carries no
+    metadata, so the header is the only signal that works on the failure path
+    too; an older image never sets it, which is how the backend tells the two
+    apart (`subscription_auto_switch.AUTH_OVERRIDE_HEADER`)."""
+    # `response` is None only for a direct in-process call (tests); FastAPI
+    # injects it for every HTTP request regardless of the default.
+    if override is not None and response is not None:
+        response.headers[AUTH_OVERRIDE_HEADER] = override.kind()
+
+
+def _reraise_with_auth_override(exc: HTTPException, override) -> None:
+    if override is not None:
+        exc.headers = {**(exc.headers or {}), AUTH_OVERRIDE_HEADER: override.kind()}
+    raise exc
 
 
 def _retain_terminal(execution_id, envelope: dict) -> None:
@@ -36,7 +68,7 @@ def _retain_terminal(execution_id, envelope: dict) -> None:
 
 
 @router.post("/api/chat")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, response: Response = None):
     """
     Send a message to Claude Code and get response with execution log.
 
@@ -72,6 +104,9 @@ async def chat(request: ChatRequest):
             runtime = get_runtime()
             # Use request.model if provided, otherwise use the model set via /api/model endpoint
             effective_model = request.model or agent_state.current_model
+            # #3470: a SUB-003 re-issue's per-spawn credential (Claude only).
+            auth_override = _accept_auth_override(request, runtime)
+            execute_kwargs = {"auth_override": auth_override} if auth_override is not None else {}
             # #1020: feed the richer /health signal — count this execution and
             # record success/failure (drives consecutive_failures).
             agent_state.record_task_start()
@@ -84,6 +119,7 @@ async def chat(request: ChatRequest):
                     system_prompt=request.system_prompt,
                     execution_id=request.execution_id,
                     isolated_session=request.isolated_session,
+                    **execute_kwargs,
                 )
             except HTTPException as exc:
                 agent_state.record_task_finish(success=False)
@@ -93,7 +129,7 @@ async def chat(request: ChatRequest):
                     request.execution_id,
                     result_callback._envelope_from_http_exception(exc),
                 )
-                raise
+                _reraise_with_auth_override(exc, auth_override)
             except BaseException:
                 agent_state.record_task_finish(success=False)
                 raise
@@ -136,6 +172,7 @@ async def chat(request: ChatRequest):
                 agent_state.session_context_window = metadata.context_window
 
             logger.info(f"[Chat] Execution lock releasing after completion")
+            _stamp_auth_override(response, auth_override)
 
             # Return enhanced response with execution log and session stats
             # Use raw_messages (full Claude Code JSON transcript) for execution log viewer compatibility
@@ -160,7 +197,7 @@ async def chat(request: ChatRequest):
 
 
 @router.post("/api/task")
-async def execute_task(request: ParallelTaskRequest):
+async def execute_task(request: ParallelTaskRequest, response: Response = None):
     """
     Execute a stateless task in parallel mode (no conversation context).
 
@@ -197,6 +234,10 @@ async def execute_task(request: ParallelTaskRequest):
 
     # Execute via runtime adapter in headless mode (no lock, no chat session)
     runtime = get_runtime()
+    # #3470: a SUB-003 re-issue's per-spawn credential (Claude only). The 202
+    # path above never carries one — the walk is inline-only (#1083 boundary).
+    auth_override = _accept_auth_override(request, runtime)
+    execute_kwargs = {"auth_override": auth_override} if auth_override is not None else {}
     # #2433: register as ACCEPTED before anything can queue. The headless
     # executor's `Popen` + `registry.register()` run inside a pool thread, so a
     # request beyond the pool size was counted in /health `active_tasks` but
@@ -224,6 +265,7 @@ async def execute_task(request: ParallelTaskRequest):
             resume_session_id=request.resume_session_id,  # Resume previous session (EXEC-023)
             persist_session=bool(request.persist_session),  # Session tab: write JSONL for future --resume
             images=request.images,  # Vision images from channel adapters (#562)
+            **execute_kwargs,
         )
     except HTTPException as exc:
         # #679 (F3): a terminated turn that surfaces a non-auth/non-rate terminal
@@ -251,6 +293,7 @@ async def execute_task(request: ParallelTaskRequest):
         )
         if is_cancel:
             logger.info(f"[Task] Task {request.execution_id} cancelled by user (status {exc.status_code})")
+            _stamp_auth_override(response, auth_override)
             return {
                 "response": exc.detail if isinstance(exc.detail, str) else "",
                 "execution_log": [],
@@ -259,7 +302,7 @@ async def execute_task(request: ParallelTaskRequest):
                 "status": "cancelled",
                 "timestamp": datetime.now().isoformat(),
             }
-        raise
+        _reraise_with_auth_override(exc, auth_override)
     except BaseException:
         agent_state.record_task_finish(success=False)
         raise
@@ -290,6 +333,7 @@ async def execute_task(request: ParallelTaskRequest):
         result_callback._cancelled_override(success_envelope) if cancelled else success_envelope,
     )
 
+    _stamp_auth_override(response, auth_override)
     # raw_messages contains the full Claude Code JSON stream (init, assistant, user, result)
     # This is the complete execution transcript showing thinking, tool calls, and results
     return {

@@ -24,7 +24,10 @@
             <span>{{ authorLabel(e.author, myEmail) }}</span>
             <span :title="formatLocalDateTime(e.created_at)">{{ formatRelativeTime(e.created_at) }}</span>
           </div>
-          <p class="mt-1 whitespace-pre-line text-sm text-gray-800 dark:text-gray-200">{{ e.body }}</p>
+          <!-- #3692: agents write entries in markdown — the shared renderer, sanitized like chat. -->
+          <div class="mt-1 text-sm text-gray-800 dark:text-gray-200" :data-testid="`project-log-body-${e.id}`">
+            <PortalMarkdown :content="e.body || ''" />
+          </div>
         </li>
       </ol>
       <p v-if="state.rows.length" class="text-xs text-gray-500 dark:text-gray-400">
@@ -56,6 +59,7 @@ import BaseTextarea from '@/components/base/BaseTextarea.vue'
 import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
+import PortalMarkdown from '@/components/portal/PortalMarkdown.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'

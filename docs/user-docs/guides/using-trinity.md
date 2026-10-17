@@ -53,7 +53,7 @@ Each skill card carries an **Assigned to** list of the agents that hold it, an *
 
 ## Agent Management
 
-Click any agent to open its detail page. Tabs appear based on what the agent has enabled — tabs that do not fit collapse into a **More ▾** menu:
+Click any agent to open its detail page. Tabs appear based on what the agent has enabled — tabs that do not fit collapse into a **More ▾** menu. The open tab is kept in the URL, so a reload stays on it and Back steps through the tabs you visited:
 
 | Tab | Purpose |
 |-----|---------|
@@ -65,14 +65,13 @@ Click any agent to open its detail page. Tabs appear based on what the agent has
 | **Canvas** | The surface the agent keeps current — its living sibling to Reports |
 | **Schedules** | Cron jobs, trigger history, next run times |
 | **Loops** | Bounded sequential task runs |
-| **Playbooks** | Reusable prompts the agent exposes |
+| **Skills** | The agent's own skills and those shared from the library, each with **Run**; owners and admins also set approval and assign skills |
 | **Credentials** | Per-agent credential setup and status |
 | **Payments** | Nevermined payment configuration |
 | **Access** / **Sharing** / **Permissions** | Who can reach the agent, and which agents it may call (owners and admins) |
 | **A2A** | Inbound A2A exposure (owner-only, entitled installations) |
 | **Git** | Repository binding, sync status, and history (only when the agent has a repository binding) |
 | **Files** / **Folders** | Browse the agent workspace, download files, shared folders (Folders: owners and admins) |
-| **Skills** | Assign and sync skills from the library (owners and admins) |
 | **Settings** | Guardrails, autonomy, resources, timeouts, runtime options (owners and admins) |
 | **Info** | Template metadata and "what you can ask" |
 
@@ -95,7 +94,7 @@ Click **Create Agent** in the Dashboard header, or **Use Template** on the Libra
    - **GitHub Templates** — Repositories your admin has registered under **Settings → Agents → GitHub Templates**.
    - **GitHub Repository** — Any repo, as `owner/repo` or a full GitHub URL, with a **Clone / Copy / Fork** choice for how the agent relates to that repo. A clone also asks **What is this repository?** — **An agent** or **A deployment of a codebase** — and Trinity sets up the git binding from the answer. (A specific branch, `github:Org/repo@branch`, is available through the API and MCP.)
    - Featured **fork-to-own** templates, when your install offers them, ask for a destination repo and a token so the agent gets a repository of its own.
-2. **Enter a name** — A **Slug / Identifier**, lowercase with hyphens, no spaces (e.g., `my-research-agent`). It becomes the agent's permanent name in URLs, containers and keys. You can also set a friendly display label.
+2. **Enter a name** — A **Slug / Identifier** (e.g., `my-research-agent`). The dialog previews the formatted identifier as you type — lowercased, with spaces and other unsupported characters turned into hyphens — so you see the exact name before you create. It becomes the agent's permanent name in URLs, containers and keys. You can also set a friendly display label.
 3. **Create Agent** — Trinity clones, builds, and starts the container. The form closes and the agent appears on the Dashboard (a GitHub-sourced create first shows an import check — **Close** is always available). Click the agent to open its detail page and start with **Chat**, **Tasks**, or the **Workspace**.
 
 What happens after creation:
@@ -131,9 +130,9 @@ Settings is visible to every authenticated user, but most tabs are admin-only. N
 | **Integrations** | Admin | Platform keys set in the browser (Anthropic, GitHub, email provider, Gemini), Slack, OAuth credentials, subscriptions (Claude subscription pool with live headroom), transport connection |
 | **MCP Keys** | Everyone | Create and revoke your own MCP API keys; your personal GitHub token |
 | **Agents** | Admin | GitHub templates, **Template registry**, **Skills Library** sources, agent quotas, automation defaults |
-| **Retention** | Admin | How long executions, logs, health checks, metric points, and soft-deleted records are kept; **Workspace sessions** policy; **Room budgets** (when shared rooms are available) |
+| **Retention** | Admin | How long executions, logs, health checks, metric points, and soft-deleted records are kept; **Database backups** status; **Workspace sessions** policy; **Room budgets** (when shared rooms are available) |
 
-Further tabs appear only when the corresponding capability is enabled on your installation.
+Further tabs appear only when the corresponding capability is enabled on your installation. The active tab is in the URL (`?tab=`), so a reload or a shared link opens the same tab — including one that appears only once your installation's capabilities have loaded.
 
 Retention windows have exactly one validated write path — values are type- and range-checked, the change is audit-logged, and an unusually large deletion is held for explicit approval rather than run silently. See [Monitoring](../operations/monitoring.md).
 

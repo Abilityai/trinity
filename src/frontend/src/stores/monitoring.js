@@ -30,6 +30,10 @@ export const useMonitoringStore = defineStore('monitoring', {
       unknown: 0
     },
     agents: [],
+    // #3452: agent name -> transport-breaker state ({state, failure_count,
+    // cooldown_remaining}), as reported by GET /api/monitoring/status. The
+    // API sends it to admins only and omits it when there is no history.
+    circuitBreakers: {},
 
     // Active alerts
     alerts: [],
@@ -130,6 +134,7 @@ export const useMonitoringStore = defineStore('monitoring', {
         this.lastCheck = response.data.last_check_at
         this.summary = response.data.summary
         this.agents = response.data.agents
+        this.circuitBreakers = response.data.circuit_breakers || {}
       } catch (err) {
         console.error('Failed to fetch monitoring status:', err)
         this.error = err.response?.data?.detail || 'Failed to fetch status'

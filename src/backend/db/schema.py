@@ -100,8 +100,8 @@ TABLES = {
             circuit_breaker_enabled INTEGER DEFAULT 0,
             mcp_exposed INTEGER DEFAULT 0,
             a2a_exposed INTEGER DEFAULT 0,
-            a2a_scope TEXT DEFAULT 'public',
-            a2a_keyless_internal INTEGER DEFAULT 1,
+            a2a_scope TEXT DEFAULT 'public',  -- inert since ent#885; drop under #746
+            a2a_keyless_internal INTEGER DEFAULT 1,  -- inert since ent#885; drop under #746
             operator_resume_enabled INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
@@ -1279,6 +1279,19 @@ TABLES = {
             PRIMARY KEY (agent_name, capability)
         )
     """,
+    # abilityai/trinity-enterprise#662 — the per-skill grant over an edge: caller
+    # X may run library-assigned skill Y on target Z. Without a row a peer may
+    # invoke only Z's DECLARED skills. Both agent columns are CASCADE AgentRefs.
+    "agent_peer_skill_grants": """
+        CREATE TABLE IF NOT EXISTS agent_peer_skill_grants (
+            caller_agent TEXT NOT NULL,
+            target_agent TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            PRIMARY KEY (caller_agent, target_agent, skill_name)
+        )
+    """,
 
     # ent#237: multi-source skills library. A source is one git repo the
     # platform syncs skills from; `skill_sources` replaces the single
@@ -1757,6 +1770,8 @@ TABLES = {
             supersedes_expired TEXT,
             subject TEXT,
             last_seen_at TEXT,
+            replaces TEXT,
+            replaced_by TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,
@@ -2248,6 +2263,7 @@ INDEXES = [
     # Agent skills indexes
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_skill ON agent_skills(skill_name)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_peer_skill_grants_target ON agent_peer_skill_grants(target_agent)",
     # ent#596: "which agents hold capability X" is the grant list's one read.
     "CREATE INDEX IF NOT EXISTS idx_agent_capability_grants_cap ON agent_capability_grants(capability)",
     # ent#237: resolution order for the custom-wins precedence merge.

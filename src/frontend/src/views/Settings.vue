@@ -190,6 +190,20 @@
             </div>
           </div>
 
+          <!-- #3454 — automatic database backups (#2216). The status rides the
+               same GET /api/settings/retention response as the card above, so
+               it takes that response rather than fetching again; "loaded" is
+               "a response has arrived", so a re-fetch after a save does not
+               blank it. -->
+          <div v-if="activeTab === 'retention'" class="mb-6">
+            <BackupStatusPanel
+              :backup="retention?.backup"
+              :has-loaded="retention !== null"
+              :error="retentionError"
+              @retry="loadRetention"
+            />
+          </div>
+
           <!-- ent#184 — Activation funnel (local product events). Capture is
                OSS-core; this operator view is entitlement-gated (`telemetry`).
                The panel fetches the gated enterprise endpoint itself. -->
@@ -1281,6 +1295,11 @@
                paydown of #717/#1030; the section owns its own data loads). -->
           <SubscriptionsPanel v-if="activeTab === 'integrations'" />
 
+          <!-- Calls between Trinity instances (abilityai/trinity-enterprise#862):
+               the AAuth switch + issuer, and the outbound A2A endpoint registry. -->
+          <AAuthPanel v-if="activeTab === 'integrations'" />
+          <A2AEndpointsPanel v-if="activeTab === 'integrations'" />
+
           <!-- Trinity Prompt Section -->
           <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -1450,6 +1469,18 @@ Example:
                     :disabled="addingEmail"
                     @keyup.enter="addEmailToWhitelist"
                   />
+                  <BaseSelect
+                    v-model="newEmailRole"
+                    aria-label="Role on first sign-in"
+                    data-testid="whitelist-role"
+                    :disabled="addingEmail"
+                    class="w-56 shrink-0"
+                  >
+                    <option value="user">{{ WORKSPACE_ONLY_ROLE_LABEL }}</option>
+                    <option value="operator">operator</option>
+                    <option value="creator">creator</option>
+                    <option value="admin">admin</option>
+                  </BaseSelect>
                   <button
                     @click="addEmailToWhitelist"
                     :disabled="!newEmail || addingEmail"
@@ -1462,6 +1493,8 @@ Example:
                     Add Email
                   </button>
                 </div>
+                <InlineError :message="whitelistAddError" data-testid="whitelist-add-error" @dismiss="whitelistAddError = ''" />
+                <p v-if="whitelistNotice" :class="HELP_CLASS" data-testid="whitelist-existing-account">{{ whitelistNotice }}</p>
 
                 <!-- Whitelist Table -->
                 <div class="mt-4 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
@@ -1470,6 +1503,13 @@ Example:
                       <tr>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                           Email
+                        </th>
+                        <th
+                          scope="col"
+                          class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider"
+                          title="The role an account gets the first time it signs in. Change an existing account's role in User Management."
+                        >
+                          Role at first sign-in
                         </th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                           Source
@@ -1484,25 +1524,28 @@ Example:
                     </thead>
                     <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                       <tr v-if="loadingWhitelist">
-                        <td colspan="4" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                        <td colspan="5" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
                           <div class="h-4 w-full rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
                         </td>
                       </tr>
                       <tr v-else-if="emailWhitelist.length === 0">
-                        <td colspan="4" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                        <td colspan="5" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
                           No whitelisted emails. Add one above to get started.
                         </td>
                       </tr>
                       <tr v-else v-for="entry in emailWhitelist" :key="entry.id" class="hover:bg-gray-50 dark:hover:bg-gray-700">
-                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
+                        <td class="px-6 py-4 break-all text-sm font-medium text-gray-900 dark:text-gray-100">
                           {{ entry.email }}
+                        </td>
+                        <td :class="['px-6 py-4 whitespace-nowrap', HELP_CLASS]">
+                          {{ roleLabel(entry.default_role) }}
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                           <span v-if="entry.source === 'agent_sharing'" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
                             🤝 Auto (Agent Sharing)
                           </span>
                           <span v-else class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">
-                            ✋ Manual
+                            {{ whitelistSourceLabel(entry.source) }}
                           </span>
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
@@ -1522,8 +1565,10 @@ Example:
                   </table>
                 </div>
 
-                <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                  💡 Tip: When you share an agent with someone by email, they're automatically added to this whitelist.
+                <p :class="[HELP_CLASS, 'mt-2']">
+                  💡 Sharing an agent adds no one here: people an agent is shared with sign in to the
+                  Workspace with an emailed code. An email added here gets a platform account at the role
+                  you pick — <code>user</code> works in the Workspace only.
                 </p>
               </div>
             </div>
@@ -1545,7 +1590,7 @@ Example:
                 <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-accent-purple-100 text-accent-purple-800 dark:bg-accent-purple-900 dark:text-accent-purple-200">admin — full control</span>
                 <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-action-primary-100 text-action-primary-800 dark:bg-action-primary-900 dark:text-action-primary-200">creator — create &amp; manage agents</span>
                 <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">operator — run existing agents</span>
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">user — public links only</span>
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">{{ WORKSPACE_ONLY_ROLE_LABEL }}</span>
               </div>
 
               <!-- #995 — enterprise: invite users (gated by user_management) -->
@@ -1563,7 +1608,7 @@ Example:
                     class="flex-1 min-w-[200px] px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" />
                   <select v-model="inviteRole" :disabled="umBusy"
                     class="px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
-                    <option value="user">user</option>
+                    <option value="user">{{ WORKSPACE_ONLY_ROLE_LABEL }}</option>
                     <option value="operator">operator</option>
                     <option value="creator">creator</option>
                     <option value="admin">admin</option>
@@ -1574,6 +1619,24 @@ Example:
                     class="px-3 py-2 text-sm rounded-lg text-gray-600 dark:text-gray-300 hover:underline">Cancel</button>
                   <span v-if="inviteMsg" class="text-xs" :class="inviteErr ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-700 dark:text-status-success-400'">{{ inviteMsg }}</span>
                 </form>
+              </div>
+
+              <!-- trinity-enterprise#837 — how many accounts the operator floor keeps in
+                   the Workspace, on one line; the filter turns the table into the list. -->
+              <div
+                :class="['mb-3 flex min-h-[2rem] flex-wrap items-center gap-x-3 gap-y-1', HELP_CLASS]"
+                data-testid="workspace-only-users"
+              >
+                <template v-if="workspaceOnlyCount">
+                <span>
+                  {{ workspaceOnlyCount }} {{ workspaceOnlyCount === 1 ? 'account works' : 'accounts work' }}
+                  in the Workspace only (role <code>user</code>). Raise anyone who operates agents to
+                  <code>operator</code>.
+                </span>
+                <BaseButton variant="ghost" size="sm" type="button" @click="showWorkspaceOnlyUsers = !showWorkspaceOnlyUsers">
+                  {{ showWorkspaceOnlyUsers ? 'Show all users' : 'Show only these' }}
+                </BaseButton>
+                </template>
               </div>
 
               <!-- Users Table — padding trimmed + compact actions so the
@@ -1605,7 +1668,7 @@ Example:
                     <tr v-else-if="usersList.length === 0">
                       <td :colspan="umEntitled ? 5 : 4" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">No users found.</td>
                     </tr>
-                    <tr v-else v-for="u in usersList" :key="u.username" class="hover:bg-gray-50 dark:hover:bg-gray-700">
+                    <tr v-else v-for="u in visibleUsers" :key="u.username" class="hover:bg-gray-50 dark:hover:bg-gray-700">
                       <td class="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
                         {{ u.name || u.username }}
                       </td>
@@ -1622,7 +1685,7 @@ Example:
                           <option value="admin">admin</option>
                           <option value="creator">creator</option>
                           <option value="operator">operator</option>
-                          <option value="user">user</option>
+                          <option value="user">{{ WORKSPACE_ONLY_ROLE_LABEL }}</option>
                         </select>
                         <span v-else class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-accent-purple-100 text-accent-purple-800 dark:bg-accent-purple-900 dark:text-accent-purple-200">
                           {{ u.role }} (you)
@@ -2031,6 +2094,10 @@ Example:
                so this is the only place an orchestrator's skill map is unblocked. -->
           <SkillManagersPanel v-if="activeTab === 'agents'" />
 
+          <!-- ent#662: agent-to-agent calls that used a library skill and are
+               now refused for want of a grant — the honest upgrade notice. -->
+          <PeerSkillDriftNotice v-if="activeTab === 'agents'" />
+
           <!-- Skills Library automation (ent#236). Kept in Settings, NOT folded
                into SkillSourcesPanel: auto-sync and fleet re-inject are
                library-WIDE policy over every source, while the panel is a
@@ -2245,11 +2312,13 @@ import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useRole } from '../composables/useRole'
 import { useBuildInfo } from '../composables/useBuildInfo'
+import { useQueryTab } from '../composables/useQueryTab'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
+import { whitelistSourceLabel } from '../utils/emailWhitelist'
 import { readOpsBool, opsBoolValue } from '../utils/opsSettings'
 import {
   visibleRetentionFields,
@@ -2267,6 +2336,7 @@ import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
 import SkillManagersPanel from '../components/SkillManagersPanel.vue'
+import PeerSkillDriftNotice from '../components/PeerSkillDriftNotice.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
 import OverflowTabs from '../components/OverflowTabs.vue'
@@ -2278,6 +2348,7 @@ import FirstRunRerunPanel from '../components/settings/FirstRunRerunPanel.vue'
 import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
 import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPanel.vue'
+import BackupStatusPanel from '../components/settings/BackupStatusPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
 // #2691: one home for what the Public URL buys, what must be true first, and
 // what saving it re-points — shared with the first-run step so the explanation
@@ -2289,9 +2360,15 @@ import {
 } from '../components/onboarding/hardeningGuide'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
+import AAuthPanel from '../components/settings/AAuthPanel.vue'
+import A2AEndpointsPanel from '../components/settings/A2AEndpointsPanel.vue'
 import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import BaseBadge from '../components/base/BaseBadge.vue'
+import BaseButton from '../components/base/BaseButton.vue'
+import BaseSelect from '../components/base/BaseSelect.vue'
+import { WORKSPACE_ONLY_ROLE_LABEL, existingAccountNotice } from '../utils/workspaceOnly'
+import { HELP_CLASS } from '../components/base/fieldClasses'
 import InlineError from '../components/InlineError.vue'
 
 const router = useRouter()
@@ -2374,29 +2451,26 @@ const validTabIds = computed(() => visibleTabs.value.map(t => t.id))
 const DEFAULT_TAB = computed(() =>
   isAdmin.value ? 'general' : 'mcp-keys'
 )
-function resolveTabFromQuery(q) {
-  return validTabIds.value.includes(q) ? q : DEFAULT_TAB.value
-}
-const activeTab = ref(resolveTabFromQuery(route.query.tab))
-
-// Click handler — push a new history entry so browser back/forward
-// navigates between tabs. Pushes only when the tab actually changes,
-// to avoid duplicate entries on re-clicks.
-function selectTab(id) {
-  if (!validTabIds.value.includes(id)) return
-  if (id === activeTab.value) return
-  activeTab.value = id
-  router.push({ query: { ...route.query, tab: id } })
-}
-
-// Sync activeTab when the URL changes externally (back/forward, deep link).
-watch(() => route.query.tab, (newTab) => {
-  activeTab.value = resolveTabFromQuery(newTab)
+// #3453: the resolution lives in `useQueryTab`. `visibleTabs` filters on
+// entitlements that load after setup, so resolving `?tab=` once here sent a
+// refresh on an entitlement-gated tab to the default and left it there; the
+// composable re-applies the URL's tab when the offered set changes, unless
+// the user has clicked a tab in the meantime. `selectTab` still pushes one
+// history entry per change, and back/forward still drives the tab.
+const { activeTab, selectTab } = useQueryTab({
+  queryTab: () => route.query.tab,
+  validTabIds,
+  defaultTab: DEFAULT_TAB,
+  pushTab: (id) => router.push({ query: { ...route.query, tab: id } }),
 })
 
 // Email whitelist state (Phase 12.4)
 const emailWhitelist = ref([])
 const newEmail = ref('')
+// trinity-enterprise#837: the role the address gets on first sign-in. `user`
+// (Workspace only) stays the default (#314) — the operator UI is a choice.
+const newEmailRole = ref('user')
+const whitelistNotice = ref(null)
 const addingEmail = ref(false)
 const removingEmail = ref(null)
 const loadingWhitelist = ref(false)
@@ -2404,6 +2478,22 @@ const loadingWhitelist = ref(false)
 // User management state (ROLE-001)
 const usersList = ref([])
 const loadingUsers = ref(false)
+
+// trinity-enterprise#837: `user` accounts are Workspace-only. The section names
+// how many there are on one line (a list above the table would push it down by
+// however many there are) and the filter turns the table into that list.
+const showWorkspaceOnlyUsers = ref(false)
+const workspaceOnlyUsers = computed(() => (Array.isArray(usersList.value)
+  ? usersList.value.filter((u) => u.role === 'user')
+  : []))
+const workspaceOnlyCount = computed(() => workspaceOnlyUsers.value.length)
+// The filter has nothing to show once the last Workspace-only account is raised;
+// left on, it would silently apply again when the next one appears.
+watch(workspaceOnlyCount, (n) => { if (!n) showWorkspaceOnlyUsers.value = false })
+const visibleUsers = computed(() => (showWorkspaceOnlyUsers.value && workspaceOnlyCount.value
+  ? workspaceOnlyUsers.value
+  : usersList.value))
+const roleLabel = (role) => (role === 'user' ? WORKSPACE_ONLY_ROLE_LABEL : (role || '—'))
 
 // #995 — enterprise per-user activity audit (gated by user_management).
 // (enterpriseStore is declared near the top — visibleTabs needs it during setup.)
@@ -3502,28 +3592,34 @@ async function loadEmailWhitelist() {
   }
 }
 
+// #3455: why the last add was refused — by the client-side rule or by the
+// server — shown beside the field until dismissed or the next attempt.
+const whitelistAddError = ref('')
+
 async function addEmailToWhitelist() {
   if (!newEmail.value) return
 
   addingEmail.value = true
-  error.value = null
+  whitelistAddError.value = ''
+  whitelistNotice.value = null
 
   try {
-    await axios.post('/api/settings/email-whitelist', {
-      email: newEmail.value,
-      source: 'manual'
-    }, {
-      headers: authStore.authHeader
-    })
+    // The store refuses a value that is not one address before any request.
+    const added = await settingsStore.addWhitelistEmail(newEmail.value, newEmailRole.value)
 
     newEmail.value = ''
+    newEmailRole.value = 'user'
+    whitelistNotice.value = existingAccountNotice(added?.existingAccountRole)
     await loadEmailWhitelist()
     showSuccess.value = true
     setTimeout(() => {
       showSuccess.value = false
     }, 3000)
   } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to add email to whitelist'
+    whitelistAddError.value = apiErrorMessage(
+      e,
+      'Could not add that address. Check it is one email address, for example user@example.com, and try again.'
+    )
   } finally {
     addingEmail.value = false
   }
@@ -3536,9 +3632,8 @@ async function removeEmailFromWhitelist(email) {
   error.value = null
 
   try {
-    await axios.delete(`/api/settings/email-whitelist/${encodeURIComponent(email)}`, {
-      headers: authStore.authHeader
-    })
+    // #3456: addressed by its exact stored value, as one encoded segment.
+    await settingsStore.removeWhitelistEmail(email)
 
     await loadEmailWhitelist()
     showSuccess.value = true

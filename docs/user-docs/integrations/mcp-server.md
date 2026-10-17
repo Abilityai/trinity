@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes 154 tools across 36 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 149 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
+Trinity's MCP server exposes 160 tools across 37 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 155 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -30,7 +30,7 @@ If your admin has enabled inline authentication, you can connect with **no API k
 2. Call `request_login(email)` — a 6-digit code is emailed to you.
 3. Call `verify_login(code)`.
 
-You can then use the exposed playbooks of every agent shared with that email. This mirrors the `/login` flow that Telegram and WhatsApp already use.
+You can then use the exposed skills of every agent shared with that email. This mirrors the `/login` flow that Telegram and WhatsApp already use.
 
 Two things to know: the login binds a **session**, not a key — nothing is written to disk and you are never handed a `trinity_mcp_*` token. And MCP sessions are per-connection, so restarting your client means logging in again.
 
@@ -69,7 +69,8 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `chat.ts` | 4 | `chat_with_agent`, `get_chat_history`, `get_agent_logs`, `fan_out` — chat and parallel dispatch, all gateway-timeout safe |
 | `executions.ts` | 5 | `list_recent_executions`, `get_execution_result`, `get_fan_out_result`, `get_agent_activity_summary`, `search_executions` — execution queries, polling for async tasks and fan-out batches, activity monitoring; `search_executions` needs a matching entitlement and is never offered to agent keys |
 | `schedules.ts` | 8 | Schedule CRUD (including retries, post-run validation and Workspace delivery) and execution history |
-| `skills.ts` | 11 | Skill management and assignment (including skill sets: `list_skill_sets`, `unassign_skill_set`), plus the skill-runner tools `run_skill` and `list_runnable_skills` (enterprise-gated — return `"disabled"` in community builds) |
+| `skills.ts` | 14 | Skill management and assignment (including skill sets: `list_skill_sets`, `unassign_skill_set`), the per-agent skill gate map (`list_skill_gates`, `set_skill_gate`, `clear_skill_gate` — see [Approvals](../automation/approvals.md#gated-skill-approvals)), plus the skill-runner tools `run_skill` and `list_runnable_skills` (enterprise-gated — return `"disabled"` in community builds) |
+| `skill_sources.ts` | 6 | Skills-library source management — `list_skill_sources`, `register_skill_source` (idempotent on the repository URL), `update_skill_source`, `delete_skill_source`, `sync_skill_source`, `sync_skill_library`. Admin only: shown to an admin's user-scoped key and the system agent, never to agent-scoped or connector keys; the backend admits the same callers |
 | `tags.ts` | 5 | Agent tagging |
 | `systems.ts` | 5 | `deploy_system`, `list_systems`, `restart_system`, `get_system_manifest`, `teardown_system` (needs a matching entitlement; previews by default) — see [System Manifest](../collaboration/system-manifest.md) |
 | `subscriptions.ts` | 6 | Subscription management |
@@ -87,7 +88,7 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `decisions.ts` | 2 | `record_decision`, `list_seat_decisions` — record why something was approved, deferred or killed for the seat an agent serves, and read that seat's standing decisions back |
 | `loops.ts` | 3 | `run_agent_loop`, `get_loop_status`, `stop_loop` — sequential bounded task loops |
 | `voip.ts` | 1 | `call_user` — outbound phone call (flag-gated, requires a per-agent voice binding) |
-| `operator_queue.ts` | 5 | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue`, `get_my_ask`, `ask_operator` — read and resolve Operating Room queue items; an agent raises its own asks and reads them back |
+| `operator_queue.ts` | 6 | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue`, `get_my_ask`, `ask_operator`, `withdraw_ask` — read and resolve Operating Room queue items; an agent raises its own asks, reads them back, and withdraws one that no longer needs an answer |
 | `reminders.ts` | 3 | `set_reminder`, `list_reminders`, `cancel_reminder` — durable one-shot deferred self-triggers |
 | `rooms.ts` | 5 | `create_room`, `list_rooms`, `read_room`, `post_to_room`, `close_room` — multi-agent rooms (see [Rooms](../collaboration/rooms.md)) |
 | `canvas.ts` | 5 | `set_canvas`, `patch_canvas`, `get_canvas`, `list_canvases`, `clear_canvas` — the agent's durable render surface in the Workspace (see [Agent Canvas](../agents/agent-canvas.md)) |
@@ -174,8 +175,9 @@ Every refusal is recorded in the audit log as a refusal, not as a successful cal
 | `get_fan_out_result` | Poll a fan-out batch: `running` while any task can still change, then `completed`, `partial` (some succeeded — normal for a best-effort batch) or `failed`, with per-task status and results. Each result carries the `task_id` you gave the task. |
 | `run_agent_loop` | Run the same task against an agent repeatedly (bounded, sequential), with templated messages and an optional stop signal. Poll with `get_loop_status`; stop gracefully with `stop_loop`. An agent-scoped key can loop only on itself or on agents it has permission to call — the same rule as `chat_with_agent` — and the refusal happens before any loop starts. `get_loop_status` and `stop_loop` apply the same rule to the loop's agent. See [Agent Loops](../automation/agent-loops.md). |
 | `list_operator_queue` | Read the Operating Room queue (approvals, questions, alerts). Agent-scoped keys see only the calling agent plus its permitted agents. Complete within `limit`, with `total`, `has_more`, `next_cursor` and `next_offset`; page with `cursor="start"`, then `next_cursor`. Resolve an item with `respond_to_operator_queue`. |
-| `ask_operator` | Raise an approval, question or alert as the calling agent. It is checked at once and answered with a receipt; asking again with the same id returns the first receipt. Read how it ended with `get_my_ask`. |
+| `ask_operator` | Raise an approval, question or alert as the calling agent. An ask addressed to a role several people fill reaches each of them, and the first answer wins. It is checked at once and answered with a receipt; asking again with the same id returns the first receipt. Read how it ended with `get_my_ask`. |
 | `set_reminder` | Schedule a durable one-shot deferred self-trigger — the agent re-invokes itself later with a message it picks. Survives restarts; list with `list_reminders`, cancel with `cancel_reminder`. |
+| `register_skill_source` | Add a skills repository to the library from an MCP client, or re-apply it: an already-registered repository is updated in place (`ref`, `priority`, …) instead of duplicated. Follow with `sync_skill_source`; the sync tools say whether the sync `ran`, was `refused_busy` (another sync is running — retry) or `failed`, and point at `get_skills_library_status` → `last_fleet_reinject` when it started a fleet re-inject. Admin only — use an admin's own user-scoped key; agent keys never see it. The URL must not contain a token; private repositories use the instance's GitHub PAT. |
 | `run_skill` | Run a named skill headlessly (enterprise-gated; returns `"disabled"` in community builds). Discover runnable skills with `list_runnable_skills`. |
 | `create_room` | Open a shared multi-agent room and post/read messages (`post_to_room` / `read_room` / `list_rooms` / `close_room`). Rooms are bounded by message, cost, and time budgets — [Rooms](../collaboration/rooms.md) owns the budget defaults. Against an older backend that does not serve rooms the tools return a `shared_sessions_not_enabled` result. |
 | `set_canvas` | Render the agent's canvas in the Workspace — a block layout the person the agent works with sees beside the conversation. `patch_canvas` updates blocks in place; `get_canvas` / `list_canvases` read it back; `clear_canvas` empties it. See [Agent Canvas](../agents/agent-canvas.md). |

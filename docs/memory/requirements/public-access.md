@@ -95,7 +95,7 @@
 - **Configurable Settings** (via Settings UI or DB):
   - `channel_rate_limit_max` — Messages per window (default: 30)
   - `channel_rate_limit_window` — Window in seconds (default: 60)
-  - `channel_timeout_seconds` — Execution timeout (default: 120)
+  - `channel_timeout_seconds` — no reader since #221 (channel executions use the agent's own timeout); setting it has no effect
   - `channel_allowed_tools` — Comma-separated tool list (default: WebSearch,WebFetch)
 - **API Endpoints (new in 2026-03-26)**:
   - `GET /api/settings/slack/status` — Transport connection state + workspace info
@@ -798,11 +798,12 @@ degrade quietly). #2086 centralizes it.
   selectable Claude model, add one `ModelEntry` to `MODEL_CATALOG` and re-run
   `python scripts/gen_model_catalog.py`.** This is the docs/PR-checklist step the
   AC requires ("docs say where the file is").
-- **FR-7 — Known-deferred display drift**: `routers/ops.py::_format_model_name` and
-  its frontend twin `stores/observability.js::formatModelName` are display
-  prettifiers with no model list (a new id renders via their title-case fallback).
-  They are the same drift class but are **deliberately out of scope** for #2086 —
-  tracked as a follow-up, not silently folded into the centralized catalog.
+- **FR-7 — Known-deferred display drift**: `services/ops_costs_service.py::_format_model_name`
+  (formerly in `routers/ops.py`) is a display prettifier with no model list (a new
+  id renders via its title-case fallback). It is the same drift class but is
+  **deliberately out of scope** for #2086 — tracked as a follow-up, not silently
+  folded into the centralized catalog. Its former frontend twin,
+  `stores/observability.js::formatModelName`, was removed with the store in #3434.
 
 ### 48.1 Voice Replies v2 — Voice as a Per-Message Capability (trinity-enterprise#117)
 
@@ -1065,12 +1066,37 @@ private module; this section is the edition-agnostic surface it needs.
   creator), where it stands (tasks by status, and what needs attention, each
   opening Tasks), the declared agent metrics a member picked (value, a small
   trend, and the platform's one stale verdict), and **Needs you**: the
-  viewer's own open asks on the project, answered in place with the Inbox's
-  component (`PortalAsks` narrowed by `askIds` — it can only narrow the
-  viewer's own list), with everyone else's as a count. The Projects list shows
+  viewer's own open asks on the project as Inbox-style list rows (agent,
+  when, one-line title — never the ask's body, #3574), each answered in place
+  behind **Answer** with the Inbox's component (`PortalAsks` narrowed by
+  `askIds` — it can only narrow the viewer's own list) or opened selected in
+  the Inbox, with everyone else's as a count; the hub's cards size to their
+  own content, never to a neighbour's. The Projects list shows
   health and an attention count per row, and an **I steward** tab lists what
   needs the steward across their projects. Guests see none of it. An ask an
   agent raises over MCP records the raising turn from the same
   platform-supplied `X-Trinity-Execution-Id` (only when it is that agent's own
   execution, winning over an agent-written `context.execution_id`), which is
   how an ask raised in a project's chat is found on the project.
+- **FR-8 — the page's information design (#3692, #3694,
+  trinity-enterprise#896)**: the goal, task objectives and log entry bodies
+  are agent markdown and render through the Workspace's one sanitized
+  renderer, never printed raw. The Overview is one layout with a fixed column
+  rhythm — a main stack and a side stack whose widths hold from top to bottom,
+  cards stacking within their column so a short card leaves no gap beside a
+  tall neighbour, and an expanded ask resizing only its own column. It leads
+  with **Continue**: my newest linked chat with an agent on the project, or
+  **Start with** the first agent I can use, the other usable agents one click
+  away; with no linked chat the empty state says what follows ("Start with
+  <agent>, and it will record what it does here"); with no agent, add one in
+  Members & access. One dismissable line, below Continue, says how a project moves (linked
+  chats build it up, agents record outcomes in the Log, the steward checks on
+  it). A **Steward** card replaces the header label: for an agent steward,
+  health, the last sweep (its last digest read, stamped by the private module),
+  and its schedule said honestly — no sweep scheduled / next run (when the
+  viewer's roster carries the agent) / scheduled without a time / unreadable —
+  with a line saying the platform does not run it; for a person steward,
+  health and what waits on them (tasks to verify, stuck tasks) and, for the
+  steward themself, the way to **I steward**. The Tasks tab states the
+  verification rule where it applies, and a pending-verification row carries
+  **Confirm** for contributors on a live project.

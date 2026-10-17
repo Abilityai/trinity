@@ -230,16 +230,39 @@ async def _fetch_retained_result(get, agent_name: str, execution_id: str) -> tup
     return _classify_retained_response(response)
 
 
+def _retained_at(record: Dict) -> Optional[datetime]:
+    """The instant the agent retained the record — its `retained_at`, ISO on
+    the wire (`agent_server/routers/chat.py` remaps the on-disk epoch float) —
+    as an aware UTC datetime; None when absent, not a string, or unparseable.
+    ONE parser for the claim grace AND the terminal timestamp (#3589), so the
+    two can never disagree on Z / +00:00 / naive."""
+    raw = record.get("retained_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return parse_iso_timestamp(raw)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _retained_age_seconds(record: Dict) -> float:
     """Seconds since the agent retained the record; +inf when unreadable, so a
     record with no timestamp is claimable (it cannot be a live consumer's)."""
-    raw = record.get("retained_at")
-    if not raw:
+    retained_at = _retained_at(record)
+    if retained_at is None:
         return float("inf")
-    try:
-        return (utc_now() - parse_iso_timestamp(raw)).total_seconds()
-    except Exception:  # noqa: BLE001
-        return float("inf")
+    return (utc_now() - retained_at).total_seconds()
+
+
+def _int4_or_none(value) -> Optional[int]:
+    """`execution_time_ms` as the envelope contract bounds it (#2434: int4,
+    ≥ 0, `bool` excluded) or None. Checked BEFORE the pydantic constructor: a
+    value outside the contract would raise inside the claim, which maps to an
+    `error` verdict and withholds a FINISHED turn every cycle until the
+    120-minute sweep fails it."""
+    if type(value) is not int or value < 0 or value > 2**31 - 1:
+        return None
+    return value
 
 
 async def _claim_retained_result(
@@ -282,12 +305,18 @@ async def _claim_retained_result(
             get_task_execution_service,
         )
 
-        payload = ExecutionResultEnvelope(**{
-            k: record.get(k) for k in (
+        payload = ExecutionResultEnvelope(
+            **{k: record.get(k) for k in (
                 "status", "response", "error", "error_code", "terminal_reason",
-                "metadata", "execution_log", "session_id", "execution_time_ms",
-            )
-        })
+                "metadata", "execution_log", "session_id",
+            )},
+            execution_time_ms=_int4_or_none(record.get("execution_time_ms")),
+            # #3589: the agent's finish time is the instant the row AND the
+            # activity record — this write runs ≥ the claim grace plus up to
+            # one cleanup cycle after it, so "now" is not when the turn ended.
+            # Unreadable → None → the writers stamp now (as every other caller).
+            completed_at=_retained_at(record),
+        )
         envelope = terminal_from_callback_payload(payload, execution_id)
         if envelope.status == TaskExecutionStatus.SUCCESS:
             envelope.response = (
@@ -316,6 +345,32 @@ async def _claim_retained_result(
         # lost its CAS returns unchanged — the counter below is observability,
         # and the row is correct either way.)
         return "lost"
+    # #3588: apply_result closed only the single dispatch activity it was
+    # handed; the caller-side collaboration / self-task companions (which share
+    # related_execution_id, possibly with NO backlog_metadata — a direct-dispatch
+    # /task hop) stayed `started` until the 120-minute sweep fabricated their
+    # duration. Close them from the PERSISTED row — a failure-style apply_result
+    # that lost its CAS reaches this line looking exactly like a winner, and the
+    # row-derived close is what keeps that case honest (the companions take the
+    # standing terminal, e.g. the cancel's CANCELLED, never the lost envelope's
+    # FAILED). Fail-open: a close failure never flips a claimed verdict.
+    try:
+        from services.activity_service import activity_service
+
+        companions_closed = await activity_service.close_companion_activities(
+            execution_id, details_extra={"recovered_by": "watchdog_claim"}
+        )
+        if companions_closed:
+            if report is not None:
+                report.activities_closed_on_recovery += companions_closed
+            if stats is not None:
+                stats["activities_closed"] = (
+                    stats.get("activities_closed", 0) + companions_closed
+                )
+    except Exception as e:  # noqa: BLE001 — the claim itself already stands
+        logger.warning(
+            f"[Watchdog] companion-activity close failed for {execution_id}: {e}"
+        )
     if report is not None:
         report.results_recovered += 1
     if stats is not None:
@@ -330,7 +385,8 @@ async def _claim_retained_result(
             pass
     logger.info(
         f"[Watchdog] result_recovered: execution {execution_id} on agent "
-        f"'{agent_name}' — status={result.status}, retained {int(age)}s ago"
+        f"'{agent_name}' — status={result.status}, retained "
+        f"{'?' if age == float('inf') else int(age)}s ago"
     )
     return "claimed"
 

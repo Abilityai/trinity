@@ -282,7 +282,7 @@
           v-model="message"
           :disabled="chatLoading"
           :public-token="token"
-          placeholder="Type your message or / for playbooks..."
+          placeholder="Type your message or / for skills..."
           :cancellable="canCancelTurn"
           :cancelling="cancelling"
           @submit="sendMessage"
@@ -320,6 +320,7 @@ const verifyError = ref(null)
 const sessionToken = ref(localStorage.getItem(`public_session_${token.value}`) || '')
 const isVerified = computed(() => !linkInfo.value?.require_email || !!sessionToken.value)
 const SESSION_EXPIRED_NOTICE = 'Session expired. Please verify your email again.'
+const TURN_FAILED_NOTICE = "The agent couldn't respond right now. Your message is back in the box below — send it again to retry."
 
 // Chat session persistence (for anonymous links)
 const chatSessionId = ref(localStorage.getItem(`public_chat_session_id_${token.value}`) || '')
@@ -868,7 +869,12 @@ const sendMessage = async (userMessage, files = []) => {
           content: execution.response
         })
       } else if (execution.status === 'failed') {
-        chatError.value = execution.error || 'Failed to process your request. Please try again.'
+        // #3461 — never the row's own `error`: it is the operator's diagnosis
+        // (exit code, where to fix the credential), and this page is read by
+        // anonymous visitors. One plain line, and their words back in the
+        // input so sending again is the retry.
+        chatError.value = TURN_FAILED_NOTICE
+        message.value = restoreDraft(userMessage, message.value)
       } else if (execution.status === 'cancelled') {
         chatError.value = 'Request was cancelled.'
       } else if (execution.status === 'skipped' && execution.gate === 'held' && execution.error) {

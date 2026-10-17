@@ -148,7 +148,6 @@ class TestCreateExecution:
             "source_channel_chat_id": "C1", "source_channel_thread": "T1",
             "source_channel_agent": "binder", "source_channel_client": "client@example.com",
             "open_canvas_id": "canvas-1", "chain_depth": 2,
-            "source_host": "100.70.1.2",
         }
         # Guard the guard: this test covers every field the object has.
         assert set(values) == {f.name for f in dataclasses.fields(TaskExecutionFields)}
@@ -194,18 +193,27 @@ class TestUpdateExecutionStatus:
     def test_every_result_field_is_persisted(self, schedule_ops):
         from db.write_params import ExecutionResult
         eid = self._fresh(schedule_ops)
+        from datetime import datetime, timezone
+        from utils.helpers import to_utc_iso
         values = {
             "response": "done", "error": None, "context_used": 1200, "context_max": 200000,
             "cost": 0.42, "tool_calls": "[]", "execution_log": "[{}]",
             "claude_session_id": "sess-1", "compact_metadata": "{}", "retry_count": 1,
             "turn_integrity": "complete",
+            # #3589: a datetime in, the Z-suffixed ISO string out (to_utc_iso).
+            # In-window (after the row's own started_at): a past instant below
+            # it is floored since trinity-enterprise#882 — floor behaviour is
+            # pinned in test_882_completed_at_floor.py, persistence here.
+            "completed_at": datetime.now(timezone.utc),
         }
         assert set(values) == {f.name for f in dataclasses.fields(ExecutionResult)}
         assert schedule_ops.update_execution_status(eid, "success", ExecutionResult(**values)) is True
         row = _row(eid)
+        completed_at = values.pop("completed_at")
         for column, expected in values.items():
             assert row[column] == expected, column
-        assert row["status"] == "success" and row["completed_at"]
+        assert row["status"] == "success"
+        assert row["completed_at"] == to_utc_iso(completed_at)
 
     def test_none_retry_count_and_turn_integrity_leave_the_columns_alone(self, schedule_ops):
         from db.write_params import ExecutionResult

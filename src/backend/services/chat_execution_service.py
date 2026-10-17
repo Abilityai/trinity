@@ -55,9 +55,15 @@ from services.model_context import DEFAULT_CONTEXT_WINDOW
 from services.execution_envelope import TaskExecutionErrorCode
 from services.task_execution_service import (
     _compute_context_used,
+    _SWITCH_RETRY_DELAY_S,
+    _SWITCH_RETRY_MIN_REMAINING_S,
     agent_post_with_retry,
     get_task_execution_service,
     dispatch_breaker_active,
+)
+from services.execution_classification import (
+    _extract_agent_error as _extract_switch_error,
+    classify_switch_failure,
 )
 from services.capacity_manager import (
     CapacityFull,
@@ -86,6 +92,7 @@ from services import channel_completion_report
 from services import dispatch_admission_service
 from services import chat_persistence_service
 from services import skill_gate_service
+from services.skill_gate_errors import SkillApprovalRequired
 from services import session_turn_service
 from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
 from services.platform_prompt_service import (
@@ -649,6 +656,12 @@ def _parse_agent_http_error(e, name: str):
 # breaks, and a dict-bodied path (the auto-switch shapes) carries it the same
 # way.
 ERROR_CODE_HEADER = "X-Trinity-Error-Code"
+# #3244: the execution row a post-dispatch failure was written to, on the same
+# additive terms. Without it the MCP server could not tell the 429 raised after
+# a turn ran from the admission 429 that dispatched nothing, and answered both
+# "agent busy, retry". The request header of the same name is the caller's own
+# turn (#2392); on a response it is the turn the response is about.
+EXECUTION_ID_HEADER = "X-Trinity-Execution-Id"
 
 
 def _error_code_headers(code, extra: Optional[dict] = None) -> Optional[dict]:
@@ -688,24 +701,92 @@ def _classify_agent_http_failure(
     return TaskExecutionErrorCode.AGENT_ERROR
 
 
-async def _apply_sub003_autoswitch(name: str, error_msg: str, agent_status_code):
+def _format_reset_instant(resets_at: Optional[str]) -> str:
+    """`" Its quota resets at HH:MM UTC on D Mon."` or `""` (#2638 AC#4 copy)."""
+    if not resets_at:
+        return ""
+    try:
+        from utils.helpers import parse_iso_timestamp
+        return " Its quota resets at " + parse_iso_timestamp(resets_at).strftime(
+            "%H:%M UTC on %-d %b"
+        ) + "."
+    except Exception:  # noqa: BLE001 — a nicer sentence is never worth a 500
+        return ""
+
+
+async def _apply_sub003_autoswitch(
+    name: str,
+    error_msg: str,
+    agent_status_code,
+    execution_id: Optional[str] = None,
+    *,
+    walk=None,
+):
     """SUB-003 (#441): auto-switch on rate-limit (429) OR auth-class failures.
     ALWAYS raises: ChatDispatchError (switch/plain) OR the HTTPException that
     handle_subscription_failure itself raised (propagate-unchanged — the original
-    ``except HTTPException: raise`` semantics; preserved by the char tests)."""
+    ``except HTTPException: raise`` semantics; preserved by the char tests).
+
+    ``execution_id`` (#3244): the row this failure was written to, named on
+    ``X-Trinity-Execution-Id`` beside the code.
+
+    ``walk`` (#3470): when `run_chat_turn` already WALKED the pool for this
+    turn, nothing is switched here — the walk did the switching and re-issuing.
+    This then only words the final answer: the pool is exhausted (usage-limit
+    copy naming the earliest known reset, the trail attached), or the turn ran
+    out of time to re-issue (the last-resort "please retry", AC#5). A caller
+    without a walk gets the pre-#3470 behaviour unchanged."""
     from services.subscription_auto_switch import (
         handle_subscription_failure,
         is_auth_failure,
     )
 
     code = _classify_agent_http_failure(agent_status_code, error_msg)
-    code_headers = _error_code_headers(code)
+    code_headers = _error_code_headers(
+        code, {EXECUTION_ID_HEADER: execution_id} if execution_id else None
+    )
 
     # #3012: no subscription can fix a model the CLI refuses — switching would
     # walk the agent through every seat onto the platform API key. Surface the
     # runtime's own sentence as a 400, the status the agent itself answers.
     if code.value == TaskExecutionErrorCode.MODEL_UNSUPPORTED.value:
         raise ChatDispatchError(400, error_msg, headers=code_headers)
+
+    # Only when the WALK ended the turn: a later, unrelated failure (a plain 500
+    # after a served switch) keeps the generic wording below, and the walk's
+    # `started` flag alone would mis-word it as an exhausted pool.
+    if walk is not None and getattr(walk, "stop_reason", None) in ("exhausted", "budget", "cap", "legacy_restart", "disabled"):
+        from services.subscription_auto_switch import earliest_known_reset, walk_reset_candidates
+
+        summary = walk.summary() or {}
+        status = 429 if agent_status_code == 429 else 503
+        if summary.get("budget_exhausted"):
+            raise ChatDispatchError(
+                status,
+                {
+                    "error": error_msg,
+                    "auto_switch": summary,
+                    "message": (
+                        "The agent hit its usage limit and the turn ran out of time to "
+                        "retry on another subscription. Please retry."
+                    ),
+                    "retry_after": 15,
+                },
+                headers=code_headers,
+            )
+        when = _format_reset_instant(earliest_known_reset(walk_reset_candidates(walk)))
+        raise ChatDispatchError(
+            status,
+            {
+                "error": error_msg,
+                "auto_switch": summary,
+                "message": (
+                    "The agent has reached its usage limit and no other subscription "
+                    f"can serve it right now.{when}{walk.trail_text()}"
+                ),
+            },
+            headers=code_headers,
+        )
 
     if agent_status_code == 429:
         try:
@@ -777,10 +858,22 @@ async def _finalize_http_failure(
     task_execution_id,
     chat_activity_id,
     collaboration_activity_id,
+    walk=None,
 ):
     """httpx failure finalizer: #1332 read-before-close mirroring + #678 salvage
     onto the FAILED row + SUB-003 auto-switch. Always raises."""
     error_msg, agent_status_code, partial_metadata = _parse_agent_http_error(e, name)
+    # #3470: the walk's trail for the FAILED row and the activity (which
+    # credentials were tried). Kept OUT of `error_msg` itself: the classifier
+    # and the client-facing wording below read the agent's own text, and the
+    # walk branch adds the trail to its message once on its own.
+    walk_trail = ""
+    if walk is not None and getattr(walk, "attempts", None):
+        try:
+            walk_trail = walk.trail_text()
+        except Exception:  # noqa: BLE001
+            walk_trail = ""
+    row_error = f"{error_msg}{walk_trail}"
     logging.getLogger("trinity.errors").error(
         f"Failed to communicate with agent {name}: {error_msg}"
     )
@@ -793,7 +886,7 @@ async def _finalize_http_failure(
         if existing
         else ActivityState.FAILED
     )
-    http_close_error = error_msg if http_close_state == ActivityState.FAILED else None
+    http_close_error = row_error if http_close_state == ActivityState.FAILED else None
 
     await activity_service.complete_activity(
         activity_id=chat_activity_id,
@@ -820,7 +913,7 @@ async def _finalize_http_failure(
             execution_id=task_execution_id,
             status=TaskExecutionStatus.FAILED,
             result=ExecutionResult(
-                error=error_msg,
+                error=row_error,
                 cost=salvage_cost,
                 context_used=salvage_context,
                 context_max=salvage_context_max,
@@ -840,7 +933,147 @@ async def _finalize_http_failure(
             error=http_close_error,
         )
 
-    await _apply_sub003_autoswitch(name, error_msg, agent_status_code)
+    await _apply_sub003_autoswitch(
+        name, error_msg, agent_status_code, execution_id=task_execution_id, walk=walk
+    )
+
+
+async def _walk_chat_dispatch(
+    *,
+    name: str,
+    payload: dict,
+    chat_timeout: int,
+    task_execution_id,
+    triggered_by: str,
+):
+    """Dispatch `/api/chat`, walking the subscription pool on a refusal (#3470).
+
+    The `/chat` twin of `task_execution_service._call_agent_with_retries`'s
+    walk: a 429/auth response is intercepted BEFORE `raise_for_status`, the
+    walk names the next credential, and the same message is re-issued with
+    it as a per-spawn `auth_override` — bounded by the chat's own HTTP budget.
+    Returns ``(response, walk, last_failure_kind)``; the caller commits a
+    served trial and raises the final refusal through `_finalize_http_failure`.
+    """
+    from services.subscription_auto_switch import (
+        advance_subscription_walk,
+        apply_rung_legacy,
+        earliest_known_reset,
+        note_override_honoured,
+        notify_pool_exhausted,
+        start_subscription_walk,
+        walk_reset_candidates,
+    )
+
+    try:
+        walk = start_subscription_walk(name, triggered_by)
+    except Exception as walk_err:  # noqa: BLE001 — never fail a turn from here
+        logger.error(f"[#3470] could not start the subscription walk for '{name}': {walk_err}")
+        walk = None
+
+    http_budget = float(chat_timeout) + 10.0  # buffer for HTTP overhead
+    turn_started = datetime.utcnow()
+    last_kind: Optional[str] = None
+    pending_rung = None
+    first_attempt = True
+    while True:
+        attempt_payload = dict(payload)
+        attempt_payload.pop("auth_override", None)
+        if walk is not None and walk.active is not None:
+            override_body = walk.active.payload()
+            if override_body:
+                attempt_payload["auth_override"] = override_body
+        if first_attempt:
+            # The first attempt gets the chat's whole budget, as it always did
+            # (`chat_timeout + 10` — the buffer for HTTP overhead); only a
+            # re-issue is cut to what the turn has left.
+            attempt_timeout = chat_timeout + 10
+            first_attempt = False
+        else:
+            elapsed = (datetime.utcnow() - turn_started).total_seconds()
+            attempt_timeout = max(1.0, http_budget - elapsed)
+        response = await agent_post_with_retry(
+            name,
+            "/api/chat",
+            attempt_payload,
+            max_retries=3,
+            retry_delay=1.0,
+            timeout=attempt_timeout,
+            execution_id=task_execution_id,  # #2433: in-flight proof-of-life
+        )
+        # A response without an integer status (a characterization harness's
+        # bare MagicMock, a transport shape) is not something the walk can
+        # classify — hand it back exactly as the pre-#3470 code would have.
+        if walk is None or not isinstance(getattr(response, "status_code", None), int):
+            return response, walk, last_kind
+        kind = classify_switch_failure(response)
+        if kind is None:
+            return response, walk, last_kind
+        last_kind = kind
+        error_msg, _, _ = _extract_switch_error(response, f"HTTP {response.status_code} from agent")
+        honoured = note_override_honoured(walk, response.headers)
+        if not honoured and pending_rung is not None:
+            # Old image: the override was ignored, so the attempt ran on the
+            # baseline (already recorded). Apply the rung the #792 way and
+            # re-issue once more — under the same budget floor as a walked rung.
+            remaining = http_budget - (datetime.utcnow() - turn_started).total_seconds() - _SWITCH_RETRY_DELAY_S
+            if remaining <= _SWITCH_RETRY_MIN_REMAINING_S:
+                walk.stop_reason = "budget"
+                return response, walk, last_kind
+            applied = await apply_rung_legacy(walk, pending_rung, failure_kind=kind)
+            pending_rung = None
+            if not applied:
+                walk.stop_reason = walk.stop_reason or "exhausted"
+                return response, walk, last_kind
+        else:
+            pending_rung = None
+            remaining = http_budget - (datetime.utcnow() - turn_started).total_seconds() - _SWITCH_RETRY_DELAY_S
+            rung = await advance_subscription_walk(
+                walk, failure_kind=kind, error_message=error_msg,
+                budget_ok=remaining > _SWITCH_RETRY_MIN_REMAINING_S,
+            )
+            if rung is None:
+                if walk.stop_reason != "budget":
+                    try:
+                        notify_pool_exhausted(walk, earliest_known_reset(walk_reset_candidates(walk)))
+                    except Exception as notify_err:  # noqa: BLE001
+                        logger.debug(f"[#3470] exhausted notice failed: {notify_err}")
+                return response, walk, last_kind
+            if rung.kind != "concurrent_switch" and walk.override_supported is False:
+                applied = await apply_rung_legacy(walk, rung, failure_kind=kind)
+                if not applied:
+                    walk.stop_reason = walk.stop_reason or "exhausted"
+                    return response, walk, last_kind
+            elif rung.kind != "concurrent_switch":
+                pending_rung = rung
+        logger.warning(
+            f"[#3470] SUB-003 walk on '{name}' (/chat, {kind}) — re-issue {len(walk.attempts)}"
+        )
+        await asyncio.sleep(_SWITCH_RETRY_DELAY_S)
+
+
+async def _commit_chat_walk(name: str, walk, last_kind: Optional[str], response, task_execution_id) -> None:
+    """A served trial becomes the assignment (once) and re-points the row's
+    SUB-004 attribution; a key-served turn is not a subscription spend."""
+    status = getattr(response, "status_code", None)
+    if walk is None or not isinstance(status, int) or status >= 400:
+        return
+    from services.subscription_auto_switch import commit_subscription_walk, note_override_honoured
+
+    note_override_honoured(walk, response.headers)
+    try:
+        await commit_subscription_walk(walk, failure_kind=last_kind or "rate_limit")
+    except Exception as commit_err:  # noqa: BLE001
+        logger.error(f"[#3470] commit failed for '{name}': {commit_err}")
+    try:
+        served_on = walk.ran_on()
+        if task_execution_id and (
+            served_on[0] == "api_key"
+            or (served_on[1] and walk.committed and walk.committed.get("switched"))
+        ):
+            db.set_execution_subscription(task_execution_id, served_on[1])
+    except Exception as attr_err:  # noqa: BLE001
+        logger.warning(f"[#3470] usage attribution update failed: {attr_err}")
 
 
 async def run_chat_turn(
@@ -895,6 +1128,7 @@ async def run_chat_turn(
             isolated_session=isolated_session,
         )
     idem_done = False
+    walk = None
     try:
         payload = build_chat_payload(
             name=name,
@@ -906,15 +1140,16 @@ async def run_chat_turn(
             isolated_session=isolated_session,
         )
         start_time = datetime.utcnow()
-        response = await agent_post_with_retry(
-            name,
-            "/api/chat",
-            payload,
-            max_retries=3,
-            retry_delay=1.0,
-            timeout=chat_timeout + 10,  # Add buffer for HTTP overhead
-            execution_id=task_execution_id,  # #2433: in-flight proof-of-life
+        # #3470: the dispatch walks the subscription pool on a refusal instead
+        # of switching once and asking the caller to retry.
+        response, walk, last_kind = await _walk_chat_dispatch(
+            name=name,
+            payload=payload,
+            chat_timeout=chat_timeout,
+            task_execution_id=task_execution_id,
+            triggered_by=triggered_by,
         )
+        await _commit_chat_walk(name, walk, last_kind, response, task_execution_id)
         response.raise_for_status()
 
         response_data = await _finalize_chat_success(
@@ -948,6 +1183,7 @@ async def run_chat_turn(
             task_execution_id=task_execution_id,
             chat_activity_id=chat_activity_id,
             collaboration_activity_id=collaboration_activity_id,
+            walk=walk,
         )
     finally:
         # CAPACITY-CONSOLIDATE (#428): single release covers both the SlotService
@@ -2604,36 +2840,47 @@ async def dispatch_parallel_task(
         if part and part not in gate_parts:
             gate_parts.append(part)
     gate_text = "\n".join(gate_parts)
-    gate = await skill_gate_service.enforce(
-        name,
-        request_text=gate_text,
-        context_text=skill_gate_service.requester_context_text(
-            mcp_key_name=getattr(current_user, "mcp_key_name", None),
-            source_email=current_user.email or current_user.username),
-        requester=skill_gate_service.requester_from_principal(
-            current_user, source_agent=x_source_agent,
-            # The platform-injected turn (#2392) first; the model-typed
-            # parent_execution_id only as a fallback. Either is kept only when
-            # it is one of the requesting agent's own executions.
-            execution_id=x_trinity_execution_id or getattr(request, "parent_execution_id", None)),
-        triggered_by=derivation.triggered_by,
-        occurrence_key=idempotency_key,
-        dispatch={
-            **skill_gate_service.frozen_dispatch(
-                triggered_by=derivation.triggered_by,
-                model=request.model,
-                timeout_seconds=request.timeout_seconds,
-                allowed_tools=request.allowed_tools,
-                source_user_id=current_user.id,
-                source_user_email=current_user.email or current_user.username,
-                source_agent_name=x_source_agent,
-                source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
-                source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
-                chain_depth=chain_depth,
-            ),
-            **skill_gate_service.frozen_replay(request.message, request.system_prompt),
-        },
-    )
+    try:
+        gate = await skill_gate_service.enforce(
+            name,
+            request_text=gate_text,
+            context_text=skill_gate_service.requester_context_text(
+                mcp_key_name=getattr(current_user, "mcp_key_name", None),
+                source_email=current_user.email or current_user.username),
+            requester=skill_gate_service.requester_from_principal(
+                current_user, source_agent=x_source_agent,
+                # The platform-injected turn (#2392) first; the model-typed
+                # parent_execution_id only as a fallback. Either is kept only when
+                # it is one of the requesting agent's own executions.
+                execution_id=x_trinity_execution_id or getattr(request, "parent_execution_id", None)),
+            triggered_by=derivation.triggered_by,
+            occurrence_key=idempotency_key,
+            dispatch={
+                **skill_gate_service.frozen_dispatch(
+                    triggered_by=derivation.triggered_by,
+                    model=request.model,
+                    timeout_seconds=request.timeout_seconds,
+                    allowed_tools=request.allowed_tools,
+                    source_user_id=current_user.id,
+                    source_user_email=current_user.email or current_user.username,
+                    source_agent_name=x_source_agent,
+                    source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+                    source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+                    chain_depth=chain_depth,
+                ),
+                **skill_gate_service.frozen_replay(request.message, request.system_prompt),
+            },
+        )
+    except SkillApprovalRequired as held:
+        # trinity#3526: nothing ran, so nothing below saves this turn — keep the
+        # request and its notice in the sender's conversation here. A person's
+        # own request only: an agent key resolves to its owner's id.
+        from dependencies import is_person_principal
+        if request.save_to_session and is_person_principal(current_user):
+            held.chat_session_id = chat_persistence_service.persist_held_request(
+                name, request, held, current_user.id,
+                current_user.email or current_user.username)
+        raise
 
     # RELIABILITY-006 (#525): idempotency begin/replay (shared with /chat, RD2).
     idem, replay = dispatch_admission_service.begin_task_idempotency(
@@ -2722,6 +2969,46 @@ async def dispatch_parallel_task(
 # ===========================================================================
 
 
+async def _record_cancel_event(name, current_user, task_execution_id, details):
+    """#3588: record the ``execution_cancelled`` EVENT — a point in time, not a
+    span — by creating the activity and completing it in the same breath.
+    ``track_activity`` hard-codes STARTED, so before this the row sat ``started``
+    until the 120-minute sweep fabricated its duration (the #1804 class).
+
+    Fail-open, and called LAST at every cancel site (after the terminal CAS and
+    the real activity closes): the cancel has already won by the time this runs,
+    and an activity-write error must neither 500 the terminate nor skip a close.
+
+    NOT a terminal-activity close: the dispatch/companion closes are owned by
+    ``close_execution_activity`` — this writes the event row only, so the #1804
+    parity guard must never read its ``complete_activity`` as a site's
+    compliance close.
+
+    ent#155: ``user_id`` is legitimately NULL for a public-link visitor and a
+    Workspace client — ``details.actor_kind`` (in ``details``) says who acted.
+    """
+    try:
+        activity_id = await activity_service.track_activity(
+            agent_name=name,
+            activity_type=ActivityType.EXECUTION_CANCELLED,
+            user_id=getattr(current_user, "id", None),
+            triggered_by="user",
+            related_execution_id=task_execution_id,
+            details=details,
+        )
+        # COMPLETED, not CANCELLED: the row records the cancel EVENT, which
+        # succeeded; the work's own state lives on the dispatch activity
+        # (closed CANCELLED via the #1332 mapping). No completed_at override —
+        # this runs inline at the terminate instant, so "now" IS the instant.
+        await activity_service.complete_activity(
+            activity_id=activity_id, status=ActivityState.COMPLETED
+        )
+    except Exception as e:
+        logger.warning(
+            f"[Terminate] cancel-event record failed for {task_execution_id}: {e}"
+        )
+
+
 async def _cancel_queued_if_queued(
     name, execution_id, task_execution_id, current_user, actor_kind="operator"
 ):
@@ -2746,12 +3033,21 @@ async def _cancel_queued_if_queued(
             task_execution_id, reason="Cancelled by user while queued"
         )
         if cancelled:
-            await activity_service.track_activity(
-                agent_name=name,
-                activity_type=ActivityType.EXECUTION_CANCELLED,
-                user_id=getattr(current_user, "id", None),
-                triggered_by="user",
-                related_execution_id=task_execution_id,
+            # #3588: `cancel_queued_execution` wins a terminal CAS, so this
+            # site owes the #1804 owner close like every other terminal
+            # writer. A queued row has NO dispatch activity (CHAT_START opens
+            # at dispatch, which it never reached) — the lookup finds nothing,
+            # harmlessly — but its #2329 metadata companions (the caller's
+            # collaboration row, a self-task row) leaked `started` here.
+            await activity_service.close_execution_activity(
+                task_execution_id,
+                TaskExecutionStatus.CANCELLED,
+                error="Cancelled by user while queued",
+            )
+            await _record_cancel_event(
+                name,
+                current_user,
+                task_execution_id,
                 details={
                     "execution_id": execution_id,
                     "task_execution_id": task_execution_id,
@@ -2884,12 +3180,14 @@ async def _proxy_terminate_and_finalize(
                     )
                 await _close_dispatch_activity_cancelled(task_execution_id, cancel_won)
 
-        await activity_service.track_activity(
-            agent_name=name,
-            activity_type=ActivityType.EXECUTION_CANCELLED,
-            user_id=getattr(current_user, "id", None),
-            triggered_by="user",
-            related_execution_id=task_execution_id,
+        # #3588: recorded AFTER the CAS + dispatch close, and completed in the
+        # same breath. Deliberately also on `already_finished` (nothing was
+        # cancelled, the agent's terminal stands): the row records the cancel
+        # ATTEMPT, labelled by `details.status`.
+        await _record_cancel_event(
+            name,
+            current_user,
+            task_execution_id,
             details={
                 "execution_id": execution_id,
                 "task_execution_id": task_execution_id,
@@ -3064,12 +3362,11 @@ async def _cancel_inflight_if_parked(
         )
         await _close_dispatch_activity_cancelled(task_execution_id, cancel_won)
 
-    await activity_service.track_activity(
-        agent_name=name,
-        activity_type=ActivityType.EXECUTION_CANCELLED,
-        user_id=getattr(current_user, "id", None),
-        triggered_by="user",
-        related_execution_id=task_execution_id,
+    # #3588: after the CAS + dispatch close; created and completed together.
+    await _record_cancel_event(
+        name,
+        current_user,
+        task_execution_id,
         details={
             "execution_id": execution_id,
             "task_execution_id": task_execution_id,

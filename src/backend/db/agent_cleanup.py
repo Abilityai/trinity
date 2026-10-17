@@ -213,6 +213,8 @@ AGENT_REFS: List[AgentRef] = [
     # keeps its historical name on the rows it wrote; the parity-test regex
     # does not match the column, which is that same distinction.
     AgentRef("agent_capability_grants",      "agent_name",        Policy.CASCADE),  # ent#596
+    AgentRef("agent_peer_skill_grants",      "caller_agent",      Policy.CASCADE),  # ent#662
+    AgentRef("agent_peer_skill_grants",      "target_agent",      Policy.CASCADE),  # ent#662
     AgentRef("agent_tags",                   "agent_name",        Policy.CASCADE),
     # #668 — latest compatibility snapshot (transient/recomputable): wipe on
     # delete, re-key on rename via this registry.
@@ -528,54 +530,6 @@ def cascade_rename(conn, old_name: str, new_name: str) -> Dict[str, int]:
             updated[table] = updated.get(table, 0) + result.rowcount
 
     return updated
-
-
-def find_orphan_agent_names(conn) -> Dict[str, int]:
-    """
-    Return mapping of {orphan_agent_name: row_count} aggregated across
-    every CASCADE-policy table. Used by the backfill script and as the
-    truth source for what `cascade_delete()` would clean up.
-
-    An "orphan" is an agent_name value present in a registered table
-    but absent from `agent_ownership`.
-    """
-    from sqlalchemy import func, select as sa_select, text as sa_text
-
-    ao = _table("agent_ownership")
-    known = {
-        row[0]
-        for row in conn.execute(sa_select(ao.c.agent_name)).all()
-    }
-
-    if not known:
-        # No agents exist; every row everywhere is technically orphan.
-        # Refuse to operate to avoid wiping a fresh-install DB.
-        return {}
-
-    known_params = list(known)
-    counts: Dict[str, int] = {}
-
-    for ref in AGENT_REFS:
-        if ref.policy != Policy.CASCADE:
-            continue
-        if not _table_exists(conn, ref.table):
-            continue
-        tbl = _table(ref.table)
-        name_col = tbl.c[ref.column]
-        stmt = (
-            sa_select(name_col.label("name"), func.count().label("n"))
-            .where(name_col.notin_(known_params))
-        )
-        if ref.extra_filter:
-            stmt = stmt.where(sa_text(ref.extra_filter))
-        stmt = stmt.group_by(name_col)
-        for row in conn.execute(stmt).all():
-            name = row[0]
-            if name is None:
-                continue
-            counts[name] = counts.get(name, 0) + int(row[1])
-
-    return counts
 
 
 def _multi_column(table: str) -> bool:

@@ -453,7 +453,12 @@ export function createSkillsTools(
         "null otherwise. `via_sets` names the assigned skill sets that bring a skill, and " +
         "`individual` is false when a skill is present ONLY through a set (unassigning that " +
         "set removes it). `sets` lists the agent's assigned sets. These rows are assignments " +
-        "only — whether a held skill is deprecated is on its list_skills entry.",
+        "only — whether a held skill is deprecated is on its list_skills entry. " +
+        "`peer_needs_grant` (abilityai/trinity-enterprise#662): a peer may run the skills an agent " +
+        "declares itself; what was assigned from the library — individually or through a set — needs a " +
+        "per-skill grant an instance admin gives beside the permission edge. Without it another agent's " +
+        "call is refused with `skill_not_granted`; the agent itself and its schedules are unaffected. " +
+        "A `conflict` row is the agent's own copy, so it needs no grant.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent"),
       }),
@@ -503,6 +508,8 @@ export function createSkillsTools(
             // ent#530: why the skill is present.
             individual: s.individual ?? true,
             via_sets: s.via_sets ?? [],
+            // ent#662: a library skill is not on the default peer-callable surface.
+            peer_needs_grant: s.delivery_status !== "conflict",
           }))
         }, null, 2);
       },
@@ -542,12 +549,16 @@ export function createSkillsTools(
       name: "list_skill_gates",
       description:
         "List the skill gates on an agent: which of its skills need approval before they run, " +
-        "who approves each (`approver`: `primary` = the agent's primary person, or `approver` where " +
-        "the install offers it — see `approver_kinds`), and the approval deadline in hours " +
+        "who approves each (`approver`: `primary` = the agent's primary person, `approver` where " +
+        "the install offers it — see `approver_kinds` — or a canon role as `role:<id>`), and the " +
+        "approval deadline in hours " +
         "(null = the 24-hour default). `origin` is `set` (set by a person or an orchestrator) or " +
         "`library_default` (the skills library recommends approval for that skill). " +
         "`approver_reachable: false` means nobody fills that approver kind right now, so a gated " +
-        "request would be refused until someone does. `cleared_defaults` are library defaults the " +
+        "request would be refused until someone does. `approvers` lists what may be picked: the " +
+        "kinds, then the canon roles this agent's roster names (`kind` is the value to set, with " +
+        "`label` and `role_id`), each with `reachable` and `viewer_fills`. " +
+        "`cleared_defaults` are library defaults the " +
         "owner cleared. Called with an agent key, this reads the calling agent's OWN gates; an " +
         "agent holding the skill-management permission may also read an agent its owner owns.",
       parameters: z.object({
@@ -573,19 +584,24 @@ export function createSkillsTools(
         "they have. Once gated, a request that invokes the skill on that agent waits for an approval " +
         "(the approver can run it directly), and the agent itself cannot load the skill outside an " +
         "approved run. Per agent: the same skill can be gated on one agent and not another. " +
-        "`approver` is `primary` (default) or `approver` where the install offers it; " +
+        "`approver` is `primary` (default), `approver` where the install offers it, or a canon role " +
+        "this agent's roster names as `role:<id>` (see `approvers` in list_skill_gates); " +
         "`deadline_hours` is 1 to 168, or null for the 24-hour default. On an existing gate, a field " +
         "you omit keeps its value. Any well-formed skill name may be gated — one the agent does not " +
         "have gates nothing until it does. Refused by name: `invalid_skill_name`, " +
-        "`invalid_approver`, `approver_unavailable`, `invalid_deadline`, `ephemeral_agent`. " +
-        "`warnings` may say `approver_unassigned` (nobody fills that kind yet). " +
+        "`invalid_approver`, `approver_unavailable`, `unknown_role` (no one on this agent's roster " +
+        "has that role), `invalid_deadline`, `ephemeral_agent`. " +
+        "`warnings` may say `approver_unassigned` (nobody fills that approver yet) or " +
+        "`approver_not_shared` (the people who fill it can't open this agent: share it with them). " +
         "Needs the agent's owner or an admin; with an agent key, the skill-management permission, " +
         "only on an agent its owner owns, and never on the calling agent itself.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent the skill runs on"),
         skill_name: z.string().describe("Name of the skill to gate"),
-        approver: z.enum(["primary", "approver"]).optional()
-          .describe("Who approves: `primary` (default) or `approver`"),
+        // trinity-enterprise#848: the role id is the backend's ROLE_ID_RE
+        // (assignment_provider.py), pinned by tests/unit/test_ent848_gate_map_roles.py.
+        approver: z.string().regex(/^(primary|approver|role:[A-Za-z0-9][A-Za-z0-9._-]{0,63})$/).optional()
+          .describe("Who approves: `primary` (default), `approver`, or a canon role as `role:<id>`"),
         deadline_hours: z.number().int().min(1).max(168).nullable().optional()
           .describe("Hours an approver has (1-168); null for the 24-hour default"),
       }),

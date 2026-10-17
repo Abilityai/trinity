@@ -115,11 +115,24 @@
           Active Alerts ({{ monitoringStore.alerts.length }})
         </h2>
       </div>
-      <div class="space-y-2">
+      <!--
+        #3450: every alert the header counts is rendered. The set is unbounded,
+        so it scrolls inside its own viewport (principle 28) — about five rows
+        tall, the height the panel always had — and never grows the page.
+        Focusable so the scroll is reachable from the keyboard.
+      -->
+      <div
+        class="space-y-2 max-h-72 overflow-y-auto rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40"
+        data-testid="alerts-list"
+        tabindex="0"
+        role="region"
+        aria-label="Active alerts"
+      >
         <div
-          v-for="alert in monitoringStore.alerts.slice(0, 5)"
+          v-for="alert in monitoringStore.alerts"
           :key="alert.id"
           class="bg-white dark:bg-gray-800 rounded p-3 flex items-center justify-between"
+          data-testid="alert-row"
         >
           <div class="flex items-center gap-3">
             <ExclamationTriangleIcon
@@ -162,6 +175,8 @@
           v-for="agent in filteredAgents"
           :key="agent.name"
           class="px-6 py-4 hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer transition-colors"
+          data-testid="agent-health-row"
+          :data-agent="agent.name"
           @click="viewAgentDetail(agent.name)"
         >
           <div class="flex items-center justify-between">
@@ -187,11 +202,25 @@
                   >
                     {{ agent.status }}
                   </span>
+                  <!--
+                    #3452: the transport breaker the status API reports. Shown
+                    for every non-closed state (open / dormant); a closed
+                    breaker is the unremarkable case and adds no badge.
+                  -->
+                  <BaseBadge
+                    v-if="breakerFor(agent.name)"
+                    :variant="breakerFor(agent.name).variant"
+                    :title="breakerFor(agent.name).title"
+                    data-testid="breaker-state"
+                  >{{ breakerFor(agent.name).label }}</BaseBadge>
                 </div>
                 <div class="text-sm text-gray-500 dark:text-gray-400 mt-1">
                   <span v-if="agent.docker_status">Container: {{ agent.docker_status }}</span>
                   <span v-if="agent.network_reachable !== undefined" class="ml-3">
                     Network: {{ agent.network_reachable ? 'Reachable' : 'Unreachable' }}
+                  </span>
+                  <span v-if="breakerFor(agent.name)?.failures" class="ml-3 tabular-nums">
+                    {{ breakerFor(agent.name).failures }}
                   </span>
                 </div>
               </div>
@@ -256,6 +285,7 @@ import { useMonitoringStore } from '../stores/monitoring'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
+import BaseBadge from './base/BaseBadge.vue'
 import {
   ArrowPathIcon,
   BellAlertIcon,
@@ -297,6 +327,28 @@ const filteredAgents = computed(() => {
   }
   return monitoringStore.agents.filter(a => a.status === statusFilter.value)
 })
+
+// #3452: the per-agent transport breaker (`circuit_breakers` on the status
+// payload — closed | open | dormant, services/agent_client/circuit.py). A
+// closed or unreported breaker yields null: nothing to say. Any other state
+// is named verbatim, so a state added server-side still reads honestly.
+const BREAKER_TITLES = {
+  open: 'Transport circuit breaker OPEN — the agent is not answering; requests fast-fail until a probe succeeds',
+  dormant: 'Transport circuit breaker DORMANT — too many failed probes, so the platform has stopped probing this agent. Trigger a health check to reset it.',
+}
+
+function breakerFor(agentName) {
+  const breaker = monitoringStore.circuitBreakers?.[agentName]
+  const state = breaker?.state
+  if (!state || state === 'closed') return null
+  const count = Number(breaker.failure_count) || 0
+  return {
+    label: `Breaker ${state.replace(/_/g, ' ')}`,
+    variant: state === 'open' || state === 'dormant' ? 'danger' : 'warning',
+    title: BREAKER_TITLES[state] || `Transport circuit breaker: ${state}`,
+    failures: count > 0 ? `${count} failed connection attempt${count === 1 ? '' : 's'}` : '',
+  }
+}
 
 // Lifecycle — onMounted/onUnmounted fire on tab enter/leave because the
 // parent toggles this panel with v-if (not v-show), so the interval is

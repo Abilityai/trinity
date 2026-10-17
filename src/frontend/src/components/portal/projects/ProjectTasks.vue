@@ -5,6 +5,12 @@
   awaiting verification, done. Members add tasks and change them; agents do
   the same through their tools. The rules are the server's — this surface only
   offers what makes sense: a done task offers "Reopen" and nothing else.
+
+  trinity-enterprise#896: the verification rule is stated where it applies —
+  an agent's completion claim waits in "Awaiting verification" until a person
+  (or the steward agent) confirms it — and each such row carries Confirm for
+  people who may (contributors on a live project). Objectives and task-log
+  bodies render as markdown through the shared renderer (#3692).
 -->
 <template>
   <div class="space-y-4" data-testid="project-tasks">
@@ -31,11 +37,14 @@
         <h3 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
           {{ g.label }} <span class="tabular-nums">· {{ g.rows.length }}</span>
         </h3>
+        <p v-if="g.key === 'verifying' && g.rows.length" class="text-xs text-gray-600 dark:text-gray-300" data-testid="project-tasks-verification-rule">
+          An agent's completion claim waits here until a person — or the steward agent — confirms it. Open a task to see its evidence{{ canConfirm ? ', then Confirm' : '' }}.
+        </p>
         <ul class="divide-y divide-gray-100 dark:divide-gray-750 rounded-lg border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-800">
-          <li v-for="t in g.rows" :key="t.id">
+          <li v-for="t in g.rows" :key="t.id" class="flex items-center gap-2 pr-2">
             <button
               type="button"
-              class="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-750 focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
+              class="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-750 focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
               :data-testid="`project-task-${t.id}`"
               @click="openTask(t.id)"
             >
@@ -45,9 +54,19 @@
               <span v-if="t.owner || t.agent" class="hidden sm:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">{{ t.agent || t.owner }}</span>
               <BaseBadge :variant="TASK_STATUS_BADGE[t.status] || 'neutral'">{{ taskStatusLabel(t.status) }}</BaseBadge>
             </button>
+            <BaseButton
+              v-if="g.key === 'verifying' && canConfirm"
+              size="sm"
+              variant="secondary"
+              :loading="confirming === t.id"
+              loading-label="Confirming…"
+              :data-testid="`project-task-confirm-${t.id}`"
+              @click="confirmDone(t)"
+            >Confirm</BaseButton>
           </li>
         </ul>
       </section>
+      <InlineError v-if="confirmError" :message="confirmError" @dismiss="confirmError = ''" />
     </template>
 
     <!-- New task -->
@@ -91,7 +110,10 @@
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Priority</dt><dd class="uppercase text-gray-900 dark:text-gray-100">{{ task.priority }}</dd></div>
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Updated</dt><dd class="text-gray-900 dark:text-gray-100" :title="formatLocalDateTime(task.updated_at)">{{ formatRelativeTime(task.updated_at) }}</dd></div>
         </dl>
-        <div v-if="task.objective"><h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400">Objective</h3><p class="mt-1 whitespace-pre-line text-sm text-gray-800 dark:text-gray-200">{{ task.objective }}</p></div>
+        <div v-if="task.objective">
+          <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400">Objective</h3>
+          <div class="mt-1 text-sm text-gray-800 dark:text-gray-200" data-testid="project-task-objective"><PortalMarkdown :content="task.objective" /></div>
+        </div>
         <div v-if="task.done_definition"><h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400">Definition of done</h3><p class="mt-1 whitespace-pre-line font-mono text-xs text-gray-800 dark:text-gray-200">{{ task.done_definition }}</p></div>
 
         <form v-if="canContribute && !archived" class="space-y-2 rounded-lg border border-gray-200 dark:border-gray-750 p-3" @submit.prevent="saveTask">
@@ -119,7 +141,7 @@
                 <span class="font-medium text-gray-700 dark:text-gray-300">{{ taskLogKindLabel(l.kind) }}</span> ·
                 {{ authorLabel(l.author, myEmail) }} · <span :title="formatLocalDateTime(l.created_at)">{{ formatRelativeTime(l.created_at) }}</span>
               </p>
-              <p class="mt-0.5 whitespace-pre-line text-gray-800 dark:text-gray-200">{{ l.body }}</p>
+              <div class="mt-0.5 text-gray-800 dark:text-gray-200"><PortalMarkdown :content="l.body || ''" /></div>
             </li>
           </ol>
         </div>
@@ -140,6 +162,7 @@ import BaseTextarea from '@/components/base/BaseTextarea.vue'
 import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
+import PortalMarkdown from '@/components/portal/PortalMarkdown.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
@@ -174,6 +197,9 @@ const groups = computed(() => {
     { key: 'done', label: 'Done', rows: g.done },
   ]
 })
+const canConfirm = computed(() => props.canContribute && !props.archived)
+const confirming = ref('')
+const confirmError = ref('')
 const dirty = computed(() => task.value && (
   edit.status !== task.value.status || edit.priority !== task.value.priority || edit.note.trim() !== ''))
 
@@ -201,6 +227,20 @@ async function create() {
     actionError.value = projectErrorMessage(err)
   } finally {
     busy.value = false
+  }
+}
+
+// ent#896: a person's confirmation of an agent's claim — the one transition
+// the rule reserves for people (and the steward agent, through its tools).
+async function confirmDone(t) {
+  confirming.value = t.id
+  confirmError.value = ''
+  try {
+    await store.updateTask(props.projectId, t.id, { status: 'done' })
+  } catch (err) {
+    confirmError.value = projectErrorMessage(err)
+  } finally {
+    confirming.value = ''
   }
 }
 

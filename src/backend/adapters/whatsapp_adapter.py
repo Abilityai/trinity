@@ -11,6 +11,7 @@ Twilio's WhatsApp API (see issue #299). Phase 2 (#467) adds /login, /logout,
 control system (#311).
 """
 
+import asyncio
 import base64
 import logging
 import re
@@ -30,6 +31,7 @@ from adapters.base import (
 )
 from services.agent_shared_files_service import create_share_from_bytes
 from services.turn_audience import whatsapp_recipient
+from services import login_policy_gate
 from services.email_service import EmailService
 from services.settings_service import get_public_chat_url
 
@@ -230,6 +232,21 @@ def _is_twilio_media_source_url(url: str) -> bool:
     """May this be an ORIGIN url — accepted from a webhook, and sent the
     tenant's Basic auth? Narrow: API hosts only, never the CDN."""
     return _host_matches_suffixes(url, _TWILIO_MEDIA_SOURCE_HOST_SUFFIXES)
+
+
+# ent#849: strong refs so a detached code send is not garbage-collected mid-flight.
+_login_code_tasks: set = set()
+
+
+async def _send_login_code_if_allowed(email: str) -> None:
+    """Mint and send a /login code off the reply path (policy-refused mode)."""
+    try:
+        if not login_policy_gate.email_code_allowed_for(email):
+            return
+        code = db.create_login_code(email, expiry_minutes=10)["code"]
+        await EmailService().send_verification_code(email, code)
+    except Exception:
+        logger.exception("Failed to issue /login code")
 
 
 class WhatsAppAdapter(ChannelAdapter):
@@ -669,6 +686,9 @@ class WhatsAppAdapter(ChannelAdapter):
                     "I don't have a pending login for you. Send "
                     "*/login your@email.com* first."
                 )
+            # ent#849: refused before redeeming, worded like a wrong code.
+            if not login_policy_gate.email_code_allowed_for(pending_email):
+                return "❌ Invalid or expired code. Try again or request a new one."
             result = db.verify_login_code(pending_email, arg)
             if not result:
                 return "❌ Invalid or expired code. Try again or request a new one."
@@ -707,6 +727,19 @@ class WhatsAppAdapter(ChannelAdapter):
         email = arg.lower()
         if "@" not in email or " " in email or len(email) > 254:
             return "That doesn't look like an email address. Try */login you@example.com*."
+
+        # ent#849: while the login policy refuses email codes, every address
+        # takes the same background path: members get no code, and neither the
+        # reply nor its timing tells a member from an outsider.
+        if not login_policy_gate.email_code_allowed():
+            _set_pending_login(binding["id"], message.sender_id, email)
+            task = asyncio.create_task(_send_login_code_if_allowed(email))
+            _login_code_tasks.add(task)
+            task.add_done_callback(_login_code_tasks.discard)
+            return (
+                f"📧 Sent a 6-digit code to `{email}`.\n"
+                "Reply with */login 123456* to finish verification."
+            )
 
         try:
             code_data = db.create_login_code(email, expiry_minutes=10)

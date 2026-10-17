@@ -263,6 +263,13 @@ _RESERVED_ID_PREFIXES = (
                            # an unreserved prefix would let it pre-create the id
                            # of the alert about its own configuration
     GATE_ASK_ID_PREFIX,    # platform-raised asks (trinity-enterprise#611 / #164)
+    # trinity-enterprise#631: a PERSON's tag of another person. Reserved so an
+    # agent can neither forge one through its queue file (nothing lets an
+    # agent tag a person) nor pre-create a tag's deterministic id and swallow
+    # it through ON CONFLICT; `is_platform_minted` then also keeps the row out
+    # of the agent's file and its answer wake. Literal, not imported: this
+    # module is a leaf the tag service imports from.
+    "mention-",
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a
@@ -333,7 +340,17 @@ def is_platform_minted(item) -> bool:
 # (trinity-enterprise#751: the approval card names the person who asked, the
 # notice the person who decided; `gate-` covers `gate-note-`). A subset of
 # `_RESERVED_ID_PREFIXES`, so no agent can mint a row into it.
-_ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-", "gate-")
+_ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-", "gate-",
+                               # trinity-enterprise#631: who tagged whom, in what
+                               "mention-")
+
+
+def is_person_tag(item: Optional[dict]) -> bool:
+    """trinity-enterprise#631: is this row a person's tag of another person —
+    the reserved `mention-` id AND the type, never the agent-authored type
+    alone? The operator's door answers such a row as not there."""
+    from db.queue_mentions import is_person_tag as _is_tag
+    return _is_tag(item)
 
 
 def is_about_a_person(item: dict) -> bool:
@@ -347,6 +364,22 @@ def is_about_a_person(item: dict) -> bool:
 # `is_about_a_person` — the list routes pass it to `_list_conditions` so the
 # exclusion runs BEFORE the limit. One tuple, read by SQL and Python alike.
 ABOUT_A_PERSON_ID_PREFIXES = _ABOUT_A_PERSON_ID_PREFIXES
+
+# trinity-enterprise#866: the rows about a person that are the agent OWNER's
+# alone. A Workspace client's complaint names the rater and quotes their words
+# (ent#499, trinity#3521); a person the agent is merely SHARED with is often a
+# client too, so reading it would tell one client which others rated the agent
+# and what they wrote — the facts `evaluations.py` already withholds from a
+# shared non-owner. Deliberately not the whole `_ABOUT_A_PERSON_ID_PREFIXES`:
+# a shared operator must still see and answer a skill gate's approval (`gate-`).
+OWNER_ONLY_ID_PREFIXES = ("workspace-problem-",)
+
+
+def is_owner_only(item: dict) -> bool:
+    """Is this row readable only by its agent's owner (and admins)? Compared
+    like `is_about_a_person`, so the SQL twin excludes exactly the same rows."""
+    candidate = item.get("request_id") or ""
+    return str(candidate).strip().lower().startswith(OWNER_ONLY_ID_PREFIXES)
 
 
 # ============================================================================
@@ -579,9 +612,15 @@ def list_for_principal(
     offset: int = 0,
     agent_names=None,
     cursor: Optional[str] = None,
+    owned_agents=None,
 ) -> dict:
     """One page of `GET /api/operator-queue` for this caller, with the fields
     that make it honest (trinity-enterprise#815).
+
+    `owned_agents` (trinity-enterprise#866): the agents this caller OWNS, or None
+    when the owner-only rule does not apply (an admin). With a set, an
+    owner-only row (`OWNER_ONLY_ID_PREFIXES`) is listed only for those agents —
+    a SQL condition like every other visibility filter, so `total` stays exact.
 
     Every visibility filter is a SQL condition on the one WHERE builder, so the
     page, `total` and the flags are computed over the same rows:
@@ -609,6 +648,9 @@ def list_for_principal(
     exclude = ABOUT_A_PERSON_ID_PREFIXES if exclude_about_a_person else None
     where = dict(filters, accessible_agent_names=agents,
                  exclude_request_id_prefixes=exclude)
+    if owned_agents is not None:
+        where.update(owner_only_request_id_prefixes=OWNER_ONLY_ID_PREFIXES,
+                     owner_agent_names=set(owned_agents))
     warnings = []
     next_cursor = None
     if cursor is None:

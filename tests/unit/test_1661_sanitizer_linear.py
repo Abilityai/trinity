@@ -51,6 +51,20 @@ BACKEND = _load("src/backend/utils/credential_sanitizer.py", "_cs_backend_1661")
 BOTH = [pytest.param(AGENT, id="agent"), pytest.param(BACKEND, id="backend")]
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_credential_values(monkeypatch):
+    """Pin the agent sanitizer's known-VALUE cache to empty.
+
+    Stage 1 redacts every exact value of a sensitive-named variable in the
+    process environment (and `~/.env`). This module pins stage 3 — the KEY=value
+    pass — so an ambient value must not get there first: `tests/setup-env.sh`
+    exports `TRINITY_TEST_PASSWORD`, and on an install whose admin password is
+    the literal word `password` stage 1 rewrote the KEY in `password=hunter2xyz`
+    to `***REDACTED***=hunter2xyz`, failing 15 cases that pass in a clean shell.
+    """
+    monkeypatch.setattr(AGENT, "_credential_values", set())
+
+
 def _big_line(n_chars: int) -> str:
     """A tool-result-shaped line: prose with env-ish tokens, no real secrets."""
     unit = "Loaded DATABASE_URL config and GH_TOKEN refs while scanning. "

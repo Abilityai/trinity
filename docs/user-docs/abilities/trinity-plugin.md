@@ -1,6 +1,6 @@
 # trinity Plugin
 
-Connect, deploy, operate, and sync agents on Trinity — the operating system for the AI-native company: open source, self-hosted, that you own. Seven skills (trinity v2.11.3) covering the complete lifecycle — from a guided first journey through connection, deployment, remote loops, and instance provisioning.
+Connect, deploy, operate, and sync agents on Trinity — the operating system for the AI-native company: open source, self-hosted, that you own. Seven skills (trinity v2.11.5) covering the complete lifecycle — from a guided first journey through connection, deployment, remote loops, and instance provisioning.
 
 > 🧭 **New to Trinity? Start with `/trinity:start-here`** — a guided, resumable walkthrough that takes you from "what is Trinity?" to your first agent running on your own instance. [Jump to the section](#the-guided-journey-trinitystart-here).
 
@@ -107,7 +107,9 @@ Run it in the agent's directory. It analyzes the current state, then:
 
 Two things it will tell you and you cannot skip: declared schedules arm only on a literal `enabled: true`, and a newly created agent's **autonomy toggle is off** — until you turn it on in the UI, the scheduler skips every cron trigger for that agent. Turning autonomy on is a person's act; an agent's own key cannot do it.
 
-The files it scaffolds follow current platform rules: `.gitignore` no longer ignores `.claude/settings.json` (project settings may be committed; Trinity keeps a copy out of a commit only when it carries platform hook paths or credential-bearing keys), a skill that needs a person raises an ask with `ask_operator` and reads the result with `get_my_ask`, and a call refused for exceeding the instance's chain-depth limit is never retried.
+The files it scaffolds follow current platform rules: `.gitignore` no longer ignores `.claude/settings.json` (project settings may be committed; Trinity keeps a copy out of a commit only when it carries platform hook paths or credential-bearing keys), a skill that needs a person raises an ask with `ask_operator` and reads the result with `get_my_ask` (one decision per ask; when the facts change while it is pending, the agent replaces its own ask rather than repeating it), and a call refused for exceeding the instance's chain-depth limit is never retried.
+
+**Run from inside a deployed agent, onboarding needs a permission.** An agent's own key can create or deploy another agent only when that agent holds **Manage other agents**, and `/trinity:sync schedules` can write another agent's schedules only with **Change other agents' schedules**. An instance admin grants both in the agent's Settings. Without them the call is refused, and the skill names the missing permission instead of working around it. Your own user key needs neither.
 
 There are three ways an agent gets onto Trinity:
 
@@ -184,7 +186,7 @@ Examples:
 
 After firing, the skill starts a lightweight local watch by default — it polls the loop and reports run-by-run progress, stalls, and the final result. Say "fire and forget" to skip the watch; the remote loop runs either way and also appears on the agent's **Loops** tab in the Trinity web UI. Inside a deployed Trinity agent there is no watch — the wake-up tools it relies on are denied there — so poll with `/trinity:loop status` or a `set_reminder` instead.
 
-**Raising the per-run timeout is the owner's act.** A loop's `timeout_per_run` cannot exceed the agent's execution timeout. The agent's owner raises that cap in the agent's settings; a loop launched from inside a deployed agent tells the owner instead of trying, because an agent key is refused.
+**Raising the per-run timeout is the owner's act.** A loop's `timeout_per_run` cannot exceed the agent's execution timeout. The agent's owner raises that cap in the agent's settings. An agent key can raise it only when the agent holds the **Manage other agents** permission, which an instance admin grants; without it, a loop launched from inside a deployed agent raises an ask naming that permission instead of trying again.
 
 **A denial is a permission, not a typo.** The loop tools enforce the same agent-to-agent permissions as `chat_with_agent`. An agent-scoped key can loop itself and the agents it has been granted, nothing else; your own user key is unaffected. A refused status or stop call answers `Loop '<id>' not found or not accessible`, whether or not the loop exists. Do not retry under another name: ask the agent's owner to grant the permission.
 

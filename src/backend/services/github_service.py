@@ -44,18 +44,17 @@ class GitHubCreateResult:
 
 
 class GitHubError(Exception):
-    """Base exception for GitHub API errors."""
-    pass
+    """Base exception for GitHub API errors.
 
+    ``status`` carries the HTTP status when GitHub answered with one (#3725),
+    so a caller can tell a token GitHub refused (401/403) from an outage
+    without parsing the message. ``None`` for network errors and for raises
+    that predate it; ``str(e)`` is unchanged either way.
+    """
 
-class GitHubAuthError(GitHubError):
-    """GitHub authentication failed."""
-    pass
-
-
-class GitHubPermissionError(GitHubError):
-    """Insufficient permissions for operation."""
-    pass
+    def __init__(self, *args, status: Optional[int] = None):
+        super().__init__(*args)
+        self.status = status
 
 
 class GitHubService:
@@ -207,7 +206,10 @@ class GitHubService:
                     name=name
                 )
             else:
-                raise GitHubError(f"GitHub API error: {response.status_code}")
+                raise GitHubError(
+                    f"GitHub API error: {response.status_code}",
+                    status=response.status_code,
+                )
         except httpx.RequestError as e:
             raise GitHubError(f"Network error: {e}")
 
@@ -232,7 +234,8 @@ class GitHubService:
         if response.status_code == 404:
             raise GitHubError(f"Repository '{repo}' not found")
         raise GitHubError(
-            f"GitHub API error listing branches: {response.status_code}"
+            f"GitHub API error listing branches: {response.status_code}",
+            status=response.status_code,
         )
 
     async def get_branch_sha(self, repo: str, branch: str) -> Optional[str]:
@@ -250,7 +253,10 @@ class GitHubService:
             return (response.json().get("commit") or {}).get("sha")
         if response.status_code == 404:
             return None
-        raise GitHubError(f"GitHub API error reading branch: {response.status_code}")
+        raise GitHubError(
+            f"GitHub API error reading branch: {response.status_code}",
+            status=response.status_code,
+        )
 
     async def create_repository(
         self,
@@ -341,19 +347,3 @@ class GitHubService:
                 error=f"Network error: {e}"
             )
 
-
-# ============================================================================
-# Factory Function
-# ============================================================================
-
-def get_github_service(pat: str) -> GitHubService:
-    """
-    Factory function to create a GitHubService.
-
-    Args:
-        pat: GitHub Personal Access Token
-
-    Returns:
-        GitHubService instance
-    """
-    return GitHubService(pat)

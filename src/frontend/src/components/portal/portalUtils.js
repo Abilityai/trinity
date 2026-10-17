@@ -401,7 +401,47 @@ function tabUnread(t, activeId) {
   }
 }
 
-export function agentChatTabs(threads, agentName, { activeId = null, draft = false, draftKeys = null } = {}) {
+// trinity-enterprise#856: the arrival sort, as one comparator — Main first, then
+// recency (`last_message_at`, else `created_at`), ties in list order (a stable
+// sort, as before). Used
+// both to take the arrival snapshot (`tabOrderFrom`) and, with no snapshot, to
+// draw the strip, so there is one rule for "the order you arrived to".
+function threadTs(t, field = null) {
+  const iso = field ? t[field] : (t.last_message_at || t.created_at)
+  const n = iso ? new Date(iso).getTime() : 0
+  return Number.isNaN(n) ? 0 : n
+}
+const tabKey = (t) => t.id || t.session_id
+const idDesc = (a, b) => (tabKey(a) < tabKey(b) ? 1 : tabKey(a) > tabKey(b) ? -1 : 0)
+function arrivalCompare(a, b) {
+  return (b.is_main ? 1 : 0) - (a.is_main ? 1 : 0) || threadTs(b) - threadTs(a)
+}
+
+/**
+ * trinity-enterprise#856 — the arrival snapshot of one agent's strip: the ids
+ * of EVERY non-room row of the agent, archived ones included, in the arrival
+ * sort. Archived rows are ranked rather than pruned so a deep-linked archived
+ * chat is drawn at its arrival slot and an Undo-close returns a tab to its own
+ * place; `agentChatTabs` filters them at compute time.
+ */
+export function tabOrderFrom(threads, agentName) {
+  if (!agentName) return []
+  return (Array.isArray(threads) ? threads : [])
+    .filter((t) => t && !t.is_room && t.agent_name === agentName)
+    .slice()
+    .sort(arrivalCompare)
+    .map(tabKey)
+}
+
+// trinity-enterprise#856: `order` is the shell's arrival snapshot,
+// `{ agent, ids }`. While it names THIS agent and has been taken (`ids` not
+// null), the strip is drawn in that frozen order: a reply, a send, or a poll
+// that re-sorts the thread list changes a badge and never a position. Ids the
+// snapshot does not know (a chat born mid-visit) sit directly after Main —
+// the provisional tab's slot — among themselves by `created_at`, never by
+// recency, or two born chats would swap on a reply. Absent, untaken, or for
+// another agent (the `convKey` fallback), the strip is the arrival sort.
+export function agentChatTabs(threads, agentName, { activeId = null, draft = false, draftKeys = null, order = null } = {}) {
   if (!agentName) return []
   const holds = (key) => !!(key && draftKeys && typeof draftKeys.has === 'function' && draftKeys.has(key))
   const mine = (Array.isArray(threads) ? threads : [])
@@ -416,17 +456,20 @@ export function agentChatTabs(threads, agentName, { activeId = null, draft = fal
     // The one exception is the chat ON SCREEN: a deep link to an archived chat
     // still draws its tab, so the strip never has a selection it cannot show.
     .filter((t) => !t.archived_at || (activeId && (t.id || t.session_id) === activeId))
-  const ts = (t) => {
-    const iso = t.last_message_at || t.created_at
-    const n = iso ? new Date(iso).getTime() : 0
-    return Number.isNaN(n) ? 0 : n
-  }
+  const frozen = order && order.agent === agentName && Array.isArray(order.ids) ? order.ids : null
+  const rank = frozen ? new Map(frozen.map((id, i) => [id, i])) : null
+  // Born mid-visit: after Main (-1 ranks before every snapshot id), newest first.
+  const rankOf = (t) => (rank.has(tabKey(t)) ? rank.get(tabKey(t)) : -1)
   const tabs = mine
     .slice()
-    // Main first, then recency. Sorted rather than spliced so there is one
-    // comparator to reason about, and so a payload that (wrongly) carries two
-    // Mains still produces a stable order instead of a random one.
-    .sort((a, b) => (b.is_main ? 1 : 0) - (a.is_main ? 1 : 0) || ts(b) - ts(a))
+    // Main first, then recency (or the frozen rank). Sorted rather than spliced
+    // so there is one comparator to reason about, and so a payload that
+    // (wrongly) carries two Mains still produces a stable order instead of a
+    // random one.
+    .sort(rank
+      ? (a, b) => (b.is_main ? 1 : 0) - (a.is_main ? 1 : 0) || rankOf(a) - rankOf(b)
+        || threadTs(b, 'created_at') - threadTs(a, 'created_at') || idDesc(a, b)
+      : arrivalCompare)
     .map((t) => ({
       id: t.id || t.session_id,
       // Main is named by its ROLE, never by its title: it is the same thread
@@ -783,6 +826,12 @@ export function asksHomeRoute(agentName = null) {
   if (agentName) query.from = agentName
   return { path: WORKSPACE_INBOX, query }
 }
+// The "Open in Inbox" link, wherever a surface draws one (the asks-waiting line
+// on Work and Info; a project's Needs you row, #3574): a 44px target on a touch
+// screen and the design-system ring (A2 round 1's rule; round 2: keyed on the
+// pointer, not the width — a tablet is touch too).
+export const INBOX_LINK_CLASS = 'inline-flex items-center max-sm:min-h-11 [@media(pointer:coarse)]:min-h-11 text-action-primary-600 dark:text-action-primary-400 hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40'
+
 export function asksWaitingLabel(n) {
   const k = Number(n) || 0
   return k > 0 ? `${k} ${k === 1 ? 'ask' : 'asks'} waiting on you` : ''
@@ -803,6 +852,20 @@ export function shouldEscapeStage(path, query) {
 // browser the person just asked to leave — the reported bug with an honest
 // sign on it. A client's button ends only their portal session, and says so.
 // Pure so the label the view renders is the one the test pins.
+// #3672 — the sidebar's ONE load verdict. The roster, the chat list and the
+// asks feed land at different times, and each used to re-lay the list as it
+// arrived (rows re-ordered and grew a subtitle when chats landed; an asked
+// agent was appended past the collapse limit when asks landed). So the list
+// shows skeleton rows until all three have a verdict, then renders in one
+// pass. `resolved` is the shell's "bootstrap placed the caller" bit — roster
+// and chats read, success OR failure (both catch). The asks feed counts as
+// settled on a 404/403 (`asksAbsent`) or a failed read (`asksFailed`) too, so
+// the list can never wait forever. Keyed on state, never a timer (§6). Strict
+// booleans: a truthy stand-in is not a verdict.
+export function sidebarSettled({ resolved = false, asksLoaded = false, asksAbsent = false, asksFailed = false } = {}) {
+  return resolved === true && (asksLoaded === true || asksAbsent === true || asksFailed === true)
+}
+
 export const SIGN_OUT_LABEL_PLATFORM = 'Sign out of Trinity'
 export const SIGN_OUT_LABEL_CLIENT = 'Sign out'
 
@@ -1054,7 +1117,7 @@ export function availabilityChip(agent, { detailed = false } = {}) {
     }
 }
 
-export const EMPTY_REASON_NO_PLAYBOOKS = 'No playbooks are available for this agent right now.'
+export const EMPTY_REASON_NO_PLAYBOOKS = 'No skills are available for this agent right now.'
 export const EMPTY_REASON_NO_PEERS = 'No other agents are shared with you.'
 export const EMPTY_REASON_NO_MENTIONABLE_PEERS =
   "The other agents shared with you can't be @mentioned — their names aren't valid mention handles."
@@ -1872,6 +1935,10 @@ export function feedbackAcknowledgement(captureFeedback) {
 //
 //   1. a link that names a CHAT opens that chat — not this function's job, and
 //      unchanged (the `/workspace/c/:id` route never reaches here);
+//   0. trinity-enterprise#856 (operator ruling 2026-10-13): the agent's most
+//      recent chat with an UNREAD answer (`agentUnreadLanding`). A failed
+//      chat-state read leaves every `unread` at 0, so this arm then yields
+//      nothing and the next arm decides — the strip's badges are blank too;
 //   2. `lastOpenSessionId`, the seam ent#621's agent-switch keys pass. Honoured
 //      only when it still names a live, unarchived chat of THIS agent in
 //      `threads` — the principal's own list — so a stale or forged id falls
@@ -1894,6 +1961,8 @@ export function feedbackAcknowledgement(captureFeedback) {
 // arm 3 — the old behaviour — rather than throwing.
 export function agentLanding({ agentName, threads = [], lastOpenSessionId = null, drafts = null } = {}) {
   if (!agentName || typeof agentName !== 'string') return null
+  const unread = agentUnreadLanding(threads, agentName)
+  if (unread) return { agentName, sessionId: unread }
   if (lastOpenSessionId) {
     const row = (Array.isArray(threads) ? threads : []).find((t) => t && !t.is_room
       && t.agent_name === agentName && !t.archived_at
@@ -1905,6 +1974,17 @@ export function agentLanding({ agentName, threads = [], lastOpenSessionId = null
   const empty = agentEmptyChat(threads, agentName)
   if (empty) return { agentName, sessionId: empty }
   return { agentName, sessionId: null }
+}
+
+// trinity-enterprise#856 landing arm 0: this agent's unarchived, non-room chat
+// with `unread > 0` and the latest `last_message_at` (ties: id descending),
+// Main included. Its id, or null.
+export function agentUnreadLanding(threads, agentName) {
+  if (!agentName) return null
+  const hit = (Array.isArray(threads) ? threads : [])
+    .filter((t) => t && !t.is_room && t.agent_name === agentName && !t.archived_at && (Number(t.unread) || 0) > 0)
+    .sort((a, b) => threadTs(b, 'last_message_at') - threadTs(a, 'last_message_at') || idDesc(a, b))[0]
+  return hit ? tabKey(hit) : null
 }
 
 // The sidebar's agent order (ent#523 AC 6).
@@ -2126,9 +2206,24 @@ export function agentRowTime(threads, agentName, now = Date.now()) {
 // `id` defaults to `null`, never `undefined`: the consumer's gate is a
 // truthiness test either way, but a row whose id is explicitly null says "this
 // was built without one" where a missing key says nothing at all.
+/**
+ * trinity-enterprise#754: the two "ran without approval" facts of a reply that
+ * just landed, in the shape `assistantRow` takes, from either shape the reply
+ * arrives in: the streaming path's row (`gateSelfApproved`, mapped by
+ * `replyFromHistory`) or the synchronous fallback's raw `POST …/chat` body
+ * (`gate_self_approved`). True only when the server said true.
+ */
+export function turnGateFlags(data) {
+  return {
+    gate_self_approved: (data?.gateSelfApproved ?? data?.gate_self_approved) === true,
+    gate_self_approved_by_viewer: (data?.gateSelfApprovedByViewer ?? data?.gate_self_approved_by_viewer) === true,
+  }
+}
+
 export function assistantRow({ content = '', id = null, my_rating = null,
                                source = null, voice_call_id = null,
-                               execution_id = null } = {}) {
+                               execution_id = null, gate_self_approved = false,
+                               gate_self_approved_by_viewer = false } = {}) {
   return {
     role: 'assistant',
     content,
@@ -2138,6 +2233,10 @@ export function assistantRow({ content = '', id = null, my_rating = null,
     voiceCallId: voice_call_id || null,
     // #3166: the turn that wrote the row.
     executionId: execution_id || null,
+    // trinity-enterprise#754: the turn went through without approval because
+    // the asker is the approver, and whether the viewer is that person.
+    selfApproved: gate_self_approved === true,
+    selfApprovedByViewer: gate_self_approved_by_viewer === true,
   }
 }
 
@@ -2232,6 +2331,10 @@ function replyFields(row) {
     // trinity-enterprise#610: the stored time, which places a chat-turn ask
     // before this reply without the browser's clock (`placeAsksInThread`).
     at: row.created_at || null,
+    // trinity-enterprise#754: a just-landed reply shows "ran without
+    // approval" without waiting for a reload.
+    gateSelfApproved: row.gate_self_approved === true,
+    gateSelfApprovedByViewer: row.gate_self_approved_by_viewer === true,
   }
 }
 

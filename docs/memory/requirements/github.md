@@ -220,6 +220,25 @@
 - **FR-6 — Private repos with no token fail with a named error**, never a raw
   500 (FR-2's combined 400 at create; auth-classified clone failure +
   `.git-clone-status` marker in-container if a repo goes private later).
+- **FR-7 — A public template's metadata read does not depend on one tier's
+  token (#3725)**: the create-path `template.yaml` read keeps today's single
+  read with the preferred tier when it answers (200, or a clean 404 = absent).
+  When that read is unreadable it walks the remaining tiers in resolver order
+  (per_user → global, each token value once — `resolve_github_pat_candidates`),
+  where only a 200 ends the walk; then the credential-free path: an anonymous
+  `git ls-remote` proves the repo public and pins the ref to a SHA
+  (`probe_anonymous_ref`), and `raw.githubusercontent.com/{owner}/{repo}/{sha}/template.yaml`
+  is read through the hardened loader — a 404 there is definitive absence and
+  clears the earlier rejections. Skipped (fail-closed) on a non-default
+  `TRINITY_GIT_BASE_URL`. Only an HTTP 401 replaces the create's identity (with
+  the tier that read, or tokenless — re-gated by FR-1, naming the rejected
+  saved token); never persisted, never on fork, never on 403 or an outage. A
+  403 from the REST access check is re-checked over the git transport with the
+  same token against the branch to clone (`probe_tokened_repo_access`). When no
+  path can read, the refusal stays 503 `TEMPLATE_METADATA_UNAVAILABLE` and
+  names every tier tried with a status category (`detail.attempts`), never a
+  token or URL. The ent#14 fail-closed gate is unchanged for a template no
+  path can read.
 - **Mixed-fleet caveat (release note)**: an un-rebuilt base image still has the
   old `GITHUB_PAT`-gated clone block — tokenless creation on an old image
   yields an empty agent with no failure marker. Base-image rebuild is a hard
@@ -949,7 +968,7 @@
   - `yellow` — a work agent diverged for 24 h or less; a deployment diverged at any age, or dirty for more than 24 h. A deployment is never red on age and never freezes: a deployment being behind is normal.
   - `green` — otherwise.
   - The reason is operator-readable (`diverged 31 behind / 0 ahead for 26h`, `last sync failed (seen on 3 polls)`, `dirty: 791 files uncommitted for 30h`, `auto-sync on, no heartbeat for 9d`), and a stale observation (last poll older than 15 minutes) is named in it. A recommendation names the fix (`credential is read-only`, `push via git_sync strategy=pull_first`, `deployment: turn auto-sync off`, `enable auto-sync`, `pull via git_pull`).
-- **The freeze**: `should_freeze = freeze_schedules_if_sync_failing AND (sync_failing OR (work agent AND diverged > 24 h AND the observation is fresh))`. `sync_failing` is unchanged from #1808 and applies to any binding. The freshness guard fails open: the poller writes nothing for an unreachable agent, so a stale `diverged_since` must never keep an agent frozen after it may already have pushed. Enforced in two places that share the module: `GET /api/internal/agents/{name}/sync-health-status` (existing keys unchanged, plus `freeze_reason`, `divergence_age_s`, `work_agent`) and the scheduler's own DB gate, which stays fail-open and writes the reason into the skipped execution's `skip_reason`. Un-freezing is automatic: both points read live state, so the next cron tick after divergence clears fires.
+- **The freeze**: `should_freeze = freeze_schedules_if_sync_failing AND (sync_failing OR (work agent AND diverged > 24 h AND the observation is fresh))`. `sync_failing` is unchanged from #1808 and applies to any binding. The freshness guard fails open: the poller writes nothing for an unreachable agent, so a stale `diverged_since` must never keep an agent frozen after it may already have pushed. Enforced by the scheduler's own DB gate (the vendored copy of the shared policy module), which stays fail-open and writes the reason into the skipped execution's `skip_reason`; `GET /api/agents/sync-health` still surfaces the verdict (`freeze`) for operators. Un-freezing is automatic: the gate reads live state, so the next cron tick after divergence clears fires.
 - **One operator-queue item per episode**: when a divergence freeze is in force, the poller (inside its leader lease) raises one `sync_diverged` item with the deterministic id `sync-diverged-{agent}-{diverged_since}`; the `(agent_name, request_id)` conflict target collapses repeat polls, restarts and a fail-open double leader onto one row. The prefix is platform-reserved so an agent cannot pre-create the id and silence its own alarm. The item carries counts, the episode start and the recommendation — never raw error text. It is not auto-resolved; a new episode gets a new id. No item for red-but-not-frozen.
 - **Surfaces (this slice)**: `GET /api/agents/sync-health` and `GET /api/agents/{name}/git/sync-state` (and therefore MCP `get_git_sync_state`, a pass-through) carry `state`, `reason`, `recommendation`, `binding`, `freeze`, the ages and the new columns; pre-existing keys are unchanged. The dashboard dot renders the backend's state and shows the reason on hover. The fleet surfaces follow below.
 - **Fleet surfaces (trinity-enterprise#707)** — read path only; the poller and the rule are unchanged, and every surface reads the same shared query (`db.list_sync_health_rows`) and the same verdict:
@@ -960,7 +979,7 @@
   - **Agent card** (Fleet grid tile and Agent Detail → Overview): one sync chip / line — `↑ahead ↓behind · N dirty · pushed <age> ago` — in the state colour (red / yellow / green; nothing for an agent with no observation), with the reason and recommendation on hover. It replaces the tile's `sync failing ×N` and `git ✓` chips, so the chip strip does not grow. The Overview attention count still counts failed syncs.
 - **Supersedes**: trinity-enterprise#142's dirty-tree advisory, by the persisted `dirty_files`.
 - **Known limitations**: a failed `git status` inside the agent reads as a clean tree and clears `dirty_since` (agent-side; needs a base-image change). The agent writes every one of these numbers, so a compromised agent can misreport them (the existing #1595 trust model). With `SYNC_HEALTH_POLL_INTERVAL_SECONDS` raised above 15 minutes every observation is stale and the divergence freeze cannot fire (`sync_failing` still can).
-- **Source of truth**: `services/sync_freeze_policy.py` (+ scheduler mirror), `services/sync_health_service.py`, `services/sync_health_view.py`, `db/sync_state.py`, `routers/internal.py`, `src/scheduler/database.py::sync_freeze_reason`; #707: `routers/monitoring.py::get_fleet_status`, `services/fleet_audit_service.py`, MCP `tools/monitoring.ts`, `utils/syncHealth.js::formatSyncSummary`.
+- **Source of truth**: `services/sync_freeze_policy.py` (+ scheduler mirror), `services/sync_health_service.py`, `services/sync_health_view.py`, `db/sync_state.py`, `src/scheduler/database.py::sync_freeze_reason`; #707: `routers/monitoring.py::get_fleet_status`, `services/fleet_audit_service.py`, MCP `tools/monitoring.ts`, `utils/syncHealth.js::formatSyncSummary`.
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md`
 - **GitHub Issue**: abilityai/trinity-enterprise#706, abilityai/trinity-enterprise#707
 

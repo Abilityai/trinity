@@ -169,6 +169,10 @@ async function boot(opts: { pull?: boolean; reportBackEnabled?: boolean } = {}):
           agent_name: CALLER,
         });
       }
+      const reach = url.match(new RegExp(`^/api/agents/${CALLER}/reach/([^/?]+)$`));
+      if (reach) {
+        return json(res, 200, { reachable: [TARGET, HELPER, CALLER].includes(decodeURIComponent(reach[1])) });
+      }
       if (url === `/api/agents/${CALLER}/permissions`) {
         return json(res, 200, { permitted_agents: [{ name: TARGET }, { name: HELPER }, { name: CALLER }] });
       }
@@ -213,7 +217,7 @@ async function boot(opts: { pull?: boolean; reportBackEnabled?: boolean } = {}):
         case "error":
           return json(res, 500, { detail: "boom" });
         case "busy":
-          return json(res, 429, { retry_after: 12 });
+          return json(res, 429, { retry_after: 12 }, { "x-trinity-error-code": "capacity" });
         case "replay409":
           return json(res, 409, { detail: { execution_id: "exec-child-replay" } });
         case "queued":

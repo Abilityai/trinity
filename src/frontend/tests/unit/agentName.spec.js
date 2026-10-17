@@ -530,10 +530,10 @@ describe('structural: the desktop grid switches on the list width, not the windo
 
   it('hides the tablet layout with the stacked `md:list-wide:hidden`', () => {
     // Tailwind 3 emits screen variants after custom ones, so a bare
-    // `list-wide:hidden` loses to `md:flex`. The tablet block then renders
+    // `list-wide:hidden` loses to the `md:` show rule. The tablet block then renders
     // inside the desktop row as an extra subgrid item and widens track 1 by
     // hundreds of pixels, which is what the first cut of this change did.
-    const tablet = classAttrsContaining(PANEL, 'md:flex md:flex-col')
+    const tablet = classAttrsContaining(PANEL, 'md:list-mid:flex md:list-mid:flex-col')
     expect(tablet).toHaveLength(1)
     expect(tablet[0]).toContain('md:list-wide:hidden')
     expect(tablet[0]).not.toMatch(/(?<!md:)list-wide:hidden/)

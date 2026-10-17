@@ -23,12 +23,13 @@
           >{{ syncBadge.label }}</BaseBadge>
           <!-- trinity-enterprise#611 (#627 AC6): a re-ask and the expired ask it
                re-raises name each other — one rule
-               (utils/operatorQueue.js::queueReaskBadges), one fact per badge. -->
+               (utils/operatorQueue.js::queueReaskBadges), one fact per badge. #3247:
+               a replaced ask and its successor name each other the same way. -->
           <BaseBadge
             v-for="b in reaskBadges"
             :key="b.key"
             :title="b.title"
-            :data-testid="b.key === 'reask-of' ? 'queue-reask-of' : 'queue-reasked-as'"
+            :data-testid="`queue-${b.key}`"
           >{{ b.prefix }} <span v-if="b.id" class="min-w-0 max-w-[12rem] truncate font-mono" :title="b.id" data-testid="queue-reask-id">{{ b.id }}</span></BaseBadge>
         </div>
 
@@ -37,7 +38,10 @@
         <!-- trinity-enterprise#611: the action this ask proposed, so the record
              says what was approved, denied or let expire (the Workspace keeps it
              on ended asks too). -->
-        <QueueProposal v-if="item.proposal" :proposal="item.proposal" class="mt-2" />
+        <!-- trinity-enterprise#755: a gated-skill approval keeps its own card,
+             which also says how the request ended. -->
+        <GatedSkillRequest v-if="isGateCard(item)" :item="item" class="mt-2" />
+        <QueueProposal v-else-if="item.proposal" :proposal="item.proposal" class="mt-2" />
 
         <!-- Response (responded/acknowledged) or terminal status (cancelled/expired, #1017).
              trinity-enterprise#611: who ended it and when, from the endings
@@ -59,8 +63,9 @@
             </svg>
             <AskMarkdown :text="decisionLabel(item.response)" inline data-testid="resolved-response" />
           </span>
-          <!-- The answer's note, or the operator's reason for cancelling. -->
-          <span v-if="note" class="text-xs text-gray-500 dark:text-gray-400">
+          <!-- The answer's note, the operator's reason for cancelling, or the
+               agent's reason for withdrawing it (trinity-enterprise#901). -->
+          <span v-if="note" class="text-xs text-gray-500 dark:text-gray-400" data-testid="resolved-note">
             &mdash; {{ note }}
           </span>
           <!-- When it ENDED — relative, absolute on hover. A row that ended
@@ -89,6 +94,8 @@ import { formatLocalDateTime } from '../../utils/timestamps'
 import AgentAvatar from '../AgentAvatar.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import QueueProposal from './QueueProposal.vue'
+import GatedSkillRequest from './GatedSkillRequest.vue'
+import { isGateCard } from '../../utils/skillGateCard'
 import AskMarkdown from './AskMarkdown.vue'
 
 const props = defineProps({
@@ -107,8 +114,17 @@ const ending = computed(() => queueEnding(props.item))   // trinity-enterprise#6
 const endingText = computed(() => queueEndingText(ending.value))
 // #3246: a platform ending's reason is a token the ending text already words
 // (`queueEndingText`), never printed raw as though an operator wrote it.
+// #3247: likewise an ending the agent authored carries a closed token
+// (`replaced`), not a person's words.
+// trinity-enterprise#844: so is the clock's (`outcome_unknown`) — a timeout
+// carries no person's words.
+// trinity-enterprise#901: a withdraw's reason IS the agent's words (T3) — the
+// one agent ending whose reason is shown, as text.
 const note = computed(() => props.item.response_text
-  || (ending.value && ending.value.who === 'the platform' ? '' : props.item.disposition_reason) || '')
+  || (ending.value?.kind === 'withdrawn' ? ending.value.reason : null)
+  || ((ending.value && (ending.value.who === 'the platform' || ending.value.kind === 'expired'))
+    || props.item.disposed_by === 'agent'
+    ? '' : props.item.disposition_reason) || '')
 const endedAtAbsolute = computed(() => (ending.value?.when ? formatLocalDateTime(ending.value.when) : ''))
 // An answer's "who" rides beside its time; a cancel / expiry names it in its label.
 const endingMeta = computed(() => {

@@ -1,0 +1,25 @@
+{
+ "_comment": "ent#623 interop vector: a request signed by @hellocoop/httpsig 2.6.0 (draft-hardt-httpbis-signature-key-08 line, jwt scheme) over an aa-agent+jwt minted by services/aauth. Public keys only. Verify with now=created.",
+ "created": 1789653598,
+ "issuer": "https://a.example",
+ "issuer_jwk": {
+  "kty": "OKP",
+  "crv": "Ed25519",
+  "x": "7EXchqa9cG6gRs8UaGiVgqLSqg8z2PddCTb7U7dMr4o",
+  "alg": "Ed25519",
+  "kid": "1uLxc_1co9J6u8S7Qe0DhSxgEROR9EuA02GUT5WHXFI"
+ },
+ "request": {
+  "method": "POST",
+  "authority": "b.example",
+  "path": "/a2a/bravo",
+  "headers": {
+   "content-digest": "sha-256=:4hoCFmdbW1238lP7Bmk0aeyzQhL/U6n3giIwXLMM+H8=:",
+   "content-type": "application/json",
+   "signature": "sig=:yJYWTeWLVyQhFPlFIIdDTcm0tpXXU1+3XKgfobDqV83fFhqoooiHwJzb551wpbsniSm04bf3dxQgls4nwNTxBg==:",
+   "signature-input": "sig=(\"@method\" \"@authority\" \"@path\" \"signature-key\" \"content-digest\" \"content-type\");created=1789653598",
+   "signature-key": "sig=jwt;jwt=\"eyJhbGciOiJFZDI1NTE5IiwidHlwIjoiYWEtYWdlbnQrand0Iiwia2lkIjoiMXVMeGNfMWNvOUo2dThTN1FlMERoU3hnRVJPUjlFdUEwMkdVVDVXSFhGSSJ9.eyJpc3MiOiJodHRwczovL2EuZXhhbXBsZSIsImR3ayI6ImFhdXRoLWFnZW50Lmpzb24iLCJzdWIiOiJhYXV0aDplY2hvQGEuZXhhbXBsZSIsImp0aSI6ImFmZGQ5NzUzMjZlZDQ1MjE4ZDAzOTRjN2NkNTMwNWE5IiwiaWF0IjoxNzg5NjUzNTk4LCJleHAiOjE3ODk2NTcxOTgsImNuZiI6eyJqd2siOnsia3R5IjoiT0tQIiwiY3J2IjoiRWQyNTUxOSIsIngiOiJTTVg4blZyVFZ4N1A2aC00S0w3T0pmbW9NZFlYcHlyTWJTaE5uelcwSVZ3IiwiYWxnIjoiRWQyNTUxOSJ9fX0.6V3JK2zQ2Nv20WgNqfHEuVyKfDltBMmqT9oyyW0mwxOTEk8ICAxXeH8I7Jt6aUyOOTTJNCc9uwCKQ7Uw_0TPAA\""
+  },
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":\"vec-1\",\"method\":\"message/send\",\"params\":{\"message\":{\"role\":\"user\",\"kind\":\"message\",\"messageId\":\"m-1\",\"parts\":[{\"kind\":\"text\",\"text\":\"hello from js\"}]}}}"
+ }
+}

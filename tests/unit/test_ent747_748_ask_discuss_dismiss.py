@@ -594,7 +594,7 @@ class TestRoutesOverHttp:
         async def agent_key(request, token):
             return SimpleNamespace(username="owner", agent_name="some-agent", mcp_scope="agent")
 
-        monkeypatch.setattr(pa, "get_current_user", agent_key)
+        monkeypatch.setattr(pa, "resolve_platform_user_unfloored", agent_key)
 
         r = client.post(f"/api/enterprise/client-portal/asks/{uid}/{route}",
                         headers={"Authorization": "Bearer trinity_mcp_x"})
@@ -815,7 +815,7 @@ class TestResumeAudience:
         base = dict(agent_name="agent-747", status="running", triggered_by="operator_response",
                     source_channel="portal", source_channel_chat_id="ps_discussion",
                     source_channel_thread=None, source_channel_agent=None,
-                    source_channel_client=email, source_user_email=email)
+                    source_channel_client=email, source_user_email=None)  # ent#886
         base.update(over)
         return SimpleNamespace(**base)
 

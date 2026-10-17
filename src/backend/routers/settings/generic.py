@@ -409,7 +409,36 @@ async def update_setting(
             ),
         )
 
-    if key in ("a2a_trusted_networks", "a2a_internal_base_url"):
+    # ent#623: the AAuth instance signing key is an AES-256-GCM envelope that
+    # IS this instance's identity to every AAuth peer. A plaintext write would
+    # corrupt it (AAuth then fails closed, confusingly); a replaced envelope
+    # would silently change the identity peers trust. Nothing writes it but
+    # `services.aauth.keys`, which creates it once.
+    from services.aauth.keys import SIGNING_KEY_SETTING
+
+    if key == SIGNING_KEY_SETTING:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is managed by the AAuth key service and cannot be set through the API",
+        )
+
+    # ent#862: the AAuth switches and the issuer are grants (publish this
+    # instance's key, accept signed callers, change every agent's identity), so
+    # they go through the dedicated route, which is admin AND interactive and
+    # validates the issuer. This catch-all is admin-only: an MCP key carrying an
+    # admin owner's role would otherwise flip them.
+    from services.aauth import config as aauth_config
+
+    if key in aauth_config.SETTINGS_ROUTE_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/aauth "
+                "(admin + interactive-only, issuer validated, audit-logged)"
+            ),
+        )
+
+    if key == "a2a_trusted_networks":
         raise HTTPException(
             status_code=422,
             detail=(
@@ -612,6 +641,29 @@ async def delete_setting(
             detail=(
                 f"{INSTALL_SOURCE_SETTING_KEY} records how this instance was "
                 "installed and cannot be cleared through the API."
+            ),
+        )
+
+    # ent#623: deleting the AAuth signing key re-keys this instance on next
+    # use — every AAuth peer's cached trust silently stops matching.
+    from services.aauth.keys import SIGNING_KEY_SETTING
+
+    if key == SIGNING_KEY_SETTING:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is managed by the AAuth key service and cannot be cleared through the API",
+        )
+
+    # ent#862: same reason as on PUT — clearing the issuer or a switch is a change
+    # to this instance's AAuth posture, made through the dedicated route.
+    from services.aauth import config as aauth_config
+
+    if key in aauth_config.SETTINGS_ROUTE_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be changed via PUT /api/settings/aauth "
+                "(admin + interactive-only, audit-logged)"
             ),
         )
 

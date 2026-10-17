@@ -257,7 +257,8 @@ def test_an_empty_roster_short_circuits_before_any_query(monkeypatch):
 # ---------------------------------------------------------------------------
 #
 # `get_portal_principal`'s platform branch resolves the caller through
-# `get_current_user`, which accepts MCP keys — and an agent-scoped key resolves
+# `resolve_platform_user_unfloored` (`get_current_user` minus the ent#837
+# operator floor), which accepts MCP keys — and an agent-scoped key resolves
 # to its OWNER carrying the owner's role (the ent#293/#297 trap). Before #2198
 # that meant any agent's injected TRINITY_MCP_API_KEY reached the portal as
 # `is_platform=True` for its owner: a REST path around the MCP layer's
@@ -287,7 +288,7 @@ def _wire_principal(monkeypatch, *, agent_name=None, mcp_scope=None,
         return _FakeUser(username="owner", agent_name=agent_name,
                          mcp_scope=mcp_scope)
 
-    monkeypatch.setattr(pa, "get_current_user", fake_get_current_user)
+    monkeypatch.setattr(pa, "resolve_platform_user_unfloored", fake_get_current_user)
     return pa
 
 

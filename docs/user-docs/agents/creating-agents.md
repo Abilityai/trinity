@@ -157,7 +157,7 @@ The check is advisory — the agent exists either way, and you can re-run the an
 
 1. Click **Create Agent** in the Dashboard header, or **Use Template** on the Library page.
 2. Select a template source. GitHub templates display as cards with metadata from `template.yaml`. For a free-form repository, pick the import intent (clone / fork / copy); a clone also asks **What is this repository?** (see above).
-3. Enter an agent name (lowercase, hyphens only) — this is the immutable slug.
+3. Enter an agent name — this is the immutable slug. As you type, the dialog shows **Identifier after formatting**: the exact slug Trinity will create, with spaces and other unsupported characters turned into hyphens and everything lowercased (`My Research Agent` becomes `my-research-agent`). Check it before creating. A name with no ASCII letter or digit formats to nothing, so **Create Agent** stays disabled and the field asks for at least one letter or number.
 4. Optionally set a **display label** (max 120 characters) — the friendly name shown across the UI. Leave it blank to render under the slug.
 5. Click **Create**, then review the inline compatibility result and, for a GitHub-backed agent, the git-mode notice. The new agent appears on the Dashboard at once.
 
@@ -212,10 +212,11 @@ The agent's container is labeled so it can be discovered and managed by the plat
 
 ## Limitations
 
-- Agent names must be unique, lowercase, with hyphens allowed. No spaces or special characters.
+- Agent names must be unique. The slug keeps only ASCII letters, digits, `-`, `_` and `.`; anything else becomes a hyphen, the result is lowercased, and it must start with a letter or digit.
 - The `base_image` must match the configured allowlist. Requests for blocked images return HTTP 403.
 - Private GitHub repositories require a GitHub PAT to be configured before use as a template source.
 - A public GitHub template clones with no token, but only in **source mode**. The anonymous clone can't push, so pushing changes back, Working-Branch mode, and fork-to-own still require a token.
+- Reading a public template's `template.yaml` at creation doesn't need a token either. When a token is present, Trinity tries your saved token, then the platform token. A token GitHub rejects as invalid is skipped for that create. If nothing can read the template, the refusal names which token failed. The create response's `git_mode.token_tier` shows which token the agent was created with, and `git_mode.rejected_token_tier` shows any token that was skipped.
 - Template metadata from GitHub is cached for 10 minutes. Changes to `template.yaml` may not appear immediately.
 - A **copy**-intent agent has no upstream by design. If both its container and its workspace volume are lost, a rebuild produces an empty workspace rather than re-fetching — Trinity will not silently pull whatever the source repository looks like *now*. Export the agent's data periodically if that matters; the creation audit entry records the source repo and exact commit.
 - An unresolvable or invalid local template id is rejected at creation rather than producing an empty agent.

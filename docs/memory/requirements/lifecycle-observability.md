@@ -448,9 +448,9 @@ endpoint — reports flow agent → MCP → backend.
 - **FR-8 — Agent read-back** (#1538, epic #1534): MCP `list_reports` (metadata; filters
   `agent_name`/`report_type`/`hours`/`search`, paged) and `get_report` (full payload by id)
   over the **existing** FR-3 endpoints — no new endpoint, no new tenant-boundary logic. The
-  MCP layer adds the one gate the backend structurally cannot: an agent-scoped key resolves to
-  its **owner**, so the backend scopes reads to everything the owner sees; the tool narrows a
-  broad listing to `{self} ∪ permitted` (the #1104 operator-queue rule) and re-checks the
+  MCP layer narrows the listing: an agent-scoped key resolves to its **owner**, so the backend
+  scopes a broad listing to everything the owner sees (a single report is narrowed by the
+  backend itself since trinity-enterprise#629); the tool narrows a broad listing to `{self} ∪ permitted` (the #1104 operator-queue rule) and re-checks the
   owning agent on `get_report`. A denied `get_report` returns the backend's own
   `Report not found` shape, so the deliberate 404-not-403 id-privacy choice (FR-3) is not
   widened for agent keys. Closes the write-only loop: an agent can see what it already filed
@@ -1578,14 +1578,25 @@ from the registry on every read: `value`, `color` (from the declared status
   |---|---|
   | `metric_dimension_invalid` | `dims` is not a mapping, a value is not a non-empty string (YAML `2024` / `yes`), is over-long or holds a control character, or there are more than 10 keys. A hint is added only for a non-text value, chosen by its type: quote it / one value per tile / the value is missing. |
   | `metric_dimension_undeclared` | A key the metric does not declare. The sentence lists the declared keys, or says the metric declares none. |
-  | `metric_series_not_found` | Valid and declared, but no recent series matches, including on a metric with no points at all. `binding_error` is "metric 'ad_spend': no recent data for channel=tiktok" (never "does not exist"); the rest travels as `binding_detail` facts (`selector`, `recent_series` ≤ 5, `more`, `window_points`, `series_cap`, `near` ≤ 5) and the browser writes the second line. |
+  | `metric_series_not_found` | Valid and declared, but no recent series matches, including on a metric with no points at all. `binding_error` is "metric 'ad_spend': no recent data for channel=tiktok" (never "does not exist"); the rest travels as `binding_detail` facts (`selector`, `recent_series` ≤ 5, `more`, `lookback_days`, `near` ≤ 5) and the browser writes the second line. |
 
-- **Known limit, documented not fixed:** the read keeps each metric's 200 newest
-  points (`LATEST_POINTS_PER_METRIC`) and lists 50 series
-  (`MAX_SERIES_PER_METRIC`). A series that reports rarely beside a busy one can
-  fall outside that window and is then refused `metric_series_not_found` even
-  though it still reports; the refusal states the window as facts and the hint
-  says so. A selector-specific lookup is the fix (follow-up bug #3293).
+- **A selected series is read on its own (#3293).** The fold reads each
+  metric's 200 newest points across all of its series
+  (`LATEST_POINTS_PER_METRIC`) and lists 50 series (`MAX_SERIES_PER_METRIC`); a
+  `dims:` selector is NOT matched against that shared read, because a series
+  that reports rarely beside a busy one is not in it. Each selected widget
+  makes its own bounded store read (`metric_series_points_for_dims`): the
+  series' 200 newest points inside the tile's window give the value, freshness
+  and history, and, only when the window holds none, its single newest point
+  back to 90 days (`SELECTED_SERIES_LOOKBACK_HOURS`) gives the value with an
+  empty history, stale. So how many points the metric's OTHER series recorded
+  never decides whether a tile binds. `metric_series_not_found` means the
+  series has no point in the last 90 days (and is not in the shared read
+  either); `lookback_days` states that bound and the hint says it. The fold,
+  `_latest_entry` and the objective join are unchanged. No schema change: the
+  read walks `idx_metric_points_agent_metric_ts` and filters on `dims`, so its
+  cost follows the metric's points inside the span it covers. A store fault on
+  this read refuses that one widget with `metric_store_unavailable`.
 - **Every successfully bound widget says what its number is** through
   `bound_series` (facts; the browser writes the caption):
 
@@ -1745,10 +1756,15 @@ file-level codes are the deliberate exception**: `objective_invalid` and
 carries nothing that says whose concern it is, and silence there is how a file
 disappears from a read that claims to show them all.
 
-An objective reaches an agent two ways: `owner: role:<id>` matching the
-template's `x-role.role` (**owned**), or the agent's own name in
-`supporting_agents` (**supporting**). An agent with no `x-role` can still
-support.
+An objective reaches an agent two ways: `owner: role:<id>` matching a seat the
+agent owns through (**owned**), or the agent's own name in `supporting_agents`
+(**supporting**). Since trinity-enterprise#812 (operator ruling 2026-10-06) the
+seat comes from Trinity's record through `assignment_provider.resolve_seat`, not
+from the template: the seat the agent **holds** itself (that seat only), else
+the seats its assigned people hold — primary first; a shared companion owns the
+union. `x-role` is neither required nor read. An agent with no seat owns nothing
+— a `no_seat` finding says so — and can still support. `supporting_agents` is
+read as before but frozen: nothing new is built on agent names in canon.
 
 ### 50.2 The four sources, and which one owns what
 
@@ -1865,7 +1881,7 @@ it. Findings appear twice — flat in `findings[]` with `objective_id` / `metric
 | `objective_id_invalid` | a file's `id:` is not a valid id | the **file name** is used instead and the finding says so — a *missing* `id` falls back silently, an id the author wrote and this read refused does not, because the ent#661 v3 project view keys objectives by id across agents |
 | `objective_file_skipped` | a `*.yaml` in `objectives/` whose NAME is not a plain path segment (a space, a non-ASCII character) | rename it; the file is never fetched, and `source.objectives_skipped` counts them so "not there" can be told from "there under a name this read will not open" |
 | `objectives_read_timeout` | the fan-out exceeded `OBJECTIVES_READ_BUDGET_SEC` | retry; the agent is answering, just too slowly — `source.objectives_dir: "timeout"`, no objective joined |
-| `role_id_invalid` | `x-role.role` is not a valid id | fix `template.yaml`; no owned objective can match until then |
+| `no_seat` | the agent neither holds a seat nor serves a person who holds one (trinity-enterprise#812; replaces `role_id_invalid`, which read `x-role`) | assign its primary with the seat they hold on the Access tab, or record the seat the agent holds; supporting objectives still show |
 | `canon_path_invalid` | `x-canon.clone_path` is not a plain path | fix it; **no file is read with that path** |
 
 Every code in this table above the file-level pair is published **only for the
@@ -1926,7 +1942,7 @@ stopped is an *answer*, not an error.
 
 ```
 {agent_name, generated_at, stale_rule: "2x cadence",
- role: {id, path} | null,          # from x-role; null → objectives can only be supporting
+ role: {id, path, case, seats} | null,   # the seat on record (#812): case holds|serves|none
  canon_root: "canon" | null,
  unavailable: null | agent_stopped | agent_missing | agent_unreachable,
  source: {template, objectives_dir, objectives_listed, objectives_scanned,
@@ -2019,10 +2035,10 @@ too (`isinstance(True, int)` is `True`, and `true` is not `1`).
 
 ### 50.9 Zero config
 
-An agent with no `x-role` and no `x-canon` costs one container-state read and
-one `template.yaml` read — **no store query at all** — and answers
-`{objectives: [], message: "no x-role or x-canon in template.yaml — nothing to
-join…"}`. Every empty state carries `message` naming the next action: the
+An agent with no `x-canon` costs one container-state read and one
+`template.yaml` read — **no store query at all** — and answers
+`{objectives: [], message: "no x-canon in template.yaml — nothing to join…"}`
+(trinity-enterprise#812: the canon declaration alone enables the join). Every empty state carries `message` naming the next action: the
 `objectives/` directory that was not found, the agent that is stopped, the fact
 that no active objective names this agent.
 

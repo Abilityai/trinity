@@ -123,8 +123,12 @@
             {{ m.content }}
           </p>
 
-          <div v-else-if="isMine(m)" class="flex justify-end">
-            <div class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white">{{ m.content }}</div>
+          <div v-else-if="isMine(m)" class="flex flex-col items-end gap-1">
+            <div class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white" :class="BUBBLE_WRAP_CLASS">{{ m.content }}</div>
+            <!-- trinity-enterprise#631: the tagger's own marks — each tag
+                 landed in that person's Inbox (in-app only), and whether they
+                 read it. Only on the sender's own messages. -->
+            <PortalTagMarks :tags="tagsFor(m, room?.own_tags)" :data-testid="`portal-room-tags-${m.seq}`" />
           </div>
 
           <div v-else class="flex items-start gap-2.5">
@@ -248,22 +252,17 @@
              (#2794) — the 1:1's shape, which this composer is otherwise a copy
              of (#2662). -->
         <div v-if="attachments.length && !isClosed" class="mb-2 flex flex-wrap gap-1.5">
-          <span
+          <PortalAttachmentChip
             v-for="(f, i) in attachments"
             :key="i"
-            class="inline-flex items-center gap-1 text-xs rounded-full pl-2.5 pr-1.5 py-1"
-            :class="f.error
-              ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
-              : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'"
-            :title="f.error || `${f.name} → ${recipientLabel}`"
-            data-testid="portal-room-attachment-chip"
+            :entry="f"
+            :locked="sending"
+            :title="`${f.name} → ${recipientLabel}`"
+            testid="portal-room-attachment-chip"
+            @remove="removeAttachment(f)"
           >
-            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
-            <span class="max-w-[10rem] truncate">{{ f.name }}</span>
-            <svg v-if="attachmentState(f) === 'uploading'" class="w-3 h-3 animate-spin text-gray-400" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-            <span v-else-if="attachmentState(f) === 'failed'" class="max-w-[16rem] truncate opacity-90">· {{ f.error }}</span>
-            <span v-else class="opacity-70">· to {{ recipientLabel }}</span>
-          </span>
+            <template #sent><span class="opacity-70">· to {{ recipientLabel }}</span></template>
+          </PortalAttachmentChip>
         </div>
         <!-- #2794: `v-if="!isClosed"`, NOT a `v-else`.
              The composer shipped as `<form v-else>` chained to the "this
@@ -300,6 +299,7 @@
               <PortalTypeahead
                 v-if="typeaheadOpen"
                 kind="@"
+                :title="typeaheadTitle"
                 :rows="typeaheadRows"
                 :active-index="activeIndex"
                 :overflow="typeaheadBound.overflow"
@@ -391,6 +391,7 @@ import { useClientPortalStore } from '@/stores/clientPortal'
 import { budgetNotice } from '@/utils/roomBudgets'
 import InlineError from '@/components/InlineError.vue'
 import PortalAgentBubble from './PortalAgentBubble.vue'
+import { BUBBLE_WRAP_CLASS } from './portalBubble'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
 import { liveElapsedSeconds, liveItemsForRoom, soleStoppableItem } from './portalWork'
@@ -399,10 +400,14 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
+import PortalTagMarks from './PortalTagMarks.vue'
+import { usePeoplePicker } from '@/composables/usePeoplePicker'
+import { noOneCalled, peopleRows, personToken, tagsFor, typeaheadHeading } from './portalMentions'
 import BaseButton from '@/components/base/BaseButton.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import { workSignalFromRoom } from './portalRail'
-import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
+import { usePortalFileDrop } from '@/composables/usePortalFileDrop'
+import PortalAttachmentChip from './PortalAttachmentChip.vue'
 import { useComposerDraft } from '@/composables/useComposerDraft'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { draftKeyFor, shouldAutoFocusComposer } from './portalDrafts'
@@ -527,14 +532,35 @@ const {
   entries: attachments,
   batchNotice,
   clear: clearAttachments,
+  remove: removeAttachment,
   handlers: dropHandlers,
 } = usePortalFileDrop(
+  // #3738: returns where each copy landed and under what stored name, so a
+  // removed chip can be deleted from every participant's inbox. A participant
+  // refusing after others took the file attaches the same receipt to the error.
   async (file) => {
     const names = agentParticipants.value
     if (!names.length) throw new Error('This room has no agents to send to.')
-    for (const name of names) await store.uploadDocument(name, file)
+    const stored = []
+    try {
+      for (const name of names) await store.uploadDocument(name, file).then((res) => stored.push({ agent: name, filename: res?.filename || file.name }))
+    } catch (err) {
+      if (stored.length && err && typeof err === 'object') err.receipt = { stored }
+      throw err
+    }
+    return { filename: stored[0]?.filename, stored }
   },
-  { disabled: () => isClosed.value },
+  {
+    disabled: () => isClosed.value,
+    // Every copy is attempted; the first refusal is rethrown so it is logged.
+    discard: async (e) => {
+      const results = await Promise.allSettled(
+        (e.receipt?.stored || []).map((s) => store.discardComposerUpload(s.agent, s.filename, e.file)),
+      )
+      const refused = results.find((r) => r.status === 'rejected')
+      if (refused) throw refused.reason
+    },
+  },
 )
 
 // Server-reported, so it survives a reload. The local `sending` flag still
@@ -652,19 +678,45 @@ const addable = computed(() => {
 
 const mentionSource = computed(() => roomMentionSource(agentParticipants.value, props.roster))
 
+// trinity-enterprise#631: the same `@` also tags a PERSON — a colleague on
+// this instance who can reach one of the room's agents (read from the server
+// once there is a query; never a directory). People follow the agents in the
+// list; picking one inserts `@Name` and remembers who, so the send carries the
+// address beside the text (`tagsInText`). A tag is a pointer, never a wake.
+const peoplePicker = usePeoplePicker({ fetch: (q) => store.fetchRoomPeople(props.roomId, q) })
+watch(() => typeaheadTrigger.value?.query, (q) => {
+  if (typeaheadTrigger.value) peoplePicker.lookup(q)
+  else peoplePicker.clear()
+})
+
 const typeaheadResult = computed(() => {
   const t = typeaheadTrigger.value
   if (!t || t.kind !== '@') return null
   return filterAgentCandidates(mentionSource.value, t.query)
 })
 
-const typeaheadBound = computed(() => boundCandidates(typeaheadResult.value?.items || []))
+const typeaheadCandidates = computed(() => {
+  const agents = (typeaheadResult.value?.items || []).map((a) => ({ kind: 'agent', name: a.name, agent: a }))
+  const q = typeaheadTrigger.value?.query || ''
+  const people = q && peoplePicker.answeredFor.value === q.trim() ? peopleRows(peoplePicker.people.value) : []
+  return [...agents, ...people]
+})
+
+const typeaheadBound = computed(() => boundCandidates(typeaheadCandidates.value))
+
+const typeaheadTitle = computed(() => typeaheadHeading({ people: !peoplePicker.unavailable.value }))
 
 const typeaheadEmpty = computed(() => {
   const t = typeaheadTrigger.value
   const r = typeaheadResult.value
-  if (!t || !r || r.items.length || t.query !== '') return null
-  return typeaheadEmptyMessage('@', r, { scope: 'room' })
+  if (!t || !r || typeaheadCandidates.value.length) return null
+  if (t.query === '') return typeaheadEmptyMessage('@', r, { scope: 'room' })
+  // trinity-enterprise#631: the named refusal — only once the server answered
+  // "no one" for exactly this query (a person may tag; agents matched nothing).
+  if (!peoplePicker.unavailable.value && peoplePicker.answeredFor.value === t.query.trim()) {
+    return noOneCalled(t.query, agentParticipants.value)
+  }
+  return null
 })
 
 const typeaheadOpen = computed(() => {
@@ -675,11 +727,11 @@ const typeaheadOpen = computed(() => {
   return typeaheadBound.value.visible.length > 0 || !!typeaheadEmpty.value
 })
 
-const typeaheadRows = computed(() => typeaheadBound.value.visible.map((a) => ({
-  key: `ag-${a.name}`,
-  primary: agentDisplayName(a),
-  secondary: `@${a.name}`,
-})))
+const typeaheadRows = computed(() => typeaheadBound.value.visible.map((c) => (
+  c.kind === 'person'
+    ? c
+    : { key: `ag-${c.name}`, primary: agentDisplayName(c.agent), secondary: `@${c.name}` }
+)))
 
 watch(typeaheadBound, (b) => { activeIndex.value = clampActiveIndex(activeIndex.value, b.visible.length) })
 
@@ -813,7 +865,11 @@ function acceptActive(index) {
   const t = typeaheadTrigger.value
   const row = typeaheadBound.value.visible[index]
   if (!t || !row) return
-  const { value, caret } = applyTypeaheadInsert(input.value, t, buildMentionToken(row.name))
+  // trinity-enterprise#631: a person's token is their name; who they are
+  // travels beside the text (`peoplePicker.picked`), never parsed out of it.
+  if (row.kind === 'person') peoplePicker.pick(row.person)
+  const token = row.kind === 'person' ? personToken(row.person) : buildMentionToken(row.name)
+  const { value, caret } = applyTypeaheadInsert(input.value, t, token)
   input.value = value
   closeTypeahead()
   // See PortalConversation: a mid-sentence pick leaves the caret inside the
@@ -879,8 +935,11 @@ async function send() {
   input.value = ''
   autoGrowAfterUpdate()   // deferred: Vue patches the textarea next tick
   resetTypeahead()
+  // trinity-enterprise#631: the people still named in the text, as picked.
+  const tags = peoplePicker.tagsFor(text)
   try {
-    await store.postRoomMessage(props.roomId, text)
+    await store.postRoomMessage(props.roomId, text, { tags })
+    peoplePicker.reset()
     // #2794: the chips describe what is going out with THIS message, so they
     // clear once it has gone — the 1:1's rule, which this composer never had.
     // Without it a room accumulated every chip it had ever drawn, describing

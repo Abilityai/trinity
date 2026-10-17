@@ -35,6 +35,8 @@ Each card carries a type pill — **Needs approval**, **Question**, or **Heads u
 | Question | Type an answer and send. |
 | Heads up | Click **Got it** to acknowledge. |
 
+An ask an agent addressed to a role that several people fill goes to every one of them: the first answer ends it, and the others' Workspace shows who answered.
+
 If the item stopped being pending while you were answering — another operator's response or Clear All landed first, or it expired — your response is **not recorded** and the page says so.
 
 Besides agent-authored items, the platform files its own alerts into this tab:
@@ -43,7 +45,8 @@ Besides agent-authored items, the platform files its own alerts into this tab:
 - Weekly-limit subscription alerts, titled **Subscription '<name>' passed N% of its weekly limit** (or **… is at N% of its weekly limit** at the critical tier) and, when two or more are all saturated, **All N subscriptions are near their weekly limit**. The thresholds are described in [Subscription Credentials](../credentials/subscription-credentials.md).
 - **Side effect refused: no execution id** (high priority) — an agent on the durable pull queue tried to send a message, place a call, share a file, or call an external A2A agent without a usable execution id. Such a turn can be re-delivered, so the send was refused rather than risk a duplicate reaching a real person. The usual fix is rebuilding the base image and restarting the agent.
 - A notice after a push whose `.gitignore` sweep changed which files are tracked — see [GitHub Sync](../integrations/github-sync.md).
-- **Legacy skills-library adoption refused** — filed when an install still carries a legacy skills-library address that matches none of its configured skill sources. One row per refused address (low priority in the steady state, high when the address failed validation). The platform ends it itself once the address is adopted or the legacy setting is removed. To dismiss it sooner, use **Clear All** on this tab, which cancels it, rather than **Got it**: an acknowledged row moves to Resolved and cannot be cleared from there, because it waits for a delivery to an agent that does not exist. Copies of this alert filed by earlier releases clear the same way, followed by **Clear All** on Resolved. A dismissal holds for 7 days (see below); to stop the alert for good, add the repository as a skill source or delete the leftover `skills_library_url` setting.
+- **Legacy skills-library adoption refused** — filed when an install still carries a legacy skills-library address that matches none of its configured skill sources. One row per refused address (low priority in the steady state, high when the address failed validation). The platform ends it itself once the address is adopted or the legacy setting is removed. To dismiss it sooner, click **Got it** or use **Clear All**; either ends it, and it can then be cleared from Resolved. A dismissal holds for 7 days (see below); to stop the alert for good, add the repository as a skill source or delete the leftover `skills_library_url` setting.
+- **A Workspace client rated a response as not useful** — a thumbs-down in the [Workspace](../sharing-and-access/workspace.md#reading-replies) names the person and quotes their comment when they leave one, even when the comment arrives after the click. It is shown only to the agent's owner and admins, never to other people the agent is shared with. See [Agent Reports](agent-reports.md).
 - Platform-health alerts: **System agent is running a stale base image**, **System agent could not be started**, **Agent circuit breaker DORMANT** (an agent failed enough consecutive probes that its scheduled tasks fast-fail until it recovers), and **Database backup failed** / **Database backups are stale** (see [Backup and Restore](../guides/deploying/backup-and-restore.md)).
 
 #### Platform alerts are conditions, not messages
@@ -66,13 +69,13 @@ Each agent may hold at most 25 pending items of its own (`OPERATOR_QUEUE_MAX_PEN
 Consolidated view of agent notifications (replaces the former standalone Events page).
 
 - Filter by agent, type, priority, or status; optionally show dismissed items.
-- Stats cards display pending, acknowledged, total, and per-agent counts.
+- Stats cards display **Pending** (every pending notification you can see, whatever the filters), **Acknowledged** and **Shown** (the rows loaded below), and **Agents**. The Pending figure, the tab badge and the navigation badge always count every pending notification; filtering the list never changes them.
 - Bulk selection and bulk actions.
 - Real-time updates via WebSocket.
 
 ### Resolved Tab
 
-Terminal operator-queue items. Responded items stay visible until the agent confirms delivery of the response.
+Terminal operator-queue items. Responded items stay visible until the agent confirms delivery of the response. A platform alert has no agent to deliver to, so answering one — **Got it** included — ends it as acknowledged straight away.
 
 When an agent asks again after one of its asks expired, the two cards name each other: **Re-ask of …** on the new ask and **Re-asked as …** on the expired one, with the other ask's id in full on hover.
 

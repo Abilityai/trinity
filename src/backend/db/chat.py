@@ -191,6 +191,22 @@ class ChatOperations:
             ).mappings().first()
             return self._row_to_chat_session(row) if row else None
 
+    def find_chat_session_by_message_source(
+        self, agent_name: str, user_id: int, source: str
+    ) -> Optional[str]:
+        """The session of this user's message on `agent_name` with `source`, if any."""
+        stmt = (
+            select(chat_messages.c.session_id)
+            .where(and_(
+                chat_messages.c.agent_name == agent_name,
+                chat_messages.c.user_id == user_id,
+                chat_messages.c.source == source,
+            ))
+            .limit(1)
+        )
+        with get_engine().connect() as conn:
+            return conn.execute(stmt).scalar()
+
     def get_chat_messages(self, session_id: str, limit: int = 100) -> List[ChatMessage]:
         """Get messages for a chat session (oldest first for display order)."""
         with get_engine().connect() as conn:

@@ -674,7 +674,7 @@ The receipts above only help a caller who knows what they mean. The rule is now
   call timed out or could not be confirmed; read with `get_execution_result` /
   `get_fan_out_result` or `set_reminder` and end the turn; an error without an
   `execution_id` is checked in `list_recent_executions` before a word-for-word
-  re-send (`agent_busy` included — it is not "nothing ran", #3244); `pending_approval` is not
+  re-send; `agent_busy` means nothing ran and is re-sent after `retry_after_seconds` (#3244: only the `capacity` 429 is `agent_busy`; any other `/chat` 429 is a `rate_limited` result naming the failed run); `pending_approval` is not
   retried, and its `message` says whether the outcome will reach the caller (#3233); `parallel=true, async=true` for long work, whose end fires
   `agent.task.*` for a subscriber (a sequential `/chat` turn fires none).
   #3245 added: after a confirmed `failed` or `cancelled`, re-send word for word
@@ -811,9 +811,9 @@ async function checkAgentAccess(
 Since ent#628 the agent-scope rule has ONE implementation, `src/mcp-server/src/access.ts::checkAgentEdge`, and
 every registered tool declares in `TOOL_ACCESS_POLICY` whether it is gated at registration (`enforce`),
 gates itself after resolving its target (`in-tool`), is ungated at the MCP layer with a named owner
-(`baselined` → trinity-enterprise#629), or has no agent target (`none`); `server.ts` refuses to register a
-tool without a row. It is a tool-surface gate — the REST routes behind the tools resolve an agent key to
-its owner (Invariant #8).
+(`baselined`, naming the backend fence), or has no agent target (`none`); `server.ts` refuses to register a
+tool without a row. The backend holds the same line one hop down (trinity-enterprise#629,
+`dependencies.agent_may_reach`).
 
 ---
 

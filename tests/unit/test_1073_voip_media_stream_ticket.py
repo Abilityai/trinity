@@ -124,7 +124,6 @@ def _load_media_stream_module() -> types.ModuleType:
     audio_mod.FRAME_BYTES = 160
     audio_mod.pcm24k_to_ulaw8k = lambda pcm, state: (b"", state)
     audio_mod.ulaw8k_to_pcm16k = lambda mulaw, state: (b"", state)
-    audio_mod.pop_frames = lambda buf, n: []
 
     config_mod = types.ModuleType("config")
     config_mod.REDIS_URL = "redis://test:test@redis:6379"

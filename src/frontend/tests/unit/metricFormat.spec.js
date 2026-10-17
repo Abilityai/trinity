@@ -328,8 +328,8 @@ describe('refusalHint writes the second line of a not-found refusal from facts',
   function refused(detail) {
     return { type: 'metric', metric: 'ad_spend', bound: false,
       binding_error_code: 'metric_series_not_found', binding_detail: {
-        selector: { channel: 'tiktok' }, recent_series: [], more: 0, window_points: 200,
-        series_cap: null, near: [], ...detail } }
+        selector: { channel: 'tiktok' }, recent_series: [], more: 0, lookback_days: 90,
+        near: [], ...detail } }
   }
 
   it('names the dimension a partial selector is missing', () => {
@@ -350,8 +350,7 @@ describe('refusalHint writes the second line of a not-found refusal from facts',
     expect(refusalHint(refused({ selector: { constructor: 'x' },
       recent_series: [{ channel: 'meta' }, { channel: 'google' }] })))
       .toBe('Check the selector or confirm this series reports. Recent series: channel=meta; '
-        + 'channel=google (among the 200 newest points; a series that reports rarely can fall '
-        + 'outside them).')
+        + 'channel=google. This series has no point in the last 90 days.')
   })
 
   it('suggests a casing fix, and only a casing fix', () => {
@@ -367,18 +366,24 @@ describe('refusalHint writes the second line of a not-found refusal from facts',
     expect(refusalHint(refused({ recent_series: [] }))).toBe('This metric has no points yet.')
   })
 
-  it('lists recent values and the window otherwise', () => {
+  it('lists recent values and how far back it looked otherwise', () => {
     expect(refusalHint(refused({ recent_series: [{ channel: 'meta' }, { channel: 'google' },
       { channel: 'linkedin' }], more: 0 })))
-      .toBe('Check the selector or confirm this channel reports. Recent channel: meta, google, +1 '
-        + '(among the 200 newest points; a channel that reports rarely can fall outside them).')
+      .toBe('Check the selector or confirm this channel reports. Recent channel: meta, google, +1. '
+        + 'This channel has no point in the last 90 days.')
   })
 
-  it('says the series may be outside the 50 read when the cap applies', () => {
+  it('never blames a shared window: the selected series is read on its own (#3293)', () => {
     const hint = refusalHint(refused({ recent_series: [{ channel: 'c1' }, { channel: 'c2' }],
-      more: 53, series_cap: 50 }))
-    expect(hint).toContain('Only the 50 newest series are read')
+      more: 53 }))
     expect(hint).toContain('+53')
+    expect(hint).not.toContain('newest')
+    expect(hint).not.toContain('outside')
+  })
+
+  it('still reads a refusal that carries no lookback', () => {
+    expect(refusalHint(refused({ recent_series: [{ channel: 'meta' }], lookback_days: undefined })))
+      .toBe('Check the selector or confirm this channel reports. Recent channel: meta.')
   })
 
   it('says nothing without facts', () => {

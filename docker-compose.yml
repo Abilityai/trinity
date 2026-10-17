@@ -76,6 +76,16 @@ services:
       # gap here cannot make the feature unreachable — but the env leg still has to
       # be forwarded or an operator setting it in .env silently does nothing.
       - A2A_OUTBOUND_ENABLED=${A2A_OUTBOUND_ENABLED:-false}
+      # AAuth prototype (trinity-enterprise#623 / #878 / #879). Default OFF and
+      # fail-closed: system_settings wins, but the env leg must be forwarded or
+      # the .env levers silently do nothing (#1056 class).
+      # ent#862: the graduated agent identity (Flows 1-4). Empty default, so an
+      # unset variable reads as unset and the Settings switch stays authoritative.
+      - AAUTH_ENABLED=${AAUTH_ENABLED:-}
+      - AAUTH_PROTOTYPE_ENABLED=${AAUTH_PROTOTYPE_ENABLED:-false}
+      - AAUTH_ISSUER=${AAUTH_ISSUER:-}
+      - AAUTH_PERSON_SERVER=${AAUTH_PERSON_SERVER:-}
+      - AAUTH_RESOURCE_ALLOWLIST=${AAUTH_RESOURCE_ALLOWLIST:-}
       # Nevermined x402 facilitator concurrency (ent#679). The bound is enforced at
       # these defaults whether or not they are wired, so a gap here is an inert
       # tuning lever rather than a dead feature — but this service uses an explicit

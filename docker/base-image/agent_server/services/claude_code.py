@@ -34,7 +34,7 @@ from ._runtime_config import (
     _load_guardrails,
     merged_disallowed_tools,
 )
-from .execution_env import build_execution_env
+from .execution_env import build_execution_env, auth_override_env_layers
 from .error_classifier import (
     _classify_signal_exit,
     _diagnose_exit_failure,
@@ -42,6 +42,7 @@ from .error_classifier import (
     _is_rate_limit_message,
     _model_rejection_detail,
     _model_rejection_message,
+    _stream_error_reason,
 )
 from . import chat_session_marker
 from . import jsonl_recovery as _jsonl_recovery
@@ -84,6 +85,9 @@ _execution_lock = asyncio.Lock()
 
 class ClaudeCodeRuntime(AgentRuntime):
     """Claude Code implementation of AgentRuntime interface."""
+
+    # #3470: a SUB-003 re-issue may carry the credential for THAT spawn.
+    supports_auth_override = True
 
     @classmethod
     def capabilities(cls) -> RuntimeCapabilities:
@@ -148,6 +152,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         system_prompt: Optional[str] = None,
         execution_id: Optional[str] = None,
         isolated_session: bool = False,
+        auth_override=None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
         """Execute Claude Code with the given prompt.
 
@@ -158,7 +163,8 @@ class ClaudeCodeRuntime(AgentRuntime):
         # Note: continue_session is handled internally: execute_claude_code
         # resumes the chat's own session id (agent_state.chat_session_id, #2958).
         return await execute_claude_code(prompt, stream, model, system_prompt=system_prompt,
-                                         execution_id=execution_id, isolated_session=isolated_session)
+                                         execution_id=execution_id, isolated_session=isolated_session,
+                                         auth_override=auth_override)
 
     async def execute_headless(
         self,
@@ -172,6 +178,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         resume_session_id: Optional[str] = None,
         persist_session: bool = False,
         images: Optional[List[Dict]] = None,
+        auth_override=None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
         """Execute Claude Code in headless mode for parallel tasks.
 
@@ -179,11 +186,13 @@ class ClaudeCodeRuntime(AgentRuntime):
             resume_session_id: Optional session ID to resume (EXEC-023)
             persist_session: If True, write the JSONL so the next --resume can find it (Session tab)
             images: Optional list of vision images: [{"media_type": str, "data": base64_str}] (#562)
+            auth_override: #3470 per-spawn credential (SUB-003 re-issue); Claude only
         """
         return await execute_headless_task(
             prompt, model, allowed_tools, system_prompt, timeout_seconds,
             max_turns, execution_id, resume_session_id,
             persist_session=persist_session, images=images,
+            auth_override=auth_override,
         )
 
 
@@ -196,6 +205,7 @@ async def _execute_claude_code_once(
     resume_session_id: Optional[str],
     attempt_state: Optional[Dict] = None,
     cli_model: Optional[str] = None,
+    auth_override=None,
 ) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
     """
     Run ONE chat subprocess. ``execute_claude_code`` owns the session choice.
@@ -312,6 +322,8 @@ async def _execute_claude_code_once(
         # descendant across fork/exec/setsid/double-fork. Cleanup uses it
         # to identify and kill orphans that escape both the pgid sweep
         # and the FD-based pipe-writer sweep.
+        # #3470: a SUB-003 re-issue's credential is a layer of THIS spawn only.
+        auth_extra, auth_drop = auth_override_env_layers(auth_override)
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -321,6 +333,7 @@ async def _execute_claude_code_once(
             bufsize=1,  # Line buffered
             start_new_session=True,
             env=build_execution_env({
+                **auth_extra,
                 EXECUTION_TAG_NAME: execution_id,
                 # #2127: same ceiling as the headless path. The chat path has no
                 # early-finalize to gate (it plainly waits for the process), so
@@ -330,7 +343,7 @@ async def _execute_claude_code_once(
                 # ceiling to only the reported path is the recurring
                 # one-of-two-call-sites escape (#686, #1264).
                 "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": str(int(timeout_seconds * 1000)),
-            }),
+            }, drop=auth_drop),
         )
         # Issue #407: capture pgid now — after wait() reaps the parent,
         # the pid is gone and we lose the ability to signal the group.
@@ -572,7 +585,9 @@ async def _execute_claude_code_once(
                     raise HTTPException(status_code=status_code, detail=detail)
 
                 error_detail = stderr_output[:500] if stderr_output else ""
-                if not error_detail:
+                # #3340: an error the stream named outranks stderr. Mirrors
+                # headless_executor._finalize_headless_result.
+                if _stream_error_reason(metadata) or not error_detail:
                     error_detail = _diagnose_exit_failure(return_code, metadata)
                 # Also check if stderr contains a rate limit message
                 if _is_rate_limit_message(error_detail) or _is_rate_limit_message(stderr_output):
@@ -729,7 +744,7 @@ def _cold_retry_reason(
     return "resume_jsonl_missing"
 
 
-async def execute_claude_code(prompt: str, stream: bool = False, model: Optional[str] = None, system_prompt: Optional[str] = None, execution_id: Optional[str] = None, isolated_session: bool = False) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
+async def execute_claude_code(prompt: str, stream: bool = False, model: Optional[str] = None, system_prompt: Optional[str] = None, execution_id: Optional[str] = None, isolated_session: bool = False, auth_override=None) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
     """
     Execute one chat turn, resuming only the chat's OWN session (#2958).
 
@@ -757,7 +772,7 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         turn_model = model or agent_state.current_model or "claude-sonnet-4-6"
         return await _execute_claude_code_once(
             prompt, stream, model, system_prompt, execution_id or str(uuid.uuid4()), None, {},
-            cli_model=turn_model,
+            cli_model=turn_model, auth_override=auth_override,
         )
 
     # Safety-net fallback: backend always resolves model before calling the agent
@@ -793,6 +808,7 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
     try:
         result = await _execute_claude_code_once(
             prompt, stream, model, system_prompt, execution_id, resume, attempt_state,
+            auth_override=auth_override,
         )
     except HTTPException as exc:
         reason = _cold_retry_reason(resume, exc, attempt_state, execution_id)
@@ -815,6 +831,7 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         _reset_session_counters()
         result = await _execute_claude_code_once(
             prompt, stream, model, system_prompt, execution_id, None, {},
+            auth_override=auth_override,
         )
 
     _capture_chat_session(result[2], effective_model, generation)

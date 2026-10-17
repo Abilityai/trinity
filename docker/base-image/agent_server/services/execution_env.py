@@ -47,7 +47,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Dict, Mapping, Optional
+from typing import Dict, Iterable, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -323,12 +323,17 @@ def arm_subscription_auth_guard() -> bool:
 def build_execution_env(
     extra: Optional[Mapping[str, str]] = None,
     env_file: Path = ENV_FILE,
+    *,
+    drop: Iterable[str] = (),
 ) -> Dict[str, str]:
     """Assemble the environment for one spawned runtime subprocess.
 
     Precedence, lowest to highest: container baseline → `.env` → runtime
-    overrides → `extra`. `extra` is last so `EXECUTION_TAG_NAME` (#407 orphan
-    sweep) can never be displaced by a `.env` key of the same name.
+    overrides → `extra` → `drop`. `extra` is after the file so `EXECUTION_TAG_NAME`
+    (#407 orphan sweep) can never be displaced by a `.env` key of the same name.
+    `drop` (#3470) removes keys LAST: a per-spawn OAuth credential has to take
+    `ANTHROPIC_API_KEY` away from that one spawn, because Claude Code prefers the
+    key over the token, and a mapping cannot express an absence.
     """
     env: Dict[str, str] = dict(INITIAL_ENV)
 
@@ -368,7 +373,40 @@ def build_execution_env(
 
     if extra:
         env.update(extra)
+    for key in drop:
+        env.pop(key, None)
     return env
+
+
+# ---------------------------------------------------------------------------
+# Per-spawn credential override (#3470)
+# ---------------------------------------------------------------------------
+
+# Response header the agent sets when a request's `auth_override` was applied
+# to the spawn. The backend reads it to tell "ran on the credential I sent"
+# from "an older image ignored the field and ran on its baseline" — a 429 body
+# carries no metadata, so the header is the only channel that works on the
+# failure path too. Mirrored by name in the backend
+# (`subscription_auto_switch.AUTH_OVERRIDE_HEADER`).
+AUTH_OVERRIDE_HEADER = "X-Trinity-Auth-Override"
+
+
+def auth_override_env_layers(override) -> tuple:
+    """``(extra, drop)`` for `build_execution_env` from a request's
+    `auth_override`, or ``({}, ())`` when there is nothing to apply.
+
+    `oauth_token`: set the token, drop every key Claude Code would prefer over
+    it (`SUBSCRIPTION_SHADOW_KEYS` — the #2114 class, applied to one spawn).
+    `api_key`: set the key, drop the OAuth token so the spawn's auth source is
+    unambiguous in `/proc/<pid>/environ` even though the key would win anyway.
+    """
+    kind = getattr(override, "kind", lambda: None)() if override is not None else None
+    secret = override.secret() if kind else None
+    if kind == "oauth_token" and secret:
+        return {"CLAUDE_CODE_OAUTH_TOKEN": secret}, tuple(SUBSCRIPTION_SHADOW_KEYS)
+    if kind == "api_key" and secret:
+        return {"ANTHROPIC_API_KEY": secret}, ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
+    return {}, ()
 
 
 # ---------------------------------------------------------------------------

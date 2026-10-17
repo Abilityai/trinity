@@ -365,28 +365,6 @@ class DispatchBreaker:
 # ----- Module-level operator hooks ------------------------------------------
 
 
-def get_all_dispatch_states() -> Dict[str, dict]:
-    """Return the state dict for every agent that has dispatch-breaker history.
-
-    Bounded SCAN (count=200), skips probe-lock keys. Fail-open → {}.
-    """
-    client = get_breaker_redis()
-    if client is None:
-        return {}
-
-    def _op() -> Dict[str, dict]:
-        result: Dict[str, dict] = {}
-        for key in client.scan_iter(match=f"{_DISPATCH_HASH_PREFIX}*", count=200):
-            if key.endswith(_DISPATCH_PROBE_LOCK_SUFFIX):
-                continue
-            agent_name = key[len(_DISPATCH_HASH_PREFIX):]
-            data = cast(Dict[str, Any], client.hgetall(key) or {})
-            result[agent_name] = _dispatch_state_dict(data)
-        return result
-
-    return fail_open({}, _op, on_error=_reset_dispatch_redis)
-
-
 def get_dispatch_states_for(agent_names: list) -> Dict[str, dict]:
     """Bulk dispatch state for a KNOWN set of agents via one pipelined HGETALL
     round-trip — no keyspace SCAN (#526 D7, slots-dashboard poll path).

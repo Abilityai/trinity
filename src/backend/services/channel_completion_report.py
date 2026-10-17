@@ -160,6 +160,7 @@ def _resolve_slack(
     *,
     binding_agent: str,
     context_client: Optional[str] = None,   # ent#457 review: portal-only, ignored here
+    triggered_by: Optional[str] = None,     # trinity#3688: portal-only, ignored here
     executing_agent: str,
     chat_id: str,
     thread: Optional[str],
@@ -209,6 +210,7 @@ def _resolve_telegram(
     *,
     binding_agent: str,
     context_client: Optional[str] = None,   # ent#457 review: portal-only, ignored here
+    triggered_by: Optional[str] = None,     # trinity#3688: portal-only, ignored here
     executing_agent: str,
     chat_id: str,
     thread: Optional[str],
@@ -311,6 +313,7 @@ def _resolve_portal(
     chat_id: str,
     context_client: Optional[str],
     thread: Optional[str],
+    triggered_by: Optional[str] = None,
     status: str,
     summary_or_error: Optional[str],
     execution_id: str,
@@ -407,6 +410,7 @@ def _resolve_portal(
         session_agent=session_agent,
         status=status,
         summary_or_error=summary_or_error,
+        triggered_by=triggered_by,
     )
 
     async def deliver() -> bool:
@@ -418,7 +422,7 @@ def _resolve_portal(
             now = utc_now_iso()
             portal_db.add_portal_message(
                 _uuid.uuid4().hex, session_agent, client_email, "assistant", body,
-                None, now, session_id=chat_id, source=_portal_source(status),
+                None, now, session_id=chat_id, source=_portal_source(status, triggered_by),
             )
             # Every other writer of a portal message touches its session, and
             # this one has to for the same reason: `last_message_at` is what
@@ -544,16 +548,28 @@ def _resolve_portal(
 # it found. Frontend readers compare `source` to 'voice' only.
 COMPLETION_SOURCE_DONE = "completion:done"
 COMPLETION_SOURCE_FAILED = "completion:failed"
+# trinity#3688: a gated request's ending notice (`triggered_by="skill_gate"`).
+# Its run completes even when the request was rejected or expired, so it is
+# neither "done" nor "failed": the Inbox shows no outcome pill for it.
+COMPLETION_SOURCE_NOTICE = "completion:notice"
 
 
-def _portal_source(status: str) -> str:
-    """The marker for `status`, decided by the SAME test `_portal_body` uses for
+def _is_gate_notice(status: str, triggered_by: Optional[str]) -> bool:
+    """The requester woken with how its gated request ended (trinity#3688).
+    One test for the header AND the source, so they cannot disagree."""
+    return status == "success" and triggered_by == "skill_gate"
+
+
+def _portal_source(status: str, triggered_by: Optional[str] = None) -> str:
+    """The marker for `status`, decided by the SAME tests `_portal_body` uses for
     its wording, so the pill and the sentence cannot disagree."""
+    if _is_gate_notice(status, triggered_by):
+        return COMPLETION_SOURCE_NOTICE
     return COMPLETION_SOURCE_DONE if status == "success" else COMPLETION_SOURCE_FAILED
 
 
 def _portal_body(*, executing_agent: str, session_agent: str, status: str,
-                 summary_or_error: Optional[str]) -> str:
+                 summary_or_error: Optional[str], triggered_by: Optional[str] = None) -> str:
     """The message a person reads when background work finishes.
 
     Honest about failure (AC #3: "never a silent vanish") and about WHO did the
@@ -562,7 +578,15 @@ def _portal_body(*, executing_agent: str, session_agent: str, status: str,
     """
     done = status == "success"
     who = "" if executing_agent == session_agent else f" ({executing_agent})"
-    head = f"**Finished{who}**" if done else f"**Didn't finish{who}** — {status}"
+    if _is_gate_notice(status, triggered_by):
+        # trinity#3688: the requester woken with how its gated request ended.
+        # The wake-up completes normally for a rejected, expired or not-run
+        # request too, so "Finished" would contradict the text below, which
+        # carries the verdict. The approved run itself keeps its requester's
+        # trigger and still reads "Finished".
+        head = f"**Approval update{who}**"
+    else:
+        head = f"**Finished{who}**" if done else f"**Didn't finish{who}** — {status}"
     # The same sanitise-then-truncate rule the other channels use. A Workspace
     # thread is a persistent, client-visible surface — if anything, MORE exposed
     # than a Slack channel, since the reader is an external client.
@@ -636,6 +660,8 @@ async def report_completion(
             # destination is a chat id on someone else's server, not a
             # per-person thread this platform owns.
             context_client=getattr(row, "source_channel_client", None),
+            # trinity#3688: a gated request's ending notice gets its own header.
+            triggered_by=triggered_by,
         )
         if deliver is None:
             return False        # consent / destination / token suppressed (logged)
@@ -690,8 +716,12 @@ def _is_approved_gate_run(execution_id: str) -> bool:
     approved background run, and reporting it would post the reply twice."""
     try:
         from database import db
+        from db.skill_gate_requests import APPROVED_RUN_STATES
         record = db.get_gate_request_by_dispatched_execution(execution_id)
-        return bool(record) and record.get("state") in ("dispatching", "dispatched")
+        # trinity#3520: the terminal fan-out runs BEFORE this report at every
+        # terminal site, so a finished run's record already reads `succeeded`
+        # / `failed` here — still an approved background run.
+        return bool(record) and record.get("state") in APPROVED_RUN_STATES
     except Exception:  # noqa: BLE001
         logger.warning("[ent#751] gate-record read failed for %s; not reporting", execution_id)
         return False

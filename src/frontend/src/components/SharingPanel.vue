@@ -207,7 +207,7 @@
         <!-- MCP connector (ent#46) — OSS-core since #118 (un-gated) -->
         <ChannelDisclosure
           title="MCP connector"
-          subtitle="Add this agent to an AI client; playbooks become tools"
+          subtitle="Add this agent to an AI client; its skills become tools"
           icon="🔌"
         >
           <ConnectorChannelPanel :agent-name="agentName" />
