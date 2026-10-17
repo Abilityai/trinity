@@ -123,7 +123,7 @@ Two routers are registered in `main.py:523-524`:
 
 **Message processing**:
 - `parse_message(raw_event)` (line 66) — Extracts text + media context from Telegram Update. Skips bot messages. Returns `NormalizedMessage` with metadata including `bot_id`, `agent_name`, `username`, media flags.
-- `send_response(channel_id, response, thread_id)` (line 123) — Converts markdown to HTML, splits at 4096 chars, sends via `sendMessage`. Falls back to plain text if HTML parsing fails (line 247).
+- `send_response(channel_id, response, thread_id)` — Converts Markdown to HTML and sends ordered chunks via `sendMessage`. The shared router keeps Telegram code blocks inline rather than extracting attachment placeholders. Explicit `ChannelResponse.files` are uploaded via `sendDocument` before references are sent; unconfirmed uploads are restored as escaped preformatted text and split. File contents are not reinterpreted as Markdown.
 - `indicate_processing(message)` (line 158) — Sends `typing` chat action.
 
 **Bot commands** (line 168):
@@ -133,7 +133,7 @@ Two routers are registered in `main.py:523-524`:
 
 **Message formatting**:
 - `_markdown_to_html()` (line 274) — Converts `**bold**`, `*italic*`, `` `code` ``, `~~strike~~` to Telegram HTML tags
-- `_split_message()` (line 298) — Splits at paragraph/sentence/word boundaries within 4096 char limit
+- `_split_message()` — Splits at paragraph/sentence/word boundaries with a conservative 4096 UTF-16-unit budget including markup. Tags and HTML entities remain whole; open tags are closed/reopened. Pathological markup that leaves no room for content falls back to escaped plain text.
 - `_extract_media_context()` (line 327) — Generates descriptive context for photos, documents, stickers, locations, voice, video
 
 ### Media Service: `src/backend/services/telegram_media.py`
@@ -274,8 +274,10 @@ The message router restricts public channel users to `WebSearch,WebFetch` by def
 | No binding found (test) | 404 | No Telegram binding found or token decryption failed | `telegram.py:220` |
 | Unknown webhook_secret | 200* | `{"ok": false}` | `telegram_webhook.py:43` |
 | Invalid header token | 200* | `{"ok": false}` | `telegram_webhook.py:49` |
-| Rate limited by Telegram | Retry | Waits `retry_after` seconds (max 30s) | `telegram_adapter.py:236` |
-| HTML parse failure | Retry | Falls back to plain text | `telegram_adapter.py:247` |
+| Reply/document rate limited by Telegram | Retry once | Honors `retry_after` before retrying the same chunk/upload | `TelegramAdapter._send_message`, `_send_document` |
+| HTML parse failure | Retry | Falls back to plain text; the same chunk can still use its one rate-limit retry | `TelegramAdapter._send_message` |
+| Reply chunk unconfirmed | Stop | Does not send later chunks or replay confirmed chunks; no automatic replay on timeout | `TelegramAdapter.send_response` |
+| Explicit document upload unconfirmed | Text fallback | Restores the text file content instead of sending an unbacked reference | `TelegramAdapter.send_response` |
 | Agent container not running | 200 | "I'm not available right now" | `message_router.py:143` |
 | Task execution timeout | 200 | "That took too long" | `message_router.py:201` |
 
