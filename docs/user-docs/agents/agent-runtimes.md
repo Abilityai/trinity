@@ -53,6 +53,8 @@ A Codex agent authenticates in one of two ways, and Trinity handles the file the
 - **API key** — inject `OPENAI_API_KEY` (or `CODEX_API_KEY`) as a credential. Trinity logs the CLI in with that key before the agent's first turn, so an API-key Codex agent works out of the box. If you rotate the key in `.env`, the next turn re-logs in with the new one.
 - **ChatGPT plan** — run `codex login` yourself from the agent's terminal. Trinity never overwrites a plan login with an API key.
 
+Codex keeps its login and MCP configuration in `~/.tmp/codex/`. The Files tab cannot edit or delete them (nor the `.tmp` folder that holds them); use `codex login` in the terminal as above.
+
 ### Gemini authentication
 
 A Gemini agent uses the platform's Gemini key. Trinity reads the key saved in **Settings** first, then `GEMINI_API_KEY` or `GOOGLE_API_KEY` on the backend, and passes it to the container as `GEMINI_API_KEY` when the container is created. Settings accepts Google AI Studio keys that start with `AIza` or `AQ.` — see [Platform Keys](../credentials/platform-keys.md). With no key configured, the agent is still created, but its turns fail with "GEMINI_API_KEY not configured".

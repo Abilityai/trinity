@@ -553,3 +553,109 @@ describe("#3247 ask_operator replaces", () => {
     assert.ok(d.includes("person | timeout | platform | agent"));
   });
 });
+
+// ---------------------------------------------------------------------------
+// trinity-enterprise#901 — withdraw_ask: an agent ends one of its OWN pending
+// asks with a reason and no successor. Self-acting like get_my_ask: the agent
+// comes from the key, only {reason} travels, and a refusal comes back as its
+// named code, never a throw.
+// ---------------------------------------------------------------------------
+
+function withdrawingClient(result: unknown = { status: "withdrawn", request_id: "deploy-1", agent_ending: "withdrawn" }) {
+  const calls: Array<[string, string, { reason: string }]> = [];
+  const fake = {
+    withdrawAsk: async (agentName: string, requestId: string, body: { reason: string }) => {
+      calls.push([agentName, requestId, body]);
+      return result;
+    },
+  } as Partial<TrinityClient>;
+  return { fake, calls };
+}
+
+function makeWithdrawAsk(fake: Partial<TrinityClient>) {
+  return createOperatorQueueTools(fake as unknown as TrinityClient, false).withdrawAsk;
+}
+
+describe("trinity-enterprise#901 withdraw_ask", () => {
+  it("ends the calling agent's own ask — the agent comes from the key", async () => {
+    const { fake, calls } = withdrawingClient();
+    const out = JSON.parse(await makeWithdrawAsk(fake).execute(
+      { request_id: "deploy-1", reason: "The build fixed itself." }, agentCtx("self")));
+    assert.deepEqual(calls, [["self", "deploy-1", { reason: "The build fixed itself." }]]);
+    assert.equal(out.status, "withdrawn");
+  });
+
+  it("forwards only {reason} in the body, whatever else the arguments carry", async () => {
+    const { fake, calls } = withdrawingClient();
+    const stray = {
+      request_id: "deploy-1", reason: "moot", agent_name: "sibling",
+      replaced_by: "x", disposed_by: "person", status: "answered",
+    };
+    await makeWithdrawAsk(fake).execute(stray as any, agentCtx("self"));
+    assert.deepEqual(calls, [["self", "deploy-1", { reason: "moot" }]]);
+  });
+
+  it("declares request_id and reason only — there is nothing to spoof", () => {
+    const tool = makeWithdrawAsk(withdrawingClient().fake);
+    assert.deepEqual(Object.keys((tool.parameters as any).shape).sort(), ["reason", "request_id"]);
+  });
+
+  it("the system key withdraws as the agent it was minted for", async () => {
+    const { fake, calls } = withdrawingClient();
+    await makeWithdrawAsk(fake).execute(
+      { request_id: "r-1", reason: "moot" },
+      { session: { scope: "system", agentName: "trinity-system" } as any },
+    );
+    assert.deepEqual(calls.map((c) => c[0]), ["trinity-system"]);
+  });
+
+  for (const session of [
+    { scope: "user" },
+    { scope: "connector", agentName: "self" },
+    { scope: "system" },
+  ]) {
+    it(`a ${session.scope}-scoped key${"agentName" in session ? " naming an agent" : ""} is refused before any backend call`, async () => {
+      const { fake, calls } = withdrawingClient();
+      const out = JSON.parse(await makeWithdrawAsk(fake).execute(
+        { request_id: "r-1", reason: "moot" }, { session: session as any }));
+      assert.equal(out.success, false);
+      assert.match(out.error, /agent identity/);
+      assert.deepEqual(calls, []);
+    });
+  }
+
+  for (const [status, detail] of [
+    [404, { code: "ask_not_found", message: "Ask not found." }],
+    [409, { code: "ask_ended", message: "It was answered.", request_id: "deploy-1",
+            ask_status: "responded", disposition: "answered", disposed_by: "person",
+            disposed_at: "2026-10-14T10:00:00Z", replaced_by: null }],
+    [422, { code: "invalid_reason", message: "Give a one-line reason.", limit: 500 }],
+  ] as const) {
+    it(`a ${detail.code} refusal reaches the agent with its extras, not a throw`, async () => {
+      const fake = {
+        withdrawAsk: async () => { throw new ApiError(status, JSON.stringify({ detail })); },
+      } as Partial<TrinityClient>;
+      const out = JSON.parse(await makeWithdrawAsk(fake).execute(
+        { request_id: "deploy-1", reason: "moot" }, agentCtx("self")));
+      assert.deepEqual(out, { success: false, status, ...detail });
+    });
+  }
+
+  it("the description teaches the refusals, the replay and where the answer is", () => {
+    const d = makeWithdrawAsk(withdrawingClient().fake).description;
+    for (const phrase of ["ask_ended", "get_my_ask", "replayed", "ask_not_found", "invalid_reason", "replaces"]) {
+      assert.ok(d.includes(phrase), phrase);
+    }
+    assert.ok(d.length <= 2048, `withdraw_ask description is ${d.length} characters`);
+  });
+
+  it("ask_operator, get_my_ask and respond_to_operator_queue name the withdraw", () => {
+    const tools = createOperatorQueueTools({} as unknown as TrinityClient, false);
+    const ask = tools.askOperator.description;
+    assert.ok(ask.includes("if nothing is needed any more, withdraw_ask"));
+    assert.ok(ask.length <= 1800, `ask_operator description is ${ask.length} characters`);
+    assert.ok(tools.getMyAsk.description.includes("withdraw_ask"));
+    assert.ok(tools.getMyAsk.description.includes("agent_ending"));
+    assert.ok(tools.respondToOperatorQueue.description.includes("withdraw_ask"));
+  });
+});

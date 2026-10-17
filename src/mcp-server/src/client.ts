@@ -24,6 +24,7 @@ import type {
   ActivityTimelineResponse,
   OperatorQueueAskReadback,
   OperatorAskCreate,
+  OperatorAskWithdraw,
   OperatorAskReceipt,
   OperatorQueueItem,
   OperatorQueueListResponse,
@@ -527,6 +528,9 @@ export interface GateResult {
   request_id?: string;
   skills?: string[];
   approver_role?: string;
+  /** trinity-enterprise#848: what the approver shows as — a kind's name, or a
+   * canon role's ("Head of sales"). Absent from an older backend. */
+  approver_label?: string;
   expires_at?: string | null;
   /** trinity#3233: how the backend will tell this caller the outcome —
    * `agent_task`, `inbox`, or `none` (absent from an older backend = none). */
@@ -560,6 +564,7 @@ export function parseGateResult(
         request_id: typeof parsed.request_id === "string" ? parsed.request_id : undefined,
         skills: Array.isArray(parsed.skills) ? (parsed.skills as string[]) : undefined,
         approver_role: typeof parsed.approver_role === "string" ? parsed.approver_role : undefined,
+        approver_label: typeof parsed.approver_label === "string" ? parsed.approver_label : undefined,
         expires_at: typeof parsed.expires_at === "string" ? parsed.expires_at : null,
         outcome_delivery: delivery,
         retryable: false,
@@ -1007,9 +1012,23 @@ export class TrinityClient {
   /**
    * Check if source agent is permitted to call target agent (Phase 9.10)
    */
+  /**
+   * May `sourceAgent` call `targetAgent`? Decided by the backend from the
+   * database — the permission edge or the spawn record — never from the
+   * Docker-filtered permissions list, so a target with no container, a spawned
+   * child, or a Docker read fault no longer reads as "not permitted"
+   * (trinity-enterprise#629). Fails closed: any error is `false`.
+   */
   async isAgentPermitted(sourceAgent: string, targetAgent: string): Promise<boolean> {
-    const permitted = await this.getPermittedAgents(sourceAgent);
-    return permitted.includes(targetAgent);
+    try {
+      const response = await this.request<{ reachable: boolean }>(
+        "GET",
+        `/api/agents/${encodeURIComponent(sourceAgent)}/reach/${encodeURIComponent(targetAgent)}`
+      );
+      return response.reachable === true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -2709,6 +2728,23 @@ export class TrinityClient {
   }
 
   /**
+   * End one of the agent's OWN pending asks with a reason and no successor
+   * (trinity-enterprise#901). Proxies
+   * POST /api/agents/{name}/operator-queue/{request_id}/withdraw: the backend
+   * answers only the agent's own key (or the system key as trinity-system),
+   * 200 with the receipt (`status: "withdrawn"`, or `"replayed"` when this
+   * agent already withdrew it). A refusal (404 ask_not_found / 409 ask_ended /
+   * 422 invalid_reason) is thrown as an ApiError carrying the named code.
+   */
+  async withdrawAsk(agentName: string, requestId: string, body: OperatorAskWithdraw): Promise<OperatorAskReceipt> {
+    return this.request<OperatorAskReceipt>(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/operator-queue/${encodeURIComponent(requestId)}/withdraw`,
+      body,
+    );
+  }
+
+  /**
    * Respond to (resolve) a pending operator-queue item (OPS-001, #1104).
    * Proxies POST /api/operator-queue/{id}/respond. The backend 400s if the
    * item is not in a respondable (`pending`) state — surfaced as a thrown
@@ -3914,6 +3950,7 @@ export class TrinityClient {
       clear_credentials?: boolean;
       /** `payment_token` makes the credential ride as x402 payment (#3185). */
       credential_kind?: "api_key" | "payment_token";
+      auth_scheme?: "bearer" | "aauth"; // ent#862
     },
   ): Promise<{ endpoint?: unknown; enabled?: boolean; hint?: string }> {
     return this.request<{ endpoint?: unknown; enabled?: boolean; hint?: string }>(
@@ -4014,6 +4051,35 @@ export class TrinityClient {
     body: { endpoint: string; task_id: string },
   ): Promise<unknown> {
     return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/a2a/task`, body);
+  }
+
+  /**
+   * Obtain (or resume obtaining) a person token for a resource as `name`
+   * (trinity-enterprise#878). Own-key only on the backend; the response never
+   * carries the token. Same bounded fetch as the A2A hop: the backend waits on
+   * the person server for up to `wait` + 8 s.
+   */
+  async requestPersonToken(
+    name: string,
+    body: {
+      resource: string;
+      pending_handle?: string;
+      wait?: number;
+      execution_id?: string;
+      trigger_source?: "mcp" | "api" | "script";
+    },
+  ): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/aauth/person-token`, body);
+  }
+
+  /**
+   * Call an allow-listed AAuth resource as `name`, or resume a pending call by
+   * its handle (trinity-enterprise#879). Own-key only on the backend; the
+   * response never carries a token. Same bounded fetch as the A2A hop: the
+   * backend's own budget is 25 s, under the 40 s gateway deadline.
+   */
+  async callAAuthResource(name: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/aauth/resource-call`, body);
   }
 
   // --- Credential vault (trinity-enterprise#279) ----------------------------

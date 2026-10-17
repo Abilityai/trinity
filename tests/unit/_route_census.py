@@ -526,6 +526,15 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
         "terminal result delivery; authenticates the agent's own key and path self-match (#1083)"),
     "routers/reports.py::create_report": (
         "POST /api/agents/{name}/reports", "structured output an agent publishes about itself (self-check)"),
+    "routers/aauth_person.py::request_person_token": (
+        "POST /api/agents/{agent_name}/aauth/person-token",
+        "a USE of the agent's AAuth identity (trinity-enterprise#878): the handler refuses every principal "
+        "but the agent's OWN key (403 aauth_agent_only) — a human may not make the backend sign as the agent"),
+    "routers/aauth_resource.py::call_aauth_resource": (
+        "POST /api/agents/{agent_name}/aauth/resource-call",
+        "a USE of the agent's AAuth identity (trinity-enterprise#879): the same own-key gate as the person-token "
+        "route — every principal but the agent's OWN key is refused (403 aauth_agent_only) before the allow-list "
+        "is consulted, so a human may neither make the backend sign as the agent nor probe the allow-list"),
     "routers/notifications.py::create_notification": (
         "POST /api/notifications", "an agent raises a notification; agent name comes from its key (NOTIF-001)"),
     # MCP schedule tools — the agent's own use; autonomy (person-only) bounds cron firing.
@@ -552,6 +561,8 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     "routers/agent_config.py::get_public_channel_model": ("GET /api/agents/{agent_name}/public-channel-model", "a non-sensitive read of this agent's own setting (access-level)"),
     "routers/agent_config.py::get_agent_guardrails": ("GET /api/agents/{agent_name}/guardrails", "a non-sensitive read of this agent's own setting (access-level)"),
     "routers/agent_config.py::list_agent_capability_grants": ("GET /api/agents/{agent_name}/capability-grants", "trinity-enterprise#164: an agent reads which self-change permissions it holds, so it knows when to raise a permission-request (owner-level; granting is interactive-admin)"),
+    "routers/agent_files.py::get_agent_peer_skills": ("GET /api/agents/{agent_name}/peer-skills", "abilityai/trinity-enterprise#662: a READ of what this agent's own edges expose — the library skills on its permitted targets and whether it may run each — so an agent can reason about a refusal before it is refused; targets filtered to what the viewer may open AND (for an agent key) reach; the grant itself is admin + interactive"),
+    "routers/agent_files.py::get_agent_reach": ("GET /api/agents/{agent_name}/reach/{target}", "trinity-enterprise#629: the MCP agent-to-agent gate asks, with the CALLING agent's own key, whether it may call a target — the edge or the spawn record, a boolean; access as for GET .../permissions"),
     "routers/users.py::get_my_github_pat_status": (
         "GET /api/users/me/github-pat", "configured flags only, never the token (ent#162)"),
     # Skill sets (ent#530). The writes are the USE of the skills-manage capability, fenced like
@@ -569,6 +580,10 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     # only the agent's own key (or trinity-system as itself) and refuses every person.
     "routers/operator_queue.py::raise_my_ask": (
         "POST /api/agents/{name}/operator-queue", "MCP ask_operator; the agent raises its own ask, self-only (get_self_acting_agent)"),
+    # trinity-enterprise#901: the agent ends its OWN pending ask with a reason; the same
+    # self-only gate, the row must carry raised_by='agent' (a gate's approval is a 404).
+    "routers/operator_queue.py::withdraw_my_ask": (
+        "POST /api/agents/{name}/operator-queue/{request_id}/withdraw", "MCP withdraw_ask; the agent withdraws its own pending ask, self-only (get_self_acting_agent)"),
     # trinity-enterprise#752: the in-container skill-gate hook reads its own gates and its own
     # run's clearance; the agent comes from the key (get_self_agent), every person is refused.
     "routers/skill_gate.py::check_skill_invocation": (
@@ -634,6 +649,13 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
     "routers/public.py::tls_allowed": ("GET /api/public/tls-allowed", "unauthenticated by design (reverse-proxy on-demand TLS probe)"),
     "routers/a2a.py::a2a_well_known_card": ("GET /a2a/{agent_name}/.well-known/agent-card.json", "unauthenticated by design (A2A discovery card)"),
     "routers/a2a.py::a2a_jsonrpc": ("POST /a2a/{agent_name}", "ent#679: a Trinity MCP key OR an x402 payment token; decided in-handler (get_user_or_anonymous → 401 unless exposed AND priced)"),
+    # trinity-enterprise#623: AAuth discovery documents. Anonymous by design —
+    # a peer fetches them from the issuer origin before it holds any credential;
+    # they carry only public material (issuer, JWKS public keys, signature
+    # requirements) and answer a uniform 404 while the prototype flag is off.
+    "routers/aauth.py::aauth_agent_metadata": ("GET /.well-known/aauth-agent.json", "unauthenticated by design (AAuth agent-provider metadata; 404 unless the prototype flag is on)"),
+    "routers/aauth.py::aauth_jwks": ("GET /.well-known/aauth-jwks.json", "unauthenticated by design (AAuth JWKS, public keys only; 404 unless the prototype flag is on)"),
+    "routers/aauth.py::aauth_resource_metadata": ("GET /.well-known/aauth-resource.json", "unauthenticated by design (AAuth resource metadata; 404 unless the prototype flag is on)"),
     "routers/mcp_keys.py::validate_mcp_api_key_http_endpoint": ("POST /api/mcp/validate", "validates the presented MCP key itself (MCP server auth)"),
     "main.py::health_check": ("GET /health", "unauthenticated by design (health probe)"),
     "routers/slack.py::handle_slack_event": ("POST /api/public/slack/events", "Slack request signature"),

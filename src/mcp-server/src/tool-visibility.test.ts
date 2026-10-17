@@ -348,6 +348,31 @@ describe("#736 outbound A2A tools are operator-scope only", () => {
     assert.match(serverSrc, /createA2ACallTools\(client, requireApiKey\)/);
     assert.doesNotMatch(serverSrc, /connectorGroup\s*=\s*createA2ACallTools/);
   });
+
+  it("registers the AAuth tools in the operator group — advertised but inert when the flag is off (ent#878 T3, ent#879 T4)", async () => {
+    // Taste T3: no env gate and no dynamic registration. The tools are ALWAYS
+    // advertised to operator scopes; with `aauth_prototype_enabled` off the
+    // backend answers 404 and the tools report `aauth_disabled: true`. The
+    // backend 404 is the authority, exactly as for call_a2a_agent. ent#879's
+    // call_aauth_resource registers through the SAME mechanism — one, never two.
+    const { createAAuthTools } = await import("./tools/aauth.js");
+    const tools = createAAuthTools({ getBaseUrl: () => "http://x" } as any, false);
+    assert.deepEqual(Object.keys(tools), ["request_person_token", "call_aauth_resource"]);
+    for (const name of Object.keys(tools)) {
+      for (const scope of ["user", "agent", "system"]) {
+        assert.equal(operatorOnly({ scope }), true, `${scope} should see ${name}`);
+      }
+      for (const scope of ["connector", "anonymous", "portal_delegate"]) {
+        assert.equal(operatorOnly({ scope }), false, `${scope} must not see ${name}`);
+      }
+    }
+    const serverSrc = await import("node:fs").then((fs) =>
+      fs.readFileSync(new URL("./server.ts", import.meta.url), "utf8"),
+    );
+    assert.match(serverSrc, /createAAuthTools\(client, requireApiKey\)/);
+    assert.doesNotMatch(serverSrc, /connectorGroup\s*=\s*createAAuthTools/);
+    assert.doesNotMatch(serverSrc, /AAUTH_PROTOTYPE_ENABLED/);
+  });
 });
 
 describe("#279 credential-vault tools are operator-scope only", () => {

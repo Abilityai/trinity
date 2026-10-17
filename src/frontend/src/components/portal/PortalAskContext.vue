@@ -129,6 +129,9 @@
                  options — is agent markdown, rendered like every other ask
                  surface (this list was the one #3122 missed). -->
             <AskMarkdown :text="r.title" inline class="font-medium" data-testid="inbox-ask-context-answer-title" />
+            <!-- trinity#3524: every gate ask on an agent shares its title; the
+                 request it asked about tells them apart. Plain text. -->
+            <span v-if="r.request" data-testid="inbox-ask-context-answer-request"> (“{{ r.request }}”)</span>
             <span v-if="r.answer"> — you answered “<AskMarkdown :text="r.answer" inline data-testid="inbox-ask-context-answer-text" />”</span>
             <span v-if="r.ended_at" class="text-gray-600 dark:text-gray-300"> · {{ relativeTime(r.ended_at) }}</span>
           </li>

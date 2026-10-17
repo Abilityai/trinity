@@ -14,11 +14,18 @@
 -->
 <template>
   <div class="flex flex-col min-h-0 h-full">
-    <p
-      class="shrink-0 px-4 pt-3 pb-2 text-[11px] font-semibold uppercase tracking-wide tabular-nums text-gray-500 dark:text-gray-400"
-      :title="headExact || undefined"
-      data-testid="inbox-list-total"
-    ><span :aria-hidden="headExact ? 'true' : undefined">{{ head }}</span><span v-if="headExact" class="sr-only">{{ headExact }}</span></p>
+    <!-- trinity-enterprise#856: the head line is one fixed 44px box — the
+         ghost select's own height — so a control in `#head-end` (Action's sort)
+         fits inside it, and the line is the same box with or without one. The
+         Inbox's loading reserve draws the same box (PortalInbox.vue). -->
+    <div class="shrink-0 h-11 px-4 flex items-center justify-between gap-2" data-testid="inbox-list-head">
+      <p
+        class="min-w-0 truncate text-[11px] font-semibold uppercase tracking-wide tabular-nums text-gray-500 dark:text-gray-400"
+        :title="headExact || undefined"
+        data-testid="inbox-list-total"
+      ><span :aria-hidden="headExact ? 'true' : undefined">{{ head }}</span><span v-if="headExact" class="sr-only">{{ headExact }}</span></p>
+      <slot name="head-end" />
+    </div>
     <!-- `relative`: each ask row's spoken kind is `sr-only` (absolute). With no
          positioned ancestor it escaped this scroll box and stretched the PAGE
          to the list's full height, so the whole shell scrolled away (sign-off). -->
@@ -78,6 +85,15 @@
             </span>
 
             <span v-if="it.type === 'ask'" class="mt-0.5 block text-sm truncate" :class="secondary(it)">{{ it.title }}</span>
+            <!-- trinity-enterprise#901: the agent's reason for withdrawing it —
+                 its own clamped line (full text on hover), never in the badge. -->
+            <span
+              v-if="it.type === 'ask' && withdrawReason(it)"
+              class="mt-0.5 block text-[12.5px] truncate"
+              :class="meta(it)"
+              :title="withdrawReason(it)"
+              :data-testid="`inbox-row-ending-reason-${it.key}`"
+            >{{ withdrawReason(it) }}</span>
             <span v-else-if="it.type === 'mention'" class="mt-0.5 block text-sm truncate" :class="secondary(it)">Mentioned you {{ mentionWhere(it.mention) }}</span>
             <span v-else-if="it.latest && it.latest.excerpt" class="mt-0.5 block text-sm truncate" :class="secondary(it)">{{ it.latest.excerpt }}</span>
 
@@ -167,7 +183,9 @@ import { relativeTime } from './portalUtils'
 import { newLabel } from './portalInbox'
 import { mentionWhere } from './portalMentions'
 import { priorityBadge, expiresSoonLabel, needsExpiryTick, nextExpiryEntry, askKindIcon } from './portalAskUrgency'
-import { queueTypeLabel, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
+import { queueEnding, queueTypeLabel, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
+// trinity#3524: an answered approval's verdict on its row.
+import { workspaceOwnAnswer } from '@/utils/operatorQueue'
 import { formatLocalDateTime } from '@/utils/timestamps'
 
 const props = defineProps({
@@ -236,16 +254,28 @@ onBeforeUnmount(() => { stopTick(); stopEntry() })
 const expiry = (it) => expiresSoonLabel(it.ask && it.ask.expires_at, now.value)
 const kindLabel = (it) => queueTypeLabel(it.ask && it.ask.kind) || 'Ask'
 
+// trinity-enterprise#901: an ended ask the agent withdrew, and why.
+function withdrawReason(it) {
+  if (it.status === 'pending') return ''
+  const ending = queueEnding(it.ask)
+  return ending?.kind === 'withdrawn' ? ending.reason || '' : ''
+}
+
 function askStatusLabel(it) {
   const s = it.status
   if (s === 'answered') {
-    if (it.ask?.ended_by === 'you') return 'Answered · you'
+    if (it.ask?.ended_by === 'you') {
+      // trinity#3524: an approval's row says which way it went.
+      const own = workspaceOwnAnswer(it.ask)
+      return own?.past ? `${own.past[0].toUpperCase()}${own.past.slice(1)} · you` : 'Answered · you'
+    }
     // trinity-enterprise#816: a shared ask another person answered first.
     if (it.ask?.ended_by === 'someone_else') return `Answered · ${it.ask.answered_by || 'someone else'}`
     return 'Answered'
   }
   if (s === 'expired') return 'Expired'
-  // #3247: the agent replaced it — never read as the operator's cancel.
+  // #3247: the agent replaced it (trinity-enterprise#901: or withdrew it) —
+  // never read as the operator's cancel.
   if (s === 'cancelled' && it.ask?.ended_by === 'agent') return workspaceEndingText(it.ask)
   if (s === 'cancelled') return 'Cancelled'
   // trinity-enterprise#748: the addressee's own "no answer".

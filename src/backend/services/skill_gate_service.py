@@ -40,7 +40,7 @@ from config import PORTAL_SOURCE_CHANNEL
 from database import db
 from db.skill_gates import ORIGIN_CLEARED
 from models import TaskExecutionStatus
-from services import rate_limiter, role_addressing
+from services import peer_skill_policy, rate_limiter, role_addressing
 from services.skill_gate_errors import (  # noqa: F401 — re-exported for entries and tests
     APPROVAL_PENDING_CODE,
     OUTCOME_DELIVERY_AGENT_TASK,
@@ -193,7 +193,15 @@ async def enforce(
     It is scanned on its own (never joined to the request, which could spell a
     name neither part holds), shown on the card when it is what matched, and
     never stored as the request or replayed.
+
+    abilityai/trinity-enterprise#662 runs first: a PEER agent invoking a
+    library-assigned skill it holds no grant for is refused here, by name, on
+    every agent — gated or not (`peer_skill_policy`).
     """
+    await peer_skill_policy.enforce(
+        agent_name, requester=requester, request_text=request_text,
+        context_text=context_text,
+        execution_id=origin_execution_id or requester.execution_id)
     if triggered_by == SKILL_GATE_TRIGGER:
         return GateDecision()
     gates = dict(gates) if gates is not None else read_gates(agent_name)
@@ -277,7 +285,7 @@ async def enforce(
         requester_mcp_key_id=requester.mcp_key_id,
         origin_execution_id=origin_execution_id,
         triggered_by=triggered_by,
-        dispatch=dict(dispatch or {}),
+        dispatch={**dict(dispatch or {}), **_requester_chat(requester)},
     )
     if not created:   # a concurrent call for the same occurrence won
         raise _answer_for_record(record, role)
@@ -286,7 +294,7 @@ async def enforce(
                     role, expires_at, card_context=card_context)
     from services.ask_service import AskRejected
     try:
-        receipt = _raise_ask(agent_name, ask)
+        receipt = _raise_ask(agent_name, ask, addressees=approvers, to_role=role)
     except AskRejected as e:
         db.transition_gate_request(request_id, "refused", detail=e.code)
         raise SkillGateRefused(e.status_code, e.code, e.message, **e.extra) from e
@@ -300,7 +308,8 @@ async def enforce(
             "The approval could not be raised; nothing was run. Try again shortly.") from e
     db.attach_gate_ask(request_id, receipt["id"])
     raise SkillApprovalRequired(request_id=request_id, agent_name=agent_name, skills=names,
-                                approver_role=role, expires_at=receipt.get("expires_at"),
+                                approver_role=role, approver_label=role_addressing.role_label(role),
+                                expires_at=receipt.get("expires_at"),
                                 outcome_delivery=outcome_delivery(
                                     requester.kind, agent_name=requester.agent_name,
                                     email=requester.email))
@@ -310,21 +319,82 @@ async def enforce(
 # Steps
 # ---------------------------------------------------------------------------
 
-def _approvers(agent_name: str, role: str) -> List[str]:
-    """The casefolded emails `role` reaches on `agent_name`; refuses when it
-    reaches nobody (an `approver` with no assignments provider, an `operator`
-    role, an owner with no email)."""
+def _resolved_people(agent_name: str, role: str) -> List[str]:
+    """The casefolded emails `role` names on `agent_name`, before any check of
+    whether they can open the agent. `[]` when it names nobody.
+
+    `role` is the stored approver: a kind (`primary` | `approver`), or a canon
+    role `role:<id>` (trinity-enterprise#848) resolved through the assignments
+    provider alone — no owner fallback, so no provider and "nobody" refuse
+    alike."""
+    role_id = role_addressing.parse_role_id(role)
     try:
-        res = role_addressing.resolve(agent_name, role)
+        res = (role_addressing.resolve_role_id(agent_name, role_id) if role_id
+               else role_addressing.resolve(agent_name, role))
     except role_addressing.RoleRefused:
         res = None
-    people = [p.casefold() for p in (res.people if res else []) if p]
+    return [p.casefold() for p in (res.people if res else []) if p]
+
+
+def _can_open(agent_name: str, email: str) -> bool:
+    """Can this person reach a gated approval on `agent_name`? (trinity-enterprise#881)
+
+    A decision is made in the Workspace (the agent on the person's roster:
+    owned or shared) or in Operations (an operator or admin with access to the
+    agent). A platform account is asked `can_user_access_agent` — owner, shared
+    or admin, which covers both doors; an email with no account only has the
+    Workspace, so the agent must be shared with it. Fails closed: an unreadable
+    lookup is "cannot open", which refuses by name rather than waits silently."""
+    try:
+        user = db.get_user_by_email(email)
+        if user:
+            return bool(db.can_user_access_agent(user["username"], agent_name))
+        from client_portal.service import agent_on_roster
+        return bool(agent_on_roster(agent_name, email, include_owned=False))
+    except Exception:  # noqa: BLE001
+        logger.warning("[SkillGate] could not tell whether an approver can open %s",
+                       agent_name, exc_info=True)
+        return False
+
+
+def _approvers(agent_name: str, role: str) -> List[str]:
+    """The casefolded emails `role` reaches on `agent_name`: the people it names
+    who can open the agent (trinity-enterprise#881). Refuses when it reaches
+    nobody — `role_unassigned` when it names nobody (an `approver` with no
+    assignments provider, an `operator` role, an owner with no email, a canon
+    role nobody is seated in), `approver_cannot_open_agent` when everyone it
+    names is outside the agent. An approval raised to people who can never see
+    it waits silently until it expires. The refusal names the role's label,
+    never a person."""
+    people = _resolved_people(agent_name, role)
     if not people:
         raise SkillGateRefused(
             422, "role_unassigned",
-            f"Nobody fills the {role} role for {agent_name}, so this gated request "
-            "can't be approved. Ask the agent's owner to assign one.", role=role)
-    return people
+            f"Nobody fills the {role_addressing.role_label(role)} role for {agent_name}, "
+            "so this gated request can't be approved. Ask the agent's owner to assign one.",
+            role=role)
+    reachable = [p for p in people if _can_open(agent_name, p)]
+    if not reachable:
+        raise SkillGateRefused(
+            422, "approver_cannot_open_agent",
+            f"The {role_addressing.role_label(role)} for {agent_name} can't open {agent_name}, "
+            "so they would never see this approval. Ask the agent's owner to share "
+            f"{agent_name} with them.", role=role)
+    return reachable
+
+
+def approver_reason(agent_name: str, role: str) -> Optional[str]:
+    """Why `role` reaches nobody on `agent_name`, for the Skills tab
+    (trinity-enterprise#881): `unfilled` (it names nobody), `not_shared`
+    (everyone it names is outside the agent), or None when it reaches someone.
+    Never raises; a failed lookup reads `unfilled`."""
+    try:
+        _approvers(agent_name, role)
+        return None
+    except SkillGateRefused as e:
+        return "not_shared" if e.code == "approver_cannot_open_agent" else "unfilled"
+    except Exception:  # noqa: BLE001
+        return "unfilled"
 
 
 def approver_people(agent_name: str, role: str) -> List[str]:
@@ -460,6 +530,87 @@ async def _fingerprints_or_refuse(agent_name: str, names: List[str]) -> Dict[str
     return out
 
 
+# The two shapes the platform's own chat surfaces send history in
+# (`ChatPanel.vue` / `MobileAdmin.vue::buildContextPrompt`): a prefix, the
+# earlier turns, then the marker before the message typed this turn.
+_CHAT_HISTORY_SHAPES = (
+    ("### Previous conversation:\n", "### Current message:\n\nUser: "),
+    ("Previous conversation:\n", "\n\nUser: "),
+)
+
+
+def split_chat_history(text: str) -> Tuple[str, bool]:
+    """`(message typed this turn, whether earlier turns came with it)` for the
+    approval card (trinity#3527), so the ask leads with what was asked rather
+    than with the history. Display only: Approve still runs the whole text,
+    which the card shows in full. The FIRST marker splits, so an ambiguous
+    split shows more as the request, never less — a message cannot move its
+    own words into the part labelled context. That holds only when a platform
+    chat surface built the prefix: callers go through `requested_message`,
+    which splits a person's request only (PR #3648 review)."""
+    for prefix, marker in _CHAT_HISTORY_SHAPES:
+        if not text.startswith(prefix):
+            continue
+        at = text.find(marker, len(prefix) - 1)
+        if at < 0:
+            continue
+        message = text[at + len(marker):].strip()
+        if message:
+            return message, True
+    return text, False
+
+
+ASK_FOOTER = f"{APPROVE} runs it once, exactly as written. {REJECT} runs nothing."
+
+
+def _also_sent_head(agent_name: str) -> str:
+    return f"Also sent to {agent_name} with this request:\n"
+
+
+def _preview(clean_text: str) -> str:
+    return clean_text if len(clean_text) <= QUESTION_PREVIEW_CHARS \
+        else clean_text[:QUESTION_PREVIEW_CHARS] + "… (the full request is shown below)"
+
+
+def requested_message(clean_text: str, requester_kind: Optional[str]) -> Tuple[str, bool]:
+    """`split_chat_history`, but only where the platform built the prefix.
+
+    Only a PERSON's request comes through the platform's own chat surfaces
+    (the Chat tab, `/m`), whose `buildContextPrompt` writes the history
+    shape. Any other requester — an agent, a connector, a channel, a public
+    visitor — can TYPE that shape, and would then choose which words the card
+    leads with: "summarise the above" as the Request, the payment line folded
+    into the history (PR #3648 review). Those requests are never split.
+    """
+    if requester_kind != KIND_PERSON:
+        return clean_text, False
+    return split_chat_history(clean_text)
+
+
+# trinity#3527: said when a chat surface sent earlier turns with the request.
+HISTORY_NOTE = ("Sent with earlier messages of the conversation as context; the full text, "
+                "history first, is shown below.\n\n")
+
+
+def _request_lines(clean_text: str, requester_kind: Optional[str]) -> str:
+    """The question's request block: the message typed this turn first
+    (`requested_message`), then a line saying history came with it."""
+    message, with_history = requested_message(clean_text, requester_kind)
+    return f"Request:\n{_preview(message)}\n\n{HISTORY_NOTE if with_history else ''}"
+
+
+def _also_sent(question: Optional[str], agent_name: str, clean_text: str,
+               requester_kind: Optional[str] = None) -> str:
+    """The context lines `_ask_body` wrote into the question, for the card,
+    which shows them in a row of their own and drops the question. Found only
+    AFTER the whole request block, so a request that quotes the heading
+    itself puts nothing in the row."""
+    head = f"{_request_lines(clean_text, requester_kind)}{_also_sent_head(agent_name)}"
+    body = (question or "").removesuffix(ASK_FOOTER)
+    at = body.find(head)
+    return body[at + len(head):].strip() if at >= 0 else ""
+
+
 def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints, role, expires_at,
               card_context: str = ""):
     """The card: the WHOLE request in `proposal.input` (what Approve runs), a
@@ -467,18 +618,19 @@ def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints
     the context the agent also receives (`requester_context_text`)."""
     skills = _skill_list(names)
     who = requester.display()
-    preview = clean_text if len(clean_text) <= QUESTION_PREVIEW_CHARS \
-        else clean_text[:QUESTION_PREVIEW_CHARS] + "… (the full request is shown below)"
-    beside = f"Also sent to {agent_name} with this request:\n{card_context}\n\n" if card_context else ""
+    beside = f"{_also_sent_head(agent_name)}{card_context}\n\n" if card_context else ""
     return {
         "request_id": request_id,
         "type": "approval",
         "priority": "high",
         "title": f"Approve {skills} on {agent_name}"[:300],
-        "question": (f"{who} asked {agent_name} to run {skills}.\n\nRequest:\n{preview}\n\n{beside}"
-                     f"{APPROVE} runs it once, exactly as written. {REJECT} runs nothing."),
+        "question": (f"{who} asked {agent_name} to run {skills}.\n\n{_request_lines(clean_text, requester.kind)}{beside}"
+                     f"{ASK_FOOTER}"),
         "options": list(OPTIONS),
-        "to": role,
+        # The sink validates `to` against the kinds an agent may name; a canon
+        # role (`role:<id>`, ent#848) is recorded through `_raise_ask`'s
+        # `to_role` instead, and reads as an `approver` here.
+        "to": role if role_addressing.parse_role_id(role) is None else "approver",
         "expires_at": expires_at,
         "proposal": {
             "kind": "gated_skill",
@@ -491,19 +643,26 @@ def _ask_body(agent_name, request_id, names, clean_text, requester, fingerprints
     }
 
 
-def _raise_ask(agent_name: str, ask: Dict[str, Any]) -> Dict[str, Any]:
+def _raise_ask(agent_name: str, ask: Dict[str, Any], *, addressees: Optional[List[str]] = None,
+               to_role: Optional[str] = None) -> Dict[str, Any]:
     """Raise through the one ask sink. After a timeout an identical proposal
-    must name the expired ask it supersedes (C6); the gate links it itself."""
+    must name the expired ask it supersedes (C6); the gate links it itself.
+
+    `addressees` is the list `enforce` decided self-approval with and
+    `to_role` the stored approver (a kind or `role:<id>`): the sink records
+    them as the ask's audience instead of resolving the role a second time
+    (trinity-enterprise#848, T10)."""
     from services import ask_service
 
+    audience = {"addressees": addressees, "to_role_override": to_role} if addressees else {}
     try:
-        return ask_service.raise_ask(agent_name, ask, raised_by="gate", channel="gate")
+        return ask_service.raise_ask(agent_name, ask, raised_by="gate", channel="gate", **audience)
     except ask_service.AskRejected as e:
         expired = (e.extra or {}).get("expired_request_id")
         if e.code != "reask_requires_link" or not expired:
             raise
         return ask_service.raise_ask(agent_name, {**ask, "supersedes_expired": expired},
-                                     raised_by="gate", channel="gate")
+                                     raised_by="gate", channel="gate", **audience)
 
 
 def _answer_for_record(record: Dict[str, Any], role: str):
@@ -525,6 +684,7 @@ def _pending_from_record(record: Dict[str, Any], role: str) -> SkillApprovalRequ
         expires_at = (row or {}).get("expires_at")
     return SkillApprovalRequired(request_id=record["request_id"], agent_name=record["agent_name"],
                                  skills=record.get("skills") or [], approver_role=role,
+                                 approver_label=role_addressing.role_label(role),
                                  expires_at=expires_at,
                                  outcome_delivery=outcome_delivery(
                                      record.get("requester_kind"), agent_name=record.get("source_agent"),
@@ -695,8 +855,12 @@ def requester_from_principal(current_user, *, source_agent: Optional[str] = None
         return Requester(kind=KIND_OTHER, key="event-loopback", label="An event subscription")
     email = getattr(current_user, "email", None) or None
     if is_person_principal(current_user):
+        # trinity#3527: an account with no email (the built-in admin) is still a
+        # person the platform knows — the card names it, never "A caller". One
+        # line, bounded: it sits above the request on the approver's card.
+        name = None if email else (" ".join(str(username).split())[:80] or None)
         return Requester(kind=KIND_PERSON, key=f"person:{(email or username).casefold()}",
-                         email=email, mcp_key_id=key_id, is_person=True)
+                         email=email, mcp_key_id=key_id, is_person=True, label=name)
     return Requester(kind=KIND_OTHER, key=f"principal:{key_id or username}", mcp_key_id=key_id)
 
 
@@ -1167,10 +1331,9 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "source_channel_chat_id": FREEZE,
     "source_channel_thread": FREEZE,
     "source_channel_client": FREEZE,
-    # trinity-enterprise#838: a keyless trusted-network caller's address — the
-    # run's attribution when there is no user or key, so an approved replay
-    # stays attributed to the same host.
-    "source_host": FREEZE,
+    # trinity#3653: set on a requester's wake-up only; an approved run is the
+    # requester's own request and never carries a binding agent of its own.
+    "source_channel_agent": DROP,
     "system_prompt": DROP,
     "resume_session_id": DROP,
     "persist_session": DROP,
@@ -1212,6 +1375,43 @@ def frozen_dispatch(**fields: Any) -> Dict[str, Any]:
 # beside the frozen fields; a record without them replays `request_text`.
 REPLAY_MESSAGE = "replay_message"
 REPLAY_SYSTEM_PROMPT = "replay_system_prompt"
+
+
+# trinity#3653: the chat the requesting agent was answering when it asked, kept
+# in the record's `dispatch` beside the frozen fields and read only by the
+# requester's wake-up — never replayed to the approved run.
+REQUESTER_CHAT = "requester_chat"
+
+
+def _requester_chat(requester: Requester) -> Dict[str, Dict[str, str]]:
+    """The chat an agent requester's turn is answering, as `execute_task`
+    keywords under `REQUESTER_CHAT`; empty when there is none to trust.
+
+    Read NOW, while the turn runs, under the rule channel inheritance uses
+    (`chat_execution_service._inherited_channel_context`): the turn is the
+    agent's own and still `running`. An agent can cite any of its past turns as
+    its own, and a finished one would address the outcome to whoever that turn
+    was for. Never raises."""
+    if not (requester.agent_name and requester.execution_id):
+        return {}
+    try:
+        turn = db.get_execution(requester.execution_id)
+        if (turn is None or getattr(turn, "agent_name", None) != requester.agent_name
+                or str(getattr(turn, "status", "") or "").lower() != "running"
+                or not getattr(turn, "source_channel", None)
+                or not getattr(turn, "source_channel_chat_id", None)):
+            return {}
+        chat = {
+            "source_channel": turn.source_channel,
+            "source_channel_chat_id": turn.source_channel_chat_id,
+            "source_channel_thread": getattr(turn, "source_channel_thread", None),
+            "source_channel_client": getattr(turn, "source_channel_client", None),
+            "source_channel_agent": getattr(turn, "source_channel_agent", None)
+            or requester.agent_name,
+        }
+        return {REQUESTER_CHAT: {k: v for k, v in chat.items() if v is not None}}
+    except Exception:  # noqa: BLE001 — provenance never fails the gate
+        return {}
 
 
 def frozen_replay(message: Optional[str], system_prompt: Optional[str] = None) -> Dict[str, str]:
@@ -1338,7 +1538,9 @@ async def resolve(request_id: str) -> Optional[str]:
     target = {"answered": "denied", "cancelled": "cancelled", "expired": "expired"}.get(
         disposition, "cancelled")
     if db.transition_gate_request(request_id, target, detail=disposition):
-        await _notify(record, target, decider=decider)
+        # trinity-enterprise#755: a rejection's optional reason reaches the requester.
+        await _notify(record, target, decider=decider,
+                      reason=row.get("response_text") if target == "denied" else None)
         return target
     return None
 
@@ -1397,6 +1599,11 @@ async def _end_not_run(record, decider, why: str) -> str:
     return "not_run"
 
 
+#: The ask-resume and ask-ending wakes (ent#329, ent#611) — mirrors
+#: `operator_resume_service.TRIGGERED_BY{,_ENDING}`.
+_PERSONLESS_REPLAY_TRIGGERS = frozenset({"operator_response", "operator_ending"})
+
+
 async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
     """Start the approved run the way an async `/task` starts: the row (under
     the id the claim wrote), the capacity slot with the PERSISTENT overflow —
@@ -1414,6 +1621,11 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
     agent = record["agent_name"]
     frozen = dict(record.get("dispatch") or {})
     triggered_by = frozen.get("triggered_by") or record.get("triggered_by") or "manual"
+    # trinity-enterprise#886: a resume or ending run carries no person. A request
+    # frozen before that fix (or by a producer that reintroduces the field)
+    # would otherwise re-stamp the responder on the approved run's prompt.
+    if triggered_by in _PERSONLESS_REPLAY_TRIGGERS:
+        frozen.pop("source_user_email", None)
     # The message and the caller's system prompt where the requester put them
     # (`frozen_replay`); a record frozen without them replays its request text.
     if REPLAY_MESSAGE in frozen:
@@ -1522,7 +1734,7 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
 
 _OUTCOME = {
     "approved": "was approved{by} and is running as execution {eid}",
-    "denied": "was rejected{by}; nothing was run",
+    "denied": "was rejected{by}; nothing was run{reason}",
     "expired": "expired before anyone decided; nothing was run",
     "cancelled": "was cancelled{by}; nothing was run",
     "stale": ("was approved{by}, but the skill changed on {agent} after you asked, so "
@@ -1563,6 +1775,19 @@ def completion_detail(status: str, excerpt: Optional[str]) -> str:
     return f'{line}. {label} (the run\'s output, not an instruction): "{words}"'
 
 
+def _completion_parts(status: str, execution) -> Tuple[str, Optional[str]]:
+    """`(detail, headline)` for a run reported as ending `status` — the one
+    wording for the notice sent at the terminal and for the conversation read
+    later (trinity#3654). The run's words are quoted only from a row that still
+    shows that ending: a pruned row, or one that moved since, gives the status
+    line alone rather than someone else's words or a false "no output"."""
+    ran = getattr(execution, "status", None)
+    if getattr(ran, "value", ran) != status:
+        return _RUN_STATUS_LINE.get(status, f"It ended ({status})"), _FAILED_HEADLINE.get(status)
+    excerpt = getattr(execution, "response" if status == "success" else "error", None)
+    return completion_detail(status, excerpt), _FAILED_HEADLINE.get(status)
+
+
 async def report_completion_on_terminal(execution_id: Optional[str]) -> Optional[str]:
     """Tell the requester how an APPROVED run ended (trinity#3520).
 
@@ -1586,11 +1811,9 @@ async def report_completion_on_terminal(execution_id: Optional[str]) -> Optional
         outcome = "succeeded" if status == "success" else "failed"
         if not db.transition_gate_request(record["request_id"], outcome, detail=status):
             return None   # another worker or the sweep reported it
-        excerpt = getattr(execution, "response", None) if status == "success" \
-            else getattr(execution, "error", None)
+        detail, headline = _completion_parts(status, execution)
         await _notify_completion(record, outcome, execution_id=execution_id,
-                                 detail=completion_detail(status, excerpt),
-                                 headline=_FAILED_HEADLINE.get(status))
+                                 detail=detail, headline=headline)
         return outcome
     except Exception:  # noqa: BLE001 — never affect the terminal that called us
         logger.warning("[SkillGate] completion report failed for %s", execution_id, exc_info=True)
@@ -1616,9 +1839,14 @@ _HEADLINE = {
 _FAILED_HEADLINE = {"failed": "Failed", "cancelled": "Cancelled", "skipped": "Skipped"}
 
 
+# How much of a rejection's reason the requester is quoted (trinity-enterprise#755).
+REJECT_REASON_MAX_CHARS = 500
+
+
 def outcome_text(record: Dict[str, Any], outcome: str, *, decider: Optional[str] = None,
                  execution_id: Optional[str] = None, detail: Optional[str] = None,
-                 for_person: bool = False, headline: Optional[str] = None) -> str:
+                 for_person: bool = False, headline: Optional[str] = None,
+                 reason: Optional[str] = None) -> str:
     """One sentence a requester can act on, led by the outcome in a few words
     (`_HEADLINE`, or `headline`) so a clipped preview still says what happened.
     Skill names without a slash, so the notice itself never reads as a request
@@ -1630,6 +1858,13 @@ def outcome_text(record: Dict[str, Any], outcome: str, *, decider: Optional[str]
                 .replace("{eid}", execution_id or "?")
                 .replace("{agent}", record["agent_name"])
                 .replace("{detail}", sanitize_text(detail or "unknown reason")))
+    # trinity-enterprise#755: the approver's own words for a rejection, quoted
+    # on one bounded line so they read as a reason, never as an instruction.
+    # Substituted LAST (a reason holding "{agent}" stays as typed), and it can
+    # neither close its own quote nor carry the platform's marker.
+    why = _one_line(sanitize_text(reason or "").replace('"', "'").replace("[Trinity]", "Trinity"),
+                    REJECT_REASON_MAX_CHARS)
+    body = body.replace("{reason}", f'. Reason given: "{why}"' if why else "")
     origin = record.get("requester_execution_id")
     tail = f" (Your request came from execution {origin}.)" if origin else ""
     marker = "" if for_person else "[Trinity] "
@@ -1651,9 +1886,29 @@ def request_status(request_id: str, agent_name: str) -> Dict[str, Optional[str]]
     if state in ("pending", "dispatching"):
         return {"request_id": request_id, "state": "pending", "text": None}
     outcome = "approved" if state == "dispatched" else state
+    # trinity-enterprise#755: a rejection's reason, for the requester who reads
+    # the outcome here instead of in a notice.
+    reason = None
+    if state == "denied":
+        row = db.get_operator_queue_item_for_agent_by_request_id(agent_name, request_id)
+        reason = (row or {}).get("response_text")
+    # trinity#3654: a finished run reads here as it does in the Inbox notice —
+    # how it ended and what it said. `state_detail` is the status it was
+    # reported with; the words come from the execution.
+    detail, headline = record.get("state_detail"), None
+    if state in ("succeeded", "failed") and detail in _RUN_STATUS_LINE:
+        try:
+            # ponytail: whole-row read (execution_log included) per finished
+            # request per session read; a (status, response, error) select
+            # beside get_execution_gate_state if session loads get slow.
+            execution = db.get_execution(record.get("dispatched_execution_id"))
+        except Exception:  # noqa: BLE001 — the conversation still loads, unquoted
+            logger.warning("[SkillGate] could not read the run of %s", request_id, exc_info=True)
+            execution = None
+        detail, headline = _completion_parts(detail, execution)
     return {"request_id": request_id, "state": outcome, "text": outcome_text(
         record, outcome, execution_id=record.get("dispatched_execution_id"),
-        detail=record.get("state_detail"), for_person=True)}
+        detail=detail, for_person=True, reason=reason, headline=headline)}
 
 
 # Outcomes that are exactly what the decider did. A person who decided their own
@@ -1674,6 +1929,122 @@ def outcome_delivery(kind: Optional[str], *, agent_name: Optional[str] = None,
     if kind == KIND_PERSON and (email or "").strip():
         return OUTCOME_DELIVERY_INBOX
     return OUTCOME_DELIVERY_NONE
+
+
+# The approval card (trinity-enterprise#755)
+# ---------------------------------------------------------------------------
+
+SKILL_DESCRIPTION_MAX_CHARS = 300
+
+
+def _skill_descriptions(agent_name: str) -> Dict[str, str]:
+    """Each skill's description from the agent's last-known listing (Redis,
+    display-only, fail-open): a card without one still names the skill."""
+    from services import agent_skills_listing
+
+    copy = agent_skills_listing.recall(agent_name) or {}
+    return {str(s.get("name") or "").lower(): str(s.get("description") or "")
+            for s in copy.get("skills") or [] if isinstance(s, dict)}
+
+
+def _person_label(email: str) -> str:
+    try:
+        user = db.get_user_by_email(email)
+    except Exception:  # noqa: BLE001 — a name is a nicety; the address stands in
+        user = None
+    return " ".join(str((user or {}).get("name") or "").split())[:DECIDER_NAME_MAX_CHARS] or email
+
+
+def _openable_run(viewer: Optional[str], agent_name: Optional[str],
+                  execution_id: Optional[str]) -> Optional[str]:
+    """`execution_id` when `viewer` can open its page, else None (trinity#3708).
+
+    The page is `/agents/{agent}/executions/{id}`: an operator route, so a
+    Workspace-only role is sent away from it, and its API is `AuthorizedAgent`,
+    so a viewer without access to THAT agent gets a 404. The requester's run is
+    on another agent than the gated one, which is why each id is checked
+    against its own agent. Fails closed: an unreadable user hides the link.
+    """
+    if not (viewer and agent_name and execution_id):
+        return None
+    from dependencies import is_workspace_only_role
+    try:
+        user = db.get_user_by_username(viewer)
+        if not user or is_workspace_only_role(user.get("role")):
+            return None
+        return execution_id if db.can_user_access_agent(viewer, agent_name) else None
+    except Exception:  # noqa: BLE001 — a link is a nicety; never fail the card
+        return None
+
+
+def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
+              run_viewer: Optional[str] = None,
+              name_approvers: bool = False) -> Optional[Dict[str, Any]]:
+    """What the approval card shows beside the ask's frozen `proposal`: the
+    skills with their descriptions, who asked, the context lines the agent was
+    also sent, who it is waiting on, whether this viewer may decide, and how
+    the request ended.
+
+    Read from the gate's own record, for an ask the GATE raised — never from
+    `proposal`, which any agent can write — so only a real gated request gets
+    the card. `state` is the record's: `pending` | `dispatching` | `dispatched`
+    | `succeeded` | `failed` | `denied` | `expired` | `cancelled` | `stale` |
+    `not_run` | `unknown`. Each execution id only when `run_viewer` (a
+    platform username) can open that run's page — its role and its access to
+    that agent (`_openable_run`) — and the approvers' names only `name_approvers`
+    (the operator's queue, whose reader already sees `resolved_to`; a Workspace
+    addressee is not told who else was asked). None when there is no such record.
+    """
+    if not (item.get("raised_by") == "gate" and item.get("type") == "approval"):
+        return None
+    record = db.get_gate_request(item.get("request_id") or "")
+    if not record or record.get("agent_name") != item.get("agent_name"):
+        return None
+    resolved = item.get("resolved_to") or []
+    if isinstance(resolved, str):
+        try:
+            resolved = json.loads(resolved)
+        except ValueError:
+            resolved = []
+    people = list(dict.fromkeys(str(p).strip().casefold() for p in resolved if str(p).strip()))
+    # ponytail: one Redis read + one user lookup per approver, per gate ask in
+    # a listing; batch them if a queue ever holds hundreds of gate asks.
+    described = _skill_descriptions(record["agent_name"])
+    proposal = item.get("proposal") if isinstance(item.get("proposal"), Mapping) else {}
+    return {
+        "skills": [{"name": name, "description": _one_line(
+            sanitize_text(described.get(str(name).lower(), "")), SKILL_DESCRIPTION_MAX_CHARS)}
+                   for name in record.get("skills") or []],
+        "requester": {
+            "kind": record.get("requester_kind"),
+            "label": proposal.get("requester"),
+            "agent": record.get("source_agent"),
+            "execution_id": _openable_run(run_viewer, record.get("source_agent"),
+                                          record.get("requester_execution_id")),
+        },
+        "also_sent": _also_sent(item.get("question"), record["agent_name"],
+                                str(proposal.get("input") or ""), record.get("requester_kind")),
+        # trinity#3527: the message typed this turn, when a chat surface sent
+        # earlier turns with it — the card leads with it; the full input
+        # (what Approve runs) stays below. None when there was no history.
+        "request": _typed_request(str(proposal.get("input") or ""), record.get("requester_kind")),
+        "state": record.get("state"),
+        "execution_id": _openable_run(run_viewer, record["agent_name"],
+                                      record.get("dispatched_execution_id")),
+        "waiting_on": [_person_label(p) for p in people] if name_approvers else [],
+        # trinity-enterprise#848: the approver the ask went to, as a value and
+        # a label — a kind's name, or a canon role's ("Head of sales"). Shown
+        # to every viewer: a role is not a person. None when the row names none.
+        "waiting_role": ({"value": item["to_role"],
+                          "label": role_addressing.role_label(item["to_role"])}
+                         if item.get("to_role") else None),
+        "can_decide": (viewer_email or "").strip().casefold() in people,
+    }
+
+
+def _typed_request(clean_text: str, requester_kind: Optional[str]) -> Optional[str]:
+    message, with_history = requested_message(clean_text, requester_kind)
+    return message if with_history else None
 
 
 # Who decided, as a requester reads it whenever no display name may be shown.
@@ -1704,16 +2075,16 @@ def _decider_label(record: Dict[str, Any], decider: Optional[str]) -> Optional[s
 
 async def _notify(record: Dict[str, Any], outcome: str, *, decider: Optional[str] = None,
                   execution_id: Optional[str] = None, detail: Optional[str] = None,
-                  notify_decider: bool = False) -> None:
+                  notify_decider: bool = False, reason: Optional[str] = None) -> None:
     """Tell the requester, as `outcome_delivery` says: an agent by a platform
     task, a person by an Inbox notice addressed to them, anyone else not at all.
     Once per record. A person's notice names the decider by `_decider_label`,
-    never by email."""
+    never by email. `reason` is a rejecting approver's note (trinity-enterprise#755)."""
     if not db.mark_gate_request_notified(record["request_id"]):
         return
     await _audit_outcome(record, outcome, decider=decider, execution_id=execution_id)
     text = outcome_text(record, outcome, decider=_decider_label(record, decider),
-                        execution_id=execution_id, detail=detail, for_person=True)
+                        execution_id=execution_id, detail=detail, for_person=True, reason=reason)
     delivery = outcome_delivery(record.get("requester_kind"), agent_name=record.get("source_agent"),
                                 email=record.get("requester_email"))
     asker = (record.get("requester_email") or "").strip().casefold() \
@@ -1722,8 +2093,11 @@ async def _notify(record: Dict[str, Any], outcome: str, *, decider: Optional[str
     try:
         if delivery == OUTCOME_DELIVERY_AGENT_TASK:
             # #715: an agent learns the outcome, never which person decided it.
+            # trinity#3653: "approved, now running" is not an ending, and a
+            # report in the person's chat reads as one.
             await _wake_requester_agent(record, outcome_text(
-                record, outcome, execution_id=execution_id, detail=detail))
+                record, outcome, execution_id=execution_id, detail=detail, reason=reason),
+                to_chat=outcome != "approved")
         elif asker and not (decided_own and outcome in _SELF_EVIDENT_OUTCOMES):
             _note_to_person(record, record["requester_email"], outcome, text)
         if notify_decider and decider and not decided_own:   # one notice per person
@@ -1784,11 +2158,16 @@ async def _audit_outcome(record: Dict[str, Any], outcome: str, *, decider: Optio
         logger.warning("[SkillGate] outcome audit failed for %s", record["request_id"], exc_info=True)
 
 
-async def _wake_requester_agent(record: Dict[str, Any], text: str) -> None:
+async def _wake_requester_agent(record: Dict[str, Any], text: str, *,
+                                to_chat: bool = True) -> None:
+    """Run the requesting agent on `text`. With `to_chat`, in the chat it was
+    answering when it asked (`REQUESTER_CHAT`), so its reply is reported there
+    like any background completion (trinity#3653)."""
     import asyncio
     from services.task_execution_service import get_task_execution_service
 
     frozen = record.get("dispatch") or {}
+    chat = (frozen.get(REQUESTER_CHAT) or {}) if to_chat else {}
 
     async def _run():
         try:
@@ -1797,6 +2176,7 @@ async def _wake_requester_agent(record: Dict[str, Any], text: str) -> None:
                 message=text,
                 triggered_by=SKILL_GATE_TRIGGER,
                 chain_depth=frozen.get("chain_depth"),
+                **chat,
             )
         except Exception:  # noqa: BLE001 — a stopped requester misses it; the record stands
             logger.info("[SkillGate] requester %s not woken for %s",

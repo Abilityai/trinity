@@ -18,7 +18,7 @@ from typing import List, Optional
 from sqlalchemy.exc import OperationalError
 
 from database import db
-from services import ask_service
+from services import ask_service, skill_gate_service
 from services.operator_queue_choices import (
     SOMETHING_ELSE,
     ReservedAnswerError,
@@ -84,6 +84,18 @@ def _resolved_people(item: dict) -> List[str]:
     return out
 
 
+def _platform_username(email: Optional[str]) -> Optional[str]:
+    """The platform account behind a Workspace platform principal's email, for
+    the gate card's run links (trinity#3708). None when it cannot be read: the
+    card then shows no link, never a broken one."""
+    if not email:
+        return None
+    try:
+        return (db.get_user_by_email(email) or {}).get("username")
+    except Exception:  # noqa: BLE001 — a link is a nicety; never fail the ask
+        return None
+
+
 def _is_shared(item: dict) -> bool:
     """An ask to a role several people fill (trinity-enterprise#816): ONE row,
     delivered to each of them; the first answer wins."""
@@ -147,7 +159,9 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
     answered or cancelled), `someone_else` (a person a SHARED ask was also
     delivered to answered it, trinity-enterprise#816), `platform` (the platform ended the row itself —
     `disposed_by = 'platform'`, #3246: never a person's answer, never a
-    timeout), `agent` (the agent replaced it, #3247) or `timeout`; never an email and never the cancel
+    timeout), `agent` (the agent replaced it, #3247, or withdrew it,
+    trinity-enterprise#901 — `_project` says which as `agent_ending`) or
+    `timeout`; never an email and never the cancel
     reason (both are the operator's, not the client's). `ended_at` is the
     ledger's time, or a legacy answer's time — never `created_at`, which is when
     the ask was filed, not when it ended.
@@ -159,9 +173,10 @@ def _ending_of(item: dict, viewer_email: Optional[str]) -> tuple:
         return item.get("disposed_at"), "timeout"
     if item.get("disposed_by") == "platform":
         return item.get("disposed_at"), "platform"
-    # #3247: the agent replaced it with a newer ask. Read BEFORE the email arm,
-    # which would otherwise call an ending with no email the operator's.
-    if item.get("disposed_by") == "agent":
+    # #3247: the agent replaced it with a newer ask; trinity-enterprise#901: or
+    # withdrew it. Read BEFORE the email arm, which would otherwise call an
+    # ending with no email the operator's.
+    if ask_service.agent_ending_kind(item) in (ask_service.REPLACED, ask_service.WITHDRAWN):
         return item.get("disposed_at"), "agent"
     by = item.get("disposed_by_email") or (item.get("responded_by_email") if status == "answered" else None)
     who = "you" if by and viewer_email and by.lower() == viewer_email.lower() else "operator"
@@ -233,7 +248,8 @@ def _linked_request_id(item: dict, key: str,
 
 
 def _project(item: dict, *, viewer_email: Optional[str] = None,
-             resume_requested: Optional[bool] = None) -> WorkspaceAsk:
+             resume_requested: Optional[bool] = None,
+             is_platform: bool = False) -> WorkspaceAsk:
     """The explicit client-facing projection (see `WorkspaceAsk`).
 
     `chat_id` comes from platform-written context only — enforced since ent#429,
@@ -253,6 +269,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
     discussion = context.get("workspace_discussion_id")
     from services.operator_queue_service import is_aged
     ended_at, ended_by = _ending_of(item, viewer_email)
+    agent_ending = ask_service.agent_ending_kind(item) if ended_by == "agent" else None
     return WorkspaceAsk(
         id=item["id"],
         agent_name=item["agent_name"],
@@ -268,6 +285,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         ended_at=ended_at,
         ended_by=ended_by,
         answered_by=_answered_by(item, ended_by),
+        **_own_answer(item, ended_by),
         shared=_is_shared(item),
         chat_id=chat_id if isinstance(chat_id, str) else None,
         raised_in_turn=raised_in_turn,
@@ -276,8 +294,17 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         sync=_coarse_sync(item),
         aging=bool(is_aged(item)),
         decided_by_options=ask_service.decided_by_options(item),
+        gate=skill_gate_service.card_view(
+            item, viewer_email=viewer_email,
+            # trinity#3708: a run link only for a platform user who can open it;
+            # an external client has no platform account to open it with.
+            run_viewer=_platform_username(viewer_email) if is_platform else None),
         replaces=_linked_request_id(item, "replaces", viewer_email),
         replaced_by=_linked_request_id(item, "replaced_by", viewer_email),
+        # trinity-enterprise#901: the agent's reason crosses for a WITHDRAW only.
+        agent_ending=agent_ending,
+        ending_reason=(item.get("disposition_reason") or None)
+        if agent_ending == ask_service.WITHDRAWN else None,
     )
 
 
@@ -426,7 +453,7 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
         logger.warning("[WorkspaceAsks] list failed", exc_info=True)
         raise AsksUnavailable("queue unreadable") from e
 
-    out = [_project(item, viewer_email=email) for item in items or []]
+    out = [_project(item, viewer_email=email, is_platform=is_platform) for item in items or []]
     if chat_id is not None:
         out = [a for a in out if _in_chat(a, chat_id)]
     end = offset + len(items or [])
@@ -450,7 +477,7 @@ def _discussed_in(chat_id: str, email: str, is_platform: bool,
     ) or []
     out = []
     for row in rows:
-        ask = _project(row, viewer_email=email)
+        ask = _project(row, viewer_email=email, is_platform=is_platform)
         if (ask.discussion_chat_id == chat_id
                 and _on_roster(row.get("agent_name") or "", email, is_platform, strict=True)):
             out.append(ask)
@@ -585,7 +612,12 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
         # the deadline refused it before the poller swept the row.
         if conflict.code == "expired":
             raise AskError(409, "expired", "This ask expired before it was answered.")
-        if (conflict.item or {}).get("disposed_by") == "agent":
+        kind = ask_service.agent_ending_kind(conflict.item or {})
+        if kind == ask_service.WITHDRAWN:
+            # trinity-enterprise#901: nobody answered it — the agent withdrew it.
+            raise AskError(409, "already_resolved",
+                           "The agent just withdrew this ask — it no longer needs an answer.")
+        if kind == ask_service.REPLACED:
             # #3247: nobody answered it — the agent replaced it first.
             raise AskError(409, "already_resolved",
                            "The agent just replaced this ask with a newer one.")
@@ -603,7 +635,8 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     # opt-in here is a report of intent — see `_resume_requested`.
     agent = updated.get("agent_name") or item.get("agent_name") or ""
     dispatched = bool(ending.observers_ok and _resume_requested(agent))
-    return _project(updated, viewer_email=email, resume_requested=dispatched)
+    return _project(updated, viewer_email=email, resume_requested=dispatched,
+                    is_platform=is_platform)
 
 
 #: trinity-enterprise#816: why Dismiss and Discuss are refused on a shared ask.
@@ -642,7 +675,7 @@ def dismiss_ask(item_id: str, email: str, is_platform: bool) -> WorkspaceAsk:
             item = conflict.item
         except ask_service.AskNotFound:
             raise AskError(404, "not_found", "Ask not found")
-    return _project(item, viewer_email=email)
+    return _project(item, viewer_email=email, is_platform=is_platform)
 
 
 #: The opening line of a discussion chat (trinity-enterprise#747). A `system`
@@ -760,7 +793,7 @@ def discuss_ask(item_id: str, email: str, is_platform: bool):
     session = portal_db.get_portal_session(chat_id, agent, email) or {}
     return WorkspaceAskDiscussion(
         chat_id=chat_id, agent_name=agent, title=session.get("title") or title,
-        created=created, ask=_project(item, viewer_email=email),
+        created=created, ask=_project(item, viewer_email=email, is_platform=is_platform),
     )
 
 
@@ -1013,6 +1046,37 @@ def _answer_label(row: dict, excerpt) -> str:
     return excerpt(row.get("response"), limit=RECENT_ANSWER_EXCERPT_MAX)
 
 
+def _own_answer(item: dict, ended_by: Optional[str]) -> dict:
+    """trinity#3524: the viewer's own decision and note on an ask they
+    answered, so the card says which answer it was. Empty for anyone else's
+    ending — the coarse rule (`_ending_of`) still holds for those."""
+    if ended_by != "you" or _status_of(item) != "answered":
+        return {}
+    from client_portal.chat_previews import _arrival_excerpt
+    # The reserved decision already quotes its instruction (`_answer_label`).
+    note = None if item.get("response") == SOMETHING_ELSE \
+        else _arrival_excerpt(item.get("response_text"))
+    return {"answer": _answer_label(item, _arrival_excerpt), "answer_note": note}
+
+
+# How much of a gated request a recent answer quotes (trinity#3524).
+RECENT_ANSWER_REQUEST_MAX = 120
+
+
+def _request_line(row: dict, excerpt) -> Optional[str]:
+    """The words a gated-skill approval asked to run — the message typed that
+    turn, ahead of any chat history it carried — or None for any other ask."""
+    proposal = row.get("proposal")
+    if not isinstance(proposal, dict) or proposal.get("kind") != "gated_skill":
+        return None
+    # The requester kind comes from the gate's own record, never from
+    # `proposal` (any agent can write one): only a person's request is split.
+    from services.skill_gate_service import requested_message
+    record = db.get_gate_request(row.get("request_id") or "") or {}
+    message, _ = requested_message(str(proposal.get("input") or ""), record.get("requester_kind"))
+    return excerpt(message, limit=RECENT_ANSWER_REQUEST_MAX)
+
+
 def _recent_answers(item: dict, email: str):
     from client_portal.chat_previews import _arrival_excerpt
     from .models import WorkspaceAskAnswered
@@ -1042,6 +1106,7 @@ def _recent_answers(item: dict, email: str):
             id=row["id"], title=row.get("title") or "",
             answer=_answer_label(row, _arrival_excerpt),
             ended_at=ended_at,
+            request=_request_line(row, _arrival_excerpt),
         )
         for _, row, ended_at in mine[:RECENT_ANSWERS]
     ]

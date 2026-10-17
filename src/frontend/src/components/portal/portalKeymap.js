@@ -445,6 +445,20 @@ export function recordLastOpen(map, { agentName, sessionId = null, keyChanged = 
 }
 
 /**
+ * trinity-enterprise#856 AC 8: a chat that was closed (archived) or deleted is
+ * no longer anyone's "last open" — drop every entry naming it, so landing arm 1
+ * cannot point at it. Belt-and-braces over `agentLanding`'s own validation.
+ * Returns whether anything was removed.
+ */
+export function forgetLastOpen(map, sessionId) {
+  if (!map || typeof map.forEach !== 'function' || !sessionId) return false
+  const gone = []
+  map.forEach((v, k) => { if (v === sessionId) gone.push(k) })
+  gone.forEach((k) => map.delete(k))
+  return gone.length > 0
+}
+
+/**
  * The rail tab `⌥.` moves to. Walks only the tabs this session may SEE
  * (`visibleTabs`), never `RAIL_TAB_ORDER` — a door-failed tab must stay
  * unreachable by key as surely as by click.

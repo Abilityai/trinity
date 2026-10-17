@@ -1295,6 +1295,11 @@
                paydown of #717/#1030; the section owns its own data loads). -->
           <SubscriptionsPanel v-if="activeTab === 'integrations'" />
 
+          <!-- Calls between Trinity instances (abilityai/trinity-enterprise#862):
+               the AAuth switch + issuer, and the outbound A2A endpoint registry. -->
+          <AAuthPanel v-if="activeTab === 'integrations'" />
+          <A2AEndpointsPanel v-if="activeTab === 'integrations'" />
+
           <!-- Trinity Prompt Section -->
           <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -2089,6 +2094,10 @@ Example:
                so this is the only place an orchestrator's skill map is unblocked. -->
           <SkillManagersPanel v-if="activeTab === 'agents'" />
 
+          <!-- ent#662: agent-to-agent calls that used a library skill and are
+               now refused for want of a grant — the honest upgrade notice. -->
+          <PeerSkillDriftNotice v-if="activeTab === 'agents'" />
+
           <!-- Skills Library automation (ent#236). Kept in Settings, NOT folded
                into SkillSourcesPanel: auto-sync and fleet re-inject are
                library-WIDE policy over every source, while the panel is a
@@ -2327,6 +2336,7 @@ import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
 import SkillManagersPanel from '../components/SkillManagersPanel.vue'
+import PeerSkillDriftNotice from '../components/PeerSkillDriftNotice.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
 import OverflowTabs from '../components/OverflowTabs.vue'
@@ -2350,6 +2360,8 @@ import {
 } from '../components/onboarding/hardeningGuide'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
+import AAuthPanel from '../components/settings/AAuthPanel.vue'
+import A2AEndpointsPanel from '../components/settings/A2AEndpointsPanel.vue'
 import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import BaseBadge from '../components/base/BaseBadge.vue'

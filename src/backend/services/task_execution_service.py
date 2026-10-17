@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional, Tuple
+from types import SimpleNamespace
 
 import httpx
 
@@ -51,7 +52,7 @@ from services.dispatch_breaker import DispatchBreaker
 from services.execution_integrity import derive_turn_integrity
 from services import event_dispatch_service
 from services import channel_completion_report
-from services import skill_gate_service
+from services import peer_skill_policy, skill_gate_service
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.platform_audit_service import AuditEventType, platform_audit_service
 # #2048: stdlib-only leaf by construction, so this cannot cycle back through the
@@ -87,16 +88,66 @@ from db.write_params import ExecutionResult, TaskExecutionFields
 from db.skill_gate_requests import APPROVED_RUN_STATES
 
 
-def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str]) -> Optional[str]:
-    """The person a scheduled seat run is addressed to (ent#637), or None —
-    picks the seat the prompt names (trinity-enterprise#814). One row read, and
-    only for a schedule fire; fail-soft."""
+#: The resume turn a person answered (trinity-enterprise#329). Mirrors
+#: `operator_resume_service.TRIGGERED_BY`; not imported, to keep this module free
+#: of that service's import graph.
+_RESUME_TRIGGER = "operator_response"
+
+
+def served_person_for_row(row: Any) -> Optional[str]:
+    """The person a run serves, read off its execution row, or None — picks the
+    seat the prompt names (trinity-enterprise#814). Never rendered.
+
+    Two kinds of run serve one person: a scheduled seat run (ent#637, via
+    `schedule_seat_memory.seat_for_execution`) and the resume turn of an ask
+    the addressee discussed in the Workspace (ent#886). The resume row carries
+    no person column — who answered stays in the operator-queue row and the
+    audit row, never in the agent's prompt (ent#715) — so its served person is
+    the Workspace stamp `_workspace_destination` wrote, which exists only when
+    the responder IS the addressee. Read off the row so the push and the pull
+    composer agree: a pull claim rebuilds the turn from the row alone.
+
+    Accepts the ORM-ish row `db.get_execution` returns and the dict a pull claim
+    returns. Pure; fail-soft (any doubt is None, i.e. the primary's seat).
+    """
     from services import schedule_seat_memory
 
-    if not execution_id or (triggered_by or "").lower() not in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS:
+    if row is None:
+        return None
+
+    def field(name: str) -> Any:
+        if isinstance(row, dict):
+            return row.get(name)
+        return getattr(row, name, None)
+
+    trigger = (field("triggered_by") or "").lower()
+    if trigger in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS:
+        return schedule_seat_memory.seat_for_execution(SimpleNamespace(
+            triggered_by=field("triggered_by"),
+            schedule_id=field("schedule_id"),
+            source_channel=field("source_channel"),
+            source_channel_client=field("source_channel_client"),
+        ))
+    if trigger == _RESUME_TRIGGER:
+        if (field("source_channel") or "").lower() != schedule_seat_memory.PORTAL_SOURCE_CHANNEL:
+            return None
+        client = (field("source_channel_client") or "").strip().lower()
+        return client or None
+    return None
+
+
+def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str]) -> Optional[str]:
+    """`served_person_for_row` for the push composer: one row read, and only
+    for a trigger that can serve a person; fail-soft."""
+    from services import schedule_seat_memory
+
+    trigger = (triggered_by or "").lower()
+    if not execution_id or (
+        trigger not in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS and trigger != _RESUME_TRIGGER
+    ):
         return None
     try:
-        return schedule_seat_memory.seat_for_execution(db.get_execution(execution_id))
+        return served_person_for_row(db.get_execution(execution_id))
     except Exception as e:  # noqa: BLE001
         logger.debug(f"_served_person_for({execution_id}) failed: {e}")
         return None
@@ -1486,9 +1537,9 @@ class TaskExecutionService:
         # splats straight into this signature — an unaccepted keyword here is a
         # TypeError on every Workspace turn, not a silently-dropped column.
         source_channel_client: Optional[str] = None,
-        # trinity-enterprise#838: a keyless trusted-network A2A caller's address,
-        # stamped on the row as its attribution.
-        source_host: Optional[str] = None,
+        # trinity#3653: the agent whose channel binding owns the context, for a
+        # row that is not that agent's direct turn (a gated request's wake-up).
+        source_channel_agent: Optional[str] = None,
         # ent#555 — which canvas the user had open when they sent this turn.
         open_canvas_id: Optional[str] = None,
         # #3114: the conversation this turn continues, e.g. "session:<key>".
@@ -1606,7 +1657,7 @@ class TaskExecutionService:
                     # persisting it would leave `_resolve_portal` failing closed on
                     # every row this branch creates — the sync Workspace turn.
                     source_channel_client=source_channel_client,
-                    source_host=source_host,
+                    source_channel_agent=source_channel_agent,
                     chain_depth=chain_depth,
                 ),
             )
@@ -1684,7 +1735,6 @@ class TaskExecutionService:
                         source_channel_chat_id=source_channel_chat_id,
                         source_channel_thread=source_channel_thread,
                         source_channel_client=source_channel_client,
-                        source_host=source_host,
                     ),
                 )
 
@@ -1944,12 +1994,15 @@ class TaskExecutionService:
         so the caller answers pending / refused instead of dispatching.
         """
         try:
-            # The gate map first: while nothing is gated (the common case, and
-            # every install until gates are set) this is the only read.
+            # The gate map first: while nothing is gated and the agent holds no
+            # library skill (the common case) these are the only reads.
+            # abilityai/trinity-enterprise#662: an agent with library skills
+            # but no gates still goes through `enforce`, whose peer check is
+            # the rule for what an edge exposes.
             gates = skill_gate_service.read_gates(agent_name)
-            if not gates:
+            if not gates and not peer_skill_policy.has_library_skills(agent_name):
                 return
-            if execution_id:
+            if gates and execution_id:
                 approved = db.get_gate_request_by_dispatched_execution(execution_id)
                 if (approved and approved.get("agent_name") == agent_name
                         and approved.get("state") in APPROVED_RUN_STATES):
@@ -3284,6 +3337,9 @@ class TaskExecutionService:
                         compact_metadata=compact_metadata_json,
                         retry_count=envelope.retry_count or None,
                         turn_integrity=turn_integrity_json,
+                        # #3589: the producer's terminal instant (the watchdog
+                        # claim's `retained_at`); None = the writer stamps now.
+                        completed_at=envelope.completed_at,
                     ),
                 )
                 if not won:
@@ -3320,6 +3376,7 @@ class TaskExecutionService:
                 await activity_service.complete_activity(
                     activity_id=activity_id,
                     status=ActivityState.COMPLETED,
+                    completed_at=envelope.completed_at,  # #3589, same instant as the row
                     details={
                         "session_id": envelope.session_id,
                         "cost_usd": total_cost,
@@ -3445,6 +3502,7 @@ class TaskExecutionService:
                     tool_calls=salvage_tool_calls_json,
                     claude_session_id=salvage_session_id,
                     retry_count=envelope.retry_count or None,
+                    completed_at=envelope.completed_at,  # #3589
                 ),
             )
         # #671/H4: complete the activity, record the AUTH breaker outcome, and
@@ -3457,6 +3515,7 @@ class TaskExecutionService:
                 activity_id=activity_id,
                 status=activity_state_for_terminal(envelope.status),
                 error=envelope.error,
+                completed_at=envelope.completed_at,  # #3589, same instant as the row
             )
         # Compare by ``.value``, NOT by enum-member equality — ``@dataclass`` on
         # the fieldless ``TaskExecutionErrorCode`` str-Enum gives every member a

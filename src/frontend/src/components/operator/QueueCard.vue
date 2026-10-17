@@ -87,13 +87,15 @@
     <!-- Expanded Content -->
     <div v-if="isExpanded" class="border-t border-gray-100 dark:border-gray-700">
       <!-- Question body -->
-      <div class="px-4 pt-3 pb-4">
+      <div v-if="!isGateCard(item)" class="px-4 pt-3 pb-4">
         <AskMarkdown :text="item.question" class="text-gray-700 dark:text-gray-300" data-testid="queue-card-question" />
       </div>
 
       <!-- trinity-enterprise#611: the exact action this approval would run, always
            shown — it is what the operator is deciding, unlike `context` below. -->
-      <QueueProposal v-if="item.proposal" :proposal="item.proposal" class="px-4 pb-4" />
+      <!-- trinity-enterprise#755: a gated-skill approval has its own card. -->
+      <GatedSkillRequest v-if="isGateCard(item)" :item="item" class="px-4 pt-3 pb-4" />
+      <QueueProposal v-else-if="item.proposal" :proposal="item.proposal" class="px-4 pb-4" />
 
       <!-- Context (collapsible) -->
       <div v-if="item.context && Object.keys(item.context).length > 0" class="px-4 pb-4">
@@ -141,8 +143,10 @@
         />
       </div>
 
-      <!-- Response area -->
-      <div class="px-4 pb-4">
+      <!-- Response area. trinity-enterprise#755: only a person a gated-skill
+           approval is addressed to gets its controls; anyone else reads who it
+           is waiting on (the card above). -->
+      <div v-if="!readOnly" class="px-4 pb-4">
         <!-- Approval: option buttons -->
         <div v-if="responseKind === 'approval'" class="space-y-3">
           <div class="flex flex-wrap gap-2">
@@ -175,8 +179,8 @@
               maxlength="4000"
               data-testid="approval-note"
               class="flex-1 text-sm rounded-lg border-gray-200 dark:border-gray-600 dark:bg-gray-700 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:ring-blue-500 focus:border-blue-500"
-              :placeholder="somethingElseArmed ? 'Instruction — none of the options will be carried out' : 'Add a note (optional)...'"
-              :aria-label="somethingElseArmed ? 'Instruction' : 'Note'"
+              :placeholder="somethingElseArmed ? 'Instruction — none of the options will be carried out' : (rejecting ? 'Reason (optional) — the requester is told' : 'Add a note (optional)...')"
+              :aria-label="somethingElseArmed ? 'Instruction' : (rejecting ? 'Reason' : 'Note')"
               @click.stop
               @keydown.enter.stop="selectedOption && submitApproval()"
             />
@@ -245,6 +249,8 @@ import AgentAvatar from '../AgentAvatar.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import InlineError from '../InlineError.vue'
 import QueueProposal from './QueueProposal.vue'
+import GatedSkillRequest from './GatedSkillRequest.vue'
+import { isGateCard, gateReadOnly, gateRejecting } from '../../utils/skillGateCard'
 
 const props = defineProps({
   item: { type: Object, required: true }
@@ -275,6 +281,8 @@ const agentAvatarUrl = computed(() => {
 
 const selectedOption = ref(null)
 const responseText = ref('')
+const readOnly = computed(() => gateReadOnly(props.item))   // trinity-enterprise#755
+const rejecting = computed(() => gateRejecting(props.item, selectedOption.value))
 const showContext = ref(false)
 
 // Reset form when collapsed

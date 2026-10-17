@@ -28,11 +28,11 @@ As the owner of a finance agent, I want "pay an invoice" to run only after the p
 
 ### Components
 
-- **Operations → Needs Response** (`components/operator/QueueCard.vue`) and the **Workspace Inbox** render the approval as an ordinary ask. The question names who asked and previews the request, and `QueueProposal` shows `kind: gated_skill`, the skills, the exact input, the requester and the fingerprints. A dedicated card is trinity-enterprise#755.
+- **Operations → Needs Response** (`components/operator/QueueCard.vue`) and the **Workspace Inbox** render the approval as an ordinary ask. The question names who asked and previews the request, and the request itself is drawn by the approval card (§7, trinity-enterprise#755). Who asked is `Requester.display()`: a person by email, or — an account with none, such as the built-in admin — by username (trinity#3527), never "A caller". A **person's** request that carries the Chat tab's or `/m`'s history leads with the message typed that turn (`requested_message` → `split_chat_history`; the FIRST marker splits, so an ambiguous split shows more as the request, never less). Only a person's request is split: the platform's chat surfaces build that prefix, and any other requester — agent, connector, channel, public — could type it to choose what the card leads with, so theirs is shown whole (PR #3648 review). With the split, the question says it was sent with earlier messages as context, and the card shows that message as **Request** (`card_view.request`) above the **Full input**, which is what Approve runs and which is never folded while a Request row is shown. In the Workspace a gate's Approve / Reject sends in one click, with any note typed first (`decidedByOptions` → `oneClick` in `PortalAsks.vue`); every other approval keeps pick → note → Send (#2375). Answered, the card reads "You approved" / "You rejected" plus the note, and the Inbox row "Approved · you" / "Rejected · you" ([workspace-inbox.md](workspace-inbox.md), trinity#3524).
 - **A refused decision:** a 403 `not_addressee` (the approval was addressed to someone else) is shown on that card as an `InlineError` beside the controls (`components/operator/QueueCard.vue:134`, `data-testid="queue-not-addressee-notice"`) and stays until dismissed. `/m` does the same (`views/MobileAdmin.vue:1294`).
 - **The Workspace thread:** a held turn is answered with the notice as a normal assistant reply, never a Failed turn. An approved run's result arrives later in the same thread ("**Finished**" plus the result).
 - **The other run senders (trinity#3274)** read the 202 through `utils/skillGate.js` (`pendingApprovalMessage`, `isGateRefusal`), show the server's own `message`, and poll nothing:
-  - **Chat tab** (`ChatPanel.vue`) and **`/m` chat** (`MobileAdmin.vue`): the notice is a platform line (`chat/ChatSystemLine.vue`, the Workspace's centred muted line; `/m` reuses its `.empty-state` tone). The held message and its notice stay on screen but are flagged `held` and left out of the history the next turn sends, which would otherwise ask for the approval again on every later turn. Both are saved to the chat session (trinity#3526, `chat_persistence_service.persist_held_request`: `chat_messages.source = gate:<request_id>`, role `user` and `system`, written once per request, for a person principal only — an agent key resolves to its owner's id), and the 202 names that session as `chat_session_id`, which the sender adopts. Loading a session maps those rows back to `held` (`utils/skillGate.js::storedChatMessage`); the session read returns each with `gate: {request_id, state, text}` (`session_messages_view` → `skill_gate_service.request_status`), and the notice line shows `text` once the request is decided. The decision is read when the conversation is loaded; nothing is pushed to an open tab. `routers/voice.py::_build_context_summary` and the pull-pilot `GET /chat/history` leave `gate:` rows out; the public link's past-session view (`routers/public.py`, `ChatHistoryDropdown.vue`) reads them the same way as the Chat tab;
+  - **Chat tab** (`ChatPanel.vue`) and **`/m` chat** (`MobileAdmin.vue`): the notice is a platform line (`chat/ChatSystemLine.vue`, the Workspace's centred muted line; `/m` reuses its `.empty-state` tone). The held message and its notice stay on screen but are flagged `held` and left out of the history the next turn sends, which would otherwise ask for the approval again on every later turn. Both are saved to the chat session (trinity#3526, `chat_persistence_service.persist_held_request`: `chat_messages.source = gate:<request_id>`, role `user` and `system`, written once per request, for a person principal only — an agent key resolves to its owner's id), and the 202 names that session as `chat_session_id`, which the sender adopts. Loading a session maps those rows back to `held` (`utils/skillGate.js::storedChatMessage`); the session read returns each with `gate: {request_id, state, text}` (`session_messages_view` → `skill_gate_service.request_status`), and the notice line shows `text` once the request is decided. For a run that ended (`succeeded | failed`) `text` is the Inbox completion notice word for word: `request_status` and `report_completion_on_terminal` both build it through `_completion_parts`, with the status from `state_detail` and the run's reply or error quoted from the execution row (trinity#3654); a row that is gone, or no longer shows that status, gives the status line with no quote. The decision is read when the conversation is loaded; nothing is pushed to an open tab. `routers/voice.py::_build_context_summary` and the pull-pilot `GET /chat/history` leave `gate:` rows out; the public link's past-session view (`routers/public.py`, `ChatHistoryDropdown.vue`) reads them the same way as the Chat tab;
   - **Public link** (`PublicChat.vue`): its async turn is held in the background, so it never sees a 202. The poll now stops at a `skipped` row. The status route returns that row's text and `gate` (`routers/public.py::_gate_state`, only for a row the link's own chat started): `held` (a gate record names the row) shows as the grey line, and `refused` shows in the red error box;
   - **Tasks tab** (`TasksPanel.vue`): the local row stays, as `pending_approval` with the notice expanded; a refused request stays as `failed` with its reason. Neither creates a server row;
   - **Skills tab** Run (trinity-enterprise#754 merged the Playbooks tab into it; Run sends `async_mode: true`) and **Dashboard** Update: an `info` toast on the agent page (`AgentDetail.vue` passes `notify`; the toast gained a `status-info` arm, so an info toast no longer renders red, and it carries `role="status"`, or `"alert"` for an error). A gate refusal there is an error toast, which stays until dismissed. Run no longer navigates to a run that does not exist;
@@ -60,6 +60,12 @@ request → entry point
   │  + find_gated_invocations(context_text, gates)   scanned apart, never joined (#3274)
   │      none → ungated → dispatch as today
   ├─ approvers = role_addressing.resolve(agent, role)   none → 422 role_unassigned
+  │      role:<id> (trinity-enterprise#848) → resolve_role_id: the assignments provider only,
+  │      no owner fallback; no provider / nobody → 422 role_unassigned naming the role's label
+  │      kept only if they can open the agent (`_can_open`, trinity-enterprise#881): a platform
+  │      account → can_user_access_agent (owner, shared, admin); an email with no account → shared
+  │      with it. Named people but none can open it → 422 approver_cannot_open_agent (names the
+  │      role, says to share the agent); some can → the ask goes to those only
   ├─ proven person ∈ approvers?  ── yes → self-approved → dispatch (+ audit, :641)
   ├─ refuse_only (voice)?         ── yes → 403 approval_not_available_here
   ├─ sanitised text > 6000 JSON bytes?  ── yes → 422 request_too_long
@@ -71,10 +77,14 @@ request → entry point
   ├─ fingerprints (:521; docker exec as root, python3 -I -S) → 409 unreadable/missing/ambiguous
   ├─ create skill_gate_requests row (pending)  ← BEFORE the ask   (db/skill_gate_requests.py:85)
   ├─ ask_service.raise_ask(raised_by="gate", approval, Approve/Reject, to=role)   (_ask_body :362)
+  │      gate-only addressees=approvers + to_role_override=role (ent#848, kinds too): the ask
+  │      goes to the list self-approval was decided with — the provider is read once, not twice
   │      the card carries the WHOLE request (what Approve runs) + a 500-char preview
   │      raise failed → record refused, 503 approval_unavailable (no pending record left)
-  └─ raise SkillApprovalRequired → 202 {status: pending_approval, request_id, …}
+  └─ raise SkillApprovalRequired → 202 {status: pending_approval, request_id, approver_label, …}
 ```
+
+The 202's notice sentence stays role-free (#3274: the requester is told it waits, not who decides); `approver_label` ("Finance", or the kind) rides the body beside it. An agent still cannot address `role:<id>` in its own `ask_operator` (`invalid_to`): `addressees` / `to_role_override` raise `ValueError` for any raise that is not the gate's.
 
 **What is read.** The gate reads everything a requester put in front of the executor, and nothing the platform composed around it. Producers that compose a message pass `request_text` explicitly:
 
@@ -182,7 +192,7 @@ claude --print (2.1.281)  PreToolUse Skill | Agent | Task
 
 ### 6. The gate map (trinity-enterprise#753)
 
-**Storage** — `agent_skill_gates` (`db/skill_gates.py` `SkillGateOperations`), PK `(agent_name, skill_name)`, `skill_name` lowercased (ASCII names; every matcher casefolds). Columns `approver` (`primary` | `approver`), `deadline_hours` (1–168, NULL → 24h), `origin`, `set_by`, `set_by_agent` (R29 provenance), `set_at`. `origin`:
+**Storage** — `agent_skill_gates` (`db/skill_gates.py` `SkillGateOperations`), PK `(agent_name, skill_name)`, `skill_name` lowercased (ASCII names; every matcher casefolds). Columns `approver` (`primary` | `approver` | `role:<id>` — a canon role, stored lower-cased, trinity-enterprise#848; no migration, same column), `deadline_hours` (1–168, NULL → 24h), `origin`, `set_by`, `set_by_agent` (R29 provenance), `set_at`. `origin`:
 
 | origin | Written by | Gates? | Leaves when |
 |---|---|---|---|
@@ -200,7 +210,7 @@ claude --print (2.1.281)  PreToolUse Skill | Agent | Task
 5. If anything changed, re-sync from the map (`sync_marker_locked`): written while gates remain, removed only after the last is gone.
 Then the audit (best-effort, after the lock). A failed re-sync on a running agent still saves the gate and returns `warnings: ["marker_not_written"]`.
 
-- `set_gate` — the merge with the stored row (an omitted field keeps its value) happens inside the DB write, under `lock_agent_rows`, so two partial PUTs never drop each other's field. Validates the name (`SKILL_NAME_RE`; any well-formed name may be gated, decision 6), the approver (`approver` only where an assignments provider is registered — `approver_kinds()`), the deadline (`type(v) is int`, 1–168), refuses a ghost (409 `ephemeral_agent`, decision 2). An omitted field keeps its stored value; an explicit null deadline resets. `warnings: ["approver_unassigned"]` when the kind reaches nobody (`role_addressing.resolve`; the default admin has no email, so `primary` can reach nobody and every gated request would be refused `role_unassigned`).
+- `set_gate` — the merge with the stored row (an omitted field keeps its value) happens inside the DB write, under `lock_agent_rows`, so two partial PUTs never drop each other's field. Validates the name (`SKILL_NAME_RE`; any well-formed name may be gated, decision 6), the approver (`approver` only where an assignments provider is registered — `approver_kinds()`; `role:<id>` (trinity-enterprise#848) only when the provider's roster for THIS agent names the role — `assignment_provider.resolve_approver_roles`: no answer or no provider → `approver_unavailable`, not on the roster → `unknown_role`, malformed → `invalid_approver`; a deadline-only PUT on a stored role gate is not re-validated), the deadline (`type(v) is int`, 1–168), refuses a ghost (409 `ephemeral_agent`, decision 2). An omitted field keeps its stored value; an explicit null deadline resets. `warnings: ["approver_unassigned"]` when the kind or role reaches nobody (`["approver_not_shared"]` when it names people who can't open the agent, trinity-enterprise#881) (a named-but-unfilled role saves; `approver_people`, the function `enforce` decides with; `role_addressing.resolve`; the default admin has no email, so `primary` can reach nobody and every gated request would be refused `role_unassigned`).
 - `clear_gate` — idempotent; a name that is library-assigned AND recommended (or the library is unreadable) becomes a `cleared` tombstone so the default is not re-applied; any other clear deletes, so a later recommendation can still apply.
 - `reconcile_library_gates(agent, add=True, drop_defaults=None)` — state-driven. `add` inserts `library_default` (`primary`) for every assigned recommended name with no row (agents that held the skill before it was recommended included — the backfill), and runs BEFORE a package is delivered (`_sync_gates` ahead of `_deliver_assigned_skills`; before injection on start, Sync and the sweep). `cleared` tombstones of unassigned skills always go. A `library_default` of an unassigned skill goes only when `drop_defaults` allows it: the names the route's own removal reported `removed`/`not_present` (`packages_gone`), or `AllExcept(keep)` after the start path's / Sync's / sweep's prune (`drop_after_prune`; a name the prune could not remove, or an unmanaged own copy, is kept). A deferred or failed removal keeps the default — the files may still be on the agent. Never removes a default because the metadata changed (tighten-only). The library read runs off the event loop; an unreadable library inserts nothing and is retried by the next reconcile. Ghosts get no default. Never raises.
 - `drop_explicit_gates_on_unassign` — only from `_sync_gates` when a **person** unassigned (PUT replace, DELETE skill, DELETE set) AND the route's removal reported the package gone: deletes the `set` rows for names still unassigned when the write runs, except names whose library row was `delivery_status = conflict` (the agent's own skill of that name runs, so the gate is the own skill's — decision 1). An agent's unassign (a `skills.manage` holder, itself or a sibling), the system key, a deferred removal, Sync, start and the sweep keep explicit gates and report `gates_kept`, so unassign-then-reassign cannot launder a gate away.
@@ -208,13 +218,45 @@ Then the audit (best-effort, after the lock). A failed re-sync on a running agen
 **Who may** (`routers/skill_gate.py`):
 - Read — `set_by` (a username: an email for email-login users) is withheld (null) from any non-person principal, on the read and the PUT response (#715 people stay with people). `get_skill_gate_readable_agent_by_name`: a person or the system key, anything they can access (uniform 404); an agent key, its OWN gates, or (holding `skills.manage`) an agent its owner owns; connector / other / no scope → 403 `skill_gates_not_readable` on the principal alone.
 - Read, the Skills tab's fields (trinity-enterprise#754, `skill_gate_map_service.approver_status` / `hook_status`):
-  - `approvers: [{kind, reachable, viewer_fills}]` for every kind in `approver_kinds()`, booleans only. `viewer_fills` is decided by the enforce path's own functions (`requester_from_principal`, then `approver_people`, which is `_approvers` without the refusal), so it is false for an agent, connector or system principal (a person's user-scoped MCP key is that person, as in `enforce`);
+  - `approvers: [{kind, reachable, viewer_fills, label, role_id, unreachable}]` (`unreachable`: `unfilled` | `not_shared` | null, trinity-enterprise#881; the gate entries carry the same as `approver_unreachable`) for every kind in `approver_kinds()`, then (trinity-enterprise#848) one entry per canon role on this agent's roster (`kind: "role:<id>"`, `label` the provider's title else the humanised id, `role_id`; kinds carry `label`/`role_id` null). Only `primary` / `approver` rows seated in the role fill it. Reach and `viewer_fills` are booleans, never a person. `approver_kinds` stays kinds. `viewer_fills` is decided by the enforce path's own functions (`requester_from_principal`, then `approver_people`, which is `_approvers` without the refusal), so it is false for an agent, connector or system principal (a person's user-scoped MCP key is that person, as in `enforce`);
   - `?probe=true` adds `hook`: the agent's `/health → skill_gate_hook` (`ok` / `missing` / `not_root_owned` / `writable` / `unsupported_runtime`), `predates` for a 200 without the field, or `unknown` for no answer. It is one direct `/health` read (3 s, no circuit-breaker bookkeeping), honoured only for a person who may manage the agent's skills (`can_manage_agent_skills`); everyone else gets `hook: null`. See [skills-tab.md](skills-tab.md).
 - Write — `require_person_or_capability("skills.manage", self_person_only=True)` (the shared helper from #3236; its holder reach bound is `_refuse_unless_owners_agent`) then `get_owned_agent_by_name`: a person (session or own user key) who owns the agent or is an admin; an agent key holding `skills.manage`, only on an agent its owner OWNS (owner equality, never the admin short-circuit; 404 otherwise) and never on itself (403 `person_required`). The system key is refused.
 
 **Audit** (`CONFIGURATION`, only when a row changed): `skill_gate_set`, `skill_gate_cleared`, `skill_gate_default_applied`, `skill_gate_default_removed`, `skill_gate_removed_with_skill`; `details.via` from the principal (`ui` / `api` / `orchestrator` / `system`) and `details.trigger` (`direct` / `assignment` / `start` / `library_sync`). An agent actor is the actor, its owner as `actor_email`.
 
 **Library metadata** — `skill_packaging.extract_contract` reads `approval:` (top level or the `trinity:` block) from the closed set `{"recommended"}`; anything else is `frontmatter_invalid:approval`. It rides `list_skills()` entries and `SkillInfo.approval`. Since trinity-enterprise#754 the agent server also reports it for the agent's own skills (`SkillInfo.approval` on its `GET /api/skills`, same precedence and closed set), for display only: it never creates or decides a gate.
+
+### 7. The approval card (trinity-enterprise#755)
+
+```
+operator_queue row (raised_by = gate, type = approval)
+  └─ skill_gate_service.card_view(item, viewer_email, with_run_ids)
+       record = skill_gate_requests[item.request_id]      same agent, else no card
+       skills[]      record.skills + description from agent_skills_listing.recall (Redis, fail-open)
+       requester     kind, label (the proposal's frozen display), agent, execution_id*
+       also_sent     the context lines the gate wrote into the question ("Also sent to …"), else ''
+       state         the record's state
+       execution_id* the approved run
+       waiting_on[]  resolved_to, each as the account name, else the address (only name_approvers)
+       waiting_role  {value: to_role, label} for every viewer — a kind, or a canon role's name (ent#848)
+       can_decide    viewer ∈ resolved_to
+       (* only with_run_ids)
+  ├─ routers/operator_queue._for_principal   a person's row: gate (run ids and approvers on)
+  └─ client_portal/asks/service._project     WorkspaceAsk.gate (run ids for a platform viewer)
+
+components/operator/GatedSkillRequest.vue   (utils/skillGateCard.js)
+  Agent · Skill(s) + description · Input (proposal.input, folded past 600 chars / 8 lines)
+  Also sent (when set) · Requested by (+ "from this run") · Raised · Deadline
+  Waiting on (viewer cannot decide: the names, else waiting_role through skillCards.kindOptionLabel)
+  · "Approve runs it once…" (viewer can decide)
+  outcome line: badge + sentence + "Open the run"
+  the hosts do not draw the ask's question on a gate card: the card says it once
+  drawn by PortalAsks (Inbox pane, chat card), QueueCard, ResolvedCard, MobileAdmin
+```
+
+- `QueueCard` and `/m` render no response controls when `gate.can_decide` is false. The server's `may_end` stays the rule; the card only stops offering what it would refuse.
+- Beside a picked Reject, the note field is labelled Reason. `resolve` passes the ask's `response_text` to `_notify`, and `outcome_text` quotes it ("Reason given: …", one line, 500 characters, substituted last, with `"` and the `[Trinity]` marker neutralised). `request_status` reads the same reason for the conversation trace.
+- The record trails the ask by one poll cycle. An ask the clock ended reads Expired on the card before the record moves; an ask just approved shows its outcome once the record leaves `pending`.
 
 ### Database Operations
 
@@ -237,10 +279,12 @@ Then the audit (best-effort, after the lock). A failed re-sync on a running agen
 
 - **The requester's notice** (`_notify`; text from `outcome_text`). Who is told follows one rule, `outcome_delivery` (`agent_task` / `inbox` / `none`), which the pending answer also carries (#3233):
   - **Agent requester:** a platform task, trigger `skill_gate` (analytics bucket "Operator queue"), naming the request, the outcome, the originating execution and the run's execution id. It never says which person decided (#715), and it contains no slash.
+  - **A rejection's note** (trinity#3525) is the reason path of trinity-enterprise#755: `resolve` passes the approver's `response_text` on a rejection (never on `approver_not_addressed`, never on an approval) to `_notify(reason=…)`, and `outcome_text` quotes it as `Reason given: "…"` on one bounded line (`REJECT_REASON_MAX_CHARS` = 500) to both the agent's task and a person's Inbox notice (§7).
   - **Person requester, including a Workspace caller:** an Inbox `alert` addressed to them, with a `gate-note-…` id that never counts against the agent's ask budget. It is worded for a person, without the `[Trinity]` marker. A person who decided their own request is not told of that decision (approved, rejected, cancelled). An approval that then could not run (`stale`, `not_run`, `unknown`) is news, and is sent once.
   - **The decider is never named by email** (trinity#3274, `_decider_label`). A request a platform session or key made (`source_user_id` frozen — only the `/chat` and `/task` seams and the platform's own producers set it) reads the decider's display name (`users.name`, one line, without `@`). Everyone else reads "the agent's approver": the Workspace, the inline connector, operator resumes, a decider with no usable name, and a failed lookup. Most email-login accounts have no name, so the label is the common case.
   - **Every notice leads with the outcome** in a few words — "Approved, now running", "Finished successfully", "Failed", "Cancelled", "Rejected", "Expired", "Not run", "Not confirmed" (`_HEADLINE`), then "— your request …" — because the Workspace Work panel and the Inbox clip a notice after about two lines, and the shared opening made "running" and "finished" look identical.
   - **How the approved run ended** (trinity#3520). Every execution terminal reaches `event_dispatch_service._terminal_side_effects`, whose third consumer `skill_gate_service.report_completion_on_terminal` reports a run a gate record dispatched: the `dispatched | dispatching → succeeded | failed` compare-and-set picks the one writer, which sends a second notice the same way as the first (`_notify_completion`: a task to an agent, an Inbox note to a person). It names the request, the execution id and the status ("It finished successfully" / "It failed" / "It was cancelled"), with a one-line quote of the run's reply or error (≤ `COMPLETION_EXCERPT_CHARS` = 1000, sanitised, marked as the run's output, never an instruction), so an approved run that ended `success` but declined the request is visible. It is not gated by `notified_at` (that stamps the first notice). The sweep reports runs whose hook never ran (`list_gate_requests_ended_unreported`: a worker died or the backend restarted mid-run). The pending answer for `agent_task` / `inbox` says so: "You will be told when it is decided, and again when an approved run ends, with how it ended."
+  - **The chat an agent requester was answering** (trinity#3653). When an agent asks during a turn that came from a conversation (a Workspace chat, Slack, Telegram), `enforce` records that turn's channel context (`_requester_chat`) in the record's `dispatch` under `REQUESTER_CHAT`, only while the turn is the agent's own and still `running` (the rule `chat_execution_service._inherited_channel_context` uses; a finished turn an agent cites would address the outcome to whoever that turn was for). Every wake-up that reports an ending (`_wake_requester_agent(to_chat=True)`: denied, expired, stale, not run, succeeded, failed) runs with that context plus `source_channel_agent`, so `channel_completion_report` posts the requester's reply into the conversation like any background completion. The "approved, now running" wake-up carries none. The key is never replayed to the approved run. A Workspace thread shows the message at its next history load.
   - **Schedules, channel users, public visitors, paid callers, connectors, system keys:** the request id in the immediate answer, whose message now says so: "Nothing will be sent back when it is decided: if it is approved, it runs as a new execution on <agent>; if not, nothing runs."
 - **The approved run's result** goes back to the Workspace thread or the channel conversation it came from (`channel_completion_report._is_approved_gate_run`, `src/backend/services/channel_completion_report.py:683`), because an approved run was never answered inline. Only a `dispatching` or `dispatched` record counts: a `self_approved` one names a run that already answered inline.
 - **Audit rows:** `skill_gate_outcome` once per decided record (ids only); `skill_gate_self_approved` once per execution the gate let through on the approver's own request; `skill_gate_refused` when the in-container hook is refused (at most once per run and skill, and 20 per agent, per 10 minutes).
@@ -258,11 +302,14 @@ All responses go through the app handler `error_handlers.skill_gate_error` (`src
 | Gate map unreadable | 503 `gate_unavailable` | nothing dispatched |
 | Approval could not be raised | 503 `approval_unavailable` | no pending record left behind |
 | Nobody fills the role | 422 `role_unassigned` | nothing raised |
+| The role's people can't open the agent (trinity-enterprise#881) | 422 `approver_cannot_open_agent` | nothing raised; share the agent with them |
 | Skills with different approvers | 422 `mixed_approvers` | ask for them separately |
 | Request too long for the card | 422 `request_too_long` | shorten it |
 | Retry after the decision | 409 `request_<state>` | the decision, never "pending" |
 | Gate map writes (trinity-enterprise#753) — bad name / approver / deadline | 422 `invalid_skill_name` / `invalid_approver` / `invalid_deadline` | nothing written (`HTTPException`, `{code, message}`, `X-Trinity-Error-Code`) |
 | …`approver` on an install with no assignments provider | 422 `approver_unavailable` | only `primary` is offered (`approver_kinds`) |
+| …`role:<id>` with no provider, or the roster could not be read (trinity-enterprise#848) | 422 `approver_unavailable` | retryable; OSS offers kinds only |
+| …`role:<id>` that no assignment on this agent names | 422 `unknown_role` | seat the role first, then gate |
 | …on an ephemeral agent | 409 `ephemeral_agent` | after the access check (an inaccessible ghost is the uniform 404) |
 | …an agent key without `skills.manage` | 403 `skill_management_not_permitted` | audited `capability_refused` |
 | …an agent key on itself, or a system / connector / other key | 403 `person_required` | on the principal alone, before any lookup |
@@ -375,11 +422,17 @@ These are covered by unit tests:
 | `tests/unit/test_ent751_gate_guards.py` | discovery guards and the frozen-dispatch parity |
 | `tests/unit/test_ent329_operator_resume.py`, `tests/unit/test_ent611_ask_endings.py` | what the gate reads on a resume and an ending |
 | `src/frontend/tests/unit/queueCardNotAddressee.spec.js`, `mobileAdminNotAddressee.spec.js` | the refusal shown on the card |
+| `tests/unit/test_ent755_gate_card_view.py` | the card view: skills and descriptions, requester, who decides, run ids, each ending, no card for an ask the gate did not raise; the rejection reason reaching the requester |
+| `src/frontend/tests/unit/mobileAdminGateCard.mount.spec.js` | `/m`: the card, no options for a non-addressee, Reject's reason |
+| `src/frontend/tests/unit/gatedSkillCard.mount.spec.js` | the card mounted alone, in `QueueCard` and in `PortalAsks`: fields, folded input, waiting-on, outcomes and run links, no controls for a non-addressee, Reject's reason |
 | `src/mcp-server/src/chat-gate.test.ts` | the MCP results and the forwarded turn; the delivery-honest suffix and the inline connector tier (#3274) |
 | `tests/unit/test_3274_gate_context.py` | the context scan at the backstop, `/task` and `/chat`; raw vs rendered; scanned apart; the `ExecutionContext` parity |
 | `tests/unit/test_3274_gate_replay.py` | `/task` and fan-out replay the message and the system prompt apart; legacy records |
 | `tests/unit/test_3520_gate_completion_notice.py` | the completion notice on success, failure and cancel, the declined-under-success reply, empty and oversized replies, once per run (a second event, the sweep, two racing workers), the restart sweep, a run ending before `dispatched` is written, ordinary and self-approved runs ignored, a person's Inbox copy, the pending answer's promise, the clearance states |
+| `tests/unit/test_3653_gate_wake_channel_context.py` | an ending wake-up carries the requester's chat (portal; a Slack thread and an inherited binding agent), the approved wake-up does not; a finished turn, another agent's turn, a turn with no chat and a request with no turn give none; the key sits beside the frozen fields; `execute_task` persists `source_channel_agent` |
+| `tests/unit/test_3654_chat_gate_run_reply.py` | the Chat tab notice of a finished run: the reply under success, the error under failure, the cancelled and skipped headlines, equality with the Inbox notice, a pruned execution row, a row whose status moved since the report, a failing execution read, a credential in the reply |
 | `tests/unit/test_3274_gate_notice.py` | `outcome_delivery` on the 202 and its retry, `_notify` parity per kind, the decider label, the held row's text |
+| `tests/unit/test_3524_gate_approval_card.py` | the rejection note to an agent and to a person (sanitised, bounded, absent on approval and without a note); a person with no email named by username; history split on both chat shapes and the first-marker rule; the viewer's own answer on the Workspace projection; a recent gate answer's request line |
 | `tests/unit/test_3526_held_chat_trace.py` | a held Chat-tab request saved once to the session; a person's re-send replayed while pending (and not for an agent, another person, another text, or after a decision); the session read's `gate` state; the voice context |
 | `tests/unit/test_3274_gate_wiring.py` | the loopback flag, the observer registration and the sweep call, each through the code that runs it |
 | `tests/unit/test_3274_channel_quote.py`, `test_3274_public_skipped_status.py` | the Telegram quote; the public status route for a held turn |
@@ -398,7 +451,11 @@ These are covered by unit tests:
 | `tests/unit/test_ent753_assignment_hooks.py` | the AST guard (every `agent_skills` writer reaches the reconcile; mutation-checked) and the behaviour through `routers/skills.py`, the start path and the sweep |
 | `tests/unit/test_ent753_approval_metadata.py` | `approval:` parsing (YAML bool/date/mapping never raise) and its listing |
 | `tests/unit/test_ent754_gate_map_viewer_and_hook.py`, `test_ent754_execution_self_approved.py`, `test_ent754_workspace_self_approved.py` | The read's `approvers` / `hook`, and the "ran without approval" marker (trinity-enterprise#754; [skills-tab.md](skills-tab.md)) |
-| `src/mcp-server/src/tools/skill-gates.test.ts` | the three MCP tools: routes, only-sent fields, the zod schema, policy rows, description cap |
+| `src/mcp-server/src/tools/skill-gates.test.ts` | the three MCP tools: routes, only-sent fields, the zod schema (incl. `role:<id>`), policy rows, description cap |
+| `tests/unit/test_ent848_role_id_seam.py` | `parse_role_id` / `role_label` / `resolve_role_id`; the two optional seam readers (no provider → None, malformed dropped, `[]` is real, capped) |
+| `tests/unit/test_ent848_enforce_and_hook.py` | a role gate through `enforce` (self-approve, refuse, the pre-resolved addressees), the hook's `check_invocation` on its self-approved record, `card_view.waiting_role` |
+| `tests/unit/test_ent848_gate_map_roles.py` | the PUT codes (`unknown_role`, `approver_unavailable`, `invalid_approver`), roles in `approvers[]`, `viewer_fills` == enforce parity, the TS/Python role-id regex parity |
+| `src/frontend/tests/unit/skillsTab.mount.spec.js`, `skillCards.spec.js`, `gatedSkillCard.mount.spec.js` | the "Roles" optgroup (unfilled disabled, stale stored role), the label chain, the Inbox card's role line (ent#848) |
 
 ### Status
 
@@ -410,7 +467,7 @@ These are covered by unit tests:
 - **Part of this flow:** the gate map (trinity-enterprise#753, §6).
 - **Downstream / shared:**
   - the ask sink and its endings (`operating-room.md`, trinity-enterprise#611);
-  - the approval card (trinity-enterprise#755);
+  - the approval card (§7, trinity-enterprise#755) in the Workspace Inbox ([workspace-inbox.md](workspace-inbox.md));
   - the completion report back to a channel or thread (ent#457);
   - the connector playbooks (`mcp-connector.md`);
   - the guardrail hooks this hook sits beside (GUARD-002, `requirements/security.md` §28.2) and the chat's own session (#2958).

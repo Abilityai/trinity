@@ -795,9 +795,9 @@ Correction supersedes (a new row; the old stays as history), close / reverse are
 status flips, reconfirm moves `review_by`. A `direction` decision (R C3) is kept as
 `routed` with the canon hint — never a seat decision, never dropped. **Readers:**
 own seat always; the agent OWNER (`role_card._is_owner`, never an assignment kind)
-every seat, writable; a stakeholder the assignment provider recognises through the
-optional `kinds_for` seam method every seat read-only (per-agent in v1); an external
-principal is never an owner. Writes: own seat, or the owner on a named seat. The
+every seat, writable; nobody else — an assignment kind (`kinds_for`) answers the role
+card's relationship line and never widens this read (#3660; per-role reads are #3381);
+an external principal is never an owner. Writes: own seat, or the owner on a named seat. The
 companion's half (`routers/seat_decisions.py`, MCP `record_decision` /
 `list_seat_decisions`) resolves the seat from `execution_id` and returns no email.
 The seat's active decisions ride the shared memory block into every turn
@@ -921,7 +921,10 @@ verdict. On phone nothing is previewed. The pinned sidebar row is its own compon
 feed — `portalInbox.inboxCanvasCount({tabs, canvases, agent})` over
 `stores/portalRailFeeds.canvases` for the selected item's agent, which the rail loads
 anyway — and shows only when that agent has a canvas and the Canvas tab is one this
-session has, on chats and asks alike (T6); it emits `open-canvas` → `openRailOn('canvas')`.
+session has, on chats only (#3714); it emits `open-canvas` → `openRailOn('canvas')`. An
+ask's header instead offers Open in chat via `portalInbox.askOriginThread` → `askThreadLink`
+(raised in a turn → its `chat_id`; a background ask → none), emitted as `open-thread` like
+the card's own link — so a chat the sidebar has not loaded still opens (#3140).
 
 **Reply to one message** (sign-off). Each agent message in the Inbox pane carries an arrow
 (not Copy): it opens the chat anchored at that message (`?anchor=m:<id>`, landed by
@@ -1497,12 +1500,35 @@ is the edition-agnostic surface it plugs into:
   narrow view (the server omits the log, tasks, decisions and members); the
   controls it cannot use are absent, not disabled. `ProjectImportModal.vue`
   imports a folder project once.
-- **Project hub (v3, `ProjectHub.vue`)** — four cards in ONE grid with
-  `lg:items-start` (#3574: a grid row stretches every cell to its tallest
-  sibling, so a tall "Needs you" once made the empty Metrics card beside it
-  screen-tall). **Needs you** is `ProjectNeedsYou.vue`: the Overview is a
-  list, not a second Inbox pane — a pending ask is the Inbox's own list row
-  (agent, when, one-line inline-markdown title; rows from the pure
+- **Project page Overview (v3 hub + #3694 + ent#896)** — ONE layout owned by
+  `ProjectPage.vue`: a `lg:grid-cols-3 lg:items-start` wrapper holding a
+  main stack (`lg:col-span-2`) and a side stack, cards stacking within their
+  column so no row-shaped gap opens beside a tall neighbour and the narrow
+  column never switches sides; `items-start` keeps #3574 (an opened ask grows
+  only its own column). The assignment is deliberate and pinned by
+  `workspaceProjectsV4.mount.spec.js` — main: Continue · Where it stands
+  (`ProjectRollupCard`) · Work on it · Metrics (`ProjectMetricsCard`) · My
+  chats; side: Steward (`ProjectStewardCard`) · Health (`ProjectHealthCard`) ·
+  Needs you (`ProjectNeedsYouCard`) · Members · Agents & rooms. The former
+  `ProjectHub.vue` grid is gone; each hub card is its own component with the
+  same `project` prop. **Continue** (ent#896) is `projectsUtils.continueChoice`
+  over `workOnItOptions`: my newest linked chat across agents (reopen), else
+  the first agent I can start with (new), the other actionable agents one click
+  away; it is the first focusable control after the tabs. One dismissable
+  "how it moves" line (`HOW_IT_MOVES_KEY`, per browser) sits as a `BaseCard`
+  directly below Continue, so it never takes first focus. **Steward card**: the
+  read's `steward` — `{kind, ref}` plus, for an agent steward on a backend
+  that carries them, `last_sweep_at` and `schedule {state ∈ none | scheduled |
+  hidden | unknown, next_run_at}` (worded by `stewardScheduleLine`; a backend
+  without the fields omits the lines rather than guessing); health from the
+  roll-up; a person steward's waiting lines are `attentionLines` filtered to
+  verify/stuck; "Open I steward" emits `open-stewarding`, which
+  `PortalProjects.vue` turns into the list's `initialFilter = 'steward'`.
+  **Markdown (#3692)**: the goal, task objectives and task/project log bodies
+  mount `PortalMarkdown` (the one sanitized `v-html`), never
+  `whitespace-pre-line` text. **Needs you** is `ProjectNeedsYou.vue`: the
+  Overview is a list, not a second Inbox pane — a pending ask is the Inbox's
+  own list row (agent, when, one-line inline-markdown title; rows from the pure
   `projectsUtils.projectNeedsYouRows`, pending in `askUrgencyCompare` order),
   with **Answer** mounting `PortalAsks` narrowed by `askIds` in place (the one
   answer surface, unchanged) and **Open in Inbox** going to
@@ -1514,7 +1540,9 @@ is the edition-agnostic surface it plugs into:
   (on the ROWS, not the ids) → rows. Focus follows the toggle (the opened
   card's `tabindex=-1`, then the Answer button back). The "Open in Inbox"
   link class is `portalUtils.INBOX_LINK_CLASS`, shared with
-  `PortalAsksWaitingLine`.
+  `PortalAsksWaitingLine`. **Tasks** (ent#896): the "Awaiting verification"
+  group states the rule and each row carries **Confirm** (`updateTask` →
+  `done`) for contributors on a live project.
 - **Chat and room header** — `ProjectChatControls.vue` (`kind` thread|room):
   the project badge + Detach, or one "Project" button (add to a project, or —
   for a 1:1 chat — make one from it). **Wrap up** in a linked chat sends the

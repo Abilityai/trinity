@@ -274,7 +274,11 @@ async def maybe_dispatch_resume(
             # around it, which quotes the agent's own question.
             request_text="\n".join(t for t in (response, response_text) if t),
             triggered_by=TRIGGERED_BY,
-            source_user_email=responded_by_email,
+            # trinity-enterprise#886: no `source_user_email`. The row would claim
+            # the responder and the prompt would render them on the Triggered-by
+            # line; every other return path withholds the person (ent#715). Who
+            # answered stays in the queue row and the audit row; the served seat
+            # is read off the Workspace stamp (`served_person_for_row`).
             **destination,
         )
     except Exception as exc:
@@ -452,7 +456,8 @@ async def maybe_dispatch_ending(
             message=_framed_ending(items, disposition, reason),
             request_text=reason or "",   # trinity-enterprise#751: the canceller's words only
             triggered_by=TRIGGERED_BY_ENDING,
-            source_user_email=disposed_by_email,
+            # trinity-enterprise#886: no `source_user_email` — the canceller is
+            # in `_audit_ending`, never in the agent's prompt (ent#715).
         )
     except Exception as exc:
         if idem is not None:

@@ -14,6 +14,7 @@ the fix safe rather than merely present:
 from __future__ import annotations
 
 import ast
+import re
 import asyncio
 import sqlite3
 import sys
@@ -275,7 +276,9 @@ async def test_dispatch_goes_through_execute_task_not_a_bespoke_path(service, mo
     recorder, _ = _install(monkeypatch, enabled=True)
     await service.maybe_dispatch_resume(ITEM, response="approve")
     assert set(recorder.calls[0]) <= {
-        "agent_name", "message", "triggered_by", "source_user_email",
+        # trinity-enterprise#886: no `source_user_email` — the responder never
+        # reaches the agent's prompt (ent#715); a closed set, so re-adding fails.
+        "agent_name", "message", "triggered_by",
         # trinity-enterprise#751: the person's own answer, for the skill gate —
         # not a second surface, the same `execute_task` reads it.
         "request_text",
@@ -496,29 +499,86 @@ def test_every_dispatch_call_site_hangs_off_the_cas_win_only():
     either consult `_status_conflict` (a single-row CAS that lost returns the row
     with that marker, having written nothing) or take its rows from a set-based
     CAS writer whose return IS the set of winners (`bulk_cancel_…` re-selects by
-    the sweep's own batch_id; `mark_…_expired` collects per-id CAS winners).
+    the sweep's own batch_id; `mark_…_expired` collects per-id CAS winners), or
+    refuse every db `outcome` but the writer's winning token (`withdraw`,
+    trinity-enterprise#901 — see `_OUTCOME_CAS_WINNERS`).
 
     It is worse than one wasted execution: the resume key digests the ANSWER
     TEXT, so a winner and a loser hash differently and one queue item produces
     TWO paid executions. Discovered, not listed; asserted against parsed CODE.
     """
     sink = _BACKEND / _SINK
-    feeders = [(n, b) for n, b in _functions_calling(sink, "_ended(") if n != "_ended"]
-    assert {n for n, _ in feeders} >= {"answer", "cancel", "bulk_cancel", "expire"}, (
-        f"the four ways an ask ends no longer all reach _ended(): {[n for n, _ in feeders]}"
-    )
     fns = {n.name: n for n in ast.walk(ast.parse(sink.read_text()))
            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    # Real calls to the sink only — an `ast.Call` whose func is the bare name
+    # `_ended`. A text match also caught helpers whose NAMES end in `_ended(`
+    # (`_refuse_ended(`, `_refuse_ended_predecessor(`), which end nothing
+    # (trinity-enterprise#901 sweep C1).
+    feeders = [(name, ast.unparse(fn)) for name, fn in fns.items()
+               if name != "_ended" and _calls_ended(fn)]
+    assert {n for n, _ in feeders} >= {"answer", "cancel", "bulk_cancel", "expire", "withdraw"}, (
+        f"the five ways an ask ends no longer all reach _ended(): {[n for n, _ in feeders]}"
+    )
     for name, body in feeders:
-        at = body.index("_ended(")
+        at = _ENDED_CALL.search(body).start()
         guarded = (
             _refuses_on_status_conflict_before_ended(fns[name])
             or any(a in body[:at] for a in _SET_CAS_ACCESSORS)
+            or _refuses_unless_outcome_won_before_ended(fns[name])
         )
         assert guarded, (
             f"{_SINK}::{name} hands rows to the ending observers without having won "
             f"a compare-and-set for them — a lost race would be woken and paid for"
         )
+
+
+# A call to the sink itself, never an identifier that merely ends in `_ended(`.
+_ENDED_CALL = re.compile(r"(?<![A-Za-z0-9_])_ended\(")
+
+# The outcome form (trinity-enterprise#901): a single-row CAS writer that reports
+# `{"outcome": ..., "row": ...}` instead of a `_status_conflict` marker. The
+# ending function must refuse every outcome but the WINNING token, by name,
+# before `_ended` — a deny-list of the known losing outcomes is not accepted,
+# because an outcome the db layer adds later would fall through to the sink.
+# writer accessor -> the one outcome that means this call won the row
+_OUTCOME_CAS_WINNERS = {
+    "withdraw_operator_queue_item(": "withdrawn",
+}
+
+
+def _calls_ended(fn) -> bool:
+    return any(isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_ended"
+               for n in ast.walk(fn))
+
+
+def _refuses_unless_outcome_won_before_ended(fn) -> bool:
+    """The function calls an outcome-form CAS writer, and above the first
+    `_ended(` call an `if` tests `<...outcome...> != "<winning token>"` with a
+    body that raises or returns. Asserted on parsed code, like the
+    `_status_conflict` form, so a comment naming the token proves nothing."""
+    ended_line = min(
+        (n.lineno for n in ast.walk(fn)
+         if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_ended"),
+        default=None,
+    )
+    if ended_line is None:
+        return False
+    body = ast.unparse(fn)
+    for accessor, winner in _OUTCOME_CAS_WINNERS.items():
+        if accessor not in body:
+            continue
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.If) and node.lineno < ended_line
+                    and any(isinstance(b, (ast.Raise, ast.Return)) for b in node.body)):
+                continue
+            t = node.test
+            if (isinstance(t, ast.Compare) and len(t.ops) == 1
+                    and isinstance(t.ops[0], ast.NotEq)
+                    and "outcome" in ast.unparse(t.left)
+                    and isinstance(t.comparators[0], ast.Constant)
+                    and t.comparators[0].value == winner):
+                return True
+    return False
 
 
 def _refuses_on_status_conflict_before_ended(fn) -> bool:

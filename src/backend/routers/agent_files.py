@@ -1,4 +1,4 @@
-# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics — ent#479, and another agent's with `agent` through a permission grant, ent#727; get_objectives → /objectives, ent#666; the definitions READ is deliberately unexposed — get_metrics carries each definition — not forgotten)
+# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics — ent#479, and another agent's with `agent` through a permission grant, ent#727; get_objectives → /objectives, ent#666; the definitions READ is deliberately unexposed — get_metrics carries each definition — not forgotten; the peer-skill grant routes, ent#662, are deliberately unexposed — granting is admin + interactive, human-only)
 """Agent file management, info, and folder endpoints."""
 import logging
 import os
@@ -9,7 +9,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 
 from models import User
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, is_interactive_principal
+from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, is_interactive_principal, require_admin, reject_non_interactive_principal
 from services.agent_auth import agent_httpx_client
 from services import (
     agent_skills_listing,
@@ -18,11 +18,13 @@ from services import (
     metric_read_service,
     objective_join_service,
     objectives_read_budget,
+    peer_skill_policy,
     rate_limiter,
 )
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 from services.agent_service import (
+    agent_reach_logic,
     get_agent_permissions_logic,
     set_agent_permissions_logic,
     add_agent_permission_logic,
@@ -281,6 +283,18 @@ async def get_agent_permissions(
     return await get_agent_permissions_logic(agent_name, current_user, strict=strict)
 
 
+@router.get("/{agent_name}/reach/{target}")
+async def get_agent_reach(
+    agent_name: str,
+    target: str,
+    current_user: User = Depends(get_current_user),
+):
+    """May `agent_name` call `target` — the edge or the spawn record, decided
+    from the database, never from the container list (trinity-enterprise#629).
+    The MCP layer's agent-to-agent gate reads this."""
+    return agent_reach_logic(agent_name, target, current_user)
+
+
 @router.put("/{agent_name}/permissions")
 async def set_agent_permissions(
     agent_name: str,
@@ -358,6 +372,75 @@ async def remove_agent_permission(
         details={"target_agent": target_agent},
     )
     return result
+
+
+# ============================================================================
+# Per-skill grants over an edge (abilityai/trinity-enterprise#662)
+# ============================================================================
+
+@router.get("/{agent_name}/peer-skills")
+async def get_agent_peer_skills(
+    agent_name: AuthorizedAgentByName,
+    current_user: User = Depends(get_current_user),
+):
+    """Per permitted target the viewer may open: the library-assigned skills on
+    it and whether this agent may run each. A peer may run what an agent
+    declares; what an admin assigned needs a grant — `not_granted` counts what
+    the edge does not reach."""
+    return peer_skill_policy.peer_skills_view(agent_name, viewer=current_user)
+
+
+async def _set_peer_skill_grant(agent_name: str, target: str, skill: str, granted: bool,
+                                request: Request, admin_user: User) -> dict:
+    # The GRANT half of grant-vs-use: an admin, signed in as a person. An MCP
+    # key — any scope — is refused (require_admin already refuses agent keys).
+    reject_non_interactive_principal(admin_user)
+    try:
+        result = peer_skill_policy.set_grant(agent_name, target, skill, granted, admin_user.username)
+    except peer_skill_policy.PeerSkillGrantRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
+    if result["changed"]:
+        try:  # best-effort: the grant has already committed
+            await platform_audit_service.log(
+                event_type=AuditEventType.AUTHORIZATION,
+                event_action="peer_skill_grant" if granted else "peer_skill_revoke",
+                source="api",
+                actor_user=admin_user,
+                actor_ip=request.client.host if request.client else None,
+                endpoint=request.scope["path"],
+                request_id=getattr(request.state, "request_id", None),
+                target_type="agent",
+                target_id=target,
+                details={"caller": agent_name, "skill": skill, "granted": granted},
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("peer-skill audit failed for %s -> %s", agent_name, target)
+    return result
+
+
+@router.put("/{agent_name}/peer-skills/{target}/{skill}")
+async def grant_agent_peer_skill(
+    agent_name: str,
+    target: str,
+    skill: str,
+    request: Request,
+    admin_user: User = Depends(require_admin),
+):
+    """Let `agent_name` run the library skill `skill` on `target` over their
+    edge. Idempotent; the answer carries the consent line."""
+    return await _set_peer_skill_grant(agent_name, target, skill, True, request, admin_user)
+
+
+@router.delete("/{agent_name}/peer-skills/{target}/{skill}")
+async def revoke_agent_peer_skill(
+    agent_name: str,
+    target: str,
+    skill: str,
+    request: Request,
+    admin_user: User = Depends(require_admin),
+):
+    """Take the grant back. Idempotent."""
+    return await _set_peer_skill_grant(agent_name, target, skill, False, request, admin_user)
 
 
 # ============================================================================
@@ -841,18 +924,18 @@ async def share_agent_file(
     agent_name matches the path. User-scoped MCP keys of non-owners
     are rejected.
     """
-    # Owner gate (the agent's owner always passes)
-    assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can share files from this agent.")
-
-    # Defense in depth: if this is an agent-scoped key, it must be for
-    # the same agent. Prevents Agent A's key from being used to share
-    # files from Agent B's volume even when both are owned by the same user.
+    # An agent-scoped key may share only from its OWN volume. Checked first so
+    # the refusal names the rule; the owner gate below (narrowed to the agent's
+    # reach since ent#629) would refuse a sibling too, less specifically.
     actor_agent = getattr(current_user, "agent_name", None)
     if actor_agent and actor_agent != agent_name:
         raise HTTPException(
             status_code=403,
             detail="Agent-scoped MCP key cannot share files for a different agent.",
         )
+
+    # Owner gate (the agent's owner always passes)
+    assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can share files from this agent.")
 
     try:
         result = await create_share(

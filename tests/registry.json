@@ -1,6 +1,103 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3725_public_template_tokenless_metadata.py",
+      "feature": "abilityai/trinity#3725",
+      "added": "2026-10-14",
+      "categories": [
+        "backend",
+        "templates",
+        "github",
+        "unit"
+      ],
+      "description": "A public github: template's metadata read walks the remaining token tiers, then a credential-free SHA-pinned read, before the ent#14 gate refuses; helpers, raw reader and the chain's read decisions."
+    },
+    {
+      "file": "unit/test_3725_identity_and_validation.py",
+      "feature": "abilityai/trinity#3725",
+      "added": "2026-10-14",
+      "categories": [
+        "backend",
+        "templates",
+        "github",
+        "security",
+        "unit"
+      ],
+      "description": "The chain's effect on the create: 403 git re-check in _validate_github_access, 401 identity swap (never persisted, never on fork), git_mode.token_tier / rejected_token_tier, token dedupe, non-default git base fail-closed, no token in any log record."
+    },
+    {
+      "file": "unit/test_ent862_aauth_settings.py",
+      "feature": "abilityai/trinity-enterprise#862",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "settings",
+        "aauth",
+        "a2a",
+        "unit"
+      ]
+    },
+    {
+      "file": "unit/test_3524_gate_approval_card.py",
+      "feature": "abilityai/trinity#3524 #3525 #3527",
+      "added": "2026-10-12",
+      "categories": [
+        "backend",
+        "skill-gate",
+        "workspace",
+        "unit"
+      ],
+      "description": "The gated-skill approval card and its ending: an approver's rejection note reaches the requesting agent and a person's Inbox notice through the trinity-enterprise#755 reason path (absent on approval and without a note); a person with no email is named by username, never 'A caller'; a request carrying chat history leads with the new message (first-marker split); the Workspace projection carries the viewer's own answer and note; a recent gate answer names its request."
+    },
+    {
+      "file": "unit/test_ent819_files_read_tier.py",
+      "feature": "trinity-enterprise#819",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "files",
+        "auth",
+        "audit",
+        "unit"
+      ],
+      "description": "Owner tier on file download and preview, run against the SHIPPED services.agent_service.files: every owner-tier pattern (credential paths, their /proc and /dev spellings, Trinity credential copies, the secret file classes, runtime config) is refused below the owner tier with the teammate message; a PERSON gate runs first (agent, system, connector and ops keys get person_required) while agent keys still read accessor-tier files; the agent is sent the normalised path that was checked; NUL is refused before any agent call and an empty path is owner-tier. Refused reads and non-owner allowed reads write one AUTHORIZATION row with per-principal attribution, and an audit failure never changes the answer. The agent server's link refusal maps to an audited structured 403; platform readers (agent_client.read_file, the Work card pipeline reader, the objective join) log a warning naming a linked file. The older-image probe: below-owner and non-person reads refused on an unverified image, cached per container and image only for grep's own quiet answer, the probe target pinned to the shipped agent server."
+    },
+    {
+      "file": "unit/test_ent819_agent_server_read_boundary.py",
+      "feature": "trinity-enterprise#819",
+      "added": "2026-10-06",
+      "categories": [
+        "agent",
+        "files",
+        "unit"
+      ],
+      "description": "The SHIPPED agent server files router (loaded by path, home monkeypatched to a temp dir) opens download and preview paths one component at a time without following any link and serves that descriptor: a link anywhere in the path (file, linked directory, dangling, self-loop) is 403 resolved_path_mismatch; leading slashes collapse before the fence; /proc and sibling-prefix paths are fenced; missing is 404, a directory or FIFO is 400; a file swapped for a link after the open is not read through, and reads stop at the size that was opened."
+    },
+    {
+      "file": "unit/test_ent819_no_platform_links_in_home.py",
+      "feature": "trinity-enterprise#819",
+      "added": "2026-10-06",
+      "categories": [
+        "backend",
+        "agent",
+        "files",
+        "guard"
+      ],
+      "description": "Premise pin for the no-link read rule: a comment-stripped scan of docker/base-image and src/backend finds no link creation (os.symlink, symlink_to, hardlink_to, os.link, ln -s) outside a reasoned allowlist; files that do not tokenize are scanned as raw text; the scan's teeth are shown by planting a line in a temp copy."
+    },
+    {
+      "file": "unit/test_ent823_agent_server_protected_paths.py",
+      "feature": "trinity-enterprise#823",
+      "added": "2026-10-06",
+      "categories": [
+        "agent",
+        "files",
+        "guardrails",
+        "unit"
+      ],
+      "description": "The SHIPPED agent server keeps the runtime config files out of its file routes: ~/.claude.json and ~/.claude/.credentials.json are on both name lists; PUT, mkdir and DELETE never reach ~/.claude.json, ~/.claude/.credentials.json, ~/.gemini/settings.json or ~/.tmp/codex, matched on the resolved target (a link elsewhere in the home included; DELETE also refuses a directory above one); ordinary .claude and .tmp files stay writable; the two Claude Code entries are present in the backend constant, the hook baseline and both agent-server lists."
+    },
+    {
       "file": "unit/test_ent844_expired_approval_outcome.py",
       "feature": "abilityai/trinity-enterprise#844",
       "added": "2026-10-10",
@@ -11,6 +108,26 @@
         "unit"
       ],
       "description": "An approval the clock ended records whether the platform held its action (trinity-enterprise#844): on the real SQLite, mark_expired stamps disposition_reason='outcome_unknown' on an expired approval raised by an agent (native or file) or a legacy NULL-raiser row, never on a gate approval (the platform held the action; expiry ran nothing), a question or an alert; an approval answered in time is never marked; the #3247 replace path's in-transaction expiry writes the same marker; the expiry audit row carries outcome_unknown: true for exactly those rows, from BOTH timeout writers (the sweep and, driven through ask_service.raise_ask, the #3247 replace-path expiry). Mutation-proven."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceProjectsV4.mount.spec.js",
+      "feature": "#3692 #3694 abilityai/trinity-enterprise#896",
+      "added": "2026-10-13",
+      "categories": [
+        "frontend",
+        "workspace",
+        "projects"
+      ]
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalSidebarTopOrder.mount.spec.js",
+      "feature": "#3695",
+      "added": "2026-10-13",
+      "categories": [
+        "frontend",
+        "workspace",
+        "sidebar"
+      ]
     },
     {
       "file": "../src/frontend/tests/unit/operatorQueueOutcomeUnknown.spec.js",
@@ -121,7 +238,31 @@
         "security",
         "unit"
       ],
-      "description": "Trusted internal networks for A2A: the admin list refuses the platform's Docker networks, loopback/link-local, anything broader than /8, one-label wildcards and any range holding an attached Docker gateway; outbound accepts a trusted endpoint that is private/CGNAT and http:// but never metadata/loopback/platform, and refuses a trusted name resolving outside the declared CIDRs; the source is the peer or the named proxy's X-Real-IP, never a cloudflared request or a host-forwarded gateway; through the real router an internal-scope agent is unexposed outside (card 404, keyed 404, anonymous 401), a trusted caller runs a keyless task attributed to source_host and reads only its own tasks, keyless off needs a key, public scope is unchanged."
+      "description": "The admin's outbound A2A endpoint allowlist (outbound-only since trinity-enterprise#885): the list refuses the platform's Docker networks, loopback/link-local, anything broader than /8, one-label wildcards and any range holding an attached Docker gateway; outbound accepts a trusted endpoint that is private/CGNAT and http:// but never metadata/loopback/platform, and refuses a trusted name resolving outside the declared CIDRs."
+    },
+    {
+      "file": "unit/test_ent885_keyless_refused.py",
+      "feature": "trinity-enterprise#885",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "a2a",
+        "security",
+        "unit"
+      ],
+      "description": "The keyless trusted-network A2A path is gone: through the real router over the real unit SQLite with a row an rc1-rc3 database still carries (a2a_scope='internal', a2a_keyless_internal=1) and a trusted CIDR seeded, a caller with no credential gets 401 and no dispatch on message/send, message/stream, tasks/get and tasks/cancel from a CGNAT peer, via X-Real-IP, with cloudflared headers and from the public internet; a keyed caller from the public internet runs the task and is never 404'd for its address; the card is served at the public origin; statically, nothing under src/backend reads a2a_scope, a2a_keyless_internal or source_host outside the DDL/migration homes and the db object has no get_a2a_scope/set_a2a_scope."
+    },
+    {
+      "file": "unit/test_ent885_outbound_allowlist.py",
+      "feature": "trinity-enterprise#885",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "a2a",
+        "security",
+        "unit"
+      ],
+      "description": "The trusted-networks list is an outbound endpoint allowlist (operator ruling 2026-10-13): with the list written through the real set_entries into the real unit SQLite, a tailnet peer on CGNAT / plain http is refused with the v0.9.5 reason (endpoint_not_https / endpoint_private_address) at register time (a2a_outbound.upsert_endpoint) and at call time (a2a_client.validate_endpoint) when its host is off the list, and is registered and called when the list names its CIDR, its *.suffix or its exact name; a stranger's name under a different suffix gets nothing; un-listing refuses the next call."
     },
     {
       "file": "unit/test_ent841_close_chat.py",
@@ -4024,6 +4165,90 @@
       "description": "The unified utilization header is a fraction of the cap and is honoured past 1.0 (#2419): parser table (1.2 -> 120.0, a percent-shaped 42.5 reads loud-wrong as 4250.0, nan/inf/1e307/negative -> None, -0.0 -> 0.0), synthetic overage header set through the REAL chain (parse -> _to_model -> classify_headroom SATURATED, selection_verdict 120.0, ranker sorts it last, decide_tier CRIT, _history_row passthrough), and the [#2419] INFO arrival log in _probe that records the raw header strings when a window reads past 100%. Direct imports + attribute monkeypatching, no backend."
     },
     {
+      "file": "unit/test_ent623_aauth_core.py",
+      "feature": "abilityai/trinity-enterprise#623",
+      "added": "2026-09-17",
+      "categories": [
+        "backend",
+        "security",
+        "a2a",
+        "unit"
+      ],
+      "description": "AAuth prototype core: aa-agent+jwt (Ed25519 JWS), RFC 9421 profile (std-base64 Signature, covered components, @authority normalisation), every verifier refusal code (trusted-issuer pre-gate fetches nothing, body read only after the signature over Content-Digest verifies, replay fail-closed), a request signed by the JS reference @hellocoop/httpsig verifies, signer token cache, instance-key first-use race + undecryptable-row fail-closed, bounded discovery (same-origin jwks_uri, negative cache, deadline)."
+    },
+    {
+      "file": "unit/test_ent623_aauth_a2a.py",
+      "feature": "abilityai/trinity-enterprise#623",
+      "added": "2026-09-17",
+      "categories": [
+        "backend",
+        "security",
+        "a2a",
+        "unit"
+      ],
+      "description": "AAuth on the A2A seam: flag-off signed request is a plain bearer 401; bearer still works with the flag on (dual acceptance) and a bearer-less 401 advertises AAuth; allow-listed identity runs with no Trinity user and is named on audit/activity; unlisted 403; bad signature 401 problem+json before the body is parsed; every missing/erroring allow-list provider refuses; message/stream refused; tasks/get scoped to the starting identity; card lists aauth after bearerAuth; discovery documents 404 when inert; outbound registry auth_scheme rules; aauth calls refuse human principals and an inert flag before egress and are signed over the exact bytes sent to the registered host."
+    },
+    {
+      "file": "unit/test_ent878_aauth_person_token.py",
+      "feature": "abilityai/trinity-enterprise#878",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "security",
+        "a2a",
+        "unit"
+      ],
+      "description": "AAuth person token (the binding leg): the AAuth-Requirement / Retry-After / interaction url+code grammar; the per-agent key is HKDF-derived and equal across workers in a window, min_remaining keeps a chain on one key from an empty AND a populated cache (the key retires at window_end); PS metadata rules (four required fields, same-origin token endpoints, off-host jwks_uri, negative cache); the capped PS egress returns every status with headers and pins the a2a_client guards and the token scrub; the signed POST replays through verifier.verify_request; 200 issues/caches/serves the held token with refresh at the margin and on key change; 202 persists a Redis record and returns link+code, the same handle before next_poll_at without network; resume drives 202/200/403/408/410/429 with terminal deletes, slow-down back-off, un-persisted refresh answering slow_down, handle scoped to the agent, rolled-key reissue; every POST refusal is named and records nothing; Redis down refuses before any POST and at persist; open interactions capped; audit details name the outcome and never the token/handle/url/code. Route: uniform 404 when inert even for a malformed body, own-key only (403), named configuration refusals incl. the POST-429 next_step, issue/pending/resume/denial through TestClient with audit rows, response model has no token field, router registered after the aauth router."
+    },
+    {
+      "file": "unit/test_ent879_aauth_resource_client.py",
+      "feature": "abilityai/trinity-enterprise#879",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "security",
+        "a2a",
+        "unit"
+      ],
+      "description": "AAuth outbound resource client (the ladder + the two sinks), on synthetic keys and recorded Senzing/Hellō header shapes: discovery resolves a resource key under aauth-resource.json cached per (issuer, dwk); httpsig/signer cover the supported extra components, carry a presented person/auth token in Signature-Key while the AGENT key signs, and refuse a rotated key; resource_meta (issuer equality, same-origin jwks/control endpoints, tolerant AAuth-Budget, caches, non-JSON/redirect refused); resource_token.verify_resource_token happy path and ONE RED TEST PER CHECK (iss, dwk, aud, agent_jkt, ps, sub, presented_jti, expired, future iat, lifetime, typ, alg, header params, kid, signature, malformed) — claims checked before any key fetch; auth-token inspection binds to our key and caps expiry; the ladder through the real signer → egress → MockTransport path: input refusals before egress, agent-token direct answer with budget, person-token challenge, auth-token mode starts at the person token, pending → interaction_required, the full person → auth chain, cached auth token presented first with no PS trip, tampered resource tokens refused before the PS, unexpected_challenge for an agent token, exchange pending/approval recorded or refused never half, expired_presented_token gets ONE fresh chain then refuses, step-up once, expired_jwt re-auth once, agent-token retry once, unknown requirements never retried, resource 202 → handle without polling, status mapping (402/403/408/410/429), round + time budgets, possibly_executed after a POST timeout, tokens scrubbed from bodies and errors; the allow-list fail-closed matrix (empty/missing/malformed/prefix/case/port → nothing allowed, settings then env); ps_client auth-token cache (margin, key, outage → not held, value never in repr), pending records kind- and agent-scoped, the exchange's signed POST shape + holding, an auth token bound elsewhere refused, refusal/denial mapping, PS failures; resume polls then re-sends the STORED request, early/slow-down/denied states, terminal vs transient PS answers, unknown/wrong-agent/rotated/re-pointed handles, resource-deferred poll."
+    },
+    {
+      "file": "unit/test_ent879_aauth_resource_route.py",
+      "feature": "abilityai/trinity-enterprise#879",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "security",
+        "a2a",
+        "unit"
+      ],
+      "description": "POST /api/agents/{name}/aauth/resource-call through TestClient over the real ladder and the scripted resource + person server: uniform 404 while inert for every body shape, the agent's OWN key only (human, sibling, system → 403 aauth_agent_only) BEFORE the allow-list is consulted, the discriminated call-XOR-resume body with bounded fields, no request or response field can carry a token (token_kind is a three-word Literal; field sets pinned); a result through the full chain with status/body/budget/token_kind/challenges and an audit row whose details name the outcome and never a token, the body, the justification or an id; the second call reuses the auth token with zero PS trips; the same dedup_label replays the snapshot without a second send (body is not identity); a pending outcome RELEASES the effect claim so the post-consent retry runs for real; resume by handle polls the PS with Prefer: wait and re-sends the STORED body outside the guard, then handle_unknown is an expired outcome; denied / approval-pending are 200 outcomes with do_not_retry; refusals are mapped errors (403 resource_not_allowed, 409 person_server_unconfigured, 503 state_unavailable as AUTHORIZATION rows before egress; 402 / 429 + retry_after / 502 unsupported_requirement as EXECUTION rows after it); a POST timeout is 504 with possibly_executed; an in-flight duplicate is 409; a missing execution id runs unguarded or is refused 422 on a pull agent; GET sends no body and the justification is INFO-logged not audited; snapshot round-trip; registered in main.py after the person-token router with the # mcp: header; the path resolves beside the agent catch-all; the gate helpers are the person-token router's."
+    },
+    {
+      "file": "unit/test_ent928_aauth_four_party.py",
+      "feature": "abilityai/trinity-enterprise#928",
+      "added": "2026-10-15",
+      "categories": [
+        "backend",
+        "security",
+        "a2a",
+        "unit"
+      ],
+      "description": "AAuth four-party resources (resource token aud = access server), no network: verify_resource_token accepts a four-party aud only when it is a strict https://host server identifier whose /.well-known/aauth-access.json is fetchable and names itself as issuer — the fetch runs only AFTER the resource's signature verifies, a three-party aud never dials anything, every refusal (no document, issuer mismatch, issuer missing, private address, timeout, non-https / port / path / IP / malformed aud) is the named check `aud` with no person-server call; discovery.access_server_metadata document rules, the outbound public-URL validator on its path, positive and negative caches; inspect_auth_token per mode (four-party: iss = the AS, dwk = aauth-access.json; three-party: iss = PS, dwk = aauth-person.json; ps must be ours in both; cross-mode tokens refused; HeldAuthToken.iss is the real issuer); the ladder end to end: the resource token goes to OUR PS's auth_token_endpoint carrying the AS aud, the AS receives only its metadata fetch, the AS-minted token is held under its issuer and reused on the second call with no PS trip, a PS-minted token answering a four-party exchange is refused and nothing held, a pending (202) record carries as_url and the poll holds the same rule, an older record without as_url stays three-party, snapshot/replay and audit details carry auth_mode + access_server and never a token."
+    },
+    {
+      "file": "mcp-server/src/tools/aauth.test.ts",
+      "feature": "abilityai/trinity-enterprise#878, abilityai/trinity-enterprise#879",
+      "added": "2026-10-13",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "a2a",
+        "unit"
+      ],
+      "description": "request_person_token (ent#878): self-acting agent-scope gate without a round-trip, issued/pending/refused pass through with next_step, a token-shaped field never does, HTTP errors become honest flags (aauth_disabled on 404) and the tool never throws. ent#879 call_aauth_resource: the call-XOR-resume zod schema (dedup_label required on a new call, a handle travels alone, bad paths/methods/bodies refused), description under 2,048 chars naming the actor and the retry rules, the self-acting agent-scope gate without a round-trip, method defaults to POST and body to null with trigger_source=mcp, result / interaction_required / denied pass through, any token-shaped field is stripped, every HTTP refusal becomes {outcome: refusal, refusal{http_status,...}, do_not_retry, next_step} with the retryable set pinned (rate_limited, state_unavailable, effect_in_progress, plain timeout) and possibly_executed final, a gateway abort is a retryable refusal with possibly_pending."
+    },
+    {
       "file": "mcp-server/src/audit-denial.test.ts",
       "feature": "#2807",
       "added": "2026-09-16",
@@ -4425,25 +4650,27 @@
     },
     {
       "file": "unit/test_ent792_file_guardrail_hook.py",
-      "feature": "trinity-enterprise#792",
+      "feature": "trinity-enterprise#792, trinity-enterprise#823",
       "added": "2026-10-06",
       "categories": [
         "agent",
         "security",
         "guardrails"
       ],
-      "description": "The in-agent PreToolUse file guardrail reads any run of leading slashes as one: runs the SHIPPED docker/base-image/hooks/file-guardrail.py main() through run_hook against the shipped guardrails-baseline.json (lib loaded by path, sys.path and sys.modules restored). //- and ///-prefixed .ssh, .aws, .claude/settings*.json, /opt/trinity and /etc/claude-code paths are denied (exit 2) like the one-slash form; ordinary // paths stay allowed; the baseline is asserted to carry the absolute patterns so the rows are not vacuous. Pairs with the // rows in test_read_only_guard.py. Reverting the hook fix turns 7 red."
+      "description": "The in-agent PreToolUse file guardrail reads any run of leading slashes as one: runs the SHIPPED docker/base-image/hooks/file-guardrail.py main() through run_hook against the shipped guardrails-baseline.json (lib loaded by path, sys.path and sys.modules restored). //- and ///-prefixed .ssh, .aws, .claude/settings*.json, /opt/trinity and /etc/claude-code paths are denied (exit 2) like the one-slash form; ordinary // paths stay allowed; the baseline is asserted to carry the absolute patterns so the rows are not vacuous. Pairs with the // rows in test_read_only_guard.py. Reverting the hook fix turns 7 red. trinity-enterprise#823: a Write to ~/.claude.json, ~/.claude/.credentials.json, ~/.gemini/settings.json or ~/.tmp/codex/* exits 2 under the shipped baseline, and every file-guardrail row of guard002-smoke.py (run at image build) is executed against the shipped hook.",
+      "updated": "2026-10-06"
     },
     {
       "file": "unit/test_files_protected_paths.py",
-      "feature": "Issue #590 / AISEC-C2, trinity-enterprise#792",
+      "feature": "Issue #590 / AISEC-C2, trinity-enterprise#792, trinity-enterprise#819, trinity-enterprise#823",
       "added": "2026-10-06",
       "categories": [
         "backend",
         "security",
         "files"
       ],
-      "description": "The backend file-route deny list, run against the SHIPPED services.agent_service.files (it used to test an inline copy, which is how ent#792 went unseen). AISEC-C2 reproduction, protected paths, traversal, allowed paths, edge cases; any number of leading slashes is refused (normpath keeps exactly two); DELETE refuses a protected path and any directory that holds one (.ssh, .claude, the home dir, the /proc/self/root and /proc/self/cwd doors), with the derived anchor tuple pinned and the derivation rule tested on hypothetical glob shapes; three Hypothesis properties (the normalised form equals an independent segment-stack resolution, extra leading slashes never change a verdict, DELETE refused iff writing is or the path holds an anchor); through the route logic and through the real FastAPI router (mkdir takes its path in the JSON body): // paths refused on PUT, mkdir and DELETE with the exact refusal, ordinary deletes reach the container lookup, and the agent is sent the normalised path that was checked. Five mutations each red."
+      "description": "The backend file-route deny list, run against the SHIPPED services.agent_service.files (it used to test an inline copy, which is how ent#792 went unseen). AISEC-C2 reproduction, protected paths, traversal, allowed paths, edge cases; any number of leading slashes is refused (normpath keeps exactly two); DELETE refuses a protected path and any directory that holds one (.ssh, .claude, the home dir, the /proc/self/root and /proc/self/cwd doors), with the derived anchor tuple pinned and the derivation rule tested on hypothetical glob shapes; three Hypothesis properties (the normalised form equals an independent segment-stack resolution, extra leading slashes never change a verdict, DELETE refused iff writing is or the path holds an anchor); through the route logic and through the real FastAPI router (mkdir takes its path in the JSON body): // paths refused on PUT, mkdir and DELETE with the exact refusal, ordinary deletes reach the container lookup, and the agent is sent the normalised path that was checked. Five mutations each red. trinity-enterprise#819/#823: .git/config, the runtime config files (~/.claude.json, ~/.claude/.credentials.json, ~/.gemini/settings.json, ~/.tmp/codex/*) and the /dev spellings join the write list with their delete anchors (deleting .tmp is refused); every owner-tier read pattern is also write-denied except the reviewed secret file classes (the set is pinned, plus a Hypothesis property over the path generator).",
+      "updated": "2026-10-06"
     },
     {
       "file": "unit/test_ent689_readiness_gate.py",
@@ -4641,6 +4868,17 @@
         "database"
       ],
       "description": "ent#527 rider (ruling 2026-09-24): the owner's readiness stamp on the agents list and the fleet grid. One batched read on a real database returns only stamped agents, names a rollout seed as such, never carries who flipped it, skips an unknown state and does not query for an empty list; GET /api/agents attaches it per agent from that one read, None when unstamped. brief_held rides next to it: the role card's shared predicates (is_seat_delivery_schedule, brief_is_held), one batched schedule read over the calibrating+autonomy candidates only, fail-soft to no claim, so the list's calibrating tooltip never says a brief is paused when the card would not."
+    },
+    {
+      "file": "unit/test_ent843_role_card_plain_words.py",
+      "feature": "trinity-enterprise#843",
+      "added": "2026-10-08",
+      "categories": [
+        "backend",
+        "workspace",
+        "metrics"
+      ],
+      "description": "The Workspace role card's objectives in plain words: readable metric names (declared label, the label the same owner's other agents' active declarations agree on via db.metric_declarations_elsewhere, else the code name in words; never snake_case, a failed lookup still words; another owner's agent cannot author the card); a supported objective tracked elsewhere says so once, never named, and only when another agent really declares the number; the canon's optional client_heading through the join."
     },
     {
       "file": "unit/test_ent676_role_card_join.py",
@@ -5790,8 +6028,100 @@
       "file": "unit/test_3526_held_chat_trace.py",
       "feature": "#3526",
       "added": "2026-10-12",
-      "categories": ["backend", "unit", "chat"],
+      "categories": [
+        "backend",
+        "unit",
+        "chat"
+      ],
       "description": "A gated request held from the Chat tab is saved once to the chat session with its notice (source gate:<request_id>), the 202 names the session, a foreign session id falls back to the sender's own, and a failed save still answers pending. A person re-sending the same request while one is pending gets it back ahead of the caps; an agent, another person, another text or a decided request each raise their own. The session read carries the request's state and decision text; the voice context leaves held rows out."
+    },
+    {
+      "file": "unit/test_3590_rebuild_pull_env.py",
+      "feature": "#3590",
+      "added": "2026-10-12",
+      "categories": [
+        "backend",
+        "unit",
+        "agent-lifecycle"
+      ],
+      "description": "The #1559 rebuild-from-nothing path bakes the pull-worker env for an allowlisted pilot (driven through the real recreate_missing_container, red before the fix on KeyError TRINITY_PULL_MODE); apply_pull_mode_env is the one owner of the set-or-clear idiom (pilot on empty dict, de-pilot clears, idempotent, module-global lookup honours stubs, MCP-key-absent and settings-fallback warnings); check_pull_mode_env_matches joins the start-path drift chain (flag only, fail-safe on unobserved attrs) and start_agent_internal recreates a pilot whose container lacks the flag; AST writer-set guard pins the three env assemblers on apply_pull_mode_env; a structural scan over services/ (rglob) finds an unknown fourth: every provision-tail caller must apply the helper and every containers_run(environment=) site must be a registered runner."
+    },
+    {
+      "file": "unit/test_882_completed_at_floor.py",
+      "feature": "trinity-enterprise#882",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "unit",
+        "execution"
+      ],
+      "description": "A terminal completed_at is floored at the row's own server-written started_at in both writers (update_execution_status and complete_activity): a backdated producer value (agent-authored retained_at or #1083 callback) lands in the completed_at COLUMN as started_at with duration 0 and the status still terminal, so an agent cannot age its own row into the next retention sweep; an in-window value passes verbatim (the #3589 behaviour), the future-clamp is unchanged, the floor wins over the clamp on server skew, and the helper's floor parameter is keyword-only and required so a future third writer cannot silently skip the decision."
+    },
+    {
+      "file": "unit/test_3588_close_cancelled_claimed_activities.py",
+      "feature": "#3588",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability"
+      ],
+      "description": "No activity created or owned by a terminal path stays `started` (#1804 class; the invariant is a scoped DB query, never a call-shape mock): the three cancel sites record the execution_cancelled EVENT created+completed in one breath via _record_cancel_event (fail-open, ordered after the real closes; already_finished labelled and pinned); the queued-cancel site runs the #1804 owner close so the #2329 metadata companions close (a queued row has no dispatch activity); the watchdog claim closes direct-dispatch collaboration/self-task companions from the PERSISTED row — state+instant row-derived, so a failure-style lost CAS stamps the standing terminal (e.g. a cancel's CANCELLED), never the lost envelope's FAILED — counts into report.activities_closed_on_recovery AND the startup stats, lets an authoritative close upgrade a provisional FAILED companion (the lookup agrees with the CAS), and keeps row/activity completed_at in agreement even when retained_at is unreadable."
+    },
+    {
+      "file": "unit/test_ent848_role_id_seam.py",
+      "feature": "abilityai/trinity-enterprise#848",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "trinity-enterprise#848: backend seam: parse_role_id (fullmatch, lower-cased), role_label, resolve_role_id (provider only, role_unassigned fails closed), resolve_role_id_people / resolve_approver_roles (None for every degraded answer, [] real, regex-filtered, de-duplicated, capped), ROLE_ID_RE parity with the enterprise ROLE_ID_PATTERN."
+    },
+    {
+      "file": "unit/test_ent848_enforce_and_hook.py",
+      "feature": "abilityai/trinity-enterprise#848",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "trinity-enterprise#848: enforce + hook for role:<id> approvers: a seated person self-approves exactly as approver_people says; anyone else raises one ask with to_role role:<id> and the pre-resolved addressees (T10, kinds too); 202 body carries approver_label, the sentence names no role; unfilled / no provider refuses role_unassigned; an agent addressing role:<id> is still invalid_to; check_invocation honours the self_approved record for a role-gated skill and refuses other runs."
+    },
+    {
+      "file": "unit/test_ent848_gate_map_roles.py",
+      "feature": "abilityai/trinity-enterprise#848",
+      "added": "2026-10-13",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "trinity-enterprise#848: gate map API for role:<id> approvers: PUT saved lower-cased when this agent's roster names the role; unknown_role / approver_unavailable (OSS, no roster answer) / invalid_approver refused with nothing written; named-but-unfilled saved with approver_unassigned; deadline-only PUT on a stored role gate passes on OSS; GET lists roles after kinds with label + role_id through the response model, booleans only; viewer_fills agrees with enforce; stored role gates report reach via approver_people; the MCP set_skill_gate regex accepts exactly what the backend parses."
+    },
+    {
+      "file": "unit/test_ent901_withdraw_ask.py",
+      "feature": "abilityai/trinity-enterprise#901",
+      "added": "2026-10-14",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "trinity-enterprise#901 checkpoint A: an agent withdraws its own pending ask with a reason and no successor. The shared compare-and-set (`_end_own_pending`) ends the row cancelled/agent/reason with replaced_by NULL and no deadline clause (a pending row past its deadline is withdrawn, like a person's cancel); a person's answer, cancel or the sweep wins and nothing is written; NULL-raiser, gate and another agent's rows are not_own; replace still runs through the shared writer. `agent_ending_kind` tells replaced from withdrawn by the link, never the reason's text. The sink: uniform 404 ask_not_found (unknown / another's / gate / platform / about-a-person), 409 ask_ended with ids+enums only, 200 replayed on a repeat (differs on a changed reason), 422 invalid_reason, agent-keyed `withdrawn` audit row without the text, one thin trigger, no wake. The route: get_self_acting_agent 403 for every other principal, receipt and readback redacted and carrying agent_ending; the #2996 census lists it as agent-callable."
+    },
+    {
+      "file": "unit/test_ent662_peer_skill_surface.py",
+      "feature": "abilityai/trinity-enterprise#662",
+      "added": "2026-10-15",
+      "categories": [
+        "backend",
+        "security",
+        "skills"
+      ],
+      "description": "A peer may run what an agent declares; what an admin assigned needs a grant (ent#662). At the real seam (skill_gate_service.enforce over the per-process SQLite, no gates set): a peer invoking an individually assigned OR set-propagated library skill is refused 403 skill_not_granted naming caller, callee and only the ungranted names; declared skills, a #2914 conflict name, a granted skill, the agent itself, a person, a schedule, a connector and trinity-system pass; a grant is per caller x target x skill and revocable; a name hidden in the context text is read too. The execute_task backstop applies the rule on an agent with no gates. An unreadable assignment table refuses a peer (503 peer_surface_unavailable) and leaves a person alone. Every refusal is one audit row. The grant routes: admin on PUT/DELETE read off the real dependant graph, an admin's MCP key refused, 422 skill_not_assigned / self / system agent, idempotent with a consent line and audited, and the per-edge read filters targets by viewer access. Both migration tracks and both CASCADE AgentRefs. Mutations: removing the enforce hook turns 8 red; restoring the backstop early return turns the backstop test red. Follow-ups: a parent runs every skill on an agent it spawned with its current key, a child calling its parent still needs a grant, a stale spawn key is no parent (symmetric-exemption and no-exemption mutations each red); removing an edge or a full replace that drops it deletes its grants and only its grants (cascade mutation red); the drift report lists only (edge x library skill) pairs USED in the last 30 days and not granted, with uses + last_used_at, off the real execution ledger read; the drift route is admin-only; the per-edge view carries last_used_at."
     }
   ]
 }

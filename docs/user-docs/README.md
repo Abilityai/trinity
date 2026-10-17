@@ -100,6 +100,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 - [Access Control](sharing-and-access/access-control.md) — Cross-channel email verification, access requests
 - [Public Links](sharing-and-access/public-links.md) — Public chat URLs, email verification, session memory, Connect Slack
 - [Workspace](sharing-and-access/workspace.md) — The chat app: the Inbox, chat tabs and the pinned Main chat, the composer (typeahead, model picker, files, voice, replies), the rail (Info, Files, Loops, Canvas, Work), keyboard shortcuts, agent pages
+- [Workspace Projects](sharing-and-access/workspace-projects.md) — Projects in the Workspace: creating one (list or chat), continuing work with an agent, what the agent records in the Log, tasks and the verification rule, the steward and its digest, visibility and guests
 - [Tags and Organization](sharing-and-access/tags-and-organization.md) — Tags, filtering, system views
 - [Mobile Admin](sharing-and-access/mobile-admin.md) — Mobile PWA at /m
 

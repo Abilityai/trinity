@@ -11,6 +11,7 @@ Each agent has independent configuration options that control its behavior, reso
 The Agent Detail page has a **Settings** tab (visible to owners only) -- a sectioned home for per-agent configuration. Current sections:
 
 - **Guardrails** — see [Agent Guardrails](agent-guardrails.md)
+- **Permissions to change itself** — what the agent may change about itself and other agents on its own (below)
 - **Parallel Capacity** — below
 - **Expose via MCP** — publish the agent as a dedicated MCP tool; see [MCP Server](../integrations/mcp-server.md#dedicated-agent-tools-expose-via-mcp)
 - **Trinity access key** — the agent-scoped key the agent uses to call Trinity's own MCP tools, with health status and a **Regenerate** action (the running container is replaced to pick the new key up)
@@ -20,6 +21,35 @@ The Agent Detail page has a **Settings** tab (visible to owners only) -- a secti
 - Further sections can appear on installations with an enterprise entitlement
 
 The remaining settings below are managed from the agent header controls, the Running/Autonomy toggles on the Dashboard, or the API.
+
+### Permissions to Change Itself
+
+An agent's own key acts for its owner, so without a fence it could rewrite any agent its owner holds. Trinity fences those changes behind permissions that an instance admin grants per agent. No agent holds any of them by default. People and the system agent never need them.
+
+The **Permissions to change itself** card on the Settings tab shows one toggle per permission, with what it allows, what is refused without it, and who granted it and when:
+
+| Toggle | Permission | Lets the agent | Without it |
+|--------|-----------|----------------|------------|
+| **Change skills** | `skills.manage` | Assign, unassign and re-deliver skills, and set skill approval gates on other agents — see [Skills and Playbooks](../automation/skills-and-playbooks.md#who-can-change-an-agents-skills) | Every skill change is refused, its own included |
+| **Change other agents' schedules** | `schedules.manage` | Create, change, enable, disable or delete another agent's schedules and their webhooks | It still manages its own schedules, never another agent's |
+| **Change instructions** | `instructions.manage` | Write `CLAUDE.md`, `AGENTS.md` and `.claude/` files (not skills) through the Files API, and reset an agent to `main` while keeping its state | Those writes are refused, its own instructions included |
+| **Manage other agents** | `agents.manage` | Create, deploy and delete agents, deploy a system, and change an agent's model, resources, timeout, public-channel model, read-only mode and guardrails | It can still spawn and discard short-lived (ephemeral) helpers |
+| **Start projects** | `projects.manage` | Start a project on its owner's behalf, on installations that offer projects | It still works on projects it is already on |
+
+Bounds that hold even with a permission:
+
+- The agent reaches only agents its **owner owns**. Any other agent answers as not found.
+- It can never lift its **own** read-only mode or guardrails.
+- It deletes only agents it spawned.
+- No permission covers autonomy, the API-key setting, capabilities, parallel capacity or renaming. Those stay with a person. The card shows autonomy beside the toggles as a switch a person sets, never a grant. Adding people to a project or changing who can see it is never granted either.
+
+The owner and admins see the card; anyone else does not. Only an instance admin, signed in to the UI, can flip a toggle: owners see the state with *Only an instance admin can change these*. Every grant and revocation is audited. A system agent and an ephemeral agent cannot receive a permission, and an agent still being calibrated cannot receive **Change instructions**.
+
+**When an agent is refused.** An agent without the permission gets a `403` that names it (`skill_management_not_permitted`, `schedule_management_not_permitted`, `instruction_management_not_permitted`, `agent_management_not_permitted` or `project_management_not_permitted`), and the refusal is audited. The message tells the agent to raise a question to its operator whose title includes the permission id (for example `schedules.manage`). The card lists those open requests under **Open permission requests**, with a link to Operations. Answering the request grants nothing: an admin grants the permission on this card.
+
+**After upgrading.** No agent holds the schedule, instruction or agent permissions after the upgrade that introduces them. An orchestrating agent that creates agents, writes another agent's schedules or instructions, or reconfigures agents is refused until an admin grants the permission.
+
+The fence covers the platform's routes, not the agent's own container: an agent can still edit files in its own workspace with its own tools.
 
 ### Parallel Capacity
 
@@ -136,6 +166,13 @@ See [Agent Runtimes](agent-runtimes.md) for capability differences (session resu
 Agents inherit their configuration at container creation time. Changes to resource allocation, API key, or runtime trigger a container recreate. Changes to autonomy, read-only mode, timeout, circuit breaker, and model selection take effect on the next execution without restarting the container.
 
 See [Backend API Docs](http://localhost:8000/docs) for full request/response schemas.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/agents/{name}/capability-grants` | GET | All five self-change permissions, held or not, with who granted each and when. Owner or admin |
+| `/api/agents/{name}/capability-grants/{capability}` | PUT | Grant or revoke one — `{"granted": true\|false}`. An admin in a signed-in session only; any API key is refused. `422 unknown_capability`, `system_agent_not_grantable`, `ephemeral_agent_not_grantable` or `calibrating_agent` |
+
+An agent's own key changes resources, timeout, the public-channel model and the chat model, or another agent's read-only mode and guardrails, only while it holds **Manage other agents**, and only on agents its owner owns. Autonomy, capabilities, parallel capacity and the API-key setting refuse every agent key. See [Authentication → What a Key Is Not](../api-reference/authentication.md#what-a-key-is-not).
 
 ## See Also
 

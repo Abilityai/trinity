@@ -436,3 +436,79 @@ screenshots:
     external: true
     captured_at: 2026-04-23
     captured_commit: unknown
+
+  # ---------------------------------------------------------------- 1.0 README set (operator capture, 2026-10-14)
+  - file: dashboard-grid-org.webp
+    title: "Dashboard — Grid view with departments and reporting lines"
+    route: /?view=grid
+    shows: "The fleet as departments: Zones and Lines on, agents grouped by department, reporting lines drawn between agents, the system agent at the top."
+    sources:
+      - src/frontend/src/views/Dashboard.vue
+      - src/frontend/src/components/FleetGrid.vue
+      - src/frontend/src/components/AgentTile.vue
+    captured_at: 2026-10-14
+    captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
+
+  - file: skills-tab.webp
+    title: "Agent — Skills tab with Requires approval"
+    route: /agents/{name}?tab=skills
+    shows: "The unified Skills tab: own skills and library skills in one list, each card with Run, Edit & Run, a Requires approval toggle and the approver picker."
+    sources:
+      - src/frontend/src/views/AgentDetail.vue
+      - src/frontend/src/components/skills
+      - src/frontend/src/components/LibrarySkillsSection.vue
+    captured_at: 2026-10-14
+    captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
+
+  - file: workspace-inbox-approval.webp
+    title: "Workspace Inbox — an approval waiting for a person"
+    route: /workspace/inbox
+    shows: "The Inbox Action view with one Needs-approval card open in the reading pane: the question, the proposed actions, answer buttons, Discuss and Dismiss, and where the ask came from."
+    sources:
+      - src/frontend/src/views/Portal.vue
+      - src/frontend/src/components/portal/PortalInbox.vue
+      - src/frontend/src/components/portal/PortalInboxPane.vue
+      - src/frontend/src/components/portal/PortalInboxList.vue
+    captured_at: 2026-10-14
+    captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
+
+  - file: workspace-chat.webp
+    title: "Workspace — a chat with an ask card and the canvas rail"
+    route: /workspace/a/{name}
+    shows: "One agent chat: activity header, topic tabs, an ask card being discussed in the thread, and the rail open on the agent canvas."
+    sources:
+      - src/frontend/src/views/Portal.vue
+      - src/frontend/src/components/portal/PortalChatTabs.vue
+      - src/frontend/src/components/portal/PortalRail.vue
+      - src/frontend/src/components/portal/PortalRailCanvas.vue
+    captured_at: 2026-10-14
+    captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
+
+  - file: workspace-projects.webp
+    title: "Workspace Projects — list (Enterprise)"
+    route: /workspace/projects
+    shows: "The Projects list: status, visibility and health chips per project, steward, open tasks, filters for membership and company projects."
+    sources:
+      - src/frontend/src/views/Portal.vue
+      - src/frontend/src/components/portal/projects
+    captured_at: 2026-10-14
+    captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
+
+  - file: workspace-project-detail.webp
+    title: "Workspace Projects — one project (Enterprise)"
+    route: /workspace/projects/{id}
+    shows: "A project page: goal, Overview / Tasks / Log / Files & reports tabs, the Continue card, the Steward card and the Health card."
+    sources:
+      - src/frontend/src/components/portal/projects
+    captured_at: 2026-10-14
+    captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
+
+  - file: workspace-start-chat.webp
+    title: "Workspace — start a chat with one or several agents"
+    route: /workspace
+    shows: "The Start-a-chat picker: pick one agent or several to share one conversation."
+    sources:
+      - src/frontend/src/components/portal/PortalAgentPicker.vue
+    captured_at: 2026-10-14
+    captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
+

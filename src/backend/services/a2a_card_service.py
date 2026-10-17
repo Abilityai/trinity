@@ -75,6 +75,7 @@ def generate_a2a_card(
     agent_name: str,
     template_data: Dict[str, Any],
     base_url: Optional[str] = None,
+    aauth_resource_metadata_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build an A2A Agent Card (protocol `0.3.0`) for `agent_name` from template data.
 
@@ -85,6 +86,10 @@ def generate_a2a_card(
             agent-server's `/api/template/info` endpoint. May be
             partial if the agent is stopped (fields default in the
             map below).
+        aauth_resource_metadata_url: ent#623 — set only while the AAuth
+            prototype is live. Adds an ``aauth`` security scheme AFTER
+            ``bearerAuth`` (alternatives, bearer first), so an AAuth-unaware
+            client that takes the first entry is unaffected.
         base_url: External base URL of this Trinity instance (e.g.
             "https://trinity.example.com"). Used to construct the
             card's `url` (where A2A clients call the agent) and
@@ -155,6 +160,22 @@ def generate_a2a_card(
         # speaks (message/send + message/stream SSE + tasks/get + tasks/cancel).
         "preferredTransport": "JSONRPC",
     }
+
+    if aauth_resource_metadata_url:
+        # A2A 0.3 has no AAuth scheme type; this is the least-surprising shape
+        # (HTTP auth scheme `signature`, as whoami.aauth.dev's OpenAPI names it).
+        card["securitySchemes"]["aauth"] = {
+            "type": "http",
+            "scheme": "signature",
+            "description": (
+                "AAuth agent identity (draft-hardt-oauth-aauth-protocol, "
+                "agent-token mode): RFC 9421 signature over @method @authority "
+                "@path signature-key content-digest content-type; "
+                'Signature-Key: sig=jwt;jwt="<aa-agent+jwt>". '
+                f"Resource metadata: {aauth_resource_metadata_url}"
+            ),
+        }
+        card["security"].append({"aauth": []})
 
     # ent#157: `url` points at the real A2A JSON-RPC endpoint served by
     # `routers/a2a.py` (`POST {base}/a2a/{name}`), NOT the old chat placeholder.

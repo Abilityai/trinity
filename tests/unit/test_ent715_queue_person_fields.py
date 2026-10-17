@@ -203,7 +203,14 @@ class TestTheMachineView:
         row = _read(_client(), route, uid)
         # #3242: plus the sink's own "decided by its options" predicate — a bare
         # boolean derived for the person's answer controls, never a column.
-        assert set(row) == MACHINE_ROW_KEYS | WITHHELD | {"decided_by_options"}
+        # trinity-enterprise#755: and `gate`, the gated-skill approval card's
+        # view, derived the same way (None on a row the gate did not raise).
+        # trinity-enterprise#901: and `agent_ending`, the ending the agent
+        # authored (replaced | withdrawn | None) — a derived enum, never a column
+        # and never PII; the agent reads it on its own readback, not this view.
+        assert set(row) == MACHINE_ROW_KEYS | WITHHELD | {"decided_by_options", "gate", "agent_ending"}
+        assert row["gate"] is None
+        assert row["agent_ending"] is None
         assert (row["responded_by_email"], row["responded_by_id"], row["addressed_to_email"],
                 row["disposed_by_email"], row["resolved_to"]) == (
             OP_EMAIL, "7", FOR_EMAIL, OP_EMAIL, [RESOLVED_EMAIL])
@@ -260,6 +267,9 @@ class TestPlatformRowsAboutAPerson:
         monkeypatch.setattr(r, "_websocket_manager", None)
         tag = uuid.uuid4().hex[:10]
         agent = f"agent-715-hu-{tag}"      # its own agent: the #1677 budget counts per agent
+        # The agent key reaches this agent through an edge (trinity-enterprise#629),
+        # so what is withheld below is the person rows, not the whole queue.
+        real_db.add_agent_permission(AGENT, agent, "op-715")
         cps._alert_collided_inbox(agent, f"legacy_{tag}",
                                   [f"a-{tag}@example.com", f"b-{tag}@example.com"])
         assert asyncio.run(cps.raise_problem_report(

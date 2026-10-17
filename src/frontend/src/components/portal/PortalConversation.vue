@@ -208,6 +208,7 @@
       :disabled="voiceCallActive"
       :draft="newChat || bornHere"
       :draft-keys="drafts.keys"
+      :order="tabOrder"
       :busy="sending"
       :close-error="closeError"
       @select="(t) => emit('open-thread', t)"
@@ -621,21 +622,14 @@
              rejected file names itself and the limit it broke. -->
         <p v-if="batchNotice" class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300">{{ batchNotice }}</p>
         <div v-if="attachments.length" class="mb-2 flex flex-wrap gap-1.5">
-          <span
+          <PortalAttachmentChip
             v-for="(f, i) in attachments"
             :key="i"
-            class="inline-flex items-center gap-1 text-xs rounded-full pl-2.5 pr-1.5 py-1"
-            :class="f.error
-              ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
-              : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'"
-            :title="f.error || f.name"
-            data-testid="portal-attachment-chip"
-          >
-            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
-            <span class="max-w-[10rem] truncate">{{ f.name }}</span>
-            <svg v-if="attachmentState(f) === 'uploading'" class="w-3 h-3 animate-spin text-gray-400" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-            <span v-else-if="attachmentState(f) === 'failed'" class="max-w-[16rem] truncate opacity-90">· {{ f.error }}</span>
-          </span>
+            :entry="f"
+            :locked="escalatingNow || settlingUploads || handedOff"
+            testid="portal-attachment-chip"
+            @remove="removeAttachment(f)"
+          />
         </div>
         <!-- #3460: the server bounds a message, so the composer says so FIRST —
              a count for the last stretch, then a named refusal with Send held.
@@ -936,7 +930,8 @@ import { replyExcerpt as excerptForReply } from './portalInbox'
 import { chatTurnAsks, placeAsksInThread, askTileMode, askHistoryLine, isDiscussedIn } from './portalChatAsks'
 import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import { formatLocalDateTime } from '@/utils/timestamps'
-import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
+import { usePortalFileDrop } from '@/composables/usePortalFileDrop'
+import PortalAttachmentChip from './PortalAttachmentChip.vue'
 import PortalMessageAttachments from './PortalMessageAttachments.vue'
 import { sentAttachments, attachmentsForRequest } from './portalMessageAttachments'
 import { useStickToBottom } from '@/composables/useStickToBottom'
@@ -1031,6 +1026,9 @@ const props = defineProps({
   // (an ElevenLabs key resolves) — a different fact from `voice_available`,
   // which additionally needs an effective voice to speak WITH.
   agent: { type: Object, required: true },      // {name, owner, avatar_url, description, playbooks, voice_available, stt_available}
+  // trinity-enterprise#856: the shell's arrival snapshot `{ agent, ids }` —
+  // the strip and the chat keys both walk it, so neither re-sorts on a reply.
+  tabOrder: { type: Object, default: null },
   roster: { type: Array, default: () => [] },
   sessionId: { type: String, default: null },   // current thread, or null for a new chat
   // ent#451: a null `sessionId` alone cannot say WHICH kind of "no thread" this
@@ -1454,8 +1452,18 @@ const {
   addFiles,
   clear: clearAttachments,
   settled: attachmentsSettled,
+  remove: removeAttachment,
   handlers: dropHandlers,
-} = usePortalFileDrop((file) => store.uploadDocument(props.agent.name, file))
+} = usePortalFileDrop(
+  // #3738: the agent is captured at upload time, so a chip removed after the
+  // person switched agents is deleted from the inbox it actually landed in.
+  async (file) => {
+    const agent = props.agent.name
+    const res = await store.uploadDocument(agent, file)
+    return { ...res, agent }
+  },
+  { discard: (e) => store.discardComposerUpload(e.receipt?.agent || props.agent.name, e.serverName || e.name, e.file) },
+)
 // #3265: a sent message's thumbnails and downloads read the upload back
 // through the same authenticated route the Files tab uses.
 const loadUploadBlob = (agentName, filename) => store.fetchUploadBlob(agentName, filename)
@@ -1698,7 +1706,7 @@ watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
 })
 
 watch(() => props.prefill, (v) => {
-  if (v) { input.value = v; resetTypeahead(); nextTick(() => { autoGrow(); textarea.value?.focus() }) }
+  if (v) { handedOff.value = false; input.value = v; resetTypeahead(); nextTick(() => { autoGrow(); textarea.value?.focus() }) }
 })
 
 onMounted(async () => {
@@ -2573,6 +2581,11 @@ const escalatingNow = ref(false)
 // turn alongside the first. Its own flag for the reason `escalatingNow` is;
 // released when `send()` returns, by which time `sending` has taken over.
 const settlingUploads = ref(false)
+// #3738: set once the chips have been handed to the shell for a room. They stay
+// standing until this component unmounts, and a × in that window would delete
+// the origin agent's copy while the shell carries it. Released when the shell
+// hands the text back after a failed escalation (the `prefill` watcher).
+const handedOff = ref(false)
 
 async function send() {
   const text = input.value.trim()
@@ -2625,6 +2638,7 @@ async function send() {
           // trinity-enterprise#631: the people this message tags go with it.
           tags: peoplePicker.tagsFor(text),
         })
+        handedOff.value = true
         peoplePicker.reset()
       } finally {
         // Released even on the success path: the emit is synchronous and this
@@ -3246,6 +3260,7 @@ function cycleChat(delta) {
     activeId: currentSessionId.value,
     draft: props.newChat || bornHere.value,
     draftKeys: drafts.keys,
+    order: props.tabOrder,
   })
   if (tabs.length < 2) return
   // The strip's EFFECTIVE selection, the same expression `PortalChatTabs` binds:

@@ -1,4 +1,4 @@
-# mcp: skills.ts (list_skills, get_skill, get_skills_library_status, list_skill_sets, assign_skill_to_agent, set_agent_skills, sync_agent_skills, get_agent_skills, unassign_skill_set); skill_sources.ts (list_skill_sources, register_skill_source, update_skill_source, delete_skill_source, sync_skill_source, sync_skill_library — admin principals only, trinity-enterprise#692); skill-manager grant routes: none — admin grant, human-only (grant-vs-use, ent#596)
+# mcp: skills.ts (list_skills, get_skill, get_skills_library_status, list_skill_sets, assign_skill_to_agent, set_agent_skills, sync_agent_skills, get_agent_skills, unassign_skill_set); skill_sources.ts (list_skill_sources, register_skill_source, update_skill_source, delete_skill_source, sync_skill_source, sync_skill_library — admin principals only, trinity-enterprise#692); skill-manager grant routes: none — admin grant, human-only (grant-vs-use, ent#596); the peer-skill drift read (ent#662): none — an admin upgrade report, UI-only
 """
 Skills Router - API endpoints for skills management.
 
@@ -57,7 +57,7 @@ from services.skill_service import (
     AmbiguousSkillSource, apply_skill_source,
 )
 from services.skill_packaging import validate_skill_name
-from services import capability_grant_service
+from services import capability_grant_service, peer_skill_policy
 from services.capability_grant_service import CapabilityGrantRefused
 from db.capability_grants import CAPABILITY_SKILLS_MANAGE
 
@@ -949,6 +949,16 @@ async def list_skill_managers(admin_user: User = Depends(require_admin)):
     except CapabilityGrantRefused as e:  # pragma: no cover - constant capability
         raise HTTPException(status_code=e.status_code, detail=e.as_detail())
     return SkillManagersResponse(capability=CAPABILITY_SKILLS_MANAGE, holders=holders)
+
+
+@router.get("/skills/peer-grants/drift")
+async def list_peer_skill_drift(admin_user: User = Depends(require_admin)):
+    """abilityai/trinity-enterprise#662 — the honest upgrade. Every agent-to-agent
+    (edge × library skill) pair the caller used in the last 30 days that is now
+    refused for want of a grant, so an admin sees it before the caller's owner
+    does. A grant (`PUT /api/agents/{caller}/peer-skills/{target}/{skill}`)
+    removes the pair."""
+    return peer_skill_policy.drift_report()
 
 
 @router.put("/agents/{agent_name}/skill-manager", response_model=SkillManagerGrantResult)

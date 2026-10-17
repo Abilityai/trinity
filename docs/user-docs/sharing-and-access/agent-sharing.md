@@ -18,8 +18,10 @@ The **Access** tab lists the people this agent is shared with.
 3. Each row shows a status badge:
    - **Active** — the email resolved to an existing Trinity account (shows username, role, and last-active time, or "never signed in"). An admin may see a role select on the row instead of the role label: the role applies on every agent, every change asks for confirmation, and an admin's own row stays read-only.
    - **Pending** — no platform account ("No platform account — uses the Workspace"). Where the row offers **Give a platform account**, an admin can create the account right away (after a confirmation; as `user` — Workspace only — unless an earlier allow-list entry set another role), so the person can be assigned to the agent before they first sign in; they sign in at `/login`. Give accounts to colleagues — a platform account sees the team's view of every agent shared with its address — and keep outside clients on a plain share.
-4. Each operator row also carries a **proactive-messaging toggle** — "allow this operator to receive proactive DMs from the agent." It is off by default; turn it on per operator to let the agent message that person unprompted. This is a **per-recipient** DM permission (`PUT /api/agents/{name}/shares/proactive`, body `{email, allow_proactive}`).
+4. Each operator row also carries a **proactive-messaging toggle** — "allow this operator to receive proactive DMs from the agent." It is off by default; turn it on per operator to let the agent message that person unprompted. This is a **per-recipient** DM permission (`PUT /api/agents/{name}/shares/proactive`, body `{email, allow_proactive}`). Trinity records consent in three states — *not asked* (every new share), *declined* and *consented* — and only *consented* lets the agent send; the other two are both a no, kept apart so you can see whether anyone ever asked.
 5. Click **Remove** on a row to revoke access.
+
+On instances licensed for it, the Access tab also shows a **People this agent serves** section above this list: the agent's primary person, its other stakeholders, and the seat the agent holds or serves. Assigning someone there also shares the agent with them, because an assignment by itself grants no access; a row for someone the agent is not shared with carries a warning and **Share with them**. Without the entitlement the section is absent, and non-admins see it read-only.
 
 The per-recipient DM toggle above is complemented on the channel side by the per-channel Slack consent — see [Slack Integration](../integrations/slack-integration.md). Platform-wide proactive-messaging rate caps are admin-configurable in **Settings**.
 
@@ -28,8 +30,16 @@ The per-recipient DM toggle above is complemented on the channel side by the per
 | Level | Permissions |
 |-------|-------------|
 | **Owner** | Full control -- create, delete, configure, share, manage credentials and schedules. |
-| **Shared operator** | Interact only -- chat, run tasks, view files and logs. Cannot modify config, credentials, or permissions. |
+| **Shared operator** | Interact only -- chat, run tasks, view files (except credential files) and logs. Cannot modify config, credentials, or permissions. |
 | **Admin** | Full access to all agents regardless of ownership. |
+
+### What someone you share an agent with can do
+
+- Chat with the agent and run its tasks. The agent keeps using its credentials while it works for them.
+- Open, preview and download the agent's files, **except credential files**.
+- They cannot open or download credential files: `.env`, `.mcp.json`, SSH and cloud credentials, key and certificate files (`*.key`, `*.pem`, `*.p12`, `*.pfx`) and the agent runtimes' login files. Trying shows a message saying so.
+- To see or change a credential, they ask the agent's owner or an admin. Managing credentials (set, inject, import, export) is for the owner or an admin.
+- If opening the agent's files shows "This agent needs a restart to apply an update", they ask the agent's owner or an admin to stop and start it in Trinity.
 
 Enforcement notes:
 
@@ -95,8 +105,8 @@ Two collapsible panels for distributing the agent's output rather than granting 
 |----------|--------|-------------|
 | `/api/agents/{name}/share` | POST | Share agent with an email address |
 | `/api/agents/{name}/share/{email}` | DELETE | Remove a share |
-| `/api/agents/{name}/shares` | GET | List all shares for an agent |
-| `/api/agents/{name}/access` | GET | Operator roster (active + pending) for the Access tab |
+| `/api/agents/{name}/shares` | GET | List all shares for an agent; each carries `proactive_consent` (`not_asked`, `declined` or `consented`) |
+| `/api/agents/{name}/access` | GET | Roster of people the agent is shared with (active + pending) for the Access tab, with each row's `proactive_consent` |
 | `/api/agents/{name}/shares/proactive` | GET / PUT | Per-recipient proactive-DM permission; PUT body `{email, allow_proactive}` (owner/admin) |
 | `/api/agents/{name}/clients` | GET | External client roster (owner-only, read-only) |
 | `/api/enterprise/client-portal/agents/{name}/clients` | GET | Portal clients with last-seen, block and session state (owner/admin; the prefix is historical) |

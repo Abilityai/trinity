@@ -2835,6 +2835,46 @@ async def dispatch_parallel_task(
 # ===========================================================================
 
 
+async def _record_cancel_event(name, current_user, task_execution_id, details):
+    """#3588: record the ``execution_cancelled`` EVENT — a point in time, not a
+    span — by creating the activity and completing it in the same breath.
+    ``track_activity`` hard-codes STARTED, so before this the row sat ``started``
+    until the 120-minute sweep fabricated its duration (the #1804 class).
+
+    Fail-open, and called LAST at every cancel site (after the terminal CAS and
+    the real activity closes): the cancel has already won by the time this runs,
+    and an activity-write error must neither 500 the terminate nor skip a close.
+
+    NOT a terminal-activity close: the dispatch/companion closes are owned by
+    ``close_execution_activity`` — this writes the event row only, so the #1804
+    parity guard must never read its ``complete_activity`` as a site's
+    compliance close.
+
+    ent#155: ``user_id`` is legitimately NULL for a public-link visitor and a
+    Workspace client — ``details.actor_kind`` (in ``details``) says who acted.
+    """
+    try:
+        activity_id = await activity_service.track_activity(
+            agent_name=name,
+            activity_type=ActivityType.EXECUTION_CANCELLED,
+            user_id=getattr(current_user, "id", None),
+            triggered_by="user",
+            related_execution_id=task_execution_id,
+            details=details,
+        )
+        # COMPLETED, not CANCELLED: the row records the cancel EVENT, which
+        # succeeded; the work's own state lives on the dispatch activity
+        # (closed CANCELLED via the #1332 mapping). No completed_at override —
+        # this runs inline at the terminate instant, so "now" IS the instant.
+        await activity_service.complete_activity(
+            activity_id=activity_id, status=ActivityState.COMPLETED
+        )
+    except Exception as e:
+        logger.warning(
+            f"[Terminate] cancel-event record failed for {task_execution_id}: {e}"
+        )
+
+
 async def _cancel_queued_if_queued(
     name, execution_id, task_execution_id, current_user, actor_kind="operator"
 ):
@@ -2859,12 +2899,21 @@ async def _cancel_queued_if_queued(
             task_execution_id, reason="Cancelled by user while queued"
         )
         if cancelled:
-            await activity_service.track_activity(
-                agent_name=name,
-                activity_type=ActivityType.EXECUTION_CANCELLED,
-                user_id=getattr(current_user, "id", None),
-                triggered_by="user",
-                related_execution_id=task_execution_id,
+            # #3588: `cancel_queued_execution` wins a terminal CAS, so this
+            # site owes the #1804 owner close like every other terminal
+            # writer. A queued row has NO dispatch activity (CHAT_START opens
+            # at dispatch, which it never reached) — the lookup finds nothing,
+            # harmlessly — but its #2329 metadata companions (the caller's
+            # collaboration row, a self-task row) leaked `started` here.
+            await activity_service.close_execution_activity(
+                task_execution_id,
+                TaskExecutionStatus.CANCELLED,
+                error="Cancelled by user while queued",
+            )
+            await _record_cancel_event(
+                name,
+                current_user,
+                task_execution_id,
                 details={
                     "execution_id": execution_id,
                     "task_execution_id": task_execution_id,
@@ -2997,12 +3046,14 @@ async def _proxy_terminate_and_finalize(
                     )
                 await _close_dispatch_activity_cancelled(task_execution_id, cancel_won)
 
-        await activity_service.track_activity(
-            agent_name=name,
-            activity_type=ActivityType.EXECUTION_CANCELLED,
-            user_id=getattr(current_user, "id", None),
-            triggered_by="user",
-            related_execution_id=task_execution_id,
+        # #3588: recorded AFTER the CAS + dispatch close, and completed in the
+        # same breath. Deliberately also on `already_finished` (nothing was
+        # cancelled, the agent's terminal stands): the row records the cancel
+        # ATTEMPT, labelled by `details.status`.
+        await _record_cancel_event(
+            name,
+            current_user,
+            task_execution_id,
             details={
                 "execution_id": execution_id,
                 "task_execution_id": task_execution_id,
@@ -3177,12 +3228,11 @@ async def _cancel_inflight_if_parked(
         )
         await _close_dispatch_activity_cancelled(task_execution_id, cancel_won)
 
-    await activity_service.track_activity(
-        agent_name=name,
-        activity_type=ActivityType.EXECUTION_CANCELLED,
-        user_id=getattr(current_user, "id", None),
-        triggered_by="user",
-        related_execution_id=task_execution_id,
+    # #3588: after the CAS + dispatch close; created and completed together.
+    await _record_cancel_event(
+        name,
+        current_user,
+        task_execution_id,
         details={
             "execution_id": execution_id,
             "task_execution_id": task_execution_id,

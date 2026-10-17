@@ -11,10 +11,11 @@ Workspace lives at `/workspace` and ships in **every** build. The older `/portal
 - **Client** — An external person who signs in with a verified email. They have no Trinity account and never see the admin UI.
 - **Chat** — One ongoing conversation. A **1:1** chat is with a single agent; a **room** is a chat with two or more.
 - **Main** — The pinned chat every (you, agent) pair has. It is the first tab for every agent and the place the agent reaches you when nothing else names a chat: an agent-initiated message, a question it raises outside a conversation, or a scheduled brief.
-- **Rail** — The right-hand column beside the conversation. Its tabs are **Work**, **Loops**, **Canvas**, **Files** and **Info**.
+- **Rail** — The right-hand column beside the conversation. Its tabs are **Work**, **Loops**, **Canvas**, **Files** and **Info**, plus **Asks** while the agent is waiting on you, and **Projects** on instances licensed for them.
+- **Project** — The record of a piece of sustained work — goal, members, agents, tasks and a shared log — linked to the chats where it happens. Licensed instances only; see [Workspace Projects](workspace-projects.md).
 - **Briefing** — The panel on an empty chat headed **Things you can ask**, drawn from the agent's exposed skills or its template.
 - **Suggestions** — A short list headed **Suggested for you**, computed for you and the agent in front of you: what is waiting on you, and what you could do next. Platform users only.
-- **Seat** — You and one agent together. The agent's memory of you, and the decisions you and it record, belong to the seat.
+- **Seat** — You and one agent together. The agent's memory of you, and the decisions you and it record, belong to the seat. The [role card](#the-role-card) also uses *seat* for a business role a person or agent holds (*Head of Sales*); that seat decides which objectives the agent owns.
 
 > **The Workspace is also where voice lives.** A voice call runs inside a Workspace chat, with the agent's canvas beside the orb. Start one from the call button in the composer, or from **Talk** on the agent's Agent Detail page — see [Voice Chat](../advanced/voice-chat.md).
 
@@ -50,11 +51,13 @@ Top to bottom:
 
 - **Trinity Workspace** — the wordmark. It links to the Inbox.
 - **Inbox** — a pinned row with two badges: the number of asks agents are waiting on you to answer, and the number of chats with something you haven't read. See [The Inbox](#the-inbox).
+- **Projects** — the list of your projects, on instances licensed for them; absent otherwise, with nothing holding its place. See [Workspace Projects](workspace-projects.md).
 - **New chat** — opens the agent picker.
 - **Search agents and chats…** — two characters or more. **⌘/** / **Ctrl+/** puts the cursor there from anywhere; pressed again from the field, it returns you to the message field. Agents filter in place; chat results replace the chat list below, and each half says separately when it matched nothing.
-- **Agents** — your roster, ordered by the agents you worked with most recently, then by name. Five rows show, with **Show all** to expand. A row carries the agent's display name, the title of your newest chat with it (or its slug when the name is a label), when you last heard from it, an availability chip when the agent is stopped or unreachable, and its own ask and unread badges. **Clicking an agent opens a new, empty chat with it**, with the cursor in the message field — or returns you to a chat with that agent where you left unsent text. Your earlier chats are its tabs, one click away.
+- **Agents** — your roster, ordered by the agents you worked with most recently, then by name. Five rows show, with **Show all** to expand. A row carries the agent's display name, the title of your newest chat with it (or its slug when the name is a label), when you last heard from it, an availability chip when the agent is stopped or unreachable, an orange ring with a count when it has asks waiting on you, and a blue unread count. **Clicking an agent opens a new, empty chat with it**, with the cursor in the message field — or returns you to a chat with that agent where you left unsent text. Your earlier chats are its tabs, one click away.
 - **Starred** — chats you've starred, lifted out of the date groups so each chat appears exactly once.
-- **Today / Yesterday / Previous 7 days / Older** — everything else. A Main you have never used is not listed here; the agent's row is the way into it.
+- **Today / Yesterday / Previous 7 days / Older** — everything else. A Main you have never used is not listed here unless you starred it; the agent's row is the way into it. Main's row always reads **Main**.
+- **Archived · N** — chats you closed, collapsed by default, newest closed first. Opening one reopens it.
 - **Keyboard shortcuts** — at the bottom, beside sign-out. It opens the list of keys (also **⌥/** / **Alt+/**).
 
 ### The Inbox
@@ -64,20 +67,22 @@ Signing in, or opening bare `/workspace`, lands you on the **Inbox** — *What n
 | Tab | Shows |
 |-----|-------|
 | **Action** | Asks addressed to you that are still waiting, most urgent first: asks that expire within 24 hours (soonest first), then by priority, then oldest first. While asks are waiting, a second strip narrows the list to one agent (**All agents** or an agent's name, with its count) |
-| **Unread** | Chats where something came back since you last read them — replies, completed runs delivered to you, deliverables addressed to you |
+| **Unread** | Chats where something came back since you last read them — replies, completed runs delivered to you, deliverables addressed to you — and times someone [tagged you](#tagging-a-person) |
 | **All** | Every chat, read or not, plus waiting asks and asks that ended in the last 7 days |
 
 Click a row to open it in the reading pane beside the list (on a narrow screen the pane replaces the list, with **Back**). An ask is answered right there, with the same controls as in a chat, and below it the ask's context: **Where it came from** (the chat and the few messages before the ask, with a link to open it there), **Delivered in that chat**, and **Your recent answers** to this agent. A chat shows what arrived since you last read it and its deliverables, and is marked read once it has loaded; **Mark read**, **Reply in chat** and **Open in chat** sit in the pane's header, plus **Open canvas** when the agent has one. On **Unread** and **All**, **Mark N chats read** clears them in one go, after a confirmation when it covers more than one chat.
 
 Rows keep their place while you stay on a tab: a chat you read stays listed, drawn as read, and a poll never re-sorts the list under you. A tab shows 50 rows, then **Show more**. Rooms are not in the Inbox yet.
 
-**Discuss and Dismiss.** A question or approval card also offers **Discuss** — a chat with the asking agent about that ask, where for a question **Send as answer** answers it from the message field — and **Dismiss**, which ends the ask without answering after a 5-second **Undo**. Alerts offer neither. Who asks reach, the controls, and how long ended asks stay are all in [Approvals](../automation/approvals.md).
+**Discuss and Dismiss.** A question or approval card also offers **Discuss** — a chat with the asking agent about that ask, where for a question **Send as answer** answers it from the message field — and **Dismiss**, which ends the ask without answering after a 5-second **Undo**. Alerts offer neither, and neither does an ask that went to several people because they fill the same role: the first answer ends it for everyone, and the others see **Answered · *name***. Who asks reach, the controls, and how long ended asks stay are all in [Approvals](../automation/approvals.md).
 
 ### Chats as tabs, and Main
 
-Every chat you have with the active agent is a tab above the thread. **Main** is always first; the rest follow most recent first, and the ones that don't fit collect under **N more**. Press **New chat** and a provisional **New chat** tab appears at once; the chat itself is created when you send the first message.
+Every open chat you have with the active agent is a tab above the thread. **Main** is always first; the rest follow most recent first, and the ones that don't fit collect under **N more**. Press **New chat** and a provisional **New chat** tab appears at once; the chat itself is created when you send the first message. A tab shows the chat's star when you starred it, and a chat with unread replies shows its blue count on the tab (and in the **N more** menu).
 
-Main is named by its role and cannot be renamed. **Reset**, in the header on Main only, archives the current Main and starts the agent cold — no confirmation, because nothing is lost: the archived chat stays in your list as an ordinary chat (named and dated if it had no title), a line in the new Main names it, and it becomes the newest tab. Reset is refused while a reply is in flight, and resetting a Main you have never used does nothing.
+Every tab but Main has an **×** that closes the chat. Closing archives it — nothing is deleted — and an **Undo** toast follows. A closed chat leaves the tabs and the sidebar's date groups and is listed under **Archived**, where opening it reopens it. The open chat's **×** does nothing while its reply is in flight.
+
+Main is named by its role and cannot be renamed. **Reset**, in the header on Main only, archives the current Main and starts the agent cold — no confirmation, because nothing is lost: the old Main is archived like a closed chat (named and dated if it had no title) and listed under **Archived**, and a line in the new Main names it. Reset is refused while a reply is in flight, and resetting a Main you have never used does nothing.
 
 Every other chat can be renamed in place — from the pencil beside its title in the header, or on its sidebar row. Enter or clicking away saves, Esc abandons. A title is one line of up to 100 characters. Otherwise Trinity names a chat for you from your first message, and takes one more pass on the second exchange if the first was only a greeting. A name you typed always stands.
 
@@ -94,13 +99,15 @@ Every other chat can be renamed in place — from the pencil beside its title in
 
 One box: the message field on top, the controls in a row inside it. Enter sends; Shift+Enter adds a line.
 
-- **`/` and `@`** — type `/` at the start of a word for the agent's skills, or `@` for another agent. ↓ then Enter (or Tab for the top row) inserts the pick; Esc dismisses the list. Enter alone always sends. A `/` pick splices the skill's starter prompt into the field without sending.
+- **`/` and `@`** — type `/` at the start of a word for the agent's skills, or `@` for another agent or, once you type a name, a person (see [Tagging a person](#tagging-a-person)). ↓ then Enter (or Tab for the top row) inserts the pick; Esc dismisses the list. Enter alone always sends. A `/` pick splices the skill's starter prompt into the field without sending.
 - **Model** — platform users on a Claude-runtime agent get a dropdown beside Send. The default option reads **Agent's default (…)** and names what the agent would use; the other three are plain-language tiers — **Most capable**, **Balanced — fast and smart**, **Fastest**. The choice is remembered per agent on your account. Resolution is your explicit choice → the model the owner set for the agent's public channels → the platform default. If the agent can't complete a turn on a model you chose, the reply says so and the choice reverts to the agent's default.
 - **Attach** — the paperclip picks files, dropping files anywhere on the conversation sends them (*Drop files to send to …*), and pasting a copied image or file into the message field attaches it the same way. A paste that also carries text still types the text. Up to 20 files per drop, 25 MB each, uploaded one after another; each shows as a chip with its own progress, and a refused file names itself and the limit. Sent files land in the agent's inbox and appear under **Files you sent** in the rail.
 - **Speak your message** — the microphone dictates into the field. It is separate from the voice call, and it appears only where dictation can work; see [Dictation](#dictation).
 - **Voice call** — the leftmost button starts the real-time call in this chat; see [Voice Chat](../advanced/voice-chat.md).
 - **Speak replies aloud** — a speaker button above the composer, shown only when the agent has a voice configured, reads each reply in the agent's ElevenLabs voice on your side. Click again to mute. It is hidden during a call, when the orb owns playback. See [Voice Replies](../advanced/voice-replies.md).
 - **Send** becomes **Stop** while a turn runs.
+
+A message can be up to 8,000 characters. Within the last 500 the composer shows a count (*7,650 of 8,000 characters*); past the limit it names the limit and holds **Send** until you shorten the message. Very long words and links wrap inside the message bubble.
 
 An agent that is stopped or unreachable is labelled above the field before you type; the message still sends, and the server's refusal is the answer.
 
@@ -114,14 +121,14 @@ The activity line reads the same way everywhere: *Reading .../src/app.py*, *Runn
 
 **Stop**, or **Esc** with nothing else open, cancels the in-flight turn and puts your words back in the composer (in front of anything you typed while waiting). A cancelled turn shows as cancelled, not as an error. Esc does nothing when no turn is running, and yields to whatever is open on top — the typeahead, the agent picker, dictation, a file preview.
 
-Turns on one chat are serialized to protect the agent's memory, so a second message while one is running is refused with *This conversation is already handling a message* — wait, or start another chat for parallel work. If a send fails you get the real reason (busy, timed out, too large, too many messages, the agent's usage limit) instead of a bare failure, and **Retry** is offered only when nothing reached the agent — a turn the agent already ran is not silently billed twice.
+Turns on one chat are serialized to protect the agent's memory. A second message on the same chat — sent from another browser tab, say — waits for the first to finish and then runs, and each reply appears under its own message. It is refused with *This conversation is already handling a message* only if the first turn holds the chat longer than the wait allows; start another chat for parallel work. If a send fails you get the real reason (busy, timed out, too large, too many messages, the agent's usage limit) instead of a bare failure, and **Retry** is offered only when nothing reached the agent — a turn the agent already ran is not silently billed twice.
 
 Closing the tab doesn't stop anything: the turn keeps running on the server and the reply is waiting when you come back.
 
 ### Reading replies
 
 - Headings, lists and tables in a reply render as such. A code block is its own object with a language label and an always-visible **Copy**; it wraps at the edge rather than scrolling sideways.
-- Under every reply: **Copy message**, **Reply to this message**, and **Helpful** / **Not helpful** thumbs. A thumbs-down opens a comment box; your rating feeds the tally in the agent's band.
+- Under every reply: **Copy message**, **Reply to this message**, and **Helpful** / **Not helpful** thumbs. A thumbs-down opens a comment box; your rating feeds the tally in the agent's band. A thumbs-down also raises a heads-up for the agent's owner in **Operations**, quoting your comment if you leave one — the agent itself never sees the words or who wrote them.
 - **Reply to this message** puts a *Replying to …* chip above the message field, and your next message tells the agent which of its messages you are answering. The **×** on the chip, or **Esc** in the message field, drops it. Reply is offered in 1:1 chats, and is disabled during a voice call.
 - If you have scrolled up to re-read something, an arriving message does not pull you back down. A **N new messages** control appears instead; sending, opening a chat or clicking it returns you to the bottom.
 - Reports the agent produced for this chat appear at the end of the thread under **Delivered here** — see [Agent Reports](../operations/agent-reports.md).
@@ -142,6 +149,7 @@ The rail sits beside the conversation, collapsed to a strip of icons by default;
 | **Canvas** | The agent's canvases (below) — see [Agent Canvas](../agents/agent-canvas.md). While there is none, **Ask for a canvas** pre-fills a request | Everyone; a client sees only canvases the agent published to its roster |
 | **Files** | Files you sent and files the agent shared | Everyone |
 | **Info** | The agent's context (below). Its dot lights when there are suggestions for you (*Info · 2 suggestions*) | Everyone, in a 1:1 chat |
+| **Asks** | The agent's asks waiting on you, one line each, in the Inbox's **Action** order; in a room, grouped by agent. A row opens that ask in the Inbox, where you answer it. The tab is there only while something is waiting, and carries the same count as the agent's ring in the sidebar | Everyone |
 
 **Files.** Drop a file on the tab, or click to send one. In a room, **Send to** defaults to **Everyone in this chat (N agents)** — one copy per agent, the same as dropping the file on the room itself — and still lists each agent for a single recipient. The receipt names who got it (*Sent “shot.png” to analyst and sidekick.*). A file counts as sent only when every recipient got it; otherwise the error line names the file and the agents it missed. The list is grouped **Files you sent** / **Files from {agent}**. Click a name to preview it — images, Markdown and text up to 256 KB; ← and → step through the previewable files, Esc closes — or **Download** to save it. The bin icon deletes a file you sent, or removes a shared file from your list without touching the share. An agent's owner, signed in as a platform user, additionally gets **Delete for everyone**.
 
@@ -155,7 +163,7 @@ Clicking an agent no longer opens a report about it. Its numbers sit in a band u
 |---------|-------|
 | Header | The agent's name and description, with health and availability as two separate facts |
 | **Suggested for you** | What is waiting on you and what you could do next — see [Suggestions](#suggestions). Platform users only |
-| **Role** | Shown only when the agent's template declares a role — see [The role card](#the-role-card) |
+| **Role** | Shown when the agent has a seat on record, a canon, or a role declared in its template — see [The role card](#the-role-card) |
 | **Your chats** | The full list, unread counts included — Main shows as **Current conversation**, archived chats in grey |
 | **What it can do** | Capability cards; clicking one pre-fills the composer |
 | **Reports** | Structured reports the agent has published; expand one to read it — see [Agent Reports](../operations/agent-reports.md) |
@@ -186,7 +194,7 @@ Each item has two buttons. The accept button never sends anything: it pre-fills 
 
 ### The role card
 
-When the agent's template declares a role, the Info tab shows a **Role** card: the role and its mission, the objectives it owns or supports, and each objective's metrics with value, target and age. The numbers are the ones the agent records. A metric is marked stale when the agent declared how often it records it and no new value arrived within twice that interval; it still shows beside its last value, never as current. A metric with no declared interval is never marked stale, and one that has never been recorded shows *no points yet*. A badge says whether each value is behind, ahead of, on or off its target. When an objective names a metric the agent does not measure, a line under the metric says so, and when the objectives cannot be read the card says that instead of showing an empty list. If only some of them could be read, a line under the list says it may be incomplete. The card also shows **Your relationship** to the agent and its **Readiness**: *calibrating* until the agent's owner presses **Mark ready** (and confirms), and **Back to calibrating** undoes it. Only the owner can change readiness; a template that claims `ready` on its own shows as calibrating. For an agent that declares a role, a scheduled brief addressed to a person does not fire on its schedule until the owner marks the agent ready; the run is recorded as skipped, with the reason. The card reads the agent's own files each time, so a stopped agent shows *The agent is stopped — the role card reads its files when it runs.* An agent without a role shows no card at all.
+The Info tab shows a **Role** card when the agent has a seat on record, a canon, or a role declared in its template. The role on the card is the seat the agent serves **for you**, and a line says where that comes from: *The agent holds this seat itself*, *Your seat on this agent*, or *Its primary's seat*. The card shows that role and its mission, the objectives it owns or supports, and each objective's metrics with value, target and age. When the agent neither holds a seat nor serves someone who holds one, the card says so — it owns no objective yet — and still lists the objectives it supports. The numbers are the ones the agent records. A metric is marked stale when the agent declared how often it records it and no new value arrived within twice that interval; it still shows beside its last value, never as current. A metric with no declared interval is never marked stale, and one that has never been recorded shows *no points yet*. A badge says whether each value is behind, ahead of, on or off its target. A **Guard** badge marks a number the objective must not move while it is pursued; a guard is only ever on or off its target, and one with no target yet reads *Target not set*. When an objective names a metric the agent does not measure, a line under the metric says so, and when the objectives cannot be read the card says that instead of showing an empty list. If only some of them could be read, a line under the list says it may be incomplete. The card also shows **Your relationship** to the agent (*primary — it works for you*, *approver*, *collaborator*, *viewer*, or *no assignment recorded*) and its **Readiness**: *calibrating* until the agent's owner presses **Mark ready** (and confirms), and **Back to calibrating** undoes it. Only the owner can change readiness; a template that claims `ready` on its own shows as calibrating. For an agent whose primary person holds a seat, a scheduled brief addressed to a person does not fire on its schedule until the owner marks the agent ready; the run is recorded as skipped, with the reason. Any other agent's brief fires as usual. The card reads the agent's own files each time, so a stopped agent shows *The agent is stopped — the role card reads its files when it runs.* An agent with no seat, no canon and no declared role shows no card at all. How objectives and guard metrics are written is in [Dynamic Dashboards](../advanced/dynamic-dashboards.md#objectives-target-vs-actual).
 
 ### Decisions
 
@@ -234,6 +242,14 @@ Files you attached in that 1:1 and have not yet sent with a message go along: th
 
 Inside a room, **+ Add agent** recruits another, and only a person can do that. Rooms carry participant avatars, a star and a budget warning as the conversation approaches its cap. For a platform user, each agent working on the room's message gets its own live card with **Stop**. A room's cards, files, names and rules are covered in [Shared Sessions (Rooms)](../collaboration/rooms.md). Against an older backend without rooms, the picker is single-select and an `@name` stays ordinary text.
 
+### Tagging a person
+
+Type `@` and a name in a 1:1 chat or a room, and the list also offers **people**: accounts on this instance that can already reach one of the chat's agents. Pick one and their name goes into your message; delete the name and the tag goes with it. You can tag up to 10 people in one message.
+
+A tag is a pointer, not an invitation. The person gets one **Unread** item in their Inbox — in the app only, no email — and it never wakes an agent. Opening it shows the message with a little around it only if they can already see that conversation. Otherwise it says they can't, and who can let them in: the chat's owner, or whoever runs the room. Under your own message a mark tells you whether the tag landed and whether they read it (*in their Inbox*, *read*, or *not delivered*). An unknown name is refused by name before anything is sent.
+
+Only a person with a platform account can tag. External clients get the agent list only, and an agent can never tag a person.
+
 ### Keyboard shortcuts
 
 The open rail carries a small **shortcut tips** panel at its foot with the most-used keys; close it with its **×** and this browser remembers. The collapsed rail shows a single keyboard icon instead, which opens the full list.
@@ -278,8 +294,9 @@ Workspace is a client-facing shell over the platform's existing agent behavior, 
 | `/agents/{name}/sessions` | GET / POST | This agent's chats (the read mints Main if missing) / start an empty chat |
 | `/agents/{name}/sessions/main/reset` | POST | Archive Main and mint a fresh one; refused while a turn is in flight |
 | `/agents/{name}/sessions/{id}` | PATCH | Rename a chat — `{title}`, one line, ≤100 characters |
+| `/agents/{name}/sessions/{id}/archive` | PUT / DELETE | Close (archive) a chat / reopen it. Nothing is deleted |
 | `/agents/{name}/history?session_id=&limit=` | GET | A chat's messages, the in-flight marker and the last turn's outcome. No message carries its cost |
-| `/agents/{name}/chat` | POST | Send a turn and wait for the reply — the synchronous integration surface; accepts `session_id`, `new_thread`, `model` and `open_canvas_id` (the canvas on screen, passed as context; an id the caller cannot see resolves to nothing) |
+| `/agents/{name}/chat` | POST | Send a turn and wait for the reply — the synchronous integration surface; accepts `session_id`, `new_thread`, `model`, `open_canvas_id` (the canvas on screen, passed as context; an id the caller cannot see resolves to nothing) and `tags` (addresses of people to tag). `message` is at most 8,000 characters |
 | `/agents/{name}/chat/stream` | POST | Begin a turn, returning an execution id to watch; same body |
 | `/agents/{name}/executions/{id}/stream` | GET | Live activity for one of your own turns (SSE) |
 | `/agents/{name}/executions/{id}/terminate` | POST | Stop one of your own turns |
@@ -307,6 +324,10 @@ Workspace is a client-facing shell over the platform's existing agent behavior, 
 | `/chat-state/{kind}/{id}/star` | PUT / DELETE | Star or unstar a chat |
 | `/chat-state/{kind}/{id}/read` | POST | Advance the read cursor |
 | `/search?q=` | GET | Search the caller's chats |
+| `/agents/{name}/people?q=` | GET | People who can be tagged in a chat with this agent, matching `q` — platform people only; an external client is refused |
+| `/mentions` | GET | Tags addressed to the caller, newest first |
+| `/mentions/{id}` | GET | One tag: the message with context when the caller can see the conversation, otherwise `can_see: false` and who can let them in |
+| `/mentions/{id}/read` | POST | Mark a tag read (a person only) |
 
 Asks (`/asks`, with `/asks/{id}/answer`, `/discuss`, `/dismiss` and `/context`) and the Work tab have their own routes under the same prefix — see [Approvals](../automation/approvals.md) and [Executions](../operations/executions.md).
 
@@ -328,12 +349,15 @@ Asks (`/asks`, with `/asks/{id}/answer`, `/discuss`, `/dismiss` and `/context`) 
 - **No cost or model information** is shown on the agent's band or Info tab, and the chat history and chat reply routes return no turn cost to any caller.
 - **Suggestions are for platform users.** An external client sees no **Suggested for you** list. Suggestions are not offered in a room.
 - **Drafts stay in one browser.** Unsent text does not follow you to another device.
-- **Rooms are not in the Inbox yet**, and **Reply to this message** is offered in 1:1 chats only.
+- **Rooms are not in the Inbox yet**, and **Reply to this message** is offered in 1:1 chats only. A tag from a room does reach the tagged person's Inbox.
+- **Tags are in-app only.** A tagged person is not emailed; they see the tag the next time they open the Workspace.
+- **An ask several people received** cannot be dismissed or discussed yet — only answered.
 - **Agent memory for the switch keys is per tab.** Which chat you last had open with each agent is forgotten on reload.
-- **Some Workspace surfaces need an entitlement.** A few platform-user features appear only on instances licensed for them; an external client never sees them.
+- **Some Workspace surfaces need an entitlement.** A few platform-user features — [Projects](workspace-projects.md) among them — appear only on instances licensed for them; an external client never sees them.
 
 ## See Also
 
+- [Workspace Projects](workspace-projects.md) — the record that links your chats into a piece of sustained work: continuing it, what the agent records, tasks and verification, the steward
 - [Public Links](public-links.md) — a single anonymous chat URL for one agent, no sign-in and no history (Workspace is the signed-in, multi-conversation counterpart)
 - [Agent Sharing & Access](agent-sharing.md) — sharing agents with operators and external clients (grants the Workspace roster)
 - [Cross-Channel Access Control](access-control.md) — verified-email identity and access requests across channels

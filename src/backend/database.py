@@ -137,6 +137,7 @@ from db.skills import SkillsOperations
 from db.skill_sets import SkillSetsOperations
 from db.role_readiness import RoleReadinessOperations
 from db.capability_grants import CapabilityGrantOperations
+from db.peer_skill_grants import PeerSkillGrantOperations
 from db.skill_gates import SkillGateOperations
 from db.seat_decisions import SeatDecisionOperations
 from db.skill_sources import SkillSourcesOperations
@@ -1020,6 +1021,7 @@ class DatabaseManager:
         self._skill_sets_ops = SkillSetsOperations()
         self._role_readiness_ops = RoleReadinessOperations()
         self._capability_grant_ops = CapabilityGrantOperations()
+        self._peer_skill_grant_ops = PeerSkillGrantOperations()  # ent#662
         self._skill_gate_ops = SkillGateOperations()
         self._seat_decision_ops = SeatDecisionOperations()
         self._skill_sources_ops = SkillSourcesOperations()
@@ -1159,6 +1161,10 @@ class DatabaseManager:
     def reconcile_spawn_key_id(self, agent_name: str, current_key_id: str) -> int:
         """#1854: re-point a parent's spawned children at its current key id."""
         return self._agent_ops.reconcile_spawn_key_id(agent_name, current_key_id)
+
+    def list_agents_spawned_by_key(self, agent_name: str, key_id: str) -> List[str]:
+        """ent#629: live agents spawned by `agent_name` with key `key_id`."""
+        return self._agent_ops.list_agents_spawned_by_key(agent_name, key_id)
 
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
@@ -1464,12 +1470,6 @@ class DatabaseManager:
 
     def get_a2a_exposed_agents(self):
         return self._agent_ops.get_a2a_exposed_agents()
-
-    def get_a2a_scope(self, agent_name: str):
-        return self._agent_ops.get_a2a_scope(agent_name)
-
-    def set_a2a_scope(self, agent_name: str, *, scope: str, keyless: bool) -> bool:
-        return self._agent_ops.set_a2a_scope(agent_name, scope=scope, keyless=keyless)
 
     # =========================================================================
     # Per-agent MCP connector (ent#46; OSS-core since #118)
@@ -2204,9 +2204,12 @@ class DatabaseManager:
     def create_activity(self, activity):
         return self._activity_ops.create_activity(activity)
 
-    def complete_activity(self, activity_id: str, status: str = "completed", details: dict = None, error: str = None):
-        """#1804: returns an ``ActivityCloseOutcome`` (tri-state), not a bool."""
-        return self._activity_ops.complete_activity(activity_id, status, details, error)
+    def complete_activity(self, activity_id: str, status: str = "completed", details: dict = None, error: str = None,
+                          *, completed_at=None):
+        """#1804: returns an ``ActivityCloseOutcome`` (tri-state), not a bool.
+        ``completed_at`` (#3589): the producer's terminal instant, else now."""
+        return self._activity_ops.complete_activity(activity_id, status, details, error,
+                                                    completed_at=completed_at)
 
     def close_open_activities_for_executions(self, execution_ids, status: str = "failed", error: str = None):
         """#1804: batched bulk-sweep close (one transaction, no per-row WS)."""
@@ -2217,6 +2220,14 @@ class DatabaseManager:
 
     def get_open_activity_id_for_execution(self, execution_id: str, include_failed: bool = False):
         return self._activity_ops.get_open_activity_id_for_execution(execution_id, include_failed)
+
+    def get_open_companion_activity_ids_for_execution(
+        self, execution_id: str, *, extra_ids=(), include_failed: bool = False
+    ):
+        """#3588: open collaboration / self-task companion ids for an execution."""
+        return self._activity_ops.get_open_companion_activity_ids_for_execution(
+            execution_id, extra_ids=extra_ids, include_failed=include_failed
+        )
 
     def get_agent_activities(self, agent_name: str, activity_type: str = None, activity_state: str = None, limit: int = 100):
         return self._activity_ops.get_agent_activities(agent_name, activity_type, activity_state, limit)
@@ -2849,6 +2860,25 @@ class DatabaseManager:
         # #2914: the inject path's per-row verdict (`conflict` / cleared).
         return self._skills_ops.set_skill_delivery_status(agent_name, conflicted, resolved)
     # =========================================================================
+    # Per-skill grants over an edge (delegated to db/peer_skill_grants.py) — ent#662
+    def granted_peer_skills(self, caller_agent: str, target_agent: str):
+        return self._peer_skill_grant_ops.granted_peer_skills(caller_agent, target_agent)
+
+    def list_peer_skill_grants(self, caller_agent: str):
+        return self._peer_skill_grant_ops.list_peer_skill_grants(caller_agent)
+
+    def grant_peer_skill(self, caller_agent: str, target_agent: str, skill_name: str, granted_by: str):
+        return self._peer_skill_grant_ops.grant_peer_skill(caller_agent, target_agent, skill_name, granted_by)
+
+    def revoke_peer_skill(self, caller_agent: str, target_agent: str, skill_name: str):
+        return self._peer_skill_grant_ops.revoke_peer_skill(caller_agent, target_agent, skill_name)
+
+    def recent_peer_messages(self, caller_agent: str, target_agent: str, since: str, limit: int = 500):
+        return self._peer_skill_grant_ops.recent_peer_messages(caller_agent, target_agent, since, limit)
+
+    def delete_agent_peer_skill_grants(self, agent_name: str):
+        return self._peer_skill_grant_ops.delete_agent_peer_skill_grants(agent_name)
+
     # Agent capability grants (delegated to db/capability_grants.py) — ent#596
     def agent_has_capability(self, agent_name: str, capability: str) -> bool:
         return self._capability_grant_ops.agent_has_capability(agent_name, capability)
@@ -3955,6 +3985,10 @@ class DatabaseManager:
             divergence_acknowledged=divergence_acknowledged, terminal=terminal,
         )
 
+    def withdraw_operator_queue_item(self, agent_name, item_id, *, reason):
+        # trinity-enterprise#901: the agent ends its own pending ask, no successor.
+        return self._operator_queue_ops.withdraw_item(agent_name, item_id, reason=reason)
+
     def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None,
                                    disposition="cancelled"):
         # trinity-enterprise#611: CAS + endings ledger; a lost race carries
@@ -4274,6 +4308,11 @@ class DatabaseManager:
         return self._metric_definition_ops.list_for_agent(
             agent_name, include_retired=include_retired
         )
+
+    def metric_declarations_elsewhere(self, agent_name, names):
+        """Metric names the owner's other agents actively declare, with their
+        agreed label (ent#843). See MetricDefinitionOperations."""
+        return self._metric_definition_ops.declarations_elsewhere(agent_name, list(names))
 
     def reconcile_metric_definitions(self, agent_name: str, declared, source: str):
         """Set-diff the declared metrics into the registry; returns a summary dict."""

@@ -13,6 +13,7 @@ from fastapi import HTTPException
 
 from models import User
 from database import db
+from dependencies import agent_may_reach
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
@@ -207,7 +208,7 @@ async def get_agent_dashboard_logic(
     - status: Agent status (running/stopped)
     - error: Error message if parsing failed
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)

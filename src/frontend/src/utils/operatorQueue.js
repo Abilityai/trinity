@@ -384,6 +384,11 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
  *     #3247: `replaced` — a cancel the AGENT authored by replacing its own
  *     ask (`disposed_by` / the projection's `ended_by` is `agent`); never a
  *     person's cancel, a timeout or a platform ending.
+ *     trinity-enterprise#901: `withdrawn` — the agent ended its own ask with a
+ *     reason and no successor. Which of the two is the server's derived
+ *     `agent_ending`, read first; never inferred from the reason text or from
+ *     a `replaced_by` the Workspace projection may withhold. A row without the
+ *     field (an older payload) keeps reading `replaced`.
  *   - `who` — the person, for the Operating Room (`disposed_by_email`, or a
  *     legacy answer's `responded_by_email`); the Workspace projection's coarse
  *     `ended_by` (`you` / `the operator`; `someone_else` → the projection's
@@ -392,7 +397,10 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
  *     'platform'`, or the projection's `ended_by = 'platform'`); `null` when the
  *     platform does not know.
  *   - `reason` — #3246: the platform's ending in words (`condition_cleared`,
- *     `superseded`); `null` for every other ending. A platform ending is never a
+ *     `superseded`); trinity-enterprise#901: the agent's own one-line reason
+ *     for a withdraw (the Workspace's `ending_reason`, the operator row's
+ *     `disposition_reason`) — agent text, rendered on its own line, never in
+ *     the ending's words; `null` for every other ending. A platform ending is never a
  *     person's answer and never a timeout.
  *   - `alert` — the row is an alert: its expiry reads "nobody acted on it",
  *     because nobody was asked anything.
@@ -406,6 +414,7 @@ export const ENDING_LABELS = Object.freeze({
   cancelled: 'Cancelled',
   expired: 'Expired',
   replaced: 'Replaced',   // #3247
+  withdrawn: 'Withdrawn', // trinity-enterprise#901
 })
 
 /** #3246 — why the platform ended a row, in words. An unknown reason token
@@ -425,7 +434,10 @@ export const TIMEOUT_ENDING_REASONS = Object.freeze({
 
 function endingKind(item) {
   const kind = ledgerKind(item)
-  if (kind === 'cancelled' && (item.disposed_by === 'agent' || item.ended_by === 'agent')) return 'replaced'
+  if (kind !== 'cancelled') return kind
+  // trinity-enterprise#901: the server's derived kind first.
+  if (item.agent_ending === 'replaced' || item.agent_ending === 'withdrawn') return item.agent_ending
+  if (item.disposed_by === 'agent' || item.ended_by === 'agent') return 'replaced'
   return kind
 }
 
@@ -450,6 +462,9 @@ export function queueEnding(item) {
     reason = TIMEOUT_ENDING_REASONS[item.disposition_reason] || null
   } else if (kind === 'replaced') {
     who = 'the agent'
+  } else if (kind === 'withdrawn') {
+    who = 'the agent'
+    reason = item.ending_reason || item.disposition_reason || null
   } else if (item.disposed_by === 'platform' || item.ended_by === 'platform') {
     who = 'the platform'
     reason = PLATFORM_ENDING_REASONS[item.disposition_reason] || null
@@ -492,6 +507,20 @@ export function workspaceEndingText(ask) {
   const ending = queueEnding(ask)
   const text = queueEndingText(ending)
   return ending?.kind === 'replaced' && ask.replaced_by ? `${text} with ${ask.replaced_by}` : text
+}
+
+/** trinity#3524 — the viewer's own answer to an ask they answered, from the
+ *  projection's `answer` (set only when `ended_by` is `you`). An approval
+ *  answered Approve / Reject reads as a verdict ("You approved"); any other
+ *  answer is quoted ("You answered “Ship it”"). `past` is the verdict word, or
+ *  null. Null when the viewer did not answer it. */
+const VERDICT_PAST = { approve: 'approved', reject: 'rejected' }
+export function workspaceOwnAnswer(ask) {
+  if (!ask || ask.ended_by !== 'you' || !ask.answer) return null
+  const past = ask.kind === 'approval'
+    ? VERDICT_PAST[String(ask.answer).trim().toLowerCase()] || null
+    : null
+  return { past, text: past ? `You ${past}` : `You answered “${ask.answer}”` }
 }
 
 /** #3247 — the successor's own line: "Replaces <request_id>", or '' . */

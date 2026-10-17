@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, capability_fence
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, capability_fence
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -490,7 +490,7 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     agent_dict["is_shared"] = not agent_dict["is_owner"] and not is_admin and \
                                db.is_agent_shared_with_user(agent_name, current_user.username)
     agent_dict["is_system"] = owner.get("is_system", False) if owner else False
-    agent_dict["can_share"] = db.can_user_share_agent(current_user.username, agent_name)
+    agent_dict["can_share"] = (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True))
     # ent#181: the detail endpoint is what AgentHeader loads on page open — it
     # must carry the label too, or the header shows the slug until the first
     # edit and the surfaces disagree (§1.3.1 FR-3). One extra read; not the list
@@ -1515,7 +1515,8 @@ async def send_voice_reply_endpoint(
     # completion report (consent-gated, ent#224/ent#265) can find the way back.
     # It must not speak into that conversation itself — this route has no
     # proactive-consent check. `source_channel_agent` is set by inheritance and
-    # by nothing else (`turn_audience._is_delegated`), so non-NULL = inherited.
+    # by a gated request's wake-up (`turn_audience._is_delegated`), so non-NULL
+    # = inherited.
     if getattr(execution, "source_channel_agent", None):
         return {"delivered": False, "channel": channel, "reason": "delegated_turn"}
     if channel == app_config.PORTAL_SOURCE_CHANNEL:

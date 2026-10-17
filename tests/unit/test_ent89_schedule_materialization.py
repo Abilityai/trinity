@@ -293,7 +293,9 @@ _TEMPLATE_YAML = {
 def _stub_github_resolution(monkeypatch, fetches: list):
     async def _passthrough_fork(config, user, gh, repo, pat, tier, branch,
                                *, source_metadata=None, source_metadata_reason=None,
-                               allow_unforked_pull_only=False):
+                               allow_unforked_pull_only=False, attempts=None):
+        # `attempts` (#3725): the chain's per-tier record, passed through to
+        # the gate's refusal; the passthrough ignores it like the rest.
         return repo, pat, tier, None
 
     async def _ok(*args, **kwargs):

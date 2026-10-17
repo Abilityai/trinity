@@ -156,9 +156,9 @@ A set names skills from **its own** source. If it names one that source does not
 
 People who own an agent (and admins) change its skills as before. **Agents** are different: changing an agent's skills — another agent's or its own — is a separate permission, and no agent holds it by default. Permission to call an agent does not include it.
 
-An admin grants it in **Settings → Agents → Skill managers**. The panel lists every agent that holds the permission, with who granted it and when, and a **Revoke** button. Pick an agent and grant it. The system agent never needs the grant, and an ephemeral agent cannot receive it. Granting and revoking are audited, and only a person at the UI can do either — an API key cannot grant.
+An admin grants it in **Settings → Agents → Skill managers**, or with the **Change skills** toggle on the agent's own Settings tab (see [Permissions to Change Itself](../agents/agent-configuration.md#permissions-to-change-itself)); both write the same permission. The Skill managers panel lists every agent that holds the permission, with who granted it and when, and a **Revoke** button. Pick an agent and grant it. The system agent never needs the grant, and an ephemeral agent cannot receive it. Granting and revoking are audited, and only a person at the UI can do either — an API key cannot grant.
 
-An agent without the grant is refused with `403 skill_management_not_permitted` when it assigns, unassigns, replaces, or re-injects skills, or assigns a skill set — for any target, including itself. The same rule covers writing into an agent's `.claude/skills/` through the Files API; people still edit skills in the Files tab. A granted agent still reaches only the agents its owner owns. A fleet orchestrator that applies a skill map needs this grant.
+An agent without the grant is refused with `403 skill_management_not_permitted` when it assigns, unassigns, replaces, or re-injects skills, or assigns a skill set — for any target, including itself. The same rule covers writing into an agent's `.claude/skills/` through the Files API, and setting or clearing a skill's approval gate; people still edit skills in the Files tab. A granted agent still reaches only the agents its owner owns, and it can never set or clear a gate on itself. A fleet orchestrator that applies a skill map or an approval policy needs this grant.
 
 ### Skill injection
 
@@ -237,9 +237,13 @@ The owner of an agent, or an admin, can make any of its skills wait for a person
 
 A kind nobody fills yet is listed but cannot be picked. The controls work on a stopped agent's last-known list too, and are not offered on ephemeral agents or the system agent. A gate on a skill the agent no longer lists is kept, as *Not in this agent's skills list: gate kept*, until it is removed with **Clear gate**.
 
-Everyone with access sees a gated card's line, which names the kind of approver, never a person: *Needs approval from the primary contact*, or *Needs approval: you approve this* if you are that approver. **Run** on a gated skill asks the approver instead, and the page says so (*Not run: … needs approval before it can run*); nothing runs until they approve (see [Approvals](approvals.md)). When the approver runs it themselves, it runs at once and is marked *Ran without approval: you are the approver* (others see *its approver started it*) on its Tasks row, its execution page and the Workspace reply.
+Everyone with access sees a gated card's line, which names the kind of approver, never a person: *Needs approval from the primary contact*, or *Needs approval: you approve this* if you are that approver. **Run** on a gated skill asks the approver instead, and the page says so (*Not run: … needs approval before it can run*); nothing runs until they approve (see [Approvals → Gated-skill approvals](approvals.md#gated-skill-approvals) for the card, the notices and what each requester hears). When the approver runs it themselves, it runs at once and is marked *Ran without approval: you are the approver* (others see *its approver started it*) on its Tasks row, its execution page and the Workspace reply.
 
-A skill's author can recommend approval with `approval: recommended`. A library skill that carries it is gated by default on every agent it is assigned to, and the owner can turn that off; an own skill is not gated for it. Where such a skill has no gate, the owner sees *Author recommends approval: not gated*.
+A skill's author can recommend approval with `approval: recommended`. A library skill that carries it is gated by default on every agent it is assigned to, and the owner can turn that off; an own skill is not gated for it. Where such a skill has no gate, the owner sees *Author recommends approval: not gated*. A later library change never loosens a gate that is already set.
+
+A gate you set stays until someone clears it. Unassigning the skill removes it only when a person unassigns it and the package has left the agent; an agent's unassign, a sync or a restart keeps it, so unassigning and reassigning cannot drop a gate. A library default goes once the skill is unassigned and its package has gone.
+
+Gates can also be set over the API or MCP (below), where each gate also takes a deadline for the approver: 1 to 168 hours, 24 by default. An orchestrator agent holding the skill-management permission can gate skills on the other agents its owner owns, never on itself. Every change is audited.
 
 Trinity checks every request that names a gated skill. Inside the agent, a second check stops a run from loading a gated skill on its own. When an agent has gates but cannot run that check, its owner sees a warning at the top of the tab: its image predates the check (recreate the agent), or its runtime has no hooks, such as Codex or Gemini.
 
@@ -271,6 +275,10 @@ MCP tools for skills:
 | `sync_agent_skills(agent_name)` | Force re-inject into a running agent — the manual retry after a `not_delivered` |
 | `get_agent_skills(agent_name)` | List an agent's assigned skills. Each carries `via_sets` (the sets that brought it) and `individual`; the agent's `sets` are listed too |
 | `unassign_skill_set(agent_name, set_name)` | Unassign a skill set; members also assigned on their own or through another set stay |
+| `list_skill_gates(agent_name)` | The agent's gated skills: who approves each (`primary` or `approver`), the deadline, the `origin` (`set` or `library_default`), and `approver_reachable` (whether anyone fills that approver kind). With an agent key, its own gates, or an agent its owner owns when it holds the skill-management permission |
+| `set_skill_gate(agent_name, skill_name, approver?, deadline_hours?)` | Gate a skill, or change its approver or deadline; an omitted field keeps its value. Refused by name: `invalid_skill_name`, `invalid_approver`, `approver_unavailable`, `invalid_deadline`, `ephemeral_agent`; `warnings` may say `approver_unassigned` |
+| `clear_skill_gate(agent_name, skill_name)` | Remove a gate. Idempotent; clearing a library default keeps it off while the skill stays assigned |
+| `list_skill_sources`, `register_skill_source`, `update_skill_source`, `delete_skill_source`, `sync_skill_source`, `sync_skill_library` | Manage library sources (admin principals only — see below) |
 
 **REST endpoints** — see [Backend API Docs](http://localhost:8000/docs) for full schemas.
 
@@ -278,10 +286,11 @@ MCP tools for skills:
 |----------|--------|-------------|
 | `/api/skills/library` | GET | Merged skill listing across sources |
 | `/api/skills/library/status` | GET | Sync state + per-source array |
-| `/api/skills/library/sync` | POST | Sync every enabled source (admin, human-only) |
-| `/api/skills/sources` | GET/POST | List / register a source (admin, human-only) |
-| `/api/skills/sources/{id}` | PUT/DELETE | Edit / remove a source (admin, human-only) |
-| `/api/skills/sources/{id}/sync` | POST | Sync one source (admin, human-only) |
+| `/api/skills/library/sync` | POST | Sync every enabled source (admin; agent keys refused) |
+| `/api/skills/sources` | GET/POST | List / register a source (admin; agent keys refused) |
+| `/api/skills/sources/apply` | POST | Register or update a source keyed on its repository URL — `201` created, `200` updated or unchanged, `409 ambiguous_source` (admin; agent keys refused) |
+| `/api/skills/sources/{id}` | PUT/DELETE | Edit / remove a source (admin; agent keys refused) |
+| `/api/skills/sources/{id}/sync` | POST | Sync one source (admin; agent keys refused) |
 | `/api/settings/skills-library` | GET/PUT | Auto-sync and fleet re-inject configuration (admin) |
 | `/api/skills/assignments` | GET | Which agents hold each skill, batched, plus `assignable_agents` — the agents the caller may assign to. Human-only; admins see the fleet, others their accessible agents (the response says which via `scope`) |
 | `/api/agents/{name}/skills` | GET/PUT | Read / set an agent's assignments (owner). The PUT response carries `delivery` and `removal` |
@@ -292,10 +301,13 @@ MCP tools for skills:
 | `/api/agents/{name}/skills/inject` | POST | Force re-inject into this agent (owner); 409 while another injection holds the agent |
 | `/api/skills/managers` | GET | Agents that hold the skill-management permission (admin) |
 | `/api/agents/{name}/skill-manager` | PUT | Grant or revoke that permission with `{"granted": true\|false}` (admin, human-only) |
+| `/api/agents/{name}/skill-gates` | GET | The agent's gates, plus `approvers` (per approver kind: `reachable`, and `viewer_fills` — whether you fill it). `?probe=true` adds `hook`, whether the agent enforces gates inside itself (`ok`, `predates`, `missing`, `unsupported_runtime`, …), for a person who may manage its skills. Who may approve is never named |
+| `/api/agents/{name}/skill-gates/{skill}` | PUT | Gate a skill — `{approver?, deadline_hours?}`; only the fields sent are applied. The owner or an admin; an agent key needs the skill-management permission, only on an agent its owner owns, never on itself (`403 person_required`) |
+| `/api/agents/{name}/skill-gates/{skill}` | DELETE | Clear a gate. Idempotent; same permissions as `PUT` |
 
 Assignment writes from an agent key (`PUT`/`POST`/`DELETE` on an agent's skills or skill sets, and `inject`) need the skill-management grant described above.
 
-Source management is **REST-only and human-only** — there is no MCP tool for it, and agent-scoped keys are rejected. Registering or syncing a source decides which repository your fleet executes code from, so it is an operator action regardless of the caller's role.
+Source management is for **admins** — an admin signed in, an admin's own `user` key, or the system agent — over REST or the source MCP tools above. Agent-scoped and connector keys are refused, whoever owns them. Registering or syncing a source decides which repository your fleet executes code from, so no agent can do it.
 
 ## Limitations
 

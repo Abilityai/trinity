@@ -348,11 +348,15 @@ class TestTimelineGapFill:
             }
 
     def test_day_stacks_present_in_by_type(self, tmp_db, ops):
-        _seed(tmp_db, started_at=_iso_ago(hours=1), triggered_by="chat")
-        _seed(tmp_db, started_at=_iso_ago(hours=1), triggered_by="schedule")
-        _seed(tmp_db, started_at=_iso_ago(hours=1), triggered_by="loop")
+        started_at = _iso_ago(hours=1)
+        _seed(tmp_db, started_at=started_at, triggered_by="chat")
+        _seed(tmp_db, started_at=started_at, triggered_by="schedule")
+        _seed(tmp_db, started_at=started_at, triggered_by="loop")
         out = ops.get_agent_analytics("agent-1", 24)
-        today = out["timeline"][-1]
-        assert today["by_type"].get("Chat/Tasks") == 1
-        assert today["by_type"].get("Scheduled") == 1
-        assert today["by_type"].get("Loops") == 1  # #1150
+        # Pick the seeded day, not ``timeline[-1]``: between 00:00 and
+        # 01:00 UTC "an hour ago" is yesterday, and the last point (today)
+        # is empty -- this failed dev-ci on 2026-10-14 at 00:17 UTC.
+        day = next(p for p in out["timeline"] if p["date"] == started_at[:10])
+        assert day["by_type"].get("Chat/Tasks") == 1
+        assert day["by_type"].get("Scheduled") == 1
+        assert day["by_type"].get("Loops") == 1  # #1150

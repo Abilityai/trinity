@@ -199,7 +199,7 @@ class TestPerformHealthCheckDormantSkip:
             alert_resource_critical = AsyncMock()
 
         fake_alerts.get_alert_service = lambda: _AlertSvc()
-        sys.modules["services.monitoring_alerts"] = fake_alerts
+        monkeypatch.setitem(sys.modules, "services.monitoring_alerts", fake_alerts)
 
         import asyncio
         asyncio.run(mod.perform_health_check("alive-agent", store_results=True))
