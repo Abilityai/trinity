@@ -95,6 +95,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         # chat's own session id, #2958), the
         # Session tab's cached-UUID --resume machinery, MCP, and native cost
         # reporting (Claude Code emits total_cost_usd directly). (#1187)
+        # Behind a proxy that figure is re-priced by provider_pricing.turn_cost (#3489).
         return RuntimeCapabilities(
             chat_continuity=True,
             session_tab_resume=True,

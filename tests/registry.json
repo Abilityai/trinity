@@ -5815,6 +5815,17 @@
       "description": "#3406: the backend half of the contract the browser's 401 verdict reads. get_current_user rejects a dead token and OAuth2PasswordBearer rejects a missing one WITH `WWW-Authenticate: Bearer`; the five public-link session routes (intro, history, session clear, chat, terminate) answer an expired or missing visitor session with a bare 401. Handlers driven directly with the link check, rate limit and session lookup stubbed. No Docker."
     },
     {
+      "file": "unit/test_provider_pricing.py",
+      "feature": "#3489",
+      "added": "2026-10-09",
+      "categories": [
+        "agent-server",
+        "unit",
+        "cost"
+      ],
+      "description": "Turn cost behind an Anthropic-compatible proxy (#3489): turn_cost re-prices a Claude Code result from modelUsage against the OpenRouter price list (input/output/cache-read/cache-write, every model of the turn summed) and keeps total_cost_usd when it cannot: no proxy, unknown proxy host, model missing from the price list, no/empty modelUsage, list not loaded yet, fetch failure (cached, no refetch per turn; a failed refresh keeps the previous list). turn_cost never waits on the network: the list loads in a background thread (boot prefetch + stale refresh, one fetch in flight). _fetch_openrouter_prices contract over a canned /api/v1/models payload (cache-price fallback, explicit 0, unparseable and incomplete entries). Proxy host re-read only when .env or a runtime override changes. Every production cost reader goes through it: process_stream_line, parse_stream_json_output, _recover_metadata_from_jsonl, _recover_metadata_from_raw_messages. No Docker, no network."
+    },
+    {
       "file": "unit/test_3455_email_whitelist_validation.py",
       "feature": "#3455",
       "added": "2026-10-09",
