@@ -1,6 +1,13 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3555_audit_time_bounds.py",
+      "feature": "#3555",
+      "added": "2026-10-11",
+      "categories": ["backend", "audit", "database", "unit"],
+      "description": "Inclusive audit time bounds on real temporary SQLite across list/count/stats/calendar/heatmap and in-process JSON/CSV export; optional fractions, offsets, upper bounds covering the hour, minute or second they state, the calendar day window, years before 1000, out-of-range offset bounds, exact microseconds, other filters, pagination, unchanged hash payloads, legacy malformed bounds and non-admin rejection."
+    },
+    {
       "file": "unit/test_3725_public_template_tokenless_metadata.py",
       "feature": "abilityai/trinity#3725",
       "added": "2026-10-14",

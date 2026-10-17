@@ -15,12 +15,51 @@ ISO-Z timestamps so the aggregation is dialect-agnostic.
 """
 
 import json
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, insert, func, and_, text
+from sqlalchemy import select, insert, func, and_, case, text
 
 from .engine import get_engine
 from .tables import audit_log
+
+
+# An ISO bound whose time part states hour, minute or second and no fraction,
+# e.g. "2026-05-18T23Z", "2026-05-18T23:59", "2026-05-18T23:59:59+00:00".
+# Group 3 is the seconds, group 2 the minutes, group 1 the hour. A date-only
+# bound or one with a fraction does not match and stays an exact instant.
+_BOUND_TIME_RE = re.compile(
+    r"^.{8,10}[Tt ](\d{2})(?::?(\d{2}))?(?::?(\d{2}))?"
+    r"(?:[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?)?$"
+)
+_ONE_MICROSECOND = timedelta(microseconds=1)
+
+
+def _bound_to_utc_text(bound: str, is_start: bool) -> str:
+    """Return ``YYYY-MM-DDTHH:MM:SS.ffffff`` (UTC, no suffix) for an ISO bound.
+
+    Raises ValueError for text that is not ISO 8601 and OverflowError for an
+    offset that moves the instant outside the datetime range. An upper bound
+    that states a time without a fraction covers the end of the smallest unit
+    it states (hour, minute or second), so ``T23:59:59Z`` keeps the whole last
+    second of a day. Lower bounds, date-only bounds and bounds with a fraction
+    stay exact. isoformat() always zero-pads the year, unlike strftime("%Y").
+    """
+    parsed = datetime.fromisoformat(bound)
+    if not is_start:
+        match = _BOUND_TIME_RE.match(bound)
+        if match:
+            hour, minute, second = match.groups()
+            unit = (
+                timedelta(seconds=1) if second
+                else timedelta(minutes=1) if minute
+                else timedelta(hours=1)
+            )
+            parsed += unit - _ONE_MICROSECOND
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed.isoformat(timespec="microseconds")
 
 
 # Serialises hash-chain appends on PostgreSQL (#2015). Transaction-scoped, so
@@ -195,10 +234,31 @@ class PlatformAuditOperations:
             conditions.append(audit_log.c.target_id == target_id)
         if source:
             conditions.append(audit_log.c.source == source)
-        if start_time:
-            conditions.append(audit_log.c.timestamp >= start_time)
-        if end_time:
-            conditions.append(audit_log.c.timestamp <= end_time)
+        if start_time or end_time:
+            timestamp = audit_log.c.timestamp
+            # UTC-Z storage has optional fractional seconds. Remove Z, pad the
+            # fraction to six digits, and compare without lossy SQL date casts.
+            # This is a read expression only: stored bytes feed the hash chain.
+            comparable = case(
+                (func.length(timestamp) == 20, func.substr(timestamp, 1, 19) + ".000000"),
+                else_=func.substr(func.replace(timestamp, "Z", "000000"), 1, 26),
+            )
+            for bound, is_start in ((start_time, True), (end_time, False)):
+                if not bound:
+                    continue
+                try:
+                    normalized = _bound_to_utc_text(bound, is_start)
+                except (ValueError, OverflowError):
+                    # Preserve the legacy unvalidated-string behavior for
+                    # malformed bounds rather than introducing a new API error.
+                    conditions.append(timestamp >= bound if is_start else timestamp <= bound)
+                    continue
+                # Keep an indexable coarse range on the raw timestamp column;
+                # the padded expression resolves precision within edge seconds.
+                if is_start:
+                    conditions.extend((timestamp >= normalized[:19], comparable >= normalized))
+                else:
+                    conditions.extend((timestamp <= normalized[:19] + "Z", comparable <= normalized))
         # #905: filter by request correlation id so an MCP `mcp_operation` row and
         # the backend `git_operation` row it triggered can be retrieved together.
         if request_id:
