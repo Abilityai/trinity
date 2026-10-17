@@ -549,6 +549,7 @@ async def _finalize_budget_exhausted(
     task_execution_id,
     chat_activity_id,
     collaboration_activity_id,
+    name=None,
 ):
     """#904 RC-1: backend agent-call budget exhausted → 503 without firing
     SUB-003. #1332: mirror a raced CANCELLED terminal onto the activities instead
@@ -1175,6 +1176,7 @@ async def run_chat_turn(
             task_execution_id=task_execution_id,
             chat_activity_id=chat_activity_id,
             collaboration_activity_id=collaboration_activity_id,
+            name=name,
         )
     except httpx.HTTPError as e:
         await _finalize_http_failure(

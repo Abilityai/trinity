@@ -320,7 +320,15 @@ def telegram_world(world, monkeypatch):
 
 
 async def _drain_reports():
-    """Await every fire-and-forget report ``spawn_completion_report`` started."""
+    """Await every fire-and-forget report ``spawn_completion_report`` started.
+
+    Only this loop's tasks: another suite's finalizer test can leave a report
+    task in ``_inflight`` bound to its own (now closed) loop, and gathering it
+    here raises "future belongs to a different loop".
+    """
+    loop = asyncio.get_running_loop()
+    for t in [t for t in ccr._inflight if t.get_loop() is not loop]:
+        ccr._inflight.discard(t)
     while ccr._inflight:
         await asyncio.gather(*list(ccr._inflight), return_exceptions=True)
 
