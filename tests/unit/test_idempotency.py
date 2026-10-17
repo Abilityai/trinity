@@ -825,8 +825,8 @@ class TestProactiveSendMessageGuard:
 
     def _make_service(self, mod, delivers):
         svc = mod.ProactiveMessageService()
-        svc._check_rate_limit = lambda *a, **k: True
-        svc._increment_rate_limit = lambda *a, **k: None
+        svc.check_rate_limit = lambda *a, **k: True
+        svc.increment_rate_limit = lambda *a, **k: None
 
         async def fake_deliver(agent_name, recipient_email, text, channel, reply_to_thread):
             delivers.append((recipient_email, channel, text))

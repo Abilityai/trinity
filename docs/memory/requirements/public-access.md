@@ -866,9 +866,48 @@ of the epic #24 voice-replies feature.
   back. Checked before any channel branch; this route has no proactive-consent
   check of its own, and #3232's async report-back default makes such children
   common.
+- **FR-10 — Proactive voice: an addressing surface (abilityai/trinity-enterprise#700)**:
+  `send_voice_reply` also takes an address — `to` (a role, the ent#606 shape of
+  `send_message`) or, deprecated, `recipient_email`, never both — plus `channel`, so
+  a run with no inbound conversation — a schedule, a loop, a reminder, an
+  agent-to-agent task — can speak. With an address the destination is resolved
+  the way `send_message` resolves it — one service rule,
+  `role_addressing.resolve_single_recipient`, shared by both routes (a role that
+  several people fill, or nobody fills, is refused by role and never names a
+  person) — then the recipient's verified chat link on that channel, never the
+  execution row, and the send passes the **same gates
+  as proactive text**: `db.can_agent_message_email` consent (owner, or a share
+  with `allow_proactive`), the shared per-recipient hourly rate limit (one budget
+  across text and voice, so voice is never the cheaper way around it), and a
+  `PROACTIVE_MESSAGE` audit row (`modality: voice`). The agent + per-channel voice
+  flags still apply. `execution_id` stays required — it validates the caller and
+  is the #1084 dedup scope; the effect key is the resolved `(recipient email,
+  channel)`, so a re-delivered or retried run does not double-speak. A pre-send
+  refusal (rate limit, no chat link) and a transient delivery failure
+  (`send_failed`, `delivery_error` — on both paths) release the claim so a retry
+  in the same run tries again; a configuration miss (`no_binding`, …) stays
+  recorded. Without an address the call is the in-session reply,
+  unchanged (FR-1..FR-9). Proactive voice delivers on **Telegram and WhatsApp**;
+  Slack is refused with `proactive_channel_unsupported` (its voice path resolves a
+  bot token by bound channel, not by DM) — deferred to
+  abilityai/trinity-enterprise#923. Deferred too: conversation-history / Workspace
+  rail persistence of a proactive note (abilityai/trinity-enterprise#922) and
+  schedule-declared channel delivery, shape (b) (abilityai/trinity-enterprise#924). Refusals on this path carry
+  a named `reason` plus a `guidance` sentence (#2157 pattern): `not_authorized`,
+  `rate_limited`, `recipient_not_linked`, `proactive_channel_unsupported`, and the
+  role refusals `role_unassigned` / `role_resolves_to_several` (role-only, no person named); and an
+  un-addressed call from a run with no conversation keeps `not_a_channel_turn` but
+  now says how to address a recipient (abilityai/trinity#2999 AC 3).
+- **FR-11 — The cost cap is a named contract**: a text longer than
+  `TTS_MAX_CHARS` (default 1500) is refused before any synthesis with
+  `reason: "text_too_long"`, `max_chars`, and guidance to shorten — distinct from
+  `synthesis_failed` (a provider/credential miss) on both the in-session and the
+  proactive path (abilityai/trinity#2999 AC 5). Long deliverables (a daily brief)
+  are the caller's job to condense into a short spoken summary, then send the
+  detail as text; no chunked multi-note send.
 - **API**: `send_voice_reply` MCP tool → `POST /api/agents/{name}/voice-reply`
-  (`AuthorizedAgentByName` + agent-scoped self-check; user-facing channel triggers
-  only); `GET/PUT /api/agents/{name}/voice-replies` extended with per-channel
+  (`AuthorizedAgentByName` + agent-scoped self-check; in-session on user-facing
+  channel triggers, or addressed via `recipient_email` + `channel` from any run, FR-10); `GET/PUT /api/agents/{name}/voice-replies` extended with per-channel
   flags + `effective_voice_id`; `GET/PUT /api/settings/elevenlabs`.
 
 ### 48.2 Narrated Surfaces — the Workspace speaks, and agents know it (#2157)

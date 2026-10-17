@@ -2842,11 +2842,18 @@ export class TrinityClient {
       text: string;
       execution_id: string;
       dedup_label?: string;
+      /** ent#700: address the note to a person (proactive path) — a role (`to`)
+       *  or, deprecated, an email; never both; always with `channel`. */
+      to?: "primary" | "approver" | "viewer";
+      recipient_email?: string;
+      channel?: "telegram" | "slack" | "whatsapp";
     }
   ): Promise<{
     delivered: boolean;
     channel?: string;
     reason?: string;
+    /** Set with reason "text_too_long" (TTS_MAX_CHARS). */
+    max_chars?: number;
     /** #2157: plain-language explanation of a refusal, for surfaces where the
      *  machine `reason` alone leads an agent to a wrong conclusion (the portal
      *  narrates the agent's text, so "no voice note here" ≠ "no voice here"). */

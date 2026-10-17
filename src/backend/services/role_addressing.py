@@ -164,6 +164,56 @@ def resolve_role_id(agent_name: str, role_id: str) -> Resolution:
     )
 
 
+class RecipientRefused(Exception):
+    """A one-recipient send (a message, a voice note) cannot be addressed.
+    ``detail`` is the caller-facing body — ``code`` / ``role`` / ``message``
+    (+ ``count`` for several) — and names the ROLE only, never a resolved
+    person (ent#606: an agent that named a role learns nobody's email)."""
+
+    def __init__(self, detail: dict):
+        super().__init__(detail.get("code"))
+        self.detail = detail
+
+
+def resolve_single_recipient(
+    agent_name: str,
+    *,
+    to: Optional[str],
+    recipient_email: Optional[str],
+    noun: str = "message",
+    surface: str = "message",
+    by_agent_key: bool = False,
+) -> str:
+    """The one person a one-recipient send goes to (ent#606, shared by
+    ``send_message`` and ``send_voice_reply`` — abilityai/trinity-enterprise#700).
+
+    ``to`` names a role, resolved by :func:`resolve`. A role nobody fills, or
+    that several people fill, raises :class:`RecipientRefused` — a send has one
+    recipient, and silently picking one of several is exactly what the ruling
+    forbids. ``recipient_email`` still works for two releases; an agent key
+    choosing a person by email is logged as deprecated (``by_agent_key``).
+    """
+    if not to:
+        if by_agent_key:
+            log_email_addressing(agent_name, surface)
+        return recipient_email
+    try:
+        r = resolve(agent_name, to)
+    except RoleRefused as e:
+        raise RecipientRefused({
+            "code": e.code, "role": e.role, "message": e.message + " Message primary instead."})
+    if len(r.people) > 1:
+        raise RecipientRefused({
+            "code": "role_resolves_to_several", "role": to, "count": len(r.people),
+            "message": f"{len(r.people)} people fill the {to} role and a {noun} has "
+                       "one recipient — message primary, or raise an ask."})
+    if not r.single:
+        raise RecipientRefused({
+            "code": "role_unassigned", "role": to,
+            "message": f"Nobody fills the {to} role for this agent yet."})
+    return r.single
+
+
 _deprecation_logged: set = set()
 
 

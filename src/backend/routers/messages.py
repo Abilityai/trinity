@@ -128,35 +128,21 @@ def _role_only(request: SendMessageRequest, code: str, message: str):
 
 
 def _recipient(agent_name: str, request: SendMessageRequest, current_user: User = None) -> str:
-    """The one person this message goes to (ent#606).
-
-    `to` names a role, resolved by the same rule asks and reports use
-    (`services/role_addressing`). A role nobody fills, or that several people
-    fill, is refused by name — a message has one recipient, and silently picking
-    one of several is exactly what the ruling forbids. `recipient_email` still
-    works for two releases and is logged as deprecated.
-    """
-    if not request.to:
-        # Same condition as reports: only an agent key choosing a person by
-        # email is the migration the log tracks; a human sender is not.
-        if current_user is not None and current_user.agent_name:
-            role_addressing.log_email_addressing(agent_name, "message")
-        return request.recipient_email
+    """The one person this message goes to (ent#606). The rule is the service's
+    (`role_addressing.resolve_single_recipient`, shared with send_voice_reply);
+    this only maps a refusal to its 422."""
     try:
-        r = role_addressing.resolve(agent_name, request.to)
-    except role_addressing.RoleRefused as e:
-        raise HTTPException(status_code=422, detail={
-            "code": e.code, "role": e.role, "message": e.message + " Message primary instead."})
-    if len(r.people) > 1:
-        raise HTTPException(status_code=422, detail={
-            "code": "role_resolves_to_several", "role": request.to, "count": len(r.people),
-            "message": f"{len(r.people)} people fill the {request.to} role and a message has "
-                       "one recipient — message primary, or raise an ask."})
-    if not r.single:
-        raise HTTPException(status_code=422, detail={
-            "code": "role_unassigned", "role": request.to,
-            "message": f"Nobody fills the {request.to} role for this agent yet."})
-    return r.single
+        return role_addressing.resolve_single_recipient(
+            agent_name,
+            to=request.to,
+            recipient_email=request.recipient_email,
+            surface="message",
+            # Same condition as reports: only an agent key choosing a person by
+            # email is the migration the log tracks; a human sender is not.
+            by_agent_key=bool(current_user is not None and current_user.agent_name),
+        )
+    except role_addressing.RecipientRefused as e:
+        raise HTTPException(status_code=422, detail=e.detail)
 
 
 @router.put("/{agent_name}/shares/proactive", response_model=dict)

@@ -259,10 +259,14 @@ async def test_portal_turn_without_a_voice_does_not_promise_a_speaker_control():
 
 @pytest.mark.asyncio
 async def test_non_channel_non_portal_turn_keeps_the_old_reason():
-    """A schedule/API turn is genuinely not user-facing — unchanged behaviour."""
+    """A schedule/API turn has no conversation to reply into — same reason code.
+    Since abilityai/trinity-enterprise#700 (trinity#2999 AC 3) it also carries
+    guidance, but that guidance is the ADDRESSING route, never the portal's
+    speaker control (no such control exists off the portal)."""
     res = await _call_voice_reply(_execution(triggered_by="schedule"))
     assert res["reason"] == "not_a_channel_turn"
-    assert "guidance" not in res
+    assert "recipient_email" in res["guidance"]
+    assert "speaker" not in res["guidance"].lower()
 
 
 @pytest.mark.asyncio

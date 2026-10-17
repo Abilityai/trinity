@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent700_proactive_voice.py",
+      "feature": "abilityai/trinity-enterprise#700",
+      "added": "2026-10-15",
+      "categories": [
+        "backend",
+        "voice",
+        "channels",
+        "unit"
+      ],
+      "description": "send_voice_reply addressed by `to` (role, shared service resolver) or recipient_email + channel: proactive-text gates (consent, shared rate limit, audit), (recipient, channel) dedup with claim release on pre-send refusal and transient send failure, text_too_long cap reason, not_a_channel_turn guidance, in-session path unchanged."
+    },
+    {
       "file": "unit/test_3725_public_template_tokenless_metadata.py",
       "feature": "abilityai/trinity#3725",
       "added": "2026-10-14",
