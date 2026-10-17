@@ -219,4 +219,38 @@ one `/api/task` turn (tools create+read a file; MCP `list_agents`).
 
 Shared subprocess-helper DRY extraction; Session-tab cached-UUID resume for Codex;
 backend reading `ExecutionMetadata.error_code` directly; Codex SSE streaming;
-vision/images; a post-creation runtime-switch endpoint.
+a post-creation runtime-switch endpoint.
+
+
+## Uploaded images
+
+Headless task images are passed to native `codex exec --image` options. Resumed
+turns put these options after `resume`, so images attach to the current turn.
+The runtime accepts base64 JPEG, PNG, GIF and WebP payloads, up to ten images,
+5 MiB each and 10 MiB combined; invalid payloads return HTTP 400 before spawn.
+A private, unique temporary directory holds mode-0600 copies only until the
+execution returns or raises (including cancellation and spawn failure).
+
+The shared upload service retains original image bytes alongside vision data.
+Prompt descriptions contain the actual saved path. Each dispatch gets its own
+UUID directory under `/home/developer/uploads`, preventing filename collisions
+and cross-dispatch cleanup. The channel router attempts to remove that exact directory after
+known terminal execution outcomes, including failed response delivery, post-send
+hooks and cancellation during delivery. Preparation cancellation waits for the
+upload producer to settle before removing its directory, so a late Docker write
+cannot recreate it. Cancellation after dispatch, a waiter timeout with an active
+execution, or unreadable execution state deliberately retains originals: losing
+the waiter is not proof that the agent stopped reading. These exceptional retained
+directories require operator cleanup after confirming the execution is terminal;
+there is no automatic reaper or restart-recovery guarantee. Container cleanup
+errors or nonzero exit statuses are logged without masking the original outcome;
+they may also retain files. Web, public and
+session callers retain completed workspace uploads as before. A
+failed original write is explicit and does not queue a vision-only success.
+Existing upload authorization, size/MIME checks and audit events still apply.
+Channel agents receive the same Read permission used for other saved uploads.
+
+Unit coverage: `test_codex_runtime.py` (initial/resumed argv, validation and
+lifetime), `test_web_file_upload.py` (original bytes, failure, isolation), and
+`test_channel_upload_lifetime.py` (terminal cleanup, active-task retention,
+interrupted preparation and repeated cancellation).

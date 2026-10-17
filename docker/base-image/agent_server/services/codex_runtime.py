@@ -34,17 +34,21 @@ Codex specifics:
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import os
 import re
 import subprocess
+import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from fastapi import HTTPException
 
@@ -727,6 +731,53 @@ def _surface_unmapped_guardrails(allowed_tools: Optional[List[str]]) -> None:
         )
 
 
+_IMAGE_EXTENSIONS = {
+    "image/jpeg": ".jpg", "image/png": ".png",
+    "image/gif": ".gif", "image/webp": ".webp",
+}
+_MAX_IMAGES = 10
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+_MAX_TOTAL_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+@contextmanager
+def _image_files(images: Optional[List[Dict]]) -> Iterator[List[str]]:
+    """Materialize bounded vision payloads only for this execution's lifetime."""
+    if not images:
+        yield []
+        return
+    if not isinstance(images, list) or len(images) > _MAX_IMAGES:
+        raise HTTPException(status_code=400, detail="At most 10 images are supported")
+    # TemporaryDirectory uses mode 0700 and a random name, independent of the
+    # caller's execution/session id. Partial writes and cancelled awaits clean up.
+    with tempfile.TemporaryDirectory(prefix="trinity-codex-images-") as directory:
+        paths = []
+        total = 0
+        for index, image in enumerate(images):
+            if not isinstance(image, dict):
+                raise HTTPException(status_code=400, detail="Invalid image payload")
+            media_type = image.get("media_type")
+            extension = _IMAGE_EXTENSIONS.get(media_type) if isinstance(media_type, str) else None
+            encoded = image.get("data")
+            if not extension or not isinstance(encoded, str) or not encoded:
+                raise HTTPException(status_code=400, detail="Expected a base64 JPEG, PNG, GIF or WebP image")
+            if len(encoded) > 4 * ((_MAX_IMAGE_BYTES + 2) // 3):
+                raise HTTPException(status_code=400, detail="Image exceeds 5 MiB limit")
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error):
+                raise HTTPException(status_code=400, detail="Invalid image base64") from None
+            total += len(data)
+            if not data or len(data) > _MAX_IMAGE_BYTES or total > _MAX_TOTAL_IMAGE_BYTES:
+                raise HTTPException(status_code=400, detail="Image size limits exceeded (5 MiB each, 10 MiB total)")
+            path = os.path.join(directory, f"{index}{extension}")
+            with open(path, "xb") as output:
+                os.chmod(path, 0o600)
+                output.write(data)
+            paths.append(path)
+        yield paths
+
+
 def _compose_prompt(system_prompt: Optional[str], prompt: str) -> str:
     """Codex ``exec`` has no system-prompt flag, so the effective platform
     prompt (platform instructions + execution context + caller prompt, always
@@ -1125,6 +1176,7 @@ class CodexRuntime(AgentRuntime):
         result_file: str,
         agent_home: str,
         resume_thread_id: Optional[str],
+        image_paths: Optional[List[str]] = None,
     ) -> List[str]:
         cmd = ["codex", "exec"]
         # Exec-level flags belong to `codex exec`, NOT to the `resume`
@@ -1153,6 +1205,10 @@ class CodexRuntime(AgentRuntime):
         # thread. Emitted AFTER the exec-level flags above (narrower arg set).
         if resume_thread_id:
             cmd += ["resume", resume_thread_id]
+        # Resume consumes its own image options; exec-level images are not
+        # attached to the resumed turn. Keep these after the subcommand.
+        for image_path in image_paths or []:
+            cmd += ["--image", image_path]
         # End-of-options separator (review I3): the caller appends the prompt as
         # the next (positional) token — for a resume it is resume's PROMPT arg —
         # so a prompt starting with "-"/"--" can never be reparsed as a flag
@@ -1172,6 +1228,7 @@ class CodexRuntime(AgentRuntime):
         allowed_tools: Optional[List[str]],
         execution_id: Optional[str],
         concurrent_reader: bool = False,
+        image_paths: Optional[List[str]] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict], Optional[str]]:
         execution_id = execution_id or str(uuid.uuid4())
 
@@ -1210,6 +1267,7 @@ class CodexRuntime(AgentRuntime):
             result_file=result_file,
             agent_home=_AGENT_HOME,
             resume_thread_id=resume_thread_id,
+            image_paths=image_paths,
         )
         cmd.append(composed_prompt)
 
@@ -1356,19 +1414,49 @@ class CodexRuntime(AgentRuntime):
                     loop.run_in_executor(reader_executor, read_subprocess_output),
                     timeout=timeout_seconds + 60,
                 )
-            except asyncio.TimeoutError:
-                logger.error(
-                    "[Codex] outer timeout on %s — killing group as last resort",
-                    execution_id,
-                )
-                await loop.run_in_executor(
+            except asyncio.CancelledError:
+                # Keep the execution registered and its image files available
+                # until the child has been terminated. Repeated cancellation
+                # must not abandon this bounded process-group cleanup.
+                cleanup = loop.run_in_executor(
                     None,
                     lambda: _terminate_process_group(
                         process, graceful_timeout=2, pgid=process_pgid,
                         execution_tag=execution_id,
                     ),
                 )
-                await loop.run_in_executor(None, _safe_close_pipes, process)
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        pass
+                cleanup.result()
+                raise
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[Codex] outer timeout on %s — killing group as last resort",
+                    execution_id,
+                )
+                def stop_timed_out_process():
+                    _terminate_process_group(
+                        process, graceful_timeout=2, pgid=process_pgid,
+                        execution_tag=execution_id,
+                    )
+                    _safe_close_pipes(process)
+
+                # Cancellation inside this handler bypasses the sibling
+                # CancelledError handler. Settle termination before leaving
+                # the image-file scope, even under repeated cancellation.
+                cleanup = loop.run_in_executor(None, stop_timed_out_process)
+                cancelled = False
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                cleanup.result()
+                if cancelled:
+                    raise asyncio.CancelledError
                 raise HTTPException(
                     status_code=504,
                     detail=f"Codex execution timed out after {timeout_seconds} seconds",
@@ -1499,8 +1587,6 @@ class CodexRuntime(AgentRuntime):
                 status_code=503,
                 detail="Codex CLI is not available in this container",
             )
-        if images:
-            logger.warning("[Codex] images are not supported in the MVP — ignoring")
         if max_turns is not None:
             logger.info(
                 "[Codex] max_turns=%s requested; Codex exec has no turn cap CLI "
@@ -1509,16 +1595,18 @@ class CodexRuntime(AgentRuntime):
             )
 
         try:
-            response, log, metadata, raw, session_id = await self._execute_codex(
-                prompt=prompt,
-                model=model,
-                system_prompt=system_prompt,
-                resume_thread_id=resume_session_id,
-                timeout_seconds=timeout_seconds,
-                allowed_tools=allowed_tools,
-                execution_id=execution_id,
-                concurrent_reader=True,  # /api/task runs concurrently → default reader
-            )
+            with _image_files(images) as image_paths:
+                response, log, metadata, raw, session_id = await self._execute_codex(
+                    prompt=prompt,
+                    model=model,
+                    system_prompt=system_prompt,
+                    resume_thread_id=resume_session_id,
+                    timeout_seconds=timeout_seconds,
+                    allowed_tools=allowed_tools,
+                    execution_id=execution_id,
+                    image_paths=image_paths,
+                    concurrent_reader=True,  # /api/task runs concurrently → default reader
+                )
         except HTTPException:
             raise
         except TimeoutError as exc:

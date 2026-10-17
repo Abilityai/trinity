@@ -459,7 +459,7 @@ class TestFileDeliveryFormat:
         container = MagicMock()
         router = ChannelMessageRouter()
 
-        with patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
+        with patch("services.upload_service.container_exec_run", new=AsyncMock(return_value=(0, b""))), \
              patch("services.upload_service.container_put_archive", new=AsyncMock(return_value=True)), \
              patch("services.upload_service.platform_audit_service") as mock_audit:
             mock_audit.log = AsyncMock()
@@ -497,7 +497,7 @@ class TestFileDeliveryFormat:
         container = MagicMock()
         router = ChannelMessageRouter()
 
-        with patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
+        with patch("services.upload_service.container_exec_run", new=AsyncMock(return_value=(0, b""))), \
              patch("services.upload_service.container_put_archive", new=AsyncMock(return_value=True)), \
              patch("services.upload_service.platform_audit_service") as mock_audit:
             mock_audit.log = AsyncMock()
@@ -541,7 +541,7 @@ class TestFileDeliveryFailures:
         container = MagicMock()
         router = ChannelMessageRouter()
 
-        with patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
+        with patch("services.upload_service.container_exec_run", new=AsyncMock(return_value=(0, b""))), \
              patch("services.upload_service.container_put_archive", new=AsyncMock(return_value=False)), \
              patch("services.upload_service.platform_audit_service") as mock_audit:
             mock_audit.log = AsyncMock()
@@ -583,7 +583,7 @@ class TestFileDeliveryFailures:
         # First put_archive call succeeds, second fails
         put_mock = AsyncMock(side_effect=[True, False])
 
-        with patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
+        with patch("services.upload_service.container_exec_run", new=AsyncMock(return_value=(0, b""))), \
              patch("services.upload_service.container_put_archive", new=put_mock), \
              patch("services.upload_service.platform_audit_service") as mock_audit:
             mock_audit.log = AsyncMock()
@@ -621,7 +621,7 @@ class TestFileDeliveryFailures:
         container = MagicMock()
         router = ChannelMessageRouter()
 
-        with patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
+        with patch("services.upload_service.container_exec_run", new=AsyncMock(return_value=(0, b""))), \
              patch("services.upload_service.container_put_archive", new=AsyncMock(return_value=True)), \
              patch("services.upload_service.platform_audit_service") as mock_audit:
             mock_audit.log = AsyncMock()

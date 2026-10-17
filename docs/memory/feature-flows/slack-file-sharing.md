@@ -2,7 +2,7 @@
 
 ## Overview
 
-Slack users can upload files (images, text, CSV, JSON, etc.) alongside messages. Images are embedded as base64 for Claude vision. Text files are copied into the agent container for reading.
+Slack users can upload files (images, text, CSV, JSON, etc.) alongside messages. All accepted attachments are saved as original bytes in the agent container. Images are also passed as vision data to the selected runtime (Claude content blocks or Codex native `--image` options).
 
 ## User Story
 
@@ -36,9 +36,9 @@ process_file_uploads() for each file:
   │     truncation + collision dedup (-1, -2, …) (#487)
   ├── size check against limit
   ├── magic-byte MIME validation (python-magic, graceful fallback)
-  ├── Image? → base64 vision block → image_data list (via stream-json)
-  └── Text?  → tar archive → container_put_archive to uploads/{session_id}/
-              → "[File uploaded by {uploader}]: name (size) saved to {path}"
+  ├── Every accepted attachment → tar archive → container_put_archive to uploads/{dispatch_uuid}/
+  │           → "[File uploaded by {uploader}]: name (size) saved to {path}"
+  └── Image with successful storage? → base64 vision data → image_data list
   ↓
 If every workspace write attempt failed → reply
   "Sorry, I couldn't save the file(s) you sent…" and abort execution (#487 AC6)
@@ -46,10 +46,12 @@ If every workspace write attempt failed → reply
 Context prompt += per-file lines (no extra header — each line self-describes)
   ↓
 Step 9: TaskExecutionService.execute_task()
-  - Images: no extra tools needed (base64 in prompt)
-  - Text files: Read added to allowed_tools
+  - Images: vision data passed to the selected runtime
+  - Saved attachments, including images: Read added to allowed_tools
   ↓
-Step 14: _cleanup_uploads() → rm -rf uploads/{session_id}/
+Finally: when execution is known terminal (or was not dispatched),
+  _cleanup_uploads() → rm -rf uploads/{dispatch_uuid}/
+  Active or unknown execution state → retain originals for operator cleanup
 ```
 
 ## Frontend Layer
@@ -81,7 +83,7 @@ No frontend changes. File handling is entirely backend (Slack → adapter → ro
   `adapter.get_source_identifier(message)`
 - All-writes-failed handling: when every write attempt fails, reply via
   channel with explicit error and skip agent execution (#487 AC6)
-- Cleanup on all exit paths (success, task failure, exception, all-failed abort)
+- Cleanup after known terminal outcomes or before dispatch; active or unknown execution state retains originals
 
 ### Upload Service (`services/upload_service.py`) — shared since #364
 - `process_file_uploads()` — core logic: sanitize, size-check, MIME-validate, image/file dispatch
@@ -91,7 +93,7 @@ No frontend changes. File handling is entirely backend (Slack → adapter → ro
 - Image budget: `CHANNEL_MAX_IMAGE_SIZE=5MB`, `CHANNEL_MAX_TOTAL_IMAGE_SIZE=10MB`
 - Unsupported MIME rejection: PDF, ZIP, tar, gzip, rar, video/*, audio/*
 - Magic-byte MIME validation via python-magic (graceful fallback if unavailable)
-- Session ID sanitized with `re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)` for shell safety
+- Storage directory uses a generated UUID (`uuid.uuid4().hex`), not caller-supplied session text, for shell safety and dispatch isolation
 
 ### Slack Service (`services/slack_service.py`)
 - `download_file(bot_token, url, max_size)`: GET with Authorization header, follow redirects, 10MB cap
@@ -102,8 +104,8 @@ No frontend changes. File handling is entirely backend (Slack → adapter → ro
 
 ## Side Effects
 
-- Files temporarily written to agent container at `/home/developer/uploads/{session_id}/`
-- Cleaned up after execution via `rm -rf`
+- Original attachment bytes written to a unique agent-container directory at `/home/developer/uploads/{dispatch_uuid}/`
+- The router attempts removal after a known terminal outcome or before dispatch. Active or unknown execution state retains originals for operator cleanup; cleanup errors can also retain files. See [Codex uploaded images](codex-runtime.md#uploaded-images) for cancellation and retention details
 - Rate limit buckets tracked in memory (pruned every 5 min)
 
 ## Error Handling
@@ -129,8 +131,8 @@ No frontend changes. File handling is entirely backend (Slack → adapter → ro
   rejection (#487)
 - **Filename length**: capped at 200 chars, extension preserved
 - **Filename collision**: per-message dedup with `-1`, `-2`, … suffix (#487)
-- **Shell injection**: Session ID sanitized before use in `rm -rf` / `mkdir -p` commands
-- **Allowed tools escalation**: `Read` only added for non-image files. Images use base64 (no tool needed). Agent can still read `.env` with Read — accepted trade-off for now.
+- **Shell injection**: Storage and cleanup paths use a generated dispatch UUID rather than caller-supplied session text
+- **Allowed tools escalation**: `Read` is added for saved attachments, including image originals. Images also receive vision data. Agent can still read `.env` with Read — accepted trade-off for now.
 - **Rate limiting**: Separate file upload rate limit (5/min) in addition to message rate limit (30/min)
 - **Size limits**: 5MB/image inline, 10MB/file container, 10MB total images, max 10 files
 - **Audit trail**: Every successful upload logs `dest_path`, `storage`, and
