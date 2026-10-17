@@ -402,6 +402,8 @@ _EXEMPT = {
         "the terminal websocket authenticates a person, never an agent key",
     ("client_portal/service.py", "*"):
         "portal principals are people; agent keys never reach the client portal",
+    ("services/turn_tier_service.py", "turn_tier"):
+        "judges the person who started a turn, never the calling key; the only caller is the route that accepts the agent's own key and a path self-match (ent#926)",
     ("services/skill_gate_service.py", "_openable_run"):
         "takes a person's username: the operator queue calls it for person principals only, the Workspace for a platform person (#3708)",
     ("services/skill_gate_service.py", "_can_open"):

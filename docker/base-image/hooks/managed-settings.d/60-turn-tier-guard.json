@@ -1,0 +1,24 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit|MultiEdit|Read|NotebookRead|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env",
+            "args": [
+              "-i",
+              "HOME=/home/developer",
+              "/usr/local/bin/python3",
+              "-I",
+              "-S",
+              "/opt/trinity/hooks/turn-tier-guard.py"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

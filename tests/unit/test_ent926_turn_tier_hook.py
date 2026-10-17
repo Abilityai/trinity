@@ -1,0 +1,259 @@
+"""The in-container guard: a shared person's turn does not do through the agent
+what the Files API refuses them (ent#926).
+
+Drives `docker/base-image/hooks/turn-tier-guard.py` the way Claude Code does
+(stdin JSON, exit 0 = allow, 2 = deny) with the platform's answer and the
+claude process's launch environment stubbed, plus one real HTTP round trip for
+the lookup itself. The policy it enforces is the Files API's own
+(`file_path_policy.py`, a byte-identical third copy).
+"""
+from __future__ import annotations
+
+import http.server
+import importlib.util
+import json
+import sys
+import threading
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+_REPO = Path(__file__).resolve().parents[2]
+_HOOKS = _REPO / "docker/base-image/hooks"
+_BACKEND_POLICY = _REPO / "src/backend/services/file_path_policy.py"
+
+
+def _load(name, path):
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture(scope="module")
+def hook():
+    """The hook as the image runs it. Its `lib` and `file_path_policy` imports are
+    served from the repo copies for the length of the module only: monkeypatch
+    puts back whatever was in sys.modules, so nothing leaks into other tests."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.syspath_prepend(str(_HOOKS))
+        mp.setitem(sys.modules, "lib", _load("lib", _HOOKS / "lib.py"))
+        mp.setitem(sys.modules, "file_path_policy", _load("file_path_policy", _HOOKS / "file_path_policy.py"))
+        yield _load("_turn_tier_guard", _HOOKS / "turn-tier-guard.py")
+
+
+def run(hook, monkeypatch, tool, tool_input, *, run_id="exec-1", tier="share"):
+    """Returns (exit code, asked) where asked says whether the platform was asked."""
+    asked = []
+    monkeypatch.setattr(hook, "read_stdin_json", lambda: {"tool_name": tool, "tool_input": tool_input})
+    monkeypatch.setattr(hook, "read_environ", lambda pid: (
+        {"TRINITY_EXECUTION_ID": run_id} if run_id else {}) if pid != 1 else
+        {"AGENT_NAME": "agent-a", "TRINITY_MCP_API_KEY": "k"})
+
+    def fake_ask(container, agent, run_):
+        asked.append((agent, run_))
+        return tier
+    monkeypatch.setattr(hook, "ask_tier", fake_ask)
+    monkeypatch.setattr(hook, "log_event", lambda *a, **k: None)
+    with pytest.raises(SystemExit) as exc:
+        hook.run_hook(hook.main)
+    return exc.value.code, asked
+
+
+# ---- the decision ------------------------------------------------------------------------
+
+def test_an_ordinary_write_is_allowed_without_asking_anyone(hook, monkeypatch):
+    code, asked = run(hook, monkeypatch, "Write", {"file_path": "/home/developer/workspace/a.py"})
+    assert (code, asked) == (0, [])
+
+
+@pytest.mark.parametrize("path", ["/home/developer/CLAUDE.md", "/home/developer/.claude/agents/a.md",
+                                  "/home/developer/.claude/skills/x/SKILL.md", "/home/developer/.bashrc",
+                                  "/home/developer/.local/lib/python3.13/site-packages/zz.pth"])
+@pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit"])
+def test_a_shared_persons_turn_cannot_rewrite_instructions_skills_or_startup_files(hook, monkeypatch, tool, path):
+    code, asked = run(hook, monkeypatch, tool, {"file_path": path}, tier="share")
+    assert code == 2 and asked == [("agent-a", "exec-1")]
+
+
+@pytest.mark.parametrize("path", ["/home/developer/CLAUDE.md", "/home/developer/.claude/skills/x/SKILL.md"])
+def test_the_owners_turn_may_edit_them(hook, monkeypatch, path):
+    code, asked = run(hook, monkeypatch, "Edit", {"file_path": path}, tier="owner")
+    assert code == 0 and len(asked) == 1
+
+
+@pytest.mark.parametrize("path", [
+    "/home/developer/.claude/projects/-home-developer/9f2c.jsonl",
+    "/home/developer/.claude/history.jsonl",
+    "/home/developer/.codex/sessions/2026/10/16/rollout.jsonl",
+    "/home/developer/.netrc", "/home/developer/.env"])
+@pytest.mark.parametrize("tool", ["Read", "NotebookRead"])
+def test_a_shared_persons_turn_cannot_read_transcripts_or_credentials(hook, monkeypatch, tool, path):
+    code, _ = run(hook, monkeypatch, tool, {"file_path": path}, tier="share")
+    assert code == 2
+
+
+def test_the_owners_turn_may_read_a_transcript(hook, monkeypatch):
+    code, _ = run(hook, monkeypatch, "Read", {"file_path": "/home/developer/.claude/history.jsonl"}, tier="owner")
+    assert code == 0
+
+
+def test_project_memory_stays_readable(hook, monkeypatch):
+    code, asked = run(hook, monkeypatch, "Read",
+                      {"file_path": "/home/developer/.claude/projects/-home-developer/memory/notes.md"})
+    assert (code, asked) == (0, [])
+
+
+@pytest.mark.parametrize("tool,tool_input", [
+    ("Grep", {"path": "/home/developer/.claude/projects", "pattern": "x"}),
+    ("Glob", {"path": "/home/developer/.claude", "pattern": "**/*.jsonl"}),
+    ("Grep", {"path": "/home/developer/.claude/history.jsonl", "pattern": "x"}),
+])
+def test_search_tools_aimed_at_owner_only_paths_are_refused_for_a_shared_turn(hook, monkeypatch, tool, tool_input):
+    code, _ = run(hook, monkeypatch, tool, tool_input, tier="share")
+    assert code == 2
+
+
+def test_a_search_with_no_path_asks_nobody(hook, monkeypatch):
+    assert run(hook, monkeypatch, "Grep", {"pattern": "x"}) == (0, [])
+
+
+@pytest.mark.parametrize("answer", ["unknown", "unreachable"])
+def test_an_unknown_turn_or_no_answer_fails_closed_on_an_owner_only_path(hook, monkeypatch, answer):
+    code, _ = run(hook, monkeypatch, "Write", {"file_path": "/home/developer/CLAUDE.md"}, tier=answer)
+    assert code == 2
+
+
+def test_no_answer_never_blocks_an_ordinary_path(hook, monkeypatch):
+    code, asked = run(hook, monkeypatch, "Write", {"file_path": "/home/developer/notes.md"}, tier="unreachable")
+    assert (code, asked) == (0, [])
+
+
+def test_no_execution_id_means_no_platform_turn_and_allows(hook, monkeypatch):
+    code, asked = run(hook, monkeypatch, "Write", {"file_path": "/home/developer/CLAUDE.md"}, run_id=None)
+    assert (code, asked) == (0, [])
+
+
+def test_a_relative_path_is_anchored_at_home(hook, monkeypatch):
+    code, _ = run(hook, monkeypatch, "Write", {"file_path": "CLAUDE.md"}, tier="share")
+    assert code == 2
+
+
+def test_tilde_and_dotdot_spellings_do_not_get_around_it(hook, monkeypatch):
+    for raw in ("~/CLAUDE.md", "/home/developer/workspace/../CLAUDE.md", "//home/developer/CLAUDE.md"):
+        code, _ = run(hook, monkeypatch, "Write", {"file_path": raw}, tier="share")
+        assert code == 2, raw
+
+
+def test_a_link_into_an_owner_only_path_is_judged_by_where_it_lands(hook, monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    (home / "workspace").mkdir(parents=True)
+    (home / "CLAUDE.md").write_text("x")
+    (home / "workspace" / "link").symlink_to(home / "CLAUDE.md")
+    monkeypatch.setattr(hook, "HOME", str(home))
+    import file_path_policy as policy
+    real = policy.decide
+    monkeypatch.setattr(policy, "decide", lambda tier, verb, path, home_=str(home): real(tier, verb, path, home_))
+    code, _ = run(hook, monkeypatch, "Write", {"file_path": str(home / "workspace" / "link")}, tier="share")
+    assert code == 2
+
+
+def test_other_tools_are_none_of_its_business(hook, monkeypatch):
+    assert run(hook, monkeypatch, "Bash", {"command": "cat ~/CLAUDE.md"}) == (0, [])
+
+
+# ---- the lookup itself, over real HTTP -----------------------------------------------------
+
+class _Platform(http.server.BaseHTTPRequestHandler):
+    status, body, seen = 200, b'{"tier": "share"}', []
+
+    def do_GET(self):  # noqa: N802
+        type(self).seen.append((self.path, self.headers.get("Authorization")))
+        self.send_response(type(self).status)
+        self.send_header("Content-Length", str(len(type(self).body)))
+        self.end_headers()
+        self.wfile.write(type(self).body)
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture()
+def platform():
+    _Platform.status, _Platform.body, _Platform.seen = 200, b'{"tier": "share"}', []
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Platform)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server, f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+
+
+def _container(url):
+    return {"TRINITY_MCP_API_KEY": "the-key", "TRINITY_BACKEND_URL": url}
+
+
+def test_the_lookup_sends_the_agents_own_key_to_the_turn_tier_route(hook, platform):
+    _, url = platform
+    assert hook.ask_tier(_container(url), "agent-a", "exec-1") == "share"
+    assert _Platform.seen == [("/api/agents/agent-a/executions/exec-1/turn-tier", "Bearer the-key")]
+
+
+@pytest.mark.parametrize("status,body,expected", [
+    (200, b'{"tier": "owner"}', "owner"),
+    (404, b'{"detail": "x"}', "unknown"),
+    (403, b"{}", "unreachable"),
+    (500, b"{}", "unreachable"),
+    (200, b"not json", "unreachable"),
+    (200, b'{"tier": "admin"}', "unreachable"),
+    (200, b'["owner"]', "unreachable"),
+])
+def test_the_lookup_reads_only_a_clean_owner_or_share_answer(hook, platform, status, body, expected):
+    _, url = platform
+    _Platform.status, _Platform.body = status, body
+    assert hook.ask_tier(_container(url), "agent-a", "exec-1") == expected
+
+
+def test_an_unreachable_platform_is_no_answer_not_an_owner(hook):
+    assert hook.ask_tier(_container("http://127.0.0.1:9"), "agent-a", "exec-1") == "unreachable"
+
+
+def test_a_missing_key_or_agent_is_no_answer(hook):
+    assert hook.ask_tier({}, "agent-a", "e") == "unreachable"
+    assert hook.ask_tier({"TRINITY_MCP_API_KEY": "k"}, "", "e") == "unreachable"
+
+
+def test_ids_are_percent_encoded_into_the_path(hook, platform):
+    _, url = platform
+    hook.ask_tier(_container(url), "agent-a", "../../x?y")
+    assert _Platform.seen[-1][0] == "/api/agents/agent-a/executions/..%2F..%2Fx%3Fy/turn-tier"
+
+
+# ---- wiring ---------------------------------------------------------------------------------
+
+def test_the_hooks_policy_copy_is_byte_identical_to_the_backends():
+    assert (_HOOKS / "file_path_policy.py").read_bytes() == _BACKEND_POLICY.read_bytes(), (
+        "copy src/backend/services/file_path_policy.py to docker/base-image/hooks/file_path_policy.py")
+
+
+def test_the_drop_in_registers_the_guard_in_exec_form_for_the_file_tools():
+    drop_in = json.loads((_HOOKS / "managed-settings.d/60-turn-tier-guard.json").read_text())
+    (entry,) = drop_in["hooks"]["PreToolUse"]
+    assert set(entry["matcher"].split("|")) == {"Edit", "Write", "NotebookEdit", "MultiEdit",
+                                                "Read", "NotebookRead", "Grep", "Glob"}
+    (h,) = entry["hooks"]
+    assert h["command"] == "/usr/bin/env"
+    assert h["args"] == ["-i", "HOME=/home/developer", "/usr/local/bin/python3", "-I", "-S",
+                         "/opt/trinity/hooks/turn-tier-guard.py"]
+
+
+def test_the_image_ships_the_hook_its_policy_and_the_drop_in_root_owned():
+    dockerfile = (_REPO / "docker/base-image/Dockerfile").read_text()
+    for line in ("COPY ./hooks/turn-tier-guard.py /opt/trinity/hooks/turn-tier-guard.py",
+                 "COPY ./hooks/file_path_policy.py /opt/trinity/hooks/file_path_policy.py",
+                 "COPY ./hooks/managed-settings.d/60-turn-tier-guard.json "
+                 "/etc/claude-code/managed-settings.d/60-turn-tier-guard.json",
+                 "/etc/claude-code/managed-settings.d/60-turn-tier-guard.json"):
+        assert line in dockerfile, line
+    assert "chmod 0555 /opt/trinity/hooks/*.py" in dockerfile and "chown -R root:root /opt/trinity" in dockerfile

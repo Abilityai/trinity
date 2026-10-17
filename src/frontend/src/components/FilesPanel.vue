@@ -35,10 +35,13 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 11v4m-2-2h4" />
             </svg>
           </button>
-          <label class="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 cursor-pointer whitespace-nowrap" title="Show hidden files">
+          <label class="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 cursor-pointer whitespace-nowrap" :title="hiddenWithheld ? HIDDEN_WITHHELD_NOTE : 'Show hidden files'">
+            <!-- ent#820: below the owner tier the server withholds hidden files;
+                 the toggle stays in place, disabled, and says why. -->
             <input
               type="checkbox"
               v-model="showHidden"
+              :disabled="hiddenWithheld"
               @change="loadFiles"
               class="rounded border-gray-300 dark:border-gray-600 dark:bg-gray-700 text-action-primary-600 focus:ring-action-primary-500 h-3.5 w-3.5"
             />
@@ -177,7 +180,7 @@
                   </button>
                   <button
                     @click="downloadFile"
-                    :disabled="downloading"
+                    :disabled="downloading || isReadRestricted"
                     class="inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-action-primary-500 disabled:opacity-50"
                   >
                     <svg class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -189,7 +192,7 @@
                     @click="showDeleteConfirm = true"
                     :disabled="deleting || isDeleteProtected"
                     class="inline-flex items-center px-3 py-2 border border-status-danger-300 dark:border-status-danger-600 rounded-md shadow-sm text-sm font-medium text-status-danger-700 dark:text-status-danger-400 bg-white dark:bg-gray-700 hover:bg-status-danger-50 dark:hover:bg-status-danger-900/20 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-status-danger-500 disabled:opacity-50"
-                    :title="isDeleteProtected ? 'Protected file cannot be deleted' : ''"
+                    :title="isDeleteProtected ? restrictionNote : ''"
                   >
                     <svg class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -199,8 +202,8 @@
                 </template>
               </div>
             </div>
-            <p v-if="isDeleteProtected && !isEditing" class="mt-2 text-xs text-status-warning-700 dark:text-status-warning-400">
-              This is a protected system file and cannot be deleted.
+            <p v-if="restrictionNote && !isEditing" class="mt-2 text-xs text-status-warning-700 dark:text-status-warning-400">
+              {{ restrictionNote }}
             </p>
             <p v-if="isEditing && hasUnsavedChanges" class="mt-2 text-xs text-status-urgent-700 dark:text-status-urgent-400">
               You have unsaved changes.
@@ -363,6 +366,11 @@ const showNewFolderModal = ref(false)
 const newFolderName = ref('')
 const creatingFolder = ref(false)
 const showHidden = ref(localStorage.getItem('filesPanel.showHidden') === 'true')
+// ent#820: what the server says this caller may do. `tier` is owner | share |
+// key; `hiddenWithheld` is true below the owner tier.
+const tier = ref(null)
+const hiddenWithheld = ref(false)
+const HIDDEN_WITHHELD_NOTE = "Hidden files are shown only to the agent's owner or an admin"
 
 // Folder is created inside the selected directory when one is selected,
 // otherwise at the workspace root.
@@ -377,11 +385,10 @@ const editContent = ref('')
 const saving = ref(false)
 const hasUnsavedChanges = ref(false)
 
-// Protected paths (cannot be deleted)
-const DELETE_PROTECTED_PATHS = ['CLAUDE.md', '.trinity', '.git', '.gitignore', '.env', '.mcp.json', '.mcp.json.template']
-
-// Edit protected paths (cannot be edited) - CLAUDE.md and .mcp.json ARE editable
-const EDIT_PROTECTED_PATHS = ['.trinity', '.git', '.gitignore', '.env', '.mcp.json.template']
+// ent#820: which verbs this caller cannot use on a node comes from the server
+// (`restricted` on each listed node, from the one backend path policy) — this
+// panel keeps no path list of its own.
+const isRestricted = (verb) => !!selectedFile.value?.restricted?.includes(verb)
 
 // Computed
 const totalFiles = computed(() => {
@@ -430,17 +437,25 @@ const filteredTree = computed(() => {
   return filterItems(fileTree.value)
 })
 
-const isDeleteProtected = computed(() => {
-  if (!selectedFile.value) return false
-  const name = selectedFile.value.name
-  return DELETE_PROTECTED_PATHS.includes(name)
+const isDeleteProtected = computed(() => isRestricted('delete'))
+const isEditProtected = computed(() => isRestricted('write'))
+const isReadRestricted = computed(() => isRestricted('read'))
+
+// One line saying why an action is unavailable: below the owner tier it is the
+// share's limit, for the owner it is a protected system file.
+const restrictionNote = computed(() => {
+  if (!selectedFile.value || !(isDeleteProtected.value || isEditProtected.value || isReadRestricted.value)) return ''
+  if (selectedFile.value.type === 'link') return 'This is a link. Open the file it points to.'
+  if (tier.value === 'owner') return 'This is a protected system file and cannot be changed here.'
+  return "Only the agent's owner or an admin can change this. A share covers the agent's files except credentials, runtime config and its instructions."
 })
 
-const isEditProtected = computed(() => {
-  if (!selectedFile.value) return false
-  const name = selectedFile.value.name
-  return EDIT_PROTECTED_PATHS.includes(name)
-})
+// A refusal's detail is either a string or `{ code, message }` (ent#819/#820).
+const errorText = (e) => {
+  const detail = e.response?.data?.detail
+  if (detail && typeof detail === 'object') return detail.message || detail.code || e.message
+  return detail || e.message
+}
 
 // Text file extensions that can be edited
 const TEXT_EXTENSIONS = [
@@ -464,12 +479,14 @@ const loadFiles = async () => {
 
   loading.value = true
   error.value = null
-  localStorage.setItem('filesPanel.showHidden', showHidden.value)
+  if (!hiddenWithheld.value) localStorage.setItem('filesPanel.showHidden', showHidden.value)
   try {
     const data = await agentsStore.listAgentFiles(props.agentName, '/home/developer', showHidden.value)
     fileTree.value = data.tree || []
+    tier.value = data.tier || null
+    hiddenWithheld.value = !!data.hidden_withheld
   } catch (e) {
-    error.value = e.response?.data?.detail || e.message
+    error.value = errorText(e)
     showNotification(`Failed to load files: ${error.value}`, 'error')
   } finally {
     loading.value = false
@@ -493,8 +510,10 @@ const onFileSelect = async (item) => {
   previewData.value = null
   previewError.value = null
 
-  if (item.type === 'file') {
+  if (item.type === 'file' && !item.restricted?.includes('read')) {
     await loadPreview(item)
+  } else if (item.type === 'file') {
+    previewError.value = "Only the agent's owner or an admin can open this file."
   }
 }
 
@@ -505,7 +524,7 @@ const loadPreview = async (file) => {
     const data = await agentsStore.getFilePreviewBlob(props.agentName, file.path)
     previewData.value = data
   } catch (e) {
-    previewError.value = e.response?.data?.detail || e.message
+    previewError.value = errorText(e)
   } finally {
     previewLoading.value = false
   }
@@ -537,7 +556,7 @@ const downloadFile = async () => {
 
     showNotification(`Downloaded ${selectedFile.value.name}`)
   } catch (e) {
-    showNotification(`Failed to download: ${e.response?.data?.detail || e.message}`, 'error')
+    showNotification(`Failed to download: ${errorText(e)}`, 'error')
   } finally {
     downloading.value = false
   }
@@ -560,7 +579,7 @@ const deleteFile = async () => {
     previewData.value = null
     await loadFiles()
   } catch (e) {
-    const errorMsg = e.response?.data?.detail || e.message
+    const errorMsg = errorText(e)
     showNotification(`Failed to delete: ${errorMsg}`, 'error')
   } finally {
     deleting.value = false
@@ -588,7 +607,7 @@ const createFolder = async () => {
     showNewFolderModal.value = false
     await loadFiles()
   } catch (e) {
-    const errorMsg = e.response?.data?.detail || e.message
+    const errorMsg = errorText(e)
     showNotification(`Failed to create folder: ${errorMsg}`, 'error')
   } finally {
     creatingFolder.value = false
@@ -642,7 +661,7 @@ const saveFile = async () => {
 
     await loadPreview(selectedFile.value)
   } catch (e) {
-    const errorMsg = e.response?.data?.detail || e.message
+    const errorMsg = errorText(e)
     showNotification(`Failed to save: ${errorMsg}`, 'error')
   } finally {
     saving.value = false
