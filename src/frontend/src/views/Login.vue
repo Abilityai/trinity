@@ -142,7 +142,26 @@
             <!-- Step 2: Enter Code -->
             <div v-else>
               <div class="mb-4">
-                <p class="text-sm text-gray-600 dark:text-gray-400">
+                <!-- #3655: with no email provider the code is only in the backend
+                     log. Say so, and never render the code itself. -->
+                <div
+                  v-if="authStore.emailDeliveryAvailable === false"
+                  class="rounded-lg px-3 py-2 text-sm bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-500/15 dark:text-status-warning-300"
+                  data-testid="login-no-email-provider"
+                  role="status"
+                >
+                  <p class="font-medium">No email provider is configured on this install, so no email was sent.</p>
+                  <p class="mt-1">
+                    If {{ emailInput }} may sign in here, its code was written to the backend
+                    log. Read it with <code class="font-mono">docker compose logs backend</code>.
+                  </p>
+                  <p class="mt-1">
+                    An admin can sign in with Admin Login and a password, and add an email
+                    provider under Settings → Integrations.
+                  </p>
+                  <BaseButton size="sm" variant="secondary" class="mt-2" @click="useAdminLogin">Admin Login</BaseButton>
+                </div>
+                <p v-else class="text-sm text-gray-600 dark:text-gray-400">
                   📧 We sent a 6-digit code to <strong class="text-gray-900 dark:text-white">{{ emailInput }}</strong>
                 </p>
                 <p v-if="countdown > 0" class="text-xs text-gray-500 dark:text-gray-400 mt-1">
@@ -290,6 +309,7 @@ import { useAuthStore } from '../stores/auth'
 import { landingAfterSignIn } from '../utils/workspaceOnly'
 import { HELP_CLASS } from '../components/base/fieldClasses'
 import QrCode from '../components/QrCode.vue'
+import BaseButton from '../components/base/BaseButton.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -419,6 +439,12 @@ const handleBackToEmail = () => {
     countdownInterval.value = null
   }
   countdown.value = 0
+}
+
+// #3655: from the no-email-provider notice straight to the password form.
+const useAdminLogin = () => {
+  handleBackToEmail()
+  showAdminLogin.value = true
 }
 
 // Initialize on mount
