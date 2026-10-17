@@ -645,9 +645,11 @@ export async function runAgentChat(
 
   // #3244: a 429 that is not the admission refusal — the run may have started
   // (or ran and failed). A result the model reads, never "wait and retry".
+  // #3295: the caller holds this outcome and the row was never armed, so it
+  // reads as answered inline, never `requested`.
   if (isRateLimitedRun(response)) {
     console.log(`[Rate Limited] Agent '${agent_name}' answered 429 after dispatch, execution_id=${response.execution_id ?? "unknown"} (#3244)`);
-    return JSON.stringify(withReportBack(response, reportBack.fields), null, 2);
+    return JSON.stringify(withReportBack(response, chatRouteFields(reportBack, "inline")), null, 2);
   }
 
   // Check if response is a queue status (agent busy)
