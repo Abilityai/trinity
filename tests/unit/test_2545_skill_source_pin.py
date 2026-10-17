@@ -115,7 +115,7 @@ def test_default_pin_is_at_least_the_floor_release():
         f"DEFAULT_SKILL_SOURCE_REF={ref!r} is below the floor {floor}. A fresh install "
         "would seed a catalog whose `project-status` never raises an ask "
         "(`invalid_request_id`) and whose `add-pipeline` teaches an escalation title "
-        "cap the platform refuses (#3430). Fix: move the pin in {_PIN_FILES} together, then re-run the "
+        f"cap the platform refuses (#3430). Fix: move the pin in {_PIN_FILES} together, then re-run the "
         "membership check in the _FLOOR comment against the new tag."
     )
 
