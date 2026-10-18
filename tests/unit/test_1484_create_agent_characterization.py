@@ -234,7 +234,8 @@ def _load_crud(monkeypatch, docker_available=True):
     db.get_agents_by_owner.return_value = []
     db.get_guardrails_config.return_value = None
     db.create_agent_mcp_api_key.return_value = MagicMock(
-        api_key="trinity_mcp_test", key_prefix="trinity_mcp_te")
+        api_key="trinity_mcp_test", key_prefix="trinity_mcp_te",
+        id="attempt-key", username="eugene")
     db.get_git_config_agent_names_for_repo.return_value = []
     db.set_agent_github_pat.return_value = True
     db.get_shared_folder_config.return_value = None
@@ -1156,7 +1157,7 @@ async def test_case15_local_rollback_mcp_key_only(crud_env, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await crud.create_agent_internal(_local_config("rb-local"), _user(), None)
     assert exc.value.status_code == 500
-    ctx["db"].delete_agent_mcp_api_key.assert_called_once_with("rb-local")
+    ctx["db"].delete_mcp_api_key.assert_called_once_with("attempt-key", "eugene")
     ctx["db"].delete_git_config.assert_not_called()      # no git handle (local)
     ctx["ephemeral"].release_ephemeral_slot.assert_not_called()
     # ent#313: the container is now removed inline. This assertion used to read
@@ -1182,7 +1183,7 @@ async def test_case16_github_rollback_gitconfig_and_mcp_key(crud_env, monkeypatc
         await crud.create_agent_internal(_github_config("rb-gh"), _user(), None)
     assert exc.value.status_code == 500
     ctx["db"].delete_git_config.assert_called_once_with("rb-gh")
-    ctx["db"].delete_agent_mcp_api_key.assert_called_once_with("rb-gh")
+    ctx["db"].delete_mcp_api_key.assert_called_once_with("attempt-key", "eugene")
     ctx["ephemeral"].release_ephemeral_slot.assert_not_called()
 
 
@@ -1198,7 +1199,7 @@ async def test_case17_ephemeral_rollback_slot_and_mcp_key(crud_env, monkeypatch)
             _user(), None)
     assert exc.value.status_code == 500
     ctx["ephemeral"].release_ephemeral_slot.assert_called_once_with(7)
-    ctx["db"].delete_agent_mcp_api_key.assert_called_once()
+    ctx["db"].delete_mcp_api_key.assert_called_once()
     ctx["db"].delete_git_config.assert_not_called()      # no git handle
 
 
@@ -1218,7 +1219,7 @@ async def test_case18_gitconfig_not_rolled_back_without_instance_id(
         await crud.create_agent_internal(_github_config("rb-noiid"), _user(), None)
     assert exc.value.status_code == 500
     ctx["db"].delete_git_config.assert_not_called()
-    ctx["db"].delete_agent_mcp_api_key.assert_called_once_with("rb-noiid")
+    ctx["db"].delete_mcp_api_key.assert_called_once_with("attempt-key", "eugene")
 
 
 # ===========================================================================
@@ -1245,7 +1246,7 @@ async def test_case19_ephemeral_429_leaks_mcp_key(crud_env, monkeypatch):
     assert exc.value.status_code == 429
     assert exc.value.detail["code"] == "ephemeral_quota_exceeded"
     ctx["db"].create_agent_mcp_api_key.assert_called_once()      # minted...
-    ctx["db"].delete_agent_mcp_api_key.assert_not_called()        # ...never freed
+    ctx["db"].delete_mcp_api_key.assert_not_called()        # ...never freed
 
 
 # ===========================================================================
@@ -1270,7 +1271,7 @@ async def test_case20_no_docker_else_leaks_mcp_key_and_gitconfig(
             _user(), None)
     assert exc.value.status_code == 503
     ctx["ephemeral"].release_ephemeral_slot.assert_called_once_with(7)
-    ctx["db"].delete_agent_mcp_api_key.assert_not_called()   # leaked (preserved)
+    ctx["db"].delete_mcp_api_key.assert_not_called()   # leaked (preserved)
     ctx["db"].delete_git_config.assert_not_called()          # leaked (preserved)
 
 
@@ -1333,7 +1334,7 @@ async def test_case22_allocator_raise_rolls_back_gitconfig_and_mcp_key(
         await crud.create_agent_internal(_github_config("rb-alloc"), _user(), None)
     assert exc.value.status_code == 500
     ctx["db"].delete_git_config.assert_called_once_with("rb-alloc")
-    ctx["db"].delete_agent_mcp_api_key.assert_called_once_with("rb-alloc")
+    ctx["db"].delete_mcp_api_key.assert_called_once_with("attempt-key", "eugene")
     ctx["docker_utils"].containers_run.assert_not_awaited()
 
 
@@ -1788,7 +1789,7 @@ async def test_3722_cancel_after_registration_preserves_owned_runtime(crud_env, 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    ctx['db'].delete_agent_mcp_api_key.assert_not_called()
+    ctx['db'].delete_mcp_api_key.assert_not_called()
     ctx['db'].delete_git_config.assert_not_called()
     crud.remove_created_config_volume.assert_not_called()
     reclaim.assert_not_awaited()
@@ -1840,26 +1841,29 @@ async def test_3722_late_git_helper_failure_preserves_registered_agent(crud_env)
     with pytest.raises(HTTPException) as error:
         await crud.create_agent_internal(_local_config('late-failure'), _user())
     assert error.value.detail['code'] == 'AGENT_CREATED_SETUP_FAILED'
-    ctx['db'].delete_agent_mcp_api_key.assert_not_called()
+    ctx['db'].delete_mcp_api_key.assert_not_called()
     ctx['db'].delete_git_config.assert_not_called()
     crud.remove_created_config_volume.assert_not_called()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [None, 500])
-async def test_3722_unknown_container_outcome_retains_config_and_key(crud_env, monkeypatch, status):
+@pytest.mark.parametrize("status", [None, 404, 500])
+async def test_3722_lost_container_reply_reclaims_unregistered_attempt(crud_env, monkeypatch, status):
     from fastapi import HTTPException
+    from types import SimpleNamespace
     crud, ctx = crud_env
     failure = TimeoutError('synthetic lost reply')
     if status is not None:
-        from types import SimpleNamespace
         failure.response = SimpleNamespace(status_code=status)
+    target = SimpleNamespace(attrs={'Config': {'Labels': {'trinity.created': '2999-01-01T00:00:00Z'}}})
+    monkeypatch.setattr(crud, 'get_agent_container', lambda name: target)
     monkeypatch.setattr(crud, '_create_agent_container', AsyncMock(side_effect=failure))
     with pytest.raises(HTTPException) as error:
         await crud.create_agent_internal(_local_config('unknown-container'), _user())
-    assert error.value.detail['code'] == 'AGENT_CREATION_OUTCOME_UNCERTAIN'
-    ctx['db'].delete_agent_mcp_api_key.assert_not_called()
-    crud.remove_created_config_volume.assert_not_called()
+    assert error.value.status_code == 500
+    ctx['docker_utils'].container_remove.assert_awaited_once_with(target, force=True)
+    ctx['db'].delete_mcp_api_key.assert_called_once_with("attempt-key", "eugene")
+    crud.remove_created_config_volume.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -1873,7 +1877,7 @@ async def test_3722_unknown_ownership_retains_config_and_key(crud_env, monkeypat
     with pytest.raises(HTTPException) as error:
         await crud.create_agent_internal(_local_config('unknown-owner'), _user())
     assert error.value.detail['code'] == 'AGENT_CREATION_OUTCOME_UNCERTAIN'
-    ctx['db'].delete_agent_mcp_api_key.assert_not_called()
+    ctx['db'].delete_mcp_api_key.assert_not_called()
     crud.remove_created_config_volume.assert_not_called()
 
 
@@ -1891,7 +1895,7 @@ async def test_3722_definitive_daemon_error_keeps_native_rollback(crud_env, monk
     with pytest.raises(HTTPException) as error:
         await crud.create_agent_internal(_local_config('daemon-refusal'), _user())
     assert error.value.status_code == 500
-    ctx['db'].delete_agent_mcp_api_key.assert_called_once()
+    ctx['db'].delete_mcp_api_key.assert_called_once()
     reclaim.assert_awaited_once()
     crud.remove_created_config_volume.assert_called_once()
 
@@ -1909,8 +1913,8 @@ async def test_3722_canceled_conflicting_worker_never_reclaims_foreign_container
         failure.response = SimpleNamespace(status_code=409)
         raise failure
     monkeypatch.setattr(crud, '_create_agent_container', rejected)
-    reclaim = AsyncMock()
-    monkeypatch.setattr(crud, '_reclaim_failed_creation_container', reclaim)
+    target = SimpleNamespace(attrs={'Config': {'Labels': {'trinity.created': '2999-01-01T00:00:00Z'}}})
+    monkeypatch.setattr(crud, 'get_agent_container', lambda name: target)
     request = asyncio.create_task(crud.create_agent_internal(_local_config('foreign-name'), _user()))
     await entered.wait()
     request.cancel()
@@ -1918,9 +1922,11 @@ async def test_3722_canceled_conflicting_worker_never_reclaims_foreign_container
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await request
-    reclaim.assert_not_awaited()
-    ctx['db'].delete_agent_mcp_api_key.assert_not_called()
-    crud.remove_created_config_volume.assert_not_called()
+    # The settled 409 must reach the real provenance gate, not be erased by
+    # cancellation: even a same-name container with a recent timestamp is foreign.
+    ctx['docker_utils'].container_remove.assert_not_awaited()
+    ctx['db'].delete_mcp_api_key.assert_called_once_with("attempt-key", "eugene")
+    crud.remove_created_config_volume.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -1973,3 +1979,72 @@ async def test_2215_create_awaits_retry_wrapper(crud_env, monkeypatch, ephemeral
     wrapper.assert_awaited_once()
     raw_create.assert_awaited_once()
     assert wrapper.await_args.args[0] is raw_create.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_3722_existing_config_volume_returns_recovery_conflict(crud_env, monkeypatch):
+    from fastapi import HTTPException
+    from services.agent_service.config_volume import ConfigVolumeConflict
+    crud, ctx = crud_env
+    def provision(*args):
+        raise ConfigVolumeConflict("Existing configuration volume requires recovery")
+    monkeypatch.setattr(crud, 'create_config_volume', provision)
+    with pytest.raises(HTTPException) as error:
+        await crud.create_agent_internal(_local_config('leftover-config'), _user())
+    assert error.value.status_code == 409
+    assert error.value.detail['code'] == 'AGENT_CONFIG_VOLUME_CONFLICT'
+    ctx['docker_utils'].containers_run.assert_not_awaited()
+    crud.remove_created_config_volume.assert_not_called()
+    ctx['db'].delete_mcp_api_key.assert_called_once_with("attempt-key", "eugene")
+
+
+@pytest.mark.asyncio
+async def test_config_collision_preserves_concurrent_winner(crud_env, monkeypatch):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from services.agent_service.config_volume import ConfigVolumeConflict
+    crud, ctx = crud_env
+    winner = SimpleNamespace(attrs={"Config": {"Labels": {"trinity.created": "2999-01-01T00:00:00Z"}}})
+    monkeypatch.setattr(crud, "get_agent_container", lambda name: winner)
+    def conflict(*args):
+        raise ConfigVolumeConflict("Existing configuration volume requires recovery")
+    monkeypatch.setattr(crud, "create_config_volume", conflict)
+    with pytest.raises(HTTPException) as error:
+        await crud.create_agent_internal(_local_config("parallel-winner"), _user())
+    assert error.value.status_code == 409
+    ctx["docker_utils"].container_remove.assert_not_awaited()
+    ctx["db"].delete_mcp_api_key.assert_called_once_with("attempt-key", "eugene")
+    ctx["db"].delete_agent_mcp_api_key.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_canceled_config_collision_preserves_concurrent_winner(crud_env, monkeypatch):
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+    from services.agent_service.config_volume import ConfigVolumeConflict
+    crud, ctx = crud_env
+    started, release = threading.Event(), threading.Event()
+    winner = SimpleNamespace(attrs={"Config": {"Labels": {"trinity.created": "2999-01-01T00:00:00Z"}}})
+    monkeypatch.setattr(crud, "get_agent_container", lambda name: winner)
+    def provision(*args):
+        started.set()
+        assert release.wait(5)
+        raise ConfigVolumeConflict("Configuration volume already claimed")
+    monkeypatch.setattr(crud, "create_config_volume", provision)
+    task = asyncio.create_task(crud.create_agent_internal(_local_config("cancel-config-collision"), _user()))
+    try:
+        for _ in range(500):
+            if started.is_set():
+                break
+            await asyncio.sleep(.01)
+        assert started.is_set()
+        task.cancel()
+        await asyncio.sleep(.01)
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    ctx["docker_utils"].container_remove.assert_not_awaited()
+    ctx["db"].delete_mcp_api_key.assert_called_once_with("attempt-key", "eugene")
+    ctx["db"].delete_agent_mcp_api_key.assert_not_called()

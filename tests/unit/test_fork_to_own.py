@@ -741,7 +741,9 @@ async def test_fork_pat_persist_failure_rolls_back(crud_env, monkeypatch):
             _fork_config("f2o-rollback"), _user(), MagicMock())
     assert exc.value.status_code == 500
     ctx["db"].delete_git_config.assert_called_once_with("f2o-rollback")
-    ctx["db"].delete_agent_mcp_api_key.assert_called_once_with("f2o-rollback")
+    key = ctx["db"].create_agent_mcp_api_key.return_value
+    ctx["db"].delete_mcp_api_key.assert_called_once_with(key.id, key.username)
+    ctx["db"].delete_agent_mcp_api_key.assert_not_called()
     # The container was never created
     ctx["docker_utils"].containers_run.assert_not_called()
 

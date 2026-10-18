@@ -16,13 +16,17 @@ import uuid
 
 import docker
 
-_IMAGE = "alpine:3.20"
+_IMAGE = "trinity-agent-base:latest"
 _MAX_BYTES = 16 * 1024 * 1024
 _CLAIM_LABEL = "trinity.config-creation"
 
 
 class ConfigVolumeError(RuntimeError):
     pass
+
+
+class ConfigVolumeConflict(ConfigVolumeError):
+    """A preexisting or concurrently claimed volume requires recovery."""
 
 
 @dataclass(frozen=True)
@@ -105,7 +109,7 @@ def create_config_volume(client, agent_name, config, credentials, seeds):
     except docker.errors.NotFound:
         pass
     else:
-        raise ConfigVolumeError("Existing configuration volume requires recovery")
+        raise ConfigVolumeConflict("Existing configuration volume requires recovery")
     claim = uuid.uuid4().hex
     labels = agent_volume_labels(agent_name, "agent-config")
     labels[_CLAIM_LABEL] = claim
@@ -115,13 +119,12 @@ def create_config_volume(client, agent_name, config, credentials, seeds):
         # Docker create is idempotent by name. A concurrent creator's existing
         # volume must never be initialized or rolled back by this attempt.
         if (volume.attrs.get("Labels") or {}).get(_CLAIM_LABEL) != claim:
-            raise ConfigVolumeError("Configuration volume already claimed")
+            raise ConfigVolumeConflict("Configuration volume already claimed")
         helper = None
         try:
-            try:
-                client.images.get(_IMAGE)
-            except docker.errors.ImageNotFound:
-                client.images.pull(_IMAGE)
+            # Reuse the base image already required for agent creation. This
+            # archive-only container never starts and needs no registry access.
+            client.images.get(_IMAGE)
             helper = client.containers.create(
                 _IMAGE, command=["true"], network_mode="none",
                 labels=labels,

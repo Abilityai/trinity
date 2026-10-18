@@ -64,7 +64,7 @@ from .fork_to_own import (
     saved_token_not_for_agents,
 )
 from . import snapshot_import
-from .config_volume import create_config_volume, remove_created_config_volume, ConfigVolumeHandle
+from .config_volume import create_config_volume, remove_created_config_volume, ConfigVolumeHandle, ConfigVolumeConflict
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
 from .capabilities import (
@@ -3106,7 +3106,7 @@ def _rollback_failed_creation(handles: _RollbackHandles) -> None:
     # mcp_api_keys row (one per failed attempt). Roll it back too.
     if handles.agent_mcp_key:
         try:
-            db.delete_agent_mcp_api_key(handles.agent_name)
+            db.delete_mcp_api_key(handles.agent_mcp_key.id, handles.agent_mcp_key.username)
         except Exception as cleanup_exc:
             logger.warning(
                 "Failed to roll back MCP key for %s after creation "
@@ -3814,7 +3814,8 @@ async def create_agent_internal(
             # reclaim re-derives it by name under provenance gates.
             created_container = None
             registration_committed = False
-            container_outcome_known = True
+            container_failure = None
+            container_submitted = False
             try:
                 # Persist the resolved PAT as the per-agent PAT (#347) onto the
                 # agent_git_config row the reservation above just created. Inside
@@ -3900,6 +3901,7 @@ async def create_agent_internal(
                 auto_allocated_port = config.port is None
                 if config.port is None:
                     config.port = get_next_available_port()
+                container_submitted = True
                 container_request = _run_agent_container_with_port_retry(
                     config,
                     volumes,
@@ -3912,7 +3914,6 @@ async def create_agent_internal(
                 if config.ephemeral:
                     container = await container_request
                 else:
-                    container_outcome_known = False
                     container_task = asyncio.create_task(container_request)
                     try:
                         container = await asyncio.shield(container_task)
@@ -3928,22 +3929,12 @@ async def create_agent_internal(
                                 break
                         if not container_task.cancelled() and container_task.exception() is None:
                             created_container = container_task.result()
-                            container_outcome_known = True
                         elif not container_task.cancelled():
-                            # Consume the worker failure but retain resources:
-                            # cancellation must not erase conflict evidence and
-                            # send a foreign same-name container into rollback.
-                            container_task.exception()
+                            # Preserve the settled worker's error for native
+                            # rollback: a cancelled waiter must not erase a
+                            # name conflict and reclaim a foreign container.
+                            container_failure = container_task.exception()
                         raise
-                    except Exception as failure:
-                        # An invalid-request or name-conflict response settles
-                        # the rejected request; native
-                        # provenance-checked rollback can reclaim any start husk.
-                        # A timeout/lost reply does not establish that outcome.
-                        status = getattr(getattr(failure, "response", None), "status_code", None)
-                        container_outcome_known = status in (400, 409)
-                        raise
-                    container_outcome_known = True
                 created_container = container
                 agent_status = get_agent_status_from_container(container)
                 if tr.copy_snapshot:
@@ -3981,10 +3972,11 @@ async def create_agent_internal(
                 )
                 return agent_status
             except (Exception, asyncio.CancelledError) as e:
-                # Registration commits owner intent. Never revoke a retained
-                # agent's key/config on later setup failure. A lost Docker reply
-                # or failed ownership read is equally unsafe to roll back.
-                preserve = registration_committed or not container_outcome_known
+                # Registration commits owner intent. Preserve registered agents
+                # and fail closed on an unreadable ownership row. A lost Docker
+                # reply alone is not ownership: native reclaim handles it with
+                # the existing name-conflict and creation-provenance guards.
+                preserve = registration_committed
                 if not config.ephemeral and not preserve:
                     try:
                         preserve = db.is_agent_name_reserved(config.name)
@@ -4004,13 +3996,24 @@ async def create_agent_internal(
                 # ent#313: and the container + its name-keyed Redis state, which the
                 # DB/quota rollback above deliberately left to a watchdog that only
                 # covers ephemeral agents.
-                await _reclaim_failed_creation_container(handles, created_container, e)
+                # Before container submission, any same-name container and
+                # Redis state belong to another attempt, including when config
+                # provisioning settles after request cancellation.
+                if container_submitted:
+                    await _reclaim_failed_creation_container(
+                        handles, created_container, container_failure or e
+                    )
                 # trinity-enterprise#15: AFTER the container reclaim, so the volume
                 # this attempt pre-populated is no longer mounted and its removal
                 # keeps the #1667 guard from 409ing the retry.
                 _cleanup_copy_artifacts(handles)
                 if isinstance(e, asyncio.CancelledError):
                     raise
+                if isinstance(e, ConfigVolumeConflict):
+                    raise HTTPException(status_code=409, detail={
+                        "code": "AGENT_CONFIG_VOLUME_CONFLICT",
+                        "message": "An agent configuration volume already exists; inspect or recover it before retrying creation.",
+                    }) from e
                 logger.error(f"Failed to create agent {config.name}: {e}")
                 raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
         else:

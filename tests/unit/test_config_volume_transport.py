@@ -43,7 +43,7 @@ def test_existing_volume_is_never_overwritten_or_removed(monkeypatch, tmp_path):
             pytest.fail('existing volume must not be overwritten')
     class Client:
         volumes = Volumes()
-    with pytest.raises(config_volume.ConfigVolumeError):
+    with pytest.raises(config_volume.ConfigVolumeConflict):
         config_volume.create_config_volume(Client(), 'test-agent', tmp_path/'x', tmp_path/'y', None)
 
 
@@ -62,7 +62,7 @@ def test_concurrent_volume_claim_is_not_written_or_deleted(monkeypatch, tmp_path
     foreign = Mock(attrs={'Labels': {'trinity.config-creation': 'other-attempt'}})
     client.volumes.create.return_value = foreign
     monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
-    with pytest.raises(config_volume.ConfigVolumeError):
+    with pytest.raises(config_volume.ConfigVolumeConflict):
         config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None)
     client.containers.create.assert_not_called()
     foreign.remove.assert_not_called()
@@ -295,6 +295,8 @@ def test_3722_archive_helper_is_never_started_and_is_removed_after_upload(monkey
     monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
     config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None)
     client.containers.create.assert_called_once()
+    assert client.containers.create.call_args.args[0] == 'trinity-agent-base:latest'
+    client.images.pull.assert_not_called()
     helper = client.containers.create.return_value
     helper.put_archive.assert_called_once()
     helper.start.assert_not_called()
@@ -302,3 +304,22 @@ def test_3722_archive_helper_is_never_started_and_is_removed_after_upload(monkey
     helper.remove.assert_called_once_with(force=True)
     assert 'restart_policy' not in client.containers.create.call_args.kwargs
     assert client.containers.create.call_args.kwargs['network_mode'] == 'none'
+
+
+def test_missing_local_helper_image_does_not_pull_and_cleans_owned_volume(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+    import docker
+    client = Mock()
+    volume = Mock()
+    def create(**kwargs):
+        volume.attrs = {'Labels': kwargs['labels']}
+        return volume
+    client.volumes.create.side_effect = create
+    client.volumes.get.side_effect = [docker.errors.NotFound('absent'), volume]
+    client.images.get.side_effect = docker.errors.ImageNotFound('local base image absent')
+    monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
+    with pytest.raises(docker.errors.ImageNotFound):
+        config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None)
+    client.images.pull.assert_not_called()
+    client.containers.create.assert_not_called()
+    volume.remove.assert_called_once_with(force=False)

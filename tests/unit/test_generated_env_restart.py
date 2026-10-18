@@ -1,4 +1,4 @@
-"""Regression for #3710. Generated template .env is a seed, not a restart-time credential authority.
+"""Regression for #3710. Generated credential files are seeds, not restart-time credential authorities.
 
 Run the actual startup credential-import shell block with only its fixed paths
 redirected into tmp_path; no Docker, provider credentials or startup services.
@@ -22,33 +22,41 @@ def _restart(home, generated):
     subprocess.run(["bash", "-c", block], check=True, capture_output=True, timeout=5)
 
 
-@pytest.fixture(params=["legacy", "volume"])
+@pytest.fixture(params=[("legacy", ".env"), ("volume", ".env"),
+                        ("legacy", ".mcp.json"), ("volume", ".mcp.json")])
 def workspace(tmp_path, request):
+    transport, filename = request.param
     home = tmp_path / "home"
-    generated = tmp_path / ("volume-seeds" if request.param == "volume" else "legacy-seeds")
+    generated = tmp_path / ("volume-seeds" if transport == "volume" else "legacy-seeds")
     home.mkdir()
     generated.mkdir()
-    (generated / ".env").write_text("EXAMPLE_SERVICE_TOKEN=\n")
-    if request.param == "volume":
+    (generated / filename).write_text(
+        "EXAMPLE_SERVICE_TOKEN=\n" if filename == ".env" else '{"mcpServers": {}}\n')
+    if transport == "volume":
         legacy = tmp_path / "legacy-seeds"
         legacy.mkdir()
-        (legacy / ".env").write_text("EXAMPLE_SERVICE_TOKEN=unused-legacy-seed\n")
-    return home, generated
+        (legacy / filename).write_text(
+            "EXAMPLE_SERVICE_TOKEN=unused-legacy-seed\n" if filename == ".env"
+            else '{"mcpServers": {"legacy": {"command": "unused"}}}\n')
+    return home, generated, filename
 
 
-def test_generated_env_seeds_new_workspace(workspace):
-    home, generated = workspace
+def test_generated_credentials_seed_new_workspace(workspace):
+    home, generated, filename = workspace
     _restart(home, generated)
-    assert (home / ".env").read_bytes() == (generated / ".env").read_bytes()
+    assert (home / filename).read_bytes() == (generated / filename).read_bytes()
 
 
-@pytest.mark.parametrize("content", ["EXAMPLE_SERVICE_TOKEN=synthetic-rotated-value\n", ""])
-def test_restart_preserves_injected_or_deliberately_cleared_env(workspace, content):
-    home, generated = workspace
+@pytest.mark.parametrize("cleared", [False, True])
+def test_restart_preserves_injected_or_deliberately_cleared_credentials(workspace, cleared):
+    home, generated, filename = workspace
+    content = "" if cleared else (
+        "EXAMPLE_SERVICE_TOKEN=synthetic-rotated-value\n" if filename == ".env"
+        else '{"mcpServers": {"injected": {"command": "synthetic"}}}\n')
     _restart(home, generated)
     # The supported inject endpoint writes this workspace file and chmods 0600;
     # it does not update the creation-time generated credential mount.
-    target = home / ".env"
+    target = home / filename
     target.write_text(content)
     target.chmod(0o600)
     for _ in range(2):
@@ -65,15 +73,27 @@ def test_restart_preserves_injected_or_deliberately_cleared_env(workspace, conte
     pytest.param(False, marks=pytest.mark.skipif(
         sys.platform == "darwin", reason="BSD cp -n follows a dangling symlink; GNU cp does not")),
 ])
-def test_restart_does_not_follow_existing_env_symlink(workspace, exists):
-    home, generated = workspace
+def test_restart_does_not_follow_existing_credential_symlink(workspace, exists):
+    home, generated, filename = workspace
     outside = home.parent / "outside"
     if exists:
         outside.write_text("synthetic-owner-content\n")
-    (home / ".env").symlink_to(outside)
+    (home / filename).symlink_to(outside)
     _restart(home, generated)
-    assert (home / ".env").is_symlink()
+    assert (home / filename).is_symlink()
     if exists:
         assert outside.read_text() == "synthetic-owner-content\n"
     else:
         assert not outside.exists()
+
+
+def test_mounted_agent_config_does_not_abort_startup(tmp_path):
+    config = tmp_path / "agent-config.yaml"
+    config.write_text("agent:\n  name: synthetic\n")
+    source = (_ROOT / "docker/base-image/startup.sh").read_text()
+    block = source.split("# Start SSH if enabled", 1)[1].split("# Configure MCP servers", 1)[0]
+    block = block.replace("/config/agent-config.yaml", str(config))
+    # Execute the actual startup block under the script's fail-fast behavior;
+    # the image does not ship /app/configure_agent.py.
+    subprocess.run(["bash", "-ec", 'ENABLE_SSH=false\n' + block],
+                   check=True, capture_output=True, timeout=5)

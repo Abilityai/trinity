@@ -768,8 +768,11 @@ result = mcp__trinity__chat_with_agent(
 Slack, Telegram or Workspace conversation, an async delegation carries that
 turn as `parent_execution_id` by default, so the delegated run posts its
 outcome there when it ends (the receipt says `report_back: "requested"`).
-Pass `execution_id="manual"` to keep a call quiet; a `parallel=true` sync call opts in by
-passing your own `execution_id`. Rules and debugging:
+A plain sequential call reports too when it comes back with a receipt instead of
+the reply (#3295) — it is armed at that moment, so a call that answers inline
+never posts a second "done". Pass `execution_id="manual"` to keep a call quiet;
+a `parallel=true` sync call opts in by passing your own `execution_id`. Rules
+and debugging:
 [channel-completion-report.md](channel-completion-report.md#how-an-mcp-delegation-carries-the-parent-3232).
 
 See [Parallel Headless Execution](parallel-headless-execution.md) for complete async mode documentation.

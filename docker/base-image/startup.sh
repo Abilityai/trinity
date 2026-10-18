@@ -537,10 +537,10 @@ if [ -d "$GENERATED_CREDS_DIR" ]; then
     echo "Copying generated credential files..."
     cd /home/developer || exit 1
 
-    # Copy .mcp.json with real credentials
+    # Seed .mcp.json only; injection may have replaced or cleared the workspace file.
     if [ -f "${GENERATED_CREDS_DIR}/.mcp.json" ]; then
-        echo "  Copying .mcp.json (with credentials)..."
-        cp "${GENERATED_CREDS_DIR}"/.mcp.json . 2>/dev/null || true
+        echo "  Seeding .mcp.json if absent..."
+        cp -n "${GENERATED_CREDS_DIR}"/.mcp.json . 2>/dev/null || true
     fi
 
     # Seed .env only: credential injection updates the workspace after creation.
@@ -640,11 +640,7 @@ if [ "${ENABLE_SSH}" = "true" ]; then
     sudo /usr/sbin/sshd -D &
 fi
 
-# Load agent configuration
-if [ -f "/config/agent-config.yaml" ]; then
-    echo "Loading agent configuration..."
-    python3 /app/configure_agent.py
-fi
+# The agent server reads /config/agent-config.yaml directly when needed.
 
 # Configure MCP servers
 if [ -d "/config/mcp-servers" ]; then
