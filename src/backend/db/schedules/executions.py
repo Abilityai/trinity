@@ -934,7 +934,7 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             row = conn.execute(
                 select(cols.schedule_id, cols.agent_name, cols.triggered_by,
-                       cols.message, cols.completed_at)
+                       cols.message, cols.completed_at, cols.source_agent_name)
                 .where(cols.id == execution_id)
             ).first()
             if row is None:
@@ -945,6 +945,13 @@ class ScheduleExecutionsMixin:
             if row.triggered_by == "schedule" and row.schedule_id:
                 conds.append(cols.schedule_id == row.schedule_id)
                 scan = limit
+            elif row.source_agent_name:
+                # ent#940 TD-2: a run another agent sent is compared with that
+                # sender's earlier runs of the same trigger (and playbook, below).
+                conds += [cols.agent_name == row.agent_name,
+                          cols.triggered_by == row.triggered_by,
+                          cols.source_agent_name == row.source_agent_name]
+                scan = self._SERIES_SCAN
             else:
                 conds += [cols.agent_name == row.agent_name, cols.triggered_by == "agent"]
                 scan = self._SERIES_SCAN

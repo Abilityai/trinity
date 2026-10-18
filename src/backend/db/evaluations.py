@@ -34,6 +34,10 @@ from utils.helpers import iso_cutoff, utc_now_iso
 TIER0_EVALUATOR = "platform:tier0"
 TIER0_TARGET_KIND = "execution"
 TIER0_TRIGGERS = ("schedule", "agent")
+# ent#940 TD-2 (ent#935 addendum A): delegation triggers, graded only when
+# another agent sent the run (`source_agent_name` set) — a fan-out, loop or
+# reminder an agent set up for itself or a person started is not an edge.
+TIER0_DELEGATED_TRIGGERS = ("fan_out", "loop", "reminder")
 TIER0_TERMINAL_STATUSES = ("success", "failed", "cancelled")
 # ent#940 — the pair (caller→callee edge) evaluator. Its row hangs off the
 # callee run under the same one-row key, so it needs no migration either. The
@@ -50,6 +54,14 @@ def _platform_evaluator(evaluator: str) -> str:
     if evaluator not in PLATFORM_EVALUATORS:
         raise ValueError(f"not a platform evaluator: {evaluator!r}")
     return evaluator
+
+
+def tier0_eligible(triggered_by: Optional[str], source_agent_name: Optional[str]) -> bool:
+    """Whether Tier-0 grades a run with this trigger and sender (ent#940 TD-2).
+    The one rule the candidate query and `evaluate_execution` both apply."""
+    if triggered_by in TIER0_TRIGGERS:
+        return True
+    return triggered_by in TIER0_DELEGATED_TRIGGERS and bool(source_agent_name)
 
 
 def derive_delegation(row) -> tuple:
@@ -507,7 +519,8 @@ class EvaluationOperations:
 
     def unevaluated_execution_ids(self, *, limit: int = 25, settle_seconds: int = 30,
                                   lookback_hours: int = 24) -> list[str]:
-        """Terminal schedule/agent runs with no Tier-0 row yet, oldest first.
+        """Terminal runs Tier-0 grades (`tier0_eligible`) with no Tier-0 row
+        yet, oldest first.
 
         Bounded on every side: settled (completed at least `settle_seconds` ago,
         so evidence written just after the CAS has landed), recent (no backfill
@@ -523,7 +536,10 @@ class EvaluationOperations:
             select(schedule_executions.c.id)
             .where(and_(
                 schedule_executions.c.status.in_(TIER0_TERMINAL_STATUSES),
-                schedule_executions.c.triggered_by.in_(TIER0_TRIGGERS),
+                or_(schedule_executions.c.triggered_by.in_(TIER0_TRIGGERS),
+                    and_(schedule_executions.c.triggered_by.in_(TIER0_DELEGATED_TRIGGERS),
+                         schedule_executions.c.source_agent_name.isnot(None),
+                         schedule_executions.c.source_agent_name != "")),
                 schedule_executions.c.completed_at >= iso_cutoff(lookback_hours),
                 schedule_executions.c.completed_at <= iso_cutoff(seconds=settle_seconds),
                 ~evaluated.exists(),
