@@ -2260,6 +2260,10 @@ class DatabaseManager:
     def earliest_collaboration_action(self, action):  # ent#940
         return self._activity_ops.earliest_collaboration_action(action)
 
+    def insert_read_receipt_if_absent(self, reader_agent, target_agent, execution_id):  # ent#940
+        return self._activity_ops.insert_read_receipt_if_absent(
+            reader_agent, target_agent, execution_id)
+
     def get_activities_in_range(self, start_time: str = None, end_time: str = None, activity_types: list = None, limit: int = 100, agent_names: list = None):
         return self._activity_ops.get_activities_in_range(start_time, end_time, activity_types, limit, agent_names)
 

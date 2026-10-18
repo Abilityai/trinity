@@ -16,7 +16,7 @@ from typing import Optional, List, Dict, Sequence
 
 from sqlalchemy import select, insert, update, and_, case, or_
 
-from .engine import get_engine
+from .engine import get_engine, make_insert
 from .query_helpers import latest_per_group
 from .tables import agent_activities, schedule_executions
 # ActivityCloseOutcome is defined in `models` (not here) on purpose — it is a
@@ -575,6 +575,39 @@ class ActivityOperations:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).first()
         return _norm_ts(row[0]) if row else None
+
+    # ent#940 — the read receipt's id is derived from (reader, run), so the
+    # primary key is what makes a receipt first-read-only.
+    _READ_RECEIPT_NS = uuid.UUID("5f0c9a52-3b8e-4d1a-9c61-940a0d1e4f21")
+
+    def insert_read_receipt_if_absent(self, reader_agent: str, target_agent: str,
+                                      execution_id: str) -> bool:
+        """Record that `reader_agent` read run `execution_id` of `target_agent`
+        (ent#940 TD-1). Returns True when a row was actually written.
+
+        One row per (reader, run) ever: the id is a uuid5 over the pair and the
+        insert is `on_conflict_do_nothing` on the primary key, so a second read
+        and two racing reads both leave the first row alone — enforced by the
+        key, not by a preceding SELECT. The row is the `agent_collaboration`
+        shape the pair evaluator's `first_read` reads (`agent_name` = reader,
+        `related_execution_id` = the run, `details.action` = `read_result`).
+        """
+        now = utc_now_iso()
+        stmt = make_insert(agent_activities).values(
+            id=str(uuid.uuid5(self._READ_RECEIPT_NS, f"{reader_agent}\x00{execution_id}")),
+            agent_name=reader_agent,
+            activity_type=ActivityType.AGENT_COLLABORATION.value,
+            activity_state=ActivityState.COMPLETED.value,
+            started_at=now,
+            completed_at=now,
+            triggered_by="agent",
+            related_execution_id=execution_id,
+            details=json.dumps({"source_agent": reader_agent, "target_agent": target_agent,
+                                "action": "read_result", "execution_id": execution_id}),
+            created_at=now,
+        ).on_conflict_do_nothing(index_elements=["id"])
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount == 1
 
     # ent#940 — bound on one IN list, so a fan-out storm is read in chunks.
     _COLLAB_IN_CHUNK = 200

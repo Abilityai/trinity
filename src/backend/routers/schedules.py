@@ -40,6 +40,7 @@ from dependencies import (
 )
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
 from services import dispatch_admission_service, skill_gate_map_service
+from services.activity_service import activity_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.schedule_validation import (
     ScheduleValidationError,
@@ -935,8 +936,11 @@ async def get_execution(
     # trinity-enterprise#754: "ran without approval", as on the list.
     self_approved, by_viewer = skill_gate_map_service.self_approved_flags(
         name, [execution_id], current_user).get(execution_id, (False, False))
-    return ExecutionResponse(**execution.model_dump(), gate_self_approved=self_approved,
-                             gate_self_approved_by_viewer=by_viewer)
+    response = ExecutionResponse(**execution.model_dump(), gate_self_approved=self_approved,
+                                 gate_self_approved_by_viewer=by_viewer)
+    # ent#940 TD-1: an agent key's first read of a finished run leaves a receipt.
+    activity_service.record_first_reads(current_user, name, [(execution_id, execution.status)])
+    return response
 
 
 @router.get("/{name}/executions/{execution_id}/log")

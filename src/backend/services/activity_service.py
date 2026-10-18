@@ -425,6 +425,30 @@ class ActivityService:
             coro.close()
             logger.debug("[#1804] spawn_close_execution_activity skipped (no loop): %s", e)
 
+    def record_first_reads(self, current_user, target_agent: str, runs) -> None:
+        """Receipt an agent key's read of another agent's finished runs
+        (ent#940 TD-1) — the evidence `relay_unverified` grades against.
+
+        `runs` is `(execution_id, status)` pairs as the read returned them.
+        Only an agent principal (`agent_name` is set for `scope=agent` keys
+        alone, never from a header) reading ANOTHER agent writes; only a
+        finished run is receipted, since a read before the callee ended never
+        verifies a relay and the receipt is first-read-only. Fail-open: the
+        caller's response must not depend on this, so nothing here raises.
+        No broadcast — a receipt is evidence, not an event.
+        """
+        reader = getattr(current_user, "agent_name", None)
+        if not reader or reader == target_agent:
+            return
+        from db.evaluations import TIER0_TERMINAL_STATUSES
+        for execution_id, status in runs:
+            if not execution_id or status not in TIER0_TERMINAL_STATUSES:
+                continue
+            try:
+                db.insert_read_receipt_if_absent(reader, target_agent, execution_id)
+            except Exception as e:
+                logger.debug("read receipt not written for %s: %s", execution_id, e)
+
     async def get_current_activities(self, agent_name: str) -> List[Dict]:
         """Get all in-progress activities for an agent."""
         return db.get_current_activities(agent_name)
