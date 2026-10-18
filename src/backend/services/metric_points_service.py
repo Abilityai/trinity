@@ -74,6 +74,8 @@ TS_FUTURE_SKEW_SECONDS = METRIC_TS_FUTURE_SKEW_SECONDS
 # Below this, a timestamp is far likelier to be a typo or a zero-year default
 # than a real observation — and one such point steers the retention sweep.
 TS_FLOOR = datetime(2000, 1, 1, tzinfo=timezone.utc)
+# ent#937: the platform evaluation scorecard (`eval.*`, owner `platform:eval`).
+EVAL_NAMESPACE_PREFIX = "eval."
 
 _ECHO_SAFE_RE = re.compile(r"[^a-zA-Z0-9_.:-]")
 
@@ -335,6 +337,18 @@ def validate_batch(
 
     for index, point in enumerate(points):
         metric = point.get("metric")
+        # ent#937: the platform writes the evaluation scorecard; no caller —
+        # agent, person or admin — may write into its namespace. Before the
+        # name rule, so the refusal is named rather than "invalid name".
+        if isinstance(metric, str) and metric.startswith(EVAL_NAMESPACE_PREFIX):
+            errors.append(PointError(
+                index, metric, "eval_namespace_reserved",
+                "metric names starting with 'eval.' are reserved for the "
+                "platform's evaluation scorecard",
+                hint="choose a name without the 'eval.' prefix (eval_ is allowed); "
+                     "read the scorecard with the evaluation read API",
+            ))
+            continue
         if not isinstance(metric, str) or not _NAME_RE.match(metric):
             errors.append(PointError(
                 index, metric, "metric_name_invalid",
