@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from database import db
 from db.evaluations import TIER0_TERMINAL_STATUSES, TIER0_TRIGGERS
+from services import eval_scorecard_service
 from services.execution_classification import detect_unresolved_slash_command
 from utils.credential_sanitizer import REDACTION_PLACEHOLDER, count_hits, sanitize_text
 from utils.helpers import to_utc_iso, utc_now_iso
@@ -559,12 +560,15 @@ def evaluate_execution(execution_id: str) -> Optional[dict]:
         "checks": results,
     }
     try:
-        return db.upsert_platform_evaluation(
+        written = db.upsert_platform_evaluation(
             row.agent_name, execution_id=row.id, completion=(status == "success"),
             archetype=intent["kind"], checks=checks)
     except Exception as e:  # noqa: BLE001 — the run already happened; log, never raise
         logger.warning("[tier0] write failed for %s: %s", execution_id, type(e).__name__)
         return None
+    # ent#937: restate the run's day on the platform scorecard. Never raises.
+    eval_scorecard_service.on_tier0_row(row.id)
+    return written
 
 
 # --- the sweep (checkpoint B) -----------------------------------------------------
@@ -608,10 +612,13 @@ def record_timeout(execution_id: str) -> Optional[dict]:
         if row is None:
             return None
         status = getattr(row.status, "value", row.status)
-        return db.insert_platform_evaluation_if_absent(
+        written = db.insert_platform_evaluation_if_absent(
             row.agent_name, execution_id=row.id, completion=(status == "success"),
             archetype=resolve_intent(row.message, response=row.response)["kind"],
             checks=_timeout_checks())
+        if written is not None:
+            eval_scorecard_service.on_tier0_row(row.id)
+        return written
     except Exception as e:  # noqa: BLE001 — a bookkeeping row, never worth a raise
         logger.warning("[tier0] timeout row failed for %s: %s", execution_id, type(e).__name__)
         return None

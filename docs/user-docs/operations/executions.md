@@ -70,6 +70,7 @@ Evaluations are written by the platform or by a human admin — never by the age
 An agent can read its own evaluations — seeing its own bad score is the feedback loop. Only humans with admin rights can write one.
 
 What a reader sees of **who graded** depends on who is reading. The agent's owner and admins — signed in, or using their own user-scoped MCP key — see the full grader, for example `admin:you@example.com`. Agents, other machine keys, and people the agent is only shared with see just the kind of grader: `admin`, `workspace` (a Workspace user's rating) or `operator` (an owner's preview rating), and never the person's name or email. The stored evaluation is not changed; only what each reader is shown.
+Evaluations also roll up: per agent, per schedule or per delegating pair, over the last day, week or a custom window of up to 92 days — how many runs completed, how many passed their deterministic checks, which checks failed most, and which runs failed. An agent reads the roll-up for its own runs (and the runs between it and an agent it works with) through the `get_evaluation_summary` MCP tool. An agent never sees a judge's quality score; people do.
 
 ### Execution Detail Page
 
@@ -131,6 +132,11 @@ Each row is labelled by kind — **You asked**, **Handed on** (a job the agent d
 | `/api/agents/{name}/task` | POST | Submit a new task |
 | `/api/agents/{name}/evaluations` | GET | Read an agent's quality evaluations (access-scoped) |
 | `/api/agents/{name}/evaluations` | POST | Write an evaluation (admin **and** human-only — an agent can never grade itself) |
+| `/api/agents/{name}/evaluations/summary` | GET | One agent's roll-up and failed runs. `period` = `day`\|`week`\|`custom` (with `since`/`until`) |
+| `/api/evaluations/aggregate` | GET | Roll-ups `by` = `agent`\|`schedule`\|`pair` over a window |
+| `/api/evaluations/failed` | GET | Runs that did not complete or failed a check, newest first |
+| `/api/evaluations/trend` | GET | The daily `eval.*` series for one agent or one pair (up to 92 days) |
+| `/api/evaluations/chain/{execution_id}` | GET | The run's delegation chain, up and down |
 | `/api/enterprise/client-portal/work?agents=a,b&chat_id=` | GET | The Workspace's Work read for a platform session: `now`, `earlier` (bounded, with `earlier_total` and `window_days`), the open chat's delegated children, and each row's `can_stop`. Up to 50 agent names; off-roster names are dropped; a Workspace client token gets 404 |
 
 Access control on the fleet endpoints mirrors the UI: admins see everything; other users see only owned or shared agents.

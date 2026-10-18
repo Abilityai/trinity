@@ -168,6 +168,39 @@ def derive_delegation(row) -> tuple:
     return (row.get("source_agent_name") or None, row.get("parent_execution_id") or None, mode)
 
 
+def tier0_gate_outcome(checks: Any) -> Optional[bool]:
+    """This Tier-0 row's gate outcome (ent#935, FR-10a): True passed, False
+    failed, None when no gate check was graded. Shared by the analytics
+    rollup and the evaluation read API (ent#937), so "graded" and "passed"
+    have one definition.
+
+    Takes the stored `checks_json` text or the parsed dict. Graded = at least
+    one gate passed or failed. A skip-only row (every gate skipped — an
+    evaluator timeout, nothing to check) is None: the execution page reads it
+    as "No gate check applied", so a rollup must not count it as a failure
+    either. A row whose headline cannot be read — malformed or wrong-typed —
+    is None too: it shows no gate was graded. A graded row passed when no
+    gate failed.
+    """
+    head = checks
+    if isinstance(head, (str, bytes)) or head is None:
+        try:
+            head = json.loads(head or "null")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+    head = head.get("headline") if isinstance(head, dict) else None
+    if not isinstance(head, dict):
+        return None
+    try:
+        gate_pass = int(head.get("gate_pass") or 0)
+        gate_fail = int(head.get("gate_fail") or 0)
+    except (TypeError, ValueError):
+        return None
+    if gate_pass + gate_fail == 0:
+        return None
+    return gate_fail == 0 and head.get("passed") is True
+
+
 class EvaluationOperations:
     """CRUD for the agent_evaluations referee surface."""
 
@@ -732,36 +765,32 @@ class EvaluationOperations:
             row = conn.execute(stmt).mappings().first()
             return self._row_to_dict(row) if row else None
 
-    def list_evaluations_for_agent(self, agent_name: str, limit: int = 50) -> list[dict]:
-        stmt = (
-            select(agent_evaluations)
-            .where(agent_evaluations.c.agent_name == agent_name)
-            .order_by(agent_evaluations.c.created_at.desc())
-            .limit(limit)
-        )
+    def list_evaluations_for_agent(self, agent_name: str, limit: int = 50, *,
+                                   caller: Optional[str] = None) -> list[dict]:
+        """`caller` keeps the runs that agent delegated to this one (ent#937)."""
+        stmt = select(agent_evaluations).where(agent_evaluations.c.agent_name == agent_name)
+        if caller is not None:
+            stmt = stmt.where(agent_evaluations.c.caller_agent == caller)
+        stmt = stmt.order_by(agent_evaluations.c.created_at.desc()).limit(limit)
         with get_engine().connect() as conn:
             return [self._row_to_dict(r) for r in conn.execute(stmt).mappings()]
 
     def list_evaluations_for_agents(self, agent_names: Optional[list[str]],
-                                    limit: int = 100) -> list[dict]:
+                                    limit: int = 100, *,
+                                    callers: Optional[list[str]] = None,
+                                    caller: Optional[str] = None) -> list[dict]:
         """Fleet read. `agent_names=None` (admin) → all; a list → that set;
-        empty list → none (the accessible-set tri-state)."""
+        empty list → none (the accessible-set tri-state). `callers` (same
+        tri-state) and `caller` filter on the delegating agent (ent#937)."""
         stmt = select(agent_evaluations).order_by(agent_evaluations.c.created_at.desc())
-        if agent_names is not None:
-            if not agent_names:
-                return []
-            stmt = stmt.where(agent_evaluations.c.agent_name.in_(agent_names))
+        for names, col in ((agent_names, agent_evaluations.c.agent_name),
+                           (callers, agent_evaluations.c.caller_agent)):
+            if names is not None:
+                if not names:
+                    return []
+                stmt = stmt.where(col.in_(list(names)))
+        if caller is not None:
+            stmt = stmt.where(agent_evaluations.c.caller_agent == caller)
         stmt = stmt.limit(limit)
         with get_engine().connect() as conn:
             return [self._row_to_dict(r) for r in conn.execute(stmt).mappings()]
-
-    def latest_for_execution(self, execution_id: str) -> Optional[dict]:
-        stmt = (
-            select(agent_evaluations)
-            .where(agent_evaluations.c.execution_id == execution_id)
-            .order_by(agent_evaluations.c.created_at.desc())
-            .limit(1)
-        )
-        with get_engine().connect() as conn:
-            row = conn.execute(stmt).mappings().first()
-            return self._row_to_dict(row) if row else None

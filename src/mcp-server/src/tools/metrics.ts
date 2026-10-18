@@ -114,7 +114,8 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         "result counts it as `corrected`. Stamp `ts` yourself (RFC 3339 with an offset, e.g. 2026-09-22T08:00:00Z) " +
         "for an observation about a specific moment; omit it for 'now'. Pass `execution_id` " +
         "(from your Execution Context block) so a re-delivered turn replays instead of " +
-        "recording twice — without it, and without `ts`, a retry is a new observation.",
+        "recording twice — without it, and without `ts`, a retry is a new observation. " +
+        "The `eval.` prefix is reserved for platform scorecards and refused (`eval_namespace_reserved`).",
       parameters: z.object({
         points: z
           .array(
