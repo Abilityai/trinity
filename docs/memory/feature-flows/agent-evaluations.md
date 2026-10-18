@@ -156,9 +156,28 @@ type; no route can create, update or delete a `platform:tier0` row (the admin
 write files under `admin:<user>`; a Workspace rating cannot address an
 `execution` target). Tier-0 rows never enter a rating read.
 
-**Not built yet.** A per-schedule / per-agent "Checks passed" rate (needs an
-analytics aggregate); re-grading a replayed run (D-3, ent#937); an MCP read
-tool (ent#937).
+**The rollup rate.** `db/schedules/analytics.py` joins each window's runs to
+their `platform:tier0` row (inner join, so an ungraded run is *not evaluated*,
+never failed) and adds two fields beside `success_rate` to all three analytics
+payloads — `get_schedule_analytics`, every `get_agent_schedules_summary` row,
+and `get_agent_analytics`:
+
+```
+ checks_passed_rate = passed / evaluated_count     (null when evaluated_count == 0)
+   passed           = headline.passed AND headline.gate_pass > 0
+                      (a skip-only row is evaluated, not passed)
+   evaluated_count  = runs in window with a platform:tier0 row
+                      (workspace:/operator: rows never match)
+```
+
+`ScheduleAnalyticsCard.vue` renders a "Checks passed" tile beside Completion.
+`OverviewPanel.vue` renders the agent's rate beside the completion headline and
+a "checks" column on each "Schedules performance" row. Each reads "—" at zero
+evaluated, never 0%. Tests: `tests/unit/test_935_checks_passed_rate.py`,
+`src/frontend/tests/unit/checksPassedTile.spec.js`.
+
+**Not built yet.** Re-grading a replayed run (D-3, ent#937); an MCP read tool
+(ent#937).
 
 ## What this does NOT include
 

@@ -1006,9 +1006,23 @@ own records, with **zero LLM calls**. OSS core, always on, no setting.
   worded or coloured as pass/fail. A 404 `not_evaluated` renders **Not evaluated** with
   the reason a run may have none (only schedule- and agent-triggered runs are graded,
   about a minute after they finish), never as an error; any other read failure says the
-  checks could not be loaded, with Retry. Running and queued runs request nothing. A
-  per-schedule / per-agent "Checks passed" rate is **planned, not built**: it needs an
-  aggregate the analytics routes do not return yet.
+  checks could not be loaded, with Retry. Running and queued runs request nothing.
+  **Checks passed rate (built, C3)**: the three existing analytics payloads — per-schedule
+  `GET …/schedules/{id}/analytics`, each row of `GET …/schedules/analytics-summary`, and
+  the agent `GET …/analytics` — carry `checks_passed_rate` + `evaluated_count` beside
+  Completion (`success_rate`, unchanged). The rate is the window's runs whose
+  `platform:tier0` gate headline passed (no gate failed AND at least one passed) divided
+  by the runs evaluated. A **skip-only** row (every gate skipped) counts as evaluated,
+  **not passed**. A run with **no** Tier-0 row is *not evaluated* — on neither side of the
+  rate, never a failure. Only `evaluator='platform:tier0'` rows are read, so a Workspace
+  or operator rating never enters it. `evaluated_count == 0` → `checks_passed_rate: null`,
+  rendered "—", never 0%. Read-only and additive: no schema change, no new route. The
+  rate is computed over the newest 5,000 graded runs (the existing pool cap).
+  `ScheduleAnalyticsCard.vue` shows it as a "Checks passed" tile next to Completion.
+  `OverviewPanel.vue` shows it beside the completion headline and as a "checks" column
+  on each "Schedules performance" row, whose rate caption now reads "completion". The
+  tooltip on each reads "N of M runs evaluated · deterministic checks, not answer
+  quality".
 
 See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
 
