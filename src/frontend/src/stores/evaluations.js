@@ -131,8 +131,10 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
   const pairsAggregate = ref(null)
   const pairsError = ref(null)
 
-  // --- the trend (C6): the stored daily series for the selected agent. With
-  // no agent there is nothing to ask — the block says "pick an agent".
+  // --- the trend (C6): the stored daily series for the selected agent; with
+  // no agent, the fleet series (C7). The API hands the fleet series only to a
+  // reader who already sees every agent — anyone else gets no points, and the
+  // block then says "pick an agent".
   const trend = ref(null)
   const trendLoading = ref(false)
   const trendLoaded = ref(false)
@@ -176,11 +178,18 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
   const trendChart = computed(() => {
     const dates = windowDays(aggregate.value?.since, aggregate.value?.until)
     const byDay = new Map((trend.value?.points || []).map((p) => [String(p.ts).slice(0, 10), p.value]))
+    const values = dates.map((d) => (typeof byDay.get(d) === 'number'
+      ? Math.round(byDay.get(d) * 1000) / 10 : null))
     return {
       dates,
-      values: dates.map((d) => (typeof byDay.get(d) === 'number'
-        ? Math.round(byDay.get(d) * 1000) / 10 : null)),
+      values,
       points: trend.value?.points?.length ?? 0,
+      // The first day the series has a point, when that is after the window
+      // opens — the fleet series is young, or the agent's first graded run is.
+      startsOn: (() => {
+        const first = dates.find((d, i) => values[i] !== null)
+        return first && first !== dates[0] ? first : null
+      })(),
     }
   })
 
@@ -296,16 +305,10 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
   }
 
   async function loadTrend() {
-    if (!agent.value) {
-      trend.value = null
-      trendLoaded.value = false
-      trendError.value = null
-      return
-    }
     const days = windowDays(aggregate.value?.since, aggregate.value?.until).length
     if (!days) return
     // Another agent's line is not a stale view of this one: drop it.
-    if (trend.value?.dims?.agent !== agent.value) {
+    if ((trend.value?.dims?.agent ?? '') !== agent.value) {
       trend.value = null
       trendLoaded.value = false
     }
@@ -313,7 +316,11 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
     trendError.value = null
     try {
       const { data } = await api.get(TREND_URL, {
-        params: { metric: TREND_METRIC, agent: agent.value, days: Math.min(days, MAX_TREND_DAYS) },
+        params: {
+          metric: TREND_METRIC,
+          ...(agent.value ? { agent: agent.value } : {}),   // none → the fleet series
+          days: Math.min(days, MAX_TREND_DAYS),
+        },
       })
       trend.value = data
       trendLoaded.value = true

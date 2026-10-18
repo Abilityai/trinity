@@ -21,6 +21,10 @@
  * read issued), the stored daily series for the selected agent over the
  * window's UTC days with gaps (never a false zero) for days with no point,
  * an empty state, and a failed read kept to its own block.
+ *
+ * C7: with no agent the block reads the fleet series (no `agent=`), plots it
+ * with the nightly / "series starts <date>" note, and falls back to "pick an
+ * agent" when the API hands this reader no fleet points.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -111,16 +115,21 @@ const PAIRS = {
 
 // Answers by route and window: the previous window is the one whose `until`
 // is SINCE; the failed route pages by offset.
-const trendOf = (agent, points) => ({ metric: 'eval.checks_passed_rate', dims: { agent }, points })
+const trendOf = (agent, points) => ({ metric: 'eval.checks_passed_rate',
+  dims: agent ? { agent } : { scope: 'fleet' }, points })
+const FLEET_POINTS = [
+  { ts: '2026-10-15T00:00:00Z', value: 0.6 },
+  { ts: '2026-10-17T00:00:00Z', value: 0.8 },
+]
 const TREND_BETA = [
   { ts: '2026-10-12T00:00:00Z', value: 0.5 },
   { ts: '2026-10-14T00:00:00Z', value: 0.75 },
 ]
-const byWindow = ({ prevFails = false, pairs = PAIRS, trend = null } = {}) => async (url, { params }) => {
+const byWindow = ({ prevFails = false, pairs = PAIRS, trend = null, fleet = [] } = {}) => async (url, { params }) => {
   if (url === FAILED) return { data: params.offset ? FAILED_PAGE_2 : FAILED_PAGE_1 }
   if (url === TREND) {
     if (trend instanceof Error) throw trend
-    return { data: trendOf(params.agent, trend ?? TREND_BETA) }
+    return { data: trendOf(params.agent, params.agent ? (trend ?? TREND_BETA) : fleet) }
   }
   if (url !== AGG) throw new Error(`unexpected ${url}`)
   if (params.by === 'pair') return { data: pairs }
@@ -340,11 +349,10 @@ describe('EvaluationsPanel — ?agent= deep link (C3)', () => {
 describe('EvaluationsPanel — trend (C6)', () => {
   beforeEach(() => setActivePinia(createPinia()))
 
-  it('with no agent selected says "pick an agent" and issues no trend read', async () => {
+  it('with no agent and no fleet points for this reader, says "pick an agent"', async () => {
     const w = await panel(byWindow())
     expect(w.find('[data-testid="eval-trend-pick"]').exists()).toBe(true)
     expect(w.find('[data-testid="eval-trend-chart"]').exists()).toBe(false)
-    expect(http.get.mock.calls.filter(([u]) => u === TREND)).toEqual([])
   })
 
   it('reads the stored checks-passed series for the selected agent over the window', async () => {
@@ -387,5 +395,38 @@ describe('EvaluationsPanel — trend (C6)', () => {
     await flush()
     expect(store.trend).toBeNull()
     expect(w.find('[data-testid="eval-trend-chart"]').exists()).toBe(false)
+  })
+})
+
+describe('EvaluationsPanel — fleet trend (C7)', () => {
+  beforeEach(() => setActivePinia(createPinia()))
+
+  it('with no agent selected reads the fleet series — no agent= on the request', async () => {
+    await panel(byWindow({ fleet: FLEET_POINTS }))
+    const calls = http.get.mock.calls.filter(([u]) => u === TREND)
+    expect(calls).toEqual([[TREND, { params: { metric: 'eval.checks_passed_rate', days: 8 } }]])
+  })
+
+  it('plots the fleet line with its nightly lag and the day the series starts', async () => {
+    const w = await panel(byWindow({ fleet: FLEET_POINTS }))
+    const chart = w.findComponent({ name: 'TrendLineChart' })
+    expect(chart.props('series')[0].data).toEqual([null, null, null, null, 60, null, 80, null])
+    expect(w.find('[data-testid="eval-trend-scope"]').text()).toBe('Fleet')
+    const note = w.find('[data-testid="eval-trend-note"]').text()
+    expect(note).toContain('runs through yesterday')
+    expect(note).toContain('Series starts 2026-10-15')
+    expect(w.find('[data-testid="eval-trend-pick"]').exists()).toBe(false)
+  })
+
+  it('picking an agent replaces the fleet line with that agent\'s; clearing brings it back', async () => {
+    const w = await panel(byWindow({ fleet: FLEET_POINTS }))
+    await w.findAll('[data-testid="eval-agent-select"]')[0].trigger('click')
+    await flush()
+    expect(w.find('[data-testid="eval-trend-scope"]').text()).toBe('beta')
+    expect(w.findComponent({ name: 'TrendLineChart' }).props('series')[0].data)
+      .toEqual([null, 50, null, 75, null, null, null, null])
+    await w.find('[data-testid="evaluations-agent-clear"]').trigger('click')
+    await flush()
+    expect(w.find('[data-testid="eval-trend-scope"]').text()).toBe('Fleet')
   })
 })

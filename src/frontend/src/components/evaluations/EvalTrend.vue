@@ -4,15 +4,18 @@
     daily `eval.checks_passed_rate` series the platform records (ent#937
     scorecard), read through the trend route — never recomputed here. One
     slot per UTC day of the window: a day with no point is a gap, not 0 %.
+    With no agent selected it plots the fleet series (C7), which the nightly
+    pass writes, so it runs through yesterday; a reader the API does not hand
+    the fleet series to gets no points and the "pick an agent" state.
   -->
   <BaseCard data-testid="eval-trend">
     <div class="flex items-baseline justify-between mb-3">
       <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Checks passed per day</h3>
-      <span v-if="agent" class="text-xs text-gray-500 dark:text-gray-400" data-testid="eval-trend-scope">{{ agent }}</span>
+      <span v-if="agent || fleetShown" class="text-xs text-gray-500 dark:text-gray-400" data-testid="eval-trend-scope">{{ agent || 'Fleet' }}</span>
     </div>
 
     <div class="min-h-[10rem]">
-      <div v-if="!agent" class="py-10 text-center" data-testid="eval-trend-pick">
+      <div v-if="!agent && loaded && !chart.points" class="py-10 text-center" data-testid="eval-trend-pick">
         <p class="text-sm font-medium text-gray-700 dark:text-gray-300">Pick an agent to see its trend</p>
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Click a row in the table above.</p>
       </div>
@@ -28,11 +31,11 @@
 
       <ScanlineReveal v-else :loading="loading && !loaded" :reveal="chart.points > 0">
         <template v-if="loaded">
-          <div v-if="!chart.points" class="py-10 text-center" data-testid="eval-trend-empty">
+          <div v-if="!chart.points && agent" class="py-10 text-center" data-testid="eval-trend-empty">
             <p class="text-sm font-medium text-gray-700 dark:text-gray-300">No graded days recorded for {{ agent }} in this period</p>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">A day appears once one of its runs has a check verdict.</p>
           </div>
-          <div v-else data-testid="eval-trend-chart">
+          <div v-else-if="chart.points" data-testid="eval-trend-chart">
             <TrendLineChart
               :dates="chart.dates"
               :series="series"
@@ -41,6 +44,10 @@
               :value-format="(v) => (v == null ? '—' : v + '%')"
               :axis-format="(v) => v + '%'"
             />
+            <p v-if="fleetShown || chart.startsOn" class="mt-2 text-[11px] text-gray-500 dark:text-gray-400" data-testid="eval-trend-note">
+              <template v-if="fleetShown">Fleet series, recorded nightly — runs through yesterday.</template>
+              <template v-if="chart.startsOn"> Series starts {{ chart.startsOn }}.</template>
+            </p>
           </div>
         </template>
         <div v-else class="h-40" aria-hidden="true"></div>
@@ -69,6 +76,9 @@ const emit = defineEmits(['retry'])
 // uPlot strokes a canvas, which takes no CSS variable: the status-success-500
 // token's value, as OverviewPanel's completion chart uses it.
 const SUCCESS_STROKE = '#22c55e'
+
+// The fleet line is on screen: no agent picked and the API handed us points.
+const fleetShown = computed(() => !props.agent && props.loaded && props.chart.points > 0)
 
 const series = computed(() => [{
   label: 'Checks passed',

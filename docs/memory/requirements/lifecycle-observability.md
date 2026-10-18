@@ -1083,10 +1083,16 @@ placement ruling and are not built until it lands.
   change; the ent#935 write-fence tests are amended additively and an AST guard pins that
   every Tier-0 reader keys on the evaluator. Never `quality` on a `platform:*` row.
 - **FR-17 — Fleet trend** (ruling T3): a nightly fleet series under the reserved
-  `platform:eval` owner with `dims={"scope":"fleet"}`, written only by the unscoped nightly
-  pass (a per-row write would be a partial fleet point), served by `GET /api/evaluations/trend`
-  to operator-floor persons; the chart caption states the one-day lag. The agreement floor
-  is one store constant (20 labels) with an ent#936 pointer (ruling T4).
+  `platform:eval` owner with `dims={"scope":"fleet"}` (never `{}`, which the dims reader
+  cannot select), written only by the unscoped nightly pass — the per-row restate and the
+  over-cap per-agent retry see one agent's rows, so they write no fleet point and an
+  over-cap day is a gap. `GET /api/evaluations/trend` naming neither `agent=` nor a pair
+  reads it (every per-agent/pair key absent) and hands it only to a principal whose scope
+  is already every agent and that is not an agent key — an admin person, or the system key
+  (counts only; a judge-score metric stays a 422 for a machine). A person scoped to fewer
+  agents, and every agent key, get the empty series (never a 403), and the tab shows
+  "pick an agent". The chart caption states the one-day lag and the day the series
+  starts. The agreement floor (ruling T4) lands later, with the agreement tile.
 
 See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
 

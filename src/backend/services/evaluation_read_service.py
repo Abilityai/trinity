@@ -359,6 +359,9 @@ def aggregate(by: str, rows: list[dict], human_labels: dict, *, machine: bool) -
 # The reserved owner the platform writes `eval.*` points under. `:` is not
 # legal in an agent name, so no agent can hold it, rename into it or cascade it.
 PLATFORM_EVAL_OWNER = "platform:eval"
+# The fleet series' dims (ent#938): non-empty, because the dims reader selects
+# nothing for `{}`; read with every per-agent/pair key absent.
+FLEET_DIMS = {"scope": "fleet"}
 EVAL_RATE_METRICS = ("eval.checks_passed_rate", "eval.completion_rate",
                      "eval.quality_mean", "eval.judge_human_agreement")
 EVAL_COUNT_METRICS = ("eval.evaluated", "eval.completed", "eval.graded",
