@@ -6207,6 +6207,19 @@
         "unit"
       ],
       "description": "Tier-0 write fence (ent#935 B.2, epic ent#205 AC): with a Tier-0-shaped body naming the platform evaluator, the execution target and every delegation column — the graded agent's own key, a connector key and a non-admin person are refused by the admin write route (403, no row); an admin's write is filed under admin:<user> with no target and no delegation and never answers the Tier-0 read; the request model has no field for the fenced columns; a Workspace rating cannot address target_kind=execution (422) and its evaluator is always prefixed; AST pins: all DML on agent_evaluations lives in db/evaluations.py + the agent-delete cascade, the writers have exactly three callers past the facade, the evaluator and sweep take an execution id only and import no FastAPI/dependencies/models, the write route is the only non-GET route, the MCP server has no /evaluations surface; positive: the sweep still writes, and an admin row and the Tier-0 row coexist. Mutations: filing the admin write as platform:tier0, and gating the route on get_current_user, each turn tests red."
+    },
+    {
+      "file": "unit/test_935_checks_passed_rate.py",
+      "feature": "abilityai/trinity-enterprise#935",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "database",
+        "evaluations",
+        "analytics",
+        "unit"
+      ],
+      "description": "Checks passed rate (ent#935 C3) on the real schema, across all three analytics payloads (per-schedule, schedules rollup row, agent Overview): rate = runs whose Tier-0 gate headline passed / runs evaluated; a skip-only row is evaluated, not passed; a run with no Tier-0 row is not evaluated (neither side); 0 evaluated -> rate None; workspace:/operator: rows never enter it; window, schedule and agent scoping; Completion (success_rate) unchanged; the Pydantic envelopes carry the fields. Mutation: counting a skip-only headline as passed turns 7 tests red."
     }
   ]
 }

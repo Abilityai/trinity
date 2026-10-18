@@ -12,9 +12,11 @@ from sqlalchemy import select, and_, func, text, case
 from ..engine import get_engine
 from ..query_helpers import viewer_scope
 from ..tables import (
+    agent_evaluations,
     agent_schedules,
     schedule_executions,
 )
+from ..evaluations import TIER0_EVALUATOR, TIER0_TARGET_KIND
 from models import TaskExecutionStatus
 from utils.helpers import iso_cutoff
 from ._common import _norm_ts
@@ -105,6 +107,57 @@ def _schedule_command_label(message: Optional[str]) -> str:
             )
     return ""
 
+def _tier0_gate_passed(checks_json: Optional[str]) -> bool:
+    """Did this Tier-0 row's gate headline pass (ent#935, FR-10a)?
+
+    Passed = no gate failed AND at least one gate passed. A skip-only row (every
+    gate skipped — an evaluator timeout, nothing to grade) is evaluated but NOT
+    passed: "nothing could be checked" is not "checks passed". A row whose
+    headline cannot be read is likewise evaluated, not passed.
+    """
+    try:
+        head = json.loads(checks_json or "null")
+        head = head.get("headline") if isinstance(head, dict) else None
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(head, dict):
+        return False
+    return head.get("passed") is True and int(head.get("gate_pass") or 0) > 0
+
+
+def _tier0_rows(conn, where, cap: int) -> List[Dict]:
+    """`(schedule_id, checks_json)` of the window's Tier-0-graded runs, newest
+    first, at most `cap` (ent#935 "Checks passed"). Inner join: a run with no
+    `platform:tier0` row is NOT EVALUATED and never appears — it is neither a
+    pass nor a fail. Other evaluators' rows (Workspace/operator ratings) are a
+    different axis and never match."""
+    se = schedule_executions.c
+    ev = agent_evaluations.c
+    q = (
+        select(se.schedule_id, ev.checks_json)
+        .select_from(schedule_executions.join(agent_evaluations, and_(
+            ev.target_id == se.id,
+            ev.evaluator == TIER0_EVALUATOR,
+            ev.target_kind == TIER0_TARGET_KIND,
+        )))
+        .where(where)
+        .order_by(se.started_at.desc())
+        .limit(cap)
+    )
+    return conn.execute(q).mappings().all()
+
+
+def _checks_passed(rows) -> Dict:
+    """`{checks_passed_rate, evaluated_count}` over Tier-0 rows; the rate is
+    `None` (UI "—") when nothing was evaluated, never a false 0%."""
+    evaluated = len(rows)
+    passed = sum(1 for r in rows if _tier0_gate_passed(r["checks_json"]))
+    return {
+        "checks_passed_rate": round(passed / evaluated, 4) if evaluated else None,
+        "evaluated_count": evaluated,
+    }
+
+
 class ScheduleAnalyticsMixin:
     """Per-schedule + per-agent analytics aggregation."""
 
@@ -173,6 +226,11 @@ class ScheduleAnalyticsMixin:
                 ),
                 {"sid": schedule_id, "cutoff": cutoff, "lim": cap + 1},
             ).mappings().all()
+
+            tier0_rows = _tier0_rows(conn, and_(
+                schedule_executions.c.schedule_id == schedule_id,
+                schedule_executions.c.started_at > cutoff,
+            ), cap)
 
         counts: Dict[str, int] = defaultdict(int)
         cost_by_status: Dict[str, float] = defaultdict(float)
@@ -282,6 +340,7 @@ class ScheduleAnalyticsMixin:
             "failed_count": failed_count,
             "cancelled_count": cancelled_count,
             "success_rate": success_rate,
+            **_checks_passed(tier0_rows),
             "duration_ms": {"p50": p50, "p95": p95, "p99": p99},
             "cost": {"total": cost_total},
             "tool_calls": {"top": tool_top5, "total_calls": tool_call_total},
@@ -382,6 +441,11 @@ class ScheduleAnalyticsMixin:
             agg_by_sched = {r["schedule_id"]: r for r in conn.execute(q_agg).mappings().all()}
             last_by_sched = {r["schedule_id"]: r for r in conn.execute(q_last).mappings().all()}
             tool_rows = conn.execute(q_tools).mappings().all()
+            tier0_rows = _tier0_rows(conn, base_where, cap)
+
+        tier0_by_sched: Dict[str, List] = defaultdict(list)
+        for row in tier0_rows:
+            tier0_by_sched[row["schedule_id"]].append(row)
 
         tool_calls_sampled = len(tool_rows) > cap
         tool_total_by_sched: Dict[str, int] = defaultdict(int)
@@ -436,6 +500,7 @@ class ScheduleAnalyticsMixin:
                 "failed_count": failed_count,
                 "cancelled_count": cancelled_count,
                 "success_rate": success_rate,
+                **_checks_passed(tier0_by_sched.get(sid, [])),
                 "avg_duration_ms": avg_duration_ms,
                 "cost_total": cost_total,
                 "context_avg": context_avg,
@@ -546,6 +611,7 @@ class ScheduleAnalyticsMixin:
             daily_metric_rows = conn.execute(q2).mappings().all()
             overall = conn.execute(q3).mappings().first()
             dur_rows = conn.execute(q4).mappings().all()
+            tier0_rows = _tier0_rows(conn, base_where, cap)
 
         # --- counts, per-day stacks, per-bucket window totals ---
         success_count = 0
@@ -666,6 +732,7 @@ class ScheduleAnalyticsMixin:
             "success_count": success_count,
             "failed_count": failed_count,
             "success_rate": success_rate,
+            **_checks_passed(tier0_rows),
             "duration_ms": {"avg": dur_avg, "p95": p95},
             "context_avg": ctx_avg,
             "by_type": by_type_totals,
