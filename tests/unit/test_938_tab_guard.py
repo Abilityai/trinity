@@ -124,3 +124,38 @@ def test_the_floor_is_wired_into_the_real_resolver():
     import dependencies
     src = inspect.getsource(dependencies.get_current_user)
     assert "enforce_operator_floor(" in src
+
+
+# C3 adds two reads to the tab: the failed list (ent#937 failed route) and the
+# delegated-pairs stub (aggregate `by=pair`). Same floor, same machine rule.
+C3_QUERIES = [
+    ("/api/evaluations/failed", {"by": "agent", "period": "week", "limit": 50, "offset": 0}),
+    ("/api/evaluations/aggregate", {"by": "pair", "period": "week"}),
+]
+
+
+def test_c3_reads_are_behind_the_same_floor():
+    import dependencies
+    from routers import evaluations
+    paths = {p for p, _ in C3_QUERIES}
+    routes = [r for r in evaluations.router.routes if getattr(r, "path", None) in paths]
+    assert {r.path for r in routes} == paths
+    for route in routes:
+        with pytest.raises(HTTPException) as exc:
+            dependencies.enforce_operator_floor(SimpleNamespace(scope={"route": route}),
+                                                _user("member", role="user"))
+        assert exc.value.detail["code"] == "workspace_only"
+
+
+def test_c3_reads_admit_an_operator_and_hold_an_agent_key_to_itself(fleet):
+    fleet.as_user(_user(OWNER, role="operator"))
+    for url, params in C3_QUERIES:
+        assert fleet.get(url, params=params).status_code == 200
+    fleet.as_user(_agent_key("agent-a"))
+    failed = fleet.get(*C3_QUERIES[0][0:1], params=C3_QUERIES[0][1]).json()
+    assert {i["agent_name"] for i in failed["items"]} <= {"agent-a"}
+    pairs = fleet.get(*C3_QUERIES[1][0:1], params=C3_QUERIES[1][1]).json()
+    for g in pairs["groups"]:
+        assert "agent-a" in (g["key"]["caller"], g["key"]["callee"])
+    for summary in [pairs["total"], *pairs["groups"]]:
+        assert not (JUDGE_KEYS & set(summary))

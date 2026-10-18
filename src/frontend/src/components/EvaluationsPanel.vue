@@ -110,13 +110,32 @@
         </div>
         <EvalKpiRow :kpis="store.kpis" />
         <EvalAgentTable :rows="store.agentRows" @select="store.setAgent" />
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <EvalFailed
+            class="lg:col-span-2"
+            :items="store.failed.items"
+            :total="store.failed.total"
+            :truncated="store.failed.truncated"
+            :has-more="store.failedHasMore"
+            :loaded="store.failedLoaded"
+            :loading="store.failedLoading"
+            :error="store.failedError"
+            :per-check="store.perCheck"
+            :pair="store.pair"
+            @more="store.loadMoreFailed()"
+            @retry="store.loadFailed()"
+            @clear-pair="store.setPair(null)"
+          />
+          <EvalPairs :rows="store.pairRows" :error="store.pairsError" @select="store.setPair" @retry="store.loadPairs()" />
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import BaseSelect from './base/BaseSelect.vue'
 import BaseInput from './base/BaseInput.vue'
 import BaseButton from './base/BaseButton.vue'
@@ -126,10 +145,14 @@ import LoadFailed from './LoadFailed.vue'
 import SkeletonLoader from './SkeletonLoader.vue'
 import EvalKpiRow from './evaluations/EvalKpiRow.vue'
 import EvalAgentTable from './evaluations/EvalAgentTable.vue'
+import EvalFailed from './evaluations/EvalFailed.vue'
+import EvalPairs from './evaluations/EvalPairs.vue'
 import { useEvaluationsStore, PERIODS } from '../stores/evaluations'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
 
 const store = useEvaluationsStore()
+const route = useRoute()
+const router = useRouter()
 
 const customSince = ref(store.since)
 const customUntil = ref(store.until)
@@ -146,7 +169,21 @@ const view = computed(() => viewState({
   count: store.evaluatedCount,
 }))
 
+// `?agent=` deep link: the URL names the agent filter on arrival, and the
+// filter writes back to the URL (keeping `?tab=` and the rest), so a narrowed
+// view is shareable and survives a reload.
+watch(() => store.agent, (name) => {
+  if ((route.query.agent || '') === name) return
+  const { agent: _drop, ...rest } = route.query
+  router.replace({ query: name ? { ...rest, agent: name } : rest })
+})
+
 onMounted(() => {
-  if (!store.hasLoaded) store.load()
+  const wanted = typeof route.query.agent === 'string' ? route.query.agent : ''
+  if (wanted !== store.agent) {
+    store.setAgent(wanted)
+  } else if (!store.hasLoaded) {
+    store.load()
+  }
 })
 </script>

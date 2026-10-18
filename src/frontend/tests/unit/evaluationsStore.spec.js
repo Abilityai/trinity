@@ -14,7 +14,7 @@ const http = vi.hoisted(() => ({ get: vi.fn() }))
 vi.mock('../../src/api', () => ({ default: { get: (...a) => http.get(...a) } }))
 
 import {
-  useEvaluationsStore, periodQuery, EVALUATION_URLS, AGGREGATE_URL,
+  useEvaluationsStore, periodQuery, EVALUATION_URLS, AGGREGATE_URL, FAILED_URL,
 } from '../../src/stores/evaluations'
 
 const NOW = new Date('2026-10-18T12:00:00Z')
@@ -60,7 +60,11 @@ describe('useEvaluationsStore', () => {
     const store = useEvaluationsStore()
     expect(store.period).toBe('7d')
     await store.load()
-    expect(http.get).toHaveBeenCalledTimes(1)
+    // C3: the aggregate first, then the failed list and the pairs stub for
+    // the same window (no previous-window read: these bounds are not ISO).
+    expect(http.get.mock.calls.map(([u, c]) => [u, c.params.by])).toEqual([
+      [AGGREGATE_URL, 'agent'], [FAILED_URL, 'agent'], [AGGREGATE_URL, 'pair'],
+    ])
     const [url, { params }] = http.get.mock.calls[0]
     expect(url).toBe(AGGREGATE_URL)
     expect(params).toEqual({ by: 'agent', period: 'week' })
@@ -78,12 +82,14 @@ describe('useEvaluationsStore', () => {
     await store.setPeriod('custom')                       // half-typed: no request
     await store.setCustomRange('2026-10-01', '2026-10-03')
     const urls = http.get.mock.calls.map(([u]) => u)
-    expect(urls.length).toBe(4)
+    expect(urls.length).toBe(12)                          // 4 loads × (aggregate, failed, pairs)
     for (const u of urls) expect(EVALUATION_URLS).toContain(u)
-    const last = http.get.mock.calls.at(-1)[1].params
+    const agg = http.get.mock.calls.filter(([u, c]) => u === AGGREGATE_URL && c.params.by === 'agent')
+    expect(agg.length).toBe(4)
+    const last = agg.at(-1)[1].params
     expect(last).toMatchObject({ by: 'agent', period: 'custom', agent: 'fin',
       since: '2026-10-01T00:00:00Z', until: '2026-10-04T00:00:00Z' })
-    expect(http.get.mock.calls[1][1].params.agent).toBeUndefined()   // no agent → no key
+    expect(agg[1][1].params.agent).toBeUndefined()        // no agent → no key
   })
 
   it('a failed first load is failed, not empty: nothing loaded, the error named', async () => {

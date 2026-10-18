@@ -20,8 +20,11 @@ import api from '../api'
 import { apiErrorMessage } from '../utils/apiError'
 
 export const AGGREGATE_URL = '/api/evaluations/aggregate'
+export const FAILED_URL = '/api/evaluations/failed'
 /** Every URL this store may issue — the "ent#937 only" contract, as data. */
-export const EVALUATION_URLS = [AGGREGATE_URL]
+export const EVALUATION_URLS = [AGGREGATE_URL, FAILED_URL]
+/** The failed route's page size (its own default; it caps at 200). */
+export const FAILED_PAGE = 50
 
 export const PERIODS = [
   { id: '7d', label: 'Last 7 days' },
@@ -94,6 +97,18 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
   // numbers stand on their own.
   const prevAggregate = ref(null)
 
+  // --- the failed list (C3) — its own block state, so a failed page never
+  // blanks the KPIs. `pair` narrows it to one caller → callee edge.
+  const failed = ref({ items: [], total: 0, truncated: false })
+  const failedLoading = ref(false)
+  const failedLoaded = ref(false)
+  const failedError = ref(null)
+  const pair = ref(null)
+
+  // --- the pairs stub (C3): aggregate by=pair over the same window.
+  const pairsAggregate = ref(null)
+  const pairsError = ref(null)
+
   const evaluatedCount = computed(() => aggregate.value?.total?.evaluated ?? 0)
   const invalidPeriod = computed(() => errorCode.value === 'invalid_period')
 
@@ -112,6 +127,21 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
         delta: p ? rateDelta(t.checks_passed_rate, p.checks_passed_rate) : null },
     ]
   })
+
+  // Failed-check counts across the window, most frequent first.
+  const perCheck = computed(() => Object.entries(aggregate.value?.total?.per_check_fail || {})
+    .filter(([, n]) => n > 0)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([id, count]) => ({ id, count })))
+
+  // Delegated pairs; with an agent selected, only the pairs it is a side of.
+  const pairRows = computed(() => (pairsAggregate.value?.groups || [])
+    .filter((g) => g.key?.caller && g.key?.callee)
+    .filter((g) => !agent.value || g.key.caller === agent.value || g.key.callee === agent.value)
+    .map((g) => ({ caller: g.key.caller, callee: g.key.callee, evaluated: g.evaluated,
+      checksPassedRate: g.checks_passed_rate ?? null })))
+
+  const failedHasMore = computed(() => failed.value.items.length < failed.value.total)
 
   // Per-agent rows, worst checks-passed rate first (ungraded last, then by
   // name) — the default order the table opens in.
@@ -152,7 +182,7 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
       aggregate.value = data
       hasLoaded.value = true
       lastLoadedAt.value = Date.now()
-      await loadPrevious(p, data)
+      await Promise.all([loadPrevious(p, data), loadFailed(), loadPairs()])
     } catch (err) {
       // A failed refresh keeps `aggregate` on screen (viewState → stale);
       // never a synthetic empty payload in a catch.
@@ -176,6 +206,58 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
     }
   }
 
+  function failedParams(offset) {
+    const q = periodQuery({ period: period.value, since: since.value, until: until.value })
+    if (!q) return null
+    const filter = pair.value
+      ? { by: 'pair', caller: pair.value.caller, callee: pair.value.callee }
+      : { by: 'agent', ...(agent.value ? { agent: agent.value } : {}) }
+    return { ...filter, ...q, limit: FAILED_PAGE, offset }
+  }
+
+  async function loadFailed({ more = false } = {}) {
+    const p = failedParams(more ? failed.value.items.length : 0)
+    if (!p) return
+    failedLoading.value = true
+    failedError.value = null
+    try {
+      const { data } = await api.get(FAILED_URL, { params: p })
+      failed.value = {
+        items: more ? [...failed.value.items, ...data.items] : data.items,
+        total: data.total,
+        truncated: data.truncated,
+      }
+      failedLoaded.value = true
+    } catch (err) {
+      // The rows already on screen stay; the block says the read failed.
+      failedError.value = apiErrorMessage(err, "Couldn't load failed runs")
+    } finally {
+      failedLoading.value = false
+    }
+  }
+
+  function loadMoreFailed() {
+    return loadFailed({ more: true })
+  }
+
+  async function loadPairs() {
+    const q = periodQuery({ period: period.value, since: since.value, until: until.value })
+    if (!q) return
+    pairsError.value = null
+    try {
+      const { data } = await api.get(AGGREGATE_URL, { params: { by: 'pair', ...q } })
+      pairsAggregate.value = data
+    } catch (err) {
+      pairsError.value = apiErrorMessage(err, "Couldn't load delegated pairs")
+    }
+  }
+
+  /** Narrow the failed list to one caller → callee edge (`null` clears). */
+  function setPair(next) {
+    pair.value = next ? { caller: next.caller, callee: next.callee } : null
+    return loadFailed()
+  }
+
   function setPeriod(next) {
     period.value = next
     return load()
@@ -189,6 +271,7 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
 
   function setAgent(name) {
     agent.value = name || ''
+    pair.value = null
     return load()
   }
 
@@ -200,7 +283,10 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
   return {
     period, since, until, agent,
     aggregate, prevAggregate, loading, hasLoaded, error, errorCode, lastLoadedAt,
+    failed, failedLoading, failedLoaded, failedError, failedHasMore, pair,
+    pairsAggregate, pairsError, pairRows, perCheck,
     evaluatedCount, invalidPeriod, kpis, agentRows,
-    load, setPeriod, setCustomRange, setAgent, clearError,
+    load, loadFailed, loadMoreFailed, loadPairs, setPair,
+    setPeriod, setCustomRange, setAgent, clearError,
   }
 })

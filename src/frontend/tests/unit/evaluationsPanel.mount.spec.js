@@ -11,11 +11,16 @@
  * top failed check, states its total, and narrows the tab to an agent on
  * click. The KPI row carries no judge or agreement tile (ruling addendum —
  * those wait on the calibration placement decision).
+ *
+ * C3: the failed-check counts and failed runs (ent#937 failed route, paged,
+ * each row linking to its run page), the delegated-pairs stub over
+ * `by=pair` whose row narrows the failed list to that edge, and the
+ * `?agent=` deep link in both directions.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
-import { nextTick, defineComponent, h } from 'vue'
+import { nextTick, defineComponent, h, reactive } from 'vue'
 
 const http = vi.hoisted(() => ({ get: null }))
 vi.mock('axios', () => {
@@ -27,6 +32,12 @@ vi.mock('axios', () => {
   return { default: { ...instance, create: vi.fn(() => instance) } }
 })
 
+const nav = vi.hoisted(() => ({ route: null, replace: null }))
+vi.mock('vue-router', () => ({
+  useRoute: () => nav.route,
+  useRouter: () => ({ push: vi.fn(), replace: nav.replace, back: vi.fn() }),
+}))
+
 const RouterLinkStub = defineComponent({
   props: ['to'],
   render() { return h('a', { 'data-to': JSON.stringify(this.to) }, this.$slots.default?.()) },
@@ -36,6 +47,7 @@ import EvaluationsPanel from '../../src/components/EvaluationsPanel.vue'
 import { useEvaluationsStore } from '../../src/stores/evaluations'
 
 const AGG = '/api/evaluations/aggregate'
+const FAILED = '/api/evaluations/failed'
 const SINCE = '2026-10-11T12:00:00Z'
 const UNTIL = '2026-10-18T12:00:00Z'
 const PREV_SINCE = '2026-10-04T12:00:00Z'
@@ -62,9 +74,32 @@ const PREVIOUS = {
   groups: [group('alpha', 4, 4, 4, 2), group('beta', 4, 4, 4, 3)],
 }
 
-// Answers by window: the previous window is the one whose `until` is SINCE.
-const byWindow = ({ prevFails = false } = {}) => async (url, { params }) => {
+const run = (id, agent, extra = {}) => ({
+  execution_id: id, agent_name: agent, caller_agent: null, schedule_id: null,
+  completed_at: '2026-10-17T09:00:00Z', completion: true, failed_checks: [], ...extra,
+})
+const FAILED_PAGE_1 = {
+  since: SINCE, until: UNTIL, total: 3, truncated: false,
+  items: [
+    run('e1', 'beta', { failed_checks: [{ id: 'schema_valid', reason: 'missing_field' }] }),
+    run('e2', 'beta', { completion: false }),
+  ],
+}
+const FAILED_PAGE_2 = { ...FAILED_PAGE_1, items: [run('e3', 'alpha', { failed_checks: [{ id: 'no_error', reason: null }] })] }
+const PAIRS = {
+  by: 'pair', since: SINCE, until: UNTIL, truncated: false, total: summary(3, 3, 3, 2),
+  groups: [
+    { key: { caller: 'alpha', callee: 'beta' }, ...summary(2, 2, 2, 1) },
+    { key: { caller: 'gamma', callee: 'alpha' }, ...summary(1, 1, 1, 1) },
+  ],
+}
+
+// Answers by route and window: the previous window is the one whose `until`
+// is SINCE; the failed route pages by offset.
+const byWindow = ({ prevFails = false, pairs = PAIRS } = {}) => async (url, { params }) => {
+  if (url === FAILED) return { data: params.offset ? FAILED_PAGE_2 : FAILED_PAGE_1 }
   if (url !== AGG) throw new Error(`unexpected ${url}`)
+  if (params.by === 'pair') return { data: pairs }
   if (params.until === SINCE) {
     if (prevFails) { const e = new Error('500'); e.response = { status: 500, data: { detail: 'down' } }; throw e }
     return { data: PREVIOUS }
@@ -76,8 +111,10 @@ async function flush() {
   for (let i = 0; i < 4; i++) { await nextTick(); await flushPromises() }
 }
 
-async function panel(get) {
+async function panel(get, query = {}) {
   http.get = vi.fn(get)
+  nav.route = reactive({ query: { tab: 'evaluations', ...query }, params: {} })
+  nav.replace = vi.fn()
   const w = mount(EvaluationsPanel, { global: { stubs: { RouterLink: RouterLinkStub } } })
   await flush()
   return w
@@ -94,8 +131,11 @@ describe('EvaluationsPanel — KPI row (C2)', () => {
 
   it('reads the previous window from the same route: same length, ending at since', async () => {
     await panel(byWindow())
-    expect(http.get.mock.calls.map(([u]) => u)).toEqual([AGG, AGG])
-    expect(http.get.mock.calls[1][1].params).toEqual({ by: 'agent', period: 'custom', since: PREV_SINCE, until: SINCE })
+    const aggCalls = http.get.mock.calls.filter(([u, { params }]) => u === AGG && params.by === 'agent')
+    expect(aggCalls.map(([, c]) => c.params)).toEqual([
+      { by: 'agent', period: 'week' },
+      { by: 'agent', period: 'custom', since: PREV_SINCE, until: SINCE },
+    ])
   })
 
   it('shows the window\'s counts and rates with their change against the previous window', async () => {
@@ -118,7 +158,7 @@ describe('EvaluationsPanel — KPI row (C2)', () => {
 
   it('nothing graded reads "—", never 0 %', async () => {
     const empty = { ...CURRENT, since: 'x', until: 'y', total: summary(3, 3, 0, 0), groups: [group('gamma', 3, 3, 0, 0)] }
-    const w = await panel(async () => ({ data: empty }))
+    const w = await panel(async (url) => ({ data: url === FAILED ? { items: [], total: 0, truncated: false } : empty }))
     expect(kpi(w, 'checks_passed_rate').value).toBe('—')
     expect(w.find('[data-testid="eval-agent-passed"]').text()).toBe('—')
   })
@@ -169,7 +209,104 @@ describe('EvaluationsPanel — per-agent table (C2)', () => {
     await w.findAll('[data-testid="eval-agent-select"]')[0].trigger('click')
     await flush()
     expect(useEvaluationsStore().agent).toBe('beta')
-    expect(http.get.mock.calls[0][1].params).toEqual({ by: 'agent', period: 'week', agent: 'beta' })
+    expect(http.get.mock.calls[0]).toEqual([AGG, { params: { by: 'agent', period: 'week', agent: 'beta' } }])
+    expect(http.get.mock.calls.find(([u]) => u === FAILED)[1].params)
+      .toEqual({ by: 'agent', period: 'week', agent: 'beta', limit: 50, offset: 0 })
     expect(w.find('[data-testid="evaluations-agent-chip"]').text()).toContain('beta')
+  })
+})
+
+describe('EvaluationsPanel — failed list (C3)', () => {
+  beforeEach(() => setActivePinia(createPinia()))
+
+  it('reads the ent#937 failed route for the same window and lists the runs, each linking to its run page', async () => {
+    const w = await panel(byWindow())
+    expect(http.get.mock.calls.find(([u]) => u === FAILED)[1].params)
+      .toEqual({ by: 'agent', period: 'week', limit: 50, offset: 0 })
+    const rows = w.findAll('[data-testid="eval-failed-row"]')
+    expect(rows).toHaveLength(2)
+    expect(JSON.parse(rows[0].find('[data-testid="eval-failed-link"]').attributes('data-to')))
+      .toEqual({ name: 'ExecutionDetail', params: { name: 'beta', executionId: 'e1' } })
+    expect(rows[0].find('[data-testid="eval-failed-why"]').text()).toContain('schema_valid · missing_field')
+    expect(rows[1].find('[data-testid="eval-failed-why"]').text()).toContain('did not complete')
+    expect(w.find('[data-testid="eval-failed-total"]').text()).toBe('2 of 3')
+  })
+
+  it('shows the window\'s failed-check counts, most frequent first', async () => {
+    const w = await panel(byWindow())
+    expect(w.findAll('[data-testid="eval-failed-check"]').map((b) => b.text().replace(/\s+/g, ' ')))
+      .toEqual(['schema_valid 2'])
+  })
+
+  it('"Load more" asks for the next page and appends it; it goes away at the total', async () => {
+    const w = await panel(byWindow())
+    await w.find('[data-testid="eval-failed-more"]').trigger('click')
+    await flush()
+    expect(http.get.mock.calls.filter(([u]) => u === FAILED).at(-1)[1].params.offset).toBe(2)
+    expect(w.findAll('[data-testid="eval-failed-row"]').map((r) => r.find('a').text())).toEqual(['beta', 'beta', 'alpha'])
+    expect(w.find('[data-testid="eval-failed-more"]').exists()).toBe(false)
+  })
+
+  it('a failed page keeps the KPIs and says so in its own block', async () => {
+    const base = byWindow()
+    const w = await panel(async (url, c) => {
+      if (url === FAILED) { const e = new Error('500'); e.response = { status: 500, data: { detail: 'boom' } }; throw e }
+      return base(url, c)
+    })
+    expect(kpi(w, 'evaluated').value).toBe('10')
+    expect(w.find('[data-testid="eval-failed"]').text()).toContain('boom')
+    expect(w.find('[data-testid="eval-failed-empty"]').exists()).toBe(false)
+  })
+})
+
+describe('EvaluationsPanel — pairs stub (C3)', () => {
+  beforeEach(() => setActivePinia(createPinia()))
+
+  it('is wired to the aggregate by=pair over the same window', async () => {
+    const w = await panel(byWindow())
+    expect(http.get.mock.calls.find(([u, c]) => u === AGG && c.params.by === 'pair')[1].params)
+      .toEqual({ by: 'pair', period: 'week' })
+    expect(w.findAll('[data-testid="eval-pair-row"]').map((r) => r.find('button').text()))
+      .toEqual(['alpha → beta', 'gamma → alpha'])
+    expect(w.find('[data-testid="eval-pairs-total"]').text()).toBe('2 pairs')
+  })
+
+  it('a pair row narrows the failed list to that caller → callee edge; clearing restores it', async () => {
+    const w = await panel(byWindow())
+    await w.findAll('[data-testid="eval-pair-select"]')[0].trigger('click')
+    await flush()
+    expect(http.get.mock.calls.filter(([u]) => u === FAILED).at(-1)[1].params)
+      .toEqual({ by: 'pair', caller: 'alpha', callee: 'beta', period: 'week', limit: 50, offset: 0 })
+    expect(w.find('[data-testid="eval-failed-pair-chip"]').text()).toContain('alpha → beta')
+    await w.find('[data-testid="eval-failed-pair-clear"]').trigger('click')
+    await flush()
+    expect(http.get.mock.calls.filter(([u]) => u === FAILED).at(-1)[1].params.by).toBe('agent')
+  })
+
+  it('no delegated runs: the stub says so', async () => {
+    const w = await panel(byWindow({ pairs: { ...PAIRS, groups: [] } }))
+    expect(w.find('[data-testid="eval-pairs-empty"]').text()).toBe('No delegated runs graded in this period.')
+  })
+})
+
+describe('EvaluationsPanel — ?agent= deep link (C3)', () => {
+  beforeEach(() => setActivePinia(createPinia()))
+
+  it('arriving with ?agent= narrows every read to that agent', async () => {
+    await panel(byWindow(), { agent: 'beta' })
+    expect(useEvaluationsStore().agent).toBe('beta')
+    expect(http.get.mock.calls[0]).toEqual([AGG, { params: { by: 'agent', period: 'week', agent: 'beta' } }])
+    expect(nav.replace).not.toHaveBeenCalled()
+  })
+
+  it('picking an agent writes ?agent= into the URL, keeping ?tab=; clearing removes it', async () => {
+    const w = await panel(byWindow())
+    await w.findAll('[data-testid="eval-agent-select"]')[0].trigger('click')
+    await flush()
+    expect(nav.replace).toHaveBeenLastCalledWith({ query: { tab: 'evaluations', agent: 'beta' } })
+    nav.route.query = { tab: 'evaluations', agent: 'beta' }
+    await w.find('[data-testid="evaluations-agent-clear"]').trigger('click')
+    await flush()
+    expect(nav.replace).toHaveBeenLastCalledWith({ query: { tab: 'evaluations' } })
   })
 })
