@@ -35,6 +35,21 @@ TIER0_EVALUATOR = "platform:tier0"
 TIER0_TARGET_KIND = "execution"
 TIER0_TRIGGERS = ("schedule", "agent")
 TIER0_TERMINAL_STATUSES = ("success", "failed", "cancelled")
+# ent#940 — the pair (caller→callee edge) evaluator. Its row hangs off the
+# callee run under the same one-row key, so it needs no migration either. The
+# id shares the `platform:tier0` stem but every Tier-0 reader matches the bare
+# string exactly, so a pair row is never counted as a Tier-0 grade.
+TIER0_PAIR_EVALUATOR = "platform:tier0:pair"
+# The closed set the platform writer may file under. Anything else is refused:
+# the writer is fenced (test_935_write_fence.py), and a free-form evaluator
+# would let a caller of it mint a new platform identity.
+PLATFORM_EVALUATORS = (TIER0_EVALUATOR, TIER0_PAIR_EVALUATOR)
+
+
+def _platform_evaluator(evaluator: str) -> str:
+    if evaluator not in PLATFORM_EVALUATORS:
+        raise ValueError(f"not a platform evaluator: {evaluator!r}")
+    return evaluator
 
 
 def derive_delegation(row) -> tuple:
@@ -341,10 +356,12 @@ class EvaluationOperations:
     # ent#935 — the Tier-0 deterministic evaluator's writer
     # ------------------------------------------------------------------
 
-    def _tier0_update(self, conn, execution_id: str, values: dict) -> Optional[dict]:
-        """UPDATE the run's Tier-0 row if it exists; None if it does not."""
+    def _tier0_update(self, conn, execution_id: str, values: dict,
+                      evaluator: str = TIER0_EVALUATOR) -> Optional[dict]:
+        """UPDATE the run's platform row (under `evaluator`) if it exists; None
+        if it does not."""
         where = and_(
-            agent_evaluations.c.evaluator == TIER0_EVALUATOR,
+            agent_evaluations.c.evaluator == evaluator,
             agent_evaluations.c.target_kind == TIER0_TARGET_KIND,
             agent_evaluations.c.target_id == execution_id,
         )
@@ -363,8 +380,13 @@ class EvaluationOperations:
         checks: Any,
         archetype: Optional[str] = None,
         quality: Optional[float] = None,
+        evaluator: str = TIER0_EVALUATOR,
     ) -> dict:
         """Write (or re-grade) the Tier-0 row for one execution.
+
+        `evaluator` (ent#940) picks which platform row: the Tier-0 grade by
+        default, or the pair row (`TIER0_PAIR_EVALUATOR`). Any other value
+        raises `ValueError` before anything is read or written.
 
         One row per run: a second evaluation of the same execution — a FAILED
         terminal later overwritten by SUCCESS, two sweep workers — updates it in
@@ -374,19 +396,20 @@ class EvaluationOperations:
         applied as the UPDATE on the same connection (see
         `upsert_workspace_rating` for why both halves are load-bearing).
         """
+        evaluator = _platform_evaluator(evaluator)
         now = utc_now_iso()
         with get_engine().begin() as conn:
             values = self._tier0_values(conn, agent_name, execution_id, completion,
                                         checks, archetype, quality, now)
-            existing = self._tier0_update(conn, execution_id, values)
+            existing = self._tier0_update(conn, execution_id, values, evaluator)
             if existing is not None:
                 return existing
             eval_id = f"eval_{uuid.uuid4().hex[:16]}"
             try:
                 with conn.begin_nested():
-                    self._tier0_insert(conn, eval_id, values, now)
+                    self._tier0_insert(conn, eval_id, values, now, evaluator)
             except IntegrityError:
-                applied = self._tier0_update(conn, execution_id, values)
+                applied = self._tier0_update(conn, execution_id, values, evaluator)
                 if applied is not None:
                     return applied
                 raise
@@ -403,8 +426,10 @@ class EvaluationOperations:
         completion: Optional[bool],
         checks: Any,
         archetype: Optional[str] = None,
+        evaluator: str = TIER0_EVALUATOR,
     ) -> Optional[dict]:
         """INSERT the run's Tier-0 row only if it has none; None if it has one.
+        `evaluator` as in `upsert_platform_evaluation` (ent#940).
 
         The writer for a bookkeeping row (the sweep's `evaluator_timeout`) that
         must never replace a real grade. There is deliberately NO update
@@ -413,6 +438,7 @@ class EvaluationOperations:
         A later real grade still re-grades this row in place through
         `upsert_platform_evaluation`.
         """
+        evaluator = _platform_evaluator(evaluator)
         now = utc_now_iso()
         eval_id = f"eval_{uuid.uuid4().hex[:16]}"
         with get_engine().begin() as conn:
@@ -420,7 +446,7 @@ class EvaluationOperations:
                                         checks, archetype, None, now)
             try:
                 with conn.begin_nested():
-                    self._tier0_insert(conn, eval_id, values, now)
+                    self._tier0_insert(conn, eval_id, values, now, evaluator)
             except IntegrityError:
                 return None
             row = conn.execute(
@@ -428,9 +454,10 @@ class EvaluationOperations:
             ).mappings().first()
         return self._row_to_dict(row)
 
-    def _tier0_insert(self, conn, eval_id: str, values: dict, now: str) -> None:
+    def _tier0_insert(self, conn, eval_id: str, values: dict, now: str,
+                      evaluator: str = TIER0_EVALUATOR) -> None:
         conn.execute(insert(agent_evaluations).values(
-            id=eval_id, evaluator=TIER0_EVALUATOR, created_at=now,
+            id=eval_id, evaluator=evaluator, created_at=now,
             target_kind=TIER0_TARGET_KIND, target_id=values["execution_id"],
             judge_json=None, comment=None, **values,
         ))
@@ -463,11 +490,14 @@ class EvaluationOperations:
             "updated_at": now,
         }
 
-    def latest_tier0_for_execution(self, execution_id: str) -> Optional[dict]:
+    def latest_tier0_for_execution(self, execution_id: str, *,
+                                   evaluator: str = TIER0_EVALUATOR) -> Optional[dict]:
         """The run's Tier-0 row, or None ("not evaluated"). Other evaluators'
-        rows for the same execution are a different axis and never answer."""
+        rows for the same execution are a different axis and never answer.
+        `evaluator=TIER0_PAIR_EVALUATOR` reads the pair row instead (ent#940)."""
+        evaluator = _platform_evaluator(evaluator)
         stmt = select(agent_evaluations).where(and_(
-            agent_evaluations.c.evaluator == TIER0_EVALUATOR,
+            agent_evaluations.c.evaluator == evaluator,
             agent_evaluations.c.target_kind == TIER0_TARGET_KIND,
             agent_evaluations.c.target_id == execution_id,
         )).limit(1)
@@ -499,6 +529,38 @@ class EvaluationOperations:
                 ~evaluated.exists(),
             ))
             .order_by(schedule_executions.c.completed_at.asc())
+            .limit(max(0, int(limit)))
+        )
+        with get_engine().connect() as conn:
+            return [r[0] for r in conn.execute(stmt).all()]
+
+    def unevaluated_pair_execution_ids(self, *, limit: int = 25, lookback_hours: int = 24
+                                       ) -> list[str]:
+        """Delegated runs (ent#940) that have a Tier-0 row naming a caller and
+        no pair row yet, oldest Tier-0 row first.
+
+        The pair row hangs off the Tier-0 row, so a run Tier-0 never graded is
+        never a candidate, and the Tier-0 sweep's settle window already applies.
+        Bounded by `lookback_hours` on the Tier-0 row's `created_at` (ISO-Z,
+        cutoff computed in Python — Invariant #16) and by `limit`.
+        """
+        t0 = agent_evaluations.alias("t0")
+        pr = agent_evaluations.alias("pr")
+        paired = select(pr.c.id).where(and_(
+            pr.c.evaluator == TIER0_PAIR_EVALUATOR,
+            pr.c.target_kind == TIER0_TARGET_KIND,
+            pr.c.target_id == t0.c.target_id,
+        ))
+        stmt = (
+            select(t0.c.target_id)
+            .where(and_(
+                t0.c.evaluator == TIER0_EVALUATOR,
+                t0.c.target_kind == TIER0_TARGET_KIND,
+                t0.c.caller_agent.isnot(None),
+                t0.c.created_at >= iso_cutoff(lookback_hours),
+                ~paired.exists(),
+            ))
+            .order_by(t0.c.created_at.asc())
             .limit(max(0, int(limit)))
         )
         with get_engine().connect() as conn:

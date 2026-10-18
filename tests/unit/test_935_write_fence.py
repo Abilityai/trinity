@@ -248,6 +248,9 @@ def test_the_writers_have_exactly_three_callers():
         "routers/evaluations.py",          # admin:<user>, human-only gate
         "client_portal/service.py",        # workspace:<email>, closed target set
         "services/tier0_evaluator.py",     # platform:tier0, execution id only
+        # ent#940: platform:tier0:pair, execution id only; the writer refuses
+        # any evaluator outside PLATFORM_EVALUATORS (test_940_pair_checks.py)
+        "services/tier0_pair_evaluator.py",
     }
     callers = set()
     for path in _py_files():

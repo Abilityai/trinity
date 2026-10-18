@@ -553,6 +553,42 @@ class ActivityOperations:
         with get_engine().connect() as conn:
             return [self._row_to_activity(row) for row in conn.execute(stmt).all()]
 
+    # ent#940 — bound on one IN list, so a fan-out storm is read in chunks.
+    _COLLAB_IN_CHUNK = 200
+
+    def collaboration_rows_for_executions(self, execution_ids: Sequence[str]) -> List[Dict]:
+        """The `agent_collaboration` rows that point at any of `execution_ids`
+        through `related_execution_id`, oldest first (ent#940).
+
+        This is the caller's own record of a delegation: `chat_with_agent`
+        writes one on the CALLER's agent (`details.source_agent/target_agent/
+        action/execution_id`). Empty input reads nothing. A row whose `details`
+        is unreadable JSON comes back with `details=None` rather than raising —
+        the pair evaluator treats that as "no claim", never a crash.
+        """
+        ids = [i for i in dict.fromkeys(execution_ids or []) if i]
+        out: List[Dict] = []
+        if not ids:
+            return out
+        with get_engine().connect() as conn:
+            for start in range(0, len(ids), self._COLLAB_IN_CHUNK):
+                chunk = ids[start:start + self._COLLAB_IN_CHUNK]
+                stmt = (
+                    select(*_ACTIVITY_COLUMNS)
+                    .where(and_(
+                        agent_activities.c.activity_type == ActivityType.AGENT_COLLABORATION.value,
+                        agent_activities.c.related_execution_id.in_(chunk),
+                    ))
+                )
+                for row in conn.execute(stmt).all():
+                    try:
+                        out.append(self._row_to_activity(row))
+                    except (TypeError, ValueError):
+                        d = self._row_to_activity(tuple(row[:12]) + (None,) + tuple(row[13:]))
+                        out.append(d)
+        out.sort(key=lambda r: (r.get("created_at") or "", r.get("id") or ""))
+        return out
+
     def get_latest_activity_for_agents(self, agent_names: List[str]) -> Dict[str, Dict]:
         """Return the single most-recent activity per agent, in one query.
 

@@ -1936,6 +1936,15 @@ class DatabaseManager:
     def recent_series_metrics(self, execution_id: str, limit: int = 20):
         return self._schedule_ops.recent_series_metrics(execution_id, limit)
 
+    # ent#940 — pair evaluator reads
+    def sibling_executions(self, parent_execution_id: str, cap: int = 200):
+        return self._schedule_ops.sibling_executions(parent_execution_id, cap)
+
+    def pair_rework_series(self, caller_agent: str, callee_agent: str, series_key: str,
+                           limit: int = 20):
+        return self._schedule_ops.pair_rework_series(caller_agent, callee_agent,
+                                                     series_key, limit)
+
     def tool_call_count(self, raw):
         return self._schedule_ops._tool_call_count(raw)
 
@@ -2244,6 +2253,9 @@ class DatabaseManager:
 
     def get_agent_activities(self, agent_name: str, activity_type: str = None, activity_state: str = None, limit: int = 100):
         return self._activity_ops.get_agent_activities(agent_name, activity_type, activity_state, limit)
+
+    def collaboration_rows_for_executions(self, execution_ids):  # ent#940
+        return self._activity_ops.collaboration_rows_for_executions(execution_ids)
 
     def get_activities_in_range(self, start_time: str = None, end_time: str = None, activity_types: list = None, limit: int = 100, agent_names: list = None):
         return self._activity_ops.get_activities_in_range(start_time, end_time, activity_types, limit, agent_names)
@@ -3132,11 +3144,14 @@ class DatabaseManager:
     def insert_platform_evaluation_if_absent(self, agent_name, **kw):
         return self._evaluation_ops.insert_platform_evaluation_if_absent(agent_name, **kw)
 
-    def latest_tier0_for_execution(self, execution_id):
-        return self._evaluation_ops.latest_tier0_for_execution(execution_id)
+    def latest_tier0_for_execution(self, execution_id, **kw):
+        return self._evaluation_ops.latest_tier0_for_execution(execution_id, **kw)
 
     def unevaluated_execution_ids(self, **kw):
         return self._evaluation_ops.unevaluated_execution_ids(**kw)
+
+    def unevaluated_pair_execution_ids(self, **kw):  # ent#940
+        return self._evaluation_ops.unevaluated_pair_execution_ids(**kw)
 
     def get_or_create_public_user_memory(self, agent_name: str, user_email: str) -> dict:
         return self._public_link_ops.get_or_create_user_memory(agent_name, user_email)
