@@ -6227,6 +6227,32 @@
         "unit"
       ],
       "description": "Checks passed rate (ent#935 C3) on the real schema, across all three analytics payloads (per-schedule, schedules rollup row, agent Overview): rate = runs whose Tier-0 gate headline passed / runs evaluated; a skip-only row is evaluated, not passed; a run with no Tier-0 row is not evaluated (neither side); 0 evaluated -> rate None; workspace:/operator: rows never enter it; window, schedule and agent scoping; Completion (success_rate) unchanged; the Pydantic envelopes carry the fields. Mutation: counting a skip-only headline as passed turns 7 tests red."
+    },
+    {
+      "file": "unit/test_938_tab_guard.py",
+      "feature": "abilityai/trinity-enterprise#938",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Operations > Evaluations tab (ent#938 C1) - the guard is the API, never UI hiding alone. The exact aggregate request set the tab's store issues, driven through the real routers.evaluations router on the ent#937 harness under four principals: admin person (whole fleet + judge keys), operator-role person (own agents + judge keys - the floor admits operator, not only admin), Workspace-only role user (403 workspace_only on every tab URL via enforce_operator_floor), agent key (its own agent's rows only, no judge key). Also pins that get_current_user wires the floor. Mutation: making is_workspace_only_role return False turns the user-role test red."
+    },
+    {
+      "file": "unit/test_938_fleet_series.py",
+      "feature": "abilityai/trinity-enterprise#938",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Fleet evaluation series (ent#938 C7, ruling T3). points_for_day(fleet=True) folds every agent's rows under dims {scope: fleet}; the per-row restate and the over-cap per-agent retry write no fleet point; the nightly pass writes it idempotently. The trend route with no agent/pair serves it to an admin person and the system key (counts only, judge score 422) and the empty series to operator/creator persons and agent keys. Mutation: writing fleet=True on every _write_day turns the per-row and over-cap tests red."
     }
   ]
 }

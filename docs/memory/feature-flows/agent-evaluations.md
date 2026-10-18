@@ -189,7 +189,7 @@ Five GET routes, declared before `/evaluations/{eval_id}` (Invariant #4), all ov
 |-------|---------|
 | `GET /api/evaluations/aggregate?by=agent\|schedule\|pair` | Tier-0-graded runs completed in the window, folded per group: `evaluated`, `completed`, `completion_rate`, `graded`, `passed`, `checks_passed_rate` (passed ÷ graded), `per_check_fail`, `judged`, plus `quality_mean` / `judge_human_agreement` / `agreement_n` for a person |
 | `GET /api/evaluations/failed` | Runs that did not complete or failed a gate check, newest first, paged (`limit` ≤ 200, `offset`) — check ids and reason codes only, never evidence text |
-| `GET /api/evaluations/trend?metric=eval.*` | The stored daily `eval.*` series for one agent (`agent=`) or one pair (`caller=` + `callee=`), ≤ 92 days — read from the points, never recomputed |
+| `GET /api/evaluations/trend?metric=eval.*` | The stored daily `eval.*` series for one agent (`agent=`), one pair (`caller=` + `callee=`), or — naming neither — the fleet (`dims={"scope":"fleet"}`, served to an admin person and the system key only; every other reader gets `[]`, ent#938), ≤ 92 days — read from the points, never recomputed. A half-named pair, or `agent=` beside a pair, is 422 `invalid_series` |
 | `GET /api/evaluations/chain/{execution_id}` | Ancestors (nearest first) and descendants (breadth first), bounded by `inter_agent_max_chain_depth` and 200 nodes; a walk stops at the first node outside the reader's scope and says `access`, never naming it |
 | `GET /api/agents/{name}/evaluations/summary` | One agent's fold plus up to 50 failed runs — what the MCP tool serves |
 
@@ -232,6 +232,61 @@ the summary route; `agent_name` defaults to the calling agent, the access row is
 `enforce` on `agent_name`, and the projection is the backend's — the proxy never
 decides what an agent may see.
 
+## Operations › Evaluations tab (ent#938)
+
+**Component tree.** `views/Operations.vue` adds tab id `evaluations`. Gated tabs are
+data — `TAB_GATES` maps tab id → predicate (`evaluations: () => atOperatorFloor`,
+ent#837's floor: operator, creator, admin); the strip, the render slot, `resolveTab`
+(a gated deep link bounces to `needs-response`) and a late-role watch (re-selects the
+tab once `/api/users/me` lands, bounces on a demotion) all read it. The slot renders
+`components/EvaluationsPanel.vue` → `components/evaluations/{EvalKpiRow, EvalAgentTable,
+EvalFailed, EvalPairs, EvalTrend}.vue` + `format.js`, over one domain store,
+`stores/evaluations.js` (Invariants #6/#7: one store, the single API client).
+
+**Request set, as data** (`EVALUATION_URLS`, pinned by the store spec):
+
+| Read | Request |
+|------|---------|
+| KPIs + per-agent table | `GET /api/evaluations/aggregate?by=agent` (+ `agent=` when one is picked), and the previous window of the same length for the deltas (a failed previous read drops the deltas to "—", never the numbers) |
+| Delegated pairs | `GET /api/evaluations/aggregate?by=pair` (narrowed client-side to the picked agent) |
+| Failed runs | `GET /api/evaluations/failed`, `limit=50`, offset paging ("Load more" hidden at `total`); `by=pair&caller&callee` when a pair is picked |
+| Trend | `GET /api/evaluations/trend?metric=eval.checks_passed_rate&days=N` — no `agent=` reads the fleet series. `N` runs back from now to the window's first day (≤ 92), so a custom window that ended in the past plots its own days; a window opening before the 92-day reach says so |
+
+Period mapping: 7 d = `period=week`; 30 d and custom = `period=custom&since&until`
+(ISO-Z; a custom range is inclusive of both picked calendar days). The API validates
+the window (≤ 92 d, 422 `invalid_period` — the data stays and the API's message shows).
+Every loader stamps its request and drops an answer a later request overtook, so two
+quick picker changes never leave the earlier window under the later picker.
+
+**The guard is the API's.** `get_current_user` refuses a Workspace-only person (403
+`workspace_only`) on every read the tab issues; an agent key reads its own rows; a
+machine principal gets no judge keys. The UI gate only mirrors it.
+`tests/unit/test_938_tab_guard.py` drives the store's request set through the router
+under admin, operator, `user` and agent-key principals.
+
+**Fleet series.** Written only by the nightly pass's unscoped read, and only for
+completed UTC days — never today, which is still filling — never by the per-row restate
+or the over-cap per-agent retry (each sees one agent; an over-cap day is a gap). Dims
+`{"scope":"fleet"}`. Read by an admin person and the system key (counts only); every
+other reader — an operator or creator scoped to fewer agents, an agent key, a connector
+or any other machine key, even one owned by an admin — gets `[]`. The empty state says
+which: an admin is told no fleet point is written yet (first nightly pass pending); an
+operator or creator is told the fleet series is admin-only and to pick an agent. The
+caption states the one-day lag and the day the series starts. Pinned by
+`tests/unit/test_938_fleet_series.py`.
+
+**Honest states.** The panel runs the `viewState` triad (loading = no data yet; a
+failed refresh keeps the data with a stale banner; a failed first load is
+`LoadFailed`); the failed, pairs and trend blocks each carry their own error state, so
+one failed read never blanks the KPIs. The trend has one slot per UTC day of the
+window and a day with no point is a gap, never 0 %; switching agents drops the previous
+agent's line rather than showing it as this one's. `?agent=` deep-links both ways
+(other query keys kept). The empty state links to the Executions tab.
+
+**Deliberately absent** (waiting on the placement ruling): the C4/C5 blocks, a
+judged-quality column, and the agreement tile with its T4 floor — the store reads no
+`quality_mean` / `judge_human_agreement` / `agreement_n`.
+
 ## What this does NOT include
 
 - **The thing that populates `quality`.** Tier-0 grades what the run left
@@ -253,4 +308,5 @@ decides what an agent may see.
 | Models | `models.py` (`EvaluationCreate`, `EvaluationResponse`) |
 | Cascade | `db/agent_cleanup.py` (`AGENT_REFS`) |
 | Frontend | `ExecutionsPanel.vue`, `OverviewPanel.vue`, `ScheduleAnalyticsCard.vue` (relabel only); `views/ExecutionDetail.vue` + `components/ExecutionChecks.vue` (Tier-0 card) |
-| Tests | `tests/unit/test_206_agent_evaluations.py`; `tests/unit/test_935_*.py`, `tests/unit/test_ent935_*.py`; `tests/unit/test_937_*.py`; `src/mcp-server/src/tools/evaluations.test.ts`; `src/frontend/tests/unit/executionChecks.mount.spec.js` |
+| Frontend (ent#938) | `views/Operations.vue` (tab + `TAB_GATES`), `components/EvaluationsPanel.vue`, `components/evaluations/*`, `stores/evaluations.js`, `utils/tokenColor.js` |
+| Tests | `tests/unit/test_938_tab_guard.py`, `tests/unit/test_938_fleet_series.py`; `src/frontend/tests/unit/{evaluationsStore.spec.js, evaluationsPanel.mount.spec.js, operationsEvaluationsTab.mount.spec.js}`; `tests/unit/test_206_agent_evaluations.py`; `tests/unit/test_935_*.py`, `tests/unit/test_ent935_*.py`; `tests/unit/test_937_*.py`; `src/mcp-server/src/tools/evaluations.test.ts`; `src/frontend/tests/unit/executionChecks.mount.spec.js` |

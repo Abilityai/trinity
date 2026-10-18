@@ -134,7 +134,7 @@ Each row is labelled by kind — **You asked**, **Handed on** (a job the agent d
 | `/api/agents/{name}/evaluations/summary` | GET | One agent's roll-up and failed runs. `period` = `day`\|`week`\|`custom` (with `since`/`until`) |
 | `/api/evaluations/aggregate` | GET | Roll-ups `by` = `agent`\|`schedule`\|`pair` over a window |
 | `/api/evaluations/failed` | GET | Runs that did not complete or failed a check, newest first |
-| `/api/evaluations/trend` | GET | The daily `eval.*` series for one agent or one pair (up to 92 days) |
+| `/api/evaluations/trend` | GET | The daily `eval.*` series for one agent, one pair, or — naming neither — the whole fleet (up to 92 days). The fleet series is recorded nightly for completed days and shown to admins; other readers get an empty series |
 | `/api/evaluations/chain/{execution_id}` | GET | The run's delegation chain, up and down |
 | `/api/enterprise/client-portal/work?agents=a,b&chat_id=` | GET | The Workspace's Work read for a platform session: `now`, `earlier` (bounded, with `earlier_total` and `window_days`), the open chat's delegated children, and each row's `can_stop`. Up to 50 agent names; off-roster names are dropped; a Workspace client token gets 404 |
 
