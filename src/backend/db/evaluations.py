@@ -18,7 +18,7 @@ import json
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import select, insert, update, and_, or_, func
+from sqlalchemy import select, insert, update, and_, or_, func, case
 from sqlalchemy.exc import IntegrityError
 
 from db.engine import get_engine
@@ -563,8 +563,12 @@ class EvaluationOperations:
         A pair row written while the caller was still running carries
         `skip: caller_running` and is not final: once the caller run is
         terminal the run is a candidate again, so the re-grade (an in-place
-        upsert) replaces the skips with real results. Matched on the quoted
-        reason token, which no JSON separator choice can split.
+        upsert) replaces the skips with real results. A row whose caller read
+        raised (`skip: caller_unreadable`) is re-picked the same way. Matched
+        on the quoted reason token, which no JSON separator choice can split.
+
+        Fresh candidates (no pair row) sort before provisional re-grades, so
+        rows whose re-grade keeps failing never starve a tick's batch (I1).
         """
         t0 = agent_evaluations.alias("t0")
         pr = agent_evaluations.alias("pr")
@@ -578,9 +582,9 @@ class EvaluationOperations:
             se.c.id == pr.c.parent_execution_id,
             se.c.status.in_(TIER0_TERMINAL_STATUSES),
         ))
-        provisional = paired.where(and_(
-            pr.c.checks_json.like('%"caller_running"%'),
-            caller_ended.exists(),
+        provisional = paired.where(or_(
+            and_(pr.c.checks_json.like('%"caller_running"%'), caller_ended.exists()),
+            pr.c.checks_json.like('%"caller_unreadable"%'),
         ))
         stmt = (
             select(t0.c.target_id)
@@ -591,7 +595,7 @@ class EvaluationOperations:
                 t0.c.created_at >= iso_cutoff(lookback_hours),
                 or_(~paired.exists(), provisional.exists()),
             ))
-            .order_by(t0.c.created_at.asc())
+            .order_by(case((paired.exists(), 1), else_=0), t0.c.created_at.asc())
             .limit(max(0, int(limit)))
         )
         with get_engine().connect() as conn:

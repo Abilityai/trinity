@@ -101,6 +101,55 @@ def test_a_caller_running_pair_row_is_re_picked_once_the_caller_ends(pe):
     assert count("agent_evaluations", "evaluator = :e", e=PAIR) == 1
 
 
+def test_fresh_candidates_are_graded_before_provisional_re_grades(pe):
+    """I1: provisional rows (oldest Tier-0 rows) never starve a fresh one
+    inside a tick's batch — the fresh candidate is graded first."""
+    import asyncio
+    from database import db
+    _caller(status="running")
+    stuck = [f"ChildRun0000000000010{i}" for i in range(3)]
+    for eid in stuck:
+        _child(eid)
+        _activity(eid)
+        assert _check(pe.evaluate_pair(eid), "duplicate_dispatch")["reason"] == "caller_running"
+    _set(CALLER_RUN, status="success", completed_at=_ago(5))
+    fresh = "ChildRun00000000000199"
+    _child(fresh)                                   # newest Tier-0 row of the four
+    _activity(fresh)
+    assert db.unevaluated_pair_execution_ids(limit=2)[0] == fresh
+    result = asyncio.new_event_loop().run_until_complete(pe.sweep(limit=1))
+    assert result["evaluated"] == 1
+    assert db.latest_tier0_for_execution(fresh, evaluator=PAIR) is not None
+    assert set(db.unevaluated_pair_execution_ids()) == set(stuck)   # still owed a re-grade
+
+
+def test_a_raising_caller_read_keeps_the_row_provisional(pe, monkeypatch):
+    """I1: one transient caller read failure during the re-grade is not a
+    permanent `caller_missing` — the row stays a candidate."""
+    from database import db
+    _caller(status="running")
+    _child(CHILD)
+    _activity(CHILD)
+    pe.evaluate_pair(CHILD)
+    _set(CALLER_RUN, status="success", completed_at=_ago(5))
+    real = db.get_execution
+
+    def flaky(execution_id, *a, **kw):
+        if execution_id == CALLER_RUN:
+            raise RuntimeError("db blip")
+        return real(execution_id, *a, **kw)
+    monkeypatch.setattr(db, "get_execution", flaky)
+    row = pe.evaluate_pair(CHILD)
+    assert _check(row, "duplicate_dispatch")["reason"] == "caller_unreadable"
+    assert "caller_missing" not in json.dumps(row["checks"])
+    assert db.unevaluated_pair_execution_ids() == [CHILD]
+    monkeypatch.setattr(db, "get_execution", real)
+    row = pe.evaluate_pair(CHILD)
+    assert _check(row, "duplicate_dispatch")["reason"] not in ("caller_unreadable",
+                                                              "caller_running")
+    assert db.unevaluated_pair_execution_ids() == []
+
+
 def test_a_final_pair_row_is_never_re_picked(pe):
     from database import db
     _caller()

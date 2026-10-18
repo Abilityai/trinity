@@ -314,7 +314,8 @@ enterprise gitlink that lands it.
         ▼
  db.unevaluated_pair_execution_ids()
    Tier-0 rows naming a caller, no pair row yet (≤24 h) — plus pair rows left
-   `skip: caller_running` whose caller has since ended (re-graded in place)
+   `skip: caller_running` whose caller has since ended, or `skip: caller_unreadable`
+   (re-graded in place); fresh candidates sort before these re-grades
         │ to_thread, ≤4 at once, 10 s bound (timeout → all-skip row, insert-only)
         ▼
  evaluate_pair(callee_execution_id)        ← id only: no principal, no route

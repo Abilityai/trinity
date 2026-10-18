@@ -1146,7 +1146,9 @@ it on the integration branch. Neither exists yet.
   against the p95 of the same caller→callee→playbook series' earlier caller turns; fewer
   than 5 → `skip: insufficient_history`; only the upper side fails). While the caller is still running the caller-side checks are
   `skip: caller_running` and the row is not final: it is re-picked and re-graded in place
-  once the caller ends (within the 24 h window). A missing caller is `skip:
+  once the caller ends (within the 24 h window). A caller whose read raised is `skip:
+  caller_unreadable` and is re-picked the same way, never finalized; fresh candidates are
+  graded before these re-grades in a tick's batch. A missing caller is `skip:
   caller_missing`; an unreadable source costs its checks only (`*_unreadable`), and a
   raising check is `skip: evaluator_error`, as in FR-8.
 - **FR-19 — The pair row and its fence**: `evaluator='platform:tier0:pair'`,

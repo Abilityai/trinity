@@ -136,7 +136,7 @@ def check_dispatch_exists(ctx: Dict[str, Any]) -> Dict[str, Any]:
     (`related_execution_id` / `details.execution_id`); its reply is secondary
     and fails only for an id that exists nowhere at all."""
     if ctx.get("caller") is None:
-        return _skip("caller_missing")
+        return _no_caller(ctx)
     if ctx.get("activities") is None:
         return _skip("activities_unreadable")
     sibling_ids = {s["id"] for s in ctx["siblings"]}
@@ -174,7 +174,7 @@ def check_one_sided_record(ctx: Dict[str, Any]) -> Dict[str, Any]:
     if ctx.get("delegation_mode") in NON_ACTIVITY_MODES:
         return _skip("no_activity_channel", mode=ctx["delegation_mode"])
     if ctx.get("caller") is None:
-        return _skip("caller_missing")
+        return _no_caller(ctx)
     if ctx.get("activities") is None:
         return _skip("activities_unreadable")
     callee_id = ctx["callee"]["id"]
@@ -186,9 +186,16 @@ def check_one_sided_record(ctx: Dict[str, Any]) -> Dict[str, Any]:
     return _pass(activity_ids=rows[:5])
 
 
+def _no_caller(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """The skip for a context with no caller run. A read that raised is
+    `caller_unreadable` — provisional, re-picked like `caller_running` — so
+    one transient failure never finalizes the row as `caller_missing` (I1)."""
+    return _skip("caller_unreadable" if ctx.get("caller_unreadable") else "caller_missing")
+
+
 def _caller_level_skip(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if ctx.get("caller") is None:
-        return _skip("caller_missing")
+        return _no_caller(ctx)
     if ctx["caller"].get("status") not in TERMINAL:
         return _skip("caller_running")
     if ctx.get("siblings_truncated"):
@@ -304,7 +311,7 @@ def check_wrong_route(ctx: Dict[str, Any]) -> Dict[str, Any]:
 
 def _caller_ended_skip(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if ctx.get("caller") is None:
-        return _skip("caller_missing")
+        return _no_caller(ctx)
     if ctx["caller"].get("status") not in TERMINAL:
         return _skip("caller_running")
     return None
@@ -532,8 +539,15 @@ def build_context(execution_id: str) -> Optional[Dict[str, Any]]:
     if callee is None:
         return None
     parent_id = tier0.get("parent_execution_id")
-    caller = _exec_dict(_guarded("caller", execution_id, db.get_execution, parent_id)) \
-        if parent_id else None
+    caller_unreadable = False
+    caller = None
+    if parent_id:
+        try:
+            caller = _exec_dict(db.get_execution(parent_id))
+        except Exception as e:  # noqa: BLE001 — provisional, never a final caller_missing
+            logger.warning("[tier0-pair] caller read failed for %s: %s", execution_id,
+                           type(e).__name__)
+            caller_unreadable = True
     siblings = (_guarded("siblings", execution_id, db.sibling_executions, parent_id,
                          SIBLING_CAP) or []) if parent_id else []
     truncated = len(siblings) > SIBLING_CAP
@@ -552,6 +566,7 @@ def build_context(execution_id: str) -> Optional[Dict[str, Any]]:
     return {
         "callee": callee,
         "caller": caller,
+        "caller_unreadable": caller_unreadable,
         "caller_agent": tier0["caller_agent"],
         "parent_execution_id": parent_id,
         "delegation_mode": tier0.get("delegation_mode"),
