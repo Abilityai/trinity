@@ -180,6 +180,28 @@ evaluated, never 0%. Tests: `tests/unit/test_935_checks_passed_rate.py`,
 **Not built yet.** Re-grading a replayed run (D-3, ent#937); an MCP read tool
 (ent#937).
 
+## Tier-1 judge seam (ent#936, checkpoint A)
+
+The sampled, model-backed judge is an enterprise module; OSS carries the seam
+it writes through, in `db/evaluations.py` (contract: [requirements §46
+addendum B](../requirements/lifecycle-observability.md)):
+
+```
+ tier1_candidates(limit, lookback_hours)   Tier-0 rows whose run has no Tier-1 row
+        ▼
+ claim_tier1_row(execution_id, model)      INSERT platform:tier1:<model> in state
+   compare-and-set on the one-row index      `claimed`; loser → None (no call, no spend)
+        ▼  (the judge's provider call — enterprise, not here)
+ finish_tier1_row(eval_id, judge)          validate_judge_json → verdict or skip,
+   only onto a row still `claimed`           final per run; Tier-0 row untouched
+ reclaim_stale_tier1(stale_seconds)        releases a claim a dead worker left
+```
+
+A second row, never the Tier-0 row (a Tier-0 re-grade would clobber `quality`
+in place). Reached from the `database.py` facade only; the write fence holds
+(`tests/unit/test_935_write_fence.py`, ent#936 section). The agent-facing
+read of a judge row is ent#937's. Tests: `tests/unit/test_936_tier1_writer.py`.
+
 ## What this does NOT include
 
 - **The thing that populates `quality`.** Tier-0 grades what the run left
@@ -195,6 +217,7 @@ evaluated, never 0%. Tests: `tests/unit/test_935_checks_passed_rate.py`,
 | Router | `src/backend/routers/evaluations.py` (incl. the Tier-0 read route) |
 | Tier-0 | `src/backend/services/tier0_evaluator.py`, `src/backend/services/tier0_sweep_service.py` |
 | DB | `src/backend/db/evaluations.py` (`EvaluationOperations`), facade in `database.py` |
+| Tier-1 seam | `src/backend/db/evaluations.py` (`claim_tier1_row` / `finish_tier1_row` / `tier1_candidates` / `reclaim_stale_tier1` / `validate_judge_json`), ent#936 |
 | Schema | `db/schema.py`, `db/tables.py`, `db/migrations.py`, `migrations/versions/0033_agent_evaluations.py` |
 | Models | `models.py` (`EvaluationCreate`, `EvaluationResponse`) |
 | Cascade | `db/agent_cleanup.py` (`AGENT_REFS`) |
