@@ -16,6 +16,11 @@
  * each row linking to its run page), the delegated-pairs stub over
  * `by=pair` whose row narrows the failed list to that edge, and the
  * `?agent=` deep link in both directions.
+ *
+ * C6: the trend block — "pick an agent" while none is selected (no trend
+ * read issued), the stored daily series for the selected agent over the
+ * window's UTC days with gaps (never a false zero) for days with no point,
+ * an empty state, and a failed read kept to its own block.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -38,6 +43,15 @@ vi.mock('vue-router', () => ({
   useRouter: () => ({ push: vi.fn(), replace: nav.replace, back: vi.fn() }),
 }))
 
+
+// uPlot draws on a canvas jsdom does not have; the stub records what the
+// block hands the chart, which is the contract under test.
+vi.mock('../../src/components/TrendLineChart.vue', async () => {
+  const { defineComponent: dc, h: hh } = await import('vue')
+  return { default: dc({ name: 'TrendLineChart', props: ['dates', 'series'],
+    render() { return hh('div', { 'data-testid': 'trend-chart-stub' }) } }) }
+})
+
 const RouterLinkStub = defineComponent({
   props: ['to'],
   render() { return h('a', { 'data-to': JSON.stringify(this.to) }, this.$slots.default?.()) },
@@ -48,6 +62,7 @@ import { useEvaluationsStore } from '../../src/stores/evaluations'
 
 const AGG = '/api/evaluations/aggregate'
 const FAILED = '/api/evaluations/failed'
+const TREND = '/api/evaluations/trend'
 const SINCE = '2026-10-11T12:00:00Z'
 const UNTIL = '2026-10-18T12:00:00Z'
 const PREV_SINCE = '2026-10-04T12:00:00Z'
@@ -96,8 +111,17 @@ const PAIRS = {
 
 // Answers by route and window: the previous window is the one whose `until`
 // is SINCE; the failed route pages by offset.
-const byWindow = ({ prevFails = false, pairs = PAIRS } = {}) => async (url, { params }) => {
+const trendOf = (agent, points) => ({ metric: 'eval.checks_passed_rate', dims: { agent }, points })
+const TREND_BETA = [
+  { ts: '2026-10-12T00:00:00Z', value: 0.5 },
+  { ts: '2026-10-14T00:00:00Z', value: 0.75 },
+]
+const byWindow = ({ prevFails = false, pairs = PAIRS, trend = null } = {}) => async (url, { params }) => {
   if (url === FAILED) return { data: params.offset ? FAILED_PAGE_2 : FAILED_PAGE_1 }
+  if (url === TREND) {
+    if (trend instanceof Error) throw trend
+    return { data: trendOf(params.agent, trend ?? TREND_BETA) }
+  }
   if (url !== AGG) throw new Error(`unexpected ${url}`)
   if (params.by === 'pair') return { data: pairs }
   if (params.until === SINCE) {
@@ -115,7 +139,9 @@ async function panel(get, query = {}) {
   http.get = vi.fn(get)
   nav.route = reactive({ query: { tab: 'evaluations', ...query }, params: {} })
   nav.replace = vi.fn()
-  const w = mount(EvaluationsPanel, { global: { stubs: { RouterLink: RouterLinkStub } } })
+  const w = mount(EvaluationsPanel, {
+    global: { stubs: { RouterLink: RouterLinkStub } },
+  })
   await flush()
   return w
 }
@@ -308,5 +334,58 @@ describe('EvaluationsPanel — ?agent= deep link (C3)', () => {
     await w.find('[data-testid="evaluations-agent-clear"]').trigger('click')
     await flush()
     expect(nav.replace).toHaveBeenLastCalledWith({ query: { tab: 'evaluations' } })
+  })
+})
+
+describe('EvaluationsPanel — trend (C6)', () => {
+  beforeEach(() => setActivePinia(createPinia()))
+
+  it('with no agent selected says "pick an agent" and issues no trend read', async () => {
+    const w = await panel(byWindow())
+    expect(w.find('[data-testid="eval-trend-pick"]').exists()).toBe(true)
+    expect(w.find('[data-testid="eval-trend-chart"]').exists()).toBe(false)
+    expect(http.get.mock.calls.filter(([u]) => u === TREND)).toEqual([])
+  })
+
+  it('reads the stored checks-passed series for the selected agent over the window', async () => {
+    await panel(byWindow(), { agent: 'beta' })
+    const calls = http.get.mock.calls.filter(([u]) => u === TREND)
+    expect(calls).toEqual([[TREND, { params: { metric: 'eval.checks_passed_rate', agent: 'beta', days: 8 } }]])
+  })
+
+  it('plots one slot per UTC day of the window; a day with no point is a gap, never 0 %', async () => {
+    const w = await panel(byWindow(), { agent: 'beta' })
+    const chart = w.findComponent({ name: 'TrendLineChart' })
+    expect(chart.props('dates')).toEqual([
+      '2026-10-11', '2026-10-12', '2026-10-13', '2026-10-14',
+      '2026-10-15', '2026-10-16', '2026-10-17', '2026-10-18',
+    ])
+    expect(chart.props('series')[0].data).toEqual([null, 50, null, 75, null, null, null, null])
+  })
+
+  it('a selected agent with no stored point reads as empty, not as a flat zero line', async () => {
+    const w = await panel(byWindow({ trend: [] }), { agent: 'gamma' })
+    expect(w.find('[data-testid="eval-trend-empty"]').text()).toContain('gamma')
+    expect(w.find('[data-testid="eval-trend-chart"]').exists()).toBe(false)
+  })
+
+  it('a failed trend read stays in its own block — the KPIs still render', async () => {
+    const e = new Error('500'); e.response = { status: 500, data: { detail: 'down' } }
+    const w = await panel(byWindow({ trend: e }), { agent: 'beta' })
+    expect(w.find('[data-testid="eval-trend-failed"]').exists()).toBe(true)
+    expect(kpi(w, 'evaluated').value).toBe('10')
+  })
+
+  it('switching agents never shows the previous agent\'s line as this one\'s', async () => {
+    const w = await panel(byWindow(), { agent: 'beta' })
+    const store = useEvaluationsStore()
+    http.get = vi.fn(async (url, cfg) => {
+      if (url === TREND) return new Promise(() => {})       // in flight forever
+      return byWindow()(url, cfg)
+    })
+    store.setAgent('alpha')
+    await flush()
+    expect(store.trend).toBeNull()
+    expect(w.find('[data-testid="eval-trend-chart"]').exists()).toBe(false)
   })
 })

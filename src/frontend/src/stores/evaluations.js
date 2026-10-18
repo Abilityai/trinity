@@ -21,8 +21,13 @@ import { apiErrorMessage } from '../utils/apiError'
 
 export const AGGREGATE_URL = '/api/evaluations/aggregate'
 export const FAILED_URL = '/api/evaluations/failed'
+export const TREND_URL = '/api/evaluations/trend'
 /** Every URL this store may issue — the "ent#937 only" contract, as data. */
-export const EVALUATION_URLS = [AGGREGATE_URL, FAILED_URL]
+export const EVALUATION_URLS = [AGGREGATE_URL, FAILED_URL, TREND_URL]
+/** The one series the trend block plots (a count-backed rate, never a judge score). */
+export const TREND_METRIC = 'eval.checks_passed_rate'
+/** The trend route's own `days` ceiling. */
+export const MAX_TREND_DAYS = 92
 /** The failed route's page size (its own default; it caps at 200). */
 export const FAILED_PAGE = 50
 
@@ -35,6 +40,7 @@ export const PERIODS = [
 const DAY_MS = 86_400_000
 const isoZ = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
 const dayStart = (ymd) => `${ymd}T00:00:00Z`
+const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10)
 
 /**
  * The ent#937 query for a picker state. `null` while a custom range is still
@@ -78,6 +84,22 @@ export function topFailedCheck(perCheckFail) {
   return { id: entries[0][0], count: entries[0][1] }
 }
 
+/**
+ * The UTC days `[since, until)` spans, oldest first — the trend's x-axis, so
+ * a day with no stored point is a gap, never a dropped day or a false zero.
+ * `[]` when the bounds cannot be read.
+ */
+export function windowDays(since, until) {
+  const lo = Date.parse(since)
+  const hi = Date.parse(until)
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return []
+  const days = []
+  for (let t = Date.parse(dayStart(utcDay(lo))); t < hi && days.length < MAX_TREND_DAYS + 1; t += DAY_MS) {
+    days.push(utcDay(t))
+  }
+  return days
+}
+
 export const useEvaluationsStore = defineStore('evaluations', () => {
   // --- picker state ---
   const period = ref('7d')
@@ -108,6 +130,13 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
   // --- the pairs stub (C3): aggregate by=pair over the same window.
   const pairsAggregate = ref(null)
   const pairsError = ref(null)
+
+  // --- the trend (C6): the stored daily series for the selected agent. With
+  // no agent there is nothing to ask — the block says "pick an agent".
+  const trend = ref(null)
+  const trendLoading = ref(false)
+  const trendLoaded = ref(false)
+  const trendError = ref(null)
 
   const evaluatedCount = computed(() => aggregate.value?.total?.evaluated ?? 0)
   const invalidPeriod = computed(() => errorCode.value === 'invalid_period')
@@ -140,6 +169,20 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
     .filter((g) => !agent.value || g.key.caller === agent.value || g.key.callee === agent.value)
     .map((g) => ({ caller: g.key.caller, callee: g.key.callee, evaluated: g.evaluated,
       checksPassedRate: g.checks_passed_rate ?? null })))
+
+  // The chart's axis and values: one slot per UTC day of the window the
+  // aggregate answered with, the stored point's rate as a percentage, `null`
+  // (a gap) where no point was written.
+  const trendChart = computed(() => {
+    const dates = windowDays(aggregate.value?.since, aggregate.value?.until)
+    const byDay = new Map((trend.value?.points || []).map((p) => [String(p.ts).slice(0, 10), p.value]))
+    return {
+      dates,
+      values: dates.map((d) => (typeof byDay.get(d) === 'number'
+        ? Math.round(byDay.get(d) * 1000) / 10 : null)),
+      points: trend.value?.points?.length ?? 0,
+    }
+  })
 
   const failedHasMore = computed(() => failed.value.items.length < failed.value.total)
 
@@ -182,7 +225,7 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
       aggregate.value = data
       hasLoaded.value = true
       lastLoadedAt.value = Date.now()
-      await Promise.all([loadPrevious(p, data), loadFailed(), loadPairs()])
+      await Promise.all([loadPrevious(p, data), loadFailed(), loadPairs(), loadTrend()])
     } catch (err) {
       // A failed refresh keeps `aggregate` on screen (viewState → stale);
       // never a synthetic empty payload in a catch.
@@ -252,6 +295,35 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
     }
   }
 
+  async function loadTrend() {
+    if (!agent.value) {
+      trend.value = null
+      trendLoaded.value = false
+      trendError.value = null
+      return
+    }
+    const days = windowDays(aggregate.value?.since, aggregate.value?.until).length
+    if (!days) return
+    // Another agent's line is not a stale view of this one: drop it.
+    if (trend.value?.dims?.agent !== agent.value) {
+      trend.value = null
+      trendLoaded.value = false
+    }
+    trendLoading.value = true
+    trendError.value = null
+    try {
+      const { data } = await api.get(TREND_URL, {
+        params: { metric: TREND_METRIC, agent: agent.value, days: Math.min(days, MAX_TREND_DAYS) },
+      })
+      trend.value = data
+      trendLoaded.value = true
+    } catch (err) {
+      trendError.value = apiErrorMessage(err, "Couldn't load the trend")
+    } finally {
+      trendLoading.value = false
+    }
+  }
+
   /** Narrow the failed list to one caller → callee edge (`null` clears). */
   function setPair(next) {
     pair.value = next ? { caller: next.caller, callee: next.callee } : null
@@ -285,8 +357,9 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
     aggregate, prevAggregate, loading, hasLoaded, error, errorCode, lastLoadedAt,
     failed, failedLoading, failedLoaded, failedError, failedHasMore, pair,
     pairsAggregate, pairsError, pairRows, perCheck,
+    trend, trendLoading, trendLoaded, trendError, trendChart,
     evaluatedCount, invalidPeriod, kpis, agentRows,
-    load, loadFailed, loadMoreFailed, loadPairs, setPair,
+    load, loadFailed, loadMoreFailed, loadPairs, loadTrend, setPair,
     setPeriod, setCustomRange, setAgent, clearError,
   }
 })

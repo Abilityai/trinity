@@ -27,6 +27,8 @@ vi.mock('axios', () => {
 })
 
 const nav = vi.hoisted(() => ({ route: null, replace: null }))
+// EvalTrend's chart pulls in uPlot, which needs a canvas jsdom lacks.
+vi.mock('../../src/components/TrendLineChart.vue', () => ({ default: { render: () => null } }))
 vi.mock('vue-router', () => ({
   useRoute: () => nav.route,
   useRouter: () => ({ push: vi.fn(), replace: nav.replace, back: vi.fn() }),

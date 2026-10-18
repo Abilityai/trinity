@@ -110,6 +110,14 @@
         </div>
         <EvalKpiRow :kpis="store.kpis" />
         <EvalAgentTable :rows="store.agentRows" @select="store.setAgent" />
+        <EvalTrend
+          :agent="store.agent"
+          :chart="store.trendChart"
+          :loading="store.trendLoading"
+          :loaded="store.trendLoaded"
+          :error="store.trendError"
+          @retry="store.loadTrend()"
+        />
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <EvalFailed
             class="lg:col-span-2"
@@ -147,6 +155,7 @@ import EvalKpiRow from './evaluations/EvalKpiRow.vue'
 import EvalAgentTable from './evaluations/EvalAgentTable.vue'
 import EvalFailed from './evaluations/EvalFailed.vue'
 import EvalPairs from './evaluations/EvalPairs.vue'
+import EvalTrend from './evaluations/EvalTrend.vue'
 import { useEvaluationsStore, PERIODS } from '../stores/evaluations'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
 
