@@ -237,10 +237,10 @@ def test_every_dml_on_agent_evaluations_lives_in_the_db_layer():
     assert offenders <= allowed, offenders - allowed
 
 
-def test_the_writers_have_exactly_three_callers():
-    """The db facade forwards; past it, a Tier-0/admin/rating row is written
-    from three places only. A fourth caller is a new write path and must
-    be fenced here before it exists."""
+def test_the_writers_have_exactly_four_callers():
+    """The db facade forwards; past it, a Tier-0/pair/admin/rating row is
+    written from four places only. A fifth caller is a new write path and
+    must be fenced here before it exists."""
     writers = {"create_agent_evaluation", "upsert_platform_evaluation",
                "upsert_workspace_rating", "create_evaluation"}
     allowed = {
