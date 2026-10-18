@@ -345,8 +345,7 @@ async def evaluation_trend(
     (`caller=` + `callee=`), or — naming neither — the fleet (ent#938, written
     by the nightly pass only, so it runs through yesterday). Read from the
     points the platform writes, never recomputed. Out of scope reads as an
-    empty series: the fleet series only to a principal whose scope is already
-    every agent and who is not an agent key."""
+    empty series: the fleet series only to an admin person and the system key."""
     scope = _scope(current_user)
     try:
         name = evaluation_read_service.trend_metric(metric, machine=scope.machine)
@@ -367,9 +366,13 @@ async def evaluation_trend(
         # reader scoped to fewer (a cross-tenant count) nor to an agent key
         # (ent#937's contract: self rows only). A machine reader that does see
         # every agent gets counts only — `trend_metric` already refused it a
-        # judge score above.
+        # judge score above. The two readers are NAMED — an admin person and the
+        # system key — rather than "every scope whose names are every agent": a
+        # connector, a portal delegate or a scope invented tomorrow owned by an
+        # admin also has that scope, and is fenced off this route only elsewhere.
         dims, absent = dict(evaluation_read_service.FLEET_DIMS), ["agent", "caller", "callee"]
-        visible = scope.self_agent is None and scope.names is None
+        visible = (scope.self_agent is None and scope.names is None
+                   and (not scope.machine or current_user.mcp_scope == "system"))
     points = []
     if visible:
         now = datetime.now(timezone.utc)

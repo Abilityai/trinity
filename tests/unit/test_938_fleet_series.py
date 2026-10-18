@@ -179,6 +179,13 @@ def test_the_system_key_reads_fleet_counts_but_never_a_judge_score(stored):
     pytest.param(lambda: _user(OWNER, role="operator"), id="operator-person"),
     pytest.param(lambda: _user(OWNER, role="creator"), id="creator-person"),
     pytest.param(lambda: _agent_key("agent-a"), id="agent-key-of-an-admin-owner"),
+    # Machine keys owned by an admin whose scope is every agent: the fleet
+    # branch names the admin PERSON and the system key, not "whoever's scope is
+    # every agent" (review /cso residual) — so a scope fenced off elsewhere, or
+    # one invented tomorrow, still reads nothing here.
+    pytest.param(lambda: _user(ADMIN, role="admin", mcp_scope="connector"), id="connector-key-of-an-admin"),
+    pytest.param(lambda: _user(ADMIN, role="admin", mcp_scope="portal_delegate"), id="portal-delegate-of-an-admin"),
+    pytest.param(lambda: _user(ADMIN, role="admin", mcp_scope="ops"), id="unknown-scope-of-an-admin"),
 ])
 def test_a_reader_scoped_to_fewer_agents_gets_the_empty_series_not_a_403(stored, principal):
     stored.as_user(principal())
