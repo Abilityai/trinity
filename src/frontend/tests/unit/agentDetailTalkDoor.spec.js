@@ -137,7 +137,8 @@ describe('AgentHeader offers the door', () => {
     // header legitimately carries `target="_blank"`, so a file-wide check would
     // fail on arrival.
     expect(talk).not.toContain('target="_blank"')
-    expect(HEADER_RAW).toContain('target="_blank"')   // the Git link, still there
+    // trinity-enterprise#887: the header's Git row (and its remote link, the one
+    // `target="_blank"` this used to cross-check) moved to the Git tab.
   })
 
   it('says where the call happens and that the conversation changes home', () => {

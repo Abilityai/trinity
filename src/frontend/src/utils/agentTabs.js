@@ -24,7 +24,18 @@
  * skills now. Exported so the resolver's data is executed by its spec rather
  * than matched out of the SFC's text.
  */
-export const TAB_ALIASES = Object.freeze({ guardrails: 'settings', playbooks: 'skills' })
+//
+// trinity-enterprise#887/#888/#890/#891 (trinity#966): the tabs whose
+// configuration moved into the Settings home alias to `settings`; the pane
+// each one lands on is `LEGACY_TAB_SECTIONS` in `utils/agentSettings.js`.
+export const TAB_ALIASES = Object.freeze({
+  guardrails: 'settings',
+  playbooks: 'skills',
+  info: 'settings',
+  credentials: 'settings',
+  folders: 'settings',
+  access: 'settings',
+})
 
 export function buildTabs({
   isSystem = false, hasDashboardFlag = false, hasDeclaredMetrics = false,
@@ -73,13 +84,13 @@ export function buildTabs({
     // tab held, visible to everyone with access (the system agent included).
     // The management controls inside it are role-gated, not the tab.
     { id: 'skills', label: 'Skills' },
-    { id: 'credentials', label: 'Credentials' },
+    // trinity-enterprise#888: Credentials is a section of Settings › Storage.
     { id: 'nevermined', label: 'Payments' }
   )
 
-  // Access control tabs - hide for system agent (system agent has full access)
+  // Access control tabs - hide for system agent (system agent has full access).
+  // trinity-enterprise#891: the Access tab is Settings › People now.
   if (canShare && !isSystem) {
-    tabs.push({ id: 'access', label: 'Access' })  // #17 operators (Trinity users)
     tabs.push({ id: 'sharing', label: 'Sharing' })
     tabs.push({ id: 'permissions', label: 'Permissions' })
   }
@@ -98,18 +109,14 @@ export function buildTabs({
   // tabs.push({ id: 'terminal', label: 'Terminal' })
   tabs.push({ id: 'files', label: 'Files' })
 
-  // Folders - hide for system agent
-  if (canShare && !isSystem) {
-    tabs.push({ id: 'folders', label: 'Folders' })
-  }
-
-  // Settings - owner-only (#1108); sectioned config home, Guardrails is section #1
-  if (canShare && !isSystem) {
+  // Settings — the one configuration home, last on the strip
+  // (trinity-enterprise#887, trinity#966). Owner-only, as the Settings tab has
+  // been since #1108. The system agent gets it too: the panes it may see are
+  // decided by `settingsSections()` in `utils/agentSettings.js` (General and
+  // Guardrails). Folders (→ Storage) and Info (→ General) are panes now.
+  if (canShare) {
     tabs.push({ id: 'settings', label: 'Settings' })
   }
-
-  // Info at the end (reference/metadata)
-  tabs.push({ id: 'info', label: 'Info' })
 
   return tabs
 }

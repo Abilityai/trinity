@@ -1,13 +1,15 @@
 <template>
   <div>
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">File Sharing</h3>
-    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      Let the agent publish files from its
-      <code class="font-mono text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">/home/developer/public/</code>
-      directory via time-limited download URLs. Agents call the
-      <code class="font-mono text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">share_file</code>
-      MCP tool once this toggle is on.
-    </p>
+    <template v-if="!embedded">
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">File Sharing</h3>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+        Let the agent publish files from its
+        <code class="font-mono text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">/home/developer/public/</code>
+        directory via time-limited download URLs. Agents call the
+        <code class="font-mono text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">share_file</code>
+        MCP tool once this toggle is on.
+      </p>
+    </template>
 
     <!-- Toggle -->
     <div class="flex items-start gap-3 mb-4">
@@ -31,14 +33,9 @@
       </div>
     </div>
 
-    <!-- Restart-required banner -->
-    <div
-      v-if="status.restart_required"
-      class="mb-4 rounded-md bg-state-autonomous-50 dark:bg-state-autonomous-900/30 border border-state-autonomous-200 dark:border-state-autonomous-800 px-4 py-3 text-sm text-state-autonomous-800 dark:text-state-autonomous-200"
-    >
-      Configuration changed — restart the agent to mount or detach
-      <code class="font-mono text-xs">/home/developer/public/</code>.
-    </div>
+    <!-- trinity-enterprise#888: no card-level restart banner. A toggle whose
+         volume is not mounted yet reports to the page's one banner (Settings),
+         which names it and carries the Restart button. -->
 
     <!-- Quota + file count -->
     <div v-if="status.enabled" class="mb-4 text-sm text-gray-600 dark:text-gray-400">
@@ -123,13 +120,17 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import { useNotification } from '../composables'
+import { useAgentRestartStore } from '../stores/agentRestart'
 import { describeSharedFileAudience } from '../utils/sharedFileAudience'
 
 const props = defineProps({
   agentName: { type: String, required: true },
+  // trinity-enterprise#888: inside Settings › Storage the section supplies
+  // the title, and the restart it needs goes to the page's one banner.
+  embedded: { type: Boolean, default: false },
 })
 
 const agentsStore = useAgentsStore()
@@ -261,4 +262,14 @@ function relativeTime(iso) {
 }
 
 onMounted(loadStatus)
+
+const restartStore = useAgentRestartStore()
+
+// The backend says when the toggle and the mounted volume disagree; that is a
+// change waiting for a restart, and the one banner is where it is announced.
+watch(() => [props.agentName, status.value.restart_required], ([name, pending]) => {
+  restartStore.report(name, 'file-sharing', 'File sharing', !!pending)
+})
+// After the banner's restart, re-read: only the backend knows if it applied.
+watch(() => restartStore.epochFor(props.agentName), () => loadStatus())
 </script>

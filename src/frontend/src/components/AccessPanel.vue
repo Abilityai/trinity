@@ -1,9 +1,11 @@
 <template>
-  <div class="p-6 space-y-6">
+  <!-- `embedded` (trinity-enterprise#891): Settings › People, whose title is
+       the pane's own — the panel keeps everything else exactly as it was. -->
+  <div :class="embedded ? 'space-y-6' : 'p-6 space-y-6'">
     <!-- Header -->
     <div>
-      <h3 class="text-lg font-medium text-gray-900 dark:text-white">Access</h3>
-      <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+      <h3 v-if="!embedded" class="text-lg font-medium text-gray-900 dark:text-white">Access</h3>
+      <p class="text-sm text-gray-500 dark:text-gray-400" :class="{ 'mt-1': !embedded }">
         <!-- trinity-enterprise#837: an admin who manages members changes the role
              right here, so the pointer to Settings is for everyone else. -->
         <template v-if="canManageMembers">
@@ -224,6 +226,7 @@ const props = defineProps({
   agentName: { type: String, required: true },
   // The owner's username: the serves section never shares the agent with them.
   agentOwner: { type: String, default: null },
+  embedded: { type: Boolean, default: false },
 })
 
 const agentsStore = useAgentsStore()

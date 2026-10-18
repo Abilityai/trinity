@@ -106,8 +106,18 @@
 
 ### 1.6 Agent Live Telemetry
 - **Status**: ✅ Implemented
-- **Description**: Real-time container metrics in agent header
+- **Description**: Real-time container metrics on the agent's Overview tab (moved from the header by trinity-enterprise#887)
 - **Key Features**: CPU/memory usage, network I/O, uptime display, auto-refresh every 10 seconds
+
+### 1.7 Agent Settings home (trinity#966; trinity-enterprise#887, #888, #890, #891, #353)
+- **Status**: 🚧 In Dev — General, Guardrails, People, Storage panes built; Channels and Integrations hold only the cards the old flat Settings list carried, and point at the Sharing / Permissions / A2A / Payments tabs until their steps land
+- **Description**: The agent page splits into a working strip and ONE Settings home: Settings is the last tab, pinned outside the overflow menu, with a left rail of panes, each answering one question. The header keeps identity (avatar, name, id, description), running state, the autonomy chip and the doors (Brain, Workspace, Talk, Start/Stop) — nothing else.
+- **FR-1 — URL**: `?tab=settings&section=<pane>`; Back steps between panes. Legacy `?tab=` values resolve: `info → general`, `guardrails → guardrails`, `credentials`/`folders → storage`, `access → people`. A pane this viewer cannot see falls back to the first visible pane, never a blank one.
+- **FR-2 — One home per control**: no control exists in two places. General owns label/id/avatar/description/tags, runtime/model/funding, execution timeout, parallel capacity, read-only, memory/CPU, template details and the Danger zone (reset to main — only with a bound repository — and delete). Guardrails owns guardrail rules, self-change permissions (ent#756), a count of approval-gated skills linking to Skills, autonomy (read-only until the dial, PR #2984, merges), cross-model validation (entitled only) and reliability. People is the former Access tab, unchanged. Storage owns repository binding, the GitHub token, git sync, credentials, shared folders and file sharing (moved from Sharing › Distribution). The Info, Credentials, Folders and Access tabs are removed; the Git tab keeps status, changes, commits, pull and push.
+- **FR-3 — One restart banner**: every change waiting for a restart (file sharing, shared folders, memory/CPU, guardrail rules, GitHub token, funding) is named in ONE banner at the top of Settings with one Restart (or Start, when stopped) button. It keeps its footprint when nothing waits. Memory/CPU is saved and applied on the next restart — no longer an immediate restart.
+- **FR-4 — Execution timeout (ent#353)**: minutes, 1–120, default 60; out-of-range input gets a named error before any request; #929's `agent_timeout_below_active_schedules` refusal is rendered as a sentence naming the longest schedule and an "Open Schedules" button.
+- **FR-5 — Who sees what**: Settings stays owner-only (`can_share`). The system agent gets General, Guardrails and Integrations. At phone width the rail becomes a pane select; no horizontal page scroll.
+- **Open decision**: ent#891 asks that People hide when user management is unentitled. It is shown to every owner for now, because the pane holds OSS sharing (adding a person by email) that the Access tab offered to every owner; its entitled sections gate themselves.
 
 ---
 
