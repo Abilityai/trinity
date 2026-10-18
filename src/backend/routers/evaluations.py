@@ -487,7 +487,7 @@ async def create_evaluation(
         judge=body.judge,
     )
     # The write fence is `require_admin` + `reject_agent_principal`, so this
-    # caller is an operator by construction — stated explicitly rather than
-    # left to the fail-closed default, which would redact an admin's own write
-    # back to them.
+    # caller should be an operator; the status is still resolved through
+    # `_operator_for` (`can_user_share_agent` + `agent_may_reach`), not
+    # assumed, so the echo is redacted only if that check says otherwise.
     return _to_response(row, current_user, _operator_for([row], current_user))
