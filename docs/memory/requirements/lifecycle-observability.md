@@ -1010,10 +1010,9 @@ the platform's own records, with **zero LLM calls**. OSS core, always on, no set
   and the failed gates listed by id, reason and scalar evidence. Signals are listed as
   "recorded, not counted" observations (`budget_vs_baseline — outside baseline`), never
   worded or coloured as pass/fail. A 404 `not_evaluated` renders **Not evaluated** with
-  the reason a run may have none (the card's copy says only schedule- and
-  agent-triggered runs are graded, about a minute after they finish — since ent#940
-  delegated `fan_out`/`loop`/`reminder` runs are graded too and the copy has not caught
-  up), never as an error; any other read failure says the
+  the reason a run may have none (the card's copy says scheduled runs, agent-triggered
+  runs and runs another agent delegated are graded, about a minute after they finish),
+  never as an error; any other read failure says the
   checks could not be loaded, with Retry. Running and queued runs request nothing.
   **Checks passed rate (built, C3)**: the three existing analytics payloads — per-schedule
   `GET …/schedules/{id}/analytics`, each row of `GET …/schedules/analytics-summary`, and
@@ -1082,9 +1081,9 @@ placement ruling and are not built until it lands.
   API's `invalid_period` message beside the picker and keeps the previous data). State
   lives in `stores/evaluations.js`, the one domain store; its request set is pinned to the
   ent#937 routes. Loading / failed / empty / stale follow `utils/loadingState.js::viewState`;
-  the empty state names the Tier-0 scope (its copy reads scheduled and agent-triggered runs,
-  graded about a minute after they finish — not yet widened to the delegated
-  `fan_out`/`loop`/`reminder` runs ent#940 grades) and links to the Executions tab.
+  the empty state names the Tier-0 scope (scheduled runs, agent-triggered runs and runs
+  another agent delegated — the ent#940 `fan_out`/`loop`/`reminder` runs — graded about a
+  minute after they finish) and links to the Executions tab.
 - **FR-16 — Operator rating from the run page** (ruling T2, built after the placement
   answer): human-only `POST|GET /api/agents/{name}/executions/{id}/rating` behind
   `require_interactive` + the owner-tier agent gate, a small service into the existing

@@ -147,8 +147,8 @@ evidence), *No gate check applied* (every gate skipped). Signals sit under
 "recorded, not counted" and are never worded or coloured as pass/fail — a
 baseline drift is an observation, not a verdict. A run with no row reads
 *Not evaluated* (manual and chat runs are not graded), never an error. The
-card's explanatory copy still names only scheduled and agent-triggered runs;
-it predates the ent#940 widening to sourced `fan_out`/`loop`/`reminder` runs.
+card's explanatory copy names scheduled runs, agent-triggered runs and runs
+another agent delegated (the ent#940 sourced `fan_out`/`loop`/`reminder` runs).
 
 **Why a sweep, not a terminal hook.** The scheduler owns no terminal for
 `agent` runs, and the backend's terminal fan-out misses the FAILED terminals the
