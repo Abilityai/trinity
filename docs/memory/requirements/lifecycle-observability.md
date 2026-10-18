@@ -1191,7 +1191,10 @@ it on the integration branch. Neither exists yet.
   read and an agent reading its own run write nothing; the reader is the key's own agent,
   never a header. First read only — the row id is a uuid5 over (reader, run) and the
   insert does nothing on conflict, so repeat and racing reads leave one row. Fail-open:
-  the response's status and body never change. No broadcast.
+  the response's status and body never change. No broadcast. Inline delivery counts as a
+  read: a sync `/chat`, sync `/task` or sync `POST /fan-out` answer (and its idempotent
+  replay) that hands an agent key a finished run writes the same receipt, by the run's
+  stored status; an accepted/queued receipt answer writes none.
 
 See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
 

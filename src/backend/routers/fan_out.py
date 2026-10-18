@@ -140,6 +140,11 @@ async def fan_out(
                 },
             )
         if idem.snapshot is not None:
+            # ent#940 I3: a replayed sync batch hands its finished children over again.
+            if isinstance(idem.snapshot, dict) and idem.snapshot.get("status") != "accepted":
+                activity_service.record_inline_reads(current_user, name, [
+                    r.get("execution_id") for r in idem.snapshot.get("results") or []
+                    if isinstance(r, dict)])
             return JSONResponse(
                 content=idem.snapshot, headers={"X-Idempotent-Replay": "true"}
             )
@@ -213,6 +218,10 @@ async def fan_out(
     # is the right thing to replay, since re-dispatching N subtasks is exactly
     # what the key exists to prevent.
     idempotency_service.complete(idem, result.fan_out_id, response.model_dump())
+    # ent#940 I3: a sync batch hands an agent key each finished child inline.
+    if not request.async_mode:
+        activity_service.record_inline_reads(
+            current_user, name, [r.execution_id for r in result.results])
     return response
 
 
