@@ -23,7 +23,7 @@ from typing import Optional
 import httpx
 
 from database import db
-from adapters.base import ChannelAdapter, FileAttachment, NormalizedMessage, ChannelResponse, OutboundFile
+from adapters.base import ChannelAdapter, FileAttachment, NormalizedMessage, ChannelResponse
 from services import login_policy_gate
 from services.email_service import EmailService
 from services.telegram_group_context import fetch_can_read_all_group_messages
@@ -321,49 +321,20 @@ class TelegramAdapter(ChannelAdapter):
             return
 
         text = response.text
-        # Explicit file payloads may still come from other callers. Do not
-        # announce an attachment until Telegram has acknowledged its upload.
-        reply_to = thread_id if response.metadata.get("is_group") else None
-        file_results = []
-        for file in response.files:
-            uploaded = await self._send_document(bot_token, channel_id, file, reply_to)
-            file_results.append((f"(see attached: {file.filename})", file, uploaded))
-
-        # Match references in occurrence order, including duplicate filenames.
-        # File content is escaped directly, never reinterpreted as Markdown.
-        html_text = ""
-        if any(not uploaded for _, _, uploaded in file_results):
-            by_marker = {}
-            for index, (marker, _, _) in enumerate(file_results):
-                by_marker.setdefault(marker, []).append(index)
-            pattern = re.compile("|".join(re.escape(marker) for marker in by_marker))
-            offset = 0
-            seen = set()
-            for match in pattern.finditer(text):
-                indices = by_marker[match.group()]
-                index = indices.pop(0) if len(indices) > 1 else indices[0]
-                _, file, uploaded = file_results[index]
-                seen.add(index)
-                html_text += self._markdown_to_html(text[offset:match.start()])
-                if uploaded:
-                    html_text += html.escape(match.group(), quote=False)
-                else:
-                    html_text += "<pre>" + html.escape(file.content.decode("utf-8", errors="replace"), quote=False) + "</pre>"
-                offset = match.end()
-            html_text += self._markdown_to_html(text[offset:])
-            for index, (_, file, uploaded) in enumerate(file_results):
-                if not uploaded and index not in seen:
-                    html_text += "\n<pre>" + html.escape(file.content.decode("utf-8", errors="replace"), quote=False) + "</pre>"
-        else:
-            html_text = self._markdown_to_html(text)
-        if not html_text:
+        if not text:
             return
 
         # Voice replies v2 (ent#117): replies are TEXT by default. Voice is now a
         # per-message capability the agent opts into via the send_voice_reply MCP
         # tool during the turn — the adapter no longer speaks replies unconditionally.
+        # Convert markdown to Telegram HTML
+        html_text = self._markdown_to_html(text)
+
         # Split long messages at paragraph boundaries
         chunks = self._split_message(html_text)
+
+        # In groups, always reply to the triggering message for threaded context
+        reply_to = thread_id if response.metadata.get("is_group") else None
 
         for chunk in chunks:
             sent = await self._send_message(
@@ -378,36 +349,6 @@ class TelegramAdapter(ChannelAdapter):
                 # already accepted chunks while retrying a later one.
                 logger.error("Telegram reply stopped after a failed chunk")
                 return
-
-    async def _send_document(
-        self, bot_token: str, chat_id: str, file: OutboundFile,
-        reply_to: Optional[str] = None,
-    ) -> bool:
-        """Upload an explicit outbound text file; false means inline fallback."""
-        import json
-
-        data = {"chat_id": str(chat_id)}
-        if reply_to:
-            data["reply_parameters"] = json.dumps({
-                "message_id": int(reply_to), "allow_sending_without_reply": True,
-            })
-        try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                for attempt in range(2):
-                    resp = await client.post(
-                        f"{TELEGRAM_API_BASE}/bot{bot_token}/sendDocument",
-                        data=data,
-                        files={"document": (file.filename, file.content, "text/plain")},
-                    )
-                    if resp.status_code == 429 and attempt == 0:
-                        await asyncio.sleep(max(0, resp.json().get("parameters", {}).get("retry_after", 5)))
-                        continue
-                    body = resp.json()
-                    return resp.status_code == 200 and body.get("ok") is True and bool(body.get("result", {}).get("message_id"))
-        except Exception:
-            # Exception URLs can contain the bot token; don't log them.
-            logger.warning("Telegram document upload failed; falling back to text")
-        return False
 
     # =========================================================================
     # Unified access control (Issue #311)
@@ -1130,7 +1071,11 @@ class TelegramAdapter(ChannelAdapter):
                     if resp.status_code == 429 and not rate_limit_retried:
                         rate_limit_retried = True
                         retry_after = body.get("parameters", {}).get("retry_after", 5)
-                        await asyncio.sleep(max(0, retry_after))
+                        if (not isinstance(retry_after, int) or isinstance(retry_after, bool)
+                                or not 0 <= retry_after <= 30):
+                            logger.warning("Telegram flood wait exceeds bounded retry policy")
+                            return None
+                        await asyncio.sleep(retry_after)
                         continue
                     if (resp.status_code == 400 and payload["parse_mode"]
                             and "can't parse entities" in str(body.get("description", "")).lower()):
@@ -1141,7 +1086,12 @@ class TelegramAdapter(ChannelAdapter):
                     if (resp.status_code == 200 and body.get("ok") is True
                             and isinstance(result, dict) and result.get("message_id")):
                         return result
-                    logger.error("Telegram sendMessage failed (status %s)", resp.status_code)
+                    # Keep the useful API reason, never its URLs or our token.
+                    description = str(body.get("description", "No error description"))
+                    description = description.replace(bot_token, "[REDACTED]")
+                    description = re.sub(r"https?://\S+", "[URL]", description)
+                    description = " ".join(description.splitlines())[:300]
+                    logger.error("Telegram sendMessage failed (status %s): %s", resp.status_code, description)
                     return None
         except Exception:
             # A timeout has an unknown delivery outcome: don't replay it, and

@@ -137,6 +137,12 @@ function gateLineFor({ gate, kinds, recommended, showApproval }) {
     const reachable = kind ? kind.reachable : gate.approver_reachable !== false
     const who = kindLabel(gate.approver, kind?.label)
     if (!reachable) {
+      // trinity-enterprise#881: filled, but its people can't open the agent —
+      // the remedy is a share, not an assignment.
+      const why = kind ? kind.unreachable : gate.approver_unreachable
+      if (why === 'not_shared') {
+        return { tone: 'warn', text: `Needs approval from ${who}: not shared with them` }
+      }
       return { tone: 'warn', text: `Needs approval from ${who}: nobody fills it yet` }
     }
     return { tone: 'locked', text: `Needs approval from ${who}` }

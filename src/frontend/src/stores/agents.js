@@ -576,6 +576,36 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // abilityai/trinity-enterprise#662: what each edge of this agent exposes —
+    // the library skills on its permitted targets and which it may run.
+    async getAgentPeerSkills(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/peer-skills`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // The honest upgrade (admin): agent-to-agent calls that used a library
+    // skill in the last 30 days and are now refused for want of a grant.
+    async getPeerSkillDrift() {
+      const authStore = useAuthStore()
+      const response = await axios.get('/api/skills/peer-grants/drift', {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // Grant (or revoke) one library skill on `target` to caller `name` (admin).
+    async setAgentPeerSkillGrant(name, target, skill, granted) {
+      const authStore = useAuthStore()
+      const url = `/api/agents/${name}/peer-skills/${encodeURIComponent(target)}/${encodeURIComponent(skill)}`
+      const response = granted
+        ? await axios.put(url, {}, { headers: authStore.authHeader })
+        : await axios.delete(url, { headers: authStore.authHeader })
+      return response.data
+    },
+
     // ent#84: one gated read for the fleet permissions matrix — returns both
     // axes (accessible, non-system agents) and every caller→target grant edge
     // among them with provenance (granted_by / granted_at). Entitlement-gated

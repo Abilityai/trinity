@@ -55,6 +55,10 @@ Two common reasons: their address isn't on the email whitelist, or no email serv
 
 The default email provider is `console`, which is meant for development — it prints the email (including the code) to the backend logs instead of sending it. For real delivery, add a Resend key and a sender address under Settings > Integrations — no `.env` edit needed ([Platform Keys](../credentials/platform-keys.md#email-provider-resend)) — or set `EMAIL_PROVIDER` in `.env` to `smtp`, `sendgrid`, or `resend` and fill in the matching credentials. Also confirm your address is on the whitelist, since codes only go to allowed emails. See [Setup](../getting-started/setup.md).
 
+## I requested a login code on localhost and nothing arrived — am I locked out?
+
+No. With no email provider configured — the default when first-run setup skipped the email key — Trinity sends no email: the code is written to the backend log, and the login page says so instead of "We sent a code". Read it with `docker compose logs backend` (look for the `EMAIL (console mode)` block) and type it into the code field. Or skip the code: choose **Admin Login** and sign in with the admin password from your `.env`. To get real emails, add an email provider key under **Settings → Integrations**. See [Platform Keys](../credentials/platform-keys.md#email-provider-resend).
+
 ## Why does nothing load when I open http://localhost?
 
 First check that Docker is actually running — Trinity can't start without it. If Docker is up, another process may already hold port 80, which the frontend binds by default; add `FRONTEND_PORT=8090` (or any free port) to `.env`, restart with `./scripts/deploy/start.sh`, and open `http://localhost:8090` instead. See [Deploying Trinity](../guides/deploying-trinity.md).

@@ -5276,6 +5276,36 @@ def _migrate_proactive_consent_not_asked(cursor, conn):
     cursor.execute("UPDATE agent_sharing SET allow_proactive = NULL WHERE allow_proactive = 0")
     conn.commit()
 
+def _migrate_agent_peer_skill_grants(cursor, conn):
+    """abilityai/trinity-enterprise#662 — a peer may run what an agent declares;
+    what an admin assigned needs a grant.
+
+    ``agent_peer_skill_grants`` holds the per-skill grant over an edge: caller X
+    may run library-assigned skill Y on target Z. Additive only. Nobody holds a
+    grant on upgrade — the safe default — and the Permissions panel shows each
+    edge's library skills as "not granted" until an admin opens them.
+
+    Idempotent. Mirrored by Alembic 0099_agent_peer_skill_grants.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_peer_skill_grants (
+            caller_agent TEXT NOT NULL,
+            target_agent TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            PRIMARY KEY (caller_agent, target_agent, skill_name)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_peer_skill_grants_target "
+        "ON agent_peer_skill_grants(target_agent)"
+    )
+    conn.commit()
+
+
 def _migrate_supersede_queue_flood_backlog(cursor, conn):
     """#3130: collapse the flood-alert backlog to one pending alert per agent.
 
@@ -5708,4 +5738,5 @@ MIGRATIONS = [
     ("a2a_internal_scope", _migrate_a2a_internal_scope),
     ("operator_queue_replace", _migrate_operator_queue_replace),
     ("proactive_consent_not_asked", _migrate_proactive_consent_not_asked),
+    ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
 ]

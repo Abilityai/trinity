@@ -9,7 +9,7 @@ import pytest
 
 from adapters import message_router as mr
 from adapters import telegram_adapter as tg
-from adapters.base import ChannelResponse, NormalizedMessage, OutboundFile
+from adapters.base import ChannelResponse, NormalizedMessage
 
 
 @pytest.fixture
@@ -35,8 +35,8 @@ def wire(monkeypatch):
     return calls, outcomes
 
 
-def response(text, files=()):
-    return ChannelResponse(text=text, files=list(files), metadata={'bot_token': 'test-token'})
+def response(text):
+    return ChannelResponse(text=text, metadata={'bot_token': 'test-token'})
 
 
 def delivered(calls):
@@ -116,23 +116,6 @@ async def test_markdown_chunks_preserve_entities_and_balanced_tags(wire, text):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('success', [True, False])
-async def test_attachment_reference_only_after_upload_or_inline_fallback(wire, success):
-    calls, outcomes = wire
-    outcomes.append((200, {'ok': True, 'result': {'message_id': 1}}) if success
-                    else (500, {'ok': False, 'description': 'failed'}))
-    content = 'file content\n' * 700
-    file = OutboundFile(filename='response_1.txt', content=content.encode(), language='txt')
-    await tg.TelegramAdapter().send_response('2', response('(see attached: response_1.txt)', [file]))
-    assert calls[0][0] == 'sendDocument'
-    if success:
-        assert delivered(calls) == '(see attached: response_1.txt)'
-    else:
-        assert 'see attached' not in delivered(calls)
-        assert content in delivered(calls)
-
-
-@pytest.mark.asyncio
 async def test_rate_limit_retries_current_chunk_before_next(wire, monkeypatch):
     calls, outcomes = wire
     outcomes.extend([(429, {'parameters': {'retry_after': 0}}),
@@ -172,7 +155,7 @@ async def test_html_fallback_can_retry_rate_limit_without_replaying(wire, monkey
     monkeypatch.setattr(tg.asyncio, 'sleep', sleep)
     outcomes.extend([
         (400, {'description': "Bad Request: can't parse entities"}),
-        (429, {'parameters': {'retry_after': 45}}),
+        (429, {'parameters': {'retry_after': 30}}),
         (200, {'ok': True, 'result': {'message_id': 1}}),
     ])
     await tg.TelegramAdapter().send_response('2', response('**' + 'a' * 9000 + '**'))
@@ -180,46 +163,7 @@ async def test_html_fallback_can_retry_rate_limit_without_replaying(wire, monkey
     assert calls[1][1]['parse_mode'] == ''
     assert calls[1] == calls[2]
     assert delivered(calls[2:]) == 'a' * 9000
-    sleep.assert_awaited_once_with(45)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('failure', [
-    (200, {'ok': False}), (200, {'ok': True, 'result': {}}),
-    httpx.ReadTimeout('upload timeout'),
-])
-async def test_attachment_unconfirmed_upload_falls_back_verbatim(wire, failure):
-    calls, outcomes = wire
-    outcomes.append(failure)
-    content = '```\n<&😀> **not bold**\n```\n' * 500
-    file = OutboundFile(filename='response_1.txt', content=content.encode(), language='txt')
-    await tg.TelegramAdapter().send_response('2', response('(see attached: response_1.txt)', [file]))
-    assert delivered(calls) == content
-
-
-@pytest.mark.asyncio
-async def test_attachment_rate_limit_and_group_reply(wire, monkeypatch):
-    calls, outcomes = wire
-    monkeypatch.setattr(tg.asyncio, 'sleep', AsyncMock())
-    outcomes.append((429, {'parameters': {'retry_after': 0}}))
-    file = OutboundFile(filename='response_1.txt', content=b'content', language='txt')
-    reply = response('(see attached: response_1.txt)', [file])
-    reply.metadata['is_group'] = True
-    await tg.TelegramAdapter().send_response('2', reply, thread_id='42')
-    assert [method for method, _ in calls] == ['sendDocument', 'sendDocument', 'sendMessage']
-    for _, multipart in calls[:2]:
-        assert b'content' in multipart
-        assert b'"message_id": 42' in multipart
-    assert calls[2][1]['reply_parameters']['message_id'] == 42
-
-
-@pytest.mark.asyncio
-async def test_attachment_only_failure_still_delivers_content(wire):
-    calls, outcomes = wire
-    outcomes.append((500, {'ok': False}))
-    file = OutboundFile(filename='response_1.txt', content=b'content', language='txt')
-    await tg.TelegramAdapter().send_response('2', response('', [file]))
-    assert delivered(calls).strip() == 'content'
+    sleep.assert_awaited_once_with(30)
 
 
 def test_large_nested_markup_falls_back_without_looping():
@@ -230,16 +174,45 @@ def test_large_nested_markup_falls_back_without_looping():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('successes', [(False, False), (True, False), (False, True)])
-async def test_duplicate_filenames_preserve_each_failed_file(wire, successes):
+@pytest.mark.parametrize("retry_after", [0, 30, 31, 45, 86400])
+async def test_flood_wait_is_bounded_without_early_retry(wire, monkeypatch, retry_after):
     calls, outcomes = wire
-    for success in successes:
-        outcomes.append((200, {'ok': True, 'result': {'message_id': 1}}) if success
-                        else (500, {'ok': False}))
-    files = [OutboundFile(filename='same.txt', content=content, language='txt')
-             for content in [b'FIRST', b'SECOND']]
-    marker = '(see attached: same.txt)'
-    await tg.TelegramAdapter().send_response('2', response(marker + '\n' + marker, files))
-    assert delivered(calls) == '\n'.join(
-        marker if success else content
-        for success, content in zip(successes, ['FIRST', 'SECOND']))
+    sleep = AsyncMock()
+    monkeypatch.setattr(tg.asyncio, "sleep", sleep)
+    outcomes.append((429, {"parameters": {"retry_after": retry_after}}))
+    result = await tg.TelegramAdapter()._send_message("test-token", "2", "hello")
+    if retry_after <= 30:
+        sleep.assert_awaited_once_with(retry_after)
+        assert len(calls) == 2 and result
+    else:
+        sleep.assert_not_awaited()
+        assert len(calls) == 1 and result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [(403, {"ok": False}), httpx.ReadTimeout("uncertain")])
+async def test_proactive_failure_stops_before_suffix(wire, monkeypatch, failure):
+    from unittest.mock import MagicMock
+    from services import proactive_message_service as pm
+    calls, outcomes = wire
+    database = MagicMock()
+    database.get_telegram_binding.return_value = {"id": "synthetic-binding", "bot_id": "123"}
+    database.get_telegram_chat_link_by_verified_email.return_value = {"telegram_user_id": "321"}
+    database.get_telegram_bot_token.return_value = "test-token"
+    monkeypatch.setattr(pm, "db", database)
+    outcomes.extend([(200, {"ok": True, "result": {"message_id": 1}}), failure])
+    result = await pm.ProactiveMessageService()._deliver_telegram("test-agent", "user@example.com", "a" * 10000)
+    assert len(calls) == 2
+    assert result.success is False
+    assert result.message_id is None
+
+
+@pytest.mark.asyncio
+async def test_failure_log_keeps_reason_without_token_or_url(wire, caplog):
+    _, outcomes = wire
+    outcomes.append((403, {"ok": False, "description":
+        "Forbidden: bot blocked test-token https://api.telegram.org/bottest-token/sendMessage"}))
+    assert await tg.TelegramAdapter()._send_message("test-token", "2", "hello") is None
+    assert "bot blocked" in caplog.text
+    assert "test-token" not in caplog.text
+    assert "https://" not in caplog.text

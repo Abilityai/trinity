@@ -185,8 +185,10 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
         "integrations. (`list_a2a_endpoints` (operator-only) shows the registered names.) " +
         "`dedup_label` is required and must DIFFER for each distinct question you ask in this " +
         "turn: calls are deduplicated on the endpoint and conversation, not on your message, so " +
-        "reusing a label returns the earlier answer. If the remote replies with state 'working' " +
-        "or 'submitted', poll get_a2a_task with the returned task_id. " +
+        "reusing a label returns the earlier answer. A Trinity remote answers within 25 s: a " +
+        "longer turn comes back with state 'working' (or 'submitted') and a `task_id` — the " +
+        "remote is still running it, so poll get_a2a_task with that task_id; NEVER re-send the " +
+        "message, which asks the question again. " +
         "If the result carries `payment_required`, the remote charges for this call: relay the " +
         "`payment` details to a person ONCE and stop — do not retry, and do not call a different " +
         "endpoint instead. Only a person can buy the token, and an admin stores it on the " +
