@@ -98,7 +98,7 @@ def test_points_for_day_writes_counts_and_only_rates_that_have_a_denominator(svc
          "checks": {"headline": {"passed": False, "gate_pass": 0, "gate_fail": 1}}},
     ]
     ts = _iso(DAY0)
-    out = svc.points_for_day(ts, rows, {})
+    out = svc.points_for_day(ts, rows, {}, fleet=False)
     by = {(p["metric"], tuple(sorted(p["dims"].items()))): p for p in out}
     agent = (("agent", "a"),)
     pair = (("callee", "a"), ("caller", "boss"))
@@ -112,6 +112,10 @@ def test_points_for_day_writes_counts_and_only_rates_that_have_a_denominator(svc
     assert ("eval.quality_mean", agent) not in by
     assert ("eval.judge_human_agreement", agent) not in by
     assert all(p["ts"] == ts for p in out)
+    # ent#938: a scoped fold writes per-agent and per-pair series only — 9
+    # agent + 9 pair metric slots minus the absent quality/agreement pairs.
+    assert {tuple(sorted(p["dims"])) for p in out} == {("agent",), ("callee", "caller")}
+    assert len(out) == 14
 
 
 def test_on_tier0_row_writes_the_runs_day_under_the_reserved_owner(db_backend, svc):

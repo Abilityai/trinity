@@ -2,6 +2,7 @@
   "generated": "2026-09-21",
   "commit": "0c470c76cb5d1fdb07f0572cf2c1a5cc9c83d10c",
   "rule": "per-spec counts of source-text reads of component/view SFCs may only shrink; a spec absent here is held to zero unless it carries a @source-text-pin marker; see scripts/scan-source-text-specs.mjs (#2918)",
+  "_ent938_note": "2026-10-18, trinity-enterprise#938: portalLoadingTreatment.spec.js 14 -> 15 by hand, not regenerated. The +1 is an allowlist ENTRY (components/evaluations/EvalTrend.vue in CHART, the #2540 chart-only scanline rule), which the scanner counts as an SFC path; that spec is an import-graph guard over who imports ScanlineReveal, which a mount cannot prove.",
   "files": {
     "src/frontend/tests/unit/agentDetailDeepLink.spec.js": 1,
     "src/frontend/tests/unit/agentDetailMountDedupe.spec.js": 1,
@@ -44,7 +45,7 @@
     "src/frontend/tests/unit/portalFailedTurn.spec.js": 1,
     "src/frontend/tests/unit/portalFiles.spec.js": 2,
     "src/frontend/tests/unit/portalLeaveSpecificRoute.spec.js": 1,
-    "src/frontend/tests/unit/portalLoadingTreatment.spec.js": 14,
+    "src/frontend/tests/unit/portalLoadingTreatment.spec.js": 15,
     "src/frontend/tests/unit/portalLoops.spec.js": 3,
     "src/frontend/tests/unit/portalMarkdownTypography.spec.js": 1,
     "src/frontend/tests/unit/portalModelChoice.spec.js": 1,
