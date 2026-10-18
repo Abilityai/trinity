@@ -171,6 +171,26 @@ class EvaluationAggregateOperations:
             rows.append(d)
         return rows, len(raw) > cap
 
+    def window_agents(self, *, since: str, until: str) -> list[str]:
+        """The distinct graded agents with a Tier-0 row completed in
+        `[since, until)` — the retry list when the fleet window is over the
+        cap (a capped page names only its newest agents)."""
+        se = schedule_executions.c
+        ev = agent_evaluations.alias("ev")
+        stmt = (
+            select(ev.c.agent_name).distinct()
+            .select_from(schedule_executions.join(ev, and_(
+                ev.c.target_id == se.id,
+                ev.c.evaluator == TIER0_EVALUATOR,
+                ev.c.target_kind == TIER0_TARGET_KIND,
+            )))
+            .where(and_(se.completed_at >= since, se.completed_at < until,
+                        ev.c.agent_name.isnot(None)))
+            .order_by(ev.c.agent_name)
+        )
+        with get_engine().connect() as conn:
+            return [r[0] for r in conn.execute(stmt).all()]
+
     def human_labels(self, execution_ids: Iterable[str]) -> dict[str, list[float]]:
         """`{execution_id: [quality, ...]}` from person ratings (ent#366) that
         name the execution. Machine rows never answer."""

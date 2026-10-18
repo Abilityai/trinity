@@ -109,9 +109,8 @@ def points_for_day(day_ts: str, rows: List[dict],
 
 
 class _Truncated(Exception):
-    def __init__(self, agents):
+    def __init__(self):
         super().__init__("window over the row cap")
-        self.agents = agents
 
 
 def _write_day(day: datetime, **scope) -> Optional[Any]:
@@ -120,7 +119,7 @@ def _write_day(day: datetime, **scope) -> Optional[Any]:
     if truncated:
         # A count over a capped window would be a wrong number stored as a
         # right one: never written. The fleet pass retries per agent.
-        raise _Truncated(sorted({r["agent_name"] for r in rows if r.get("agent_name")}))
+        raise _Truncated()
     if not rows:
         return None
     labels = db.evaluation_human_labels([r["execution_id"] for r in rows])
@@ -162,9 +161,12 @@ def nightly_pass(now: Optional[datetime] = None, *, days: int = NIGHTLY_DAYS) ->
         try:
             try:
                 written = [_write_day(day)]
-            except _Truncated as t:
+            except _Truncated:
+                # The capped page names only the newest agents; the retry list
+                # is every agent graded that day.
+                since, until = day_bounds(day)
                 written = []
-                for agent in t.agents:
+                for agent in db.evaluation_window_agents(since=since, until=until):
                     try:
                         written.append(_write_day(day, agents=[agent]))
                     except _Truncated:

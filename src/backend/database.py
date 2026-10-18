@@ -3110,6 +3110,9 @@ class DatabaseManager:
     def evaluation_window_rows(self, **kw):
         return self._evaluation_aggregate_ops.window_rows(**kw)
 
+    def evaluation_window_agents(self, **kw):
+        return self._evaluation_aggregate_ops.window_agents(**kw)
+
     def evaluation_human_labels(self, execution_ids):
         return self._evaluation_aggregate_ops.human_labels(execution_ids)
 

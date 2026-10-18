@@ -177,6 +177,44 @@ def test_a_capped_window_is_never_written_as_a_count(db_backend, svc, monkeypatc
     assert points(agent="a") == {}
 
 
+def _capped(monkeypatch, cap):
+    """Shrink the row cap so a page is smaller than the agent set."""
+    from database import db
+    real = db.evaluation_window_rows
+    monkeypatch.setattr(db, "evaluation_window_rows", lambda **kw: real(cap=cap, **kw))
+
+
+def test_an_over_cap_fleet_day_retries_every_agent_of_the_day_not_the_page(
+        db_backend, svc, monkeypatch):
+    """A capped fleet page (newest first) names only the newest agents; the
+    per-agent retry must come from the day's distinct agents, or an agent
+    whose rows sit past the page is silently left stale."""
+    for i, agent in enumerate(("a", "b", "c")):
+        seed(f"e-{agent}", agent=agent, completed=DAY0 + timedelta(minutes=5 + i))
+        grade(f"e-{agent}", agent=agent)
+    _capped(monkeypatch, 1)
+    result = svc.nightly_pass(NOW, days=0)
+    assert result["failed"] == 0
+    for agent in ("a", "b", "c"):
+        assert points(agent=agent)["eval.evaluated"][0] == 1, agent
+
+
+def test_an_agent_over_its_own_cap_is_skipped_and_logged(db_backend, svc, monkeypatch, caplog):
+    seed("a1", agent="a", completed=DAY0 + timedelta(minutes=5))
+    grade("a1", agent="a")
+    seed("a2", agent="a", completed=DAY0 + timedelta(minutes=6))
+    grade("a2", agent="a")
+    seed("b1", agent="b", completed=DAY0 + timedelta(minutes=1))
+    grade("b1", agent="b")
+    _capped(monkeypatch, 1)
+    with caplog.at_level("WARNING", logger="services.eval_scorecard_service"):
+        result = svc.nightly_pass(NOW, days=0)
+    assert result["failed"] == 1
+    assert points(agent="a") == {}
+    assert points(agent="b")["eval.evaluated"][0] == 1
+    assert any("a over the row cap" in r.getMessage() for r in caplog.records)
+
+
 # --- the hooks ----------------------------------------------------------------
 
 def test_evaluate_execution_restates_the_scorecard_after_its_write(db_backend, monkeypatch):
