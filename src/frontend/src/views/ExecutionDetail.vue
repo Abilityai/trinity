@@ -232,6 +232,13 @@
         </div>
       </div>
 
+      <!-- Tier-0 checks (trinity-enterprise#935): graded after the run ends -->
+      <ExecutionChecks
+        v-if="!['running', 'queued'].includes(execution.status)"
+        :agent-name="agentName"
+        :execution-id="executionId"
+      />
+
       <!-- Task Input -->
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
         <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
@@ -418,6 +425,7 @@ import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
 import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
 import ExecutionGateMarker from '../components/skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
+import ExecutionChecks from '../components/ExecutionChecks.vue'  // trinity-enterprise#935
 
 const route = useRoute()
 const router = useRouter()
