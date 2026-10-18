@@ -15,9 +15,14 @@ the mode the operator cannot see. A contended lease skips the tick; nothing
 here waits on, retries toward, or sits in the path of a terminal execution
 write (decision 16: zero edits to `task_execution_service`).
 
+Phase 2 of the same tick (ent#940, TD-5) grades the pair rows — the edge of
+each delegated run — through `tier0_pair_evaluator.sweep`, under this lease:
+no second lease, no setting of its own, bounded like the Tier-0 batch.
+
 The write fence holds here too: this module takes no principal and imports
 nothing from FastAPI or the auth layer; it reaches the writer only through
-`tier0_evaluator`, whose entry point takes an execution id and nothing else.
+`tier0_evaluator` and `tier0_pair_evaluator`, whose entry points take an
+execution id and nothing else.
 """
 from __future__ import annotations
 
@@ -29,7 +34,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from redis_breaker_util import get_breaker_redis
-from services import eval_scorecard_service, tier0_evaluator
+from services import eval_scorecard_service, tier0_evaluator, tier0_pair_evaluator
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +130,8 @@ class Tier0SweepService:
             await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
 
     async def run_cycle(self) -> Dict[str, Any]:
-        """One tick at the TD-8 bounds. `sweep` never raises."""
+        """One tick at the TD-8 bounds: the Tier-0 batch, then the pair batch
+        (ent#940 phase 2) at the same bounds. Neither `sweep` raises."""
         result = await tier0_evaluator.sweep(
             limit=tier0_evaluator.SWEEP_LIMIT,
             settle_seconds=tier0_evaluator.SWEEP_SETTLE_SECONDS,
@@ -135,7 +141,15 @@ class Tier0SweepService:
         )
         if result.get("candidates"):
             logger.info("Tier-0 sweep: %s", result)
-        return result
+        pair = await tier0_pair_evaluator.sweep(
+            limit=tier0_evaluator.SWEEP_LIMIT,
+            lookback_hours=tier0_evaluator.SWEEP_LOOKBACK_HOURS,
+            timeout_seconds=tier0_evaluator.EVALUATION_TIMEOUT_SECONDS,
+            concurrency=tier0_evaluator.EVALUATION_CONCURRENCY,
+        )
+        if pair.get("candidates"):
+            logger.info("Tier-0 pair sweep: %s", pair)
+        return {**result, "pair": pair}
 
     async def run_nightly_if_due(self, now: Optional[datetime] = None) -> Optional[Dict[str, int]]:
         """ent#937: the scorecard restate, at the first leader tick after

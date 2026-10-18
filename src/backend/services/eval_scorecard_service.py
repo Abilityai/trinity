@@ -14,6 +14,9 @@ Tier-0 rows — the five counts (`evaluated`, `completed`, `graded`, `passed`,
 `judged`) beside the rates, so a multi-day window sums counts and rebuilds
 every rate exactly (T4 + the 08:50Z ruling). A rate with no denominator is not
 written: absence, not a zero that reads as "all failed".
+A pair series also carries the edge checks (`eval.pair_graded`,
+`eval.pair_passed`, `eval.pair_checks_passed_rate`, ent#940) from the fold's
+`pair` block; an agent or fleet series never does (TD-6).
 
 Two writers, one result. `on_tier0_row` restates the day of the run just
 graded (called by `tier0_evaluator` after its write); `nightly_pass` restates
@@ -39,6 +42,7 @@ from typing import Any, Dict, List, Optional
 from database import db
 from services.evaluation_read_service import (
     EVAL_METRICS,
+    EVAL_PAIR_METRICS,
     FLEET_DIMS,
     PLATFORM_EVAL_OWNER,
     fold,
@@ -64,6 +68,10 @@ _FIELDS = {
     "eval.checks_passed_rate": "checks_passed_rate",
     "eval.quality_mean": "quality_mean",
     "eval.judge_human_agreement": "judge_human_agreement",
+    # ent#940 — from the fold's `pair` block, on the pair series only.
+    "eval.pair_graded": "pair_graded",
+    "eval.pair_passed": "pair_passed",
+    "eval.pair_checks_passed_rate": "pair_checks_passed_rate",
 }
 assert set(_FIELDS) == set(EVAL_METRICS), "every scorecard metric has one writer field"
 
@@ -105,10 +113,16 @@ def points_for_day(day_ts: str, rows: List[dict],
     created_at = utc_now_iso()
     out: List[Dict[str, Any]] = []
     for key, group in _series(rows, fleet=fleet).items():
-        folded = fold(group, human_labels, failed_limit=0)
+        is_pair = key[0] == "pair"
+        folded = fold(group, human_labels, failed_limit=0, pair=is_pair)
         dims = _dims(key)
         for metric, field in _FIELDS.items():
-            value = folded.get(field)
+            if metric in EVAL_PAIR_METRICS:
+                if not is_pair:
+                    continue
+                value = folded["pair"].get(field)
+            else:
+                value = folded.get(field)
             if value is None:
                 continue
             out.append({
