@@ -6,7 +6,8 @@ what each kind of reader may see of them:
 
 * `parse_period` — the UTC window a request names (≤ 92 days).
 * `fold` — window rows → evaluated / completion / checks passed / per-check
-  fails / judged / quality / agreement, plus a bounded failed-run list.
+  fails / judged / quality / agreement, plus a bounded failed-run list; on
+  request a disjoint `pair` block over the pair rows (ent#940).
 * `redact_evaluator` — the grader-identity ALLOWLIST (ent#781).
 * `project_row` — one evaluation row for one reader; the Tier-1 read guard
   (ent#936 TD-8) lives here and nowhere else.
@@ -22,7 +23,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from db.evaluations import TIER0_EVALUATOR, tier0_gate_outcome
+from db.evaluations import TIER0_EVALUATOR, TIER0_PAIR_EVALUATOR, tier0_gate_outcome
 
 TIER1_EVALUATOR_PREFIX = "platform:tier1:"
 TIER1_KIND = "platform:tier1"
@@ -32,7 +33,7 @@ FINDINGS_CAP = 32
 
 # Known non-person evaluator names: shown as stored. Everything else is
 # reduced to its kind — a fourth kind is anonymised on the day it appears.
-NON_PERSON_EVALUATORS = frozenset({TIER0_EVALUATOR})
+NON_PERSON_EVALUATORS = frozenset({TIER0_EVALUATOR, TIER0_PAIR_EVALUATOR})
 _PERIODS = {"day": timedelta(days=1), "week": timedelta(days=7)}
 _RFC3339_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$")
@@ -41,6 +42,12 @@ _TOKEN_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _VERDICTS = ("pass", "fail", "n/a")
 # Aggregate keys that carry a judge's score — absent from an agent's view.
 QUALITY_KEYS = ("quality_mean", "judge_human_agreement", "agreement_n")
+# What a machine reads of the pair block (ent#940): counts by check id, as it
+# reads the Tier-0 counts. The latency / cost / round-trip measures are an
+# operator's — a number an agent could optimise is not a finding.
+PAIR_MACHINE_KEYS = ("pair_graded", "pair_passed", "pair_checks_passed_rate",
+                     "pair_per_check_fail")
+PAIR_LATENCY_KEYS = ("dispatch_to_start", "start_to_end", "end_to_first_read")
 
 
 class PeriodError(ValueError):
@@ -84,17 +91,18 @@ def _rate(n: int, d: int) -> Optional[float]:
     return round(n / d, 4) if d else None
 
 
-def _checks_of(row: dict) -> list:
-    checks = row.get("checks")
+def _checks_of(row: dict, key: str = "checks") -> list:
+    checks = row.get(key)
     items = checks.get("checks") if isinstance(checks, dict) else None
     return items if isinstance(items, list) else []
 
 
-def _failed_checks(row: dict) -> list[dict]:
+def _failed_checks(row: dict, key: str = "checks") -> list[dict]:
     """`[{id, reason}]` of the run's failed checks — closed vocabulary only.
-    `evidence` (which may quote the run) is never carried."""
+    `evidence` (which may quote the run) is never carried. `key` reads the
+    pair row's checks instead (`pair_checks`)."""
     out = []
-    for c in _checks_of(row):
+    for c in _checks_of(row, key):
         if not isinstance(c, dict) or c.get("status") != "fail":
             continue
         cid = c.get("id")
@@ -112,11 +120,81 @@ def _completed(row: dict) -> bool:
     return row.get("status") == "success"
 
 
+def _num(value) -> Optional[float]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _median(values: list) -> Optional[int]:
+    if not values:
+        return None
+    values = sorted(values)
+    mid = len(values) // 2
+    m = values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+    return int(round(m))
+
+
+def _pair_metrics(row: dict) -> dict:
+    head = row.get("pair_checks")
+    m = head.get("metrics") if isinstance(head, dict) else None
+    return m if isinstance(m, dict) else {}
+
+
+def fold_pair(rows: list[dict]) -> dict:
+    """The pair block (ent#940): the edge checks of the rows that carry a pair
+    row, disjoint from the Tier-0 counters. A pair headline that cannot be
+    read is "not graded"; a measure the row does not hold is left out of its
+    mean, never counted as 0."""
+    graded = passed = verified = 0
+    per_check: dict[str, int] = {}
+    latency: dict[str, list] = {k: [] for k in PAIR_LATENCY_KEYS}
+    cost_sum = 0.0
+    trips: list[float] = []
+    for r in rows:
+        outcome = tier0_gate_outcome(r.get("pair_checks"))
+        if outcome is None:
+            continue
+        graded += 1
+        passed += outcome is True
+        for c in _failed_checks(r, "pair_checks"):
+            per_check[c["id"]] = per_check.get(c["id"], 0) + 1
+        m = _pair_metrics(r)
+        lat = m.get("latency_ms") if isinstance(m.get("latency_ms"), dict) else {}
+        for k in PAIR_LATENCY_KEYS:
+            v = _num(lat.get(k))
+            if v is not None:
+                latency[k].append(v)
+        cost = _num(m.get("cost"))
+        if cost is not None:
+            cost_sum += cost
+        verified += m.get("verified") is True
+        for c in _checks_of(r, "pair_checks"):
+            if isinstance(c, dict) and c.get("id") == "rework_bounds":
+                ev = c.get("evidence")
+                v = _num(ev.get("round_trips")) if isinstance(ev, dict) else None
+                if v is not None:
+                    trips.append(v)
+    return {
+        "pair_graded": graded,
+        "pair_passed": passed,
+        "pair_checks_passed_rate": _rate(passed, graded),
+        "pair_per_check_fail": per_check,
+        "latency_p50_ms": {k: _median(v) for k, v in latency.items()},
+        "cost_per_verified_outcome": round(cost_sum / verified, 4) if verified else None,
+        "round_trips_mean": round(sum(trips) / len(trips), 4) if trips else None,
+    }
+
+
 def fold(rows: list[dict], human_labels: dict[str, list[float]], *,
-         failed_limit: int = FAILED_LIMIT) -> dict:
+         failed_limit: int = FAILED_LIMIT, pair: bool = False) -> dict:
     """The aggregate over window rows. Never raises on a malformed row: a
     headline that cannot be read is "not graded", a wrong-typed check is
-    skipped. Zero rows → zero counts and null rates."""
+    skipped. Zero rows → zero counts and null rates.
+
+    `pair` adds the `pair` block (`by=pair` only — TD-6: no pair rates on an
+    agent's own fold). A run whose edge failed a pair gate is a failed run
+    either way, with its `pair_failed_checks` beside the Tier-0 ones."""
     evaluated = completed = graded = passed = judged = 0
     quality_sum = 0.0
     agree = agreement_n = 0
@@ -134,6 +212,9 @@ def fold(rows: list[dict], human_labels: dict[str, list[float]], *,
         fails = _failed_checks(r) if outcome is not None else []
         for c in fails:
             per_check[c["id"]] = per_check.get(c["id"], 0) + 1
+        pair_outcome = tier0_gate_outcome(r.get("pair_checks"))
+        pair_fails = (_failed_checks(r, "pair_checks")
+                      if pair_outcome is not None else [])
         q = r.get("judge_quality")
         if isinstance(q, (int, float)) and not isinstance(q, bool):
             judged += 1
@@ -143,7 +224,7 @@ def fold(rows: list[dict], human_labels: dict[str, list[float]], *,
                 agreement_n += 1
                 human_up = sum(1 for v in labels if v >= 0.5) * 2 >= len(labels)
                 agree += (q >= 0.5) == human_up
-        if outcome is False or not done:
+        if outcome is False or not done or pair_outcome is False:
             failed_total += 1
             if len(failed) < failed_limit:
                 failed.append({
@@ -154,6 +235,7 @@ def fold(rows: list[dict], human_labels: dict[str, list[float]], *,
                     "completed_at": r.get("completed_at"),
                     "completion": done,
                     "failed_checks": fails,
+                    "pair_failed_checks": pair_fails,
                 })
     return {
         "evaluated": evaluated,
@@ -167,6 +249,7 @@ def fold(rows: list[dict], human_labels: dict[str, list[float]], *,
         "quality_mean": round(quality_sum / judged, 4) if judged else None,
         "judge_human_agreement": _rate(agree, agreement_n),
         "agreement_n": agreement_n,
+        "pair": fold_pair(rows) if pair else None,
         "failed": failed,
         "failed_truncated": failed_total > len(failed),
     }
@@ -237,10 +320,14 @@ def project_row(row: dict, *, machine: bool, operator: bool) -> dict:
 
 
 def project_summary(summary: dict, *, machine: bool) -> dict:
-    """An aggregate for one reader: a machine never reads a judge's score."""
+    """An aggregate for one reader: a machine never reads a judge's score,
+    and of the pair block only the counts (`PAIR_MACHINE_KEYS`)."""
     if not machine:
         return summary
-    return {k: v for k, v in summary.items() if k not in QUALITY_KEYS}
+    out = {k: v for k, v in summary.items() if k not in QUALITY_KEYS}
+    if isinstance(out.get("pair"), dict):
+        out["pair"] = {k: v for k, v in out["pair"].items() if k in PAIR_MACHINE_KEYS}
+    return out
 
 
 # --- who reads what (ent#937 T1) ---------------------------------------------
@@ -320,6 +407,22 @@ def window_filters(scope: ReadScope, *, by: str, agent: Optional[str] = None,
     return kw
 
 
+def caller_side_filters(scope: ReadScope, names: Optional[set]) -> dict:
+    """`db.evaluation_window_rows` filters for the runs `names` (the one agent
+    an agent summary is about, already narrowed) DELEGATED. The callee must be
+    visible to a person; an agent key reads every pair it is the caller of —
+    `sees_row`'s rule — and `names` is empty for any agent but itself."""
+    return {"callers": names, "delegated_only": True,
+            "agents": None if scope.self_agent else scope.names}
+
+
+def pair_failures(rows: list[dict], *, limit: int = FAILED_LIMIT) -> list[dict]:
+    """The failed-run entries of `rows` whose edge failed a pair check —
+    nothing for a run that failed its Tier-0 checks only."""
+    edge_failed = [r for r in rows if tier0_gate_outcome(r.get("pair_checks")) is False]
+    return fold(edge_failed, {}, failed_limit=limit)["failed"]
+
+
 def group_key(by: str, row: dict) -> tuple:
     if by == "schedule":
         return (row.get("agent_name"), row.get("schedule_id"))
@@ -344,7 +447,7 @@ def aggregate(by: str, rows: list[dict], human_labels: dict, *, machine: bool) -
         buckets.setdefault(group_key(by, r), []).append(r)
 
     def _summary(rs):
-        s = fold(rs, human_labels, failed_limit=0)
+        s = fold(rs, human_labels, failed_limit=0, pair=by == "pair")
         s.pop("failed", None)
         s.pop("failed_truncated", None)
         return project_summary(s, machine=machine)
@@ -363,9 +466,14 @@ PLATFORM_EVAL_OWNER = "platform:eval"
 # nothing for `{}`; read with every per-agent/pair key absent.
 FLEET_DIMS = {"scope": "fleet"}
 EVAL_RATE_METRICS = ("eval.checks_passed_rate", "eval.completion_rate",
-                     "eval.quality_mean", "eval.judge_human_agreement")
+                     "eval.quality_mean", "eval.judge_human_agreement",
+                     "eval.pair_checks_passed_rate")
 EVAL_COUNT_METRICS = ("eval.evaluated", "eval.completed", "eval.graded",
-                      "eval.passed", "eval.judged")
+                      "eval.passed", "eval.judged",
+                      "eval.pair_graded", "eval.pair_passed")
+# Written on the pair series only (ent#940; TD-6 — no pair rate per agent).
+EVAL_PAIR_METRICS = frozenset({"eval.pair_checks_passed_rate", "eval.pair_graded",
+                               "eval.pair_passed"})
 EVAL_METRICS = EVAL_RATE_METRICS + EVAL_COUNT_METRICS
 # A judge's score as a series — never served to a machine.
 QUALITY_METRICS = frozenset({"eval.quality_mean", "eval.judge_human_agreement"})

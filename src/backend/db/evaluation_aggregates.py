@@ -15,6 +15,8 @@ Three rules are carried by the SQL itself:
 * **A Tier-1 verdict is its own row** (`platform:tier1:<model>`, keyed like the
   Tier-0 row on `(target_kind='execution', target_id)`). It is LEFT JOINed one
   per execution, newest wins, so a run judged twice is still one run.
+* **A pair row rides along** (`platform:tier0:pair`, ent#940): LEFT JOINed on
+  the same unique key as `pair_checks`, so a delegated run is still one run.
 """
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ from typing import Iterable, Optional
 from sqlalchemy import and_, exists, or_, select
 
 from db.engine import get_engine
-from db.evaluations import TIER0_EVALUATOR, TIER0_TARGET_KIND
+from db.evaluations import TIER0_EVALUATOR, TIER0_PAIR_EVALUATOR, TIER0_TARGET_KIND
 from db.tables import agent_evaluations, schedule_executions
 
 TIER1_EVALUATOR_PREFIX = "platform:tier1:"
@@ -94,6 +96,7 @@ class EvaluationAggregateOperations:
         ev = agent_evaluations.alias("ev")
         t1 = agent_evaluations.alias("t1")
         t2 = agent_evaluations.alias("t2")
+        pr = agent_evaluations.alias("pr")
 
         def _tier1(alias):
             return and_(
@@ -115,6 +118,12 @@ class EvaluationAggregateOperations:
                 ev.c.target_kind == TIER0_TARGET_KIND,
             ))
             .outerjoin(t1, and_(_tier1(t1), t1.c.target_id == se.id, ~newer))
+            # One pair row per run (the ent#366 unique index), so no newest-wins.
+            .outerjoin(pr, and_(
+                pr.c.evaluator == TIER0_PAIR_EVALUATOR,
+                pr.c.target_kind == TIER0_TARGET_KIND,
+                pr.c.target_id == se.id,
+            ))
         )
         conds = [se.completed_at >= since, se.completed_at < until]
         for names, col in ((agents, ev.c.agent_name), (callers, ev.c.caller_agent)):
@@ -153,6 +162,7 @@ class EvaluationAggregateOperations:
                 t1.c.quality.label("judge_quality"),
                 t1.c.judge_json,
                 t1.c.evaluator.label("judge_evaluator"),
+                pr.c.checks_json.label("pair_checks_json"),
             )
             .select_from(joined)
             .where(and_(*conds))
@@ -166,6 +176,7 @@ class EvaluationAggregateOperations:
             d = dict(r)
             d["checks"] = _json(d.pop("checks_json"))
             d["judge"] = _json(d.pop("judge_json"))
+            d["pair_checks"] = _json(d.pop("pair_checks_json"))
             if d["completion"] is not None:
                 d["completion"] = bool(d["completion"])
             rows.append(d)
