@@ -260,3 +260,21 @@ def test_the_rating_index_comment_no_longer_says_tier0_rows_are_null_target():
     block = src[src.index("agent_evaluations = Table("):src.index('"idx_agent_evaluations_rating_target"')]
     assert "NULL-target rows a Tier-0" not in block
     assert "target_kind='execution'" in block
+
+
+def test_deleting_the_caller_keeps_the_callee_grade(db_backend):
+    """Review I3: `caller_agent` is initiator provenance (like
+    `schedule_executions.source_agent_name`), not ownership. Purging the agent
+    that delegated must not delete another agent's Tier-0 history — the
+    callee's Checks passed rate and verdicts stay as they were. The callee's
+    own purge still removes it (`agent_name` stays CASCADE)."""
+    from db.agent_cleanup import cascade_delete
+    from db.engine import get_engine
+    seed_exec("ex-c", triggered_by="agent", source_agent_name="boss")
+    assert _write("ex-c")["caller_agent"] == "boss"
+    with get_engine().begin() as conn:
+        cascade_delete(conn, "boss")
+    assert count("agent_evaluations") == 1
+    with get_engine().begin() as conn:
+        cascade_delete(conn, "agent-a")
+    assert count("agent_evaluations") == 0
