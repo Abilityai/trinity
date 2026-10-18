@@ -113,9 +113,14 @@ def test_points_for_day_writes_counts_and_only_rates_that_have_a_denominator(svc
     assert ("eval.judge_human_agreement", agent) not in by
     assert all(p["ts"] == ts for p in out)
     # ent#938: a scoped fold writes per-agent and per-pair series only — 9
-    # agent + 9 pair metric slots minus the absent quality/agreement pairs.
+    # agent + 9 pair metric slots minus the absent quality/agreement pairs,
+    # plus (ent#940) the pair series' two edge counts; no pair row graded, so
+    # no `eval.pair_checks_passed_rate` (no denominator).
     assert {tuple(sorted(p["dims"])) for p in out} == {("agent",), ("callee", "caller")}
-    assert len(out) == 14
+    assert by[("eval.pair_graded", pair)]["value_numeric"] == 0
+    assert ("eval.pair_checks_passed_rate", pair) not in by
+    assert ("eval.pair_graded", agent) not in by
+    assert len(out) == 16
 
 
 def test_on_tier0_row_writes_the_runs_day_under_the_reserved_owner(db_backend, svc):

@@ -237,10 +237,10 @@ def test_every_dml_on_agent_evaluations_lives_in_the_db_layer():
     assert offenders <= allowed, offenders - allowed
 
 
-def test_the_writers_have_exactly_three_callers():
-    """The db facade forwards; past it, a Tier-0/admin/rating row is written
-    from three places only. A fourth caller is a new write path and must
-    be fenced here before it exists."""
+def test_the_writers_have_exactly_four_callers():
+    """The db facade forwards; past it, a Tier-0/pair/admin/rating row is
+    written from four places only. A fifth caller is a new write path and
+    must be fenced here before it exists."""
     writers = {"create_agent_evaluation", "upsert_platform_evaluation",
                "upsert_workspace_rating", "create_evaluation"}
     allowed = {
@@ -248,6 +248,9 @@ def test_the_writers_have_exactly_three_callers():
         "routers/evaluations.py",          # admin:<user>, human-only gate
         "client_portal/service.py",        # workspace:<email>, closed target set
         "services/tier0_evaluator.py",     # platform:tier0, execution id only
+        # ent#940: platform:tier0:pair, execution id only; the writer refuses
+        # any evaluator outside PLATFORM_EVALUATORS (test_940_pair_checks.py)
+        "services/tier0_pair_evaluator.py",
     }
     callers = set()
     for path in _py_files():
@@ -263,14 +266,21 @@ def test_the_writers_have_exactly_three_callers():
 
 def test_the_evaluator_and_the_sweep_take_no_principal():
     """Decision 18: the writer takes an execution id and nothing else, and the
-    two modules import no FastAPI, no `dependencies`, no `models` — there is no
+    modules import no FastAPI, no `dependencies`, no `models` — there is no
     type through which a route could hand them a caller to trust."""
     import inspect
-    from services import tier0_evaluator, tier0_sweep_service
+    from services import tier0_evaluator, tier0_pair_evaluator, tier0_sweep_service
     assert list(inspect.signature(tier0_evaluator.evaluate_execution).parameters) == ["execution_id"]
     assert list(inspect.signature(tier0_evaluator.record_timeout).parameters) == ["execution_id"]
+    # ent#940: the pair evaluator's two writer entry points, same shape; its
+    # sweep takes bounds only (all keyword), never a caller.
+    for fn in (tier0_pair_evaluator.evaluate_pair, tier0_pair_evaluator.record_timeout):
+        assert list(inspect.signature(fn).parameters) == ["execution_id"], fn.__name__
+    sweep_params = inspect.signature(tier0_pair_evaluator.sweep).parameters
+    assert set(sweep_params) == {"limit", "lookback_hours", "timeout_seconds", "concurrency"}
+    assert all(p.kind is p.KEYWORD_ONLY for p in sweep_params.values())
     forbidden = ("fastapi", "starlette", "dependencies", "models")
-    for mod in (tier0_evaluator, tier0_sweep_service):
+    for mod in (tier0_evaluator, tier0_pair_evaluator, tier0_sweep_service):
         tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
         imported = set()
         for n in ast.walk(tree):

@@ -18,7 +18,7 @@ import json
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import select, insert, update, and_, func
+from sqlalchemy import select, insert, update, and_, or_, func, case
 from sqlalchemy.exc import IntegrityError
 
 from db.engine import get_engine
@@ -34,7 +34,34 @@ from utils.helpers import iso_cutoff, utc_now_iso
 TIER0_EVALUATOR = "platform:tier0"
 TIER0_TARGET_KIND = "execution"
 TIER0_TRIGGERS = ("schedule", "agent")
+# ent#940 TD-2 (ent#935 addendum A): delegation triggers, graded only when
+# another agent sent the run (`source_agent_name` set) — a fan-out, loop or
+# reminder an agent set up for itself or a person started is not an edge.
+TIER0_DELEGATED_TRIGGERS = ("fan_out", "loop", "reminder")
 TIER0_TERMINAL_STATUSES = ("success", "failed", "cancelled")
+# ent#940 — the pair (caller→callee edge) evaluator. Its row hangs off the
+# callee run under the same one-row key, so it needs no migration either. The
+# id shares the `platform:tier0` stem but every Tier-0 reader matches the bare
+# string exactly, so a pair row is never counted as a Tier-0 grade.
+TIER0_PAIR_EVALUATOR = "platform:tier0:pair"
+# The closed set the platform writer may file under. Anything else is refused:
+# the writer is fenced (test_935_write_fence.py), and a free-form evaluator
+# would let a caller of it mint a new platform identity.
+PLATFORM_EVALUATORS = (TIER0_EVALUATOR, TIER0_PAIR_EVALUATOR)
+
+
+def _platform_evaluator(evaluator: str) -> str:
+    if evaluator not in PLATFORM_EVALUATORS:
+        raise ValueError(f"not a platform evaluator: {evaluator!r}")
+    return evaluator
+
+
+def tier0_eligible(triggered_by: Optional[str], source_agent_name: Optional[str]) -> bool:
+    """Whether Tier-0 grades a run with this trigger and sender (ent#940 TD-2).
+    The one rule the candidate query and `evaluate_execution` both apply."""
+    if triggered_by in TIER0_TRIGGERS:
+        return True
+    return triggered_by in TIER0_DELEGATED_TRIGGERS and bool(source_agent_name)
 
 
 def derive_delegation(row) -> tuple:
@@ -341,10 +368,12 @@ class EvaluationOperations:
     # ent#935 — the Tier-0 deterministic evaluator's writer
     # ------------------------------------------------------------------
 
-    def _tier0_update(self, conn, execution_id: str, values: dict) -> Optional[dict]:
-        """UPDATE the run's Tier-0 row if it exists; None if it does not."""
+    def _tier0_update(self, conn, execution_id: str, values: dict,
+                      evaluator: str = TIER0_EVALUATOR) -> Optional[dict]:
+        """UPDATE the run's platform row (under `evaluator`) if it exists; None
+        if it does not."""
         where = and_(
-            agent_evaluations.c.evaluator == TIER0_EVALUATOR,
+            agent_evaluations.c.evaluator == evaluator,
             agent_evaluations.c.target_kind == TIER0_TARGET_KIND,
             agent_evaluations.c.target_id == execution_id,
         )
@@ -363,8 +392,13 @@ class EvaluationOperations:
         checks: Any,
         archetype: Optional[str] = None,
         quality: Optional[float] = None,
+        evaluator: str = TIER0_EVALUATOR,
     ) -> dict:
         """Write (or re-grade) the Tier-0 row for one execution.
+
+        `evaluator` (ent#940) picks which platform row: the Tier-0 grade by
+        default, or the pair row (`TIER0_PAIR_EVALUATOR`). Any other value
+        raises `ValueError` before anything is read or written.
 
         One row per run: a second evaluation of the same execution — a FAILED
         terminal later overwritten by SUCCESS, two sweep workers — updates it in
@@ -374,19 +408,20 @@ class EvaluationOperations:
         applied as the UPDATE on the same connection (see
         `upsert_workspace_rating` for why both halves are load-bearing).
         """
+        evaluator = _platform_evaluator(evaluator)
         now = utc_now_iso()
         with get_engine().begin() as conn:
             values = self._tier0_values(conn, agent_name, execution_id, completion,
                                         checks, archetype, quality, now)
-            existing = self._tier0_update(conn, execution_id, values)
+            existing = self._tier0_update(conn, execution_id, values, evaluator)
             if existing is not None:
                 return existing
             eval_id = f"eval_{uuid.uuid4().hex[:16]}"
             try:
                 with conn.begin_nested():
-                    self._tier0_insert(conn, eval_id, values, now)
+                    self._tier0_insert(conn, eval_id, values, now, evaluator)
             except IntegrityError:
-                applied = self._tier0_update(conn, execution_id, values)
+                applied = self._tier0_update(conn, execution_id, values, evaluator)
                 if applied is not None:
                     return applied
                 raise
@@ -403,8 +438,10 @@ class EvaluationOperations:
         completion: Optional[bool],
         checks: Any,
         archetype: Optional[str] = None,
+        evaluator: str = TIER0_EVALUATOR,
     ) -> Optional[dict]:
         """INSERT the run's Tier-0 row only if it has none; None if it has one.
+        `evaluator` as in `upsert_platform_evaluation` (ent#940).
 
         The writer for a bookkeeping row (the sweep's `evaluator_timeout`) that
         must never replace a real grade. There is deliberately NO update
@@ -413,6 +450,7 @@ class EvaluationOperations:
         A later real grade still re-grades this row in place through
         `upsert_platform_evaluation`.
         """
+        evaluator = _platform_evaluator(evaluator)
         now = utc_now_iso()
         eval_id = f"eval_{uuid.uuid4().hex[:16]}"
         with get_engine().begin() as conn:
@@ -420,7 +458,7 @@ class EvaluationOperations:
                                         checks, archetype, None, now)
             try:
                 with conn.begin_nested():
-                    self._tier0_insert(conn, eval_id, values, now)
+                    self._tier0_insert(conn, eval_id, values, now, evaluator)
             except IntegrityError:
                 return None
             row = conn.execute(
@@ -428,9 +466,10 @@ class EvaluationOperations:
             ).mappings().first()
         return self._row_to_dict(row)
 
-    def _tier0_insert(self, conn, eval_id: str, values: dict, now: str) -> None:
+    def _tier0_insert(self, conn, eval_id: str, values: dict, now: str,
+                      evaluator: str = TIER0_EVALUATOR) -> None:
         conn.execute(insert(agent_evaluations).values(
-            id=eval_id, evaluator=TIER0_EVALUATOR, created_at=now,
+            id=eval_id, evaluator=evaluator, created_at=now,
             target_kind=TIER0_TARGET_KIND, target_id=values["execution_id"],
             judge_json=None, comment=None, **values,
         ))
@@ -463,11 +502,14 @@ class EvaluationOperations:
             "updated_at": now,
         }
 
-    def latest_tier0_for_execution(self, execution_id: str) -> Optional[dict]:
+    def latest_tier0_for_execution(self, execution_id: str, *,
+                                   evaluator: str = TIER0_EVALUATOR) -> Optional[dict]:
         """The run's Tier-0 row, or None ("not evaluated"). Other evaluators'
-        rows for the same execution are a different axis and never answer."""
+        rows for the same execution are a different axis and never answer.
+        `evaluator=TIER0_PAIR_EVALUATOR` reads the pair row instead (ent#940)."""
+        evaluator = _platform_evaluator(evaluator)
         stmt = select(agent_evaluations).where(and_(
-            agent_evaluations.c.evaluator == TIER0_EVALUATOR,
+            agent_evaluations.c.evaluator == evaluator,
             agent_evaluations.c.target_kind == TIER0_TARGET_KIND,
             agent_evaluations.c.target_id == execution_id,
         )).limit(1)
@@ -477,7 +519,8 @@ class EvaluationOperations:
 
     def unevaluated_execution_ids(self, *, limit: int = 25, settle_seconds: int = 30,
                                   lookback_hours: int = 24) -> list[str]:
-        """Terminal schedule/agent runs with no Tier-0 row yet, oldest first.
+        """Terminal runs Tier-0 grades (`tier0_eligible`) with no Tier-0 row
+        yet, oldest first.
 
         Bounded on every side: settled (completed at least `settle_seconds` ago,
         so evidence written just after the CAS has landed), recent (no backfill
@@ -493,12 +536,66 @@ class EvaluationOperations:
             select(schedule_executions.c.id)
             .where(and_(
                 schedule_executions.c.status.in_(TIER0_TERMINAL_STATUSES),
-                schedule_executions.c.triggered_by.in_(TIER0_TRIGGERS),
+                or_(schedule_executions.c.triggered_by.in_(TIER0_TRIGGERS),
+                    and_(schedule_executions.c.triggered_by.in_(TIER0_DELEGATED_TRIGGERS),
+                         schedule_executions.c.source_agent_name.isnot(None),
+                         schedule_executions.c.source_agent_name != "")),
                 schedule_executions.c.completed_at >= iso_cutoff(lookback_hours),
                 schedule_executions.c.completed_at <= iso_cutoff(seconds=settle_seconds),
                 ~evaluated.exists(),
             ))
             .order_by(schedule_executions.c.completed_at.asc())
+            .limit(max(0, int(limit)))
+        )
+        with get_engine().connect() as conn:
+            return [r[0] for r in conn.execute(stmt).all()]
+
+    def unevaluated_pair_execution_ids(self, *, limit: int = 25, lookback_hours: int = 24
+                                       ) -> list[str]:
+        """Delegated runs (ent#940) that have a Tier-0 row naming a caller and
+        no pair row yet, oldest Tier-0 row first.
+
+        The pair row hangs off the Tier-0 row, so a run Tier-0 never graded is
+        never a candidate, and the Tier-0 sweep's settle window already applies.
+        Bounded by `lookback_hours` on the Tier-0 row's `created_at` (ISO-Z,
+        cutoff computed in Python — Invariant #16) and by `limit`.
+
+        A pair row written while the caller was still running carries
+        `skip: caller_running` and is not final: once the caller run is
+        terminal the run is a candidate again, so the re-grade (an in-place
+        upsert) replaces the skips with real results. A row whose caller read
+        raised (`skip: caller_unreadable`) is re-picked the same way. Matched
+        on the quoted reason token, which no JSON separator choice can split.
+
+        Fresh candidates (no pair row) sort before provisional re-grades, so
+        rows whose re-grade keeps failing never starve a tick's batch (I1).
+        """
+        t0 = agent_evaluations.alias("t0")
+        pr = agent_evaluations.alias("pr")
+        se = schedule_executions
+        paired = select(pr.c.id).where(and_(
+            pr.c.evaluator == TIER0_PAIR_EVALUATOR,
+            pr.c.target_kind == TIER0_TARGET_KIND,
+            pr.c.target_id == t0.c.target_id,
+        ))
+        caller_ended = select(se.c.id).where(and_(
+            se.c.id == pr.c.parent_execution_id,
+            se.c.status.in_(TIER0_TERMINAL_STATUSES),
+        ))
+        provisional = paired.where(or_(
+            and_(pr.c.checks_json.like('%"caller_running"%'), caller_ended.exists()),
+            pr.c.checks_json.like('%"caller_unreadable"%'),
+        ))
+        stmt = (
+            select(t0.c.target_id)
+            .where(and_(
+                t0.c.evaluator == TIER0_EVALUATOR,
+                t0.c.target_kind == TIER0_TARGET_KIND,
+                t0.c.caller_agent.isnot(None),
+                t0.c.created_at >= iso_cutoff(lookback_hours),
+                or_(~paired.exists(), provisional.exists()),
+            ))
+            .order_by(case((paired.exists(), 1), else_=0), t0.c.created_at.asc())
             .limit(max(0, int(limit)))
         )
         with get_engine().connect() as conn:

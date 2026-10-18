@@ -16,7 +16,7 @@ from typing import Optional, List, Dict, Sequence
 
 from sqlalchemy import select, insert, update, and_, case, or_
 
-from .engine import get_engine
+from .engine import get_engine, make_insert
 from .query_helpers import latest_per_group
 from .tables import agent_activities, schedule_executions
 # ActivityCloseOutcome is defined in `models` (not here) on purpose — it is a
@@ -552,6 +552,98 @@ class ActivityOperations:
         )
         with get_engine().connect() as conn:
             return [self._row_to_activity(row) for row in conn.execute(stmt).all()]
+
+    def earliest_collaboration_action(self, action: str) -> Optional[str]:
+        """`created_at` of the oldest `agent_collaboration` row whose details
+        name `action`, or None if there is none (ent#940).
+
+        The pair evaluator asks this for `read_result` to tell "the caller did
+        not read the result" from "the platform was not recording reads yet":
+        a relay older than the first receipt anywhere is ungradable, not a
+        failure. Matched on the serialised `"action": "<action>"` pair, which is
+        how `track_activity` writes details (`json.dumps`, default separators).
+        """
+        stmt = (
+            select(agent_activities.c.created_at)
+            .where(and_(
+                agent_activities.c.activity_type == ActivityType.AGENT_COLLABORATION.value,
+                agent_activities.c.details.like(f'%"action": "{action}"%'),
+            ))
+            .order_by(agent_activities.c.created_at.asc())
+            .limit(1)
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).first()
+        return _norm_ts(row[0]) if row else None
+
+    # ent#940 — the read receipt's id is derived from (reader, run), so the
+    # primary key is what makes a receipt first-read-only.
+    _READ_RECEIPT_NS = uuid.UUID("5f0c9a52-3b8e-4d1a-9c61-940a0d1e4f21")
+
+    def insert_read_receipt_if_absent(self, reader_agent: str, target_agent: str,
+                                      execution_id: str) -> bool:
+        """Record that `reader_agent` read run `execution_id` of `target_agent`
+        (ent#940 TD-1). Returns True when a row was actually written.
+
+        One row per (reader, run) ever: the id is a uuid5 over the pair and the
+        insert is `on_conflict_do_nothing` on the primary key, so a second read
+        and two racing reads both leave the first row alone — enforced by the
+        key, not by a preceding SELECT. The row is the `agent_collaboration`
+        shape the pair evaluator's `first_read` reads (`agent_name` = reader,
+        `related_execution_id` = the run, `details.action` = `read_result`).
+        """
+        now = utc_now_iso()
+        stmt = make_insert(agent_activities).values(
+            id=str(uuid.uuid5(self._READ_RECEIPT_NS, f"{reader_agent}\x00{execution_id}")),
+            agent_name=reader_agent,
+            activity_type=ActivityType.AGENT_COLLABORATION.value,
+            activity_state=ActivityState.COMPLETED.value,
+            started_at=now,
+            completed_at=now,
+            triggered_by="agent",
+            related_execution_id=execution_id,
+            details=json.dumps({"source_agent": reader_agent, "target_agent": target_agent,
+                                "action": "read_result", "execution_id": execution_id}),
+            created_at=now,
+        ).on_conflict_do_nothing(index_elements=["id"])
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount == 1
+
+    # ent#940 — bound on one IN list, so a fan-out storm is read in chunks.
+    _COLLAB_IN_CHUNK = 200
+
+    def collaboration_rows_for_executions(self, execution_ids: Sequence[str]) -> List[Dict]:
+        """The `agent_collaboration` rows that point at any of `execution_ids`
+        through `related_execution_id`, oldest first (ent#940).
+
+        This is the caller's own record of a delegation: `chat_with_agent`
+        writes one on the CALLER's agent (`details.source_agent/target_agent/
+        action/execution_id`). Empty input reads nothing. A row whose `details`
+        is unreadable JSON comes back with `details=None` rather than raising —
+        the pair evaluator treats that as "no claim", never a crash.
+        """
+        ids = [i for i in dict.fromkeys(execution_ids or []) if i]
+        out: List[Dict] = []
+        if not ids:
+            return out
+        with get_engine().connect() as conn:
+            for start in range(0, len(ids), self._COLLAB_IN_CHUNK):
+                chunk = ids[start:start + self._COLLAB_IN_CHUNK]
+                stmt = (
+                    select(*_ACTIVITY_COLUMNS)
+                    .where(and_(
+                        agent_activities.c.activity_type == ActivityType.AGENT_COLLABORATION.value,
+                        agent_activities.c.related_execution_id.in_(chunk),
+                    ))
+                )
+                for row in conn.execute(stmt).all():
+                    try:
+                        out.append(self._row_to_activity(row))
+                    except (TypeError, ValueError):
+                        d = self._row_to_activity(tuple(row[:12]) + (None,) + tuple(row[13:]))
+                        out.append(d)
+        out.sort(key=lambda r: (r.get("created_at") or "", r.get("id") or ""))
+        return out
 
     def get_latest_activity_for_agents(self, agent_names: List[str]) -> Dict[str, Dict]:
         """Return the single most-recent activity per agent, in one query.

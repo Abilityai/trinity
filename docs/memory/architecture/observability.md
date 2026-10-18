@@ -337,6 +337,15 @@ process exit). Router `routers/evaluations.py` → `db/evaluations.py` → table
   the reserved owner `platform:eval` (per Tier-0 row + nightly under the sweep lease);
   `record_metrics` refuses `eval.`. MCP: `get_evaluation_summary`. Requirements §46
   FR-11..FR-14.
+- **Pair evaluation (ent#940, Layer 1)**: `services/tier0_pair_evaluator.py` writes one
+  `platform:tier0:pair` row per delegated callee run (phase 2 of the Tier-0 sweep) —
+  seven gate + two signal edge checks and latency/cost metrics. `window_rows` LEFT JOINs
+  it as `pair_checks`; `fold` adds a disjoint `pair` block on `by=pair` only (Tier-0
+  counters untouched); a machine reads its counts only. `activity_service.record_first_reads`
+  writes a first-read `read_result` receipt when an agent key reads another agent's
+  finished run (execution and fan-out result GETs; fail-open, response unchanged). Tier-0
+  now also grades sourced `fan_out`/`loop`/`reminder` runs. The sampled pair judge
+  (Layer 2) is not built. Requirements §46 addendum C, FR-18..FR-21.
 - **OSS-core by decision** (strategy gate ent#206 §10): the enforcement primitive and
   the deterministic tier are edition-agnostic; the managed grading experience is the
   paid layer, mirroring #668.
