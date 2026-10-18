@@ -118,6 +118,16 @@ def _make_db_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX idx_executions_agent_started "
         "ON schedule_executions(agent_name, started_at DESC)"
     )
+    # ent#935: the analytics accessors join Tier-0 rows for "Checks passed".
+    cur.execute(
+        """
+        CREATE TABLE agent_evaluations (
+            id TEXT PRIMARY KEY, agent_name TEXT, execution_id TEXT,
+            evaluator TEXT, target_kind TEXT, target_id TEXT,
+            checks_json TEXT, created_at TEXT
+        )
+        """
+    )
     cur.execute("INSERT INTO users(id, username, role) VALUES (1, 'owner', 'user')")
     conn.commit()
 

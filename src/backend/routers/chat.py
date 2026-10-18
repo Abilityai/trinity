@@ -316,6 +316,8 @@ async def chat_with_agent(
             chain_depth=admission.chain_depth,
             # trinity-enterprise#752: a self-approval is recorded on the row.
             gate=admission.gate,
+            # ent#935: stored as parent_execution_id when it is the caller's own turn.
+            x_trinity_execution_id=x_trinity_execution_id,
         )
     except BaseException:
         await chat_execution_service.release_admission(

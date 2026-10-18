@@ -65,8 +65,10 @@ CREATE UNIQUE INDEX idx_agent_evaluations_rating_target
 A second thumb is a **correction**, not a second vote — which is what makes a raw
 tally count *people* rather than clicks. The index carries the rule so two rapid
 clicks cannot race into two rows; the service's update-then-insert reflects it.
-Partial on `target_id IS NOT NULL`, so however many graded-run rows a Tier-0 pass
-writes (all with no target), none of them are affected.
+Partial on `target_id IS NOT NULL`. Tier-0 rows (ent#935) use the same index on
+purpose — `evaluator='platform:tier0', target_kind='execution', target_id=<execution_id>`
+— which makes them one row per run; they never meet a rating, because every tally and
+per-person read keys on a `workspace:` / `operator:` evaluator.
 
 ## What the rated agent may read — the grooming decision
 

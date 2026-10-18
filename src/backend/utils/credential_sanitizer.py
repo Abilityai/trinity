@@ -449,6 +449,19 @@ def sanitize_text(text: str) -> str:
     return result
 
 
+def count_hits(text: Optional[str]) -> int:
+    """How many credential-shaped values `sanitize_text` would redact in *text*
+    — an int, never the matches (ent#935 `credential_echo`: evidence the graded
+    agent can read must not carry the secret). Defined as the redactions
+    sanitize_text adds, so it can never disagree with what gets scrubbed and
+    inherits its linear cost (#1661); a marker already in the text is not
+    re-counted."""
+    if not text:
+        return 0
+    before = text.count(REDACTION_PLACEHOLDER)
+    return max(0, sanitize_text(text).count(REDACTION_PLACEHOLDER) - before)
+
+
 def sanitize_dict(data: Dict[str, Any], depth: int = 0, max_depth: int = 10) -> Dict[str, Any]:
     """Recursively sanitize sensitive values in a dictionary.
 

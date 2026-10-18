@@ -149,6 +149,7 @@ class TestCreateExecution:
             "source_channel_agent": "binder", "source_channel_client": "client@example.com",
             "open_canvas_id": "canvas-1", "chain_depth": 2,
             "a2a_caller_identity": "aauth:echo@a.example",
+            "parent_execution_id": "parent-1",
         }
         # Guard the guard: this test covers every field the object has.
         assert set(values) == {f.name for f in dataclasses.fields(TaskExecutionFields)}
@@ -160,6 +161,7 @@ class TestCreateExecution:
         assert (row["schedule_id"], row["agent_name"], row["message"], row["triggered_by"]) == (
             "__manual__", "agent-a", "do it", "mcp")
         assert ex.chain_depth == 2 and ex.source_channel_client == "client@example.com"
+        assert ex.parent_execution_id == "parent-1"
 
     def test_a2a_caller_identity_reads_back_through_the_execution_response(self, schedule_ops):
         # ent#862: the column was written but never read back, so the execution
