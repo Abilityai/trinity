@@ -12,7 +12,6 @@
     "src/frontend/src/components/ChatPanel.vue": 1,
     "src/frontend/src/components/CompatibilityPanel.vue": 1,
     "src/frontend/src/components/ConnectorChannelPanel.vue": 1,
-    "src/frontend/src/components/CreateAgentModal.vue": 1,
     "src/frontend/src/components/CredentialSetupChecklist.vue": 1,
     "src/frontend/src/components/CredentialsPanel.vue": 2,
     "src/frontend/src/components/FilesPanel.vue": 1,

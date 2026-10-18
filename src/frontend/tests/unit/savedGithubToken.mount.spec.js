@@ -10,8 +10,8 @@
  *  - without one the field is required and nothing is sent;
  *  - the browser only ever learns presence (the store mock returns a boolean).
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount, DOMWrapper } from '@vue/test-utils'
 
 const createAgent = vi.fn()
 const bindAgentToOwnRepo = vi.fn()
@@ -31,6 +31,13 @@ vi.mock('../../src/api', () => ({ default: { get: vi.fn(async () => ({ data: TEM
 import SavedGithubTokenField from '../../src/components/SavedGithubTokenField.vue'
 // eslint-disable-next-line import/first
 import CreateAgentModal from '../../src/components/CreateAgentModal.vue'
+
+// #3792: the dialog sits in BaseModal, which teleports to <body>, so DOM
+// queries go through `dom()`. Not stubbed: test-utils' `teleport: true` stub
+// remounts its children on every parent render, which wipes child state (the
+// token field's override toggle) in a way the real Teleport never does.
+const dom = () => new DOMWrapper(document.body)
+afterEach(() => { document.body.innerHTML = '' })
 // eslint-disable-next-line import/first
 import BindRepoPanel from '../../src/components/BindRepoPanel.vue'
 
@@ -68,14 +75,14 @@ async function forkForm() {
     global: { stubs: { ImportValidationStep: { template: '<div />' } } },
   })
   await flushPromises()
-  await w.find('input[type="text"]').setValue('my-agent')
-  await w.findAll('div.cursor-pointer').find((d) => d.text().includes('Brain')).trigger('click')
-  await w.find('input[placeholder="your-github-username/my-agent-brain"]').setValue('alice/brain')
+  await dom().find('#agent-name').setValue('my-agent')
+  await dom().findAll('[data-testid="source-option"]').find((d) => d.text().includes('Brain')).trigger('click')
+  await dom().find('input[placeholder="your-github-username/my-agent-brain"]').setValue('alice/brain')
   return w
 }
 
 async function submit(w) {
-  await w.find('form').trigger('submit')
+  await dom().find('form').trigger('submit')
   await flushPromises()
   return createAgent.mock.calls.at(-1)?.[0]
 }
@@ -90,13 +97,13 @@ describe('fork-to-own at create', () => {
     saved.value = false
     const w = await forkForm()
     expect(await submit(w)).toBeUndefined()
-    expect(w.text()).toContain('Settings → GitHub token')
+    expect(dom().text()).toContain('Settings → GitHub token')
   })
 
   it('a typed override rides the payload', async () => {
     const w = await forkForm()
-    await w.find('[data-testid="github-token-toggle"]').trigger('click')
-    await w.find('[data-testid="github-token-input"]').setValue('ghp_override')
+    await dom().find('[data-testid="github-token-toggle"]').trigger('click')
+    await dom().find('[data-testid="github-token-input"]').setValue('ghp_override')
     expect((await submit(w)).fork_to_own.github_pat).toBe('ghp_override')
   })
 
@@ -104,7 +111,7 @@ describe('fork-to-own at create', () => {
     // #3164 review: the parent could not see the override, so an empty one
     // read as "use my saved token".
     const w = await forkForm()
-    await w.find('[data-testid="github-token-toggle"]').trigger('click')
+    await dom().find('[data-testid="github-token-toggle"]').trigger('click')
     expect(await submit(w)).toBeUndefined()
   })
 })
