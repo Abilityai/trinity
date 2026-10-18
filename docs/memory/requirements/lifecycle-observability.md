@@ -1092,7 +1092,10 @@ prompts or calls a model.
   the judge beside the transcript); a skipped document names a `skip` from the frozen
   reason enum. Each defect is a named `JudgeJsonError.code` (`judge_reason_too_long`,
   `judge_skip_unknown`, …) and the row is never written. Whether `quality` agrees with
-  the dimensions is the rubric's, not the guard's.
+  the dimensions is the rubric's, not the guard's. A judged document also carries
+  `findings` — `[{dimension, verdict, reason}]`, `reason` null — the list FR-12's
+  machine projection hands the graded agent as `judge_findings`; `dimensions` (with
+  the prose reasons) is for operators only. Extra keys pass the guard unchanged.
 - **FR-18 — The fence, extended**: the three Tier-1 writers are reached from the
   `database.py` facade only — no router, no service, no MCP tool — and take ids and
   column values, never a principal. The admin write still files under `admin:<user>`
