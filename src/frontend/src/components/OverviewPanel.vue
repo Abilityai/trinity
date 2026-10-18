@@ -194,15 +194,16 @@ async function loadAnalytics() {
 function fmtSuccessRate(rate) {
   return rate == null ? '—' : `${Math.round(rate * 100)}%`
 }
-// ent#935: "Checks passed" — Tier-0 gate rate over evaluated runs. Zero
-// evaluated is "—": a run with no Tier-0 row is not evaluated, never failed.
+// ent#935: "Checks passed" — Tier-0 gate rate over runs with a gate check
+// graded. Zero graded is "—": a run with no Tier-0 row, or a skip-only one, is
+// not a failure.
 function fmtChecksPassed(row) {
   if (!row?.evaluated_count || row.checks_passed_rate == null) return '—'
   return `${Math.round(row.checks_passed_rate * 100)}%`
 }
 function checksPassedTitle(row) {
-  if (!row?.evaluated_count) return 'No evaluated runs in this window — deterministic checks, not answer quality'
-  return `${row.evaluated_count} of ${row.total_executions} runs evaluated · deterministic checks, not answer quality`
+  if (!row?.evaluated_count) return 'No runs with a gate check graded in this window — deterministic checks, not answer quality'
+  return `${row.evaluated_count} of ${row.total_executions} runs with a gate check graded · deterministic checks, not answer quality`
 }
 function successRateClass(rate) {
   if (rate == null) return 'text-gray-500 dark:text-gray-400'

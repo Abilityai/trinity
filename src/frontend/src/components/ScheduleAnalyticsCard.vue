@@ -49,7 +49,7 @@
           </div>
         </div>
         <!-- ent#935: the deterministic Tier-0 gate rate — a second number, not
-             a replacement for Completion. "—" when no run was evaluated. -->
+             a replacement for Completion. "—" when no run had a gate check graded. -->
         <div class="px-3 py-2 rounded bg-gray-50 dark:bg-gray-800/50" data-testid="checks-passed" :title="checksPassedTitle">
           <div class="text-xs text-gray-500 dark:text-gray-400">Checks passed</div>
           <div class="text-sm font-semibold text-gray-900 dark:text-white">
@@ -257,7 +257,7 @@ const successRateColor = computed(() => {
   return 'text-status-danger-600 dark:text-status-danger-400'
 })
 
-// ent#935: null rate / zero evaluated → "—" (not evaluated is not "failed").
+// ent#935: null rate / zero graded → "—" (no gate graded is not "failed").
 const checksPassedPercent = computed(() => {
   const d = data.value
   if (!d || !d.evaluated_count || d.checks_passed_rate == null) return '—'
@@ -266,8 +266,8 @@ const checksPassedPercent = computed(() => {
 
 const checksPassedTitle = computed(() => {
   const d = data.value
-  if (!d || !d.evaluated_count) return 'No evaluated runs in this window — deterministic checks, not answer quality'
-  return `${d.evaluated_count} of ${d.total_executions} runs evaluated · deterministic checks, not answer quality`
+  if (!d || !d.evaluated_count) return 'No runs with a gate check graded in this window — deterministic checks, not answer quality'
+  return `${d.evaluated_count} of ${d.total_executions} runs with a gate check graded · deterministic checks, not answer quality`
 })
 
 const formatPercentileTriple = computed(() => {

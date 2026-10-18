@@ -10,12 +10,16 @@ read from the Tier-0 rows (`evaluator='platform:tier0'`) and added beside it as
   * `get_agent_analytics`          — the agent headline (Overview)
 
 Pinned semantics (FR-10a):
-  * a run PASSES when its gate headline passed — no gate failed AND at least one
-    gate passed. A skip-only row (every gate skipped, e.g. an evaluator timeout)
-    counts as EVALUATED, not passed;
+  * the denominator is the runs with a gate check GRADED — at least one gate
+    passed or failed. A skip-only row (every gate skipped, e.g. an evaluator
+    timeout, or nothing to check) is in NEITHER numerator nor denominator: the
+    execution page reads it as "No gate check applied", and the rollup must not
+    count the same row as a failure (review I5, re-ruling C3);
+  * a graded run PASSES when no gate failed (so at least one gate passed);
   * an execution with no Tier-0 row is "not evaluated": it is in neither the
     numerator nor the denominator — never a failure;
-  * `evaluated_count == 0` → `checks_passed_rate is None` (the UI shows "—");
+  * `evaluated_count == 0` → `checks_passed_rate is None` (the UI shows "—"),
+    including when every Tier-0 row in the window is skip-only;
   * only `platform:tier0` rows count — a `workspace:` or `operator:` rating of
     the same execution never enters the rate.
 
@@ -124,7 +128,7 @@ def seeded(db_backend):
     grade("ex-1", gate_pass=3)
     grade("ex-2", gate_pass=1, gate_skip=2)          # skips beside a pass: passed
     grade("ex-3", gate_pass=2, gate_fail=1)          # a gate failed
-    grade("ex-4", gate_pass=0, gate_fail=0, gate_skip=5)  # skip-only: evaluated, not passed
+    grade("ex-4", gate_pass=0, gate_fail=0, gate_skip=5)  # skip-only: no gate graded
     # ex-5: no Tier-0 row — not evaluated
     return db_backend
 
@@ -132,8 +136,9 @@ def seeded(db_backend):
 @pytest.mark.parametrize("reader", sorted(READERS))
 def test_rate_is_passed_over_evaluated(seeded, reader):
     rate, evaluated = _rate_fields(READERS[reader]())
-    assert evaluated == 4, "the run with no Tier-0 row is not evaluated, not failed"
-    assert rate == 0.5, "2 passed of 4 evaluated; a skip-only row is evaluated, not passed"
+    assert evaluated == 3, ("neither the run with no Tier-0 row nor the skip-only "
+                            "row had a gate check graded")
+    assert rate == round(2 / 3, 4), "2 passed of 3 graded; a skip-only row is not a fail"
 
 
 @pytest.mark.parametrize("reader", sorted(READERS))
@@ -153,11 +158,12 @@ def test_zero_evaluated_is_none_not_zero(db_backend, reader):
 
 
 @pytest.mark.parametrize("reader", sorted(READERS))
-def test_all_skip_only_is_zero_percent(db_backend, reader):
+def test_all_skip_only_is_none_not_zero_percent(db_backend, reader):
     seed_schedule("s1")
     seed_exec("ex-1")
     grade("ex-1", gate_pass=0, gate_skip=5)
-    assert _rate_fields(READERS[reader]()) == (0.0, 1)
+    assert _rate_fields(READERS[reader]()) == (None, 0), \
+        "nothing could be checked renders '—', never 0%"
 
 
 @pytest.mark.parametrize("reader", sorted(READERS))
@@ -199,8 +205,8 @@ def test_response_models_carry_the_fields(seeded):
                         ScheduleAnalyticsResponse)
     from database import db
     out = ScheduleAnalyticsResponse(**_schedule()).model_dump()
-    assert (out["checks_passed_rate"], out["evaluated_count"]) == (0.5, 4)
+    assert (out["checks_passed_rate"], out["evaluated_count"]) == (0.6667, 3)
     out = AgentAnalyticsResponse(**_agent()).model_dump()
-    assert (out["checks_passed_rate"], out["evaluated_count"]) == (0.5, 4)
+    assert (out["checks_passed_rate"], out["evaluated_count"]) == (0.6667, 3)
     out = AgentSchedulesSummaryResponse(**db.get_agent_schedules_summary(AGENT, 24)).model_dump()
-    assert (out["schedules"][0]["checks_passed_rate"], out["schedules"][0]["evaluated_count"]) == (0.5, 4)
+    assert (out["schedules"][0]["checks_passed_rate"], out["schedules"][0]["evaluated_count"]) == (0.6667, 3)

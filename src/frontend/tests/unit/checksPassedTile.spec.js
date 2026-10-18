@@ -10,8 +10,9 @@
  *   * OverviewPanel headline — the agent's rate next to the completion rate;
  *   * OverviewPanel "Schedules performance" rows — a checks column per schedule.
  *
- * At `evaluated_count == 0` the number is "—", never 0% (nothing evaluated is
- * not "every check failed"), and Completion is unchanged in every case.
+ * `evaluated_count` is the runs with a gate check graded (a skip-only row is on
+ * neither side, review I5). At 0 the number is "—", never 0% (nothing graded
+ * is not "every check failed"), and Completion is unchanged in every case.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
@@ -119,13 +120,16 @@ describe('ScheduleAnalyticsCard — Checks passed tile', () => {
     expect(tileValue(w, 'Checks passed')).toBe('50.0%')
     expect(tileValue(w, 'Completion')).toBe('80.0%')
     const tile = w.find('[data-testid="checks-passed"]')
-    expect(tile.attributes('title')).toContain('4 of 5 runs evaluated')
+    expect(tile.attributes('title')).toContain('4 of 5 runs with a gate check graded')
   })
 
   it('shows "—", not 0%, when nothing was evaluated', async () => {
     const w = await mountCard(scheduleAnalytics({ checks_passed_rate: null, evaluated_count: 0 }))
     expect(tileValue(w, 'Checks passed')).toBe('—')
     expect(tileValue(w, 'Completion')).toBe('80.0%')
+    // review I5: a window of skip-only rows reads the same — nothing graded
+    expect(w.find('[data-testid="checks-passed"]').attributes('title'))
+      .toContain('No runs with a gate check graded in this window')
   })
 
   it('a real 0% (evaluated, none passed) still reads 0%', async () => {
@@ -143,7 +147,7 @@ describe('OverviewPanel — Checks passed beside Completion', () => {
     const head = w.find('[data-testid="overview-checks-passed"]')
     expect(head.exists()).toBe(true)
     expect(head.text()).toContain('75%')
-    expect(head.attributes('title')).toContain('4 of 5 runs evaluated')
+    expect(head.attributes('title')).toContain('4 of 5 runs with a gate check graded')
     expect(w.text()).toContain('80%') // Completion, unchanged
     const row = w.find('[data-testid="schedule-checks-passed"]')
     expect(row.text()).toContain('25%')

@@ -164,10 +164,11 @@ and `get_agent_analytics`:
 
 ```
  checks_passed_rate = passed / evaluated_count     (null when evaluated_count == 0)
-   passed           = headline.passed AND headline.gate_pass > 0
-                      (a skip-only row is evaluated, not passed)
-   evaluated_count  = runs in window with a platform:tier0 row
-                      (workspace:/operator: rows never match)
+   evaluated_count  = runs in window with a platform:tier0 row that has a
+                      gate check graded (gate_pass + gate_fail > 0)
+                      (a skip-only row is on neither side; workspace:/
+                      operator: rows never match)
+   passed           = graded rows whose headline passed (gate_fail == 0)
 ```
 
 `ScheduleAnalyticsCard.vue` renders a "Checks passed" tile beside Completion.

@@ -2501,8 +2501,8 @@ class ScheduleAnalyticsResponse(BaseModel):
     cancelled_count: int
     success_rate: float
     # ent#935: the deterministic Tier-0 gate rate beside Completion — runs
-    # whose gate headline passed / runs evaluated (skip-only = evaluated, not
-    # passed; a run with no Tier-0 row = not evaluated). None when 0 evaluated.
+    # whose gate headline passed / runs with a gate check graded (a skip-only
+    # row or a run with no Tier-0 row is on neither side). None when 0 graded.
     checks_passed_rate: Optional[float] = None
     evaluated_count: int = 0
     duration_ms: DurationPercentiles
@@ -2570,8 +2570,8 @@ class AgentAnalyticsResponse(BaseModel):
     failed_count: int
     success_rate: float
     # ent#935: the deterministic Tier-0 gate rate beside Completion — runs
-    # whose gate headline passed / runs evaluated (skip-only = evaluated, not
-    # passed; a run with no Tier-0 row = not evaluated). None when 0 evaluated.
+    # whose gate headline passed / runs with a gate check graded (a skip-only
+    # row or a run with no Tier-0 row is on neither side). None when 0 graded.
     checks_passed_rate: Optional[float] = None
     evaluated_count: int = 0
     duration_ms: DurationStats
@@ -2603,8 +2603,8 @@ class ScheduleSummaryRow(BaseModel):
     cancelled_count: int
     success_rate: Optional[float] = None
     # ent#935: the deterministic Tier-0 gate rate beside Completion — runs
-    # whose gate headline passed / runs evaluated (skip-only = evaluated, not
-    # passed; a run with no Tier-0 row = not evaluated). None when 0 evaluated.
+    # whose gate headline passed / runs with a gate check graded (a skip-only
+    # row or a run with no Tier-0 row is on neither side). None when 0 graded.
     checks_passed_rate: Optional[float] = None
     evaluated_count: int = 0
     avg_duration_ms: Optional[int] = None

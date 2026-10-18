@@ -107,22 +107,28 @@ def _schedule_command_label(message: Optional[str]) -> str:
             )
     return ""
 
-def _tier0_gate_passed(checks_json: Optional[str]) -> bool:
-    """Did this Tier-0 row's gate headline pass (ent#935, FR-10a)?
+def _tier0_gate_outcome(checks_json: Optional[str]) -> Optional[bool]:
+    """This Tier-0 row's gate outcome (ent#935, FR-10a): True passed, False
+    failed, None when no gate check was graded.
 
-    Passed = no gate failed AND at least one gate passed. A skip-only row (every
-    gate skipped — an evaluator timeout, nothing to grade) is evaluated but NOT
-    passed: "nothing could be checked" is not "checks passed". A row whose
-    headline cannot be read is likewise evaluated, not passed.
+    Graded = at least one gate passed or failed. A skip-only row (every gate
+    skipped — an evaluator timeout, nothing to check) is None: the execution
+    page reads it as "No gate check applied", so the rollup must not count it
+    as a failure either. A row whose headline cannot be read is None too — it
+    shows no gate was graded. A graded row passed when no gate failed.
     """
     try:
         head = json.loads(checks_json or "null")
         head = head.get("headline") if isinstance(head, dict) else None
     except (json.JSONDecodeError, TypeError):
-        return False
+        return None
     if not isinstance(head, dict):
-        return False
-    return head.get("passed") is True and int(head.get("gate_pass") or 0) > 0
+        return None
+    gate_pass = int(head.get("gate_pass") or 0)
+    gate_fail = int(head.get("gate_fail") or 0)
+    if gate_pass + gate_fail == 0:
+        return None
+    return gate_fail == 0 and head.get("passed") is True
 
 
 def _tier0_rows(conn, where, cap: int) -> List[Dict]:
@@ -148,10 +154,14 @@ def _tier0_rows(conn, where, cap: int) -> List[Dict]:
 
 
 def _checks_passed(rows) -> Dict:
-    """`{checks_passed_rate, evaluated_count}` over Tier-0 rows; the rate is
-    `None` (UI "—") when nothing was evaluated, never a false 0%."""
-    evaluated = len(rows)
-    passed = sum(1 for r in rows if _tier0_gate_passed(r["checks_json"]))
+    """`{checks_passed_rate, evaluated_count}` over Tier-0 rows.
+
+    `evaluated_count` counts the runs with a gate check graded; skip-only
+    rows are in neither numerator nor denominator. The rate is `None` (UI "—")
+    when no run had a gate graded, never a false 0%."""
+    outcomes = [_tier0_gate_outcome(r["checks_json"]) for r in rows]
+    evaluated = sum(1 for o in outcomes if o is not None)
+    passed = sum(1 for o in outcomes if o is True)
     return {
         "checks_passed_rate": round(passed / evaluated, 4) if evaluated else None,
         "evaluated_count": evaluated,
