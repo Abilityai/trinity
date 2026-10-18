@@ -959,14 +959,29 @@ own records, with **zero LLM calls**. OSS core, always on, no setting.
   signals — `trajectory_bounds` and `footprint` — are planned but not built: the
   per-tool-call records they were specified against are not written by the platform
   today, so they await a data-source decision.
-- **FR-9 — Sweep**: a backend loop (every 60 s, Redis leader lease, fail-open — the
-  write is idempotent on the index) grades up to 25 runs per cycle that are terminal
-  (`success`/`failed`/`cancelled`), triggered by `schedule` or `agent`, completed at
-  least 30 s ago (so evidence written just after the terminal has landed) and at most
-  24 h ago (no backfill), and have no Tier-0 row yet. Each evaluation is bounded (10 s,
-  run off the event loop) and fail-open. Not the scheduler's terminal hook: the
-  scheduler owns no terminal for `agent` runs, and the backend's own terminal fan-out
-  misses the FAILED terminals the scheduler writes itself.
+- **FR-9 — Sweep**: the single writer path. `services/tier0_sweep_service.py` is a
+  backend loop started in every uvicorn worker (`main.py`, the watch-loops boot phase,
+  staggered +13 s; stopped with the background services, releasing the lease) that
+  ticks every 60 s under the Redis leader lease `tier0:leader` (TTL 3× the cadence, the
+  #1464 shape: SET NX EX, GET == self → EXPIRE). The lease **fails open**: no Redis or
+  a Redis error makes the worker a leader for the tick, a contended lease skips the
+  tick — never an error, never a wait — and two leaders at once are only a doubled
+  read, because the write is idempotent on the index (FR-7). Nothing in the sweep sits
+  in the path of a terminal execution write; the terminal writers do not import the
+  evaluator and it does not import them. Each tick (`tier0_evaluator.sweep`) grades up
+  to 25 runs that are terminal (`success`/`failed`/`cancelled`), triggered by `schedule`
+  or `agent`, completed at least 30 s ago (so evidence written just after the terminal
+  has landed) and at most 24 h ago (no backfill), and have no Tier-0 row yet — oldest
+  first, the rest on the next tick. Each evaluation runs off the event loop
+  (`to_thread`, at most 4 at once) under a 10 s bound; a raising evaluation costs
+  itself only, and one that outlives the bound gets a row every check of which is
+  `skip: evaluator_timeout` — written only when no row exists, so a grade that lands
+  late is never replaced by a skip (the reverse order re-grades in place) and a hung
+  evaluation is not re-picked every tick. An evaluated run is never picked again: a
+  FAILED terminal later replayed as SUCCESS is re-graded in place by the writer, but
+  nothing triggers that re-grade yet (D-3, ent#937). Not the scheduler's terminal
+  hook: the scheduler owns no terminal for `agent` runs, and the backend's own terminal
+  fan-out misses the FAILED terminals the scheduler writes itself.
 
 See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
 

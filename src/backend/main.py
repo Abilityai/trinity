@@ -823,6 +823,19 @@ async def _schedule_watch_loops() -> None:
             logger.error(f"Error resuming monitoring service: {e}")
     asyncio.create_task(_start_monitoring_delayed())
 
+    # trinity-enterprise#935: Tier-0 evaluation sweep — 60s cadence, Redis
+    # leader lease (fail-open: the write is idempotent). Started in every
+    # worker; only the lease holder ticks. Staggered +13s, clear of the loops above.
+    async def _start_tier0_sweep_delayed():
+        await asyncio.sleep(13)
+        try:
+            from services.tier0_sweep_service import tier0_sweep_service
+            tier0_sweep_service.start()
+            logger.info("Tier-0 sweep service started (staggered +13s)")
+        except Exception as e:
+            logger.error(f"Error starting Tier-0 sweep service: {e}")
+    asyncio.create_task(_start_tier0_sweep_delayed())
+
 
 async def _run_startup_recovery() -> None:
     """Orphaned-execution recovery (#128). Opens the #748 warming-up gate in `finally`.
@@ -1049,6 +1062,15 @@ async def _shutdown_background_services(app: FastAPI) -> None:
         logger.info("Session cleanup service stopped")
     except Exception as e:
         logger.error(f"Error stopping session cleanup service: {e}")
+
+    # Shutdown the Tier-0 sweep (trinity-enterprise#935) — releases the lease
+    # so a sibling worker takes over at once instead of waiting out the TTL.
+    try:
+        from services.tier0_sweep_service import tier0_sweep_service
+        tier0_sweep_service.stop()
+        logger.info("Tier-0 sweep service stopped")
+    except Exception as e:
+        logger.error(f"Error stopping Tier-0 sweep service: {e}")
 
 
 async def _shutdown_loops_and_transports(app: FastAPI) -> None:

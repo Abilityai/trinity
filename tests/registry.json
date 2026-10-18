@@ -6168,6 +6168,19 @@
         "unit"
       ],
       "description": "Tier-0 intent resolution (ent#935 A1): /playbook args names a skill ref (namespaced too), paths and prose are messages, the #1410 unknown-command reply marks a playbook unresolved through #1410's own detector."
+    },
+    {
+      "file": "unit/test_935_sweep.py",
+      "feature": "abilityai/trinity-enterprise#935",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "database",
+        "evaluations",
+        "reliability",
+        "unit"
+      ],
+      "description": "Tier-0 sweep + leader lease (ent#935 B.1) on the real schema: a tick grades only settled terminal schedule/agent runs inside the lookback, bounded per tick with the rest on the next tick, never re-picks an evaluated run; one raising evaluation does not stop the batch; a timed-out evaluation leaves a skip:evaluator_timeout row that a late grade never loses to; evaluation runs off the event loop; two sweepers racing one execution leave one row; a replayed terminal re-grades the same row. Lease (FakeRedis): one holder, fail-open without Redis and on a Redis error, release hands off, lapsed lease taken over, contended lease skips the tick, a failing tick never kills the loop, the cycle hands the TD-8 bounds to the sweep, stop releases. Wiring pinned by AST over main.py (start in _schedule_watch_loops, stop in _shutdown_background_services) and the sweep never imports a terminal writer. Mutations: a never-contended lease and a non-idempotent writer each turn tests red."
     }
   ]
 }

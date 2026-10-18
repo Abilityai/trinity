@@ -23,6 +23,7 @@ counted in `headline()`. Every check here is graded from platform records
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -552,3 +553,98 @@ def evaluate_execution(execution_id: str) -> Optional[dict]:
     except Exception as e:  # noqa: BLE001 — the run already happened; log, never raise
         logger.warning("[tier0] write failed for %s: %s", execution_id, type(e).__name__)
         return None
+
+
+# --- the sweep (checkpoint B) -----------------------------------------------------
+
+# TD-8 bounds. The sweep is the ONLY writer path (TD-1): no terminal hook, no
+# fan-out consumer — so a lost lease, a slow tick or a crashed evaluation can
+# never delay a terminal execution write; the two never meet.
+SWEEP_LIMIT = 25
+SWEEP_SETTLE_SECONDS = 30
+SWEEP_LOOKBACK_HOURS = 24
+EVALUATION_TIMEOUT_SECONDS = 10
+EVALUATION_CONCURRENCY = 4
+
+
+def _timeout_checks() -> Dict[str, Any]:
+    """The row a hung evaluation gets: every registered check skipped as
+    `evaluator_timeout`. Same vocabulary as a graded row (FR-8), so a reader
+    needs no third shape; the headline is all-skip, never a pass count."""
+    results = [{"id": c.id, "tier": c.tier, "source": c.source, "status": "skip",
+                "reason": "evaluator_timeout", "evidence": {}} for c in CHECKS]
+    return {"schema": SCHEMA_VERSION, "intent_ref": None, "evaluated_at": utc_now_iso(),
+            "headline": headline(results), "checks": results}
+
+
+def record_timeout(execution_id: str) -> Optional[dict]:
+    """Leave a Tier-0 row for a run whose evaluation outlived its bound.
+
+    `wait_for` cannot stop a thread, so the bound is enforced by recording the
+    outcome: with a row in place the run is not re-picked every tick for as
+    long as the evaluation keeps hanging. Written ONLY when no row exists —
+    the slow thread may land its real grade a moment after the bound fires,
+    and a grade must never be replaced by a skip. The reverse order (this
+    row, then the late grade) re-grades in place through the TD-2 update
+    path, which is the right outcome. Never raises."""
+    try:
+        if db.latest_tier0_for_execution(execution_id) is not None:
+            return None
+        row = db.get_execution(execution_id)
+        if row is None:
+            return None
+        status = getattr(row.status, "value", row.status)
+        return db.upsert_platform_evaluation(
+            row.agent_name, execution_id=row.id, completion=(status == "success"),
+            archetype=resolve_intent(row.message, response=row.response)["kind"],
+            checks=_timeout_checks())
+    except Exception as e:  # noqa: BLE001 — a bookkeeping row, never worth a raise
+        logger.warning("[tier0] timeout row failed for %s: %s", execution_id, type(e).__name__)
+        return None
+
+
+async def sweep(*, limit: int = SWEEP_LIMIT, settle_seconds: int = SWEEP_SETTLE_SECONDS,
+                lookback_hours: int = SWEEP_LOOKBACK_HOURS,
+                timeout_seconds: float = EVALUATION_TIMEOUT_SECONDS,
+                concurrency: int = EVALUATION_CONCURRENCY) -> Dict[str, int]:
+    """One tick: grade up to `limit` settled, unevaluated terminal runs.
+
+    Each evaluation is sync DB + regex work, so it runs in a thread
+    (`to_thread`) behind a semaphore and under `wait_for(timeout_seconds)`;
+    one raising or hanging evaluation costs itself only, never the batch.
+    Idempotent and concurrent-safe: two ticks that pick the same run both
+    write through `upsert_platform_evaluation`, and the index makes the
+    second write an UPDATE (TD-2) — which is why the lease may fail open.
+    Returns counts only; never raises.
+    """
+    try:
+        ids = await asyncio.to_thread(
+            db.unevaluated_execution_ids, limit=limit, settle_seconds=settle_seconds,
+            lookback_hours=lookback_hours)
+    except Exception as e:  # noqa: BLE001 — an unreadable candidate list is an empty tick
+        logger.warning("[tier0] candidate read failed: %s", type(e).__name__)
+        ids = []
+    result = {"candidates": len(ids), "evaluated": 0, "timed_out": 0, "failed": 0}
+    if not ids:
+        return result
+    sem = asyncio.Semaphore(max(1, int(concurrency)))
+
+    async def one(execution_id: str) -> str:
+        async with sem:
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(evaluate_execution, execution_id), timeout_seconds)
+                return "evaluated"
+            except asyncio.TimeoutError:
+                logger.warning("[tier0] evaluation of %s exceeded %ss", execution_id,
+                               timeout_seconds)
+                await asyncio.to_thread(record_timeout, execution_id)
+                return "timed_out"
+            except Exception as e:  # noqa: BLE001 — evaluate_execution never raises; belt
+                logger.warning("[tier0] evaluation of %s failed: %s", execution_id,
+                               type(e).__name__)
+                return "failed"
+
+    for outcome in await asyncio.gather(*(one(i) for i in ids)):
+        result[outcome] += 1
+    return result
