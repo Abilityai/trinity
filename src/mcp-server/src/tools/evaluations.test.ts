@@ -162,9 +162,10 @@ describe("ent#937 get_evaluation_summary contract", () => {
     assert.deepEqual(TOOL_ACCESS_POLICY.get_evaluation_summary, { kind: "enforce", param: "agent_name" });
   });
 
-  it("states the self/pair scope and that agents never see judge scores, inside the cap", () => {
+  it("states the own-runs-only scope and that agents never see judge scores, inside the cap", () => {
     assert.ok(tool.description.length <= 2048, `${tool.description.length} chars`);
-    assert.match(tool.description, /ITS OWN runs/);
+    assert.match(tool.description, /ITS OWN runs only; naming another agent returns zeros/);
+    assert.doesNotMatch(tool.description, /pairs you are part of/);
     assert.match(tool.description, /NEVER sees judge scores/);
     for (const key of ["quality_mean", "judge_human_agreement", "agreement_n"]) {
       assert.ok(tool.description.includes(key), key);

@@ -37,9 +37,8 @@ export function createEvaluationTools(client: TrinityClient, requireApiKey: bool
         "per_check_fail (check id -> runs failing it), and up to 50 `failed` runs, each with " +
         "its execution_id, caller_agent, schedule_id and failed check ids with reason codes. " +
         "Evidence text is never returned. " +
-        "Scope: an agent key reads ITS OWN runs, plus the runs between it and another agent " +
-        "it is a side of (`caller` filters to runs that agent delegated to this one); naming " +
-        "another agent you may reach returns only the pairs you are part of, often zeros. " +
+        "Scope: an agent key reads ITS OWN runs only; naming another agent returns zeros, " +
+        "even one you may reach. `caller` keeps the runs that agent delegated to you. " +
         "Omit `agent_name` to read yourself. An agent or machine key NEVER sees judge scores: " +
         "`quality_mean`, `judge_human_agreement` and `agreement_n` are absent from its copy, " +
         "by rule — absent does not mean ungraded. A person's key sees them. " +
