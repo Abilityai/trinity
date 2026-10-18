@@ -227,7 +227,8 @@ a post-creation runtime-switch endpoint.
 Headless task images are passed to native `codex exec --image` options. Resumed
 turns put these options after `resume`, so images attach to the current turn.
 The runtime accepts base64 JPEG, PNG, GIF and WebP payloads, up to ten images,
-5 MiB each and 10 MiB combined; invalid payloads return HTTP 400 before spawn.
+5 MiB each and 10 MiB combined; violations of these MIME, base64 and size checks return HTTP 400 before spawn.
+Raster decoding is performed by the Codex CLI, not by this validation helper.
 A private, unique mode-0700 temporary directory holds mode-0600 copies. Before
 subprocess handoff, failures remove partial files immediately. After handoff, the
 reader owns cleanup until subprocess reading and bounded cleanup finish. Canceling the
