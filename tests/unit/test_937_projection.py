@@ -232,6 +232,34 @@ def test_agent_summary_view_drops_quality_fields():
     assert project_summary(full, machine=False) == full
 
 
+@pytest.mark.parametrize("reader, machine", [
+    ({"agent_name": AGENT}, True),
+    ({"mcp_scope": "system"}, True),
+    ({"mcp_scope": "connector"}, True),
+    ({}, False),                                    # a person's JWT
+    ({"mcp_scope": "user"}, False),                 # a person's own MCP key
+])
+def test_a_machine_principals_summary_has_no_judge_score(reader, machine):
+    """From the principal, through the route's scope, to the summary it is
+    served: a machine never gets `quality_mean` / `judge_human_agreement` /
+    `agreement_n`; a person does."""
+    from models import User
+    from routers import evaluations
+    from services.evaluation_read_service import QUALITY_KEYS, fold, project_summary
+    rows = [{"execution_id": "e1", "agent_name": AGENT, "caller_agent": None, "completion": True,
+             "status": "success", "completed_at": "x", "judge_quality": 0.9,
+             "checks": {"headline": {"passed": True, "gate_pass": 1, "gate_fail": 0}, "checks": []}}]
+    full = fold(rows, {"e1": [1.0]})
+    assert all(full.get(k) is not None for k in QUALITY_KEYS)     # precondition
+    principal = User(id=1, username="o", role="admin", **reader)
+    scope = evaluations._scope(principal)
+    assert scope.machine is machine
+    served = project_summary(full, machine=scope.machine)
+    for k in ("quality_mean", "judge_human_agreement", "agreement_n"):
+        assert (k in served) is not machine, k
+    assert served["judged"] == 1
+
+
 # --- N2 --------------------------------------------------------------------------------
 
 def test_response_projects_the_delegation_columns():
