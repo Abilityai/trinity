@@ -125,6 +125,7 @@ from db.skill_gate_requests import SkillGateRequestOperations
 from db.user_preferences import UserPreferenceOperations
 from db.product_events import ProductEventOperations
 from db.evaluations import EvaluationOperations
+from db.evaluation_aggregates import EvaluationAggregateOperations
 from db.reminders import RemindersOperations
 from db.connector import ConnectorOperations
 from db.permissions import PermissionOperations
@@ -1009,6 +1010,7 @@ class DatabaseManager:
         self._user_preference_ops = UserPreferenceOperations()
         self._product_event_ops = ProductEventOperations()
         self._evaluation_ops = EvaluationOperations()
+        self._evaluation_aggregate_ops = EvaluationAggregateOperations()  # ent#937 read side
         self._reminder_ops = RemindersOperations()
         self._connector_ops = ConnectorOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
@@ -3097,14 +3099,31 @@ class DatabaseManager:
     def workspace_rating_tally(self, agent_name):
         return self._evaluation_ops.workspace_rating_tally(agent_name)
 
-    def list_agent_evaluations(self, agent_name, limit=50):
-        return self._evaluation_ops.list_evaluations_for_agent(agent_name, limit)
+    def list_agent_evaluations(self, agent_name, limit=50, *, caller=None):
+        return self._evaluation_ops.list_evaluations_for_agent(agent_name, limit, caller=caller)
 
-    def list_fleet_evaluations(self, agent_names, limit=100):
-        return self._evaluation_ops.list_evaluations_for_agents(agent_names, limit)
+    def list_fleet_evaluations(self, agent_names, limit=100, *, callers=None, caller=None):
+        return self._evaluation_ops.list_evaluations_for_agents(
+            agent_names, limit, callers=callers, caller=caller)
 
-    def latest_evaluation_for_execution(self, execution_id):
-        return self._evaluation_ops.latest_for_execution(execution_id)
+    # --- evaluation read API (ent#937) ---------------------------------------
+    def evaluation_window_rows(self, **kw):
+        return self._evaluation_aggregate_ops.window_rows(**kw)
+
+    def evaluation_window_agents(self, **kw):
+        return self._evaluation_aggregate_ops.window_agents(**kw)
+
+    def evaluation_human_labels(self, execution_ids):
+        return self._evaluation_aggregate_ops.human_labels(execution_ids)
+
+    def execution_chain_node(self, execution_id):
+        return self._evaluation_aggregate_ops.chain_node(execution_id)
+
+    def execution_chain_ancestors(self, execution_id, **kw):
+        return self._evaluation_aggregate_ops.chain_ancestors(execution_id, **kw)
+
+    def execution_chain_descendants(self, execution_id, **kw):
+        return self._evaluation_aggregate_ops.chain_descendants(execution_id, **kw)
 
     # --- Tier-0 deterministic evaluator (ent#935) ---------------------------
     def upsert_platform_evaluation(self, agent_name, **kw):
@@ -4388,10 +4407,14 @@ class DatabaseManager:
         absent_keys,
         since_iso: str,
         limit: int,
+        *,
+        until_iso=None,
     ):
-        """One dimension series' newest points since `since_iso` (#3293)."""
+        """One dimension series' newest points since `since_iso` (#3293),
+        optionally before `until_iso` (ent#937 trend read)."""
         return self._metric_point_ops.series_points_for_dims(
-            agent_name, metric, dict(dims), list(absent_keys), since_iso, limit
+            agent_name, metric, dict(dims), list(absent_keys), since_iso, limit,
+            until_iso=until_iso,
         )
 
     def count_metric_points_candidates(self, retention_days: int, limit: int) -> int:

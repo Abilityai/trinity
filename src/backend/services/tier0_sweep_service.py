@@ -25,10 +25,11 @@ import asyncio
 import logging
 import os
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from redis_breaker_util import get_breaker_redis
-from services import tier0_evaluator
+from services import eval_scorecard_service, tier0_evaluator
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,8 @@ class Tier0SweepService:
         # released by its own holder.
         self._worker_id = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._is_leader = False
+        # ent#937: the UTC day the nightly scorecard restate last ran in.
+        self._nightly_day: Optional[str] = None
 
     @property
     def is_running(self) -> bool:
@@ -114,6 +117,7 @@ class Tier0SweepService:
                 self._is_leader = leader
                 if leader:
                     await self.run_cycle()
+                    await self.run_nightly_if_due()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 — a bad tick must not kill the loop
@@ -131,6 +135,18 @@ class Tier0SweepService:
         )
         if result.get("candidates"):
             logger.info("Tier-0 sweep: %s", result)
+        return result
+
+    async def run_nightly_if_due(self, now: Optional[datetime] = None) -> Optional[Dict[str, int]]:
+        """ent#937: the scorecard restate, at the first leader tick after
+        00:10 UTC, under the same lease. Idempotent, so a fail-open double
+        leader or a restart re-running it costs a repeat write, not a wrong one."""
+        now = now or datetime.now(timezone.utc)
+        if not eval_scorecard_service.nightly_due(now, self._nightly_day):
+            return None
+        self._nightly_day = now.strftime("%Y-%m-%d")
+        result = await asyncio.to_thread(eval_scorecard_service.nightly_pass, now)
+        logger.info("Eval scorecard nightly: %s", result)
         return result
 
 

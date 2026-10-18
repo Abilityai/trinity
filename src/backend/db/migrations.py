@@ -5350,6 +5350,26 @@ def _migrate_delegation_link(cursor, conn):
     conn.commit()
 
 
+def _migrate_execution_parent_index(cursor, conn):
+    """ent#937 — index ``schedule_executions.parent_execution_id``.
+
+    The evaluation chain read walks descendants by ``parent_execution_id IN
+    (...)`` one level at a time; without an index each level is a full scan of
+    ``schedule_executions``. Index only — no column, no backfill. A database
+    without the table (or the column) is left alone: ``init_schema`` creates
+    the index with the table on a fresh build. Idempotent. Mirrored by Alembic
+    0101_execution_parent_index.
+    """
+    cursor.execute("PRAGMA table_info(schedule_executions)")
+    if "parent_execution_id" not in {row[1] for row in cursor.fetchall()}:
+        return
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_parent "
+        "ON schedule_executions(parent_execution_id)"
+    )
+    conn.commit()
+
+
 def _migrate_supersede_queue_flood_backlog(cursor, conn):
     """#3130: collapse the flood-alert backlog to one pending alert per agent.
 
@@ -5784,4 +5804,5 @@ MIGRATIONS = [
     ("proactive_consent_not_asked", _migrate_proactive_consent_not_asked),
     ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
     ("delegation_link", _migrate_delegation_link),
+    ("execution_parent_index", _migrate_execution_parent_index),
 ]

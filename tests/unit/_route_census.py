@@ -511,6 +511,11 @@ ADMIN_WIDENED: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
         "GET /api/subscriptions/{subscription_id}/usage", ("ops",), "#2323 ops read fence: an ops key reads fleet state; role == admin still enforced (subscription pressure, #2389)"),
 }
 
+_EVAL_READ_937 = (
+    "a READ of evaluation rows (trinity-enterprise#937); an agent key is narrowed to its own "
+    "rows and the pairs it is a side of (evaluation_read_service.scope_for, test_937_routes), "
+    "never sees a judge's score, and read != write (test_935_write_fence)")
+
 # Reviewed uses an agent key may make. key -> ("METHOD /full/path", reason)
 AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     # The agent's own runtime surface (#2996 §3.4 regression set).
@@ -523,6 +528,21 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
         "a READ of the agent's own Tier-0 grade (trinity-enterprise#935); the same "
         "uniform-404 rule as its other evaluation reads, and read != write — the "
         "Tier-0 writer is the sweep, reachable by no route (test_935_write_fence)"),
+    "routers/evaluations.py::aggregate_evaluations": (
+        "GET /api/evaluations/aggregate",
+        _EVAL_READ_937),
+    "routers/evaluations.py::failed_evaluations": (
+        "GET /api/evaluations/failed",
+        _EVAL_READ_937),
+    "routers/evaluations.py::evaluation_trend": (
+        "GET /api/evaluations/trend",
+        _EVAL_READ_937),
+    "routers/evaluations.py::evaluation_chain": (
+        "GET /api/evaluations/chain/{execution_id}",
+        _EVAL_READ_937),
+    "routers/evaluations.py::agent_evaluation_summary": (
+        "GET /api/agents/{agent_name}/evaluations/summary",
+        _EVAL_READ_937),
     "routers/agents.py::agent_heartbeat": (
         "POST /api/agents/{agent_name}/heartbeat",
         "liveness; authenticates the agent's own agent-scoped key outside get_current_user (#307)"),

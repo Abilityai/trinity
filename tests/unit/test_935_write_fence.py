@@ -28,6 +28,7 @@ from __future__ import annotations
 import ast
 import os
 import sys
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -138,12 +139,17 @@ def test_a_non_admin_person_cannot_write_one_either(client):
 
 # --- 2. a human write cannot impersonate the platform ------------------------------------
 
-def test_an_admin_write_cannot_become_a_tier0_row(client):
+def test_an_admin_write_cannot_become_a_tier0_row(client, monkeypatch):
     """The body names the Tier-0 evaluator, the execution target and every
     delegation column. None of it lands: the row is filed under the admin's
     own identity, carries no target and no delegation, and the Tier-0 read for
-    that execution still answers "not evaluated"."""
+    that execution still answers "not evaluated".
+
+    ent#937 (ent#781): the grader reads in full only to an OPERATOR of the
+    agent. This fixture's admin has no users row, so the operator check is
+    stated here rather than resolved — otherwise the echo reads `admin`."""
     from database import db
+    monkeypatch.setattr(db, "can_user_share_agent", lambda u, a: True)
     _seed()
     r = client.post(WRITE, json=TIER0_SHAPED_BODY)
     assert r.status_code == 200, r.text
@@ -284,16 +290,94 @@ def test_the_write_route_is_the_only_non_get_route_in_the_module():
     assert non_get == {(("POST",), "create_evaluation")}
 
 
-def test_the_mcp_server_exposes_no_evaluations_surface():
+_WRITE_VERB = re.compile(
+    r"""["'`](POST|PUT|PATCH|DELETE)["'`]"""            # request("POST", …) / method: "POST"
+    r"""|\.(post|put|patch|delete)\s*(<[^>]*>)?\s*\(""",  # axios-style .post(…)
+    re.I,
+)
+_HELPER_DEF = re.compile(r"^\s*(?:public\s+|private\s+)?async\s+(\w+)\s*(?:<[^>]*>)?\(", re.M)
+
+
+def _statements(text: str):
+    """TypeScript statements, split on `;` — every call site here is one."""
+    return text.split(";")
+
+
+def _evaluations_writes(text: str):
+    """The statements of one file that put a write verb and an `/evaluations`
+    path in the same call."""
+    return [s.strip()[:160] for s in _statements(text)
+            if "/evaluations" in s and _WRITE_VERB.search(s)]
+
+
+def _evaluations_write_helpers(client_text: str):
+    """Names of `TrinityClient` methods whose body issues such a write."""
+    defs = list(_HELPER_DEF.finditer(client_text))
+    names = set()
+    for i, m in enumerate(defs):
+        end = defs[i + 1].start() if i + 1 < len(defs) else len(client_text)
+        if _evaluations_writes(client_text[m.start():end]):
+            names.add(m.group(1))
+    return names
+
+
+def _mcp_evaluations_write_sites(root: Path):
+    """Every write against an `/evaluations` path anywhere under
+    `src/mcp-server/src`: a literal verb + path call, or a call of a client
+    helper that makes one."""
+    files = {p: p.read_text(encoding="utf-8") for p in sorted(root.rglob("*.ts"))}
+    client = root / "client.ts"
+    helpers = _evaluations_write_helpers(files.get(client, ""))
+    sites = []
+    for p, text in files.items():
+        sites += [(p.name, s) for s in _evaluations_writes(text)]
+        sites += [(p.name, h) for h in helpers
+                  if p != client and re.search(rf"\.{h}\s*\(", text)]
+    return sites
+
+
+def test_the_mcp_server_exposes_no_evaluations_write_surface():
     """The third surface (Invariant #13) is TypeScript, so this is a text pin
-    over the tool table by design: the router's `# mcp: none` header promises
-    no tool proxies `/evaluations`, and an MCP tool that did would be a write
-    path reachable by an agent key."""
-    tools = Path(__file__).resolve().parents[2] / "src" / "mcp-server" / "src"
-    hits = [p for p in tools.rglob("*.ts") if "/evaluations" in p.read_text(encoding="utf-8")]
-    assert hits == [], hits
+    by design — and it pins the PROPERTY, not a file list: no `.ts` file under
+    `src/mcp-server/src` issues POST/PUT/PATCH/DELETE (directly, or through a
+    client helper that does) against an `/evaluations` path. Imports of the
+    `tools/evaluations.js` module and GET reads (ent#937's
+    `get_evaluation_summary`) pass; an MCP write would be a write path
+    reachable by an agent key."""
+    root = Path(__file__).resolve().parents[2] / "src" / "mcp-server" / "src"
+    assert (root / "client.ts").exists()
+    assert _mcp_evaluations_write_sites(root) == []
     header = (_SRC / "routers" / "evaluations.py").read_text(encoding="utf-8").splitlines()[0]
-    assert header.startswith("# mcp: none")
+    assert header.startswith("# mcp: src/mcp-server/src/tools/evaluations.ts")
+    assert "never exposed" in header
+
+
+@pytest.mark.parametrize("client_ts, tool_ts", [
+    ('async addEval(n: string) {\n    return this.request("POST", `/api/agents/${n}/evaluations`, {})\n  }',
+     'await client.addEval("a")'),
+    ('async delEval(id: string) {\n    return this.request<void>(\n      "DELETE",\n      `/api/evaluations/${id}`\n    )\n  }',
+     'x'),
+    ('async getEval(n: string) {\n    return this.request("GET", `/api/agents/${n}/evaluations/summary`)\n  }',
+     'await this.http.put(`/api/evaluations/1`, {})'),
+])
+def test_the_write_surface_property_catches_a_write(tmp_path, client_ts, tool_ts):
+    """The detector itself: a POST/DELETE helper or a raw `.put(` against
+    `/evaluations` is found; the shipped GET-plus-import shape is not."""
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "client.ts").write_text(client_ts + ";\n")
+    (tmp_path / "tools" / "x.ts").write_text(
+        'import { x } from "./evaluations.js";\n' + tool_ts + ";\n")
+    assert _mcp_evaluations_write_sites(tmp_path) != []
+
+
+def test_the_write_surface_property_passes_a_get_and_an_import(tmp_path):
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "client.ts").write_text(
+        'async getEval(n: string) {\n    return this.request(\n      "GET",\n'
+        '      `/api/agents/${n}/evaluations/summary`\n    );\n  }\n')
+    (tmp_path / "tools" / "x.ts").write_text(
+        'import { r } from "./tools/evaluations.js";\nawait client.getEval("a");\n')
+    assert _mcp_evaluations_write_sites(tmp_path) == []
 
 
 # --- the positive half: the sweep's path still writes --------------------------------
