@@ -189,7 +189,7 @@ describe('EvaluationsPanel — the shell over the store, mounted', () => {
     await flush()
     const empty = w.find('[data-testid="evaluations-empty"]')
     expect(empty.exists()).toBe(true)
-    expect(empty.text()).toContain('Only scheduled and agent-triggered runs are graded')
+    expect(empty.text()).toContain('runs another agent delegated are graded')
     const link = w.find('[data-testid="evaluations-empty-executions-link"]')
     expect(JSON.parse(link.attributes('data-to'))).toEqual({ path: '/operations', query: { tab: 'executions' } })
   })

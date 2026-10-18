@@ -46,7 +46,7 @@
           data-testid="execution-checks-count"
         >{{ countLine }}</span>
         <span v-else class="text-sm text-gray-600 dark:text-gray-300">
-          Only scheduled and agent-triggered runs are graded, about a minute after they finish.
+          Scheduled runs, agent-triggered runs and runs another agent delegated are graded, about a minute after they finish.
         </span>
       </div>
 

@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from database import db
-from db.evaluations import TIER0_TERMINAL_STATUSES, TIER0_TRIGGERS
+from db.evaluations import TIER0_TERMINAL_STATUSES, tier0_eligible
 from services import eval_scorecard_service
 from services.execution_classification import detect_unresolved_slash_command
 from utils.credential_sanitizer import REDACTION_PLACEHOLDER, count_hits, sanitize_text
@@ -505,8 +505,8 @@ def _run_check(check: Check, ctx: Dict[str, Any]) -> Dict[str, Any]:
 
 def evaluate_execution(execution_id: str) -> Optional[dict]:
     """Grade one finished run and write its Tier-0 row. Returns the row, or
-    None when the run is not eligible (missing, not terminal, trigger outside
-    {schedule, agent}) or the write failed — never raises."""
+    None when the run is not eligible (missing, not terminal, not
+    `tier0_eligible`) or the write failed — never raises."""
     try:
         row = db.get_execution(execution_id)
     except Exception as e:  # noqa: BLE001
@@ -515,7 +515,8 @@ def evaluate_execution(execution_id: str) -> Optional[dict]:
     if row is None:
         return None
     status = getattr(row.status, "value", row.status)
-    if status not in TIER0_TERMINAL_STATUSES or row.triggered_by not in TIER0_TRIGGERS:
+    if status not in TIER0_TERMINAL_STATUSES or not tier0_eligible(
+            row.triggered_by, getattr(row, "source_agent_name", None)):
         return None
 
     execution = {

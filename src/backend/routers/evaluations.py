@@ -320,13 +320,14 @@ async def failed_evaluations(
     current_user: User = Depends(get_current_user),
 ):
     """Runs in the window that did not complete or failed a gate check,
-    newest first, paged. Check ids and reason codes only — never evidence."""
+    newest first, paged. Check ids and reason codes only — never evidence. A
+    pair-gate failure is a failed run on `by=pair` only (TD-6)."""
     lo, hi = _window(period, since, until)
     scope = _scope(current_user)
     rows, truncated = db.evaluation_window_rows(
         since=lo, until=hi, **evaluation_read_service.window_filters(
             scope, by=by, agent=agent, caller=caller, callee=callee, schedule_id=schedule_id))
-    folded = evaluation_read_service.fold(rows, {}, failed_limit=len(rows))
+    folded = evaluation_read_service.fold(rows, {}, failed_limit=len(rows), pair=by == "pair")
     failed = folded["failed"]
     return {"since": lo, "until": hi, "total": len(failed), "truncated": truncated,
             "items": failed[offset:offset + limit]}
@@ -426,7 +427,8 @@ async def agent_evaluation_summary(
 ):
     """One agent's summary and failed runs — what the MCP self-read serves.
     An agent key reads its own only (another agent it may reach reads as
-    zeros); a machine never gets a judge's score."""
+    zeros); a machine never gets a judge's score. `pair_failed` lists the
+    runs this agent delegated whose edge failed a pair check (ent#940)."""
     lo, hi = _window(period, since, until)
     scope = _scope(current_user)
     names = evaluation_read_service.narrow(scope, agent_name)
@@ -435,9 +437,12 @@ async def agent_evaluation_summary(
     folded = evaluation_read_service.fold(rows, labels)
     failed = folded.pop("failed")
     failed_truncated = folded.pop("failed_truncated")
+    caller_rows, _ = db.evaluation_window_rows(
+        since=lo, until=hi, **evaluation_read_service.caller_side_filters(scope, names))
     return {"agent_name": agent_name, "since": lo, "until": hi, "truncated": truncated,
             "summary": evaluation_read_service.project_summary(folded, machine=scope.machine),
-            "failed": failed, "failed_truncated": failed_truncated}
+            "failed": failed, "failed_truncated": failed_truncated,
+            "pair_failed": evaluation_read_service.pair_failures(caller_rows)}
 
 
 @router.get("/evaluations/{eval_id}", response_model=EvaluationResponse)

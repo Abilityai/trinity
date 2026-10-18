@@ -112,7 +112,8 @@ def test_a_racing_duplicate_insert_becomes_the_update(db_backend, monkeypatch):
     real = EvaluationOperations._tier0_update
     calls = {"n": 0}
 
-    def racing_update(self, conn, execution_id, values):
+    # ent#940 threads the evaluator through as a fourth argument; forwarded.
+    def racing_update(self, conn, execution_id, values, *rest):
         calls["n"] += 1
         if calls["n"] == 1:
             # The winner commits between our UPDATE and our INSERT.
@@ -121,7 +122,7 @@ def test_a_racing_duplicate_insert_becomes_the_update(db_backend, monkeypatch):
                 evaluator=TIER0, target_kind="execution", target_id=execution_id,
                 completion=0, created_at=_ago(1), updated_at=_ago(1)))
             return None
-        return real(self, conn, execution_id, values)
+        return real(self, conn, execution_id, values, *rest)
 
     monkeypatch.setattr(EvaluationOperations, "_tier0_update", racing_update)
     row = _write("ex-3", completion=True, checks={"schema": 1, "checks": [{"id": "loser"}]})
