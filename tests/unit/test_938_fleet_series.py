@@ -4,7 +4,8 @@ The scorecard writes one more daily series, `dims={"scope": "fleet"}`, and the
 ent#937 trend route serves it when neither `agent=` nor a pair is named:
 
   * the fleet point is the fold of EVERY agent's rows for the day, written by
-    the nightly pass's unscoped read only — never by the per-row restate or
+    the nightly pass's unscoped read of a COMPLETED day only (never today,
+    which is still filling) — never by the per-row restate or
     the over-cap per-agent retry, which see one agent and would store a
     partial number as a whole one;
   * its dims are non-empty (the dims reader selects nothing for `{}`) and its
@@ -80,25 +81,67 @@ def test_the_per_row_restate_never_writes_a_fleet_point(db_backend, svc):
     assert points(**FLEET) == {}
 
 
-def test_the_nightly_pass_writes_the_whole_fleets_day_and_is_idempotent(db_backend, svc):
-    seed("a1", agent="a")
+def _fleet_days(metric="eval.evaluated"):
+    """Every stored fleet point of one metric, as {day_ts: value}."""
+    from sqlalchemy import select
+    from db.engine import get_engine
+    from db.tables import metric_points
+    import json
+    with get_engine().connect() as conn:
+        rows = conn.execute(select(metric_points).where(
+            metric_points.c.metric == metric)).mappings().all()
+    return {r["ts"]: r["value_numeric"] for r in rows
+            if (r["dims"] if isinstance(r["dims"], dict) else json.loads(r["dims"])) == FLEET}
+
+
+def test_the_nightly_pass_writes_the_whole_fleets_completed_day_and_is_idempotent(db_backend, svc):
+    yesterday = DAY0 - timedelta(days=1)
+    seed("a1", agent="a", completed=yesterday + timedelta(minutes=5))
     grade("a1", agent="a")
-    seed("b1", agent="b", completed=DAY0 + timedelta(minutes=7))
+    seed("b1", agent="b", completed=yesterday + timedelta(minutes=7))
     grade("b1", agent="b", passed=False)
-    assert svc.nightly_pass(NOW, days=0)["failed"] == 0
+    assert svc.nightly_pass(NOW, days=1)["failed"] == 0
     got = points(**FLEET)
-    assert got["eval.evaluated"] == (2.0, _iso(DAY0))
+    assert got["eval.evaluated"] == (2.0, _iso(yesterday))
     assert got["eval.passed"][0] == 1
     assert got["eval.checks_passed_rate"][0] == 0.5
-    assert svc.nightly_pass(NOW, days=0)["written"] == 0
+    assert svc.nightly_pass(NOW, days=1)["written"] == 0
+
+
+def test_the_nightly_pass_never_writes_todays_fleet_point(db_backend, svc):
+    """Today is still filling: a fleet point folded at 00:10 from ten minutes of
+    runs would be a partial number stored as the day's whole one, and nothing
+    restates the fleet until the next nightly (review C1). Today's per-agent
+    point is still written — the per-row restate keeps that one current."""
+    yesterday = DAY0 - timedelta(days=1)
+    seed("y1", agent="a", completed=yesterday + timedelta(minutes=5))
+    grade("y1", agent="a")
+    seed("t1", agent="a")                                     # today
+    grade("t1", agent="a")
+    assert svc.nightly_pass(NOW, days=1)["failed"] == 0
+    assert _fleet_days() == {_iso(yesterday): 1.0}
+    assert _iso(DAY0) in _agent_days("a")
+
+
+def _agent_days(agent, metric="eval.evaluated"):
+    from sqlalchemy import select
+    from db.engine import get_engine
+    from db.tables import metric_points
+    import json
+    with get_engine().connect() as conn:
+        rows = conn.execute(select(metric_points).where(
+            metric_points.c.metric == metric)).mappings().all()
+    return {r["ts"] for r in rows
+            if (r["dims"] if isinstance(r["dims"], dict) else json.loads(r["dims"])) == {"agent": agent}}
 
 
 def test_an_over_cap_day_retries_per_agent_and_writes_no_fleet_point(db_backend, svc, monkeypatch):
+    yesterday = DAY0 - timedelta(days=1)     # a completed day, so only the cap withholds the fleet point
     for i, agent in enumerate(("a", "b")):
-        seed(f"e-{agent}", agent=agent, completed=DAY0 + timedelta(minutes=5 + i))
+        seed(f"e-{agent}", agent=agent, completed=yesterday + timedelta(minutes=5 + i))
         grade(f"e-{agent}", agent=agent)
     _capped(monkeypatch, 1)
-    assert svc.nightly_pass(NOW, days=0)["failed"] == 0
+    assert svc.nightly_pass(NOW, days=1)["failed"] == 0
     assert points(agent="a")["eval.evaluated"][0] == 1      # the per-agent retry ran
     assert points(**FLEET) == {}                              # …and wrote no partial fleet total
 

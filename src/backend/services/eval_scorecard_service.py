@@ -129,7 +129,7 @@ class _Truncated(Exception):
         super().__init__("window over the row cap")
 
 
-def _write_day(day: datetime, **scope) -> Optional[Any]:
+def _write_day(day: datetime, *, whole_day: bool = False, **scope) -> Optional[Any]:
     since, until = day_bounds(day)
     rows, truncated = db.evaluation_window_rows(since=since, until=until, **scope)
     if truncated:
@@ -139,8 +139,10 @@ def _write_day(day: datetime, **scope) -> Optional[Any]:
     if not rows:
         return None
     labels = db.evaluation_human_labels([r["execution_id"] for r in rows])
-    # An unscoped read is the whole fleet's day; any `agents=` scope is not.
-    points = points_for_day(since, rows, labels, fleet=not scope)
+    # An unscoped read of a COMPLETED day is the whole fleet's day; any
+    # `agents=` scope is not, and nor is today, which is still filling — and
+    # nothing restates the fleet until the next nightly (review C1).
+    points = points_for_day(since, rows, labels, fleet=whole_day and not scope)
     if not points:
         return None
     return db.insert_metric_points(PLATFORM_EVAL_OWNER, points)
@@ -170,14 +172,15 @@ def on_tier0_row(execution_id: str) -> Optional[Any]:
 
 def nightly_pass(now: Optional[datetime] = None, *, days: int = NIGHTLY_DAYS) -> Dict[str, int]:
     """Restate the last `days` completed days (yesterday back) and today for
-    the whole fleet. Idempotent. Never raises."""
+    the whole fleet — the fleet point for completed days only. Idempotent.
+    Never raises."""
     now = now or datetime.now(timezone.utc)
     result = {"days": 0, "written": 0, "failed": 0}
     for back in range(days, -1, -1):
         day = now - timedelta(days=back)
         try:
             try:
-                written = [_write_day(day)]
+                written = [_write_day(day, whole_day=back > 0)]
             except _Truncated:
                 # The capped page names only the newest agents; the retry list
                 # is every agent graded that day.
