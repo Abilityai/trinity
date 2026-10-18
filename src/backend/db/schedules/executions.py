@@ -934,7 +934,7 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             row = conn.execute(
                 select(cols.schedule_id, cols.agent_name, cols.triggered_by,
-                       cols.message, cols.completed_at)
+                       cols.message, cols.completed_at, cols.source_agent_name)
                 .where(cols.id == execution_id)
             ).first()
             if row is None:
@@ -945,6 +945,13 @@ class ScheduleExecutionsMixin:
             if row.triggered_by == "schedule" and row.schedule_id:
                 conds.append(cols.schedule_id == row.schedule_id)
                 scan = limit
+            elif row.source_agent_name:
+                # ent#940 TD-2: a run another agent sent is compared with that
+                # sender's earlier runs of the same trigger (and playbook, below).
+                conds += [cols.agent_name == row.agent_name,
+                          cols.triggered_by == row.triggered_by,
+                          cols.source_agent_name == row.source_agent_name]
+                scan = self._SERIES_SCAN
             else:
                 conds += [cols.agent_name == row.agent_name, cols.triggered_by == "agent"]
                 scan = self._SERIES_SCAN
@@ -962,6 +969,63 @@ class ScheduleExecutionsMixin:
                  "context_used": r.context_used,
                  "tool_call_count": self._tool_call_count(r.tool_calls)}
                 for r in rows[:limit]]
+
+    # ent#940 — the pair evaluator's two reads. Columns are the delegation
+    # record only: no `response`, no transcript — the pair row never copies a
+    # reply, so the read never fetches one.
+    _SIBLING_COLUMNS = ("id", "agent_name", "status", "triggered_by", "message",
+                        "source_agent_name", "parent_execution_id", "fan_out_id",
+                        "fan_out_task_id", "loop_id", "retry_of_execution_id",
+                        "queued_at", "started_at", "completed_at")
+
+    def sibling_executions(self, parent_execution_id: str, cap: int = 200) -> List[Dict]:
+        """Every run whose `parent_execution_id` is `parent_execution_id`, in
+        admission order (ent#940) — the caller run's delegations.
+
+        Reads at most `cap + 1` rows, so a caller can tell "exactly `cap`" from
+        "more than `cap`" (the fan-out storm bound) without a second COUNT.
+        Uses `idx_executions_parent` (#0101). Empty for a falsy id.
+        """
+        if not parent_execution_id:
+            return []
+        cols = schedule_executions.c
+        stmt = (
+            select(*(getattr(cols, c) for c in self._SIBLING_COLUMNS))
+            .where(cols.parent_execution_id == parent_execution_id)
+            .order_by(func.coalesce(cols.queued_at, cols.started_at).asc(), cols.id.asc())
+            .limit(max(0, int(cap)) + 1)
+        )
+        with get_engine().connect() as conn:
+            return [{c: _norm_ts(r[c]) if c.endswith("_at") else r[c]
+                     for c in self._SIBLING_COLUMNS}
+                    for r in conn.execute(stmt).mappings().all()]
+
+    def pair_rework_series(self, caller_agent: str, callee_agent: str, series_key: str,
+                           limit: int = 20) -> List[Dict]:
+        """Up to `limit` SUCCESSFUL runs `caller_agent` delegated to
+        `callee_agent` under the same `_series_key` (playbook, or "message"),
+        newest first, as `{id, parent_execution_id, completed_at}` (ent#940).
+
+        The pair baseline: how many round-trips this caller usually needs with
+        this callee for this kind of brief. Bounded like `recent_series_metrics`
+        — at most `_SERIES_SCAN` rows are read before the key filter.
+        """
+        if not caller_agent or not callee_agent:
+            return []
+        cols = schedule_executions.c
+        stmt = (
+            select(cols.id, cols.parent_execution_id, cols.completed_at, cols.message)
+            .where(and_(cols.source_agent_name == caller_agent,
+                        cols.agent_name == callee_agent,
+                        cols.status == "success"))
+            .order_by(cols.completed_at.desc())
+            .limit(self._SERIES_SCAN)
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).all()
+        return [{"id": r.id, "parent_execution_id": r.parent_execution_id,
+                 "completed_at": _norm_ts(r.completed_at)}
+                for r in rows if self._series_key(r.message) == series_key][:max(0, int(limit))]
 
     # ent#525 — the in-flight rows a Workspace chat is waiting on.
     _CHAT_INFLIGHT_STATUSES = ("running", "queued")

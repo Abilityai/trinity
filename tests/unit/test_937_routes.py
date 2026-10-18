@@ -368,7 +368,10 @@ def test_trend_refuses_a_score_metric_to_a_machine_and_unknown_metrics(client):
     assert r.status_code == 422 and r.json()["detail"]["code"] == "unknown_metric"
     r = client.get("/api/evaluations/trend", params={"metric": "cpu", "agent": "agent-a"})
     assert r.status_code == 422 and "cpu" not in r.text
+    # Naming no series is the fleet series since ent#938 — never an agent key's.
     r = client.get("/api/evaluations/trend", params={"metric": "eval.passed"})
+    assert r.status_code == 200 and r.json()["points"] == []
+    r = client.get("/api/evaluations/trend", params={"metric": "eval.passed", "caller": "agent-a"})
     assert r.status_code == 422 and r.json()["detail"]["code"] == "invalid_series"
 
 

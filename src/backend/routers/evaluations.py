@@ -320,13 +320,14 @@ async def failed_evaluations(
     current_user: User = Depends(get_current_user),
 ):
     """Runs in the window that did not complete or failed a gate check,
-    newest first, paged. Check ids and reason codes only — never evidence."""
+    newest first, paged. Check ids and reason codes only — never evidence. A
+    pair-gate failure is a failed run on `by=pair` only (TD-6)."""
     lo, hi = _window(period, since, until)
     scope = _scope(current_user)
     rows, truncated = db.evaluation_window_rows(
         since=lo, until=hi, **evaluation_read_service.window_filters(
             scope, by=by, agent=agent, caller=caller, callee=callee, schedule_id=schedule_id))
-    folded = evaluation_read_service.fold(rows, {}, failed_limit=len(rows))
+    folded = evaluation_read_service.fold(rows, {}, failed_limit=len(rows), pair=by == "pair")
     failed = folded["failed"]
     return {"since": lo, "until": hi, "total": len(failed), "truncated": truncated,
             "items": failed[offset:offset + limit]}
@@ -341,9 +342,11 @@ async def evaluation_trend(
     days: int = Query(30, ge=1, le=evaluation_read_service.MAX_TREND_DAYS),
     current_user: User = Depends(get_current_user),
 ):
-    """The stored daily `eval.*` series for one agent (`agent=`) or one pair
-    (`caller=` + `callee=`) — read from the points the platform writes, never
-    recomputed. Out of scope reads as an empty series."""
+    """The stored daily `eval.*` series for one agent (`agent=`), one pair
+    (`caller=` + `callee=`), or — naming neither — the fleet (ent#938, written
+    by the nightly pass only, so it runs through yesterday). Read from the
+    points the platform writes, never recomputed. Out of scope reads as an
+    empty series: the fleet series only to an admin person and the system key."""
     scope = _scope(current_user)
     try:
         name = evaluation_read_service.trend_metric(metric, machine=scope.machine)
@@ -360,8 +363,17 @@ async def evaluation_trend(
         dims, absent = {"agent": agent}, ["caller", "callee"]
         visible = scope.sees(agent)
     else:
-        raise HTTPException(status_code=422, detail={
-            "code": "invalid_series", "message": "name agent=, or caller= and callee="})
+        # The fleet total folds every agent's runs, so it is never handed to a
+        # reader scoped to fewer (a cross-tenant count) nor to an agent key
+        # (ent#937's contract: self rows only). A machine reader that does see
+        # every agent gets counts only — `trend_metric` already refused it a
+        # judge score above. The two readers are NAMED — an admin person and the
+        # system key — rather than "every scope whose names are every agent": a
+        # connector, a portal delegate or a scope invented tomorrow owned by an
+        # admin also has that scope, and is fenced off this route only elsewhere.
+        dims, absent = dict(evaluation_read_service.FLEET_DIMS), ["agent", "caller", "callee"]
+        visible = (scope.self_agent is None and scope.names is None
+                   and (not scope.machine or current_user.mcp_scope == "system"))
     points = []
     if visible:
         now = datetime.now(timezone.utc)
@@ -415,7 +427,8 @@ async def agent_evaluation_summary(
 ):
     """One agent's summary and failed runs — what the MCP self-read serves.
     An agent key reads its own only (another agent it may reach reads as
-    zeros); a machine never gets a judge's score."""
+    zeros); a machine never gets a judge's score. `pair_failed` lists the
+    runs this agent delegated whose edge failed a pair check (ent#940)."""
     lo, hi = _window(period, since, until)
     scope = _scope(current_user)
     names = evaluation_read_service.narrow(scope, agent_name)
@@ -424,9 +437,12 @@ async def agent_evaluation_summary(
     folded = evaluation_read_service.fold(rows, labels)
     failed = folded.pop("failed")
     failed_truncated = folded.pop("failed_truncated")
+    caller_rows, _ = db.evaluation_window_rows(
+        since=lo, until=hi, **evaluation_read_service.caller_side_filters(scope, names))
     return {"agent_name": agent_name, "since": lo, "until": hi, "truncated": truncated,
             "summary": evaluation_read_service.project_summary(folded, machine=scope.machine),
-            "failed": failed, "failed_truncated": failed_truncated}
+            "failed": failed, "failed_truncated": failed_truncated,
+            "pair_failed": evaluation_read_service.pair_failures(caller_rows)}
 
 
 @router.get("/evaluations/{eval_id}", response_model=EvaluationResponse)

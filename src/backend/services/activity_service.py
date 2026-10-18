@@ -425,6 +425,65 @@ class ActivityService:
             coro.close()
             logger.debug("[#1804] spawn_close_execution_activity skipped (no loop): %s", e)
 
+    def record_first_reads(self, current_user, target_agent: str, runs) -> None:
+        """Receipt an agent key's read of another agent's finished runs
+        (ent#940 TD-1) — the evidence `relay_unverified` grades against.
+
+        `runs` is `(execution_id, status)` pairs as the read returned them.
+        Only an agent principal (`agent_name` is set for `scope=agent` keys
+        alone, never from a header) reading ANOTHER agent writes; only a
+        finished run is receipted, since a read before the callee ended never
+        verifies a relay and the receipt is first-read-only. Fail-open: the
+        caller's response must not depend on this, so nothing here raises.
+        No broadcast — a receipt is evidence, not an event.
+        """
+        reader = getattr(current_user, "agent_name", None)
+        if not reader or reader == target_agent:
+            return
+        from db.evaluations import TIER0_TERMINAL_STATUSES
+        for execution_id, status in runs:
+            if not execution_id or status not in TIER0_TERMINAL_STATUSES:
+                continue
+            try:
+                db.insert_read_receipt_if_absent(reader, target_agent, execution_id)
+            except Exception as e:
+                logger.debug("read receipt not written for %s: %s", execution_id, e)
+
+    def record_inline_reads(self, current_user, target_agent: str, execution_ids) -> None:
+        """Receipt a finished result an agent key was handed INLINE — a sync
+        `/chat`, sync `/task` or sync `POST /fan-out` answer (ent#940 review
+        I3): the caller read it as surely as by polling.
+
+        The status is the row's, not the answer's, so only a run already
+        terminal is receipted (same rule as `record_first_reads`). Fail-open:
+        nothing here raises into the response."""
+        reader = getattr(current_user, "agent_name", None)
+        if not reader or reader == target_agent:
+            return
+        runs = []
+        for execution_id in execution_ids or ():
+            if not execution_id:
+                continue
+            try:
+                row = db.get_execution(execution_id)
+            except Exception as e:
+                logger.debug("inline read not receipted for %s: %s", execution_id, e)
+                continue
+            if row is not None and row.agent_name == target_agent:
+                runs.append((execution_id, getattr(row.status, "value", row.status)))
+        self.record_first_reads(current_user, target_agent, runs)
+
+    def record_inline_result(self, current_user, target_agent: str, response) -> None:
+        """`record_inline_reads` for a `/chat` or `/task` answer. A receipt
+        answer (`async_mode` — accepted, queued, queued_timeout) handed over
+        no result, so it receipts nothing."""
+        if not isinstance(response, dict) or response.get("async_mode"):
+            return
+        execution = response.get("execution")
+        execution_id = response.get("task_execution_id") or (
+            execution.get("task_execution_id") if isinstance(execution, dict) else None)
+        self.record_inline_reads(current_user, target_agent, [execution_id])
+
     async def get_current_activities(self, agent_name: str) -> List[Dict]:
         """Get all in-progress activities for an agent."""
         return db.get_current_activities(agent_name)

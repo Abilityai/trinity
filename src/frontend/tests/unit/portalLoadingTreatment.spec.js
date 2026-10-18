@@ -55,6 +55,7 @@ const CHART = [
   'components/AgentTile.vue',            // grid tile chart zones (ent#245)
   'components/DashboardPanel.vue',       // agent-defined dashboard charts (ent#253)
   'components/tiles/ExecutionsTile.vue', // the Executions grid tile (ent#449)
+  'components/evaluations/EvalTrend.vue', // Operations › Evaluations checks-passed trend chart (ent#938)
   // ent#523 — the Workspace agent band. A Workspace surface AND a chart
   // surface: the ruling is "charts only", not "not in the Workspace", and the
   // beam here wraps the `StackedBarChart` alone. The band's own stat figures

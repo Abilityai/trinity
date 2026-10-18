@@ -6239,6 +6239,130 @@
         "unit"
       ],
       "description": "Tier-1 (judge) seam (ent#936 checkpoint A) on the real schema: claim_tier1_row is a compare-and-set on the ent#366 partial unique index (needs the Tier-0 row; a second claim under any model is None; two concurrent claims on one execution yield exactly one row and one claim); finish_tier1_row writes a verdict or a skip onto a row still `claimed` only (a finished row is final, a Tier-0 id writes nothing, an invalid document never reaches the table); validate_judge_json names each structural defect (schema, state, dimension/verdict enums, 160-char reason cap, no quotation marks, quality range, skip enum; an omitted dimension is n/a); tier1_candidates are Tier-0 rows without a Tier-1 row, bounded, oldest first; reclaim_stale_tier1 releases stale claims only; a Tier-0 re-grade keeps the judge row; a Tier-1 row never enters a rating read. Mutations: dropping the any-model pre-check reds the second-claim test; dropping the IntegrityError loser handler reds the race test."
+    },
+    {
+      "file": "unit/test_938_tab_guard.py",
+      "feature": "abilityai/trinity-enterprise#938",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Operations > Evaluations tab (ent#938 C1) - the guard is the API, never UI hiding alone. The exact aggregate request set the tab's store issues, driven through the real routers.evaluations router on the ent#937 harness under four principals: admin person (whole fleet + judge keys), operator-role person (own agents + judge keys - the floor admits operator, not only admin), Workspace-only role user (403 workspace_only on every tab URL via enforce_operator_floor), agent key (its own agent's rows only, no judge key). Also pins that get_current_user wires the floor. Mutation: making is_workspace_only_role return False turns the user-role test red."
+    },
+    {
+      "file": "unit/test_938_fleet_series.py",
+      "feature": "abilityai/trinity-enterprise#938",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Fleet evaluation series (ent#938 C7, ruling T3). points_for_day(fleet=True) folds every agent's rows under dims {scope: fleet}; the per-row restate and the over-cap per-agent retry write no fleet point; the nightly pass writes it idempotently. The trend route with no agent/pair serves it to an admin person and the system key (counts only, judge score 422) and the empty series to operator/creator persons and agent keys. Mutation: writing fleet=True on every _write_day turns the per-row and over-cap tests red."
+    },
+    {
+      "file": "unit/test_940_facade.py",
+      "feature": "abilityai/trinity-enterprise#940",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "database",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Pair evaluation db accessors (ent#940 CP-A) exist on the REAL database.db facade and forward to EvaluationOperations / ActivityOperations / execution ops - the facade-delegation class (a method on the ops class but not on DatabaseManager passes direct tests and raises AttributeError in production)."
+    },
+    {
+      "file": "unit/test_940_pair_checks.py",
+      "feature": "abilityai/trinity-enterprise#940",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "database",
+        "evaluations",
+        "security",
+        "unit"
+      ],
+      "description": "Pair checks part 1 (ent#940 CP-A) on the real schema through evaluate_pair: dispatch_exists, one_sided_record (fan_out/loop/reminder -> skip no_activity_channel), duplicate_dispatch (same playbook series key AND token-set Jaccard >= 0.9; loop mode and distinct fan-out tasks excluded; retry chains are one dispatch), resend_after_receipt, wrong_route (Unknown command reply or a peer_skill_refused audit row). Also the writer's evaluator= fence: platform:tier0:pair is a second platform row beside the Tier-0 grade, anything outside PLATFORM_EVALUATORS raises."
+    },
+    {
+      "file": "unit/test_940_pair_checks_part2.py",
+      "feature": "abilityai/trinity-enterprise#940",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "database",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Pair checks part 2 (ent#940 CP-B): relay_unverified (relay without a read_result receipt between callee end and the relay fails; no relay / no readback record are named skips), relayed_failed_work, the signals failed_with_side_effects and rework_bounds (insufficient_history below BASELINE_MIN_RUNS), and the caller_running re-pick - a pair row written while the caller ran is re-graded once the caller ends."
+    },
+    {
+      "file": "unit/test_940_pair_metrics.py",
+      "feature": "abilityai/trinity-enterprise#940",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Pair row metrics (ent#940 CP-B part 2), read back off the written row: latency dispatch->start, start->end, end->caller's first read; the callee run's cost; verified = the callee's own Tier-0 headline passed. Evidence only, never pass/fail; a value the records do not hold is None, never 0."
+    },
+    {
+      "file": "unit/test_940_pair_read.py",
+      "feature": "abilityai/trinity-enterprise#940",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "api",
+        "evaluations",
+        "security",
+        "unit"
+      ],
+      "description": "Pair read side (ent#940 CP-C) through the real routers.evaluations router: window_rows LEFT JOINs the pair row as pair_checks (a run counts once); fold keeps Tier-0 counters and adds a disjoint pair block on by=pair only (TD-6: no pair rates on by=agent); the agent summary lists the agent's own pair failures as callee and as caller (pair_failed); a machine principal reads pair counts only (PAIR_MACHINE_KEYS), never evidence or quality; eval.pair_* scorecard points on pair series only. Mutation: unscoping caller_side_filters turns 3 tests red."
+    },
+    {
+      "file": "unit/test_940_pair_sweep.py",
+      "feature": "abilityai/trinity-enterprise#940",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "evaluations",
+        "reliability",
+        "unit"
+      ],
+      "description": "Pair sweep (ent#940 CP-B part 2, TD-5): phase 2 of tier0_sweep_service.run_cycle under the tier0:leader lease - up to 25 candidates (Tier-0 rows naming a caller with no pair row), to_thread under the 10 s bound; a hung evaluation leaves an all-skip evaluator_timeout pair row through the INSERT-only writer, never replacing a grade that landed; the sweep never raises."
+    },
+    {
+      "file": "unit/test_940_read_receipt.py",
+      "feature": "abilityai/trinity-enterprise#940",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "api",
+        "evaluations",
+        "security",
+        "unit"
+      ],
+      "description": "First-read receipt (ent#940 CP-D1, TD-1): an agent key reading another agent's FINISHED run via GET /api/agents/{name}/executions/{id} or GET /api/agents/{name}/fan-out/{id} writes one agent_collaboration activity action read_result on the reader's own agent; a poll of a running run, a human read and an agent reading its own run write nothing; second and racing reads leave one row (uuid5 primary key); fail-open, response unchanged. Mutations: uuid4 id -> 4 red; try/except removed -> 2 red."
+    },
+    {
+      "file": "unit/test_940_trigger_widening.py",
+      "feature": "abilityai/trinity-enterprise#940",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "database",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Tier-0 trigger widening (ent#940 CP-D2, TD-2): fan_out, loop and reminder runs are graded when source_agent_name is set and stay ungraded without it (user stays ungraded); one rule (tier0_eligible) for the candidate query and evaluate_execution; budget_vs_baseline series keyed on (agent_name, triggered_by, source_agent_name, playbook) for every sourced non-schedule run, unsourced agent runs keep the ent#935 key; a fan-out of three yields three pair rows with no duplicate_dispatch fail."
     }
   ]
 }

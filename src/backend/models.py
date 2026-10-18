@@ -2046,6 +2046,9 @@ class EvaluationSummary(BaseModel):
     checks_passed_rate: Optional[float] = None
     per_check_fail: Dict[str, int] = {}
     judged: int
+    # ent#940 — the edge checks of the pair rows, on `by=pair` only (TD-6).
+    # A machine's copy holds the counts only (`PAIR_MACHINE_KEYS`).
+    pair: Optional[Dict[str, Any]] = None
 
 
 class EvaluationAggregateGroup(EvaluationSummary):
@@ -2071,6 +2074,8 @@ class EvaluationFailedRun(BaseModel):
     completed_at: Optional[str] = None
     completion: bool
     failed_checks: List[Dict[str, Optional[str]]] = []
+    # ent#940 — the failed edge checks of the run's pair row, same vocabulary.
+    pair_failed_checks: List[Dict[str, Optional[str]]] = []
 
 
 class EvaluationAgentSummaryResponse(BaseModel):
@@ -2081,6 +2086,9 @@ class EvaluationAgentSummaryResponse(BaseModel):
     summary: EvaluationSummary
     failed: List[EvaluationFailedRun]
     failed_truncated: bool
+    # ent#940 (TD-6) — runs this agent delegated whose edge failed a pair
+    # check: its own failures as the caller (`failed` holds them as callee).
+    pair_failed: List[EvaluationFailedRun] = []
 
 
 class EvaluationFailedResponse(BaseModel):

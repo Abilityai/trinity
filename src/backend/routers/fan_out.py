@@ -36,6 +36,7 @@ from services.fan_out_service import (
     get_fan_out_service,
 )
 from services import dispatch_admission_service, idempotency_service
+from services.activity_service import activity_service
 from services.chat_execution_service import ERROR_CODE_HEADER
 from services.chat_signals import InterAgentDepthExceeded
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -139,6 +140,11 @@ async def fan_out(
                 },
             )
         if idem.snapshot is not None:
+            # ent#940 I3: a replayed sync batch hands its finished children over again.
+            if isinstance(idem.snapshot, dict) and idem.snapshot.get("status") != "accepted":
+                activity_service.record_inline_reads(current_user, name, [
+                    r.get("execution_id") for r in idem.snapshot.get("results") or []
+                    if isinstance(r, dict)])
             return JSONResponse(
                 content=idem.snapshot, headers={"X-Idempotent-Replay": "true"}
             )
@@ -212,6 +218,10 @@ async def fan_out(
     # is the right thing to replay, since re-dispatching N subtasks is exactly
     # what the key exists to prevent.
     idempotency_service.complete(idem, result.fan_out_id, response.model_dump())
+    # ent#940 I3: a sync batch hands an agent key each finished child inline.
+    if not request.async_mode:
+        activity_service.record_inline_reads(
+            current_user, name, [r.execution_id for r in result.results])
     return response
 
 
@@ -229,6 +239,7 @@ _FAN_OUT_ID_RE = re.compile(r"^fo_[A-Za-z0-9_-]{1,64}$")
 async def get_fan_out_status(
     fan_out_id: str,
     name: str = Depends(get_authorized_agent),
+    current_user: User = Depends(get_current_user),
 ):
     """Read one fan-out batch back from its execution rows (#2670).
 
@@ -255,4 +266,8 @@ async def get_fan_out_status(
     if not rows:
         raise HTTPException(status_code=404, detail="Fan-out not found")
 
-    return build_fan_out_batch_status(name, fan_out_id, rows)
+    batch = build_fan_out_batch_status(name, fan_out_id, rows)
+    # ent#940 TD-1: an agent key's first read of each finished child leaves a receipt.
+    activity_service.record_first_reads(
+        current_user, name, [(r.get("id"), r.get("status")) for r in rows])
+    return batch
