@@ -6122,6 +6122,41 @@
         "skills"
       ],
       "description": "A peer may run what an agent declares; what an admin assigned needs a grant (ent#662). At the real seam (skill_gate_service.enforce over the per-process SQLite, no gates set): a peer invoking an individually assigned OR set-propagated library skill is refused 403 skill_not_granted naming caller, callee and only the ungranted names; declared skills, a #2914 conflict name, a granted skill, the agent itself, a person, a schedule, a connector and trinity-system pass; a grant is per caller x target x skill and revocable; a name hidden in the context text is read too. The execute_task backstop applies the rule on an agent with no gates. An unreadable assignment table refuses a peer (503 peer_surface_unavailable) and leaves a person alone. Every refusal is one audit row. The grant routes: admin on PUT/DELETE read off the real dependant graph, an admin's MCP key refused, 422 skill_not_assigned / self / system agent, idempotent with a consent line and audited, and the per-edge read filters targets by viewer access. Both migration tracks and both CASCADE AgentRefs. Mutations: removing the enforce hook turns 8 red; restoring the backstop early return turns the backstop test red. Follow-ups: a parent runs every skill on an agent it spawned with its current key, a child calling its parent still needs a grant, a stale spawn key is no parent (symmetric-exemption and no-exemption mutations each red); removing an edge or a full replace that drops it deletes its grants and only its grants (cascade mutation red); the drift report lists only (edge x library skill) pairs USED in the last 30 days and not granted, with uses + last_used_at, off the real execution ledger read; the drift route is admin-only; the per-edge view carries last_used_at."
+    },
+    {
+      "file": "unit/test_935_tier0_writer.py",
+      "feature": "abilityai/trinity-enterprise#935",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "database",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Tier-0 writer (ent#935 A1) on the real schema: one platform:tier0 row per execution keyed target_kind='execution' on the ent#366 partial unique index; a second write re-grades in place; a racing duplicate INSERT becomes the UPDATE on the same connection; the delegation columns are derived from the execution row on every write (fan_out / loop / reminder / agent-sourced NULL mode / not delegated) and refreshed or cleared on a re-write; the sweep candidate read (settled, bounded, terminal schedule/agent runs, oldest first); a Tier-0 row never enters a rating read (tally, per-person reads). Mutations: dropping the reminder branch or the IntegrityError retry turns tests red."
+    },
+    {
+      "file": "unit/test_935_tier0_checks.py",
+      "feature": "abilityai/trinity-enterprise#935",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "evaluations",
+        "security",
+        "unit"
+      ],
+      "description": "Tier-0 checks part 1 (ent#935 A1): execution_exists, credential_echo (counts only, staged secrets in memory), validate_001, deliverable_landed incl. the null test (bare Done with zero receipts fails; explicit no-op skips no_claim; window-matched report skips unattributable, never passes; commit claim skips no_receipt_source); scrubbed <=200-char excerpt; count_hits; evaluate_execution end-to-end (receipts by the run's own id, a raising check is skip:evaluator_error and the row is still written, trigger/terminal gate, failed write never raises, staged values fail open)."
+    },
+    {
+      "file": "unit/test_935_intent_resolution.py",
+      "feature": "abilityai/trinity-enterprise#935",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Tier-0 intent resolution (ent#935 A1): /playbook args names a skill ref (namespaced too), paths and prose are messages, the #1410 unknown-command reply marks a playbook unresolved through #1410's own detector."
     }
   ]
 }

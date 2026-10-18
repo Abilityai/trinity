@@ -22,8 +22,39 @@ from sqlalchemy import select, insert, update, and_, func
 from sqlalchemy.exc import IntegrityError
 
 from db.engine import get_engine
-from db.tables import agent_evaluations
-from utils.helpers import utc_now_iso
+from db.tables import agent_evaluations, schedule_executions
+from utils.helpers import iso_cutoff, utc_now_iso
+
+
+# ent#935 — the deterministic (Tier-0) evaluator's identity and its one-row rule.
+# A Tier-0 row is keyed `(evaluator, target_kind='execution', target_id=<id>)`,
+# which `idx_agent_evaluations_rating_target` makes unique: one grade per run,
+# with no migration (TD-2). Rating readers all key on a `workspace:`/`operator:`
+# evaluator, so these rows never enter a tally.
+TIER0_EVALUATOR = "platform:tier0"
+TIER0_TARGET_KIND = "execution"
+TIER0_TRIGGERS = ("schedule", "agent")
+TIER0_TERMINAL_STATUSES = ("success", "failed", "cancelled")
+
+
+def derive_delegation(row) -> tuple:
+    """`(caller_agent, parent_execution_id, delegation_mode)` for one execution
+    row (ent#935 addendum A). Read off the row, never passed by a caller:
+    `fan_out_id` → fan_out, `loop_id` → loop, `triggered_by='reminder'` →
+    reminder, in that order. Anything else — including an agent-sourced run —
+    is NULL, because whether a `chat_with_agent` call was sync or async is not
+    recorded on the row, and a guessed mode is worse than none."""
+    if not row:
+        return (None, None, None)
+    if row.get("fan_out_id"):
+        mode = "fan_out"
+    elif row.get("loop_id"):
+        mode = "loop"
+    elif row.get("triggered_by") == "reminder":
+        mode = "reminder"
+    else:
+        mode = None
+    return (row.get("source_agent_name") or None, row.get("parent_execution_id") or None, mode)
 
 
 class EvaluationOperations:
@@ -272,6 +303,131 @@ class EvaluationOperations:
                 else:
                     down += int(n)
         return {"up": up, "down": down, "total": up + down}
+
+    # ------------------------------------------------------------------
+    # ent#935 — the Tier-0 deterministic evaluator's writer
+    # ------------------------------------------------------------------
+
+    def _tier0_update(self, conn, execution_id: str, values: dict) -> Optional[dict]:
+        """UPDATE the run's Tier-0 row if it exists; None if it does not."""
+        where = and_(
+            agent_evaluations.c.evaluator == TIER0_EVALUATOR,
+            agent_evaluations.c.target_kind == TIER0_TARGET_KIND,
+            agent_evaluations.c.target_id == execution_id,
+        )
+        if not conn.execute(update(agent_evaluations).where(where).values(**values)).rowcount:
+            return None
+        return self._row_to_dict(
+            conn.execute(select(agent_evaluations).where(where)).mappings().first()
+        )
+
+    def upsert_platform_evaluation(
+        self,
+        agent_name: str,
+        *,
+        execution_id: str,
+        completion: Optional[bool],
+        checks: Any,
+        archetype: Optional[str] = None,
+        quality: Optional[float] = None,
+    ) -> dict:
+        """Write (or re-grade) the Tier-0 row for one execution.
+
+        One row per run: a second evaluation of the same execution — a FAILED
+        terminal later overwritten by SUCCESS, two sweep workers — updates it in
+        place. The delegation columns are re-derived from the execution row on
+        EVERY write (addendum A), so a row never carries a stale link. A racing
+        first INSERT is the ent#366 case: SAVEPOINT, then the loser's write is
+        applied as the UPDATE on the same connection (see
+        `upsert_workspace_rating` for why both halves are load-bearing).
+        """
+        now = utc_now_iso()
+        with get_engine().begin() as conn:
+            ex = conn.execute(
+                select(
+                    schedule_executions.c.source_agent_name,
+                    schedule_executions.c.parent_execution_id,
+                    schedule_executions.c.fan_out_id,
+                    schedule_executions.c.loop_id,
+                    schedule_executions.c.triggered_by,
+                ).where(schedule_executions.c.id == execution_id)
+            ).mappings().first()
+            caller_agent, parent_execution_id, delegation_mode = derive_delegation(
+                dict(ex) if ex else None
+            )
+            values = {
+                "agent_name": agent_name,
+                "execution_id": execution_id,
+                "archetype": archetype,
+                "completion": None if completion is None else (1 if completion else 0),
+                "quality": quality,
+                "checks_json": json.dumps(checks) if checks is not None else None,
+                "caller_agent": caller_agent,
+                "parent_execution_id": parent_execution_id,
+                "delegation_mode": delegation_mode,
+                "updated_at": now,
+            }
+            existing = self._tier0_update(conn, execution_id, values)
+            if existing is not None:
+                return existing
+            eval_id = f"eval_{uuid.uuid4().hex[:16]}"
+            try:
+                with conn.begin_nested():
+                    conn.execute(insert(agent_evaluations).values(
+                        id=eval_id, evaluator=TIER0_EVALUATOR, created_at=now,
+                        target_kind=TIER0_TARGET_KIND, target_id=execution_id,
+                        judge_json=None, comment=None, **values,
+                    ))
+            except IntegrityError:
+                applied = self._tier0_update(conn, execution_id, values)
+                if applied is not None:
+                    return applied
+                raise
+            row = conn.execute(
+                select(agent_evaluations).where(agent_evaluations.c.id == eval_id)
+            ).mappings().first()
+        return self._row_to_dict(row)
+
+    def latest_tier0_for_execution(self, execution_id: str) -> Optional[dict]:
+        """The run's Tier-0 row, or None ("not evaluated"). Other evaluators'
+        rows for the same execution are a different axis and never answer."""
+        stmt = select(agent_evaluations).where(and_(
+            agent_evaluations.c.evaluator == TIER0_EVALUATOR,
+            agent_evaluations.c.target_kind == TIER0_TARGET_KIND,
+            agent_evaluations.c.target_id == execution_id,
+        )).limit(1)
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return self._row_to_dict(row) if row else None
+
+    def unevaluated_execution_ids(self, *, limit: int = 25, settle_seconds: int = 30,
+                                  lookback_hours: int = 24) -> list[str]:
+        """Terminal schedule/agent runs with no Tier-0 row yet, oldest first.
+
+        Bounded on every side: settled (completed at least `settle_seconds` ago,
+        so evidence written just after the CAS has landed), recent (no backfill
+        past `lookback_hours`), and at most `limit` ids. Cutoffs are computed in
+        Python (Invariant #16 — `completed_at` is an ISO-Z string).
+        """
+        evaluated = select(agent_evaluations.c.id).where(and_(
+            agent_evaluations.c.evaluator == TIER0_EVALUATOR,
+            agent_evaluations.c.target_kind == TIER0_TARGET_KIND,
+            agent_evaluations.c.target_id == schedule_executions.c.id,
+        ))
+        stmt = (
+            select(schedule_executions.c.id)
+            .where(and_(
+                schedule_executions.c.status.in_(TIER0_TERMINAL_STATUSES),
+                schedule_executions.c.triggered_by.in_(TIER0_TRIGGERS),
+                schedule_executions.c.completed_at >= iso_cutoff(lookback_hours),
+                schedule_executions.c.completed_at <= iso_cutoff(seconds=settle_seconds),
+                ~evaluated.exists(),
+            ))
+            .order_by(schedule_executions.c.completed_at.asc())
+            .limit(max(0, int(limit)))
+        )
+        with get_engine().connect() as conn:
+            return [r[0] for r in conn.execute(stmt).all()]
 
     def get_evaluation(self, eval_id: str) -> Optional[dict]:
         stmt = select(agent_evaluations).where(agent_evaluations.c.id == eval_id)

@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 
 from sqlalchemy import select, insert, update, and_, func, or_
@@ -10,6 +10,10 @@ from sqlalchemy import select, insert, update, and_, func, or_
 from ..engine import get_engine
 from ..query_helpers import latest_per_group, viewer_scope
 from ..tables import (
+    agent_reports,
+    idempotency_keys,
+    metric_points,
+    operator_queue,
     schedule_executions,
 )
 from db_models import ScheduleExecution
@@ -827,6 +831,69 @@ class ScheduleExecutionsMixin:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).first()
         return (row.status, row.error, row.completed_at) if row else None
+
+    # ent#935 — what a run left behind, for the Tier-0 `deliverable_landed`
+    # check. One function every check calls, so "a receipt" means one thing.
+    _RECEIPT_ID_CAP = 20
+
+    def get_execution_receipts(self, execution_id: str, agent_name: str,
+                               started_at: Optional[str],
+                               completed_at: Optional[str],
+                               grace_seconds: int = 60) -> Dict:
+        """Counts (and a capped id list) of the side effects one execution left.
+
+        Attributable by id: asks (`operator_queue.execution_id`), completed
+        outbound effects (`idempotency_keys` scope `effect:<execution_id>`, the
+        messages/voip/share guard) and recorded metric points
+        (`metric_points.execution_id`). Reports carry no execution id, so
+        `reports_in_window` is a window match on the agent and
+        `[started_at, completed_at + grace]` — evidence that something was
+        published, never proof THIS run published it (TD-3). Both bounds are
+        ISO-Z strings compared lexicographically (Invariant #16); a missing
+        bound yields zero window matches rather than an unbounded scan.
+        """
+        out: Dict = {}
+        with get_engine().connect() as conn:
+            ask_ids = [r[0] for r in conn.execute(
+                select(operator_queue.c.id)
+                .where(operator_queue.c.execution_id == execution_id)
+                .order_by(operator_queue.c.created_at.asc())
+                .limit(self._RECEIPT_ID_CAP)
+            ).all()]
+            asks = conn.execute(
+                select(func.count()).select_from(operator_queue)
+                .where(operator_queue.c.execution_id == execution_id)
+            ).scalar() or 0
+            effects = conn.execute(
+                select(func.count()).select_from(idempotency_keys).where(and_(
+                    idempotency_keys.c.scope == f"effect:{execution_id}",
+                    idempotency_keys.c.status == "completed",
+                ))
+            ).scalar() or 0
+            metrics = conn.execute(
+                select(func.count()).select_from(metric_points)
+                .where(metric_points.c.execution_id == execution_id)
+            ).scalar() or 0
+            report_ids: List[str] = []
+            if started_at and completed_at:
+                lower = to_utc_iso(parse_iso_timestamp(started_at))
+                upper = to_utc_iso(
+                    parse_iso_timestamp(completed_at) + timedelta(seconds=grace_seconds)
+                )
+                report_ids = [r[0] for r in conn.execute(
+                    select(agent_reports.c.id).where(and_(
+                        agent_reports.c.agent_name == agent_name,
+                        agent_reports.c.created_at >= lower,
+                        agent_reports.c.created_at <= upper,
+                    ))
+                    .order_by(agent_reports.c.created_at.asc())
+                    .limit(self._RECEIPT_ID_CAP)
+                ).all()]
+        out["asks"] = {"count": int(asks), "ids": ask_ids}
+        out["effects"] = {"count": int(effects)}
+        out["metrics"] = {"count": int(metrics)}
+        out["reports_in_window"] = {"count": len(report_ids), "ids": report_ids}
+        return out
 
     # ent#525 — the in-flight rows a Workspace chat is waiting on.
     _CHAT_INFLIGHT_STATUSES = ("running", "queued")

@@ -752,8 +752,11 @@ agent_evaluations = Table(
     # index the model does not know about is proposed for DROP by the first
     # `alembic revision --autogenerate` anyone runs — and accepting that turns
     # the rule into "one row per click": no error, no failing test, just a tally
-    # that counts clicks. Partial, matching the DDL exactly, so the NULL-target
-    # rows a Tier-0 grading pass writes are unaffected.
+    # that counts clicks. Partial, matching the DDL exactly. ent#935: Tier-0
+    # rows USE this index too — `evaluator='platform:tier0',
+    # target_kind='execution', target_id=<execution_id>` — so "one grade per
+    # run" is the same rule, enforced by the same index, with no migration.
+    # Rating reads key on a `workspace:`/`operator:` evaluator and never see them.
     Index(
         "idx_agent_evaluations_rating_target",
         "evaluator", "target_kind", "target_id",
