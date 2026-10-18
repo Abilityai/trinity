@@ -194,6 +194,16 @@ async function loadAnalytics() {
 function fmtSuccessRate(rate) {
   return rate == null ? '—' : `${Math.round(rate * 100)}%`
 }
+// ent#935: "Checks passed" — Tier-0 gate rate over evaluated runs. Zero
+// evaluated is "—": a run with no Tier-0 row is not evaluated, never failed.
+function fmtChecksPassed(row) {
+  if (!row?.evaluated_count || row.checks_passed_rate == null) return '—'
+  return `${Math.round(row.checks_passed_rate * 100)}%`
+}
+function checksPassedTitle(row) {
+  if (!row?.evaluated_count) return 'No evaluated runs in this window — deterministic checks, not answer quality'
+  return `${row.evaluated_count} of ${row.total_executions} runs evaluated · deterministic checks, not answer quality`
+}
 function successRateClass(rate) {
   if (rate == null) return 'text-gray-500 dark:text-gray-400'
   if (rate >= 0.9) return 'text-status-success-700 dark:text-status-success-400'
@@ -372,7 +382,11 @@ onMounted(() => {
         <div>
           <div class="flex items-baseline justify-between mb-2">
             <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300" title="Runs that finished without erroring — completion, not answer quality (ent#206)">Execution completion rate</h4>
-            <span class="text-sm font-semibold text-status-success-700 dark:text-status-success-400">{{ Math.round(analytics.success_rate * 100) }}%</span>
+            <div class="flex items-baseline gap-3">
+              <span class="text-sm font-semibold text-status-success-700 dark:text-status-success-400">{{ Math.round(analytics.success_rate * 100) }}%</span>
+              <!-- ent#935: the Tier-0 gate rate, a second number beside Completion -->
+              <span data-testid="overview-checks-passed" class="text-xs text-gray-500 dark:text-gray-400" :title="checksPassedTitle(analytics)">checks passed <span class="text-sm font-semibold tabular-nums text-gray-900 dark:text-white">{{ fmtChecksPassed(analytics) }}</span></span>
+            </div>
           </div>
           <TrendLineChart :dates="dates" :series="successSeries" :y-min="0" :y-max="100" :value-format="(v) => (v == null ? '—' : v + '%')" :axis-format="(v) => v + '%'" />
         </div>
@@ -427,7 +441,11 @@ onMounted(() => {
           <div class="shrink-0 flex items-center gap-4 text-right">
             <div class="w-14">
               <p :class="['text-sm font-semibold', successRateClass(s.success_rate)]">{{ fmtSuccessRate(s.success_rate) }}</p>
-              <p class="text-[10px] text-gray-400 uppercase tracking-wide">success</p>
+              <p class="text-[10px] text-gray-400 uppercase tracking-wide">completion</p>
+            </div>
+            <div class="w-14" data-testid="schedule-checks-passed" :title="checksPassedTitle(s)">
+              <p class="text-sm font-semibold tabular-nums text-gray-900 dark:text-white">{{ fmtChecksPassed(s) }}</p>
+              <p class="text-[10px] text-gray-400 uppercase tracking-wide">checks</p>
             </div>
             <div class="w-16 hidden sm:block">
               <p class="text-sm font-mono text-gray-700 dark:text-gray-200">{{ fmtDuration(s.avg_duration_ms) }}</p>

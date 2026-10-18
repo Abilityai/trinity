@@ -35,7 +35,7 @@
 
     <div v-else class="space-y-3">
       <!-- Stat tiles -->
-      <div class="grid grid-cols-2 sm:grid-cols-5 gap-2">
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         <div class="px-3 py-2 rounded bg-gray-50 dark:bg-gray-800/50">
           <div class="text-xs text-gray-500 dark:text-gray-400">Runs</div>
           <div class="text-sm font-semibold text-gray-900 dark:text-white">
@@ -46,6 +46,14 @@
           <div class="text-xs text-gray-500 dark:text-gray-400" title="Runs that finished without erroring — completion, not answer quality (ent#206)">Completion</div>
           <div :class="['text-sm font-semibold', successRateColor]">
             {{ successRatePercent }}
+          </div>
+        </div>
+        <!-- ent#935: the deterministic Tier-0 gate rate — a second number, not
+             a replacement for Completion. "—" when no run was evaluated. -->
+        <div class="px-3 py-2 rounded bg-gray-50 dark:bg-gray-800/50" data-testid="checks-passed" :title="checksPassedTitle">
+          <div class="text-xs text-gray-500 dark:text-gray-400">Checks passed</div>
+          <div class="text-sm font-semibold text-gray-900 dark:text-white">
+            {{ checksPassedPercent }}
           </div>
         </div>
         <div class="px-3 py-2 rounded bg-gray-50 dark:bg-gray-800/50">
@@ -247,6 +255,19 @@ const successRateColor = computed(() => {
   if (rate >= 0.95) return 'text-status-success-700 dark:text-status-success-400'
   if (rate >= 0.80) return 'text-status-warning-700 dark:text-status-warning-400'
   return 'text-status-danger-600 dark:text-status-danger-400'
+})
+
+// ent#935: null rate / zero evaluated → "—" (not evaluated is not "failed").
+const checksPassedPercent = computed(() => {
+  const d = data.value
+  if (!d || !d.evaluated_count || d.checks_passed_rate == null) return '—'
+  return `${(d.checks_passed_rate * 100).toFixed(1)}%`
+})
+
+const checksPassedTitle = computed(() => {
+  const d = data.value
+  if (!d || !d.evaluated_count) return 'No evaluated runs in this window — deterministic checks, not answer quality'
+  return `${d.evaluated_count} of ${d.total_executions} runs evaluated · deterministic checks, not answer quality`
 })
 
 const formatPercentileTriple = computed(() => {
