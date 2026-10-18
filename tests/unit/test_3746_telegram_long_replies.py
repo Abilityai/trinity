@@ -216,3 +216,29 @@ async def test_failure_log_keeps_reason_without_token_or_url(wire, caplog):
     assert "bot blocked" in caplog.text
     assert "test-token" not in caplog.text
     assert "https://" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_proactive_auto_falls_back_after_partial_telegram_failure(wire, monkeypatch):
+    """#3746: stopping Telegram chunks preserves the existing auto fallback policy."""
+    from unittest.mock import MagicMock
+    from services import proactive_message_service as pm
+    calls, outcomes = wire
+    database = MagicMock()
+    database.get_telegram_binding.return_value = {"id": "synthetic-binding", "bot_id": "123"}
+    database.get_telegram_chat_link_by_verified_email.return_value = {"telegram_user_id": "321"}
+    database.get_telegram_bot_token.return_value = "test-token"
+    monkeypatch.setattr(pm, "db", database)
+    service = pm.ProactiveMessageService()
+    monkeypatch.setattr(service, "_check_rate_limit", lambda *a: True)
+    monkeypatch.setattr(service, "_increment_rate_limit", MagicMock())
+    monkeypatch.setattr(service, "_persist_outbound", MagicMock())
+    monkeypatch.setattr(service, "_audit_send", AsyncMock())
+    slack = AsyncMock(return_value=pm.DeliveryResult(success=True, channel="slack", message_id="s1"))
+    monkeypatch.setattr(service, "_deliver_slack", slack)
+    outcomes.extend([(200, {"ok": True, "result": {"message_id": 1}}), (403, {"ok": False})])
+    text = "a" * 10000
+    result = await service._rate_limit_and_deliver("test-agent", "user@example.com", text, "auto", False, "preview")
+    assert len(calls) == 2
+    assert result.success and result.channel == "slack"
+    slack.assert_awaited_once_with("test-agent", "user@example.com", text)
