@@ -49,6 +49,32 @@ export function periodQuery({ period, since = '', until = '' }, now = new Date()
   return { period: 'custom', since: dayStart(since), until: isoZ(Date.parse(dayStart(until)) + DAY_MS) }
 }
 
+/**
+ * The window just before `{since, until}` — same length, ending at `since` —
+ * as a custom query, or `null` when the bounds the API answered with cannot
+ * be read. The KPI and per-agent deltas compare against it.
+ */
+export function previousWindow(since, until) {
+  const lo = Date.parse(since)
+  const hi = Date.parse(until)
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return null
+  return { period: 'custom', since: isoZ(lo - (hi - lo)), until: isoZ(lo) }
+}
+
+/** A rate's change in percentage points, `null` when either side has none. */
+export function rateDelta(now, before) {
+  if (typeof now !== 'number' || typeof before !== 'number') return null
+  return Math.round((now - before) * 1000) / 10
+}
+
+/** The most frequent failed check id (ties → alphabetical), `null` for none. */
+export function topFailedCheck(perCheckFail) {
+  const entries = Object.entries(perCheckFail || {}).filter(([, n]) => n > 0)
+  if (!entries.length) return null
+  entries.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  return { id: entries[0][0], count: entries[0][1] }
+}
+
 export const useEvaluationsStore = defineStore('evaluations', () => {
   // --- picker state ---
   const period = ref('7d')
@@ -63,9 +89,51 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
   const error = ref(null)
   const errorCode = ref(null)
   const lastLoadedAt = ref(null)
+  // The previous window's aggregate, for deltas only. `null` when it has not
+  // loaded or its read failed — the deltas then read "—", the current
+  // numbers stand on their own.
+  const prevAggregate = ref(null)
 
   const evaluatedCount = computed(() => aggregate.value?.total?.evaluated ?? 0)
   const invalidPeriod = computed(() => errorCode.value === 'invalid_period')
+
+  // KPI row (C2). No judge-quality or agreement tile: those wait on the
+  // calibration placement decision (ent#938 ruling addendum).
+  const kpis = computed(() => {
+    const t = aggregate.value?.total
+    if (!t) return []
+    const p = prevAggregate.value?.total
+    return [
+      { id: 'evaluated', label: 'Runs evaluated', value: t.evaluated, rate: false,
+        delta: p ? t.evaluated - p.evaluated : null },
+      { id: 'completion_rate', label: 'Completed', value: t.completion_rate ?? null, rate: true,
+        delta: p ? rateDelta(t.completion_rate, p.completion_rate) : null },
+      { id: 'checks_passed_rate', label: 'Checks passed', value: t.checks_passed_rate ?? null, rate: true,
+        delta: p ? rateDelta(t.checks_passed_rate, p.checks_passed_rate) : null },
+    ]
+  })
+
+  // Per-agent rows, worst checks-passed rate first (ungraded last, then by
+  // name) — the default order the table opens in.
+  const agentRows = computed(() => {
+    const prevBy = new Map((prevAggregate.value?.groups || []).map((g) => [g.key?.agent, g]))
+    const rows = (aggregate.value?.groups || []).map((g) => {
+      const prev = prevBy.get(g.key?.agent)
+      return {
+        agent: g.key?.agent ?? '',
+        evaluated: g.evaluated,
+        completionRate: g.completion_rate ?? null,
+        checksPassedRate: g.checks_passed_rate ?? null,
+        delta: prev ? rateDelta(g.checks_passed_rate, prev.checks_passed_rate) : null,
+        topFailedCheck: topFailedCheck(g.per_check_fail),
+      }
+    })
+    return rows.sort((a, b) => {
+      const ra = a.checksPassedRate ?? Infinity
+      const rb = b.checksPassedRate ?? Infinity
+      return ra - rb || a.agent.localeCompare(b.agent)
+    })
+  })
 
   function params() {
     const q = periodQuery({ period: period.value, since: since.value, until: until.value })
@@ -84,6 +152,7 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
       aggregate.value = data
       hasLoaded.value = true
       lastLoadedAt.value = Date.now()
+      await loadPrevious(p, data)
     } catch (err) {
       // A failed refresh keeps `aggregate` on screen (viewState → stale);
       // never a synthetic empty payload in a catch.
@@ -91,6 +160,19 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
       errorCode.value = err?.response?.data?.detail?.code ?? null
     } finally {
       loading.value = false
+    }
+  }
+
+  async function loadPrevious(p, data) {
+    const prev = previousWindow(data?.since, data?.until)
+    if (!prev) { prevAggregate.value = null; return }
+    try {
+      const { data: before } = await api.get(AGGREGATE_URL, { params: { ...p, ...prev } })
+      prevAggregate.value = before
+    } catch {
+      // Deltas are context, not the reading: a failed previous-window read
+      // drops them to "—" and leaves the current numbers (and no banner).
+      prevAggregate.value = null
     }
   }
 
@@ -117,8 +199,8 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
 
   return {
     period, since, until, agent,
-    aggregate, loading, hasLoaded, error, errorCode, lastLoadedAt,
-    evaluatedCount, invalidPeriod,
+    aggregate, prevAggregate, loading, hasLoaded, error, errorCode, lastLoadedAt,
+    evaluatedCount, invalidPeriod, kpis, agentRows,
     load, setPeriod, setCustomRange, setAgent, clearError,
   }
 })

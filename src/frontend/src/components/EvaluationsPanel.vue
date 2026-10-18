@@ -1,9 +1,9 @@
 <template>
   <!--
     Operations › Evaluations (trinity-enterprise#938). The toolbar and the
-    honest-state shell; the KPI row, per-agent table, failed list, pairs stub
-    and trend land in their own components under components/evaluations/
-    (C2–C7). Data comes from stores/evaluations.js, which reads only the
+    honest-state shell; the KPI row and per-agent table (C2), failed list and
+    pairs stub (C3) and trend (C6) are their own components under
+    components/evaluations/. Data comes from stores/evaluations.js, which reads only the
     ent#937 routes — the audience guard is the API (test_938_tab_guard.py),
     mirrored by Operations.vue listing this tab only at the operator floor.
   -->
@@ -101,11 +101,15 @@
         </p>
       </div>
 
-      <div v-else data-testid="evaluations-summary" class="text-sm text-gray-600 dark:text-gray-300 tabular-nums">
-        {{ store.evaluatedCount }} {{ store.evaluatedCount === 1 ? 'run' : 'runs' }} evaluated in this period
-        <span v-if="store.aggregate?.truncated" class="ml-2 text-xs text-gray-500 dark:text-gray-400" data-testid="evaluations-truncated">
-          · window capped at 5,000 runs — narrow the period
-        </span>
+      <div v-else class="space-y-6" data-testid="evaluations-ready">
+        <div data-testid="evaluations-summary" class="text-sm text-gray-600 dark:text-gray-300 tabular-nums">
+          {{ store.evaluatedCount }} {{ store.evaluatedCount === 1 ? 'run' : 'runs' }} evaluated in this period
+          <span v-if="store.aggregate?.truncated" class="ml-2 text-xs text-gray-500 dark:text-gray-400" data-testid="evaluations-truncated">
+            · window capped at 5,000 runs — narrow the period
+          </span>
+        </div>
+        <EvalKpiRow :kpis="store.kpis" />
+        <EvalAgentTable :rows="store.agentRows" @select="store.setAgent" />
       </div>
     </div>
   </div>
@@ -120,6 +124,8 @@ import BaseBadge from './base/BaseBadge.vue'
 import InlineError from './InlineError.vue'
 import LoadFailed from './LoadFailed.vue'
 import SkeletonLoader from './SkeletonLoader.vue'
+import EvalKpiRow from './evaluations/EvalKpiRow.vue'
+import EvalAgentTable from './evaluations/EvalAgentTable.vue'
 import { useEvaluationsStore, PERIODS } from '../stores/evaluations'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
 
