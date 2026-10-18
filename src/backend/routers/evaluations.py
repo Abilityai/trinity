@@ -244,6 +244,27 @@ async def get_evaluation(eval_id: str, current_user: User = Depends(get_current_
     return _to_response(row, current_user, _operator_for([row], current_user))
 
 
+@router.get("/agents/{agent_name}/executions/{execution_id}/evaluation",
+            response_model=EvaluationResponse)
+async def get_execution_evaluation(
+    execution_id: str,
+    agent_name: str = Depends(get_authorized_agent_by_name),
+    current_user: User = Depends(get_current_user),
+):
+    """How one run graded — the Tier-0 row (trinity-enterprise#935).
+
+    Same gate as the agent's other evaluation reads (`get_authorized_agent_by_name`,
+    uniform 404), same projection (`_to_response`). Not evaluated yet, or an
+    execution that is not this agent's, is one 404 `not_evaluated`: the path
+    must not become an oracle over other agents' execution ids. Read only —
+    the Tier-0 writer is the sweep, reachable by no route.
+    """
+    row = db.latest_tier0_for_execution(execution_id)
+    if not row or row.get("agent_name") != agent_name:
+        raise HTTPException(status_code=404, detail="not_evaluated")
+    return _to_response(row, current_user, _operator_for([row], current_user))
+
+
 @router.post("/agents/{agent_name}/evaluations", response_model=EvaluationResponse)
 async def create_evaluation(
     agent_name: str,

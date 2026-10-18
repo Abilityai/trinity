@@ -982,6 +982,19 @@ own records, with **zero LLM calls**. OSS core, always on, no setting.
   nothing triggers that re-grade yet (D-3, ent#937). Not the scheduler's terminal
   hook: the scheduler owns no terminal for `agent` runs, and the backend's own terminal
   fan-out misses the FAILED terminals the scheduler writes itself.
+- **FR-10 — Read, and the fence on write**: `GET
+  /api/agents/{name}/executions/{execution_id}/evaluation` returns the run's Tier-0 row
+  under the agent's existing evaluation access rule (`get_authorized_agent_by_name`,
+  uniform 404) and the ent#366 projection; not evaluated yet, or an execution that is
+  not this agent's, is one 404 `not_evaluated`. No MCP tool (`# mcp: none` stays
+  accurate; ent#937 owns the read tool). The write fence (FR-2, extended): no agent-key,
+  MCP or user route can create, update or delete a `platform:tier0` row or set the
+  delegation columns — the admin write files under `admin:<user>` and ignores any
+  evaluator/target/delegation keys in the body, a Workspace rating cannot address an
+  `execution` target and is always prefixed, every DML on `agent_evaluations` lives in
+  the db layer with exactly three callers past the facade (the admin route, the
+  Workspace rating, the Tier-0 evaluator), and the evaluator and sweep import no
+  FastAPI or auth type, so no route can hand them a caller to trust.
 
 See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
 

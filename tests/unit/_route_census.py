@@ -518,6 +518,11 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
         "GET /api/agents/{agent_name}/canon/roles",
         "a READ of the agent's own canon seats (trinity-enterprise#817); an agent key is "
         "self-gated to its own canon, the same rule and budget as its objectives"),
+    "routers/evaluations.py::get_execution_evaluation": (
+        "GET /api/agents/{agent_name}/executions/{execution_id}/evaluation",
+        "a READ of the agent's own Tier-0 grade (trinity-enterprise#935); the same "
+        "uniform-404 rule as its other evaluation reads, and read != write — the "
+        "Tier-0 writer is the sweep, reachable by no route (test_935_write_fence)"),
     "routers/agents.py::agent_heartbeat": (
         "POST /api/agents/{agent_name}/heartbeat",
         "liveness; authenticates the agent's own agent-scoped key outside get_current_user (#307)"),

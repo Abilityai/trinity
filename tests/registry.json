@@ -6181,6 +6181,32 @@
         "unit"
       ],
       "description": "Tier-0 sweep + leader lease (ent#935 B.1) on the real schema: a tick grades only settled terminal schedule/agent runs inside the lookback, bounded per tick with the rest on the next tick, never re-picks an evaluated run; one raising evaluation does not stop the batch; a timed-out evaluation leaves a skip:evaluator_timeout row that a late grade never loses to; evaluation runs off the event loop; two sweepers racing one execution leave one row; a replayed terminal re-grades the same row. Lease (FakeRedis): one holder, fail-open without Redis and on a Redis error, release hands off, lapsed lease taken over, contended lease skips the tick, a failing tick never kills the loop, the cycle hands the TD-8 bounds to the sweep, stop releases. Wiring pinned by AST over main.py (start in _schedule_watch_loops, stop in _shutdown_background_services) and the sweep never imports a terminal writer. Mutations: a never-contended lease and a non-idempotent writer each turn tests red."
+    },
+    {
+      "file": "unit/test_935_evaluation_read_route.py",
+      "feature": "abilityai/trinity-enterprise#935",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "api",
+        "evaluations",
+        "security",
+        "unit"
+      ],
+      "description": "Tier-0 read route (ent#935 B.2) GET /api/agents/{name}/executions/{id}/evaluation through a real app with the real get_authorized_agent_by_name: owner 200 with the platform:tier0 row; not evaluated and unknown execution are one 404 not_evaluated; another agent's run under this agent's path is the same 404; another tenant and a missing agent get the uniform 'Agent not found' 404; admin reads any; the graded agent's own key reads its own row and gets the uniform 404 on a sibling; the route is GET-only and takes the shared dependency."
+    },
+    {
+      "file": "unit/test_935_write_fence.py",
+      "feature": "abilityai/trinity-enterprise#935",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "api",
+        "evaluations",
+        "security",
+        "unit"
+      ],
+      "description": "Tier-0 write fence (ent#935 B.2, epic ent#205 AC): with a Tier-0-shaped body naming the platform evaluator, the execution target and every delegation column — the graded agent's own key, a connector key and a non-admin person are refused by the admin write route (403, no row); an admin's write is filed under admin:<user> with no target and no delegation and never answers the Tier-0 read; the request model has no field for the fenced columns; a Workspace rating cannot address target_kind=execution (422) and its evaluator is always prefixed; AST pins: all DML on agent_evaluations lives in db/evaluations.py + the agent-delete cascade, the writers have exactly three callers past the facade, the evaluator and sweep take an execution id only and import no FastAPI/dependencies/models, the write route is the only non-GET route, the MCP server has no /evaluations surface; positive: the sweep still writes, and an admin row and the Tier-0 row coexist. Mutations: filing the admin write as platform:tier0, and gating the route on get_current_user, each turn tests red."
     }
   ]
 }
