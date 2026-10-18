@@ -8,10 +8,12 @@ beside the Tier-0 row it hangs off. Pinned here, on the real schema
     rows is still one run (Tier-0 counters unchanged);
   * `fold` keeps `graded`/`passed`/`per_check_fail` Tier-0-only and adds a
     disjoint `pair` block only when asked (`by=pair`); a failed entry carries
-    `pair_failed_checks` (ids + reason codes, never evidence);
-  * `by=agent` carries no pair rates (TD-6); the agent summary lists the
-    agent's own failed pair checks as callee (`failed`) and as caller
-    (`pair_failed`);
+    `pair_failed_checks` (ids + reason codes, never evidence) on the by=pair
+    view only;
+  * `by=agent` carries no pair rates (TD-6), and an agent's own `failed`
+    list never carries a caller-side pair failure (TD-6 "only the agent's own
+    failed pair checks", review I2): the caller reads them as `pair_failed`,
+    a person through `by=pair`;
   * an agent key reads its own pairs' block without the latency/cost/
     round-trip metrics, never another agent's pair, never a judge score;
   * the pair evaluator is a known non-person grader name;
@@ -163,12 +165,21 @@ class TestFold:
 
     def test_failed_entry_carries_pair_failed_checks_without_evidence(self, svc):
         out = svc.fold([_row("1", pair=pair_checks(fail="relay_unverified")),
-                        _row("2", pair=pair_checks())], {})
+                        _row("2", pair=pair_checks())], {}, pair=True)
         assert [f["execution_id"] for f in out["failed"]] == ["1"]
         assert out["failed"][0]["pair_failed_checks"] == [
             {"id": "relay_unverified", "reason": "no_readback"}]
         assert out["failed"][0]["failed_checks"] == []
         assert "SECRET" not in json.dumps(out)
+
+    def test_an_agents_own_fold_never_lists_a_caller_side_failure(self, svc):
+        rows = [_row("1", pair=pair_checks(fail="relay_unverified")),
+                _row("2", pair=pair_checks(fail="wrong_route"), t0_fail=1)]
+        out = svc.fold(rows, {})
+        assert [f["execution_id"] for f in out["failed"]] == ["2"]   # its own Tier-0 fail
+        assert out["failed"][0]["pair_failed_checks"] == []
+        assert out["failed_truncated"] is False
+        assert "relay_unverified" not in json.dumps(out) and "wrong_route" not in json.dumps(out)
 
     def test_malformed_pair_checks_are_not_graded(self, svc):
         out = svc.fold([_row("1", pair={"headline": "x"}), _row("2", pair="garbage")],
@@ -295,15 +306,29 @@ def test_failed_route_carries_pair_failed_checks(edges):
     assert "SECRET" not in json.dumps(body)
 
 
-def test_agent_summary_lists_own_failed_pair_checks_as_callee_and_caller(edges):
+def test_agent_summary_lists_pair_failures_only_on_the_caller_side(edges):
     edges.as_user(_agent_key("agent-b"))
     s = edges.get("/api/agents/agent-b/evaluations/summary").json()
-    assert [f["execution_id"] for f in s["failed"]] == ["ab"]           # as callee
-    assert s["failed"][0]["pair_failed_checks"][0]["id"] == "relay_unverified"
+    assert s["failed"] == [] and s["failed_truncated"] is False      # a→b: a's failure
+    assert "relay_unverified" not in json.dumps(s)
     assert [f["execution_id"] for f in s["pair_failed"]] == ["bx"]      # as caller
     assert s["pair_failed"][0]["pair_failed_checks"][0]["id"] == "wrong_route"
     assert s["summary"].get("pair") is None and "quality_mean" not in s["summary"]
     assert "SECRET" not in json.dumps(s)
+
+
+def test_the_caller_still_reads_its_edge_failure_as_pair_failed(edges):
+    edges.as_user(_agent_key("agent-a"))
+    s = edges.get("/api/agents/agent-a/evaluations/summary").json()
+    assert [f["execution_id"] for f in s["pair_failed"]] == ["ab"]
+    assert s["pair_failed"][0]["pair_failed_checks"][0]["id"] == "relay_unverified"
+
+
+def test_agent_key_failed_route_by_agent_carries_no_caller_side_check(edges):
+    edges.as_user(_agent_key("agent-b"))
+    body = edges.get("/api/evaluations/failed").json()
+    assert body["items"] == [] and body["total"] == 0
+    assert "relay_unverified" not in json.dumps(body)
 
 
 def test_agent_key_never_reads_another_agents_pair_failures(edges, monkeypatch):
@@ -317,7 +342,7 @@ def test_agent_key_never_reads_another_agents_pair_failures(edges, monkeypatch):
 
 def test_person_caller_side_hides_a_callee_outside_scope(edges):
     s = edges.get("/api/agents/agent-b/evaluations/summary").json()
-    assert [f["execution_id"] for f in s["failed"]] == ["ab"]
+    assert s["failed"] == []                                  # a → b is a's to fix
     assert s["pair_failed"] == []                             # b → x: x is another tenant's
 
 

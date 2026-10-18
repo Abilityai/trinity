@@ -333,7 +333,8 @@ enterprise gitlink that lands it.
         ▼
  evaluation_aggregates.window_rows   LEFT JOIN pair row → pair_checks
  evaluation_read_service.fold        Tier-0 counters unchanged + `pair` block
-   (by=pair only) · agent summary: own pair failures (failed / pair_failed)
+   (by=pair only) · edge failures in `failed` on by=pair only · agent
+   summary: its edge failures as caller (`pair_failed`), never in the callee's `failed`
  eval_scorecard_service              eval.pair_{graded,passed,checks_passed_rate}
                                      on pair series only
 ```
@@ -386,7 +387,8 @@ retry chain (`retry_of_execution_id`) is one dispatch.
 visible; an agent key reads the pairs it is caller or callee of. A machine
 principal gets the pair block's counts only (`PAIR_MACHINE_KEYS`) — check ids
 and reason codes, never evidence, latency or cost, never quality. `by=agent`
-carries no pair rates (TD-6): an agent sees what to fix, not a pair score.
+carries no pair rates (TD-6): an agent sees what to fix, not a pair score — and
+only its own: a callee's `failed` list never carries the caller's edge failure.
 
 **Tests.** `tests/unit/test_940_pair_checks.py`, `test_940_pair_checks_part2.py`,
 `test_940_pair_metrics.py`, `test_940_pair_sweep.py`, `test_940_pair_read.py`,

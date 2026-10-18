@@ -1169,8 +1169,10 @@ it on the integration branch. Neither exists yet.
   and adds a disjoint `pair` block on `by=pair` only — `pair_graded`, `pair_passed`,
   `pair_checks_passed_rate`, `pair_per_check_fail`, `latency_p50_ms`,
   `cost_per_verified_outcome`, `round_trips_mean`. `by=agent` carries no pair rates; an
-  agent's summary lists only its own failed pair checks — as callee in `failed`, as
-  caller in `pair_failed` (an agent key sees only its own side). A machine principal
+  agent's summary lists only its own failed pair checks: a pair check grades the caller's
+  handling of the edge, so it appears as caller in `pair_failed` and never in the
+  callee's `failed` list (nor on `/evaluations/failed` outside `by=pair`); a person
+  reads the edge failures through `by=pair` (an agent key sees only its own side). A machine principal
   reads the pair block's counts only (`pair_graded`, `pair_passed`,
   `pair_checks_passed_rate`, `pair_per_check_fail`), check ids and reason codes, never
   evidence or quality; the evaluator projects as `platform:tier0:pair`. Scorecard (FR-13)

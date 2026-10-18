@@ -192,9 +192,12 @@ def fold(rows: list[dict], human_labels: dict[str, list[float]], *,
     headline that cannot be read is "not graded", a wrong-typed check is
     skipped. Zero rows → zero counts and null rates.
 
-    `pair` adds the `pair` block (`by=pair` only — TD-6: no pair rates on an
-    agent's own fold). A run whose edge failed a pair gate is a failed run
-    either way, with its `pair_failed_checks` beside the Tier-0 ones."""
+    `pair` is the `by=pair` view: it adds the `pair` block, and a run whose
+    edge failed a pair gate is a failed run there, with its
+    `pair_failed_checks` beside the Tier-0 ones. An agent's own fold (TD-6)
+    carries neither: a pair check grades the caller's handling of the edge,
+    so it is the caller's to fix — read through `pair_failures` — and never
+    lands in the callee's `failed` list (review I2)."""
     evaluated = completed = graded = passed = judged = 0
     quality_sum = 0.0
     agree = agreement_n = 0
@@ -213,6 +216,8 @@ def fold(rows: list[dict], human_labels: dict[str, list[float]], *,
         for c in fails:
             per_check[c["id"]] = per_check.get(c["id"], 0) + 1
         pair_outcome = tier0_gate_outcome(r.get("pair_checks"))
+        if not pair:
+            pair_outcome = None
         pair_fails = (_failed_checks(r, "pair_checks")
                       if pair_outcome is not None else [])
         q = r.get("judge_quality")
@@ -442,7 +447,7 @@ def pair_failures(rows: list[dict], *, limit: int = FAILED_LIMIT) -> list[dict]:
     """The failed-run entries of `rows` whose edge failed a pair check —
     nothing for a run that failed its Tier-0 checks only."""
     edge_failed = [r for r in rows if tier0_gate_outcome(r.get("pair_checks")) is False]
-    return fold(edge_failed, {}, failed_limit=limit)["failed"]
+    return fold(edge_failed, {}, failed_limit=limit, pair=True)["failed"]
 
 
 def group_key(by: str, row: dict) -> tuple:
