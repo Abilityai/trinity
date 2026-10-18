@@ -894,8 +894,10 @@ box; the words are recorded either way and handed to the agent's
   a missing one does (Invariant #8).
 - **FR-3 — Idempotent per person per target**: `UNIQUE(evaluator, target_kind,
   target_id) WHERE target_id IS NOT NULL`. A second thumb is a correction, which
-  is what makes a tally count **people rather than clicks**. Partial, so the
-  graded-run rows a Tier-0 pass writes (no target) are untouched.
+  is what makes a tally count **people rather than clicks**. Partial on a
+  non-NULL target; Tier-0 rows (ent#935) share it as `platform:tier0` /
+  `execution` / `<execution_id>` — one row per run — and never enter a tally, which
+  keys on the `workspace:` evaluator.
 - **FR-4 — A raw tally, never a percentage** (agent page): one thumbs-down out of
   one rating renders as "100% negative" — a number that looks like evidence and
   is not. Both counts cross to the page; an unreadable tally is flagged

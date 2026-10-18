@@ -313,6 +313,9 @@ schedule_executions = Table(
     # (the pull claim relies on its IntegrityError), so autogenerate must not
     # propose dropping it.
     Column("conversation_key", Text),
+    # ent#935 — the caller turn that delegated this one; kept only when it
+    # belongs to source_agent_name. NULL = not delegated.
+    Column("parent_execution_id", Text),
     Index(
         "idx_executions_one_running_turn",
         "agent_name", "conversation_key",
@@ -737,6 +740,11 @@ agent_evaluations = Table(
     Column("target_id", Text),
     Column("comment", Text),
     Column("updated_at", Text),
+    # ent#935 — the delegation the graded run came from. NULL = not delegated;
+    # delegation_mode is sync|async|fan_out|reminder|loop.
+    Column("caller_agent", Text),
+    Column("parent_execution_id", Text),
+    Column("delegation_mode", Text),
     # ent#366 review — declared HERE, not only in schema.py/Alembic, because
     # this one is not a performance index: it IS the "one rating per person per
     # thing" rule, and `upsert_workspace_rating` relies on the IntegrityError it
@@ -744,8 +752,11 @@ agent_evaluations = Table(
     # index the model does not know about is proposed for DROP by the first
     # `alembic revision --autogenerate` anyone runs — and accepting that turns
     # the rule into "one row per click": no error, no failing test, just a tally
-    # that counts clicks. Partial, matching the DDL exactly, so the NULL-target
-    # rows a Tier-0 grading pass writes are unaffected.
+    # that counts clicks. Partial, matching the DDL exactly. ent#935: Tier-0
+    # rows USE this index too — `evaluator='platform:tier0',
+    # target_kind='execution', target_id=<execution_id>` — so "one grade per
+    # run" is the same rule, enforced by the same index, with no migration.
+    # Rating reads key on a `workspace:`/`operator:` evaluator and never see them.
     Index(
         "idx_agent_evaluations_rating_target",
         "evaluator", "target_kind", "target_id",

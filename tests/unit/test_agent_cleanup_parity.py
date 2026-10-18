@@ -114,6 +114,12 @@ _EXEMPT: set[tuple[str, str]] = {
     # children; the `agent_ownership` row is deleted/soft-deleted by the
     # caller, by design (see agent_cleanup.py "Order" docstring).
     ("agent_ownership", "agent_name"),
+    # ent#935 — initiator provenance on a Tier-0 grade (the agent that
+    # delegated the run), audit-only like `source_agent_name`. The regex
+    # matches it only because ent#662 added `caller_agent` for
+    # agent_peer_skill_grants, where it IS a managed grant column. A grade
+    # belongs to the callee; purging the caller must not delete it.
+    ("agent_evaluations", "caller_agent"),
 }
 
 

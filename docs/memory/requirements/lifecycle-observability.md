@@ -895,9 +895,136 @@ external call. The managed grading experience — judge panels, calibration, rub
 management UI — is the paid layer, mirroring §42 (#668) where STATIC is free and the
 AI tier is not.
 
-**Not included** (later children of the epic): the Tier-0 evaluator that *populates*
-`quality`, the agent-owned case runner, the Tier-1 judge (enterprise), and
-replay/shadow evaluation (blocked on #1084 fail-closed + #1408).
+**Not included** (later children of the epic): the agent-owned case runner, the Tier-1
+judge (enterprise), and replay/shadow evaluation (blocked on #1084 fail-closed + #1408).
+
+### Addendum — Tier-0 deterministic evaluator (trinity-enterprise#935)
+
+Every finished `schedule`- or `agent`-triggered run is graded against the platform's
+own records, with **zero LLM calls**. OSS core, always on, no setting.
+
+- **FR-7 — Tier-0 writer**: one `agent_evaluations` row per execution, written by the
+  platform under `evaluator='platform:tier0'`, keyed `target_kind='execution',
+  target_id=<execution_id>`. The existing partial unique index
+  `idx_agent_evaluations_rating_target` (ent#366) makes that one row — a re-evaluation
+  (a FAILED terminal later overwritten by SUCCESS, two sweep workers) updates in place;
+  no migration. `completion` mirrors `status == 'success'`; `quality` stays NULL (Tier
+  0 grades checks, not answer quality). The writer (`services/tier0_evaluator.py ::
+  evaluate_execution(execution_id)`) takes an execution id only — no principal, no
+  request — and imports nothing from FastAPI or the auth layer, so the graded agent
+  cannot reach it (the FR-2 rule, extended). Every row also carries the **delegation
+  link** (addendum A), derived from the execution row on each write and never passed
+  in: `caller_agent` = `source_agent_name`, `parent_execution_id` = the row's stored
+  parent, `delegation_mode` = `fan_out` / `loop` / `reminder` from `fan_out_id` /
+  `loop_id` / `triggered_by`, otherwise **NULL** — an agent-sourced run's sync vs
+  async is not recorded on the row, and the mode is not guessed. Tier-0 rows never
+  enter a rating read: every tally and per-person read keys on a `workspace:` /
+  `operator:` evaluator.
+- **FR-8 — Checks vocabulary**: `checks_json = {schema: 1, intent_ref, evaluated_at,
+  headline, checks: [...]}`; each check is `{id, tier: gate|signal, source:
+  platform|agent_reported, status: pass|fail|skip, reason?, evidence}`. A skip always
+  names its reason; a check that raises is `skip: evaluator_error` (exception class
+  only) and never costs the row. Evidence is counts, ids, paths and hashes only; the
+  one text field, a claim excerpt, is ≤200 characters and scrubbed of credential
+  patterns and staged runtime secrets. Gate checks: `execution_exists` (the run's
+  #2467 integrity record; NULL → `skip: no_integrity_record`), `credential_echo`
+  (pattern hits, redaction markers and staged-secret hits in reply/error — counts only),
+  `validate_001` (VALIDATE-001's `business_status`; usually `skip: not_run_yet` at
+  grading time), `deliverable_landed` (a claimed deliverable must have left a receipt
+  attributable by execution id — an ask, a completed outbound effect, a metric point;
+  a bare "Done"/"completed" with **zero receipts fails**, an explicit no-op reply
+  ("nothing to do", "no new items") is `skip: no_claim`, a report published in the
+  run's time window is `skip: unattributable` and never a pass — reports carry no
+  execution id — and a commit/push claim alone is `skip: no_receipt_source`),
+  `playbook_outputs` (every output the invoked skill declares must have left a receipt:
+  declared outputs come from an `outputs:` frontmatter key — flat or under `trinity:`,
+  read through the ent#183 hardened frontmatter parser; the contract itself does not
+  carry it yet — and from the `## Output` prose section only when the frontmatter
+  declares none; the skill is the library's copy, recorded by source id and tree sha. A
+  declared ask / outbound effect / metric with zero receipts, or a declared report with
+  no report at all in the run's window, fails; a report only window-matched is `skip:
+  unattributable`; an "Unknown command" reply (#1410) fails `playbook_unresolved`; a
+  reply whose `Not done:` footer names missing work is `skip: declared_not_done`, so an
+  honest abort is not graded as a silent miss; a non-playbook run, a skill the library
+  does not hold, or nothing declared is a named skip). Signal check (listed, never
+  counted in the headline): `budget_vs_baseline` (cost, duration, tool-call count and
+  context against the p5–p95 band of the same series' last ≤20 successful runs — the
+  schedule, or for an agent-triggered run the agent plus the playbook it invoked; fewer
+  than 5 → `skip: insufficient_history`; a metric the run or its history did not record
+  is left out, never read as zero; outside the band on either side fails). **Headline**
+  (`headline = {passed, gate_pass, gate_fail, gate_skip}`): computed from gate checks
+  only — the run passes when no gate failed; skips never count against it and a failing
+  signal never moves it. The null tests hold on the headline: a do-nothing run and a
+  claims-everything-done run both fail it, an honest abort passes it. Two further
+  signals — `trajectory_bounds` and `footprint` — are planned but not built: the
+  per-tool-call records they were specified against are not written by the platform
+  today, so they await a data-source decision.
+- **FR-9 — Sweep**: the single writer path. `services/tier0_sweep_service.py` is a
+  backend loop started in every uvicorn worker (`main.py`, the watch-loops boot phase,
+  staggered +13 s; stopped with the background services, releasing the lease) that
+  ticks every 60 s under the Redis leader lease `tier0:leader` (TTL 3× the cadence, the
+  #1464 shape: SET NX EX, GET == self → EXPIRE). The lease **fails open**: no Redis or
+  a Redis error makes the worker a leader for the tick, a contended lease skips the
+  tick — never an error, never a wait — and two leaders at once are only a doubled
+  read, because the write is idempotent on the index (FR-7). Nothing in the sweep sits
+  in the path of a terminal execution write; the terminal writers do not import the
+  evaluator and it does not import them. Each tick (`tier0_evaluator.sweep`) grades up
+  to 25 runs that are terminal (`success`/`failed`/`cancelled`), triggered by `schedule`
+  or `agent`, completed at least 30 s ago (so evidence written just after the terminal
+  has landed) and at most 24 h ago (no backfill), and have no Tier-0 row yet — oldest
+  first, the rest on the next tick. Each evaluation runs off the event loop
+  (`to_thread`, at most 4 at once) under a 10 s bound; a raising evaluation costs
+  itself only, and one that outlives the bound gets a row every check of which is
+  `skip: evaluator_timeout` — written only when no row exists, so a grade that lands
+  late is never replaced by a skip (the reverse order re-grades in place) and a hung
+  evaluation is not re-picked every tick. An evaluated run is never picked again: a
+  FAILED terminal later replayed as SUCCESS is re-graded in place by the writer, but
+  nothing triggers that re-grade yet (D-3, ent#937). Not the scheduler's terminal
+  hook: the scheduler owns no terminal for `agent` runs, and the backend's own terminal
+  fan-out misses the FAILED terminals the scheduler writes itself.
+- **FR-10 — Read, and the fence on write**: `GET
+  /api/agents/{name}/executions/{execution_id}/evaluation` returns the run's Tier-0 row
+  under the agent's existing evaluation access rule (`get_authorized_agent_by_name`,
+  uniform 404) and the ent#366 projection; not evaluated yet, or an execution that is
+  not this agent's, is one 404 `not_evaluated`. No MCP tool (`# mcp: none` stays
+  accurate; ent#937 owns the read tool). The write fence (FR-2, extended): no agent-key,
+  MCP or user route can create, update or delete a `platform:tier0` row or set the
+  delegation columns — the admin write files under `admin:<user>` and ignores any
+  evaluator/target/delegation keys in the body, a Workspace rating cannot address an
+  `execution` target and is always prefixed, every DML on `agent_evaluations` lives in
+  the db layer with exactly three callers past the facade (the admin route, the
+  Workspace rating, the Tier-0 evaluator), and the evaluator and sweep import no
+  FastAPI or auth type, so no route can hand them a caller to trust.
+- **FR-10a — Execution page**: `ExecutionDetail.vue` shows the run's Tier-0 result in a
+  "Checks" card (`components/ExecutionChecks.vue`) read from the FR-10 route, through the
+  shared api client. One headline, from the stored gate-only `headline` (counted from the
+  gate entries when a row carries none): **Checks passed** (no gate failed, at least one
+  passed), **Checks failed** (any gate failed), **No gate check applied** (every gate
+  skipped — e.g. `evaluator_timeout`), with "N of M gate checks passed/failed · K skipped"
+  and the failed gates listed by id, reason and scalar evidence. Signals are listed as
+  "recorded, not counted" observations (`budget_vs_baseline — outside baseline`), never
+  worded or coloured as pass/fail. A 404 `not_evaluated` renders **Not evaluated** with
+  the reason a run may have none (only schedule- and agent-triggered runs are graded,
+  about a minute after they finish), never as an error; any other read failure says the
+  checks could not be loaded, with Retry. Running and queued runs request nothing.
+  **Checks passed rate (built, C3)**: the three existing analytics payloads — per-schedule
+  `GET …/schedules/{id}/analytics`, each row of `GET …/schedules/analytics-summary`, and
+  the agent `GET …/analytics` — carry `checks_passed_rate` + `evaluated_count` beside
+  Completion (`success_rate`, unchanged). `evaluated_count` is the window's runs with a
+  **gate check graded** — at least one gate passed or failed; the rate is those whose
+  `platform:tier0` gate headline passed (no gate failed) divided by that count. A
+  **skip-only** row (every gate skipped — `evaluator_timeout`, nothing to check) is on
+  **neither side** of the rate, matching the execution page's "No gate check applied"; a
+  run with **no** Tier-0 row is likewise *not evaluated*, never a failure. Only
+  `evaluator='platform:tier0'` rows are read, so a Workspace or operator rating never
+  enters it. `evaluated_count == 0` (including an all-skip-only window) →
+  `checks_passed_rate: null`, rendered "—", never 0%. Read-only and additive: no schema change, no new route. The
+  rate is computed over the newest 5,000 graded runs (the existing pool cap).
+  `ScheduleAnalyticsCard.vue` shows it as a "Checks passed" tile next to Completion.
+  `OverviewPanel.vue` shows it beside the completion headline and as a "checks" column
+  on each "Schedules performance" row, whose rate caption now reads "completion". The
+  tooltip on each reads "N of M runs with a gate check graded · deterministic checks,
+  not answer quality".
 
 See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
 

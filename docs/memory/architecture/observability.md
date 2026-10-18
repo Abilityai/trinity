@@ -308,8 +308,9 @@ process exit). Router `routers/evaluations.py` → `db/evaluations.py` → table
   agent's own evaluations, `accessible_agent_names` for the fleet list. An agent seeing
   its own bad score is the feedback loop; read ≠ write.
 - **`quality` is nullable and null ≠ 0** — the axes are independent, so a run can carry
-  `completion` before anything has graded it. The Tier-0 evaluator that populates
-  `quality` is a later child; this is the surface it writes to.
+  `completion` before anything has graded it. The Tier-0 evaluator (ent#935) writes
+  `completion` and its checks and leaves `quality` NULL — it grades what the run left
+  behind, not the answer (requirements §46, FR-7..FR-10a).
 - **Completion relabel**: Overview (#1107), schedules rollup (#1115) and fleet stats
   (EXEC-022) now say "Completion", not "Success rate". Additive — the `success_rate`
   API field is unchanged; only the label moved.

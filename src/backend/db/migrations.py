@@ -5306,6 +5306,50 @@ def _migrate_agent_peer_skill_grants(cursor, conn):
     conn.commit()
 
 
+def _migrate_delegation_link(cursor, conn):
+    """ent#935 addendum A — the delegation link between a child execution and
+    the caller turn that asked for it.
+
+    ``schedule_executions.parent_execution_id`` is stamped at admission only when
+    the parent row belongs to the child's authenticated source agent (the
+    ``_inherited_channel_context`` provenance rule); ``agent_evaluations`` gains
+    ``caller_agent`` / ``parent_execution_id`` / ``delegation_mode`` (sync | async
+    | fan_out | reminder | loop) plus a per-caller index, so a grade can be read
+    back by the agent that delegated. All nullable with no default: every
+    existing row reads as "not delegated" and nothing is backfilled.
+
+    Idempotent. Each table's half is applied on its own: a database holding
+    only one of the two tables still gets that one's columns, so the index
+    ``init_schema`` creates over ``caller_agent`` never meets a table without it.
+    Mirrored by Alembic 0100_delegation_link.
+    """
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name IN ('schedule_executions', 'agent_evaluations')"
+    )
+    present = {row[0] for row in cursor.fetchall()}
+    if "schedule_executions" in present:
+        _safe_add_column(
+            cursor,
+            "schedule_executions",
+            "parent_execution_id",
+            "ALTER TABLE schedule_executions ADD COLUMN parent_execution_id TEXT",
+        )
+    if "agent_evaluations" in present:
+        for column in ("caller_agent", "parent_execution_id", "delegation_mode"):
+            _safe_add_column(
+                cursor,
+                "agent_evaluations",
+                column,
+                f"ALTER TABLE agent_evaluations ADD COLUMN {column} TEXT",
+            )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_caller "
+            "ON agent_evaluations(caller_agent, agent_name, created_at)"
+        )
+    conn.commit()
+
+
 def _migrate_supersede_queue_flood_backlog(cursor, conn):
     """#3130: collapse the flood-alert backlog to one pending alert per agent.
 
@@ -5739,4 +5783,5 @@ MIGRATIONS = [
     ("operator_queue_replace", _migrate_operator_queue_replace),
     ("proactive_consent_not_asked", _migrate_proactive_consent_not_asked),
     ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
+    ("delegation_link", _migrate_delegation_link),
 ]

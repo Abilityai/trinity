@@ -313,6 +313,8 @@ class ScheduleExecution(BaseModel):
     open_canvas_id: Optional[str] = None
     # #2806 — agent-to-agent hops from a non-agent root (NULL/None = root).
     chain_depth: Optional[int] = None
+    # ent#935: the caller turn that delegated this one (NULL = not delegated).
+    parent_execution_id: Optional[str] = None
 
 
 # =========================================================================

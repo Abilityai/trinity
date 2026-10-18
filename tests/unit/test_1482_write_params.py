@@ -148,6 +148,7 @@ class TestCreateExecution:
             "source_channel_chat_id": "C1", "source_channel_thread": "T1",
             "source_channel_agent": "binder", "source_channel_client": "client@example.com",
             "open_canvas_id": "canvas-1", "chain_depth": 2,
+            "parent_execution_id": "parent-1",
         }
         # Guard the guard: this test covers every field the object has.
         assert set(values) == {f.name for f in dataclasses.fields(TaskExecutionFields)}
@@ -159,6 +160,7 @@ class TestCreateExecution:
         assert (row["schedule_id"], row["agent_name"], row["message"], row["triggered_by"]) == (
             "__manual__", "agent-a", "do it", "mcp")
         assert ex.chain_depth == 2 and ex.source_channel_client == "client@example.com"
+        assert ex.parent_execution_id == "parent-1"
 
     def test_no_fields_is_a_bare_manual_row(self, schedule_ops):
         ex = schedule_ops.create_task_execution("agent-a", "hi")

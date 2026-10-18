@@ -230,6 +230,12 @@ AGENT_REFS: List[AgentRef] = [
     # tenant's reports (cross-tenant disclosure).
     AgentRef("agent_reports",                "agent_name",        Policy.CASCADE),
     AgentRef("agent_evaluations",            "agent_name",        Policy.CASCADE),
+    # ent#935 — `agent_evaluations.caller_agent` (the agent that delegated the
+    # graded run) is initiator provenance, audit-only — same as
+    # agent_loops.source_agent_name / schedule_executions.source_agent_name —
+    # and is intentionally NOT registered: a grade belongs to the callee
+    # (`agent_name` above), so purging the caller must not delete another
+    # agent's Tier-0 history. Exempted in test_agent_cleanup_parity._EXEMPT.
     # ent#477 — the declared metric registry. CASCADE on both halves: a purge
     # must not leave definitions addressed to a name that is gone (ent#478
     # validates incoming points against them, so a stale row would ACCEPT

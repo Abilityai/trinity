@@ -1926,6 +1926,17 @@ class DatabaseManager:
     def get_execution_gate_state(self, execution_id: str):
         return self._schedule_ops.get_execution_gate_state(execution_id)
 
+    def get_execution_receipts(self, execution_id: str, agent_name: str,
+                               started_at, completed_at, grace_seconds: int = 60):
+        return self._schedule_ops.get_execution_receipts(
+            execution_id, agent_name, started_at, completed_at, grace_seconds)
+
+    def recent_series_metrics(self, execution_id: str, limit: int = 20):
+        return self._schedule_ops.recent_series_metrics(execution_id, limit)
+
+    def tool_call_count(self, raw):
+        return self._schedule_ops._tool_call_count(raw)
+
     def get_execution_failure_stamp(self, execution_id: str):
         """`(status, error, completed_at)` or None — the #3245 liveness read."""
         return self._schedule_ops.get_execution_failure_stamp(execution_id)
@@ -3094,6 +3105,19 @@ class DatabaseManager:
 
     def latest_evaluation_for_execution(self, execution_id):
         return self._evaluation_ops.latest_for_execution(execution_id)
+
+    # --- Tier-0 deterministic evaluator (ent#935) ---------------------------
+    def upsert_platform_evaluation(self, agent_name, **kw):
+        return self._evaluation_ops.upsert_platform_evaluation(agent_name, **kw)
+
+    def insert_platform_evaluation_if_absent(self, agent_name, **kw):
+        return self._evaluation_ops.insert_platform_evaluation_if_absent(agent_name, **kw)
+
+    def latest_tier0_for_execution(self, execution_id):
+        return self._evaluation_ops.latest_tier0_for_execution(execution_id)
+
+    def unevaluated_execution_ids(self, **kw):
+        return self._evaluation_ops.unevaluated_execution_ids(**kw)
 
     def get_or_create_public_user_memory(self, agent_name: str, user_email: str) -> dict:
         return self._public_link_ops.get_or_create_user_memory(agent_name, user_email)

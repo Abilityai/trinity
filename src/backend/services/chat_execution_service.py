@@ -157,6 +157,7 @@ async def prepare_chat_execution(
     queue_result: str,
     chain_depth: Optional[int] = None,
     gate: Optional[object] = None,
+    x_trinity_execution_id: Optional[str] = None,
 ) -> ChatExecutionContext:
     """Execution setup for chat_with_agent (#1026 slice 2).
 
@@ -205,6 +206,8 @@ async def prepare_chat_execution(
             subscription_id=_exec_subscription_id,
             # #2806: from admission — None for a non-agent principal (a root).
             chain_depth=chain_depth,
+            # ent#935: the caller's own turn, or None.
+            parent_execution_id=_delegation_parent_id(x_trinity_execution_id, x_source_agent),
         ),
     )
     task_execution_id = task_execution.id if task_execution else None
@@ -1597,6 +1600,33 @@ _TaskDerivation = namedtuple(
 _NO_INHERITED_CONTEXT = (None, None, None, None, None)
 
 
+def _delegation_parent_id(candidate, source_agent_name):
+    """ent#935: the caller turn to persist as the child's ``parent_execution_id``.
+
+    ``candidate`` is the platform-injected ``X-Trinity-Execution-Id`` (#2392) or,
+    failing that, the model-typed ``parent_execution_id``. It is kept ONLY when
+    the parent row's agent is the child's ``source_agent_name`` — the
+    ``_inherited_channel_context`` provenance rule: ``db.get_execution`` is a
+    global lookup, so an unchecked id would let a caller graft its run onto
+    another agent's delegation record. ``source_agent_name`` is the value
+    ``resolve_source_agent`` already authenticated (ent#614). Any miss is None.
+    """
+    if not candidate or not source_agent_name:
+        return None
+    try:
+        parent = db.get_execution(candidate)
+    except Exception:
+        logger.warning("[ent#935] parent execution lookup failed for %s", candidate, exc_info=True)
+        return None
+    if parent is None or getattr(parent, "agent_name", None) != source_agent_name:
+        logger.info(
+            "[ent#935] delegation link refused: parent execution %s is not a turn of '%s'",
+            candidate, source_agent_name,
+        )
+        return None
+    return candidate
+
+
 def _inherited_channel_context(
     request, *, current_user=None, x_source_agent=None
 ) -> tuple:
@@ -2148,6 +2178,7 @@ async def create_task_execution_and_activities(
     is_self_task,
     idem,
     chain_depth=None,
+    x_trinity_execution_id=None,
 ):
     """Create the execution record (#95/#96), attach the idempotency claim, and
     track the collaboration / self-task activity (mirrors the /chat pattern).
@@ -2191,6 +2222,11 @@ async def create_task_execution_and_activities(
             source_channel_client=src_channel_client,
             # #2806: stamped once here; a backlog-queued row keeps it when drained.
             chain_depth=chain_depth,
+            # ent#935: the injected turn first, the model-typed id as fallback.
+            parent_execution_id=_delegation_parent_id(
+                x_trinity_execution_id or getattr(request, "parent_execution_id", None),
+                x_source_agent,
+            ),
         ),
     )
     execution_id = execution.id if execution else None
@@ -2922,6 +2958,7 @@ async def dispatch_parallel_task(
         is_self_task=derivation.is_self_task,
         idem=idem,
         chain_depth=chain_depth,
+        x_trinity_execution_id=x_trinity_execution_id,
     )
     # trinity-enterprise#752: clear the run the agent receives for the skills
     # it was self-approved for (the in-container hook's clearance), + audit.
