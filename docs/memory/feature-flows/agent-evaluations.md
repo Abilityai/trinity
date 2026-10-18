@@ -180,6 +180,58 @@ evaluated, never 0%. Tests: `tests/unit/test_935_checks_passed_rate.py`,
 **Not built yet.** Re-grading a replayed run (D-3, ent#937); an MCP read tool
 (ent#937).
 
+## Read API — aggregates, failures, trend, chain (ent#937)
+
+Five GET routes, declared before `/evaluations/{eval_id}` (Invariant #4), all over
+`agent_evaluations` INNER JOINed to `schedule_executions`:
+
+| Route | Answers |
+|-------|---------|
+| `GET /api/evaluations/aggregate?by=agent\|schedule\|pair` | Tier-0-graded runs completed in the window, folded per group: `evaluated`, `completed`, `completion_rate`, `graded`, `passed`, `checks_passed_rate` (passed ÷ graded), `per_check_fail`, `judged`, plus `quality_mean` / `judge_human_agreement` / `agreement_n` for a person |
+| `GET /api/evaluations/failed` | Runs that did not complete or failed a gate check, newest first, paged (`limit` ≤ 200, `offset`) — check ids and reason codes only, never evidence text |
+| `GET /api/evaluations/trend?metric=eval.*` | The stored daily `eval.*` series for one agent (`agent=`) or one pair (`caller=` + `callee=`), ≤ 92 days — read from the points, never recomputed |
+| `GET /api/evaluations/chain/{execution_id}` | Ancestors (nearest first) and descendants (breadth first), bounded by `inter_agent_max_chain_depth` and 200 nodes; a walk stops at the first node outside the reader's scope and says `access`, never naming it |
+| `GET /api/agents/{name}/evaluations/summary` | One agent's fold plus up to 50 failed runs — what the MCP tool serves |
+
+`period ∈ {day, week, custom}`; `custom` needs `since` + `until`, at most 92 days
+apart (422 `invalid_period`). The window fetch is capped at 5,000 rows with an honest
+`truncated` flag. Rates are `null`, not 0, when nothing was counted. `caller=` /
+`callee=` also filter the two existing list reads.
+
+**Who reads what** (`evaluation_read_service.scope_for`, one helper for every route):
+a person reads every agent they can access; an **agent key is narrowed to itself** —
+its own rows and the pairs it is caller or callee of — never its owner's other agents,
+on the new routes *and* the existing `GET /evaluations`, `GET /evaluations/{id}`,
+`GET /agents/{name}/evaluations` and the execution read. An out-of-scope agent reads as
+zeros (the same body as "no runs"), so there is no existence oracle. A **machine
+principal never receives a judge's score**: `quality_mean`, `judge_human_agreement`
+and `agreement_n` are absent from its copy (absent by rule, not null-as-ungraded), and
+the trend refuses `eval.quality_mean` / `eval.judge_human_agreement` for it. The
+evaluator column is projected through an allowlist (`platform:tier0`,
+`platform:tier1:*` pass; `kind:rest` → `kind`; no colon → `unknown`, ent#781). A
+`role=user` key gets 403 `workspace_only` (no route is `@workspace_route`).
+
+**Scorecard points.** `services/eval_scorecard_service.py` writes daily points under
+the reserved owner `platform:eval`, graded agent (or caller/callee pair) in `dims` —
+four rates (`eval.checks_passed_rate`, `eval.completion_rate`, `eval.quality_mean`,
+`eval.judge_human_agreement`) and five counts (`eval.evaluated`, `eval.completed`,
+`eval.graded`, `eval.passed`, `eval.judged`) so a multi-day window rebuilds every
+rate exactly. Rolled up on each Tier-0 row and nightly (first sweep tick after
+00:10 UTC, same lease); identity `(metric, ts, dims)` makes a second write a
+correction. `platform:eval` is invisible to every agent `get_metrics` read, and
+`record_metrics` refuses the `eval.` prefix for every principal
+(`eval_namespace_reserved`) — a graded agent cannot write its own scorecard.
+
+**Retention.** Aggregates age out with execution rows by construction (the INNER
+JOIN drops an evaluation whose execution row is gone; orphan eval rows are not pruned
+yet — deferred). Scorecard points persist for the metric-point retention window
+(`metrics_retention_days`, default 365 d).
+
+**MCP.** `get_evaluation_summary` (`src/mcp-server/src/tools/evaluations.ts`) proxies
+the summary route; `agent_name` defaults to the calling agent, the access row is
+`enforce` on `agent_name`, and the projection is the backend's — the proxy never
+decides what an agent may see.
+
 ## Tier-1 judge seam (ent#936, checkpoint A)
 
 The sampled, model-backed judge is an enterprise module; OSS carries the seam
@@ -218,8 +270,10 @@ read of a judge row is ent#937's. Tests: `tests/unit/test_936_tier1_writer.py`.
 | Tier-0 | `src/backend/services/tier0_evaluator.py`, `src/backend/services/tier0_sweep_service.py` |
 | DB | `src/backend/db/evaluations.py` (`EvaluationOperations`), facade in `database.py` |
 | Tier-1 seam | `src/backend/db/evaluations.py` (`claim_tier1_row` / `finish_tier1_row` / `tier1_candidates` / `reclaim_stale_tier1` / `validate_judge_json`), ent#936 |
+| Read (ent#937) | `src/backend/db/evaluation_aggregates.py`, `src/backend/services/evaluation_read_service.py`, `src/backend/services/eval_scorecard_service.py` |
+| MCP | `src/mcp-server/src/tools/evaluations.ts` (`get_evaluation_summary`) |
 | Schema | `db/schema.py`, `db/tables.py`, `db/migrations.py`, `migrations/versions/0033_agent_evaluations.py` |
 | Models | `models.py` (`EvaluationCreate`, `EvaluationResponse`) |
 | Cascade | `db/agent_cleanup.py` (`AGENT_REFS`) |
 | Frontend | `ExecutionsPanel.vue`, `OverviewPanel.vue`, `ScheduleAnalyticsCard.vue` (relabel only); `views/ExecutionDetail.vue` + `components/ExecutionChecks.vue` (Tier-0 card) |
-| Tests | `tests/unit/test_206_agent_evaluations.py`; `tests/unit/test_935_*.py`, `tests/unit/test_ent935_*.py`; `src/frontend/tests/unit/executionChecks.mount.spec.js` |
+| Tests | `tests/unit/test_206_agent_evaluations.py`; `tests/unit/test_935_*.py`, `tests/unit/test_ent935_*.py`; `tests/unit/test_937_*.py`; `src/mcp-server/src/tools/evaluations.test.ts`; `src/frontend/tests/unit/executionChecks.mount.spec.js` |

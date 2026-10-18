@@ -5940,6 +5940,10 @@ def submit_rating(agent_name: str, email: str, *, target_kind: str, target_id: s
         raise ClientPortalError(404, "Not found")
 
     text_comment = (comment or "").strip()[:MAX_RATING_COMMENT_CHARS] or None
+    # ent#937 T5: the run that wrote the rated message, so a person's label
+    # can be compared with the judge's verdict on that same run.
+    execution_id = ((db.get_portal_message(target_id) or {}).get("execution_id")
+                    if target_kind == "message" else None)
 
     from database import db as platform_db
     try:
@@ -5953,6 +5957,7 @@ def submit_rating(agent_name: str, email: str, *, target_kind: str, target_id: s
             target_id=target_id,
             quality=RATING_VALUES[rating],
             comment=text_comment,
+            execution_id=execution_id,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("portal: rating write failed for %s/%s: %s", agent_name, target_kind, e)
