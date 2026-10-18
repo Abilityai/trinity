@@ -626,13 +626,11 @@ def test_is_read_only_unreadable_fails_open_and_logs(tmp_path, monkeypatch, capl
     assert any("unreadable" in r.getMessage() for r in caplog.records)
 
 
-# ====================================================================
-
+# ===========================================================================
 # Added coverage (#1187 follow-up): pure helpers, getters, parser branches,
 # the execute() chat path, and the _execute_codex orchestration body — all
 # previously exercised only indirectly or not at all.
-# ====================================================================
-
+# ===========================================================================
 
 import threading  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -2015,46 +2013,63 @@ async def test_image_reaches_spawn_through_real_execution_body(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_cancelled_image_execution_terminates_before_removing_files(tmp_path, monkeypatch):
+@pytest.mark.parametrize("with_image", [False, True])
+async def test_cancelled_execution_keeps_worker_and_image_lifetime(tmp_path, monkeypatch, with_image):
     import asyncio
     import threading
+    from concurrent.futures import ThreadPoolExecutor
     from pathlib import Path
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     monkeypatch.setattr(CodexRuntime, "is_available", lambda self: True)
     registry = _install_fake_codex(monkeypatch, result_text=None, stdout_events=[])
     fake_popen = codex_runtime.subprocess.Popen
-    started = threading.Event()
-    stopped = threading.Event()
-    paths = []
-    terminated = []
+    started, release = threading.Event(), threading.Event()
+    paths, terminated = [], []
     def spawn(cmd, **kwargs):
         process = fake_popen(cmd, **kwargs)
-        paths.append(Path(cmd[cmd.index("--image") + 1]))
+        if with_image:
+            paths.append(Path(cmd[cmd.index("--image") + 1]))
         def wait(timeout=None):
             started.set()
-            stopped.wait(timeout=5)
+            assert release.wait(5)
+            if with_image:
+                assert paths[0].read_bytes() == b"a"
             return 0
         process.wait = wait
         return process
-    def terminate(*args, **kwargs):
-        assert paths[0].exists()
-        assert not registry.unregistered
-        terminated.append(True)
-        stopped.set()
     monkeypatch.setattr(codex_runtime.subprocess, "Popen", spawn)
-    monkeypatch.setattr(codex_runtime, "_terminate_process_group", terminate)
+    monkeypatch.setattr(codex_runtime, "_terminate_process_group", lambda *a, **k: terminated.append(True))
+    # Occupy the entire default executor with the reader. Cancellation must
+    # return without queuing termination behind the very child it would stop.
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
     task = asyncio.create_task(CodexRuntime().execute_headless(
-        prompt="x", execution_id="cancel-image", images=[{"media_type": "image/png", "data": "YQ=="}]))
+        prompt="x", execution_id="cancel-image",
+        images=[{"media_type": "image/png", "data": "YQ=="}] if with_image else None))
     try:
-        assert await asyncio.to_thread(started.wait, 5)
+        for _ in range(500):
+            if started.is_set():
+                break
+            await asyncio.sleep(.001)
+        assert started.is_set()
         task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=.25)
+        assert task in done, "cancellation blocked behind the saturated reader executor"
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert terminated
-        assert registry.unregistered == ["cancel-image"]
-        assert not paths[0].exists()
+        assert not terminated, "HTTP cancellation must not kill a running execution"
+        if with_image:
+            assert paths[0].exists()
+            assert not registry.unregistered
     finally:
-        stopped.set()
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+    if with_image:
+        for _ in range(500):
+            if registry.unregistered:
+                break
+            await asyncio.sleep(.001)
+        assert registry.unregistered == ["cancel-image"]
+        assert not paths[0].parent.exists()
 
 
 @pytest.mark.parametrize("terminal,stderr,expected", [
@@ -2092,9 +2107,61 @@ def test_nonterminal_error_keeps_stderr_fallback():
     assert codex_runtime._classify_codex_failure(1, "HTTP 429", metadata)[0] == 429
 
 
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel_count", [1, 2])
-async def test_timeout_cleanup_cancellation_preserves_images(tmp_path, monkeypatch, cancel_count):
+async def test_cancelled_queued_image_reader_still_reaps_child(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(CodexRuntime, "is_available", lambda self: True)
+    registry = _install_fake_codex(monkeypatch, result_text=None, stdout_events=[])
+    async def auth_ready(*args):
+        pass
+    monkeypatch.setattr(codex_runtime, "_materialize_api_key_auth", auth_ready)
+    fake_popen = codex_runtime.subprocess.Popen
+    spawned = asyncio.Event()
+    release = threading.Event()
+    paths, waited = [], []
+    def spawn(cmd, **kwargs):
+        process = fake_popen(cmd, **kwargs)
+        paths.append(Path(cmd[cmd.index("--image") + 1]))
+        def wait(timeout=None):
+            waited.append(paths[0].read_bytes())
+            return 0
+        process.wait = wait
+        spawned.set()
+        return process
+    monkeypatch.setattr(codex_runtime.subprocess, "Popen", spawn)
+    loop = asyncio.get_running_loop()
+    pool = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(pool)
+    blocker = loop.run_in_executor(None, release.wait, 5)
+    task = asyncio.create_task(CodexRuntime().execute_headless(
+        prompt="x", execution_id="queued-image", images=[{"media_type":"image/png", "data":"YQ=="}]))
+    try:
+        await asyncio.wait_for(spawned.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert paths[0].exists() and not waited
+        assert not registry.unregistered
+    finally:
+        release.set()
+        await blocker
+    for _ in range(500):
+        if registry.unregistered:
+            break
+        await asyncio.sleep(.001)
+    assert waited == [b"a"]
+    assert registry.unregistered == ["queued-image"]
+    assert not paths[0].parent.exists()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_outer_timeout_retains_images_until_reader_finishes(tmp_path, monkeypatch):
     import asyncio
     import threading
     from pathlib import Path
@@ -2102,40 +2169,95 @@ async def test_timeout_cleanup_cancellation_preserves_images(tmp_path, monkeypat
     monkeypatch.setattr(CodexRuntime, "is_available", lambda self: True)
     registry = _install_fake_codex(monkeypatch, result_text=None, stdout_events=[])
     fake_popen = codex_runtime.subprocess.Popen
-    entered, release = threading.Event(), threading.Event()
+    started, release, terminating = threading.Event(), threading.Event(), threading.Event()
     paths = []
     def spawn(cmd, **kwargs):
+        process = fake_popen(cmd, **kwargs)
         paths.append(Path(cmd[cmd.index("--image") + 1]))
-        return fake_popen(cmd, **kwargs)
+        def wait(timeout=None):
+            started.set()
+            assert release.wait(5)
+            assert paths[0].exists()
+            return 0
+        process.wait = wait
+        return process
     real_wait_for = asyncio.wait_for
-
     async def timeout(awaitable, **kwargs):
+        for _ in range(500):
+            if started.is_set():
+                break
+            await asyncio.sleep(.001)
+        assert started.is_set()
         awaitable.cancel()
-        raise asyncio.TimeoutError()
+        raise asyncio.TimeoutError
     def terminate(*args, **kwargs):
-        entered.set()
-        release.wait(5)
+        terminating.set()
+        assert release.wait(5)
     monkeypatch.setattr(codex_runtime.subprocess, "Popen", spawn)
     monkeypatch.setattr(codex_runtime.asyncio, "wait_for", timeout)
     monkeypatch.setattr(codex_runtime, "_terminate_process_group", terminate)
-    task = asyncio.create_task(CodexRuntime().execute_headless(prompt="x", execution_id="timeout-cancel", images=[{"media_type":"image/png", "data":"YQ=="}]))
+    task = asyncio.create_task(CodexRuntime().execute_headless(
+        prompt="x", execution_id="timeout-image", images=[{"media_type":"image/png", "data":"YQ=="}]))
     try:
-        assert await asyncio.to_thread(entered.wait, 5)
-        for _ in range(cancel_count):
-            task.cancel()
-            for _ in range(10):
-                await asyncio.sleep(0)
-        assert paths[0].exists(), "Image removed while timeout termination is still blocked"
-        assert not registry.unregistered
-        assert not task.done()
+        for _ in range(500):
+            if terminating.is_set():
+                break
+            await asyncio.sleep(.001)
+        assert terminating.is_set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert paths[0].exists() and not registry.unregistered
     finally:
         release.set()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        finally:
-            # Restore before pytest-asyncio shuts down this test's runner.
-            monkeypatch.setattr(asyncio, "wait_for", real_wait_for)
-    assert not paths[0].exists()
-    assert registry.unregistered == ["timeout-cancel"]
+        monkeypatch.setattr(asyncio, "wait_for", real_wait_for)
+        await asyncio.gather(task, return_exceptions=True)
+    for _ in range(500):
+        if registry.unregistered:
+            break
+        await asyncio.sleep(.001)
+    assert registry.unregistered == ["timeout-image"]
+    assert not paths[0].parent.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["submission", "reader_start"])
+async def test_failed_image_reader_handoff_stops_child_before_cleanup(tmp_path, monkeypatch, failure):
+    import asyncio
+    import threading
+    from pathlib import Path
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(CodexRuntime, "is_available", lambda self: True)
+    registry = _install_fake_codex(monkeypatch, result_text="late answer", stdout_events=[])
+    async def auth_ready(*args):
+        pass
+    monkeypatch.setattr(codex_runtime, "_materialize_api_key_auth", auth_ready)
+    fake_popen = codex_runtime.subprocess.Popen
+    paths, stopped = [], []
+    def spawn(cmd, **kwargs):
+        paths.append(Path(cmd[cmd.index("--image") + 1]))
+        return fake_popen(cmd, **kwargs)
+    def terminate(*args, **kwargs):
+        assert paths[0].exists()
+        stopped.append(True)
+    monkeypatch.setattr(codex_runtime.subprocess, "Popen", spawn)
+    monkeypatch.setattr(codex_runtime, "_terminate_process_group", terminate)
+    if failure == "submission":
+        def reject(*args):
+            raise RuntimeError("executor shutdown")
+        monkeypatch.setattr(asyncio.get_running_loop(), "run_in_executor", reject)
+    else:
+        real_start = threading.Thread.start
+        def fail_reader(thread):
+            if thread._target.__name__ == "read_stdout":
+                raise RuntimeError("cannot start reader")
+            return real_start(thread)
+        monkeypatch.setattr(threading.Thread, "start", fail_reader)
+    with pytest.raises(HTTPException) as error:
+        await CodexRuntime().execute_headless(prompt="x", execution_id="failed-image-reader",
+            images=[{"media_type":"image/png", "data":"YQ=="}])
+    assert error.value.status_code == 500
+    assert stopped, "live child abandoned by failed image-reader handoff"
+    assert not paths[0].parent.exists()
+    assert registry.unregistered == ["failed-image-reader"]
+    assert not list(tmp_path.glob("*-last.txt"))

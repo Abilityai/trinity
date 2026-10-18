@@ -662,7 +662,13 @@ def a2a_client(monkeypatch):
         # ent#679: the inbound door asks whether the agent declares a price
         # first; this harness's agent does not (the test_157 stub).
         get_nevermined_config=lambda name: None,
-        get_nevermined_config_with_key=lambda name: None))
+        get_nevermined_config_with_key=lambda name: None,
+        # #3749: `message/send` pre-mints the execution row before dispatch.
+        create_task_execution=lambda **kw: SimpleNamespace(id="exec-a2a"),
+        get_agent_subscription_id=lambda name: None,
+        get_execution=lambda eid: None))
+    monkeypatch.setattr(a2a, "settings_service",
+                        SimpleNamespace(get_platform_default_model=lambda: "claude-test"))
     dispatch = AsyncMock(side_effect=_pending())
     monkeypatch.setattr(a2a, "dispatch_and_await_terminal", dispatch)
 
@@ -864,6 +870,8 @@ def _voice(monkeypatch, gates):
 
     monkeypatch.setattr(sgs, "list_skill_gates", lambda agent: gates)
     monkeypatch.setattr(sgs.role_addressing, "owner_email", lambda agent: "owner@example.com")
+    # trinity-enterprise#881: approvers here can open the agent; reach is pinned in test_ent881.
+    monkeypatch.setattr(sgs, "_can_open", lambda agent, email: True)
     client = MagicMock()
     client.task = AsyncMock(return_value=SimpleNamespace(response_text="done"))
     get_client = MagicMock(return_value=client)

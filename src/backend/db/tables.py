@@ -1113,6 +1113,19 @@ agent_capability_grants = Table(
     Column("granted_at", Text, nullable=False),
 )
 
+# abilityai/trinity-enterprise#662: caller X may run library-assigned skill Y on
+# target Z over their agent_permissions edge. Both agent columns are CASCADE
+# AgentRefs (db/agent_cleanup.py).
+agent_peer_skill_grants = Table(
+    "agent_peer_skill_grants",
+    metadata,
+    Column("caller_agent", Text, primary_key=True),
+    Column("target_agent", Text, primary_key=True),
+    Column("skill_name", Text, primary_key=True),
+    Column("granted_by", Text, nullable=False),
+    Column("granted_at", Text, nullable=False),
+)
+
 # ent#237: one row per git repo the skills library syncs from.
 skill_sources = Table(
     "skill_sources",

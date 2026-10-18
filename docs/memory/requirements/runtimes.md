@@ -408,9 +408,9 @@ Headless Codex tasks must forward validated JPEG, PNG, GIF and WebP attachments
 through native CLI image arguments on both new and resumed executions. Reject
 invalid base64, unsupported MIME types, more than ten images, individual images
 over 5 MiB or combined images over 10 MiB. Temporary copies must be private,
-unique per execution and removed after success, failure or cancellation.
-Uploaded image originals must also be available under the existing workspace
-upload boundary with an accurate saved path in the prompt. Channel cleanup must
-follow known execution termination, including failed delivery; a cancelled/timed-out
-waiter must not delete files still needed by an active or unknown execution. Concurrent uploads must not overwrite or delete each other.
-Failed original writes must be reported explicitly and must not claim success.
+unique per execution and removed after the subprocess reader completes, including
+when its HTTP waiter has already failed or been canceled. Before subprocess
+handoff, errors remove partial files immediately. Cancellation of an HTTP waiter
+must not delete files still needed by the child or introduce a new process-kill
+policy for text-only turns. Native image support does not require persistent
+workspace originals or additional tool permissions.

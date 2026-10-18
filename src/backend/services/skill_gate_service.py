@@ -40,7 +40,7 @@ from config import PORTAL_SOURCE_CHANNEL
 from database import db
 from db.skill_gates import ORIGIN_CLEARED
 from models import TaskExecutionStatus
-from services import rate_limiter, role_addressing
+from services import peer_skill_policy, rate_limiter, role_addressing
 from services.skill_gate_errors import (  # noqa: F401 — re-exported for entries and tests
     APPROVAL_PENDING_CODE,
     OUTCOME_DELIVERY_AGENT_TASK,
@@ -193,7 +193,15 @@ async def enforce(
     It is scanned on its own (never joined to the request, which could spell a
     name neither part holds), shown on the card when it is what matched, and
     never stored as the request or replayed.
+
+    abilityai/trinity-enterprise#662 runs first: a PEER agent invoking a
+    library-assigned skill it holds no grant for is refused here, by name, on
+    every agent — gated or not (`peer_skill_policy`).
     """
+    await peer_skill_policy.enforce(
+        agent_name, requester=requester, request_text=request_text,
+        context_text=context_text,
+        execution_id=origin_execution_id or requester.execution_id)
     if triggered_by == SKILL_GATE_TRIGGER:
         return GateDecision()
     gates = dict(gates) if gates is not None else read_gates(agent_name)
@@ -311,29 +319,82 @@ async def enforce(
 # Steps
 # ---------------------------------------------------------------------------
 
-def _approvers(agent_name: str, role: str) -> List[str]:
-    """The casefolded emails `role` reaches on `agent_name`; refuses when it
-    reaches nobody (an `approver` with no assignments provider, an `operator`
-    role, an owner with no email, a canon role nobody is seated in).
+def _resolved_people(agent_name: str, role: str) -> List[str]:
+    """The casefolded emails `role` names on `agent_name`, before any check of
+    whether they can open the agent. `[]` when it names nobody.
 
     `role` is the stored approver: a kind (`primary` | `approver`), or a canon
     role `role:<id>` (trinity-enterprise#848) resolved through the assignments
     provider alone — no owner fallback, so no provider and "nobody" refuse
-    alike. The refusal names the role's label, never a person."""
+    alike."""
     role_id = role_addressing.parse_role_id(role)
     try:
         res = (role_addressing.resolve_role_id(agent_name, role_id) if role_id
                else role_addressing.resolve(agent_name, role))
     except role_addressing.RoleRefused:
         res = None
-    people = [p.casefold() for p in (res.people if res else []) if p]
+    return [p.casefold() for p in (res.people if res else []) if p]
+
+
+def _can_open(agent_name: str, email: str) -> bool:
+    """Can this person reach a gated approval on `agent_name`? (trinity-enterprise#881)
+
+    A decision is made in the Workspace (the agent on the person's roster:
+    owned or shared) or in Operations (an operator or admin with access to the
+    agent). A platform account is asked `can_user_access_agent` — owner, shared
+    or admin, which covers both doors; an email with no account only has the
+    Workspace, so the agent must be shared with it. Fails closed: an unreadable
+    lookup is "cannot open", which refuses by name rather than waits silently."""
+    try:
+        user = db.get_user_by_email(email)
+        if user:
+            return bool(db.can_user_access_agent(user["username"], agent_name))
+        from client_portal.service import agent_on_roster
+        return bool(agent_on_roster(agent_name, email, include_owned=False))
+    except Exception:  # noqa: BLE001
+        logger.warning("[SkillGate] could not tell whether an approver can open %s",
+                       agent_name, exc_info=True)
+        return False
+
+
+def _approvers(agent_name: str, role: str) -> List[str]:
+    """The casefolded emails `role` reaches on `agent_name`: the people it names
+    who can open the agent (trinity-enterprise#881). Refuses when it reaches
+    nobody — `role_unassigned` when it names nobody (an `approver` with no
+    assignments provider, an `operator` role, an owner with no email, a canon
+    role nobody is seated in), `approver_cannot_open_agent` when everyone it
+    names is outside the agent. An approval raised to people who can never see
+    it waits silently until it expires. The refusal names the role's label,
+    never a person."""
+    people = _resolved_people(agent_name, role)
     if not people:
         raise SkillGateRefused(
             422, "role_unassigned",
             f"Nobody fills the {role_addressing.role_label(role)} role for {agent_name}, "
             "so this gated request can't be approved. Ask the agent's owner to assign one.",
             role=role)
-    return people
+    reachable = [p for p in people if _can_open(agent_name, p)]
+    if not reachable:
+        raise SkillGateRefused(
+            422, "approver_cannot_open_agent",
+            f"The {role_addressing.role_label(role)} for {agent_name} can't open {agent_name}, "
+            "so they would never see this approval. Ask the agent's owner to share "
+            f"{agent_name} with them.", role=role)
+    return reachable
+
+
+def approver_reason(agent_name: str, role: str) -> Optional[str]:
+    """Why `role` reaches nobody on `agent_name`, for the Skills tab
+    (trinity-enterprise#881): `unfilled` (it names nobody), `not_shared`
+    (everyone it names is outside the agent), or None when it reaches someone.
+    Never raises; a failed lookup reads `unfilled`."""
+    try:
+        _approvers(agent_name, role)
+        return None
+    except SkillGateRefused as e:
+        return "not_shared" if e.code == "approver_cannot_open_agent" else "unfilled"
+    except Exception:  # noqa: BLE001
+        return "unfilled"
 
 
 def approver_people(agent_name: str, role: str) -> List[str]:
@@ -1894,8 +1955,31 @@ def _person_label(email: str) -> str:
     return " ".join(str((user or {}).get("name") or "").split())[:DECIDER_NAME_MAX_CHARS] or email
 
 
+def _openable_run(viewer: Optional[str], agent_name: Optional[str],
+                  execution_id: Optional[str]) -> Optional[str]:
+    """`execution_id` when `viewer` can open its page, else None (trinity#3708).
+
+    The page is `/agents/{agent}/executions/{id}`: an operator route, so a
+    Workspace-only role is sent away from it, and its API is `AuthorizedAgent`,
+    so a viewer without access to THAT agent gets a 404. The requester's run is
+    on another agent than the gated one, which is why each id is checked
+    against its own agent. Fails closed: an unreadable user hides the link.
+    """
+    if not (viewer and agent_name and execution_id):
+        return None
+    from dependencies import is_workspace_only_role
+    try:
+        user = db.get_user_by_username(viewer)
+        if not user or is_workspace_only_role(user.get("role")):
+            return None
+        return execution_id if db.can_user_access_agent(viewer, agent_name) else None
+    except Exception:  # noqa: BLE001 — a link is a nicety; never fail the card
+        return None
+
+
 def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
-              with_run_ids: bool = False, name_approvers: bool = False) -> Optional[Dict[str, Any]]:
+              run_viewer: Optional[str] = None,
+              name_approvers: bool = False) -> Optional[Dict[str, Any]]:
     """What the approval card shows beside the ask's frozen `proposal`: the
     skills with their descriptions, who asked, the context lines the agent was
     also sent, who it is waiting on, whether this viewer may decide, and how
@@ -1905,8 +1989,9 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
     `proposal`, which any agent can write — so only a real gated request gets
     the card. `state` is the record's: `pending` | `dispatching` | `dispatched`
     | `succeeded` | `failed` | `denied` | `expired` | `cancelled` | `stale` |
-    `not_run` | `unknown`. Execution ids only `with_run_ids` (a platform
-    viewer, who can open them), and the approvers' names only `name_approvers`
+    `not_run` | `unknown`. Each execution id only when `run_viewer` (a
+    platform username) can open that run's page — its role and its access to
+    that agent (`_openable_run`) — and the approvers' names only `name_approvers`
     (the operator's queue, whose reader already sees `resolved_to`; a Workspace
     addressee is not told who else was asked). None when there is no such record.
     """
@@ -1934,7 +2019,8 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
             "kind": record.get("requester_kind"),
             "label": proposal.get("requester"),
             "agent": record.get("source_agent"),
-            "execution_id": record.get("requester_execution_id") if with_run_ids else None,
+            "execution_id": _openable_run(run_viewer, record.get("source_agent"),
+                                          record.get("requester_execution_id")),
         },
         "also_sent": _also_sent(item.get("question"), record["agent_name"],
                                 str(proposal.get("input") or ""), record.get("requester_kind")),
@@ -1943,7 +2029,8 @@ def card_view(item: Mapping[str, Any], *, viewer_email: Optional[str] = None,
         # (what Approve runs) stays below. None when there was no history.
         "request": _typed_request(str(proposal.get("input") or ""), record.get("requester_kind")),
         "state": record.get("state"),
-        "execution_id": record.get("dispatched_execution_id") if with_run_ids else None,
+        "execution_id": _openable_run(run_viewer, record["agent_name"],
+                                      record.get("dispatched_execution_id")),
         "waiting_on": [_person_label(p) for p in people] if name_approvers else [],
         # trinity-enterprise#848: the approver the ask went to, as a value and
         # a label — a kind's name, or a canon role's ("Head of sales"). Shown

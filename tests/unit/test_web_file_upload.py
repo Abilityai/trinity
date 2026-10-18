@@ -194,22 +194,13 @@ class TestProcessFileUploads:
             b"\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
         )
         raw = self._make_raw(name="img.png", mimetype="image/png", data=png)
-        # Images now persist their original bytes before becoming vision blocks.
-        # Patch the consumer directly: another test may have imported it before
-        # this module's optional dependency stubs were installed.
-        with (
-            patch.object(_svc, "container_exec_run", new=AsyncMock(return_value=(0, b""))),
-            patch.object(_svc, "container_put_archive", new=AsyncMock(return_value=True)),
-            patch.object(_svc.platform_audit_service, "log", new=AsyncMock()),
-        ):
-            descs, udir, failed, imgs = await _svc.process_file_uploads(
-                raw_files=[raw], agent_name="a", container=container,
-                session_id="s1", uploader="u"
-            )
+        descs, udir, failed, imgs = await _svc.process_file_uploads(
+            raw_files=[raw], agent_name="a", container=container,
+            session_id="s1", uploader="u"
+        )
         assert len(imgs) == 1
         assert imgs[0]["media_type"].startswith("image/")
-        assert udir is not None
-        assert any(f"saved to {udir}/img.png" in d for d in descs)
+        assert udir is None  # no container writes for images
         assert not failed
 
     @pytest.mark.asyncio
@@ -303,51 +294,3 @@ class TestProcessFileUploads:
                 )
         combined = " ".join(descs)
         assert "skipped" in combined or "more file" in combined
-
-
-@pytest.mark.asyncio
-async def test_image_original_write_failure_is_explicit():
-    with (patch.object(_svc, "_MAGIC_AVAILABLE", False),
-          patch.object(_svc, "container_exec_run", AsyncMock(return_value=(0, b""))),
-          patch.object(_svc, "container_put_archive", AsyncMock(return_value=False))):
-        desc, directory, failed, images = await _svc.process_file_uploads(
-            [{"name": "photo.jpg", "mimetype": "image/jpeg", "data": b"original"}],
-            "agent", MagicMock(), "session", "user")
-    assert failed and not images
-    assert "could not save" in desc[0] and "saved to" not in desc[0]
-
-
-@pytest.mark.asyncio
-async def test_image_original_bytes_and_dispatch_directories_are_isolated():
-    import io
-    import tarfile
-    archives = []
-    async def save(container, directory, archive):
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            member = tar.getmember("photo.jpg")
-            assert member.mode == 0o600
-            assert member.uid == member.gid == 1000
-            archives.append((directory, tar.extractfile(member).read()))
-        return True
-    with (patch.object(_svc, "_MAGIC_AVAILABLE", False),
-          patch.object(_svc, "container_exec_run", AsyncMock(return_value=(0, b""))),
-          patch.object(_svc, "container_put_archive", save)):
-        results = await asyncio.gather(*[
-            _svc.process_file_uploads(
-                [{"name": "photo.jpg", "mimetype": "image/jpeg", "data": data}],
-                "agent", MagicMock(), "same-session", "user")
-            for data in (b"first", b"second")])
-    assert results[0][1] != results[1][1]
-    assert {body for _, body in archives} == {b"first", b"second"}
-    assert all(r[1].startswith(_svc.UPLOAD_BASE + "/") for r in results)
-
-
-@pytest.mark.asyncio
-async def test_failed_mkdir_does_not_claim_original_saved():
-    with (patch.object(_svc, "_MAGIC_AVAILABLE", False),
-          patch.object(_svc, "container_exec_run", AsyncMock(return_value=(1, b"denied")))):
-        desc, directory, failed, images = await _svc.process_file_uploads(
-            [{"name": "photo.jpg", "mimetype": "image/jpeg", "data": b"original"}],
-            "agent", MagicMock(), "session", "user")
-    assert failed and not images and directory is None
-    assert "could not create" in desc[0]

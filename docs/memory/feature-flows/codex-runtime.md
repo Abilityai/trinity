@@ -228,29 +228,17 @@ Headless task images are passed to native `codex exec --image` options. Resumed
 turns put these options after `resume`, so images attach to the current turn.
 The runtime accepts base64 JPEG, PNG, GIF and WebP payloads, up to ten images,
 5 MiB each and 10 MiB combined; invalid payloads return HTTP 400 before spawn.
-A private, unique temporary directory holds mode-0600 copies only until the
-execution returns or raises (including cancellation and spawn failure).
+A private, unique mode-0700 temporary directory holds mode-0600 copies. Before
+subprocess handoff, failures remove partial files immediately. After handoff, the
+reader owns cleanup until subprocess reading and bounded cleanup finish. Canceling the
+HTTP waiter leaves those inputs and the process registry entry available until
+that worker completes; cleanup does not need another executor slot. Native
+process timeouts and explicit operator cancellation retain their existing policy.
+Text-only execution cancellation remains unchanged.
 
-The shared upload service retains original image bytes alongside vision data.
-Prompt descriptions contain the actual saved path. Each dispatch gets its own
-UUID directory under `/home/developer/uploads`, preventing filename collisions
-and cross-dispatch cleanup. The channel router attempts to remove that exact directory after
-known terminal execution outcomes, including failed response delivery, post-send
-hooks and cancellation during delivery. Preparation cancellation waits for the
-upload producer to settle before removing its directory, so a late Docker write
-cannot recreate it. Cancellation after dispatch, a waiter timeout with an active
-execution, or unreadable execution state deliberately retains originals: losing
-the waiter is not proof that the agent stopped reading. These exceptional retained
-directories require operator cleanup after confirming the execution is terminal;
-there is no automatic reaper or restart-recovery guarantee. Container cleanup
-errors or nonzero exit statuses are logged without masking the original outcome;
-they may also retain files. Web, public and
-session callers retain completed workspace uploads as before. A
-failed original write is explicit and does not queue a vision-only success.
-Existing upload authorization, size/MIME checks and audit events still apply.
-Channel agents receive the same Read permission used for other saved uploads.
+This change adds no persistent upload originals or tool permissions. Existing
+upload authorization, preprocessing, and channel behavior remain in place.
 
-Unit coverage: `test_codex_runtime.py` (initial/resumed argv, validation and
-lifetime), `test_web_file_upload.py` (original bytes, failure, isolation), and
-`test_channel_upload_lifetime.py` (terminal cleanup, active-task retention,
-interrupted preparation and repeated cancellation).
+Unit coverage: `test_codex_runtime.py` exercises initial/resumed argv, bounded
+validation, private permissions, spawn failure, concurrent isolation, and
+cancellation with a saturated reader executor.

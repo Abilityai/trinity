@@ -119,7 +119,7 @@ files: Optional[List[WebFileUpload]] = None  # (#364)
 
 **Authenticated chat** — `src/backend/routers/chat.py:858-894` (`execute_parallel_task`):
 - File processing block runs synchronously before the async/sync fork
-- `session_id` is `str(current_user.id)` (caller identity; storage uses a fresh UUID directory per dispatch)
+- `session_id` is `str(current_user.id)` (stable per user, scopes the upload directory)
 - `uploader` is `current_user.email or current_user.username`
 - On `all_writes_failed=True` → `502` with `"File upload failed: could not write to agent workspace."`
 - Appends file descriptions to `request.message` as a newline-joined block
@@ -160,14 +160,14 @@ for each file (up to max_files):
      - Image MIME mislabel (JPEG vs PNG) → accept with detected MIME
      - text/plain vs text/csv → accept
      - Other mismatch → reject with "file type mismatch"
-  5a. Save every accepted attachment with mkdir -p -m 700 + put_archive to /home/developer/uploads/{dispatch_uuid}/
-  5b. If image and storage succeeded → base64-encode → append to image_data list (vision data)
+  5a. If image → base64-encode → append to image_data list (vision blocks)
+  5b. If non-image → container mkdir -p + put_archive to /home/developer/uploads/{session_id}/
   6. Emit platform_audit_service.log(event_type=EXECUTION, event_action="file_upload")
 ```
 
 Returns:
 - `descriptions` — list of context strings injected into the agent prompt
-- `upload_dir` — container path for cleanup, or `None` if no upload directory was created
+- `upload_dir` — container path for cleanup, or `None` if no non-image writes occurred
 - `all_writes_failed` — `True` when at least one write was attempted but all failed
 - `image_data` — `[{"media_type": str, "data": base64_str}]` for `execute_task(images=...)`
 
@@ -186,31 +186,30 @@ Returns:
 1. Frontend encodes file via `FileReader.readAsDataURL` → `data: URI`
 2. `decode_web_file()` strips prefix → raw bytes
 3. `process_file_uploads()` validates, MIME-checks, and routes:
-   - Every accepted attachment → original bytes written to `/home/developer/uploads/{dispatch_uuid}/{filename}` via Docker `put_archive`
-   - Images → additionally collected as base64 in `image_data` only after successful storage
+   - Images → base64 collected in `image_data` list
+   - Non-images → written to `/home/developer/uploads/{session_id}/{filename}` in the running container via Docker `put_archive`
 4. File descriptions appended to the message text
-5. `task_execution_service.execute_task(images=image_data)` delivers images through the selected runtime: Claude Code uses `--input-format stream-json` vision content blocks; Codex uses native `--image` options
-6. Saved originals are readable by the agent at `/home/developer/uploads/{dispatch_uuid}/`
+5. `task_execution_service.execute_task(images=image_data)` invokes Claude Code with `--input-format stream-json`, delivering images as vision content blocks (not embedded text)
+6. Text files are readable by the agent at `/home/developer/uploads/{session_id}/`
 
 ### Docker Operations
-- `container_exec_run(container, f"mkdir -p -m 700 {upload_dir}", user="developer")` — create upload directory
-- `container_put_archive(container, upload_dir, tar_bytes)` — write file into container via tar stream with uid/gid 1000, mode 0o600
+- `container_exec_run(container, f"mkdir -p {upload_dir}", user="developer")` — create upload directory
+- `container_put_archive(container, upload_dir, tar_bytes)` — write file into container via tar stream with uid/gid 1000, mode 0o644
 
 ## Agent Layer
 
-The backend saves attachment originals directly into the agent container (Docker SDK) and passes image data through the existing `execute_task` path. Claude Code receives `--input-format stream-json` content blocks; Codex receives native `--image` options. See [Codex uploaded images](codex-runtime.md#uploaded-images) for runtime validation and temporary-file lifetime.
+Images are passed through to Claude Code via `--input-format stream-json` as content blocks. There is no agent-server endpoint involved; the backend writes files directly into the agent container (Docker SDK) and passes image bytes through the existing `execute_task` path.
 
 ## Side Effects
 
-- **Audit log**: `platform_audit_service.log(event_type=EXECUTION, event_action="file_upload")` fires once per successfully processed file; records filename, size, MIME, storage type (`container_file_and_vision` for images, `container_file` for non-images), dest_path, uploader, sender_id, channel_id, agent_name
-- **Retention**: Completed web, public and session uploads remain in the workspace. Channel cleanup follows known terminal execution outcomes; see [Codex uploaded images](codex-runtime.md#uploaded-images) for cancellation and retention details.
+- **Audit log**: `platform_audit_service.log(event_type=EXECUTION, event_action="file_upload")` fires once per successfully processed file; records filename, size, MIME, storage type (`stream_json_vision` for images, `container_file` for non-images), uploader, sender_id, channel_id, agent_name
 - **No WebSocket broadcast** specific to file uploads; the enclosing chat execution broadcasts normally via activity tracking
 
 ## Error Handling
 
 | Error Case | HTTP Status | Detail |
 |------------|-------------|--------|
-| All attachment writes fail | 502 | `"File upload failed: could not write to agent workspace."` |
+| All non-image writes fail | 502 | `"File upload failed: could not write to agent workspace."` |
 | Single file rejected (size) | — | Description appended to prompt: `"{name} — rejected (exceeds X limit)"` |
 | Single file rejected (MIME mismatch) | — | Description: `"{name} — rejected (file type mismatch)"` |
 | Unsupported format (PDF, tar/gzip/rar, video, audio) | — | Description: `"{name} — unsupported format ({mime}). Text, CSV, JSON, ZIP, and image files are supported."` (ZIP allowed since 2026-08) |
@@ -246,22 +245,21 @@ upload_service.process_file_uploads():
     reject unsupported MIME (PDF, tar/gzip/rar, video, audio)
     size check vs WEB_MAX_FILE_SIZE / WEB_MAX_IMAGE_SIZE
     magic-byte MIME validation (python-magic; fallback graceful; declared ZIP with ZIP signature bypasses libmagic, #3046)
-    docker exec mkdir -p -m 700 /home/developer/uploads/{dispatch_uuid}/
-    docker put_archive → original bytes written to container (mode 0600)
-    if image and storage succeeded:
+    if image:
       base64-encode → append to image_data list
-      audit log: storage=container_file_and_vision
-    otherwise, after successful storage:
+      audit log: storage=stream_json_vision
+    if non-image:
+      docker exec mkdir -p /home/developer/uploads/{session_id}/
+      docker put_archive → file written to container
       audit log: storage=container_file
   returns (descriptions, upload_dir, all_writes_failed, image_data)
     ↓
 router appends descriptions to message text
 router calls task_execution_service.execute_task(images=image_data)
     ↓
-execute_task → selected runtime
-  Claude Code: --input-format stream-json vision content blocks
-  Codex: native --image options
-  saved originals readable at /home/developer/uploads/{dispatch_uuid}/
+execute_task → claude code --input-format stream-json
+  images delivered as vision content blocks (not text data URIs)
+  text files readable at /home/developer/uploads/{session_id}/
 ```
 
 ## Testing
@@ -288,7 +286,7 @@ execute_task → selected runtime
    Verify: Claude Code receives image via `--input-format stream-json`; agent can describe image content
 
 3. **Attach a text file (`.csv`)**
-   Expected: file written to `/home/developer/uploads/{dispatch_uuid}/file.csv` in container
+   Expected: file written to `/home/developer/uploads/{session_id}/file.csv` in container
    Verify: `docker exec {container} ls /home/developer/uploads/` shows the file
 
 4. **Exceed 5 MB limit client-side**

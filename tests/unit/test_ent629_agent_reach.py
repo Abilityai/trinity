@@ -402,6 +402,10 @@ _EXEMPT = {
         "the terminal websocket authenticates a person, never an agent key",
     ("client_portal/service.py", "*"):
         "portal principals are people; agent keys never reach the client portal",
+    ("services/skill_gate_service.py", "_openable_run"):
+        "takes a person's username: the operator queue calls it for person principals only, the Workspace for a platform person (#3708)",
+    ("services/skill_gate_service.py", "_can_open"):
+        "takes an approver's email resolved from a role, a person, never a principal (ent#881)",
 }
 _PREDICATES = {"can_user_access_agent", "can_user_share_agent"}
 #: `_may_reach_for_path` is files.py's reach plus the ent#596 skills-holder case.

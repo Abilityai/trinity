@@ -484,16 +484,6 @@ screenshots:
     captured_at: 2026-10-14
     captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
 
-  - file: workspace-files-rail.webp
-    title: "Workspace — the Files rail"
-    route: /workspace/a/{name}
-    shows: "The rail on Files: the drop zone, files you sent, files the agent sent back."
-    sources:
-      - src/frontend/src/components/portal/PortalRail.vue
-      - src/frontend/src/components/portal/PortalRailFiles.vue
-    captured_at: 2026-10-14
-    captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
-
   - file: workspace-projects.webp
     title: "Workspace Projects — list (Enterprise)"
     route: /workspace/projects

@@ -87,6 +87,11 @@ def client(monkeypatch):
         can_user_access_agent=lambda user, name: name in state["access"],
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=_cancel_queued,
+        # #3749: message/send mints the row before dispatch; the stub's id is
+        # the one the execute stub below echoes back.
+        create_task_execution=lambda **kw: (
+            state.__setitem__("minted", kw), types.SimpleNamespace(id="exec-123"))[1],
+        get_agent_subscription_id=lambda name: None,
         # ent#679: the card producer reads the payment config to decide whether
         # to declare a price. Nothing in this file is priced — stub it
         # explicitly so the "card unchanged" assertions below prove the
@@ -106,8 +111,11 @@ def client(monkeypatch):
 
     # Fake task-execution service → deterministic success.
     class _Result:
-        def __init__(self):
-            self.execution_id = "exec-123"
+        def __init__(self, execution_id=None):
+            # #3749: echo the id the router minted (a stub that returned its own
+            # literal would make every id assertion below prove nothing); the
+            # stream path, which does not mint, keeps the literal.
+            self.execution_id = execution_id or "exec-stream"
             self.status = "success"
             self.response = "hello from bot"
             self.error = None
@@ -115,7 +123,7 @@ def client(monkeypatch):
     class _Svc:
         async def execute_task(self, **kwargs):
             state["last_execute"] = kwargs
-            return _Result()
+            return _Result(kwargs.get("execution_id"))
 
     # NOTE: the unit harness loads a duplicate `services.*` module, so patching
     # `services.task_execution_service` directly does NOT reach the router. We
@@ -153,6 +161,7 @@ def client(monkeypatch):
         def __init__(self, key=None, replay=False, in_flight=False, snapshot=None):
             self.key, self.replay, self.in_flight, self.snapshot = key, replay, in_flight, snapshot
             self.enabled = True
+            self.execution_id = None
 
     class _Idem:
         def begin(self, scope, key):
@@ -162,6 +171,9 @@ def client(monkeypatch):
             if rec is not None:
                 return _Dec(key=(scope, key), replay=True, snapshot=rec)
             return _Dec(key=(scope, key))
+
+        def attach_execution(self, decision, execution_id):
+            pass
 
         def complete(self, decision, execution_id, snapshot):
             if decision.key is not None:
@@ -535,7 +547,8 @@ def test_message_stream_emits_working_then_final_completed(client):
 def test_message_send_in_flight_duplicate_is_retryable_error(client, monkeypatch):
     class _InFlight:
         def begin(self, scope, key):
-            return types.SimpleNamespace(key=(scope, key), replay=True, in_flight=True, snapshot=None, enabled=True)
+            return types.SimpleNamespace(key=(scope, key), replay=True, in_flight=True, snapshot=None, enabled=True,
+                                         execution_id=None)
         def complete(self, *a, **k):
             pass
         def fail(self, *a, **k):

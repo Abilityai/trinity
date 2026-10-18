@@ -31,6 +31,19 @@ Explicit permission model controlling which agents can communicate with which. R
 - A permitted call can still be refused if it is too deep in a chain of agent-to-agent calls. See [Agent Network → Chain-Depth Limit](agent-network.md#concepts).
 - Every blocked call is recorded in the [audit log](../operations/audit-trail.md) as a refusal, so an admin can see which agent tried to reach which.
 
+### Which skills a permission lets the caller run
+
+**A peer may run what an agent declares; what an admin assigned needs a grant.**
+
+- A permission lets Agent A run the skills Agent B **declares itself** (the skills in B's own repository).
+- A skill **assigned to B from the skills library** (one at a time, or through a skill set) is not included. When A asks B to run it, the call is refused with `skill_not_granted` and nothing runs. The refusal is recorded in the audit log.
+- B itself, B's schedules and B's loops can always run every skill B holds. People are unaffected.
+- An agent can run every skill on an agent **it spawned**. The reverse is not true: a spawned agent calling its parent needs a grant like any other agent.
+- To let A run one library skill on B, an admin turns it on in A's **Permissions** tab, under **Library skills on agents this agent can call**. Each skill is granted separately and can be turned off again. Removing A's permission to call B also removes these grants.
+- **After an upgrade, nothing is granted.** **Settings → Agents** shows a notice listing every call between agents that used a library skill in the last 30 days and is now refused, with a **Grant** button for each. The Permissions list also shows when each library skill was last used.
+- **Known gap:** the check looks for the skill's name (`/skill-name`) in the request. If A describes the work in plain words without naming the skill, B may still choose to run it. Grant permissions only to agents you would trust with B's skills.
+- The MCP tool `get_agent_skills` marks each library skill with `peer_needs_grant`.
+
 ### When a withdrawn permission takes effect
 
 Each control re-reads the permission at a different moment, so removing one (or replacing the set with **Save Permissions**) reaches each at a different time:
@@ -57,6 +70,10 @@ Turning **Mount Shared Folders** off on the consuming agent works the same way: 
 | `/api/agents/{name}/permissions/{target}` | POST | Grant one target (owner or admin; human only) |
 | `/api/agents/{name}/permissions/{target}` | DELETE | Withdraw one target (owner or admin; human only) |
 | `/api/agents/permissions-edges` | GET | Every permission edge between agents you can access, in one call |
+| `/api/agents/{name}/peer-skills` | GET | For each agent `name` may call: the library skills on it, and whether `name` may run each |
+| `/api/agents/{name}/peer-skills/{target}/{skill}` | PUT | Let `name` run the library skill `skill` on `target` (admin; human only) |
+| `/api/agents/{name}/peer-skills/{target}/{skill}` | DELETE | Take that grant back (admin; human only) |
+| `/api/skills/peer-grants/drift` | GET | Calls between agents that used a library skill in the last 30 days and are now refused (admin) |
 | `/api/agents/{name}/reach/{target}` | GET | Whether `name` may call `target` — `{source_agent, target_agent, reachable}`, decided from the permission or the spawn record, never from which containers are running. The MCP server's agent-to-agent check reads it |
 
 Every grant, replacement and withdrawal is written to the audit log.

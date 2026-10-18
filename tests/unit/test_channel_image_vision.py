@@ -329,16 +329,9 @@ class TestHandleFileUploadsImageReturn:
             import adapters.message_router as mr
 
             router = mr.ChannelMessageRouter()
-            # Patch where upload_service uses these functions; its import may
-            # predate the dependency stubs above when the whole suite collects.
-            with (
-                patch("services.upload_service.container_exec_run", new=AsyncMock(return_value=(0, b""))),
-                patch("services.upload_service.container_put_archive", new=AsyncMock(return_value=True)),
-                patch("services.upload_service.platform_audit_service.log", new=AsyncMock()),
-            ):
-                result = await router._handle_file_uploads(
-                    adapter, message, "test-agent", container, "session-abc"
-                )
+            result = await router._handle_file_uploads(
+                adapter, message, "test-agent", container, "session-abc"
+            )
 
         assert len(result) == 4, "Return must be a 4-tuple"
         descriptions, upload_dir, all_writes_failed, image_data = result
@@ -400,16 +393,9 @@ class TestHandleFileUploadsImageReturn:
             import adapters.message_router as mr
 
             router = mr.ChannelMessageRouter()
-            # Patch where upload_service uses these functions; its import may
-            # predate the dependency stubs above when the whole suite collects.
-            with (
-                patch("services.upload_service.container_exec_run", new=AsyncMock(return_value=(0, b""))),
-                patch("services.upload_service.container_put_archive", new=AsyncMock(return_value=True)),
-                patch("services.upload_service.platform_audit_service.log", new=AsyncMock()),
-            ):
-                result = await router._handle_file_uploads(
-                    adapter, message, "test-agent", container, "session-abc"
-                )
+            result = await router._handle_file_uploads(
+                adapter, message, "test-agent", container, "session-abc"
+            )
 
         descriptions, upload_dir, all_writes_failed, image_data = result
         assert image_data == [], "CSV file must not appear in image_data"
