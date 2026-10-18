@@ -260,6 +260,24 @@ class ReadScope:
     def sees(self, agent: Optional[str]) -> bool:
         return self.names is None or agent in self.names
 
+    def sees_row(self, row: dict) -> bool:
+        """One row on a per-agent read the path gate already let through. A
+        person reads every row there; an agent key only its own rows and the
+        pairs it is a side of — what the fleet reads would show it."""
+        if not self.self_agent:
+            return True
+        return self.self_agent in (row.get("agent_name"), row.get("caller_agent"))
+
+    def caller_for(self, agent_name: str, caller: Optional[str]) -> tuple[bool, Optional[str]]:
+        """`(empty, caller)` for a per-agent list read of `agent_name`. An
+        agent key reading another agent's rows is held to the runs it
+        delegated (`caller` = itself); naming a different caller reads empty."""
+        if not self.self_agent or agent_name == self.self_agent:
+            return False, caller
+        if caller not in (None, self.self_agent):
+            return True, None
+        return False, self.self_agent
+
 
 def scope_for(current_user, *, machine: bool) -> ReadScope:
     """The one scope helper every evaluation read goes through."""

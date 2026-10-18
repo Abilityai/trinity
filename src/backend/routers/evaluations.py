@@ -230,6 +230,11 @@ async def list_agent_evaluations(
     `caller=` keeps the runs that agent delegated to this one (ent#937)."""
     # ent#366: an agent-scoped caller gets the tallies and not the words —
     # applied inside `_to_response`, so every read path below inherits it.
+    # ent#937: an agent key reads a sibling's rows only for the pairs it is a
+    # side of, even where a permission edge lets it past the path gate.
+    empty, caller = _scope(current_user).caller_for(agent_name, caller)
+    if empty:
+        return []
     rows = db.list_agent_evaluations(agent_name, limit, caller=caller)
     operator_agents = _operator_for(rows, current_user)
     return [_to_response(r, current_user, operator_agents) for r in rows]
@@ -452,7 +457,8 @@ async def get_execution_evaluation(
     the Tier-0 writer is the sweep, reachable by no route.
     """
     row = db.latest_tier0_for_execution(execution_id)
-    if not row or row.get("agent_name") != agent_name:
+    if (not row or row.get("agent_name") != agent_name
+            or not _scope(current_user).sees_row(row)):
         raise HTTPException(status_code=404, detail="not_evaluated")
     return _to_response(row, current_user, _operator_for([row], current_user))
 

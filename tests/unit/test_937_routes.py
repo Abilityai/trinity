@@ -15,6 +15,9 @@ the principal and the owner map are supplied. Pinned:
   * a machine never reads a judge's score (summary, aggregate, trend);
   * the chain stops at an inaccessible node and never echoes its id;
   * `caller=` / `callee=` on the list reads;
+  * the per-agent reads (`/agents/{name}/evaluations`, `.../executions/{id}/
+    evaluation`) hold an agent key to the same self/pair rule even where a
+    permission edge lets it past the path gate (09:20Z addendum);
   * a Workspace-only principal is refused by the operator floor (F12).
 """
 from __future__ import annotations
@@ -395,3 +398,50 @@ def test_workspace_only_principal_is_refused_on_every_new_route():
             dependencies.enforce_operator_floor(SimpleNamespace(scope={"route": route}),
                                                 _user("client", role="user"))
         assert exc.value.status_code == 403
+
+
+# --- per-agent reads narrowed for an agent key (09:20Z addendum) ---------------
+
+def _edge(monkeypatch):
+    """A permission edge: the path gate lets agent-a's key reach its siblings."""
+    from routers import evaluations
+    monkeypatch.setitem(evaluations.get_authorized_agent_by_name.__globals__,
+                        "agent_may_reach", lambda u, n, **k: True)
+
+
+def test_agent_key_lists_a_siblings_rows_only_for_pairs_it_is_a_side_of(fleet, monkeypatch):
+    _edge(monkeypatch)
+    _exec("b2", "agent-b"); _grade("b2", "agent-b")            # b's own run, no caller
+    fleet.as_user(_agent_key("agent-a"))
+    rows = fleet.get("/api/agents/agent-b/evaluations").json()
+    assert [r["execution_id"] for r in rows] == ["b1"]          # a delegated b1 only
+    # naming another caller does not widen it.
+    assert fleet.get("/api/agents/agent-b/evaluations",
+                     params={"caller": "agent-b"}).json() == []
+    # b delegated nothing to a: b's key reads none of a's rows.
+    fleet.as_user(_agent_key("agent-b"))
+    assert fleet.get("/api/agents/agent-a/evaluations").json() == []
+    # its own rows are unchanged.
+    own = fleet.get("/api/agents/agent-b/evaluations").json()
+    assert {r["execution_id"] for r in own} == {"b1", "b2"}
+
+
+def test_agent_key_reads_a_siblings_run_grade_only_as_its_caller(fleet, monkeypatch):
+    _edge(monkeypatch)
+    _exec("b2", "agent-b"); _grade("b2", "agent-b")
+    fleet.as_user(_agent_key("agent-a"))
+    assert fleet.get("/api/agents/agent-b/executions/b1/evaluation").status_code == 200
+    r = fleet.get("/api/agents/agent-b/executions/b2/evaluation")
+    assert (r.status_code, r.json()["detail"]) == (404, "not_evaluated")
+    fleet.as_user(_agent_key("agent-b"))
+    r = fleet.get("/api/agents/agent-a/executions/a1/evaluation")
+    assert (r.status_code, r.json()["detail"]) == (404, "not_evaluated")
+    assert fleet.get("/api/agents/agent-b/executions/b2/evaluation").status_code == 200
+
+
+def test_a_person_still_reads_every_row_of_an_agent_it_can_access(fleet):
+    _exec("b2", "agent-b"); _grade("b2", "agent-b")
+    fleet.as_user(_user(OWNER))
+    rows = fleet.get("/api/agents/agent-b/evaluations").json()
+    assert {r["execution_id"] for r in rows} == {"b1", "b2"}
+    assert fleet.get("/api/agents/agent-b/executions/b2/evaluation").status_code == 200
