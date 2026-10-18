@@ -1052,6 +1052,42 @@ own records, with **zero LLM calls**. OSS core, always on, no setting.
   The description states the self/pair scope and that an agent never sees judge scores,
   inside the 2,048-character cap.
 
+### Addendum — Operations › Evaluations tab (trinity-enterprise#938)
+
+Operator-facing read surface over the ent#935/#937 primitives — one tab, no new aggregate
+route, no direct table reads. Tier-0 blocks are OSS-core (AGENT_EVAL_STRATEGY §10: a read
+surface over an OSS primitive is an OSS primitive); the calibration pieces (judged-quality
+column, judge–human agreement tile, the rating affordance) wait on the OSS-vs-enterprise
+placement ruling and are not built until it lands.
+
+- **FR-15 — The tab and its audience**: `/operations?tab=evaluations` renders
+  `components/EvaluationsPanel.vue` from `views/Operations.vue`. The audience is the
+  **operator floor** (roles `operator`, `creator`, `admin` — ent#837's rung above `user`),
+  as the ent#938 DoD reads ("Admin / operator only"). The guard is the API: every read the
+  tab issues goes to the ent#937 routes, where the operator floor refuses role `user` with
+  403 `workspace_only`, an agent key reads only its own rows, and a machine principal never
+  receives a judge score (FR-12) — pinned under four principals by
+  `tests/unit/test_938_tab_guard.py`. The UI mirrors that guard (the tab is listed, and
+  its panel mounted, only at the floor; a deep link below it bounces to the default tab)
+  and is never the guard alone. Period picker: 7 days (default, `period=week`), 30 days
+  and custom (`period=custom&since&until`, API-validated ≤ 92 d; a bad window renders the
+  API's `invalid_period` message beside the picker and keeps the previous data). State
+  lives in `stores/evaluations.js`, the one domain store; its request set is pinned to the
+  ent#937 routes. Loading / failed / empty / stale follow `utils/loadingState.js::viewState`;
+  the empty state names the Tier-0 scope (scheduled and agent-triggered runs, graded about a
+  minute after they finish) and links to the Executions tab.
+- **FR-16 — Operator rating from the run page** (ruling T2, built after the placement
+  answer): human-only `POST|GET /api/agents/{name}/executions/{id}/rating` behind
+  `require_interactive` + the owner-tier agent gate, a small service into the existing
+  rating upsert, evaluator `operator:<identity>`, `target_kind='execution'`, no schema
+  change; the ent#935 write-fence tests are amended additively and an AST guard pins that
+  every Tier-0 reader keys on the evaluator. Never `quality` on a `platform:*` row.
+- **FR-17 — Fleet trend** (ruling T3): a nightly fleet series under the reserved
+  `platform:eval` owner with `dims={"scope":"fleet"}`, written only by the unscoped nightly
+  pass (a per-row write would be a partial fleet point), served by `GET /api/evaluations/trend`
+  to operator-floor persons; the chart caption states the one-day lag. The agreement floor
+  is one store constant (20 labels) with an ent#936 pointer (ruling T4).
+
 See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
 
 ---
