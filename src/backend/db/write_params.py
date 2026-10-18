@@ -50,6 +50,7 @@ class TaskExecutionFields(ExecutionSource):
     open_canvas_id: Optional[str] = None
     chain_depth: Optional[int] = None
     a2a_caller_identity: Optional[str] = None
+    parent_execution_id: Optional[str] = None
 
 
 @dataclass(frozen=True, kw_only=True)
