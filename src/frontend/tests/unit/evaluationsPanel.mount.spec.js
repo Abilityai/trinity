@@ -26,7 +26,7 @@
  * with the nightly / "series starts <date>" note, and falls back to "pick an
  * agent" when the API hands this reader no fleet points.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 import { nextTick, defineComponent, h, reactive } from 'vue'
@@ -63,6 +63,7 @@ const RouterLinkStub = defineComponent({
 
 import EvaluationsPanel from '../../src/components/EvaluationsPanel.vue'
 import { useEvaluationsStore } from '../../src/stores/evaluations'
+import { useAuthStore } from '../../src/stores/auth'
 
 const AGG = '/api/evaluations/aggregate'
 const FAILED = '/api/evaluations/failed'
@@ -347,12 +348,46 @@ describe('EvaluationsPanel — ?agent= deep link (C3)', () => {
 })
 
 describe('EvaluationsPanel — trend (C6)', () => {
-  beforeEach(() => setActivePinia(createPinia()))
+  // The trend's `days` runs back from now to the window's first day (I1):
+  // the fixture window ends at UNTIL, so that is now.
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(UNTIL))
+  })
+  afterEach(() => vi.useRealTimers())
 
   it('with no agent and no fleet points for this reader, says "pick an agent"', async () => {
     const w = await panel(byWindow())
     expect(w.find('[data-testid="eval-trend-pick"]').exists()).toBe(true)
     expect(w.find('[data-testid="eval-trend-chart"]').exists()).toBe(false)
+  })
+
+  // I2: the API answers [] both to a reader it does not hand the fleet series
+  // and to an admin before the first nightly pass; the copy says which.
+  it('an admin with no fleet points yet is told the nightly pass has not written one', async () => {
+    useAuthStore().user = { username: 'admin', role: 'admin' }
+    const w = await panel(byWindow())
+    const pick = w.find('[data-testid="eval-trend-pick"]').text()
+    expect(pick).toContain('No fleet points yet')
+    expect(pick).toContain('first nightly pass')
+    expect(pick).not.toContain('admins')
+  })
+
+  it.each(['operator', 'creator'])('a %s is told the fleet series is admin-only and to pick an agent', async (role) => {
+    useAuthStore().user = { username: 'op', role }
+    const w = await panel(byWindow())
+    const pick = w.find('[data-testid="eval-trend-pick"]').text()
+    expect(pick).toContain('fleet series is shown to admins')
+    expect(pick).toContain('Pick an agent')
+    expect(pick).not.toContain('nightly')
+  })
+
+  it('a period older than the trend keeps says so rather than "no graded days"', async () => {
+    const old = { ...CURRENT, since: '2026-06-01T00:00:00Z', until: '2026-06-30T00:00:00Z' }
+    const w = await panel(async (url, cfg) => (url === AGG && cfg.params.by === 'agent' && cfg.params.until !== SINCE
+      ? { data: old } : byWindow({ trend: [] })(url, cfg)), { agent: 'gamma' })
+    expect(w.find('[data-testid="eval-trend-empty"]').text()).toContain('last 92 days')
   })
 
   it('reads the stored checks-passed series for the selected agent over the window', async () => {
@@ -399,7 +434,14 @@ describe('EvaluationsPanel — trend (C6)', () => {
 })
 
 describe('EvaluationsPanel — fleet trend (C7)', () => {
-  beforeEach(() => setActivePinia(createPinia()))
+  // The trend's `days` runs back from now to the window's first day (I1):
+  // the fixture window ends at UNTIL, so that is now.
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(UNTIL))
+  })
+  afterEach(() => vi.useRealTimers())
 
   it('with no agent selected reads the fleet series — no agent= on the request', async () => {
     await panel(byWindow({ fleet: FLEET_POINTS }))

@@ -116,6 +116,7 @@
           :loading="store.trendLoading"
           :loaded="store.trendLoaded"
           :error="store.trendError"
+          :fleet-reader="authStore.role === 'admin'"
           @retry="store.loadTrend()"
         />
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -157,9 +158,11 @@ import EvalFailed from './evaluations/EvalFailed.vue'
 import EvalPairs from './evaluations/EvalPairs.vue'
 import EvalTrend from './evaluations/EvalTrend.vue'
 import { useEvaluationsStore, PERIODS } from '../stores/evaluations'
+import { useAuthStore } from '../stores/auth'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
 
 const store = useEvaluationsStore()
+const authStore = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 

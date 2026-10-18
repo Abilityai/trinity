@@ -100,7 +100,26 @@ export function windowDays(since, until) {
   return days
 }
 
+/**
+ * The trend route's `days` for a window: it reads `now - days .. now`, so the
+ * count runs back from NOW to the window's first day — a custom window that
+ * ended in the past plots its own days (review I1). `clipped` when the window
+ * opens before the route's ceiling reaches.
+ * @param {string} since  ISO-Z
+ * @param {number} [nowMs]  injectable for tests
+ */
+export function trendDays(since, nowMs = Date.now()) {
+  const lo = Date.parse(since)
+  if (!Number.isFinite(lo)) return { days: 0, clipped: false }
+  const need = Math.max(1, Math.ceil((nowMs - lo) / DAY_MS) + 1)
+  return { days: Math.min(need, MAX_TREND_DAYS), clipped: need > MAX_TREND_DAYS }
+}
+
 export const useEvaluationsStore = defineStore('evaluations', () => {
+  // Latest request wins (review I5): each loader stamps its request and drops
+  // an answer that a later request has overtaken, so two quick picker changes
+  // never leave the earlier window's numbers under the later picker state.
+  const seq = { load: 0, prev: 0, failed: 0, pairs: 0, trend: 0 }
   // --- picker state ---
   const period = ref('7d')
   const since = ref('')
@@ -184,6 +203,9 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
       dates,
       values,
       points: trend.value?.points?.length ?? 0,
+      // The window opens before the trend route's 92-day reach: its first
+      // days are outside the series, not "no graded days".
+      clipped: dates.length > 0 && trendDays(aggregate.value?.since).clipped,
       // The first day the series has a point, when that is after the window
       // opens — the fleet series is young, or the agent's first graded run is.
       startsOn: (() => {
@@ -226,32 +248,37 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
   async function load() {
     const p = params()
     if (!p) return
+    const mine = ++seq.load
     loading.value = true
     error.value = null
     errorCode.value = null
     try {
       const { data } = await api.get(AGGREGATE_URL, { params: p })
+      if (mine !== seq.load) return
       aggregate.value = data
       hasLoaded.value = true
       lastLoadedAt.value = Date.now()
       await Promise.all([loadPrevious(p, data), loadFailed(), loadPairs(), loadTrend()])
     } catch (err) {
+      if (mine !== seq.load) return
       // A failed refresh keeps `aggregate` on screen (viewState → stale);
       // never a synthetic empty payload in a catch.
       error.value = apiErrorMessage(err, "Couldn't load evaluations")
       errorCode.value = err?.response?.data?.detail?.code ?? null
     } finally {
-      loading.value = false
+      if (mine === seq.load) loading.value = false
     }
   }
 
   async function loadPrevious(p, data) {
     const prev = previousWindow(data?.since, data?.until)
+    const mine = ++seq.prev
     if (!prev) { prevAggregate.value = null; return }
     try {
       const { data: before } = await api.get(AGGREGATE_URL, { params: { ...p, ...prev } })
-      prevAggregate.value = before
+      if (mine === seq.prev) prevAggregate.value = before
     } catch {
+      if (mine !== seq.prev) return
       // Deltas are context, not the reading: a failed previous-window read
       // drops them to "—" and leaves the current numbers (and no banner).
       prevAggregate.value = null
@@ -270,10 +297,12 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
   async function loadFailed({ more = false } = {}) {
     const p = failedParams(more ? failed.value.items.length : 0)
     if (!p) return
+    const mine = ++seq.failed
     failedLoading.value = true
     failedError.value = null
     try {
       const { data } = await api.get(FAILED_URL, { params: p })
+      if (mine !== seq.failed) return
       failed.value = {
         items: more ? [...failed.value.items, ...data.items] : data.items,
         total: data.total,
@@ -281,10 +310,11 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
       }
       failedLoaded.value = true
     } catch (err) {
+      if (mine !== seq.failed) return
       // The rows already on screen stay; the block says the read failed.
       failedError.value = apiErrorMessage(err, "Couldn't load failed runs")
     } finally {
-      failedLoading.value = false
+      if (mine === seq.failed) failedLoading.value = false
     }
   }
 
@@ -295,18 +325,20 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
   async function loadPairs() {
     const q = periodQuery({ period: period.value, since: since.value, until: until.value })
     if (!q) return
+    const mine = ++seq.pairs
     pairsError.value = null
     try {
       const { data } = await api.get(AGGREGATE_URL, { params: { by: 'pair', ...q } })
-      pairsAggregate.value = data
+      if (mine === seq.pairs) pairsAggregate.value = data
     } catch (err) {
-      pairsError.value = apiErrorMessage(err, "Couldn't load delegated pairs")
+      if (mine === seq.pairs) pairsError.value = apiErrorMessage(err, "Couldn't load delegated pairs")
     }
   }
 
   async function loadTrend() {
-    const days = windowDays(aggregate.value?.since, aggregate.value?.until).length
-    if (!days) return
+    if (!windowDays(aggregate.value?.since, aggregate.value?.until).length) return
+    const { days } = trendDays(aggregate.value?.since)
+    const mine = ++seq.trend
     // Another agent's line is not a stale view of this one: drop it.
     if ((trend.value?.dims?.agent ?? '') !== agent.value) {
       trend.value = null
@@ -319,15 +351,16 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
         params: {
           metric: TREND_METRIC,
           ...(agent.value ? { agent: agent.value } : {}),   // none → the fleet series
-          days: Math.min(days, MAX_TREND_DAYS),
+          days,
         },
       })
+      if (mine !== seq.trend) return
       trend.value = data
       trendLoaded.value = true
     } catch (err) {
-      trendError.value = apiErrorMessage(err, "Couldn't load the trend")
+      if (mine === seq.trend) trendError.value = apiErrorMessage(err, "Couldn't load the trend")
     } finally {
-      trendLoading.value = false
+      if (mine === seq.trend) trendLoading.value = false
     }
   }
 

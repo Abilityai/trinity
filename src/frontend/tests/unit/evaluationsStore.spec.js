@@ -7,14 +7,14 @@
  * load is `failed`, a failed refresh (422 `invalid_period` included) keeps the
  * data and carries the API's own message.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 
 const http = vi.hoisted(() => ({ get: vi.fn() }))
 vi.mock('../../src/api', () => ({ default: { get: (...a) => http.get(...a) } }))
 
 import {
-  useEvaluationsStore, periodQuery, EVALUATION_URLS, AGGREGATE_URL, FAILED_URL,
+  useEvaluationsStore, periodQuery, EVALUATION_URLS, AGGREGATE_URL, FAILED_URL, TREND_URL,
 } from '../../src/stores/evaluations'
 
 const NOW = new Date('2026-10-18T12:00:00Z')
@@ -116,5 +116,75 @@ describe('useEvaluationsStore', () => {
     store.clearError()
     expect(store.error).toBeNull()
     expect(store.invalidPeriod).toBe(false)
+  })
+})
+
+describe('trend day range — derived from the selected window (review I1)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    http.get.mockReset()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(NOW)
+  })
+  afterEach(() => vi.useRealTimers())
+
+  const windowed = (since, until) => async (url) => (url === TREND_URL
+    ? { data: { metric: 'eval.checks_passed_rate', dims: { scope: 'fleet' }, points: [] } }
+    : { data: body(1, { since, until }) })
+
+  it('a custom window that ended in the past reaches back to its own first day', async () => {
+    http.get.mockImplementation(windowed('2026-08-01T00:00:00Z', '2026-09-01T00:00:00Z'))
+    const store = useEvaluationsStore()
+    store.period = 'custom'
+    await store.setCustomRange('2026-08-01', '2026-08-31')
+    const [, { params }] = http.get.mock.calls.find(([u]) => u === TREND_URL)
+    // 78.5 days from Aug 1 00:00 to now, rounded up, plus the day itself: the
+    // route's `now - days` then opens before the window does.
+    expect(params.days).toBe(80)
+    expect(store.trendChart.dates[0]).toBe('2026-08-01')
+    expect(store.trendChart.clipped).toBe(false)
+  })
+
+  it('a window older than the trend route keeps says so instead of reading as empty', async () => {
+    http.get.mockImplementation(windowed('2026-06-01T00:00:00Z', '2026-06-30T00:00:00Z'))
+    const store = useEvaluationsStore()
+    store.period = 'custom'
+    await store.setCustomRange('2026-06-01', '2026-06-29')
+    const [, { params }] = http.get.mock.calls.find(([u]) => u === TREND_URL)
+    expect(params.days).toBe(92)
+    expect(store.trendChart.clipped).toBe(true)
+  })
+})
+
+describe('overlapping loads — the latest request wins (review I5)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    http.get.mockReset()
+  })
+
+  it('an earlier window resolving last never replaces the later one on screen', async () => {
+    let releaseFirst
+    const first = new Promise((r) => { releaseFirst = r })
+    http.get.mockImplementation(async (url, { params }) => {
+      if (url === AGGREGATE_URL && params.by === 'agent' && params.period === 'week') {
+        await first
+        return { data: body(7) }
+      }
+      if (url === FAILED_URL) {
+        if (params.period === 'week') await first
+        return { data: { items: [{ execution_id: params.period }], total: 1, truncated: false } }
+      }
+      return { data: body(30) }
+    })
+    const store = useEvaluationsStore()
+    const a = store.load()                                  // 7 d, slow
+    const b = store.setPeriod('30d')                        // 30 d, fast
+    await b
+    expect(store.evaluatedCount).toBe(30)
+    releaseFirst()
+    await a
+    expect(store.evaluatedCount).toBe(30)                   // the stale week answer was dropped
+    expect(store.loading).toBe(false)
+    expect(store.failed.items.map((i) => i.execution_id)).toEqual(['custom'])
   })
 })
