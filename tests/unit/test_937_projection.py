@@ -187,6 +187,28 @@ def test_a_tier0_row_is_unchanged_for_an_agent():
     assert out.judge_findings is None
 
 
+@pytest.mark.parametrize("reader", [
+    {"agent_name": AGENT},
+    {"mcp_scope": "system"},
+])
+def test_a_machine_never_reads_an_admin_rows_judge_document(reader):
+    """An admin's POSTed `judge` is free-form, a person's words: withheld from
+    a machine on every row, like the comment — not only on Tier-1 rows. The
+    admin's `quality` is a human rating and stays (ent#366 class)."""
+    from models import User
+    from routers import evaluations
+    row = {**_tier1_row(), "evaluator": f"admin:{GRADER}", "quality": 0.25,
+           "judge": {"prose": "SECRET admin words",
+                     "findings": [{"dimension": "tone", "verdict": "fail",
+                                   "reason": "rude", "detail": "SECRET detail"}]}}
+    out = evaluations._to_response(row, User(id=1, username="o", role="user", **reader),
+                                   frozenset({AGENT}))
+    assert out.judge is None
+    assert out.judge_findings == [{"dimension": "tone", "verdict": "fail", "reason": "rude"}]
+    assert out.quality == 0.25
+    assert "SECRET" not in out.model_dump_json()
+
+
 def test_project_row_does_not_mutate_its_input():
     from services.evaluation_read_service import project_row
     row = _tier1_row()

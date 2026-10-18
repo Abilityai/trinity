@@ -219,15 +219,18 @@ def project_row(row: dict, *, machine: bool, operator: bool) -> dict:
     """One evaluation row for one reader; never mutates `row`.
 
     An operator (owner/admin, a person) reads the row as stored. Anyone else
-    reads the grader's kind only. A machine reading a Tier-1 row additionally
-    loses `quality` and the judge document, and gets `judge_findings` — the
-    one read guard for the judge's verdict (ent#936 TD-8)."""
+    reads the grader's kind only. A machine never reads a judge document —
+    on any row: an `admin:` row's `judge` is a person's free-form words, held
+    back like the comment — and gets `judge_findings` in its place; on a
+    Tier-1 row it also loses `quality`. The one read guard for the judge's
+    verdict (ent#936 TD-8)."""
     if operator and not machine:
         return row
     out = dict(row)
     out["evaluator"] = redact_evaluator(row.get("evaluator"))
-    if machine and is_tier1(row):
-        out["quality"] = None
+    if machine and (is_tier1(row) or row.get("judge") is not None):
+        if is_tier1(row):
+            out["quality"] = None
         out["judge"] = None
         out["judge_findings"] = judge_findings(row.get("judge"))
     return out
