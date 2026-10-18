@@ -646,9 +646,11 @@ async def sweep(*, limit: int = SWEEP_LIMIT, settle_seconds: int = SWEEP_SETTLE_
     async def one(execution_id: str) -> str:
         async with sem:
             try:
-                await asyncio.wait_for(
+                row = await asyncio.wait_for(
                     asyncio.to_thread(evaluate_execution, execution_id), timeout_seconds)
-                return "evaluated"
+                # None = not eligible or the write failed: no row landed, so
+                # the tick log must not report it as evaluated (review I6).
+                return "evaluated" if row is not None else "failed"
             except asyncio.TimeoutError:
                 logger.warning("[tier0] evaluation of %s exceeded %ss", execution_id,
                                timeout_seconds)

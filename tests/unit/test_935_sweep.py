@@ -140,6 +140,21 @@ def test_one_raising_evaluation_does_not_stop_the_batch(db_backend, no_staged, m
     assert result["failed"] == 1 and result["evaluated"] == 1
 
 
+def test_an_evaluation_that_wrote_no_row_counts_as_failed(db_backend, no_staged, monkeypatch):
+    """Review I6: `evaluate_execution` returns None when the run is not
+    eligible or its write failed. That is not an evaluation — the tick's
+    counts (the only tick-level log line) must say `failed`, or a run whose
+    write fails every tick reads as evaluated for 24 h."""
+    _seed("ex-nowrite", completed_ago=300)
+    _seed("ex-good", completed_ago=200)
+    real = t0.evaluate_execution
+    monkeypatch.setattr(t0, "evaluate_execution",
+                        lambda i: None if i == "ex-nowrite" else real(i))
+    result = _run(t0.sweep())
+    assert (result["evaluated"], result["failed"], result["timed_out"]) == (1, 1, 0)
+    assert set(_tier0_rows()) == {"ex-good"}
+
+
 def test_a_timed_out_evaluation_leaves_a_timeout_row(db_backend, no_staged, monkeypatch):
     """`wait_for` cannot stop a thread, so the bound is enforced by recording
     the timeout: the run gets a row every check of which is
