@@ -1,5 +1,6 @@
 """Execution-row create/update lifecycle, dispatch marker, and execution getters."""
 
+import json
 import logging
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -894,6 +895,73 @@ class ScheduleExecutionsMixin:
         out["metrics"] = {"count": int(metrics)}
         out["reports_in_window"] = {"count": len(report_ids), "ids": report_ids}
         return out
+
+    # ent#935 — the Tier-0 `budget_vs_baseline` series: the same work's last
+    # successful runs. A schedule run's series is its schedule; an agent-
+    # triggered run's is the agent plus the playbook it invoked (or plain
+    # messages). Bounded: at most `_SERIES_SCAN` rows are read for an agent
+    # series before filtering by playbook.
+    _SERIES_SCAN = 100
+
+    @staticmethod
+    def _series_key(message: Optional[str]) -> str:
+        text = (message or "").lstrip()
+        if text.startswith("/"):
+            return text[1:].split(None, 1)[0] if text[1:].strip() else "message"
+        return "message"
+
+    @staticmethod
+    def _tool_call_count(raw: Optional[str]) -> Optional[int]:
+        """Length of the #1741 tool-call summary; None when absent or when the
+        column still holds a legacy raw transcript (not a count of tools)."""
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(parsed, list):
+            return None
+        if any(not isinstance(e, dict) or e.get("type") != "tool_use" for e in parsed):
+            return None
+        return len(parsed)
+
+    def recent_series_metrics(self, execution_id: str, limit: int = 20) -> List[Dict]:
+        """`{cost, duration_ms, context_used, tool_call_count}` for up to `limit`
+        earlier SUCCESSFUL runs in the same series as `execution_id`, newest
+        first. Empty when the run is unknown. NULL metrics stay None."""
+        cols = schedule_executions.c
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(cols.schedule_id, cols.agent_name, cols.triggered_by,
+                       cols.message, cols.completed_at)
+                .where(cols.id == execution_id)
+            ).first()
+            if row is None:
+                return []
+            conds = [cols.id != execution_id, cols.status == "success"]
+            if row.completed_at:
+                conds.append(cols.completed_at < row.completed_at)
+            if row.triggered_by == "schedule" and row.schedule_id:
+                conds.append(cols.schedule_id == row.schedule_id)
+                scan = limit
+            else:
+                conds += [cols.agent_name == row.agent_name, cols.triggered_by == "agent"]
+                scan = self._SERIES_SCAN
+            rows = conn.execute(
+                select(cols.cost, cols.duration_ms, cols.context_used, cols.tool_calls,
+                       cols.message)
+                .where(and_(*conds))
+                .order_by(cols.completed_at.desc())
+                .limit(scan)
+            ).all()
+        if not (row.triggered_by == "schedule" and row.schedule_id):
+            key = self._series_key(row.message)
+            rows = [r for r in rows if self._series_key(r.message) == key]
+        return [{"cost": r.cost, "duration_ms": r.duration_ms,
+                 "context_used": r.context_used,
+                 "tool_call_count": self._tool_call_count(r.tool_calls)}
+                for r in rows[:limit]]
 
     # ent#525 — the in-flight rows a Workspace chat is waiting on.
     _CHAT_INFLIGHT_STATUSES = ("running", "queued")

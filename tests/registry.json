@@ -6148,6 +6148,17 @@
       "description": "Tier-0 checks part 1 (ent#935 A1): execution_exists, credential_echo (counts only, staged secrets in memory), validate_001, deliverable_landed incl. the null test (bare Done with zero receipts fails; explicit no-op skips no_claim; window-matched report skips unattributable, never passes; commit claim skips no_receipt_source); scrubbed <=200-char excerpt; count_hits; evaluate_execution end-to-end (receipts by the run's own id, a raising check is skip:evaluator_error and the row is still written, trigger/terminal gate, failed write never raises, staged values fail open)."
     },
     {
+      "file": "unit/test_935_tier0_checks_part2.py",
+      "feature": "abilityai/trinity-enterprise#935",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Tier-0 checks part 2 (ent#935 A2): playbook_outputs gate (frontmatter outputs: first via the ent#183 hardened parser, ## Output prose fallback; missing receipt fails, window-matched report skips unattributable, Unknown command fails playbook_unresolved, Not done footer skips declared_not_done, named skips, no skill text in evidence); budget_vs_baseline signal (p5-p95 band of the series' last <=20 successful runs, min 5, NULL never zero, both sides); recent_series_metrics (schedule series, agent+playbook series); TD-7 headline from gates only (a failing signal never moves it); skill lookup failure is skip:skill_unreadable; null tests: do-nothing and claims-everything-done fail the headline, an honest abort passes it."
+    },
+    {
       "file": "unit/test_935_intent_resolution.py",
       "feature": "abilityai/trinity-enterprise#935",
       "added": "2026-10-18",

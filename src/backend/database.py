@@ -1931,6 +1931,12 @@ class DatabaseManager:
         return self._schedule_ops.get_execution_receipts(
             execution_id, agent_name, started_at, completed_at, grace_seconds)
 
+    def recent_series_metrics(self, execution_id: str, limit: int = 20):
+        return self._schedule_ops.recent_series_metrics(execution_id, limit)
+
+    def tool_call_count(self, raw):
+        return self._schedule_ops._tool_call_count(raw)
+
     def get_execution_failure_stamp(self, execution_id: str):
         """`(status, error, completed_at)` or None — the #3245 liveness read."""
         return self._schedule_ops.get_execution_failure_stamp(execution_id)

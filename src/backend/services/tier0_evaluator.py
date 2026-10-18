@@ -17,8 +17,9 @@ text field, a claim excerpt, is ≤200 chars and scrubbed (decision 17), because
 the graded agent can read its own row.
 
 Gate checks (counted in the "Checks passed" headline, TD-7) carry
-`tier='gate'`; signals land in A2 with `tier='signal'`. Every check here is
-graded from platform records (`source='platform'`).
+`tier='gate'`; signals carry `tier='signal'` — recorded, listed, and never
+counted in `headline()`. Every check here is graded from platform records
+(`source='platform'`).
 """
 from __future__ import annotations
 
@@ -246,12 +247,198 @@ def check_deliverable_landed(ctx: Dict[str, Any]) -> Dict[str, Any]:
     return _fail("claim_without_receipt", **evidence)
 
 
+# --- playbook_outputs ------------------------------------------------------------
+
+# What a declared output word means as a receipt. `report` can only ever be
+# window-matched (reports carry no execution id, TD-3); a word outside this map
+# (file, canvas, commit, …) has no receipt source and is counted, not guessed.
+_OUTPUT_KINDS = {
+    "report": "report", "reports": "report",
+    "ask": "ask", "asks": "ask", "approval": "ask", "approvals": "ask",
+    "question": "ask", "alert": "ask", "alerts": "ask", "operator": "ask",
+    "metric": "metric", "metrics": "metric",
+    "effect": "effect", "message": "effect", "messages": "effect", "email": "effect",
+    "emails": "effect", "slack": "effect", "notification": "effect",
+    "notifications": "effect",
+}
+_RECEIPT_FOR_KIND = {"ask": "asks", "effect": "effects", "metric": "metrics"}
+_PROSE_OUTPUT_HEADING_RE = re.compile(r"^##[ \t]+outputs?\b[^\n]*$", re.IGNORECASE | re.MULTILINE)
+_NEXT_HEADING_RE = re.compile(r"^#{1,2}[ \t]", re.MULTILINE)
+_PROSE_WORD_RE = re.compile(r"\b(" + "|".join(sorted(_OUTPUT_KINDS, key=len, reverse=True)) + r")\b",
+                            re.IGNORECASE)
+_NOT_DONE_RE = re.compile(r"^[ \t]*not done[ \t]*:[ \t]*([^\n]*)$", re.IGNORECASE | re.MULTILINE)
+_NOT_DONE_NONE = frozenset({"", "none", "none.", "nothing", "n/a", "-"})
+
+
+def _frontmatter_outputs(content: str):
+    """The `outputs:` key, read through the ent#183 hardened frontmatter
+    parser with the contract's precedence (a `trinity:` block wins over the
+    flat key). None when absent or the frontmatter is refused."""
+    from services.skill_packaging import parse_frontmatter
+    fm, _warning = parse_frontmatter(content)
+    if not isinstance(fm, dict):
+        return None
+    block = fm.get("trinity")
+    if isinstance(block, dict) and block.get("outputs") is not None:
+        raw = block.get("outputs")
+    else:
+        raw = fm.get("outputs")
+    if raw is None:
+        return None
+    return raw if isinstance(raw, list) else [raw]
+
+
+def declared_outputs(content: Optional[str]) -> Optional[Dict[str, Any]]:
+    """`{source: frontmatter|prose, kinds: [...], unmapped: n}` or None.
+
+    Frontmatter first (TD-5); the `## Output` prose section only when the
+    frontmatter declares nothing. Kinds are the receipt vocabulary above,
+    sorted and de-duplicated; never raises on hostile input."""
+    text, _ = _bounded(content)
+    if not text:
+        return None
+    entries = _frontmatter_outputs(text)
+    if entries:
+        kinds, unmapped = set(), 0
+        for entry in entries:
+            word = entry.get("kind") or entry.get("type") if isinstance(entry, dict) else entry
+            kind = _OUTPUT_KINDS.get(word.strip().lower()) if isinstance(word, str) else None
+            if kind:
+                kinds.add(kind)
+            else:
+                unmapped += 1
+        return {"source": "frontmatter", "kinds": sorted(kinds), "unmapped": unmapped}
+    heading = _PROSE_OUTPUT_HEADING_RE.search(text)
+    if not heading:
+        return None
+    body = text[heading.end():]
+    nxt = _NEXT_HEADING_RE.search(body)
+    body = body[:nxt.start()] if nxt else body
+    kinds = {_OUTPUT_KINDS[m.group(1).lower()] for m in _PROSE_WORD_RE.finditer(body)}
+    if not kinds:
+        return None
+    return {"source": "prose", "kinds": sorted(kinds), "unmapped": 0}
+
+
+def _declared_not_done(text: str) -> bool:
+    """The fleet's honest-abort footer: `Not done: <something other than none>`."""
+    return any(m.group(1).strip().lower() not in _NOT_DONE_NONE for m in _NOT_DONE_RE.finditer(text))
+
+
+def check_playbook_outputs(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Every output the invoked skill declares must have left a receipt.
+
+    - not a `/playbook` run → `skip: not_a_playbook`
+    - the runtime answered "Unknown command" (#1410) → fail `playbook_unresolved`
+    - skill not found in the library → `skip: contract_unresolved`; the
+      lookup failing → `skip: skill_unreadable`
+    - nothing declared → `skip: no_declared_outputs`; declared but none with a
+      receipt source → `skip: no_checkable_outputs`
+    - the reply's `Not done:` footer names missing work → `skip:
+      declared_not_done` (an honest abort is not graded as a silent miss)
+    - a declared ask / effect / metric with zero receipts, or a declared report
+      with no report at all in the run's window → fail `declared_output_missing`
+    - otherwise a report only window-matched → `skip: unattributable` (TD-3)
+    """
+    intent = ctx["intent"]
+    if intent["kind"] != "playbook":
+        return _skip("not_a_playbook")
+    if intent["unresolved"]:
+        return _fail("playbook_unresolved")
+    skill = ctx.get("skill") or {}
+    if skill.get("status") == "unreadable":
+        return _skip("skill_unreadable", error=skill.get("error"))
+    if skill.get("status") != "found":
+        return _skip("contract_unresolved")
+    declared = declared_outputs(skill.get("content"))
+    provenance = {"skill_source_id": skill.get("source_id"), "skill_version": skill.get("version")}
+    if declared is None:
+        return _skip("no_declared_outputs", **provenance)
+    evidence: Dict[str, Any] = {"declared": declared["kinds"], "contract_source": declared["source"],
+                                "unmapped": declared["unmapped"], **provenance}
+    if not declared["kinds"]:
+        return _skip("no_checkable_outputs", **evidence)
+    text, _ = _bounded(ctx["execution"].get("response"))
+    if _declared_not_done(text):
+        return _skip("declared_not_done", **evidence)
+    receipts = ctx.get("receipts") or {}
+
+    def _count(key):
+        return int((receipts.get(key) or {}).get("count") or 0)
+
+    missing, landed, unattributable = [], [], []
+    for kind in declared["kinds"]:
+        if kind == "report":
+            (unattributable if _count("reports_in_window") else missing).append(kind)
+        else:
+            (landed if _count(_RECEIPT_FOR_KIND[kind]) else missing).append(kind)
+    evidence.update(missing=missing, landed=landed, unattributable=unattributable)
+    if missing:
+        return _fail("declared_output_missing", **evidence)
+    if unattributable:
+        return _skip("unattributable", **evidence)
+    return _pass(**evidence)
+
+
+# --- budget_vs_baseline (signal) ---------------------------------------------------
+
+BASELINE_MIN_RUNS = 5
+BASELINE_METRICS = ("cost", "duration_ms", "tool_call_count", "context_used")
+
+
+def _percentile(sorted_values: List[float], pct: float) -> float:
+    """Nearest-rank percentile over an already-sorted, non-empty list."""
+    rank = max(1, -(-len(sorted_values) * pct // 100))   # ceil without float drift
+    return sorted_values[int(rank) - 1]
+
+
+def check_budget_vs_baseline(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Cost / duration / tool calls / context against the p5–p95 band of the
+    same series' last successful runs (at most 20, at least 5). A metric the
+    run did not record, or with fewer than 5 recorded history values, is left
+    out — NULL is never read as zero. Outside the band on either side fails:
+    far cheaper than usual is as much a signal as far dearer."""
+    series = ctx.get("series")
+    if series is None:
+        return _skip("history_unreadable")
+    if len(series) < BASELINE_MIN_RUNS:
+        return _skip("insufficient_history", n=len(series))
+    ex = ctx["execution"]
+    metrics: Dict[str, Any] = {}
+    outside: List[str] = []
+    for name in BASELINE_METRICS:
+        observed = ex.get(name)
+        history = sorted(h[name] for h in series if h.get(name) is not None)
+        if observed is None or len(history) < BASELINE_MIN_RUNS:
+            continue
+        p5, p95 = _percentile(history, 5), _percentile(history, 95)
+        metrics[name] = {"p5": p5, "p95": p95, "observed": observed}
+        if observed < p5 or observed > p95:
+            outside.append(name)
+    if not metrics:
+        return _skip("no_comparable_metrics", n=len(series))
+    if outside:
+        return _fail("outside_baseline", n=len(series), outside=outside, metrics=metrics)
+    return _pass(n=len(series), metrics=metrics)
+
+
 CHECKS: List[Check] = [
     Check("execution_exists", "gate", "platform", check_execution_exists),
     Check("credential_echo", "gate", "platform", check_credential_echo),
     Check("validate_001", "gate", "platform", check_validate_001),
     Check("deliverable_landed", "gate", "platform", check_deliverable_landed),
+    Check("playbook_outputs", "gate", "platform", check_playbook_outputs),
+    Check("budget_vs_baseline", "signal", "platform", check_budget_vs_baseline),
 ]
+
+
+def headline(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The run's headline, from GATE checks only (TD-7): it passes when no gate
+    failed. Skips never count against it; signals are never read here."""
+    gates = [r for r in results if r.get("tier") == "gate"]
+    counts = {s: sum(1 for r in gates if r.get("status") == s) for s in ("pass", "fail", "skip")}
+    return {"passed": counts["fail"] == 0, "gate_pass": counts["pass"],
+            "gate_fail": counts["fail"], "gate_skip": counts["skip"]}
 
 
 # --- the run ------------------------------------------------------------------
@@ -265,6 +452,26 @@ def _staged_values() -> List[str]:
     except Exception as e:  # noqa: BLE001
         logger.debug("[tier0] staged values unavailable: %s", type(e).__name__)
         return []
+
+
+def _load_skill(ref: str) -> Optional[Dict[str, Any]]:
+    """The invoked skill from the library (the contract the run is graded
+    against — the library's copy, recorded with its source and tree sha, since
+    the agent's workspace is not readable from here). `not_found` for a
+    namespaced plugin ref or a skill the library does not hold; a failing
+    lookup is `unreadable` with the exception class only."""
+    if ":" in ref:
+        return {"status": "not_found"}
+    try:
+        from services.skill_service import skill_service
+        info = skill_service.get_skill(ref)
+    except Exception as e:  # noqa: BLE001 — a dead clone costs the check, never the row
+        logger.debug("[tier0] skill lookup failed for %s: %s", ref, type(e).__name__)
+        return {"status": "unreadable", "error": type(e).__name__}
+    if not info or not info.get("content"):
+        return {"status": "not_found"}
+    return {"status": "found", "content": info["content"],
+            "source_id": info.get("source_id"), "version": info.get("version")}
 
 
 def _iso(value) -> Optional[str]:
@@ -303,6 +510,9 @@ def evaluate_execution(execution_id: str) -> Optional[dict]:
         "response": row.response, "error": row.error,
         "turn_integrity": row.turn_integrity, "business_status": row.business_status,
         "validation_execution_id": getattr(row, "validation_execution_id", None),
+        "schedule_id": row.schedule_id, "cost": row.cost, "duration_ms": row.duration_ms,
+        "context_used": row.context_used,
+        "tool_call_count": db.tool_call_count(row.tool_calls),
     }
     intent = resolve_intent(row.message, response=row.response)
     try:
@@ -311,21 +521,28 @@ def evaluate_execution(execution_id: str) -> Optional[dict]:
     except Exception as e:  # noqa: BLE001 — absent receipts read as zero, never a crash
         logger.warning("[tier0] receipts read failed for %s: %s", execution_id, type(e).__name__)
         receipts = None
+    try:
+        series = db.recent_series_metrics(row.id)
+    except Exception as e:  # noqa: BLE001 — no history reads as a skip, never a crash
+        logger.warning("[tier0] series read failed for %s: %s", execution_id, type(e).__name__)
+        series = None
+    skill = _load_skill(intent["ref"]) if intent["kind"] == "playbook" and not intent["unresolved"] else None
     ctx = {"execution": execution, "intent": intent, "receipts": receipts,
-           "staged_values": _staged_values()}
+           "skill": skill, "series": series, "staged_values": _staged_values()}
     if receipts is None:
         ctx["receipts"] = {}
 
     results = [_run_check(c, ctx) for c in CHECKS]
     if receipts is None:
         for r in results:
-            if r["id"] == "deliverable_landed" and r["status"] != "skip":
+            if r["id"] in ("deliverable_landed", "playbook_outputs") and r["status"] != "skip":
                 r.update(status="skip", reason="receipts_unreadable")
     checks = {
         "schema": SCHEMA_VERSION,
         "intent_ref": {"kind": intent["kind"], "ref": intent["ref"],
                        "unresolved": intent["unresolved"]},
         "evaluated_at": utc_now_iso(),
+        "headline": headline(results),
         "checks": results,
     }
     try:

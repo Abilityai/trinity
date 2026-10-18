@@ -921,7 +921,7 @@ own records, with **zero LLM calls**. OSS core, always on, no setting.
   enter a rating read: every tally and per-person read keys on a `workspace:` /
   `operator:` evaluator.
 - **FR-8 — Checks vocabulary**: `checks_json = {schema: 1, intent_ref, evaluated_at,
-  checks: [...]}`; each check is `{id, tier: gate|signal, source:
+  headline, checks: [...]}`; each check is `{id, tier: gate|signal, source:
   platform|agent_reported, status: pass|fail|skip, reason?, evidence}`. A skip always
   names its reason; a check that raises is `skip: evaluator_error` (exception class
   only) and never costs the row. Evidence is counts, ids, paths and hashes only; the
@@ -936,9 +936,29 @@ own records, with **zero LLM calls**. OSS core, always on, no setting.
   ("nothing to do", "no new items") is `skip: no_claim`, a report published in the
   run's time window is `skip: unattributable` and never a pass — reports carry no
   execution id — and a commit/push claim alone is `skip: no_receipt_source`),
-  `playbook_outputs` (the ent#183 skill contract's declared outputs, `## Output` prose
-  only when the contract declares none). Signal checks (listed, not counted in the
-  headline): `budget_vs_baseline`, `trajectory_bounds`, `footprint`.
+  `playbook_outputs` (every output the invoked skill declares must have left a receipt:
+  declared outputs come from an `outputs:` frontmatter key — flat or under `trinity:`,
+  read through the ent#183 hardened frontmatter parser; the contract itself does not
+  carry it yet — and from the `## Output` prose section only when the frontmatter
+  declares none; the skill is the library's copy, recorded by source id and tree sha. A
+  declared ask / outbound effect / metric with zero receipts, or a declared report with
+  no report at all in the run's window, fails; a report only window-matched is `skip:
+  unattributable`; an "Unknown command" reply (#1410) fails `playbook_unresolved`; a
+  reply whose `Not done:` footer names missing work is `skip: declared_not_done`, so an
+  honest abort is not graded as a silent miss; a non-playbook run, a skill the library
+  does not hold, or nothing declared is a named skip). Signal check (listed, never
+  counted in the headline): `budget_vs_baseline` (cost, duration, tool-call count and
+  context against the p5–p95 band of the same series' last ≤20 successful runs — the
+  schedule, or for an agent-triggered run the agent plus the playbook it invoked; fewer
+  than 5 → `skip: insufficient_history`; a metric the run or its history did not record
+  is left out, never read as zero; outside the band on either side fails). **Headline**
+  (`headline = {passed, gate_pass, gate_fail, gate_skip}`): computed from gate checks
+  only — the run passes when no gate failed; skips never count against it and a failing
+  signal never moves it. The null tests hold on the headline: a do-nothing run and a
+  claims-everything-done run both fail it, an honest abort passes it. Two further
+  signals — `trajectory_bounds` and `footprint` — are planned but not built: the
+  per-tool-call records they were specified against are not written by the platform
+  today, so they await a data-source decision.
 - **FR-9 — Sweep**: a backend loop (every 60 s, Redis leader lease, fail-open — the
   write is idempotent on the index) grades up to 25 runs per cycle that are terminal
   (`success`/`failed`/`cancelled`), triggered by `schedule` or `agent`, completed at
