@@ -5,8 +5,10 @@ The platform's own daily `eval.*` points, written under the reserved owner
 refuses the `eval.` prefix for every principal — `eval_namespace_reserved`),
 so a scorecard can only ever come from here.
 
-One series per agent (`dims={"agent": a}`) and one per delegation pair
-(`dims={"caller": c, "callee": a}`), one point per UTC day the runs
+One series per agent (`dims={"agent": a}`), one per delegation pair
+(`dims={"caller": c, "callee": a}`) and one for the whole fleet
+(`dims={"scope": "fleet"}`, ent#938 — never `{}`, which the dims reader
+cannot select), one point per UTC day the runs
 COMPLETED in (the read layer's bucket). Each point is the fold of that day's
 Tier-0 rows — the five counts (`evaluated`, `completed`, `graded`, `passed`,
 `judged`) beside the rates, so a multi-day window sums counts and rebuilds
@@ -16,7 +18,12 @@ written: absence, not a zero that reads as "all failed".
 Two writers, one result. `on_tier0_row` restates the day of the run just
 graded (called by `tier0_evaluator` after its write); `nightly_pass` restates
 the last `NIGHTLY_DAYS` days for every agent, which also catches a late
-Tier-1 verdict or a human rating. Both compute from the same rows, and a
+Tier-1 verdict or a human rating. Only the nightly pass's UNSCOPED read writes
+the fleet point: the per-row restate and the over-cap per-agent retry each see
+one agent's rows, and a fleet point folded from those would be a partial
+number stored as a whole one. So the fleet series is complete through
+yesterday and has a gap on a day whose fleet window was over the cap. Both
+compute from the same rows, and a
 point's identity is `(metric, day, dims)`, so a second write is a correction
 (ent#729 `corrected`), never a duplicate.
 
@@ -32,6 +39,7 @@ from typing import Any, Dict, List, Optional
 from database import db
 from services.evaluation_read_service import (
     EVAL_METRICS,
+    FLEET_DIMS,
     PLATFORM_EVAL_OWNER,
     fold,
 )
@@ -66,13 +74,16 @@ def day_bounds(day: datetime) -> tuple[str, str]:
     return to_utc_iso(start), to_utc_iso(start + timedelta(days=1))
 
 
-def _series(rows: List[dict]) -> Dict[tuple, List[dict]]:
-    """Rows grouped by series key: `("agent", a)` and `("pair", caller, callee)`."""
+def _series(rows: List[dict], *, fleet: bool) -> Dict[tuple, List[dict]]:
+    """Rows grouped by series key: `("agent", a)`, `("pair", caller, callee)`
+    and, when `fleet`, `("fleet",)` over every row."""
     groups: Dict[tuple, List[dict]] = {}
     for r in rows:
         agent = r.get("agent_name")
         if not agent:
             continue
+        if fleet:
+            groups.setdefault(("fleet",), []).append(r)
         groups.setdefault(("agent", agent), []).append(r)
         if r.get("caller_agent"):
             groups.setdefault(("pair", r["caller_agent"], agent), []).append(r)
@@ -80,15 +91,20 @@ def _series(rows: List[dict]) -> Dict[tuple, List[dict]]:
 
 
 def _dims(key: tuple) -> Dict[str, str]:
+    if key[0] == "fleet":
+        return dict(FLEET_DIMS)
     return {"agent": key[1]} if key[0] == "agent" else {"caller": key[1], "callee": key[2]}
 
 
 def points_for_day(day_ts: str, rows: List[dict],
-                   human_labels: Dict[str, List[float]]) -> List[Dict[str, Any]]:
-    """The validated-shape point rows for one day's window rows (pure)."""
+                   human_labels: Dict[str, List[float]], *, fleet: bool) -> List[Dict[str, Any]]:
+    """The validated-shape point rows for one day's window rows (pure).
+
+    `fleet` is required, not defaulted: only a caller holding the WHOLE day's
+    rows may say so."""
     created_at = utc_now_iso()
     out: List[Dict[str, Any]] = []
-    for key, group in _series(rows).items():
+    for key, group in _series(rows, fleet=fleet).items():
         folded = fold(group, human_labels, failed_limit=0)
         dims = _dims(key)
         for metric, field in _FIELDS.items():
@@ -113,7 +129,7 @@ class _Truncated(Exception):
         super().__init__("window over the row cap")
 
 
-def _write_day(day: datetime, **scope) -> Optional[Any]:
+def _write_day(day: datetime, *, whole_day: bool = False, **scope) -> Optional[Any]:
     since, until = day_bounds(day)
     rows, truncated = db.evaluation_window_rows(since=since, until=until, **scope)
     if truncated:
@@ -123,7 +139,10 @@ def _write_day(day: datetime, **scope) -> Optional[Any]:
     if not rows:
         return None
     labels = db.evaluation_human_labels([r["execution_id"] for r in rows])
-    points = points_for_day(since, rows, labels)
+    # An unscoped read of a COMPLETED day is the whole fleet's day; any
+    # `agents=` scope is not, and nor is today, which is still filling — and
+    # nothing restates the fleet until the next nightly (review C1).
+    points = points_for_day(since, rows, labels, fleet=whole_day and not scope)
     if not points:
         return None
     return db.insert_metric_points(PLATFORM_EVAL_OWNER, points)
@@ -153,14 +172,15 @@ def on_tier0_row(execution_id: str) -> Optional[Any]:
 
 def nightly_pass(now: Optional[datetime] = None, *, days: int = NIGHTLY_DAYS) -> Dict[str, int]:
     """Restate the last `days` completed days (yesterday back) and today for
-    the whole fleet. Idempotent. Never raises."""
+    the whole fleet — the fleet point for completed days only. Idempotent.
+    Never raises."""
     now = now or datetime.now(timezone.utc)
     result = {"days": 0, "written": 0, "failed": 0}
     for back in range(days, -1, -1):
         day = now - timedelta(days=back)
         try:
             try:
-                written = [_write_day(day)]
+                written = [_write_day(day, whole_day=back > 0)]
             except _Truncated:
                 # The capped page names only the newest agents; the retry list
                 # is every agent graded that day.

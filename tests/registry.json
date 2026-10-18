@@ -1,12 +1,82 @@
 {
   "test_files": [
-    {"file": "unit/test_937_aggregate_db.py", "feature": "abilityai/trinity-enterprise#937", "added": "2026-10-18", "categories": ["backend", "database", "evaluations", "unit"]},
-    {"file": "unit/test_937_fold.py", "feature": "abilityai/trinity-enterprise#937", "added": "2026-10-18", "categories": ["backend", "evaluations", "unit"]},
-    {"file": "unit/test_937_projection.py", "feature": "abilityai/trinity-enterprise#937", "added": "2026-10-18", "categories": ["backend", "evaluations", "security", "unit"]},
-    {"file": "unit/test_937_ent781_census.py", "feature": "abilityai/trinity-enterprise#937", "added": "2026-10-18", "categories": ["backend", "evaluations", "security", "unit"]},
-    {"file": "unit/test_937_routes.py", "feature": "abilityai/trinity-enterprise#937", "added": "2026-10-18", "categories": ["backend", "api", "evaluations", "security", "unit"]},
-    {"file": "unit/test_937_rollup.py", "feature": "abilityai/trinity-enterprise#937", "added": "2026-10-18", "categories": ["backend", "evaluations", "metrics", "unit"]},
-    {"file": "unit/test_937_eval_namespace.py", "feature": "abilityai/trinity-enterprise#937", "added": "2026-10-18", "categories": ["backend", "metrics", "security", "unit"]},
+    {
+      "file": "unit/test_937_aggregate_db.py",
+      "feature": "abilityai/trinity-enterprise#937",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "database",
+        "evaluations",
+        "unit"
+      ]
+    },
+    {
+      "file": "unit/test_937_fold.py",
+      "feature": "abilityai/trinity-enterprise#937",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "evaluations",
+        "unit"
+      ]
+    },
+    {
+      "file": "unit/test_937_projection.py",
+      "feature": "abilityai/trinity-enterprise#937",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "evaluations",
+        "security",
+        "unit"
+      ]
+    },
+    {
+      "file": "unit/test_937_ent781_census.py",
+      "feature": "abilityai/trinity-enterprise#937",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "evaluations",
+        "security",
+        "unit"
+      ]
+    },
+    {
+      "file": "unit/test_937_routes.py",
+      "feature": "abilityai/trinity-enterprise#937",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "api",
+        "evaluations",
+        "security",
+        "unit"
+      ]
+    },
+    {
+      "file": "unit/test_937_rollup.py",
+      "feature": "abilityai/trinity-enterprise#937",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "evaluations",
+        "metrics",
+        "unit"
+      ]
+    },
+    {
+      "file": "unit/test_937_eval_namespace.py",
+      "feature": "abilityai/trinity-enterprise#937",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "metrics",
+        "security",
+        "unit"
+      ]
+    },
     {
       "file": "unit/test_ent1001_endpoint_env.py",
       "feature": "trinity-enterprise#1001",
@@ -7287,6 +7357,32 @@
         "unit"
       ],
       "description": "Tier-1 (judge) seam (ent#936 checkpoint A) on the real schema: claim_tier1_row is a compare-and-set on the ent#366 partial unique index (needs the Tier-0 row; a second claim under any model is None; two concurrent claims on one execution yield exactly one row and one claim); finish_tier1_row writes a verdict or a skip onto a row still `claimed` only (a finished row is final, a Tier-0 id writes nothing, an invalid document never reaches the table); validate_judge_json names each structural defect (schema, state, dimension/verdict enums, 160-char reason cap, no quotation marks, quality range, skip enum; an omitted dimension is n/a); tier1_candidates are Tier-0 rows without a Tier-1 row, bounded, oldest first; reclaim_stale_tier1 releases stale claims only; a Tier-0 re-grade keeps the judge row; a Tier-1 row never enters a rating read. Mutations: dropping the any-model pre-check reds the second-claim test; dropping the IntegrityError loser handler reds the race test."
+    },
+    {
+      "file": "unit/test_938_tab_guard.py",
+      "feature": "abilityai/trinity-enterprise#938",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Operations > Evaluations tab (ent#938 C1) - the guard is the API, never UI hiding alone. The exact aggregate request set the tab's store issues, driven through the real routers.evaluations router on the ent#937 harness under four principals: admin person (whole fleet + judge keys), operator-role person (own agents + judge keys - the floor admits operator, not only admin), Workspace-only role user (403 workspace_only on every tab URL via enforce_operator_floor), agent key (its own agent's rows only, no judge key). Also pins that get_current_user wires the floor. Mutation: making is_workspace_only_role return False turns the user-role test red."
+    },
+    {
+      "file": "unit/test_938_fleet_series.py",
+      "feature": "abilityai/trinity-enterprise#938",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Fleet evaluation series (ent#938 C7, ruling T3). points_for_day(fleet=True) folds every agent's rows under dims {scope: fleet}; the per-row restate and the over-cap per-agent retry write no fleet point; the nightly pass writes it idempotently. The trend route with no agent/pair serves it to an admin person and the system key (counts only, judge score 422) and the empty series to operator/creator persons and agent keys. Mutation: writing fleet=True on every _write_day turns the per-row and over-cap tests red."
     }
   ]
 }
