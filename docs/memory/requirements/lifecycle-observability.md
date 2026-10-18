@@ -986,8 +986,8 @@ own records, with **zero LLM calls**. OSS core, always on, no setting.
   /api/agents/{name}/executions/{execution_id}/evaluation` returns the run's Tier-0 row
   under the agent's existing evaluation access rule (`get_authorized_agent_by_name`,
   uniform 404) and the ent#366 projection; not evaluated yet, or an execution that is
-  not this agent's, is one 404 `not_evaluated`. No MCP tool (`# mcp: none` stays
-  accurate; ent#937 owns the read tool). The write fence (FR-2, extended): no agent-key,
+  not this agent's, is one 404 `not_evaluated`. No MCP tool for this route (ent#937's
+  `get_evaluation_summary` serves the summary, FR-14). The write fence (FR-2, extended): no agent-key,
   MCP or user route can create, update or delete a `platform:tier0` row or set the
   delegation columns — the admin write files under `admin:<user>` and ignores any
   evaluator/target/delegation keys in the body, a Workspace rating cannot address an
@@ -1025,6 +1025,32 @@ own records, with **zero LLM calls**. OSS core, always on, no setting.
   on each "Schedules performance" row, whose rate caption now reads "completion". The
   tooltip on each reads "N of M runs with a gate check graded · deterministic checks,
   not answer quality".
+
+- **FR-11 — Aggregate read (ent#937)**: `GET /api/evaluations/aggregate` (`by ∈
+  {agent, schedule, pair}`), `/evaluations/failed`, `/evaluations/chain/{execution_id}` and
+  `/agents/{name}/evaluations/summary` fold Tier-0 rows (plus any `platform:tier1:*` row,
+  LEFT JOINed) INNER JOINed to their execution rows over `period ∈ {day, week, custom}`
+  (custom ≤ 92 d, 422 `invalid_period`), capped at 5,000 rows with `truncated`. Rates are
+  null when nothing was counted; `checks_passed_rate` = passed ÷ graded; a skip-only row
+  is on neither side. Failed runs carry check ids and reason codes, never evidence.
+- **FR-12 — Who reads what**: one `scope_for` helper. A person reads the agents they
+  can access; an agent key reads its own rows and the pairs it is caller or callee of —
+  on the new routes and the existing list, single-row and execution reads — and an
+  out-of-scope agent reads as zeros. A machine principal never receives
+  `quality_mean` / `judge_human_agreement` / `agreement_n` (absent, not null), nor the
+  two quality trend series. The evaluator is projected through an allowlist (ent#781).
+  The chain walk stops at the first inaccessible node and names only the reason kind.
+- **FR-13 — Scorecard points**: daily `eval.*` points (four rates + five counts) under
+  the reserved owner `platform:eval`, graded agent or pair in `dims`, written on each
+  Tier-0 row and nightly under the sweep lease; `GET /api/evaluations/trend` reads them
+  verbatim (≤ 92 d). `record_metrics` refuses the `eval.` prefix for every principal
+  (`eval_namespace_reserved`). Aggregates age out with execution rows via the INNER
+  JOIN; points persist for `metrics_retention_days` (default 365 d).
+- **FR-14 — MCP read**: `get_evaluation_summary` proxies the summary route for agent,
+  user and system keys. An agent key with no `agent_name` reads itself; naming another
+  agent passes the MCP permission edge first and the backend then narrows to the pair.
+  The description states the self/pair scope and that an agent never sees judge scores,
+  inside the 2,048-character cap.
 
 See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
 

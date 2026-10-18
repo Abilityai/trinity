@@ -305,8 +305,9 @@ process exit). Router `routers/evaluations.py` → `db/evaluations.py` → table
   trinity-ops-agent#232 trap). The surface has exactly one write route and no
   agent-writable path.
 - **Read is access-scoped, deliberately unfenced**: `AuthorizedAgentByName` for an
-  agent's own evaluations, `accessible_agent_names` for the fleet list. An agent seeing
-  its own bad score is the feedback loop; read ≠ write.
+  agent's own evaluations, `accessible_agent_names` for the fleet list — an agent key
+  narrowed to itself and its pairs (ent#937). An agent seeing its own bad score is the
+  feedback loop; read ≠ write.
 - **`quality` is nullable and null ≠ 0** — the axes are independent, so a run can carry
   `completion` before anything has graded it. The Tier-0 evaluator (ent#935) writes
   `completion` and its checks and leaves `quality` NULL — it grades what the run left
@@ -326,6 +327,16 @@ process exit). Router `routers/evaluations.py` → `db/evaluations.py` → table
   agent may optimise for, and client free text handed verbatim to the agent being
   criticised is a prompt-injection path into it. See
   [workspace-ratings.md](../feature-flows/workspace-ratings.md).
+- **Read API + scorecard (ent#937)**: `db/evaluation_aggregates.py` (bounded,
+  execution-INNER-JOINed window fetch, 5,000-row cap, chain walk ≤ 200 nodes) →
+  `services/evaluation_read_service.py` (period parse, fold, projection, `scope_for`) →
+  five GET routes (`/evaluations/aggregate|failed|trend|chain/{id}`,
+  `/agents/{name}/evaluations/summary`), static before `/{eval_id}`. An agent key is
+  narrowed to itself and its pairs on every evaluation read; a machine never gets a
+  judge's score. `services/eval_scorecard_service.py` writes daily `eval.*` points under
+  the reserved owner `platform:eval` (per Tier-0 row + nightly under the sweep lease);
+  `record_metrics` refuses `eval.`. MCP: `get_evaluation_summary`. Requirements §46
+  FR-11..FR-14.
 - **OSS-core by decision** (strategy gate ent#206 §10): the enforcement primitive and
   the deterministic tier are edition-agnostic; the managed grading experience is the
   paid layer, mirroring #668.
