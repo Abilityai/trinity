@@ -319,3 +319,62 @@ def test_person_caller_side_hides_a_callee_outside_scope(edges):
     s = edges.get("/api/agents/agent-b/evaluations/summary").json()
     assert [f["execution_id"] for f in s["failed"]] == ["ab"]
     assert s["pair_failed"] == []                             # b → x: x is another tenant's
+
+
+# --- the row reads (C1: deviation C binds row reads too) ----------------------------
+
+def _pair_rows(rows):
+    from db.evaluations import TIER0_PAIR_EVALUATOR
+    from services.evaluation_read_service import redact_evaluator
+    return [r for r in rows if r["evaluator"] == redact_evaluator(TIER0_PAIR_EVALUATOR)]
+
+
+def _assert_machine_pair_row(row):
+    c = row["checks"]
+    assert set(c) <= {"schema", "headline", "edge", "checks"}
+    assert "metrics" not in c
+    assert c["checks"] and all(set(k) == {"id", "tier", "source", "status", "reason"}
+                               for k in c["checks"])
+    ids = {k["id"] for k in c["checks"]}
+    assert "relay_unverified" in ids and "rework_bounds" in ids     # ids + reasons kept
+    assert "SECRET" not in json.dumps(row)
+
+
+def test_agent_key_list_route_reads_pair_rows_without_metrics_or_evidence(edges):
+    edges.as_user(_agent_key("agent-b"))
+    rows = edges.get("/api/agents/agent-b/evaluations").json()
+    pair = _pair_rows(rows)
+    assert [r["execution_id"] for r in pair] == ["ab"]
+    _assert_machine_pair_row(pair[0])
+
+
+def test_agent_key_fleet_list_and_by_id_read_pair_rows_without_metrics(edges):
+    edges.as_user(_agent_key("agent-b"))
+    pair = _pair_rows(edges.get("/api/evaluations").json())
+    assert pair and all(r["agent_name"] == "agent-b" for r in pair)
+    for r in pair:
+        _assert_machine_pair_row(r)
+    one = edges.get(f"/api/evaluations/{pair[0]['id']}")
+    assert one.status_code == 200
+    _assert_machine_pair_row(one.json())
+
+
+def test_a_person_reads_the_pair_row_with_metrics_and_evidence(edges):
+    from db.evaluations import TIER0_PAIR_EVALUATOR
+    rows = edges.get("/api/agents/agent-b/evaluations").json()
+    pair = [r for r in rows if r["evaluator"] == TIER0_PAIR_EVALUATOR]
+    assert len(pair) == 1
+    assert pair[0]["checks"]["metrics"]["cost"] == 0.5
+    assert any("evidence" in k for k in pair[0]["checks"]["checks"])
+    one = edges.get(f"/api/evaluations/{pair[0]['id']}").json()
+    assert one["checks"]["metrics"]["latency_ms"]["start_to_end"] == 2000
+
+
+def test_agent_key_tier0_row_is_not_reduced(edges):
+    """The reduction is the pair row's only: a Tier-0 row reads as ent#937 left it."""
+    from db.evaluations import TIER0_EVALUATOR
+    from services.evaluation_read_service import redact_evaluator
+    edges.as_user(_agent_key("agent-b"))
+    r = edges.get("/api/agents/agent-b/executions/ab/evaluation").json()
+    assert r["evaluator"] == redact_evaluator(TIER0_EVALUATOR)
+    assert r["checks"]["headline"]["gate_fail"] == 0

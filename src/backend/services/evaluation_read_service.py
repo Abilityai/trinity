@@ -298,6 +298,25 @@ def is_tier1(row: dict) -> bool:
     return str(row.get("evaluator") or "").startswith(TIER1_EVALUATOR_PREFIX)
 
 
+PAIR_ROW_MACHINE_KEYS = ("schema", "headline", "edge")
+PAIR_CHECK_MACHINE_KEYS = ("id", "tier", "source", "status", "reason")
+
+
+def pair_checks_for_machine(checks: Any) -> Any:
+    """A pair row's `checks` for a machine: the headline and per-check ids and
+    reason codes. `metrics` (latency, cost) and every `evidence` (round trips,
+    sibling scores) are dropped — a number an agent could optimise is not a
+    finding (ent#940 deviation C, on the row as on the aggregate)."""
+    if not isinstance(checks, dict):
+        return None
+    out = {k: checks[k] for k in PAIR_ROW_MACHINE_KEYS if k in checks}
+    items = checks.get("checks")
+    out["checks"] = [{k: c.get(k) for k in PAIR_CHECK_MACHINE_KEYS}
+                     for c in (items if isinstance(items, list) else [])
+                     if isinstance(c, dict)]
+    return out
+
+
 def project_row(row: dict, *, machine: bool, operator: bool) -> dict:
     """One evaluation row for one reader; never mutates `row`.
 
@@ -306,11 +325,14 @@ def project_row(row: dict, *, machine: bool, operator: bool) -> dict:
     on any row: an `admin:` row's `judge` is a person's free-form words, held
     back like the comment — and gets `judge_findings` in its place; on a
     Tier-1 row it also loses `quality`. The one read guard for the judge's
-    verdict (ent#936 TD-8)."""
+    verdict (ent#936 TD-8). On a pair row a machine reads check ids and
+    reason codes only (`pair_checks_for_machine`)."""
     if operator and not machine:
         return row
     out = dict(row)
     out["evaluator"] = redact_evaluator(row.get("evaluator"))
+    if machine and row.get("evaluator") == TIER0_PAIR_EVALUATOR:
+        out["checks"] = pair_checks_for_machine(row.get("checks"))
     if machine and (is_tier1(row) or row.get("judge") is not None):
         if is_tier1(row):
             out["quality"] = None
