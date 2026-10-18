@@ -2146,6 +2146,8 @@ INDEXES = [
     # VALIDATE-001: Business status for validation results
     "CREATE INDEX IF NOT EXISTS idx_executions_business_status ON schedule_executions(business_status)",
     "CREATE INDEX IF NOT EXISTS idx_executions_validates ON schedule_executions(validates_execution_id)",
+    # ent#937: the evaluation chain read walks descendants by parent id.
+    "CREATE INDEX IF NOT EXISTS idx_executions_parent ON schedule_executions(parent_execution_id)",
     # Issue #772: partial index drives execution_log null + row delete retention sweeps.
     # Status values match TaskExecutionStatus terminal set (fix: #862).
     "CREATE INDEX IF NOT EXISTS idx_executions_completed_terminal "

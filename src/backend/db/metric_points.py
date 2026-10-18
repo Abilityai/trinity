@@ -270,8 +270,12 @@ class MetricPointOperations:
         absent_keys: List[str],
         since_iso: str,
         limit: int,
+        *,
+        until_iso: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """The newest `limit` points of ONE dimension series, newest first (#3293).
+        `until_iso` (exclusive) closes the window for a bounded trend read
+        (ent#937); None leaves it open.
 
         `latest_points_for` returns a metric's newest rows across all of its
         series, so a series that reports rarely beside a busy one is not in
@@ -299,6 +303,8 @@ class MetricPointOperations:
             t.c.metric == metric,
             t.c.ts >= since_iso,
         ]
+        if until_iso is not None:
+            conditions.append(t.c.ts < until_iso)
         for key, value in dims.items():
             conditions.append(t.c.dims[key].as_string() == value)
         for key in absent_keys:
