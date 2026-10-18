@@ -28,6 +28,7 @@ from __future__ import annotations
 import ast
 import os
 import sys
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -289,16 +290,23 @@ def test_the_write_route_is_the_only_non_get_route_in_the_module():
     assert non_get == {(("POST",), "create_evaluation")}
 
 
-def test_the_mcp_server_exposes_no_evaluations_surface():
+def test_the_mcp_server_exposes_no_evaluations_write_surface():
     """The third surface (Invariant #13) is TypeScript, so this is a text pin
-    over the tool table by design: the router's `# mcp: none` header promises
-    no tool proxies `/evaluations`, and an MCP tool that did would be a write
-    path reachable by an agent key."""
+    over the tool table by design. ent#937 gives the router one MCP read
+    (`tools/evaluations.ts`, named by the `# mcp:` header); no other tool
+    module may proxy `/evaluations`, and that one may not write — an MCP tool
+    that did would be a write path reachable by an agent key."""
     tools = Path(__file__).resolve().parents[2] / "src" / "mcp-server" / "src"
+    module = tools / "tools" / "evaluations.ts"
     hits = [p for p in tools.rglob("*.ts") if "/evaluations" in p.read_text(encoding="utf-8")]
-    assert hits == [], hits
+    assert set(hits) <= {module}, hits
+    if module.exists():
+        text = module.read_text(encoding="utf-8")
+        assert not re.search(r"""method:\s*["'](POST|PUT|PATCH|DELETE)""", text, re.I)
+        assert not re.search(r"\.(post|put|patch|delete)\(", text)
     header = (_SRC / "routers" / "evaluations.py").read_text(encoding="utf-8").splitlines()[0]
-    assert header.startswith("# mcp: none")
+    assert header.startswith("# mcp: src/mcp-server/src/tools/evaluations.ts")
+    assert "never exposed" in header
 
 
 # --- the positive half: the sweep's path still writes --------------------------------

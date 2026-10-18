@@ -238,3 +238,157 @@ def project_summary(summary: dict, *, machine: bool) -> dict:
     if not machine:
         return summary
     return {k: v for k, v in summary.items() if k not in QUALITY_KEYS}
+
+
+# --- who reads what (ent#937 T1) ---------------------------------------------
+
+class ReadScope:
+    """The rows one principal may read, decided once per request.
+
+    `names` is the accessible-set tri-state (None = every agent, an empty set =
+    none). `self_agent` is set for an agent-scoped key: it reads its OWN rows
+    and the pairs it is a side of — never its owner's other agents, which is
+    what `accessible_agent_names` alone would hand it (ent#629 class)."""
+
+    __slots__ = ("names", "self_agent", "machine")
+
+    def __init__(self, names: Optional[set], self_agent: Optional[str], machine: bool):
+        self.names = names
+        self.self_agent = self_agent
+        self.machine = machine
+
+    def sees(self, agent: Optional[str]) -> bool:
+        return self.names is None or agent in self.names
+
+
+def scope_for(current_user, *, machine: bool) -> ReadScope:
+    """The one scope helper every evaluation read goes through."""
+    agent = getattr(current_user, "agent_name", None)
+    if agent:
+        return ReadScope({agent}, agent, machine)
+    from services.agent_service.helpers import accessible_agent_names
+    names = accessible_agent_names(current_user)
+    return ReadScope(None if names is None else set(names), None, machine)
+
+
+def narrow(scope: ReadScope, agent: Optional[str]) -> Optional[set]:
+    """`scope.names` narrowed by an `agent=` filter; an agent outside the
+    scope narrows to nothing (zeros, never a 403 — `narrow_to_agent` parity)."""
+    if agent is None:
+        return scope.names
+    return {agent} if scope.sees(agent) else set()
+
+
+def window_filters(scope: ReadScope, *, by: str, agent: Optional[str] = None,
+                   caller: Optional[str] = None, callee: Optional[str] = None,
+                   schedule_id: Optional[str] = None) -> dict:
+    """`db.evaluation_window_rows` keyword filters for one scope.
+
+    A person reads a pair only when BOTH sides are visible; an agent key reads
+    its own runs, and with `by=pair` the pairs it is caller or callee of."""
+    kw: dict = {"caller": caller, "callee": callee, "schedule_id": schedule_id}
+    if by != "pair":
+        kw["agents"] = narrow(scope, agent)
+        return kw
+    kw["delegated_only"] = True
+    if scope.self_agent:
+        kw["either"] = scope.self_agent
+    else:
+        kw["agents"] = scope.names
+        kw["callers"] = scope.names
+    return kw
+
+
+def group_key(by: str, row: dict) -> tuple:
+    if by == "schedule":
+        return (row.get("agent_name"), row.get("schedule_id"))
+    if by == "pair":
+        return (row.get("caller_agent"), row.get("agent_name"))
+    return (row.get("agent_name"),)
+
+
+def group_fields(by: str, key: tuple) -> dict:
+    if by == "schedule":
+        return {"agent": key[0], "schedule_id": key[1]}
+    if by == "pair":
+        return {"caller": key[0], "callee": key[1]}
+    return {"agent": key[0]}
+
+
+def aggregate(by: str, rows: list[dict], human_labels: dict, *, machine: bool) -> dict:
+    """`{total, groups}` for `by` — each group is a `fold`, projected for the
+    reader. The failed lists stay on the failed route; groups carry counts."""
+    buckets: dict[tuple, list] = {}
+    for r in rows:
+        buckets.setdefault(group_key(by, r), []).append(r)
+
+    def _summary(rs):
+        s = fold(rs, human_labels, failed_limit=0)
+        s.pop("failed", None)
+        s.pop("failed_truncated", None)
+        return project_summary(s, machine=machine)
+
+    groups = [{"key": group_fields(by, k), **_summary(rs)}
+              for k, rs in sorted(buckets.items(), key=lambda kv: tuple(str(x) for x in kv[0]))]
+    return {"total": _summary(rows), "groups": groups}
+
+
+# --- the stored scorecard (trend reads; the writer is ent#937 C4) -------------
+
+# The reserved owner the platform writes `eval.*` points under. `:` is not
+# legal in an agent name, so no agent can hold it, rename into it or cascade it.
+PLATFORM_EVAL_OWNER = "platform:eval"
+EVAL_RATE_METRICS = ("eval.checks_passed_rate", "eval.completion_rate",
+                     "eval.quality_mean", "eval.judge_human_agreement")
+EVAL_COUNT_METRICS = ("eval.evaluated", "eval.completed", "eval.graded",
+                      "eval.passed", "eval.judged")
+EVAL_METRICS = EVAL_RATE_METRICS + EVAL_COUNT_METRICS
+# A judge's score as a series — never served to a machine.
+QUALITY_METRICS = frozenset({"eval.quality_mean", "eval.judge_human_agreement"})
+MAX_TREND_DAYS = 92
+
+
+class MetricError(ValueError):
+    code = "unknown_metric"
+
+
+def trend_metric(metric: str, *, machine: bool) -> str:
+    """The metric if this reader may read it; a closed enum, never echoed."""
+    if metric not in EVAL_METRICS or (machine and metric in QUALITY_METRICS):
+        raise MetricError("metric is not an evaluation scorecard metric")
+    return metric
+
+
+# --- the delegation chain ------------------------------------------------------
+
+CHAIN_DEPTH_KEY = "inter_agent_max_chain_depth"
+CHAIN_DEPTH_HARD_CAP = 32
+
+
+def chain_max_depth() -> int:
+    """The platform's own stated chain maximum, clamped to 1..32; a bad
+    setting falls back to the code default rather than failing the read."""
+    from config import OPS_SETTINGS_DEFAULTS
+    default = int(OPS_SETTINGS_DEFAULTS[CHAIN_DEPTH_KEY])
+    try:
+        from services import settings_service
+        value = int(settings_service.get_ops_setting(CHAIN_DEPTH_KEY, int))
+    except Exception:  # noqa: BLE001
+        return default
+    return max(1, min(CHAIN_DEPTH_HARD_CAP, value))
+
+
+def chain_node_view(node: dict) -> dict:
+    """A chain node as served: ids, agents, status and times — no message,
+    no response text."""
+    return {
+        "execution_id": node.get("id"),
+        "agent_name": node.get("agent_name"),
+        "caller_agent": node.get("source_agent_name"),
+        "parent_execution_id": node.get("parent_execution_id"),
+        "status": node.get("status"),
+        "triggered_by": node.get("triggered_by"),
+        "chain_depth": node.get("chain_depth"),
+        "started_at": node.get("started_at"),
+        "completed_at": node.get("completed_at"),
+    }

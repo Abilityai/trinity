@@ -3099,11 +3099,12 @@ class DatabaseManager:
     def workspace_rating_tally(self, agent_name):
         return self._evaluation_ops.workspace_rating_tally(agent_name)
 
-    def list_agent_evaluations(self, agent_name, limit=50):
-        return self._evaluation_ops.list_evaluations_for_agent(agent_name, limit)
+    def list_agent_evaluations(self, agent_name, limit=50, *, caller=None):
+        return self._evaluation_ops.list_evaluations_for_agent(agent_name, limit, caller=caller)
 
-    def list_fleet_evaluations(self, agent_names, limit=100):
-        return self._evaluation_ops.list_evaluations_for_agents(agent_names, limit)
+    def list_fleet_evaluations(self, agent_names, limit=100, *, callers=None, caller=None):
+        return self._evaluation_ops.list_evaluations_for_agents(
+            agent_names, limit, callers=callers, caller=caller)
 
     # --- evaluation read API (ent#937) ---------------------------------------
     def evaluation_window_rows(self, **kw):

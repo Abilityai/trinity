@@ -510,25 +510,32 @@ class EvaluationOperations:
             row = conn.execute(stmt).mappings().first()
             return self._row_to_dict(row) if row else None
 
-    def list_evaluations_for_agent(self, agent_name: str, limit: int = 50) -> list[dict]:
-        stmt = (
-            select(agent_evaluations)
-            .where(agent_evaluations.c.agent_name == agent_name)
-            .order_by(agent_evaluations.c.created_at.desc())
-            .limit(limit)
-        )
+    def list_evaluations_for_agent(self, agent_name: str, limit: int = 50, *,
+                                   caller: Optional[str] = None) -> list[dict]:
+        """`caller` keeps the runs that agent delegated to this one (ent#937)."""
+        stmt = select(agent_evaluations).where(agent_evaluations.c.agent_name == agent_name)
+        if caller is not None:
+            stmt = stmt.where(agent_evaluations.c.caller_agent == caller)
+        stmt = stmt.order_by(agent_evaluations.c.created_at.desc()).limit(limit)
         with get_engine().connect() as conn:
             return [self._row_to_dict(r) for r in conn.execute(stmt).mappings()]
 
     def list_evaluations_for_agents(self, agent_names: Optional[list[str]],
-                                    limit: int = 100) -> list[dict]:
+                                    limit: int = 100, *,
+                                    callers: Optional[list[str]] = None,
+                                    caller: Optional[str] = None) -> list[dict]:
         """Fleet read. `agent_names=None` (admin) → all; a list → that set;
-        empty list → none (the accessible-set tri-state)."""
+        empty list → none (the accessible-set tri-state). `callers` (same
+        tri-state) and `caller` filter on the delegating agent (ent#937)."""
         stmt = select(agent_evaluations).order_by(agent_evaluations.c.created_at.desc())
-        if agent_names is not None:
-            if not agent_names:
-                return []
-            stmt = stmt.where(agent_evaluations.c.agent_name.in_(agent_names))
+        for names, col in ((agent_names, agent_evaluations.c.agent_name),
+                           (callers, agent_evaluations.c.caller_agent)):
+            if names is not None:
+                if not names:
+                    return []
+                stmt = stmt.where(col.in_(list(names)))
+        if caller is not None:
+            stmt = stmt.where(agent_evaluations.c.caller_agent == caller)
         stmt = stmt.limit(limit)
         with get_engine().connect() as conn:
             return [self._row_to_dict(r) for r in conn.execute(stmt).mappings()]

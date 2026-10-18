@@ -2033,6 +2033,97 @@ class EvaluationResponse(BaseModel):
     judge_findings: Optional[List[Dict[str, Optional[str]]]] = None
 
 
+class EvaluationSummary(BaseModel):
+    """One fold of Tier-0-graded runs (ent#937). A machine principal's copy
+    has no `quality_mean` / `judge_human_agreement` / `agreement_n` — absent
+    by rule, not null-as-ungraded."""
+    model_config = ConfigDict(extra="allow")
+    evaluated: int
+    completed: int
+    completion_rate: Optional[float] = None
+    graded: int
+    passed: int
+    checks_passed_rate: Optional[float] = None
+    per_check_fail: Dict[str, int] = {}
+    judged: int
+
+
+class EvaluationAggregateGroup(EvaluationSummary):
+    key: Dict[str, Optional[str]]
+
+
+class EvaluationAggregateResponse(BaseModel):
+    by: str
+    since: str
+    until: str
+    truncated: bool
+    total: EvaluationSummary
+    groups: List[EvaluationAggregateGroup]
+
+
+class EvaluationFailedRun(BaseModel):
+    """A run that did not complete or failed a gate check. Closed vocabulary
+    only — check ids and reason codes, never evidence text."""
+    execution_id: str
+    agent_name: str
+    caller_agent: Optional[str] = None
+    schedule_id: Optional[str] = None
+    completed_at: Optional[str] = None
+    completion: bool
+    failed_checks: List[Dict[str, Optional[str]]] = []
+
+
+class EvaluationAgentSummaryResponse(BaseModel):
+    agent_name: str
+    since: str
+    until: str
+    truncated: bool
+    summary: EvaluationSummary
+    failed: List[EvaluationFailedRun]
+    failed_truncated: bool
+
+
+class EvaluationFailedResponse(BaseModel):
+    since: str
+    until: str
+    total: int
+    truncated: bool
+    items: List[EvaluationFailedRun]
+
+
+class EvaluationChainNode(BaseModel):
+    execution_id: str
+    agent_name: str
+    caller_agent: Optional[str] = None
+    parent_execution_id: Optional[str] = None
+    status: Optional[str] = None
+    triggered_by: Optional[str] = None
+    chain_depth: Optional[int] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+class EvaluationChainResponse(BaseModel):
+    """A run's delegation chain. A walk that stops early says why
+    (`depth` | `nodes` | `access` | `missing`) — never which id it stopped at."""
+    execution: EvaluationChainNode
+    ancestors: List[EvaluationChainNode]
+    descendants: List[EvaluationChainNode]
+    ancestors_truncated: Optional[str] = None
+    descendants_truncated: Optional[str] = None
+
+
+class EvaluationTrendPoint(BaseModel):
+    ts: str
+    value: float
+
+
+class EvaluationTrendResponse(BaseModel):
+    metric: str
+    dims: Dict[str, str]
+    points: List[EvaluationTrendPoint]
+
+
 class CircuitBreakerConfigUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/circuit-breaker (RELIABILITY-007, #526).
 

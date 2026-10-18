@@ -1,4 +1,4 @@
-# mcp: none — the referee surface (ent#206): writes are human-admin-only by design, reads serve the UI
+# mcp: src/mcp-server/src/tools/evaluations.ts — get_evaluation_summary (an agent's own summary, ent#937); writes are human-admin-only and never exposed
 """Behavioral evaluations — the referee surface (ent#206).
 
 Three-layer (Invariant #1). The load-bearing rule of the eval epic: **the graded
@@ -12,7 +12,13 @@ agent must never write its own grade.** Enforced structurally here —
   gets a narrow write grant; the *graded* agent has no write path either way.
 * **Read** is access-controlled: an agent (or its owner) reads its own
   evaluations; an admin reads all. Read ≠ write — feedback is fine, self-grading
-  is not.
+  is not. An agent-scoped key reads its OWN rows on every fleet read (and, on
+  the pair views, the pairs it is a side of) — never its owner's other agents
+  (ent#937 T1, `evaluation_read_service.scope_for`).
+* **Read API** (ent#937): aggregate (`by=agent|schedule|pair`), failed runs,
+  the delegation chain, the stored `eval.*` trend and an agent's summary. All
+  GET; the static `/evaluations/<name>` routes are declared before
+  `/evaluations/{eval_id}` (Invariant #4).
 
 `agent_reports` (#918) was rejected as the surface precisely because its create
 is self-gated (an agent writes its own). This surface inverts that.
@@ -20,7 +26,7 @@ is self-gated (an agent writes its own). This surface inverts that.
 from __future__ import annotations
 
 import logging
-
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -33,14 +39,22 @@ from dependencies import (
     reject_agent_principal,
     require_admin,
 )
-from models import EvaluationCreate, EvaluationResponse, User
+from models import (
+    EvaluationAgentSummaryResponse,
+    EvaluationAggregateResponse,
+    EvaluationChainResponse,
+    EvaluationCreate,
+    EvaluationFailedResponse,
+    EvaluationResponse,
+    EvaluationTrendResponse,
+    User,
+)
 
 # Mirrors `client_portal.service.WORKSPACE_EVALUATOR_PREFIX`. Imported would be
 # a router→portal-module dependency for one constant; the two are pinned
 # together by `test_ent366_workspace_ratings.py` instead.
 WORKSPACE_EVALUATOR_PREFIX = "workspace:"
 OPERATOR_EVALUATOR_PREFIX = "operator:"
-from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
 from services import evaluation_read_service
 
 logger = logging.getLogger(__name__)
@@ -208,28 +222,206 @@ def _to_response(row: dict, current_user: User, operator_agents: set = frozenset
 async def list_agent_evaluations(
     agent_name: str = Depends(get_authorized_agent_by_name),
     limit: int = Query(50, ge=1, le=200),
+    caller: Optional[str] = Query(None, max_length=64),
     current_user: User = Depends(get_current_user),
 ):
     """An agent's own evaluations (newest first). `AuthorizedAgentByName` gates
-    read to owner/admin/agent-self — reading feedback is allowed; writing is not."""
+    read to owner/admin/agent-self — reading feedback is allowed; writing is not.
+    `caller=` keeps the runs that agent delegated to this one (ent#937)."""
     # ent#366: an agent-scoped caller gets the tallies and not the words —
     # applied inside `_to_response`, so every read path below inherits it.
-    rows = db.list_agent_evaluations(agent_name, limit)
+    rows = db.list_agent_evaluations(agent_name, limit, caller=caller)
     operator_agents = _operator_for(rows, current_user)
     return [_to_response(r, current_user, operator_agents) for r in rows]
+
+
+def _scope(current_user: User) -> evaluation_read_service.ReadScope:
+    return evaluation_read_service.scope_for(
+        current_user, machine=_is_machine_principal(current_user))
+
+
+def _window(period: str, since: Optional[str], until: Optional[str]) -> tuple[str, str]:
+    try:
+        return evaluation_read_service.parse_period(period, since=since, until=until)
+    except evaluation_read_service.PeriodError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)})
 
 
 @router.get("/evaluations", response_model=List[EvaluationResponse])
 async def list_fleet_evaluations(
     limit: int = Query(100, ge=1, le=500),
-    agent: Optional[str] = Query(None),
+    agent: Optional[str] = Query(None, max_length=64),
+    caller: Optional[str] = Query(None, max_length=64),
+    callee: Optional[str] = Query(None, max_length=64),
     current_user: User = Depends(get_current_user),
 ):
-    """Fleet evaluations across accessible agents (admin = all)."""
-    names = narrow_to_agent(accessible_agent_names(current_user), agent)
-    rows = db.list_fleet_evaluations(names, limit)
+    """Fleet evaluations across accessible agents (admin = all). An agent key
+    reads its own rows only (ent#937 T1). `callee=` is the graded agent (same
+    as `agent=`; both given and different → empty); `caller=` the delegator."""
+    scope = _scope(current_user)
+    names = evaluation_read_service.narrow(scope, agent)
+    if callee is not None:
+        names = (evaluation_read_service.narrow(scope, callee) if names is None
+                 else names & {callee})
+    rows = db.list_fleet_evaluations(None if names is None else sorted(names), limit,
+                                     caller=caller)
     operator_agents = _operator_for(rows, current_user)
     return [_to_response(r, current_user, operator_agents) for r in rows]
+
+
+_BY = "^(agent|schedule|pair)$"
+_PERIOD = "^(day|week|custom)$"
+
+
+@router.get("/evaluations/aggregate", response_model=EvaluationAggregateResponse,
+            response_model_exclude_none=False)
+async def aggregate_evaluations(
+    by: str = Query("agent", pattern=_BY),
+    period: str = Query("week", pattern=_PERIOD),
+    since: Optional[str] = Query(None, max_length=40),
+    until: Optional[str] = Query(None, max_length=40),
+    agent: Optional[str] = Query(None, max_length=64),
+    caller: Optional[str] = Query(None, max_length=64),
+    callee: Optional[str] = Query(None, max_length=64),
+    schedule_id: Optional[str] = Query(None, max_length=64),
+    current_user: User = Depends(get_current_user),
+):
+    """Tier-0-graded runs that completed in the window, folded `by` agent,
+    schedule or caller→callee pair (ent#937). An agent outside the caller's
+    scope reads as zeros — the same body as "no runs", so no oracle. A
+    machine reader never gets a judge's score."""
+    lo, hi = _window(period, since, until)
+    scope = _scope(current_user)
+    rows, truncated = db.evaluation_window_rows(
+        since=lo, until=hi, **evaluation_read_service.window_filters(
+            scope, by=by, agent=agent, caller=caller, callee=callee, schedule_id=schedule_id))
+    labels = db.evaluation_human_labels([r["execution_id"] for r in rows]) if rows else {}
+    out = evaluation_read_service.aggregate(by, rows, labels, machine=scope.machine)
+    return {"by": by, "since": lo, "until": hi, "truncated": truncated, **out}
+
+
+@router.get("/evaluations/failed", response_model=EvaluationFailedResponse)
+async def failed_evaluations(
+    by: str = Query("agent", pattern=_BY),
+    period: str = Query("week", pattern=_PERIOD),
+    since: Optional[str] = Query(None, max_length=40),
+    until: Optional[str] = Query(None, max_length=40),
+    agent: Optional[str] = Query(None, max_length=64),
+    caller: Optional[str] = Query(None, max_length=64),
+    callee: Optional[str] = Query(None, max_length=64),
+    schedule_id: Optional[str] = Query(None, max_length=64),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=10_000),
+    current_user: User = Depends(get_current_user),
+):
+    """Runs in the window that did not complete or failed a gate check,
+    newest first, paged. Check ids and reason codes only — never evidence."""
+    lo, hi = _window(period, since, until)
+    scope = _scope(current_user)
+    rows, truncated = db.evaluation_window_rows(
+        since=lo, until=hi, **evaluation_read_service.window_filters(
+            scope, by=by, agent=agent, caller=caller, callee=callee, schedule_id=schedule_id))
+    folded = evaluation_read_service.fold(rows, {}, failed_limit=len(rows))
+    failed = folded["failed"]
+    return {"since": lo, "until": hi, "total": len(failed), "truncated": truncated,
+            "items": failed[offset:offset + limit]}
+
+
+@router.get("/evaluations/trend", response_model=EvaluationTrendResponse)
+async def evaluation_trend(
+    metric: str = Query(..., max_length=64),
+    agent: Optional[str] = Query(None, max_length=64),
+    caller: Optional[str] = Query(None, max_length=64),
+    callee: Optional[str] = Query(None, max_length=64),
+    days: int = Query(30, ge=1, le=evaluation_read_service.MAX_TREND_DAYS),
+    current_user: User = Depends(get_current_user),
+):
+    """The stored daily `eval.*` series for one agent (`agent=`) or one pair
+    (`caller=` + `callee=`) — read from the points the platform writes, never
+    recomputed. Out of scope reads as an empty series."""
+    scope = _scope(current_user)
+    try:
+        name = evaluation_read_service.trend_metric(metric, machine=scope.machine)
+    except evaluation_read_service.MetricError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)})
+    if caller is not None or callee is not None:
+        if not (caller and callee) or agent is not None:
+            raise HTTPException(status_code=422, detail={
+                "code": "invalid_series", "message": "name agent=, or caller= and callee="})
+        dims, absent = {"caller": caller, "callee": callee}, ["agent"]
+        visible = ((scope.self_agent in (caller, callee)) if scope.self_agent
+                   else scope.sees(caller) and scope.sees(callee))
+    elif agent:
+        dims, absent = {"agent": agent}, ["caller", "callee"]
+        visible = scope.sees(agent)
+    else:
+        raise HTTPException(status_code=422, detail={
+            "code": "invalid_series", "message": "name agent=, or caller= and callee="})
+    points = []
+    if visible:
+        now = datetime.now(timezone.utc)
+        rows = db.metric_series_points_for_dims(
+            evaluation_read_service.PLATFORM_EVAL_OWNER, name, dims, absent,
+            (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), days + 1)
+        points = [{"ts": p["ts"], "value": p["value_numeric"]} for p in reversed(rows)
+                  if p.get("value_numeric") is not None]
+    return {"metric": name, "dims": dims, "points": points}
+
+
+@router.get("/evaluations/chain/{execution_id}", response_model=EvaluationChainResponse)
+async def evaluation_chain(execution_id: str, current_user: User = Depends(get_current_user)):
+    """A run's delegation chain: its ancestors (nearest first) and the runs it
+    delegated (breadth first), bounded by the platform's chain depth and 200
+    nodes. A run outside the caller's scope is the uniform 404; a walk that
+    reaches one stops there and says `access`, without naming it."""
+    scope = _scope(current_user)
+    root = db.execution_chain_node(execution_id)
+    if not root or not scope.sees(root.get("agent_name")):
+        raise HTTPException(status_code=404, detail="not_found")
+    depth = evaluation_read_service.chain_max_depth()
+    up, up_stop = db.execution_chain_ancestors(execution_id, max_depth=depth, visible=scope.names)
+    down, down_stop = db.execution_chain_descendants(execution_id, max_depth=depth,
+                                                     visible=scope.names)
+    served = {n["id"] for n in [root, *up, *down]}
+
+    def _view(node):
+        v = evaluation_read_service.chain_node_view(node)
+        # Never echo an id or an agent the walk did not serve.
+        if v["parent_execution_id"] not in served:
+            v["parent_execution_id"] = None
+        if v["caller_agent"] is not None and not scope.sees(v["caller_agent"]):
+            v["caller_agent"] = None
+        return v
+
+    return {"execution": _view(root), "ancestors": [_view(n) for n in up],
+            "descendants": [_view(n) for n in down],
+            "ancestors_truncated": up_stop, "descendants_truncated": down_stop}
+
+
+@router.get("/agents/{agent_name}/evaluations/summary",
+            response_model=EvaluationAgentSummaryResponse)
+async def agent_evaluation_summary(
+    agent_name: str = Depends(get_authorized_agent_by_name),
+    period: str = Query("week", pattern=_PERIOD),
+    since: Optional[str] = Query(None, max_length=40),
+    until: Optional[str] = Query(None, max_length=40),
+    caller: Optional[str] = Query(None, max_length=64),
+    current_user: User = Depends(get_current_user),
+):
+    """One agent's summary and failed runs — what the MCP self-read serves.
+    An agent key reads its own only (another agent it may reach reads as
+    zeros); a machine never gets a judge's score."""
+    lo, hi = _window(period, since, until)
+    scope = _scope(current_user)
+    names = evaluation_read_service.narrow(scope, agent_name)
+    rows, truncated = db.evaluation_window_rows(since=lo, until=hi, agents=names, caller=caller)
+    labels = db.evaluation_human_labels([r["execution_id"] for r in rows]) if rows else {}
+    folded = evaluation_read_service.fold(rows, labels)
+    failed = folded.pop("failed")
+    failed_truncated = folded.pop("failed_truncated")
+    return {"agent_name": agent_name, "since": lo, "until": hi, "truncated": truncated,
+            "summary": evaluation_read_service.project_summary(folded, machine=scope.machine),
+            "failed": failed, "failed_truncated": failed_truncated}
 
 
 @router.get("/evaluations/{eval_id}", response_model=EvaluationResponse)
@@ -237,9 +429,9 @@ async def get_evaluation(eval_id: str, current_user: User = Depends(get_current_
     row = db.get_agent_evaluation(eval_id)
     if not row:
         raise HTTPException(status_code=404, detail="Evaluation not found")
-    # tenant boundary: non-admin may only see an evaluation of an accessible agent
-    names = accessible_agent_names(current_user)
-    if names is not None and row["agent_name"] not in names:
+    # tenant boundary: non-admin may only see an evaluation of an accessible
+    # agent; an agent key only its own (ent#937 T1)
+    if not _scope(current_user).sees(row["agent_name"]):
         raise HTTPException(status_code=404, detail="Evaluation not found")
     return _to_response(row, current_user, _operator_for([row], current_user))
 
