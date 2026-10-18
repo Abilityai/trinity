@@ -313,6 +313,9 @@ schedule_executions = Table(
     # (the pull claim relies on its IntegrityError), so autogenerate must not
     # propose dropping it.
     Column("conversation_key", Text),
+    # ent#935 — the caller turn that delegated this one; kept only when it
+    # belongs to source_agent_name. NULL = not delegated.
+    Column("parent_execution_id", Text),
     Index(
         "idx_executions_one_running_turn",
         "agent_name", "conversation_key",
@@ -737,6 +740,11 @@ agent_evaluations = Table(
     Column("target_id", Text),
     Column("comment", Text),
     Column("updated_at", Text),
+    # ent#935 — the delegation the graded run came from. NULL = not delegated;
+    # delegation_mode is sync|async|fan_out|reminder|loop.
+    Column("caller_agent", Text),
+    Column("parent_execution_id", Text),
+    Column("delegation_mode", Text),
     # ent#366 review — declared HERE, not only in schema.py/Alembic, because
     # this one is not a performance index: it IS the "one rating per person per
     # thing" rule, and `upsert_workspace_rating` relies on the IntegrityError it

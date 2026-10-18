@@ -302,6 +302,9 @@ TABLES = {
             -- #2843: the conversation this turn continues; at most one running
             -- row per (agent, key). NULL = no conversation guard.
             conversation_key TEXT,
+            -- ent#935: the caller turn that delegated this one; kept only when
+            -- it belongs to source_agent_name. NULL = not delegated.
+            parent_execution_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -827,6 +830,11 @@ TABLES = {
             -- words in the rated agent's context are an injection surface).
             comment TEXT,
             updated_at TEXT,
+            -- ent#935: the delegation the graded run came from. NULL = not
+            -- delegated; delegation_mode is sync|async|fan_out|reminder|loop.
+            caller_agent TEXT,
+            parent_execution_id TEXT,
+            delegation_mode TEXT,
             FOREIGN KEY (execution_id) REFERENCES schedule_executions(id)
         )
     """,
@@ -2209,6 +2217,9 @@ INDEXES = [
     "ON agent_evaluations(evaluator, target_kind, target_id) WHERE target_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_target "
     "ON agent_evaluations(agent_name, target_kind, target_id)",
+    # ent#935 — "how did the runs this caller delegated go", per callee.
+    "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_caller "
+    "ON agent_evaluations(caller_agent, agent_name, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_type ON agent_reports(report_type, created_at DESC)",
     # Serves the retention sweep's `WHERE created_at < cutoff` scan (#918).
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_created ON agent_reports(created_at)",

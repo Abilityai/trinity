@@ -230,6 +230,10 @@ AGENT_REFS: List[AgentRef] = [
     # tenant's reports (cross-tenant disclosure).
     AgentRef("agent_reports",                "agent_name",        Policy.CASCADE),
     AgentRef("agent_evaluations",            "agent_name",        Policy.CASCADE),
+    # ent#935 — the agent that delegated the graded run. CASCADE like
+    # agent_peer_skill_grants.caller_agent: a reused name must not inherit
+    # another agent's delegation record, and a rename must carry it.
+    AgentRef("agent_evaluations",            "caller_agent",      Policy.CASCADE),
     # ent#477 — the declared metric registry. CASCADE on both halves: a purge
     # must not leave definitions addressed to a name that is gone (ent#478
     # validates incoming points against them, so a stale row would ACCEPT
