@@ -97,3 +97,39 @@ def test_mounted_agent_config_does_not_abort_startup(tmp_path):
     # the image does not ship /app/configure_agent.py.
     subprocess.run(["bash", "-ec", 'ENABLE_SSH=false\n' + block],
                    check=True, capture_output=True, timeout=5)
+
+
+@pytest.mark.parametrize("transport", ["legacy", "volume"])
+@pytest.mark.parametrize("relative", ["service.pem", ".config/gcloud/credentials.db", "credential-files/service.pem"])
+@pytest.mark.parametrize("existing", [None, "rotated", "empty", "symlink", "dangling"])
+def test_3722_recovery_preserves_mutable_file_credentials(tmp_path, transport, relative, existing):
+    home = tmp_path / "home"
+    home.mkdir()
+    generated = tmp_path / ("volume-seeds" if transport == "volume" else "legacy-seeds")
+    seed = generated / relative
+    seed.parent.mkdir(parents=True)
+    seed.write_text("synthetic-creation-seed")
+    seed.chmod(0o600)
+    target = home / relative.removeprefix("credential-files/")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    if existing in ("symlink", "dangling"):
+        if existing == "symlink":
+            outside.write_text("synthetic-owner-content")
+            outside.chmod(0o640)
+        target.symlink_to(outside)
+    elif existing is not None:
+        target.write_text("" if existing == "empty" else "synthetic-rotated-key")
+        target.chmod(0o600)
+    _restart(home, generated)
+    if existing in ("symlink", "dangling"):
+        assert target.is_symlink()
+        if existing == "symlink":
+            assert outside.read_text() == "synthetic-owner-content"
+            assert outside.stat().st_mode & 0o777 == 0o640
+        else:
+            assert not outside.exists()
+    else:
+        assert target.read_text() == ("synthetic-creation-seed" if existing is None else
+                                      "" if existing == "empty" else "synthetic-rotated-key")
+        assert target.stat().st_mode & 0o777 == 0o600

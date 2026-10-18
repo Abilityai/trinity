@@ -3856,7 +3856,7 @@ async def create_agent_internal(
                     seed_dir = Path(next(iter(cred_files_volume))) if cred_files_volume else None
                     config_task = asyncio.create_task(asyncio.to_thread(
                         create_config_volume, docker_client, config.name,
-                        config_path, credentials_path, seed_dir,
+                        config_path, credentials_path, seed_dir, config.base_image,
                     ))
                     try:
                         handles.config_volume = await asyncio.shield(config_task)

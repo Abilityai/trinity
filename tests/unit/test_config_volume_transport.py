@@ -44,7 +44,7 @@ def test_existing_volume_is_never_overwritten_or_removed(monkeypatch, tmp_path):
     class Client:
         volumes = Volumes()
     with pytest.raises(config_volume.ConfigVolumeConflict):
-        config_volume.create_config_volume(Client(), 'test-agent', tmp_path/'x', tmp_path/'y', None)
+        config_volume.create_config_volume(Client(), 'test-agent', tmp_path/'x', tmp_path/'y', None, 'trinity-agent-base:latest')
 
 
 def _inputs(tmp_path):
@@ -63,7 +63,7 @@ def test_concurrent_volume_claim_is_not_written_or_deleted(monkeypatch, tmp_path
     client.volumes.create.return_value = foreign
     monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
     with pytest.raises(config_volume.ConfigVolumeConflict):
-        config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None)
+        config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None, 'trinity-agent-base:latest')
     client.containers.create.assert_not_called()
     foreign.remove.assert_not_called()
 
@@ -82,7 +82,7 @@ def test_failed_archive_removes_only_owned_unattached_volume(monkeypatch, tmp_pa
     helper.put_archive.return_value = False
     monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
     with pytest.raises(config_volume.ConfigVolumeError):
-        config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None)
+        config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None, 'trinity-agent-base:latest')
     helper.remove.assert_called_once_with(force=True)
     volume.remove.assert_called_once_with(force=False)
 
@@ -198,7 +198,7 @@ def test_helper_remove_failure_still_attempts_owned_volume_cleanup(monkeypatch, 
     helper.remove.side_effect = docker.errors.APIError('synthetic remove failure')
     monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
     with pytest.raises(docker.errors.APIError):
-        config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None)
+        config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None, 'trinity-agent-base:latest')
     volume.remove.assert_called_once_with(force=False)
 
 
@@ -282,7 +282,8 @@ def test_3722_cleanup_removes_valid_private_staging(monkeypatch, tmp_path):
     assert not target.exists()
 
 
-def test_3722_archive_helper_is_never_started_and_is_removed_after_upload(monkeypatch, tmp_path):
+@pytest.mark.parametrize("image", ["trinity-agent-base:latest", "example/trinity:approved-pin"])
+def test_3722_archive_helper_is_never_started_and_is_removed_after_upload(monkeypatch, tmp_path, image):
     from unittest.mock import Mock
     import docker
     client = Mock()
@@ -293,9 +294,14 @@ def test_3722_archive_helper_is_never_started_and_is_removed_after_upload(monkey
     client.volumes.create.side_effect = create
     client.volumes.get.side_effect = docker.errors.NotFound('absent')
     monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
-    config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None)
+    def cached_image(selected):
+        if selected != image:
+            raise docker.errors.ImageNotFound("only the selected image is cached")
+        return Mock()
+    client.images.get.side_effect = cached_image
+    config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None, image)
     client.containers.create.assert_called_once()
-    assert client.containers.create.call_args.args[0] == 'trinity-agent-base:latest'
+    assert client.containers.create.call_args.args[0] == image
     client.images.pull.assert_not_called()
     helper = client.containers.create.return_value
     helper.put_archive.assert_called_once()
@@ -319,7 +325,7 @@ def test_missing_local_helper_image_does_not_pull_and_cleans_owned_volume(monkey
     client.images.get.side_effect = docker.errors.ImageNotFound('local base image absent')
     monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
     with pytest.raises(docker.errors.ImageNotFound):
-        config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None)
+        config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None, 'trinity-agent-base:latest')
     client.images.pull.assert_not_called()
     client.containers.create.assert_not_called()
     volume.remove.assert_called_once_with(force=False)

@@ -2048,3 +2048,16 @@ async def test_canceled_config_collision_preserves_concurrent_winner(crud_env, m
     ctx["docker_utils"].container_remove.assert_not_awaited()
     ctx["db"].delete_mcp_api_key.assert_called_once_with("attempt-key", "eugene")
     ctx["db"].delete_agent_mcp_api_key.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_3722_archive_helper_uses_selected_base_image(crud_env, monkeypatch):
+    from types import SimpleNamespace
+    crud, ctx = crud_env
+    config = _local_config("selected-image")
+    config.base_image = "example/trinity:approved-pin"
+    provision = MagicMock(return_value=SimpleNamespace(name="agent-selected-image-config", claim="synthetic"))
+    monkeypatch.setattr(crud, "create_config_volume", provision)
+    await crud.create_agent_internal(config, _user())
+    crud.validate_base_image.assert_called_once_with(config.base_image)
+    assert provision.call_args.args[-1] == config.base_image

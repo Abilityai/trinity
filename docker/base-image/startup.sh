@@ -568,8 +568,13 @@ if [ -d "$GENERATED_CREDS_DIR" ]; then
             mkdir -p "/home/developer/$target_dir"
         fi
 
-        echo "  Copying $rel_path..."
-        cp "$file" "/home/developer/$rel_path" 2>/dev/null || true
+        # Generated files are creation seeds, including mutable file credentials.
+        # Recovery must preserve later injections, empty files and symlinks.
+        if [ -e "/home/developer/$rel_path" ] || [ -L "/home/developer/$rel_path" ]; then
+            continue
+        fi
+        echo "  Seeding $rel_path..."
+        cp -n "$file" "/home/developer/$rel_path" 2>/dev/null || true
     done
 
     # Copy credential files from credential-files/ subdirectory
@@ -587,9 +592,13 @@ if [ -d "$GENERATED_CREDS_DIR" ]; then
                 mkdir -p "/home/developer/$target_dir"
             fi
 
-            echo "  Copying credential file: $rel_path"
-            cp "$file" "/home/developer/$rel_path" 2>/dev/null || true
-            # Set restrictive permissions on credential files
+            # Do not overwrite or chmod an existing credential or symlink.
+            if [ -e "/home/developer/$rel_path" ] || [ -L "/home/developer/$rel_path" ]; then
+                continue
+            fi
+            echo "  Seeding credential file: $rel_path"
+            cp -n "$file" "/home/developer/$rel_path" 2>/dev/null || true
+            # Set restrictive permissions on newly seeded credential files
             chmod 600 "/home/developer/$rel_path" 2>/dev/null || true
         done
     fi

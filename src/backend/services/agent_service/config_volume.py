@@ -16,7 +16,6 @@ import uuid
 
 import docker
 
-_IMAGE = "trinity-agent-base:latest"
 _MAX_BYTES = 16 * 1024 * 1024
 _CLAIM_LABEL = "trinity.config-creation"
 
@@ -99,7 +98,7 @@ def remove_created_config_volume(client, handle: ConfigVolumeHandle):
     volume.remove(force=False)
 
 
-def create_config_volume(client, agent_name, config, credentials, seeds):
+def create_config_volume(client, agent_name, config, credentials, seeds, image):
     """Populate one new agent-config volume using the native archive interface."""
     from services.docker_utils import agent_volume_labels
 
@@ -122,11 +121,11 @@ def create_config_volume(client, agent_name, config, credentials, seeds):
             raise ConfigVolumeConflict("Configuration volume already claimed")
         helper = None
         try:
-            # Reuse the base image already required for agent creation. This
+            # Reuse the caller-validated image selected for this agent. This
             # archive-only container never starts and needs no registry access.
-            client.images.get(_IMAGE)
+            client.images.get(image)
             helper = client.containers.create(
-                _IMAGE, command=["true"], network_mode="none",
+                image, command=["true"], network_mode="none",
                 labels=labels,
                 volumes={name: {"bind": "/dest", "mode": "rw"}},
             )
