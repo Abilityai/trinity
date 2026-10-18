@@ -58,7 +58,7 @@ JUDGE_DIMENSIONS = ("scope_fidelity", "escalation_correctness", "intent_alignmen
 JUDGE_DIMENSION_VERDICTS = ("pass", "fail", "n/a")
 JUDGE_REASON_MAX_CHARS = 160
 # A reason is structural, never a quotation: the no-quote guard proper (a
-# 32-char window of the transcript) lives beside the transcript, in the judge;
+# window of the transcript) lives beside the transcript, in the judge;
 # here the structural proxy is that a reason carries no quotation mark at all.
 _QUOTE_CHARS = frozenset('"\'`\u201c\u201d\u2018\u2019\u00ab\u00bb')
 JUDGE_SKIP_REASONS = frozenset({
