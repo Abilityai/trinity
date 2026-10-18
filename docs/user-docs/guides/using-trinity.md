@@ -88,14 +88,14 @@ There is no browser terminal on this page. Direct shell access is by SSH — see
 
 Click **Create Agent** in the Dashboard header, or **Use Template** on the Library page:
 
-1. **Choose a source**:
-   - **Blank Agent (Claude Code)** — A minimal agent with a default CLAUDE.md that you shape yourself.
+1. **Choose a source** from the list on the left of the dialog (**Search templates** narrows it). The selected source, the name and its options appear on the right; the dialog keeps one size whatever you pick:
+   - **Blank agent** — A minimal agent with a default CLAUDE.md that you shape yourself.
    - **Local Templates** — The templates bundled with your install (the scout / sage / scribe starters, and more).
    - **GitHub Templates** — Repositories your admin has registered under **Settings → Agents → GitHub Templates**.
-   - **GitHub Repository** — Any repo, as `owner/repo` or a full GitHub URL, with a **Clone / Copy / Fork** choice for how the agent relates to that repo. A clone also asks **What is this repository?** — **An agent** or **A deployment of a codebase** — and Trinity sets up the git binding from the answer. (A specific branch, `github:Org/repo@branch`, is available through the API and MCP.)
+   - **Import a GitHub repository** — Any repo, as `owner/repo` or a full GitHub URL, with a **Clone / Copy / Fork** choice for how the agent relates to that repo. A clone also asks **What is this repository?** — **An agent** or **A deployment of a codebase** — and Trinity sets up the git binding from the answer. (A specific branch, `github:Org/repo@branch`, is available through the API and MCP.)
    - Featured **fork-to-own** templates, when your install offers them, ask for a destination repo and a token so the agent gets a repository of its own.
-2. **Enter a name** — A **Slug / Identifier** (e.g., `my-research-agent`). The dialog previews the formatted identifier as you type — lowercased, with spaces and other unsupported characters turned into hyphens — so you see the exact name before you create. It becomes the agent's permanent name in URLs, containers and keys. You can also set a friendly display label.
-3. **Create Agent** — Trinity clones, builds, and starts the container. The form closes and the agent appears on the Dashboard (a GitHub-sourced create first shows an import check — **Close** is always available). Click the agent to open its detail page and start with **Chat**, **Tasks**, or the **Workspace**.
+2. **Enter a name** — One **Name** field (e.g., `My Research Agent`), shown in the UI. The dialog previews the permanent **ID** derived from it as you type — lowercased, with spaces and other unsupported characters turned into hyphens (`my-research-agent`). The ID is used in URLs, containers and keys; **Edit** sets a different one. The **Runtime** row shows the runtime the agent will use (Claude Code for a blank agent; a template may declare another).
+3. **Create agent** — Trinity clones, builds, and starts the container. The form closes and the agent appears on the Dashboard (a GitHub-sourced create first shows an import check — **Close** is always available). Click the agent to open its detail page and start with **Chat**, **Tasks**, or the **Workspace**.
 
 What happens after creation:
 
