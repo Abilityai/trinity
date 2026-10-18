@@ -253,6 +253,28 @@ def test_the_staged_secret_is_scrubbed_from_the_excerpt_too():
     assert secret not in r["evidence"]["claim_excerpt"]
 
 
+@pytest.mark.parametrize("edge", ["start", "end"])
+@pytest.mark.parametrize("kind", ["staged", "pattern"])
+def test_a_secret_straddling_the_excerpt_window_leaves_no_fragment(edge, kind):
+    """Review I2: the excerpt window is cut from text that was already
+    scrubbed whole, so a secret crossing either window edge cannot survive
+    as a half that no longer matches its pattern or its staged value."""
+    secret = "plainStagedSecretValue0123456789" if kind == "staged" else FAKE_PAT
+    staged = [secret] if kind == "staged" else []
+    if edge == "start":
+        # window starts 80 chars before the claim: put the secret across it
+        reply = "q" * 10 + secret + " " + "w" * (90 - 10 - len(secret) + len(secret) // 2) + " Done"
+        lo = reply.index("Done") - 80
+        assert reply.index(secret) < lo < reply.index(secret) + len(secret)
+    else:
+        # a redaction ahead of the claim shortens the window's text, so what
+        # lay past the slice end is pulled into the 200-char cut
+        reply = (f"{FAKE_PAT} " * 3) + "Done " + "e" * 128 + " " + secret + " tail"
+    r = _run("deliverable_landed", _ctx(reply, staged=staged))
+    excerpt = r["evidence"]["claim_excerpt"]
+    assert not any(secret[i:i + 8] in excerpt for i in range(len(secret) - 7)), excerpt
+
+
 def test_an_oversized_reply_is_bounded_and_says_so():
     reply = "Done. " + ("z" * (t0.MAX_SCAN_CHARS + 10))
     r = _run("deliverable_landed", _ctx(reply))

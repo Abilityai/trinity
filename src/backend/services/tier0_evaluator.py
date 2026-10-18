@@ -94,16 +94,23 @@ def _bounded(text: Optional[str]) -> tuple:
     return text[:MAX_SCAN_CHARS], len(text) > MAX_SCAN_CHARS
 
 
-def _scrubbed_excerpt(text: str, start: int, end: int, staged: List[str]) -> str:
-    """≤200 chars around [start, end), credential patterns and staged runtime
-    secrets redacted. Scrubbed BEFORE it is cut, so a secret straddling the
-    window edge cannot leave half of itself behind."""
-    lo = max(0, start - 80)
-    window = text[lo:end + 80 + 64]
-    window = sanitize_text(window)
+def _scrub(text: str, staged: List[str]) -> str:
+    """Credential patterns and staged runtime secrets redacted from the WHOLE
+    (already bounded) text. Done once, before any position is taken or any
+    window is cut: a secret sliced first would leave a fragment that matches
+    neither its pattern nor its staged value, and that fragment would survive."""
+    text = sanitize_text(text)
     for value in sorted((v for v in staged if v), key=len, reverse=True):
-        window = window.replace(value, REDACTION_PLACEHOLDER)
-    return window[:MAX_EXCERPT_CHARS]
+        text = text.replace(value, REDACTION_PLACEHOLDER)
+    return text
+
+
+def _scrubbed_excerpt(scrubbed: str, start: int, end: int) -> str:
+    """≤200 chars around [start, end) of text that `_scrub` already redacted
+    whole — so cutting the window can never split a secret into a fragment
+    that escapes redaction. Positions are offsets into that scrubbed text."""
+    lo = max(0, start - 80)
+    return scrubbed[lo:end + 80 + 64][:MAX_EXCERPT_CHARS]
 
 
 def _staged_hits(staged: List[str], text: str) -> int:
@@ -233,15 +240,14 @@ def check_deliverable_landed(ctx: Dict[str, Any]) -> Dict[str, Any]:
     counts = {k: int((receipts.get(k) or {}).get("count") or 0)
               for k in ("asks", "effects", "metrics", "reports_in_window")}
     evidence: Dict[str, Any] = {"receipts": counts, "truncated": truncated}
-    scan = _FOOTER_LINE_RE.sub("", text)
+    scan = _scrub(_FOOTER_LINE_RE.sub("", text), ctx.get("staged_values") or [])
     claims = _claims(scan)
     if not claims:
         return _skip("no_claim", **evidence)
     if _NO_OP_RE.search(scan) and all(m.group(1).lower() in _GENERIC_CLAIMS for m in claims):
         return _skip("no_claim", **evidence)
     first = claims[0]
-    evidence["claim_excerpt"] = _scrubbed_excerpt(
-        scan, first.start(), first.end(), ctx.get("staged_values") or [])
+    evidence["claim_excerpt"] = _scrubbed_excerpt(scan, first.start(), first.end())
     attributable = counts["asks"] + counts["effects"] + counts["metrics"]
     if attributable:
         evidence["ask_ids"] = list((receipts.get("asks") or {}).get("ids") or [])
