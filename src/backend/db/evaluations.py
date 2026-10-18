@@ -18,7 +18,7 @@ import json
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import select, insert, update, and_, func
+from sqlalchemy import select, insert, update, delete, and_, func
 from sqlalchemy.exc import IntegrityError
 
 from db.engine import get_engine
@@ -35,6 +35,117 @@ TIER0_EVALUATOR = "platform:tier0"
 TIER0_TARGET_KIND = "execution"
 TIER0_TRIGGERS = ("schedule", "agent")
 TIER0_TERMINAL_STATUSES = ("success", "failed", "cancelled")
+
+
+# ent#936 — the sampled judge (Tier-1) writes a SECOND platform row per run,
+# `evaluator='platform:tier1:<model>'`, keyed on the same `(evaluator,
+# target_kind='execution', target_id=<id>)` index. Two rows, not one: a Tier-0
+# re-grade emits `quality=NULL` on ITS row on every write, so a verdict written
+# in place would be clobbered by the next FAILED→SUCCESS relabel (TD-5). The
+# judge itself (sampling, prompt, provider call) is an enterprise module; this
+# layer is the seam it writes through — a claim, a finish, a candidate read and
+# a schema guard — and takes execution ids and column values only. Nothing here
+# knows a caller; no route reaches these writers (test_935_write_fence.py).
+TIER1_EVALUATOR_PREFIX = "platform:tier1:"
+TIER1_CLAIM_STALE_SECONDS = 600
+
+JUDGE_SCHEMA = 1
+JUDGE_STATES = ("claimed", "judged", "skipped")
+JUDGE_FINAL_STATES = ("judged", "skipped")
+JUDGE_VERDICTS = ("graded", "indeterminate")
+JUDGE_DIMENSIONS = ("scope_fidelity", "escalation_correctness", "intent_alignment",
+                    "helpfulness")
+JUDGE_DIMENSION_VERDICTS = ("pass", "fail", "n/a")
+JUDGE_REASON_MAX_CHARS = 160
+# A reason is structural, never a quotation: the no-quote guard proper (a
+# 32-char window of the transcript) lives beside the transcript, in the judge;
+# here the structural proxy is that a reason carries no quotation mark at all.
+_QUOTE_CHARS = frozenset('"\'`\u201c\u201d\u2018\u2019\u00ab\u00bb')
+JUDGE_SKIP_REASONS = frozenset({
+    "not_sampled", "excluded_trigger", "excluded_channel", "excluded_archetype",
+    "run_too_cheap", "cost_unknown", "model_unknown", "same_family",
+    "credential_echo", "no_response", "judge_unavailable", "judge_budget",
+    "provider_error", "unparseable", "agent_opted_out", "flag_off",
+})
+# The claim marker as `json.dumps` serialises it (default separators). The
+# finish writer's compare-and-set keys on it in SQL, so it is pinned here, once.
+_CLAIMED_MARKER = '"state": "claimed"'
+
+
+def tier1_evaluator(model: str) -> str:
+    """`platform:tier1:<model>` — the row key of a judge verdict. The model id
+    is part of the key, so it must be a bare id (no whitespace, non-empty)."""
+    if not isinstance(model, str) or not model or any(c.isspace() for c in model):
+        raise ValueError("judge model id must be a non-empty bare id")
+    return f"{TIER1_EVALUATOR_PREFIX}{model}"
+
+
+class JudgeJsonError(ValueError):
+    """A `judge_json` document that fails the structural guard. `code` names
+    the defect (`judge_<field>_<problem>`); the row is never written."""
+
+    def __init__(self, code: str, detail: str = ""):
+        super().__init__(code if not detail else f"{code}: {detail}")
+        self.code = code
+
+
+def validate_judge_json(judge: Any) -> dict:
+    """The structural guard on a finished judge document. Structural fields
+    ONLY: schema, state, the dimension/verdict enums, the reason cap and the
+    no-quotation-mark rule, the quality range, the skip enum. Whether
+    `quality` agrees with the dimensions is the rubric's job, not this
+    layer's. An omitted dimension is `n/a`. Returns the normalised document;
+    raises `JudgeJsonError` with a named code otherwise."""
+    if not isinstance(judge, dict):
+        raise JudgeJsonError("judge_json_not_object")
+    if judge.get("schema") != JUDGE_SCHEMA:
+        raise JudgeJsonError("judge_schema_unsupported", str(judge.get("schema")))
+    state = judge.get("state")
+    if state not in JUDGE_FINAL_STATES:
+        raise JudgeJsonError("judge_state_invalid", str(state))
+    out = dict(judge)
+    if state == "skipped":
+        if judge.get("skip") not in JUDGE_SKIP_REASONS:
+            raise JudgeJsonError("judge_skip_unknown", str(judge.get("skip")))
+        return out
+    # judged
+    if not isinstance(judge.get("model"), str) or not judge["model"]:
+        raise JudgeJsonError("judge_model_missing")
+    dims = judge.get("dimensions")
+    if not isinstance(dims, dict):
+        raise JudgeJsonError("judge_dimensions_invalid")
+    unknown = set(dims) - set(JUDGE_DIMENSIONS)
+    if unknown:
+        raise JudgeJsonError("judge_dimension_unknown", ",".join(sorted(unknown)))
+    norm = {}
+    for name in JUDGE_DIMENSIONS:
+        dim = dims.get(name)
+        if dim is None:
+            norm[name] = {"verdict": "n/a"}
+            continue
+        if not isinstance(dim, dict) or dim.get("verdict") not in JUDGE_DIMENSION_VERDICTS:
+            raise JudgeJsonError("judge_dimension_verdict_invalid", name)
+        entry = {"verdict": dim["verdict"]}
+        if "reason" in dim and dim["reason"] is not None:
+            reason = dim["reason"]
+            if not isinstance(reason, str):
+                raise JudgeJsonError("judge_reason_invalid", name)
+            if len(reason) > JUDGE_REASON_MAX_CHARS:
+                raise JudgeJsonError("judge_reason_too_long", name)
+            if any(c in _QUOTE_CHARS for c in reason):
+                raise JudgeJsonError("judge_reason_quoted", name)
+            entry["reason"] = reason
+        norm[name] = entry
+    out["dimensions"] = norm
+    quality = judge.get("quality")
+    if quality is not None:
+        if isinstance(quality, bool) or not isinstance(quality, (int, float)) \
+                or not (0.0 <= float(quality) <= 1.0):
+            raise JudgeJsonError("judge_quality_out_of_range", str(quality))
+        out["quality"] = float(quality)
+    if judge.get("verdict") not in JUDGE_VERDICTS:
+        raise JudgeJsonError("judge_verdict_invalid", str(judge.get("verdict")))
+    return out
 
 
 def derive_delegation(row) -> tuple:
@@ -470,6 +581,150 @@ class EvaluationOperations:
         )
         with get_engine().connect() as conn:
             return [r[0] for r in conn.execute(stmt).all()]
+
+    # ------------------------------------------------------------------
+    # ent#936 — the Tier-1 (judge) row: claim / finish / candidates / reclaim
+    # ------------------------------------------------------------------
+
+    def _tier1_row_for(self, conn, execution_id: str) -> Optional[dict]:
+        """The run's Tier-1 row under ANY model, or None."""
+        row = conn.execute(select(agent_evaluations).where(and_(
+            agent_evaluations.c.evaluator.like(f"{TIER1_EVALUATOR_PREFIX}%"),
+            agent_evaluations.c.target_kind == TIER0_TARGET_KIND,
+            agent_evaluations.c.target_id == execution_id,
+        )).limit(1)).mappings().first()
+        return self._row_to_dict(row) if row else None
+
+    def claim_tier1_row(self, execution_id: str, *, model: str) -> Optional[dict]:
+        """INSERT the run's Tier-1 row in state `claimed`; None if it cannot.
+
+        The compare-and-set that makes the judge's provider call happen at most
+        once per run: the row is keyed `platform:tier1:<model>` on the one-row
+        index, so two claims on one execution — two sweep leaders, the lease
+        failing open — race to one INSERT and the loser's `IntegrityError` is
+        its answer (`None`: no call, no spend). The existence check before it
+        covers a claim under a DIFFERENT model id (a changed primary), which the
+        index alone would admit; both run in one write transaction. A run
+        without a Tier-0 row is not claimable: the judge grades on top of Tier-0
+        evidence, and the row copies the Tier-0 row's agent, archetype and
+        delegation link — nothing is passed in. There is NO update fallback: a
+        row that exists, in any state, is the answer to "has this run been
+        judged or decided", and a skip is final per run (TD-10).
+        """
+        evaluator = tier1_evaluator(model)
+        now = utc_now_iso()
+        eval_id = f"eval_{uuid.uuid4().hex[:16]}"
+        with get_engine().begin() as conn:
+            tier0 = conn.execute(select(agent_evaluations).where(and_(
+                agent_evaluations.c.evaluator == TIER0_EVALUATOR,
+                agent_evaluations.c.target_kind == TIER0_TARGET_KIND,
+                agent_evaluations.c.target_id == execution_id,
+            )).limit(1)).mappings().first()
+            if tier0 is None:
+                return None
+            if self._tier1_row_for(conn, execution_id) is not None:
+                return None
+            judge = {"schema": JUDGE_SCHEMA, "state": "claimed", "evaluator": evaluator,
+                     "claimed_at": now}
+            try:
+                with conn.begin_nested():
+                    conn.execute(insert(agent_evaluations).values(
+                        id=eval_id, evaluator=evaluator, created_at=now, updated_at=now,
+                        target_kind=TIER0_TARGET_KIND, target_id=execution_id,
+                        agent_name=tier0["agent_name"], execution_id=execution_id,
+                        archetype=tier0["archetype"], completion=None, quality=None,
+                        checks_json=None, judge_json=json.dumps(judge), comment=None,
+                        caller_agent=tier0["caller_agent"],
+                        parent_execution_id=tier0["parent_execution_id"],
+                        delegation_mode=tier0["delegation_mode"],
+                    ))
+            except IntegrityError:
+                return None
+            row = conn.execute(
+                select(agent_evaluations).where(agent_evaluations.c.id == eval_id)
+            ).mappings().first()
+        return self._row_to_dict(row)
+
+    def finish_tier1_row(self, eval_id: str, *, judge: Any) -> Optional[dict]:
+        """Write the verdict (or the skip) onto a claimed Tier-1 row; None if
+        no claimed Tier-1 row has that id.
+
+        `judge` passes `validate_judge_json` first, so a malformed document
+        never reaches the table. The UPDATE is keyed on the Tier-1 evaluator
+        prefix AND the `claimed` marker: a Tier-0 row's id writes nothing, and a
+        row already judged or skipped is final — a late second finish (the
+        original worker returning after its claim was reclaimed, a retried
+        tick) is dropped (`None`), never an overwrite. `quality` is the
+        document's `quality` (NULL for a skip); `completion` stays NULL — the
+        judge grades quality, not the exit.
+        """
+        doc = validate_judge_json(judge)
+        now = utc_now_iso()
+        doc.setdefault("finished_at", now)
+        where = and_(
+            agent_evaluations.c.id == eval_id,
+            agent_evaluations.c.evaluator.like(f"{TIER1_EVALUATOR_PREFIX}%"),
+            agent_evaluations.c.judge_json.like(f"%{_CLAIMED_MARKER}%"),
+        )
+        with get_engine().begin() as conn:
+            rc = conn.execute(update(agent_evaluations).where(where).values(
+                quality=doc.get("quality"), judge_json=json.dumps(doc), updated_at=now,
+            )).rowcount
+            if not rc:
+                return None
+            row = conn.execute(
+                select(agent_evaluations).where(agent_evaluations.c.id == eval_id)
+            ).mappings().first()
+        return self._row_to_dict(row) if row else None
+
+    def latest_tier1_for_execution(self, execution_id: str) -> Optional[dict]:
+        """The run's Tier-1 row (any model, any state), or None."""
+        with get_engine().connect() as conn:
+            return self._tier1_row_for(conn, execution_id)
+
+    def tier1_candidates(self, *, limit: int = 25, lookback_hours: int = 24) -> list[dict]:
+        """Tier-0 rows whose run has no Tier-1 row yet, oldest first.
+
+        The candidate IS the Tier-0 row (the sampler needs its checks and
+        headline). Bounded: Tier-0 rows created within `lookback_hours`, at
+        most `limit`. A run with a Tier-1 row in ANY state is never offered
+        again — claimed means in flight, judged/skipped means final — until a
+        stale claim is released by `reclaim_stale_tier1`. Cutoff computed in
+        Python (Invariant #16).
+        """
+        tier0 = agent_evaluations.alias("tier0")
+        judged = select(agent_evaluations.c.id).where(and_(
+            agent_evaluations.c.evaluator.like(f"{TIER1_EVALUATOR_PREFIX}%"),
+            agent_evaluations.c.target_kind == TIER0_TARGET_KIND,
+            agent_evaluations.c.target_id == tier0.c.target_id,
+        ))
+        stmt = (
+            select(tier0)
+            .where(and_(
+                tier0.c.evaluator == TIER0_EVALUATOR,
+                tier0.c.target_kind == TIER0_TARGET_KIND,
+                tier0.c.target_id.isnot(None),
+                tier0.c.created_at >= iso_cutoff(lookback_hours),
+                ~judged.exists(),
+            ))
+            .order_by(tier0.c.created_at.asc(), tier0.c.id.asc())
+            .limit(max(0, int(limit)))
+        )
+        with get_engine().connect() as conn:
+            return [self._row_to_dict(r) for r in conn.execute(stmt).mappings()]
+
+    def reclaim_stale_tier1(self, *, stale_seconds: int = TIER1_CLAIM_STALE_SECONDS) -> int:
+        """DELETE `claimed` Tier-1 rows older than `stale_seconds` (a worker
+        that died mid-call) so the run is a candidate again. Finished rows
+        are never touched — a skip is final. Returns the count released."""
+        stmt = delete(agent_evaluations).where(and_(
+            agent_evaluations.c.evaluator.like(f"{TIER1_EVALUATOR_PREFIX}%"),
+            agent_evaluations.c.target_kind == TIER0_TARGET_KIND,
+            agent_evaluations.c.judge_json.like(f"%{_CLAIMED_MARKER}%"),
+            agent_evaluations.c.updated_at < iso_cutoff(seconds=max(0, int(stale_seconds))),
+        ))
+        with get_engine().begin() as conn:
+            return int(conn.execute(stmt).rowcount or 0)
 
     def get_evaluation(self, eval_id: str) -> Optional[dict]:
         stmt = select(agent_evaluations).where(agent_evaluations.c.id == eval_id)

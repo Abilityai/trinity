@@ -22,6 +22,12 @@ columns. Four properties, each pinned by driving the path an agent could reach:
    auth type (so no route can hand them a caller to trust).
 
 Plus the positive half: the sweep's writer path still writes.
+
+ent#936 (checkpoint A) extends the fence to the Tier-1 (judge) row: the
+claim/finish/reclaim writers in `db/evaluations.py` are reached from the
+`database.py` facade only — no router, no service, no MCP tool — an admin
+write cannot be dressed up as a `platform:tier1:<model>` row, and a Workspace
+rating's prefixed evaluator can never collide with the Tier-1 key either.
 """
 from __future__ import annotations
 
@@ -47,6 +53,7 @@ from db_harness import count, db_backend  # noqa: E402,F401
 pytestmark = pytest.mark.unit
 
 TIER0 = "platform:tier0"
+TIER1 = "platform:tier1:claude-sonnet-5"
 OWNER = "owner"
 
 # What an agent that wanted to grade itself would send: a Tier-0-shaped row
@@ -190,9 +197,10 @@ def test_a_rating_evaluator_is_always_prefixed_so_it_cannot_be_the_platform(port
     """Even a person whose address IS the platform evaluator string files
     under `workspace:`/`operator:` — the prefix is unconditional."""
     for is_platform in (False, True):
-        ev = portal.workspace_evaluator(TIER0, is_platform=is_platform)
-        assert ev != TIER0
-        assert ev.startswith(("workspace:", "operator:"))
+        for platform_key in (TIER0, TIER1):
+            ev = portal.workspace_evaluator(platform_key, is_platform=is_platform)
+            assert ev != platform_key
+            assert ev.startswith(("workspace:", "operator:"))
 
 
 # --- 4. there is no other writer --------------------------------------------------------
@@ -236,7 +244,9 @@ def test_the_writers_have_exactly_three_callers():
     from three places only. A fourth caller is a new write path and must
     be fenced here before it exists."""
     writers = {"create_agent_evaluation", "upsert_platform_evaluation",
-               "upsert_workspace_rating", "create_evaluation"}
+               "upsert_workspace_rating", "create_evaluation",
+               # ent#936 — the Tier-1 writers; in OSS only the facade reaches them
+               "claim_tier1_row", "finish_tier1_row", "reclaim_stale_tier1"}
     allowed = {
         "database.py",                     # facade → EvaluationOperations
         "routers/evaluations.py",          # admin:<user>, human-only gate
@@ -324,3 +334,68 @@ def test_an_admin_row_and_the_tier0_row_coexist_for_one_execution(client, monkey
     assert graded["id"] != admin_id
     assert count("agent_evaluations") == 2
     assert db.latest_tier0_for_execution("ex-1")["id"] == graded["id"]
+
+
+# --- ent#936: the Tier-1 (judge) row is fenced the same way -------------------------
+
+TIER1_SHAPED_BODY = {
+    **TIER0_SHAPED_BODY,
+    "evaluator": TIER1,
+    "quality": 1.0,
+    "judge": {"schema": 1, "state": "judged", "model": "claude-sonnet-5", "verdict": "graded",
+              "dimensions": {"helpfulness": {"verdict": "pass"}}, "quality": 1.0},
+}
+
+
+def test_the_tier1_writers_are_reached_from_the_facade_only():
+    """`claim_tier1_row` / `finish_tier1_row` / `reclaim_stale_tier1` are the
+    judge's write path. In the OSS tree exactly one module calls them — the
+    `database.py` facade the enterprise module imports — so no router or
+    service can hand a caller to them. A second OSS caller is a new write path
+    and must be fenced here before it exists."""
+    tier1_writers = {"claim_tier1_row", "finish_tier1_row", "reclaim_stale_tier1"}
+    callers = set()
+    for path in _py_files():
+        rel = str(path.relative_to(_SRC))
+        if rel == "db/evaluations.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for call in _calls(tree):
+            if isinstance(call.func, ast.Attribute) and call.func.attr in tier1_writers:
+                callers.add(rel)
+    assert callers == {"database.py"}, callers
+    assert not any(rel.startswith(("routers/", "services/")) for rel in callers)
+
+
+def test_the_tier1_writers_take_ids_and_column_values_only():
+    """Decision 18, extended: the claim takes an execution id and a model id,
+    the finish an eval id and a document, the reclaim a bound. No principal,
+    no request, no agent name — the row's identity is copied from the Tier-0
+    row inside the transaction."""
+    import inspect
+    from db.evaluations import EvaluationOperations as ops
+    assert list(inspect.signature(ops.claim_tier1_row).parameters) == ["self", "execution_id", "model"]
+    assert list(inspect.signature(ops.finish_tier1_row).parameters) == ["self", "eval_id", "judge"]
+    assert list(inspect.signature(ops.reclaim_stale_tier1).parameters) == ["self", "stale_seconds"]
+
+
+def test_an_admin_write_cannot_become_a_tier1_row(client, monkeypatch):
+    """A body naming the Tier-1 evaluator with a judge document lands under
+    the admin's own identity, with no target — `judge` is kept as the admin's
+    own note on their own row (ent#206) — and the Tier-1 read for that
+    execution stays empty: the judge's key is unreachable from the route."""
+    from database import db
+    from services import tier0_evaluator as t0
+    monkeypatch.setattr(t0, "_staged_values", lambda: [])
+    _seed()
+    t0.evaluate_execution("ex-1")             # a Tier-0 row exists, so a claim COULD land
+    r = client.post(WRITE, json=TIER1_SHAPED_BODY)
+    assert r.status_code == 200, r.text
+    row = db.get_agent_evaluation(r.json()["id"])
+    assert row["evaluator"] == f"admin:{OWNER}"
+    assert row["target_kind"] is None and row["target_id"] is None
+    assert db.latest_tier1_for_execution("ex-1") is None
+    # and the agent's own key still cannot write it
+    client.as_user(_user(OWNER, role="admin", agent_name="agent-a", mcp_scope="agent"))
+    assert client.post(WRITE, json=TIER1_SHAPED_BODY).status_code == 403
+    assert db.latest_tier1_for_execution("ex-1") is None
