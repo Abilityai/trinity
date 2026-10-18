@@ -357,8 +357,8 @@ def get_portal_message(message_id: str) -> Optional[dict]:
     for ent#610's reply-to, which quotes the row only AFTER the same proof.
     """
     stmt = text(
-        "SELECT id, agent_name, client_email, session_id, role, content, created_at "
-        "FROM enterprise_portal_messages WHERE id = :id"
+        "SELECT id, agent_name, client_email, session_id, role, content, created_at, "
+        "execution_id FROM enterprise_portal_messages WHERE id = :id"
     )
     with get_engine().connect() as conn:
         row = conn.execute(stmt, {"id": message_id}).mappings().first()
