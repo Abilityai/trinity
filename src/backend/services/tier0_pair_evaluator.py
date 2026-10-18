@@ -438,6 +438,36 @@ CHECKS: List[Check] = [
 ]
 
 
+# --- metrics ------------------------------------------------------------------
+
+def _ms(start, end) -> Optional[int]:
+    if start is None or end is None:
+        return None
+    return int(round((end - start).total_seconds() * 1000))
+
+
+def pair_metrics(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Evidence beside the checks, never pass/fail: dispatch (the callee's
+    admission) → start → end → the caller's first read, the callee run's
+    cost, and `verified` = the callee's own Tier-0 headline passed. Anything
+    the records do not hold is None, never 0 — a zero would pull a mean."""
+    callee = ctx["callee"]
+    started, ended = _ts(callee.get("started_at")), _ts(callee.get("completed_at"))
+    read = first_read(ctx) if ctx.get("activities") is not None else None
+    headline_ = (ctx.get("tier0") or {}).get("checks")
+    headline_ = headline_.get("headline") if isinstance(headline_, dict) else None
+    passed = headline_.get("passed") if isinstance(headline_, dict) else None
+    return {
+        "latency_ms": {
+            "dispatch_to_start": _ms(_ts(callee.get("queued_at")), started),
+            "start_to_end": _ms(started, ended),
+            "end_to_first_read": _ms(ended, read[1]) if read else None,
+        },
+        "cost": callee.get("cost"),
+        "verified": passed if isinstance(passed, bool) else None,
+    }
+
+
 # --- context ------------------------------------------------------------------
 
 def _guarded(label: str, execution_id: str, fn, *args, **kw):
@@ -461,7 +491,7 @@ def _exec_dict(row) -> Optional[Dict[str, Any]]:
             "loop_id": getattr(row, "loop_id", None),
             "retry_of_execution_id": getattr(row, "retry_of_execution_id", None),
             "queued_at": getattr(row, "queued_at", None), "started_at": row.started_at,
-            "completed_at": row.completed_at}
+            "completed_at": row.completed_at, "cost": getattr(row, "cost", None)}
 
 
 def _refusal_ids(callee: Dict[str, Any]) -> List[Any]:
@@ -567,6 +597,7 @@ def evaluate_pair(execution_id: str) -> Optional[dict]:
         "evaluated_at": utc_now_iso(),
         "headline": headline(results),
         "checks": results,
+        "metrics": _guarded("metrics", execution_id, pair_metrics, ctx),
     }
     try:
         return db.upsert_platform_evaluation(
