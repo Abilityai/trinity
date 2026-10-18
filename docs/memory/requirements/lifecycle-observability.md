@@ -895,9 +895,58 @@ external call. The managed grading experience — judge panels, calibration, rub
 management UI — is the paid layer, mirroring §42 (#668) where STATIC is free and the
 AI tier is not.
 
-**Not included** (later children of the epic): the Tier-0 evaluator that *populates*
-`quality`, the agent-owned case runner, the Tier-1 judge (enterprise), and
-replay/shadow evaluation (blocked on #1084 fail-closed + #1408).
+**Not included** (later children of the epic): the agent-owned case runner, the Tier-1
+judge (enterprise), and replay/shadow evaluation (blocked on #1084 fail-closed + #1408).
+
+### Addendum — Tier-0 deterministic evaluator (trinity-enterprise#935)
+
+Every finished `schedule`- or `agent`-triggered run is graded against the platform's
+own records, with **zero LLM calls**. OSS core, always on, no setting.
+
+- **FR-7 — Tier-0 writer**: one `agent_evaluations` row per execution, written by the
+  platform under `evaluator='platform:tier0'`, keyed `target_kind='execution',
+  target_id=<execution_id>`. The existing partial unique index
+  `idx_agent_evaluations_rating_target` (ent#366) makes that one row — a re-evaluation
+  (a FAILED terminal later overwritten by SUCCESS, two sweep workers) updates in place;
+  no migration. `completion` mirrors `status == 'success'`; `quality` stays NULL (Tier
+  0 grades checks, not answer quality). The writer (`services/tier0_evaluator.py ::
+  evaluate_execution(execution_id)`) takes an execution id only — no principal, no
+  request — and imports nothing from FastAPI or the auth layer, so the graded agent
+  cannot reach it (the FR-2 rule, extended). Every row also carries the **delegation
+  link** (addendum A), derived from the execution row on each write and never passed
+  in: `caller_agent` = `source_agent_name`, `parent_execution_id` = the row's stored
+  parent, `delegation_mode` = `fan_out` / `loop` / `reminder` from `fan_out_id` /
+  `loop_id` / `triggered_by`, otherwise **NULL** — an agent-sourced run's sync vs
+  async is not recorded on the row, and the mode is not guessed. Tier-0 rows never
+  enter a rating read: every tally and per-person read keys on a `workspace:` /
+  `operator:` evaluator.
+- **FR-8 — Checks vocabulary**: `checks_json = {schema: 1, intent_ref, evaluated_at,
+  checks: [...]}`; each check is `{id, tier: gate|signal, source:
+  platform|agent_reported, status: pass|fail|skip, reason?, evidence}`. A skip always
+  names its reason; a check that raises is `skip: evaluator_error` (exception class
+  only) and never costs the row. Evidence is counts, ids, paths and hashes only; the
+  one text field, a claim excerpt, is ≤200 characters and scrubbed of credential
+  patterns and staged runtime secrets. Gate checks: `execution_exists` (the run's
+  #2467 integrity record; NULL → `skip: no_integrity_record`), `credential_echo`
+  (pattern hits, redaction markers and staged-secret hits in reply/error — counts only),
+  `validate_001` (VALIDATE-001's `business_status`; usually `skip: not_run_yet` at
+  grading time), `deliverable_landed` (a claimed deliverable must have left a receipt
+  attributable by execution id — an ask, a completed outbound effect, a metric point;
+  a bare "Done"/"completed" with **zero receipts fails**, an explicit no-op reply
+  ("nothing to do", "no new items") is `skip: no_claim`, a report published in the
+  run's time window is `skip: unattributable` and never a pass — reports carry no
+  execution id — and a commit/push claim alone is `skip: no_receipt_source`),
+  `playbook_outputs` (the ent#183 skill contract's declared outputs, `## Output` prose
+  only when the contract declares none). Signal checks (listed, not counted in the
+  headline): `budget_vs_baseline`, `trajectory_bounds`, `footprint`.
+- **FR-9 — Sweep**: a backend loop (every 60 s, Redis leader lease, fail-open — the
+  write is idempotent on the index) grades up to 25 runs per cycle that are terminal
+  (`success`/`failed`/`cancelled`), triggered by `schedule` or `agent`, completed at
+  least 30 s ago (so evidence written just after the terminal has landed) and at most
+  24 h ago (no backfill), and have no Tier-0 row yet. Each evaluation is bounded (10 s,
+  run off the event loop) and fail-open. Not the scheduler's terminal hook: the
+  scheduler owns no terminal for `agent` runs, and the backend's own terminal fan-out
+  misses the FAILED terminals the scheduler writes itself.
 
 See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
 
