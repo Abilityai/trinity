@@ -172,6 +172,14 @@
         <ExecutionsPanel />
       </div>
 
+      <!-- Evaluations Tab (trinity-enterprise#938) — operator floor, not
+           admin-only: the API refuses role `user` on every read it issues
+           (test_938_tab_guard.py); this render gate mirrors that, it is not
+           the guard. -->
+      <div v-if="activeTab === 'evaluations' && atOperatorFloor">
+        <EvaluationsPanel />
+      </div>
+
       <!-- Reports Tab (#918) -->
       <div v-if="activeTab === 'reports'">
         <ReportsPanelFleet />
@@ -232,12 +240,14 @@ import NotificationsPanel from '../components/operator/NotificationsPanel.vue'
 import MonitoringPanel from '../components/MonitoringPanel.vue'
 import ExecutionsPanel from '../components/ExecutionsPanel.vue'
 import ReportsPanelFleet from '../components/ReportsPanelFleet.vue'
+import EvaluationsPanel from '../components/EvaluationsPanel.vue'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useNotificationsStore } from '../stores/notifications'
 import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
+import { isWorkspaceOnlyRole } from '../utils/workspaceOnly'
 
 const route = useRoute()
 const router = useRouter()
@@ -247,6 +257,10 @@ const agentsStore = useAgentsStore()
 const authStore = useAuthStore()
 
 const isAdmin = computed(() => authStore.role === 'admin')
+// ent#837's floor: operator, creator, admin. `authStore.role` defaults to
+// 'user' until the profile lands, so this flips true asynchronously the same
+// way `isAdmin` does — the watch below re-selects a deep-linked gated tab.
+const atOperatorFloor = computed(() => !isWorkspaceOnlyRole(authStore.role))
 
 // #1926 — the loading / failed / empty triad for the operator-queue tabs.
 // `hasLoaded` flips only on a SUCCEEDED fetch, so an empty list before the
@@ -265,14 +279,24 @@ const queueRefreshFailed = computed(
   () => operatorQueueStore.hasLoaded && !!operatorQueueStore.error
 )
 
-// Health is admin-only; non-admins must not reach it even via deep link.
-const VALID_TABS = ['needs-response', 'notifications', 'health', 'executions', 'reports', 'resolved']
+// Health is admin-only; Evaluations (ent#938) is operator-floor. A principal
+// below a tab's gate must not reach it even via deep link.
+const VALID_TABS = ['needs-response', 'notifications', 'health', 'executions', 'evaluations', 'reports', 'resolved']
 const OPERATOR_TABS = ['needs-response', 'notifications', 'resolved']
+// Gated tabs, as data: tab id → the predicate that admits the current role.
+// The strip, the render slot, `resolveTab` and the role watch all read this
+// one map, so a second gated tab is one line here and no copied branches.
+const TAB_GATES = {
+  health: () => isAdmin.value,
+  evaluations: () => atOperatorFloor.value,
+}
+const tabAllowed = (id) => !(id in TAB_GATES) || TAB_GATES[id]()
 
 function resolveTab(q) {
-  // A non-admin landing on ?tab=health (e.g. the /monitoring redirect) is
-  // bounced to the default tab rather than shown an empty Health surface.
-  if (q === 'health' && !isAdmin.value) return 'needs-response'
+  // A principal below the gate landing on ?tab=health (e.g. the /monitoring
+  // redirect) or ?tab=evaluations is bounced to the default tab rather than
+  // shown an empty surface.
+  if (!tabAllowed(q)) return 'needs-response'
   return VALID_TABS.includes(q) ? q : 'needs-response'
 }
 
@@ -286,6 +310,9 @@ const subtitle = computed(() => {
   }
   if (activeTab.value === 'executions') {
     return 'All task runs across your fleet'
+  }
+  if (activeTab.value === 'evaluations') {
+    return 'How your agents\' runs are graded — completion and gate checks, per agent'
   }
 
   const queueCount = operatorQueueStore.pendingCount
@@ -310,8 +337,9 @@ const subtitle = computed(() => {
 const visibleTabs = computed(() => [
   { id: 'needs-response', label: 'Needs Response', badge: operatorQueueStore.pendingCount || undefined },
   { id: 'notifications', label: 'Notifications', badge: notificationsStore.pendingCount || undefined },
-  ...(isAdmin.value ? [{ id: 'health', label: 'Health' }] : []),
+  ...(tabAllowed('health') ? [{ id: 'health', label: 'Health' }] : []),
   { id: 'executions', label: 'Executions' },
+  ...(tabAllowed('evaluations') ? [{ id: 'evaluations', label: 'Evaluations' }] : []),
   { id: 'reports', label: 'Reports' },
   { id: 'resolved', label: 'Resolved' },
 ])
@@ -412,14 +440,17 @@ async function confirmClearAll() {
   }
 }
 
-// If the role resolves asynchronously after mount and confirms non-admin,
-// bounce off the Health tab. (For admins deep-linking ?tab=health this
-// re-selects health once isAdmin flips true.)
-watch(isAdmin, (admin) => {
-  if (!admin && activeTab.value === 'health') {
+// If the role resolves asynchronously after mount and lands below a gated
+// tab's gate, bounce off it; if it lands at or above the gate and the deep
+// link asked for that tab, re-select it (the role defaults to 'user' until
+// the profile lands, so a deep-linked admin or operator first resolves to the
+// default tab).
+watch(() => authStore.role, () => {
+  const wanted = route.query.tab
+  if (!tabAllowed(activeTab.value)) {
     switchTab('needs-response')
-  } else if (admin && route.query.tab === 'health' && activeTab.value !== 'health') {
-    activeTab.value = 'health'
+  } else if (wanted in TAB_GATES && tabAllowed(wanted) && activeTab.value !== wanted) {
+    activeTab.value = wanted
   }
 })
 
