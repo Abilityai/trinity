@@ -192,6 +192,10 @@ _NO_OP_RE = re.compile(
     re.IGNORECASE,
 )
 _COMMIT_CLAIMS = frozenset({"committed", "pushed", "merged"})
+# The only claim words a no-op phrase may excuse ("Done — nothing to do").
+# A deliverable verb (sent, published, filed, …) next to a sign-off such as
+# "No action needed from you" is still a claim that must leave a receipt.
+_GENERIC_CLAIMS = frozenset({"done", "complete", "completed", "finished"})
 _CLAIM_RE = re.compile(
     r"\b(done|completed?|finished|sent|published|posted|created|filed|delivered|shared"
     r"|uploaded|reported|committed|pushed|merged)\b",
@@ -212,8 +216,10 @@ def _claims(text: str) -> List[re.Match]:
 def check_deliverable_landed(ctx: Dict[str, Any]) -> Dict[str, Any]:
     """A claimed deliverable must have left a receipt (TD-6, the null test).
 
-    - explicit no-op wording → `skip: no_claim` (an honest "nothing to do")
     - no claim → `skip: no_claim`
+    - explicit no-op wording and only generic completion words (done /
+      completed / finished) → `skip: no_claim` (an honest "nothing to do");
+      a deliverable verb is never excused by a no-op sign-off
     - claim + an attributable receipt (ask / completed effect / metric) → pass
     - claim, none attributable, a report published in the run's window →
       `skip: unattributable` — a window match is never a pass (TD-3)
@@ -228,10 +234,10 @@ def check_deliverable_landed(ctx: Dict[str, Any]) -> Dict[str, Any]:
               for k in ("asks", "effects", "metrics", "reports_in_window")}
     evidence: Dict[str, Any] = {"receipts": counts, "truncated": truncated}
     scan = _FOOTER_LINE_RE.sub("", text)
-    if _NO_OP_RE.search(scan):
-        return _skip("no_claim", **evidence)
     claims = _claims(scan)
     if not claims:
+        return _skip("no_claim", **evidence)
+    if _NO_OP_RE.search(scan) and all(m.group(1).lower() in _GENERIC_CLAIMS for m in claims):
         return _skip("no_claim", **evidence)
     first = claims[0]
     evidence["claim_excerpt"] = _scrubbed_excerpt(

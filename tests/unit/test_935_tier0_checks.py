@@ -192,6 +192,20 @@ def test_null_test_an_explicit_no_op_skips_no_claim(reply):
     assert (r["status"], r["reason"]) == ("skip", "no_claim")
 
 
+@pytest.mark.parametrize("reply", [
+    "Filed the report and sent the email. No action needed from you.",
+    "Published the digest. No changes needed elsewhere.",
+    "Posted the update — nothing to do on your side.",
+    "Done. Sent the invoice; no updates required.",
+])
+def test_a_no_op_sign_off_never_hides_a_deliverable_claim(reply):
+    """Review I4: a no-op phrase skips only when every claim is a generic
+    completion word. A deliverable verb next to a sign-off is still a claim,
+    and with zero receipts it is the null test's fail (TD-6)."""
+    r = _run("deliverable_landed", _ctx(reply))
+    assert (r["status"], r["reason"]) == ("fail", "claim_without_receipt")
+
+
 def test_no_claim_at_all_skips():
     r = _run("deliverable_landed", _ctx("Here is a summary of the market."))
     assert (r["status"], r["reason"]) == ("skip", "no_claim")
