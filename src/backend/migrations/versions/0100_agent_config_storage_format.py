@@ -10,6 +10,9 @@ Revises: 0098_proactive_consent_not_asked
 """
 from alembic import op
 
+# The filename was renumbered to avoid a numeric-prefix collision.
+# Keep the published revision ID and parent links valid for existing databases.
+
 revision = "0099_agent_config_storage_format"
 down_revision = "0098_proactive_consent_not_asked"
 branch_labels = None

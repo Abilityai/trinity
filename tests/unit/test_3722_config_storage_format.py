@@ -33,7 +33,7 @@ def test_registration_records_transport_atomically_and_never_upgrades_existing(d
         from db.engine import get_engine
         from sqlalchemy.exc import DBAPIError
         spec = importlib.util.spec_from_file_location('migration_3722', Path(__file__).parents[2] /
-            'src/backend/migrations/versions/0099_agent_config_storage_format.py')
+            'src/backend/migrations/versions/0100_agent_config_storage_format.py')
         revision = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(revision)
         # Simulate an existing legacy database, then run the actual revision.
@@ -70,3 +70,21 @@ def test_registration_records_transport_atomically_and_never_upgrades_existing(d
             revision.downgrade()
             revision.upgrade()
         assert ops.get_agent_config_storage_format('legacy') is None
+
+
+def test_migration_filenames_are_unique_and_published_history_resolves():
+    """A merged graph alone does not catch a numeric filename collision."""
+    from pathlib import Path
+    from alembic.script import ScriptDirectory
+
+    migrations = Path(__file__).parents[2] / 'src/backend/migrations'
+    prefixes = [p.name.split('_', 1)[0] for p in (migrations / 'versions').glob('[0-9]*.py')]
+    assert len(prefixes) == len(set(prefixes)), 'duplicate migration filename prefixes'
+    scripts = ScriptDirectory(str(migrations))
+    config = scripts.get_revision('0099_agent_config_storage_format')
+    peer = scripts.get_revision('0099_agent_peer_skill_grants')
+    merge = scripts.get_revision('0100_merge_agent_config_peer_grants')
+    assert config is not None and peer is not None
+    assert set(merge.down_revision) == {config.revision, peer.revision}
+    assert len(scripts.get_heads()) == 1
+    assert merge.revision in {r.revision for r in scripts.walk_revisions()}
