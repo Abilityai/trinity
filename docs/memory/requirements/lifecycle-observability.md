@@ -1084,14 +1084,16 @@ placement ruling and are not built until it lands.
   every Tier-0 reader keys on the evaluator. Never `quality` on a `platform:*` row.
 - **FR-17 — Fleet trend** (ruling T3): a nightly fleet series under the reserved
   `platform:eval` owner with `dims={"scope":"fleet"}` (never `{}`, which the dims reader
-  cannot select), written only by the unscoped nightly pass — the per-row restate and the
+  cannot select), written only by the unscoped nightly pass, and only for completed UTC days (never today,
+  which is still filling) — the per-row restate and the
   over-cap per-agent retry see one agent's rows, so they write no fleet point and an
   over-cap day is a gap. `GET /api/evaluations/trend` naming neither `agent=` nor a pair
-  reads it (every per-agent/pair key absent) and hands it only to a principal whose scope
-  is already every agent and that is not an agent key — an admin person, or the system key
-  (counts only; a judge-score metric stays a 422 for a machine). A person scoped to fewer
-  agents, and every agent key, get the empty series (never a 403), and the tab shows
-  "pick an agent". The chart caption states the one-day lag and the day the series
+  reads it (every per-agent/pair key absent) and hands it only to the two readers it names —
+  an admin person, or the system key (counts only; a judge-score metric stays a 422 for a
+  machine). A person scoped to fewer agents, every agent key, and any other machine key
+  (even one owned by an admin) get the empty series (never a 403); the tab tells an admin
+  no fleet point is written yet, and anyone else that the fleet series is admin-only and to
+  pick an agent. The chart caption states the one-day lag and the day the series
   starts. The agreement floor (ruling T4) lands later, with the agreement tile.
 
 See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
