@@ -1,5 +1,9 @@
 {
   "test_files": [
+    {"file": "unit/test_937_aggregate_db.py", "feature": "abilityai/trinity-enterprise#937", "added": "2026-10-18", "categories": ["backend", "database", "evaluations", "unit"]},
+    {"file": "unit/test_937_fold.py", "feature": "abilityai/trinity-enterprise#937", "added": "2026-10-18", "categories": ["backend", "evaluations", "unit"]},
+    {"file": "unit/test_937_projection.py", "feature": "abilityai/trinity-enterprise#937", "added": "2026-10-18", "categories": ["backend", "evaluations", "security", "unit"]},
+    {"file": "unit/test_937_ent781_census.py", "feature": "abilityai/trinity-enterprise#937", "added": "2026-10-18", "categories": ["backend", "evaluations", "security", "unit"]},
     {
       "file": "unit/test_3725_public_template_tokenless_metadata.py",
       "feature": "abilityai/trinity#3725",

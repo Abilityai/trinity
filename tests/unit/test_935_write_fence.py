@@ -138,12 +138,17 @@ def test_a_non_admin_person_cannot_write_one_either(client):
 
 # --- 2. a human write cannot impersonate the platform ------------------------------------
 
-def test_an_admin_write_cannot_become_a_tier0_row(client):
+def test_an_admin_write_cannot_become_a_tier0_row(client, monkeypatch):
     """The body names the Tier-0 evaluator, the execution target and every
     delegation column. None of it lands: the row is filed under the admin's
     own identity, carries no target and no delegation, and the Tier-0 read for
-    that execution still answers "not evaluated"."""
+    that execution still answers "not evaluated".
+
+    ent#937 (ent#781): the grader reads in full only to an OPERATOR of the
+    agent. This fixture's admin has no users row, so the operator check is
+    stated here rather than resolved — otherwise the echo reads `admin`."""
     from database import db
+    monkeypatch.setattr(db, "can_user_share_agent", lambda u, a: True)
     _seed()
     r = client.post(WRITE, json=TIER0_SHAPED_BODY)
     assert r.status_code == 200, r.text

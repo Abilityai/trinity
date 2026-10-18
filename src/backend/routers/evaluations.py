@@ -41,6 +41,7 @@ from models import EvaluationCreate, EvaluationResponse, User
 WORKSPACE_EVALUATOR_PREFIX = "workspace:"
 OPERATOR_EVALUATOR_PREFIX = "operator:"
 from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
+from services import evaluation_read_service
 
 logger = logging.getLogger(__name__)
 
@@ -107,36 +108,31 @@ def _redact_for_agent_principal(row: dict, current_user: User,
         handing it to the rated agent verbatim is a prompt-injection path INTO
         the thing being criticised.
 
-    Only the comment is withheld. Quality, target and evaluator stay, so the
-    agent can count its ratings and an operator surface loses nothing.
+    The comment is withheld and the grader reduced to its kind. A rating's
+    quality and target stay, so the agent can count its ratings and an operator
+    surface loses nothing; a Tier-1 verdict's quality does not (TD-8).
     """
     # A machine never reads the words. Neither does a human who is not an
     # OPERATOR of this agent — a shared non-owner is another client, and the
     # rating they would be reading is somebody else's (review finding).
     # `operator_agents` defaults empty, so a caller that forgets to pass it
     # redacts rather than discloses.
-    if not _is_machine_principal(current_user) and row.get("agent_name") in operator_agents:
+    machine = _is_machine_principal(current_user)
+    operator = row.get("agent_name") in operator_agents
+    if not machine and operator:
         return row
-    redacted = dict(row)
+    # The grader goes too, and this was missed on the first pass: hiding the
+    # words while leaving `workspace:someone@example.com` tells the rated agent
+    # exactly WHO was unhappy. The KIND survives (`workspace` vs a Tier-0 pass
+    # name), because "a person rated this" is the signal; "which person" is
+    # not. ent#781: the rule is an ALLOWLIST (`redact_evaluator`) — the old
+    # two-prefix denylist let `admin:<email>` through verbatim. The same call
+    # is the Tier-1 read guard: a machine never reads a judge's quality, model
+    # or prose (ent#936 TD-8).
+    redacted = evaluation_read_service.project_row(row, machine=machine, operator=operator)
     if row.get("comment"):
         redacted["comment"] = None
         redacted["comment_withheld"] = True
-    # The rater's identity goes too, and this was missed on the first pass:
-    # hiding the words while leaving `workspace:someone@example.com` tells the
-    # rated agent exactly WHO was unhappy. That is arguably the more actionable
-    # half — an agent that cannot read a complaint but can name the complainant
-    # is in a better position to change its behaviour toward that person than
-    # one that read the text. The KIND survives (`workspace` vs a Tier-0 pass
-    # name), because "a person rated this" is the signal; "which person" is not.
-    _evaluator = str(row.get("evaluator") or "")
-    # ent#366 review: the operator form is anonymised on the same terms. An
-    # agent must not learn WHO rated it either way — and leaving the new prefix
-    # out would have made an operator's address the one identity that still
-    # reached the graded agent.
-    for _prefix in (WORKSPACE_EVALUATOR_PREFIX, OPERATOR_EVALUATOR_PREFIX):
-        if _evaluator.startswith(_prefix):
-            redacted["evaluator"] = _prefix.rstrip(":")
-            break
     return redacted
 
 
@@ -201,6 +197,10 @@ def _to_response(row: dict, current_user: User, operator_agents: set = frozenset
         comment=row.get("comment"),
         comment_withheld=bool(row.get("comment_withheld")),
         updated_at=row.get("updated_at"),
+        caller_agent=row.get("caller_agent"),
+        parent_execution_id=row.get("parent_execution_id"),
+        delegation_mode=row.get("delegation_mode"),
+        judge_findings=row.get("judge_findings"),
     )
 
 

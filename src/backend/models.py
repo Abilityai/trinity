@@ -2023,6 +2023,14 @@ class EvaluationResponse(BaseModel):
     comment: Optional[str] = None
     comment_withheld: bool = False
     updated_at: Optional[str] = None
+    # ent#935 addendum A, projected by ent#937 (N2): who delegated this run.
+    caller_agent: Optional[str] = None
+    parent_execution_id: Optional[str] = None
+    delegation_mode: Optional[str] = None
+    # ent#937 / ent#936 TD-8 — what a MACHINE reads of a Tier-1 verdict instead
+    # of `quality` and `judge`: `[{dimension, verdict: pass|fail|n/a, reason}]`.
+    # None on every other row and for an operator.
+    judge_findings: Optional[List[Dict[str, Optional[str]]]] = None
 
 
 class CircuitBreakerConfigUpdate(BaseModel):
