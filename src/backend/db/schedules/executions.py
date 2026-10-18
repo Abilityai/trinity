@@ -105,6 +105,8 @@ class ScheduleExecutionsMixin:
             open_canvas_id=row["open_canvas_id"] if "open_canvas_id" in row_keys else None,
             # Inter-agent chain depth (#2806); NULL = root.
             chain_depth=row["chain_depth"] if "chain_depth" in row_keys else None,
+            # Delegation link (ent#935); NULL = not delegated.
+            parent_execution_id=row["parent_execution_id"] if "parent_execution_id" in row_keys else None,
         )
 
     # =========================================================================
@@ -149,6 +151,9 @@ class ScheduleExecutionsMixin:
             chain_depth: Agent-to-agent hops from a non-agent root (#2806).
                 Set only on the child row of an agent-principal call; None
                 (read as 0) on every root.
+            parent_execution_id: The caller turn that delegated this one
+                (ent#935). Set only when that turn belongs to
+                `source_agent_name` (`_delegation_parent_id`); None otherwise.
         """
         f = asdict(fields or TaskExecutionFields())
         # trinity-enterprise#751: a caller may pass the id it already wrote
