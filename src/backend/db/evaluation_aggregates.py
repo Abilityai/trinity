@@ -24,10 +24,9 @@ from typing import Iterable, Optional
 from sqlalchemy import and_, exists, or_, select
 
 from db.engine import get_engine
-from db.evaluations import TIER0_EVALUATOR, TIER0_TARGET_KIND
+from db.evaluations import TIER0_EVALUATOR, TIER0_TARGET_KIND, TIER1_EVALUATOR_PREFIX
 from db.tables import agent_evaluations, schedule_executions
 
-TIER1_EVALUATOR_PREFIX = "platform:tier1:"
 # The person-label kinds (ent#366). Anything else is not a human label.
 HUMAN_EVALUATOR_PREFIXES = ("workspace:", "operator:")
 AGG_ROW_CAP = 5000
