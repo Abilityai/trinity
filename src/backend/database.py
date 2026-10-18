@@ -3119,6 +3119,22 @@ class DatabaseManager:
     def unevaluated_execution_ids(self, **kw):
         return self._evaluation_ops.unevaluated_execution_ids(**kw)
 
+    # --- Tier-1 sampled judge seam (ent#936) --------------------------------
+    def claim_tier1_row(self, execution_id, **kw):
+        return self._evaluation_ops.claim_tier1_row(execution_id, **kw)
+
+    def finish_tier1_row(self, eval_id, **kw):
+        return self._evaluation_ops.finish_tier1_row(eval_id, **kw)
+
+    def latest_tier1_for_execution(self, execution_id):
+        return self._evaluation_ops.latest_tier1_for_execution(execution_id)
+
+    def tier1_candidates(self, **kw):
+        return self._evaluation_ops.tier1_candidates(**kw)
+
+    def reclaim_stale_tier1(self, **kw):
+        return self._evaluation_ops.reclaim_stale_tier1(**kw)
+
     def get_or_create_public_user_memory(self, agent_name: str, user_email: str) -> dict:
         return self._public_link_ops.get_or_create_user_memory(agent_name, user_email)
 
