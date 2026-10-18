@@ -396,7 +396,9 @@ def test_the_headline_counts_gates_and_evidence_carries_no_reply_text(pe):
     _activity("ChildRun00000000000001")
     row = pe.evaluate_pair("ChildRun00000000000001")
     head = row["checks"]["headline"]
-    assert head["gate_pass"] + head["gate_fail"] + head["gate_skip"] == 5
+    gates = [c for c in pe.CHECKS if c.tier == "gate"]
+    assert len(gates) == 7  # CP-B adds relay_unverified + relayed_failed_work
+    assert head["gate_pass"] + head["gate_fail"] + head["gate_skip"] == len(gates)
     blob = json.dumps(row["checks"])
     assert "secret plan text" not in blob and "callee private reply" not in blob
 

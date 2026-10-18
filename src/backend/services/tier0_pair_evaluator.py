@@ -26,12 +26,14 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from database import db
 from db.evaluations import TIER0_PAIR_EVALUATOR
 from services.tier0_evaluator import (
-    MAX_SCAN_CHARS, Check, _fail, _pass, _skip, headline, _run_check,
+    BASELINE_MIN_RUNS, MAX_SCAN_CHARS, Check, _fail, _pass, _percentile, _skip, headline,
+    _run_check,
 )
 from utils.helpers import parse_iso_timestamp, utc_now_iso
 
@@ -49,6 +51,13 @@ DUPLICATE_JACCARD = 0.9
 # secondary claim source behind its own activity rows.
 MAX_CLAIMED_TOKENS = 20
 TERMINAL = ("success", "failed", "cancelled")
+# The activity `details.action` a first read of a delegated result writes
+# (TD-1, CP-D). Before the first such row exists anywhere the relay checks
+# cannot grade — `skip: no_readback_record`, never a fail.
+READ_RESULT_ACTION = "read_result"
+# The pair series' history read for rework_bounds, in callee runs (grouped
+# into caller turns afterwards); the db read is itself capped at its scan bound.
+REWORK_SERIES_LIMIT = 100
 NON_ACTIVITY_MODES = ("fan_out", "loop", "reminder")
 
 
@@ -103,9 +112,13 @@ def claimed_tokens(text: Optional[str]) -> Dict[str, List[str]]:
 
 
 def _ts(value):
+    """An aware UTC datetime from an ISO string or a datetime (the execution
+    model hands back parsed values, the sibling read strings); None if neither."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     try:
         return parse_iso_timestamp(value) if value else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, AttributeError):
         return None
 
 
@@ -287,12 +300,141 @@ def check_wrong_route(ctx: Dict[str, Any]) -> Dict[str, Any]:
                  in_catalog=None if catalog is None else intent.get("ref") in catalog)
 
 
+def _caller_ended_skip(ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if ctx.get("caller") is None:
+        return _skip("caller_missing")
+    if ctx["caller"].get("status") not in TERMINAL:
+        return _skip("caller_running")
+    return None
+
+
+def relays_callee(ctx: Dict[str, Any]) -> bool:
+    """The caller passed this callee's result upward: its own reply names the
+    callee run's id. (Reports carry no execution id and asks carry no cited
+    id — D-1 — so the reply is the one attributable relay channel.)"""
+    reply = ((ctx.get("caller") or {}).get("response") or "")[:MAX_SCAN_CHARS]
+    return bool(ctx["callee"]["id"]) and ctx["callee"]["id"] in reply
+
+
+def first_read(ctx: Dict[str, Any]):
+    """The caller's first `read_result` receipt for this callee run dated
+    after the callee ended, as `(activity_id, datetime)`, or None."""
+    callee_end = _ts(ctx["callee"].get("completed_at"))
+    reads = []
+    for a in ctx.get("activities") or []:
+        details = a.get("details") if isinstance(a.get("details"), dict) else {}
+        at = _ts(a.get("created_at"))
+        if (a.get("agent_name") == ctx["caller_agent"]
+                and a.get("related_execution_id") == ctx["callee"]["id"]
+                and details.get("action") == READ_RESULT_ACTION and at is not None
+                and (callee_end is None or at >= callee_end)):
+            reads.append((at, a.get("id")))
+    if not reads:
+        return None
+    at, act_id = min(reads)
+    return act_id, at
+
+
+def check_relay_unverified(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """The caller relayed the callee's result without ever reading it: a reply
+    that names the callee run, with no `read_result` receipt between the
+    callee's end and the caller's."""
+    skip = _caller_ended_skip(ctx)
+    if skip:
+        return skip
+    if not relays_callee(ctx):
+        return _skip("no_relay")
+    if ctx.get("activities") is None:
+        return _skip("activities_unreadable")
+    caller_end = _ts(ctx["caller"].get("completed_at"))
+    live_since = _ts(ctx.get("readback_live_since"))
+    if live_since is None or (caller_end is not None and live_since > caller_end):
+        return _skip("no_readback_record")
+    read = first_read(ctx)
+    if read is None or (caller_end is not None and read[1] > caller_end):
+        return _fail("unread_relay", callee_execution_id=ctx["callee"]["id"])
+    return _pass(read_activity_id=read[0])
+
+
+def check_relayed_failed_work(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """The caller relayed a result that Tier-0 graded as failed."""
+    skip = _caller_ended_skip(ctx)
+    if skip:
+        return skip
+    if not relays_callee(ctx):
+        return _skip("no_relay")
+    callee_headline = (ctx.get("tier0") or {}).get("checks")
+    callee_headline = callee_headline.get("headline") if isinstance(callee_headline, dict) else None
+    if not isinstance(callee_headline, dict) or "passed" not in callee_headline:
+        return _skip("callee_not_graded")
+    if callee_headline["passed"] is False:
+        return _fail("relayed_failed", callee_execution_id=ctx["callee"]["id"],
+                     gate_fail=callee_headline.get("gate_fail"))
+    return _pass()
+
+
+def check_failed_with_side_effects(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """A failed callee run that still left attributable side effects (asks,
+    completed outbound effects, metric points). Recorded, not counted. Window-
+    matched reports are evidence only (D-1)."""
+    if ctx["callee"].get("status") != "failed":
+        return _skip("not_failed")
+    receipts = ctx.get("receipts")
+    if receipts is None:
+        return _skip("receipts_unreadable")
+    asks = (receipts.get("asks") or {}).get("count", 0)
+    effects = (receipts.get("effects") or {}).get("count", 0)
+    metrics = (receipts.get("metrics") or {}).get("count", 0)
+    evidence = {"asks": asks, "effects": effects, "metrics": metrics,
+                "reports_in_window": (receipts.get("reports_in_window") or {}).get("count", 0)}
+    if asks + effects + metrics:
+        return _fail("side_effects", **evidence)
+    return _pass(**evidence)
+
+
+def round_trips(ctx: Dict[str, Any]) -> int:
+    """Dispatches from this caller turn to this callee, a retry chain counted
+    once (the platform's re-run, not the caller's)."""
+    callee = ctx["callee"]
+    same = {s["id"] for s in ctx["siblings"] if s.get("agent_name") == callee.get("agent_name")}
+    return sum(1 for s in ctx["siblings"]
+               if s["id"] in same and s.get("retry_of_execution_id") not in same)
+
+
+def check_rework_bounds(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Round-trips this caller turn needed with this callee, against the p95
+    of the same pair's past turns for the same kind of brief. Only the upper
+    side fails — needing fewer round-trips than usual is not rework."""
+    skip = _caller_level_skip(ctx)
+    if skip:
+        return skip
+    series = ctx.get("rework_series")
+    if series is None:
+        return _skip("history_unreadable")
+    per_turn: Dict[str, int] = {}
+    for r in series:
+        parent = r.get("parent_execution_id")
+        if parent and parent != ctx["parent_execution_id"]:
+            per_turn[parent] = per_turn.get(parent, 0) + 1
+    if len(per_turn) < BASELINE_MIN_RUNS:
+        return _skip("insufficient_history", n=len(per_turn))
+    p95 = _percentile(sorted(per_turn.values()), 95)
+    observed = round_trips(ctx)
+    if observed > p95:
+        return _fail("above_baseline", round_trips=observed, p95=p95, n=len(per_turn))
+    return _pass(round_trips=observed, p95=p95, n=len(per_turn))
+
+
 CHECKS: List[Check] = [
     Check("dispatch_exists", "gate", "platform", check_dispatch_exists),
     Check("one_sided_record", "gate", "platform", check_one_sided_record),
+    Check("relay_unverified", "gate", "platform", check_relay_unverified),
+    Check("relayed_failed_work", "gate", "platform", check_relayed_failed_work),
     Check("duplicate_dispatch", "gate", "platform", check_duplicate_dispatch),
     Check("resend_after_receipt", "gate", "platform", check_resend_after_receipt),
     Check("wrong_route", "gate", "platform", check_wrong_route),
+    Check("failed_with_side_effects", "signal", "platform", check_failed_with_side_effects),
+    Check("rework_bounds", "signal", "platform", check_rework_bounds),
 ]
 
 
@@ -390,6 +532,14 @@ def build_context(execution_id: str) -> Optional[Dict[str, Any]]:
         "exists": _exists,
         "catalog": set(catalog) if catalog is not None else None,
         "refusals": _guarded("refusals", execution_id, _refusal_ids, callee),
+        "readback_live_since": _guarded("readback", execution_id,
+                                        db.earliest_collaboration_action, READ_RESULT_ACTION),
+        "receipts": _guarded("receipts", execution_id, db.get_execution_receipts,
+                             callee["id"], callee["agent_name"], callee.get("started_at"),
+                             callee.get("completed_at")),
+        "rework_series": _guarded("rework", execution_id, db.pair_rework_series,
+                                  tier0["caller_agent"], callee["agent_name"],
+                                  _series_key(callee.get("message")), REWORK_SERIES_LIMIT),
     }
 
 

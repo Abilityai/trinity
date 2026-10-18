@@ -18,7 +18,7 @@ import json
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import select, insert, update, and_, func
+from sqlalchemy import select, insert, update, and_, or_, func
 from sqlalchemy.exc import IntegrityError
 
 from db.engine import get_engine
@@ -543,13 +543,28 @@ class EvaluationOperations:
         never a candidate, and the Tier-0 sweep's settle window already applies.
         Bounded by `lookback_hours` on the Tier-0 row's `created_at` (ISO-Z,
         cutoff computed in Python — Invariant #16) and by `limit`.
+
+        A pair row written while the caller was still running carries
+        `skip: caller_running` and is not final: once the caller run is
+        terminal the run is a candidate again, so the re-grade (an in-place
+        upsert) replaces the skips with real results. Matched on the quoted
+        reason token, which no JSON separator choice can split.
         """
         t0 = agent_evaluations.alias("t0")
         pr = agent_evaluations.alias("pr")
+        se = schedule_executions
         paired = select(pr.c.id).where(and_(
             pr.c.evaluator == TIER0_PAIR_EVALUATOR,
             pr.c.target_kind == TIER0_TARGET_KIND,
             pr.c.target_id == t0.c.target_id,
+        ))
+        caller_ended = select(se.c.id).where(and_(
+            se.c.id == pr.c.parent_execution_id,
+            se.c.status.in_(TIER0_TERMINAL_STATUSES),
+        ))
+        provisional = paired.where(and_(
+            pr.c.checks_json.like('%"caller_running"%'),
+            caller_ended.exists(),
         ))
         stmt = (
             select(t0.c.target_id)
@@ -558,7 +573,7 @@ class EvaluationOperations:
                 t0.c.target_kind == TIER0_TARGET_KIND,
                 t0.c.caller_agent.isnot(None),
                 t0.c.created_at >= iso_cutoff(lookback_hours),
-                ~paired.exists(),
+                or_(~paired.exists(), provisional.exists()),
             ))
             .order_by(t0.c.created_at.asc())
             .limit(max(0, int(limit)))

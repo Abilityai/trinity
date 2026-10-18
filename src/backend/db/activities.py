@@ -553,6 +553,29 @@ class ActivityOperations:
         with get_engine().connect() as conn:
             return [self._row_to_activity(row) for row in conn.execute(stmt).all()]
 
+    def earliest_collaboration_action(self, action: str) -> Optional[str]:
+        """`created_at` of the oldest `agent_collaboration` row whose details
+        name `action`, or None if there is none (ent#940).
+
+        The pair evaluator asks this for `read_result` to tell "the caller did
+        not read the result" from "the platform was not recording reads yet":
+        a relay older than the first receipt anywhere is ungradable, not a
+        failure. Matched on the serialised `"action": "<action>"` pair, which is
+        how `track_activity` writes details (`json.dumps`, default separators).
+        """
+        stmt = (
+            select(agent_activities.c.created_at)
+            .where(and_(
+                agent_activities.c.activity_type == ActivityType.AGENT_COLLABORATION.value,
+                agent_activities.c.details.like(f'%"action": "{action}"%'),
+            ))
+            .order_by(agent_activities.c.created_at.asc())
+            .limit(1)
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).first()
+        return _norm_ts(row[0]) if row else None
+
     # ent#940 — bound on one IN list, so a fan-out storm is read in chunks.
     _COLLAB_IN_CHUNK = 200
 

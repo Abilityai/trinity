@@ -2257,6 +2257,9 @@ class DatabaseManager:
     def collaboration_rows_for_executions(self, execution_ids):  # ent#940
         return self._activity_ops.collaboration_rows_for_executions(execution_ids)
 
+    def earliest_collaboration_action(self, action):  # ent#940
+        return self._activity_ops.earliest_collaboration_action(action)
+
     def get_activities_in_range(self, start_time: str = None, end_time: str = None, activity_types: list = None, limit: int = 100, agent_names: list = None):
         return self._activity_ops.get_activities_in_range(start_time, end_time, activity_types, limit, agent_names)
 

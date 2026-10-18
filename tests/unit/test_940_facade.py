@@ -29,6 +29,7 @@ pytestmark = pytest.mark.unit
     ("sibling_executions", "_schedule_ops", ("p-1", 7), {}),
     ("pair_rework_series", "_schedule_ops", ("a", "b", "review", 3), {}),
     ("collaboration_rows_for_executions", "_activity_ops", (["x"],), {}),
+    ("earliest_collaboration_action", "_activity_ops", ("read_result",), {}),
     ("unevaluated_pair_execution_ids", "_evaluation_ops", (), {"limit": 4}),
     ("latest_tier0_for_execution", "_evaluation_ops", ("ex-1",),
      {"evaluator": "platform:tier0:pair"}),
@@ -49,5 +50,6 @@ def test_the_facade_reads_land_on_the_real_schema(db_backend):
     assert db.pair_rework_series("a", "b", "message") == []
     assert db.collaboration_rows_for_executions(["nope"]) == []
     assert db.collaboration_rows_for_executions([]) == []
+    assert db.earliest_collaboration_action("read_result") is None
     assert db.unevaluated_pair_execution_ids() == []
     assert db.latest_tier0_for_execution("nope", evaluator="platform:tier0:pair") is None
