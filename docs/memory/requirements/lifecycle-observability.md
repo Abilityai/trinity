@@ -995,6 +995,20 @@ own records, with **zero LLM calls**. OSS core, always on, no setting.
   the db layer with exactly three callers past the facade (the admin route, the
   Workspace rating, the Tier-0 evaluator), and the evaluator and sweep import no
   FastAPI or auth type, so no route can hand them a caller to trust.
+- **FR-10a — Execution page**: `ExecutionDetail.vue` shows the run's Tier-0 result in a
+  "Checks" card (`components/ExecutionChecks.vue`) read from the FR-10 route, through the
+  shared api client. One headline, from the stored gate-only `headline` (counted from the
+  gate entries when a row carries none): **Checks passed** (no gate failed, at least one
+  passed), **Checks failed** (any gate failed), **No gate check applied** (every gate
+  skipped — e.g. `evaluator_timeout`), with "N of M gate checks passed/failed · K skipped"
+  and the failed gates listed by id, reason and scalar evidence. Signals are listed as
+  "recorded, not counted" observations (`budget_vs_baseline — outside baseline`), never
+  worded or coloured as pass/fail. A 404 `not_evaluated` renders **Not evaluated** with
+  the reason a run may have none (only schedule- and agent-triggered runs are graded,
+  about a minute after they finish), never as an error; any other read failure says the
+  checks could not be loaded, with Retry. Running and queued runs request nothing. A
+  per-schedule / per-agent "Checks passed" rate is **planned, not built**: it needs an
+  aggregate the analytics routes do not return yet.
 
 See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
 

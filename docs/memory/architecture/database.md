@@ -1080,7 +1080,7 @@ CREATE TABLE agent_evaluations (
     quality REAL,                        -- the graded axis (nullable, independent)
     checks_json TEXT,                    -- Tier-0 deterministic check results
     judge_json TEXT,                     -- Tier-1 judge output (enterprise layer)
-    evaluator TEXT NOT NULL,             -- 'tier0' | judge id | admin username
+    evaluator TEXT NOT NULL,             -- 'platform:tier0' | 'admin:<user>' | 'workspace:<email>' | judge id
     created_at TEXT NOT NULL,
     FOREIGN KEY (execution_id) REFERENCES schedule_executions(id)
 );
