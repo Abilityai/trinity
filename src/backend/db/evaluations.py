@@ -343,41 +343,15 @@ class EvaluationOperations:
         """
         now = utc_now_iso()
         with get_engine().begin() as conn:
-            ex = conn.execute(
-                select(
-                    schedule_executions.c.source_agent_name,
-                    schedule_executions.c.parent_execution_id,
-                    schedule_executions.c.fan_out_id,
-                    schedule_executions.c.loop_id,
-                    schedule_executions.c.triggered_by,
-                ).where(schedule_executions.c.id == execution_id)
-            ).mappings().first()
-            caller_agent, parent_execution_id, delegation_mode = derive_delegation(
-                dict(ex) if ex else None
-            )
-            values = {
-                "agent_name": agent_name,
-                "execution_id": execution_id,
-                "archetype": archetype,
-                "completion": None if completion is None else (1 if completion else 0),
-                "quality": quality,
-                "checks_json": json.dumps(checks) if checks is not None else None,
-                "caller_agent": caller_agent,
-                "parent_execution_id": parent_execution_id,
-                "delegation_mode": delegation_mode,
-                "updated_at": now,
-            }
+            values = self._tier0_values(conn, agent_name, execution_id, completion,
+                                        checks, archetype, quality, now)
             existing = self._tier0_update(conn, execution_id, values)
             if existing is not None:
                 return existing
             eval_id = f"eval_{uuid.uuid4().hex[:16]}"
             try:
                 with conn.begin_nested():
-                    conn.execute(insert(agent_evaluations).values(
-                        id=eval_id, evaluator=TIER0_EVALUATOR, created_at=now,
-                        target_kind=TIER0_TARGET_KIND, target_id=execution_id,
-                        judge_json=None, comment=None, **values,
-                    ))
+                    self._tier0_insert(conn, eval_id, values, now)
             except IntegrityError:
                 applied = self._tier0_update(conn, execution_id, values)
                 if applied is not None:
@@ -387,6 +361,74 @@ class EvaluationOperations:
                 select(agent_evaluations).where(agent_evaluations.c.id == eval_id)
             ).mappings().first()
         return self._row_to_dict(row)
+
+    def insert_platform_evaluation_if_absent(
+        self,
+        agent_name: str,
+        *,
+        execution_id: str,
+        completion: Optional[bool],
+        checks: Any,
+        archetype: Optional[str] = None,
+    ) -> Optional[dict]:
+        """INSERT the run's Tier-0 row only if it has none; None if it has one.
+
+        The writer for a bookkeeping row (the sweep's `evaluator_timeout`) that
+        must never replace a real grade. There is deliberately NO update
+        fallback: an `IntegrityError` on the one-row index means a grade landed
+        first (possibly after the caller's own existence check), and it is kept.
+        A later real grade still re-grades this row in place through
+        `upsert_platform_evaluation`.
+        """
+        now = utc_now_iso()
+        eval_id = f"eval_{uuid.uuid4().hex[:16]}"
+        with get_engine().begin() as conn:
+            values = self._tier0_values(conn, agent_name, execution_id, completion,
+                                        checks, archetype, None, now)
+            try:
+                with conn.begin_nested():
+                    self._tier0_insert(conn, eval_id, values, now)
+            except IntegrityError:
+                return None
+            row = conn.execute(
+                select(agent_evaluations).where(agent_evaluations.c.id == eval_id)
+            ).mappings().first()
+        return self._row_to_dict(row)
+
+    def _tier0_insert(self, conn, eval_id: str, values: dict, now: str) -> None:
+        conn.execute(insert(agent_evaluations).values(
+            id=eval_id, evaluator=TIER0_EVALUATOR, created_at=now,
+            target_kind=TIER0_TARGET_KIND, target_id=values["execution_id"],
+            judge_json=None, comment=None, **values,
+        ))
+
+    def _tier0_values(self, conn, agent_name, execution_id, completion, checks,
+                      archetype, quality, now) -> dict:
+        """The column values of a Tier-0 write; delegation re-derived each time."""
+        ex = conn.execute(
+            select(
+                schedule_executions.c.source_agent_name,
+                schedule_executions.c.parent_execution_id,
+                schedule_executions.c.fan_out_id,
+                schedule_executions.c.loop_id,
+                schedule_executions.c.triggered_by,
+            ).where(schedule_executions.c.id == execution_id)
+        ).mappings().first()
+        caller_agent, parent_execution_id, delegation_mode = derive_delegation(
+            dict(ex) if ex else None
+        )
+        return {
+            "agent_name": agent_name,
+            "execution_id": execution_id,
+            "archetype": archetype,
+            "completion": None if completion is None else (1 if completion else 0),
+            "quality": quality,
+            "checks_json": json.dumps(checks) if checks is not None else None,
+            "caller_agent": caller_agent,
+            "parent_execution_id": parent_execution_id,
+            "delegation_mode": delegation_mode,
+            "updated_at": now,
+        }
 
     def latest_tier0_for_execution(self, execution_id: str) -> Optional[dict]:
         """The run's Tier-0 row, or None ("not evaluated"). Other evaluators'

@@ -582,11 +582,13 @@ def record_timeout(execution_id: str) -> Optional[dict]:
 
     `wait_for` cannot stop a thread, so the bound is enforced by recording the
     outcome: with a row in place the run is not re-picked every tick for as
-    long as the evaluation keeps hanging. Written ONLY when no row exists —
-    the slow thread may land its real grade a moment after the bound fires,
-    and a grade must never be replaced by a skip. The reverse order (this
-    row, then the late grade) re-grades in place through the TD-2 update
-    path, which is the right outcome. Never raises."""
+    long as the evaluation keeps hanging. The write is INSERT-only — the slow
+    thread may land its real grade at any moment after the bound fires,
+    including between a "no row yet" read and this write, and a grade must
+    never be replaced by a skip; a row already on the index makes this a
+    no-op (None). The reverse order (this row, then the late grade)
+    re-grades in place through the TD-2 update path, which is the right
+    outcome. Never raises."""
     try:
         if db.latest_tier0_for_execution(execution_id) is not None:
             return None
@@ -594,7 +596,7 @@ def record_timeout(execution_id: str) -> Optional[dict]:
         if row is None:
             return None
         status = getattr(row.status, "value", row.status)
-        return db.upsert_platform_evaluation(
+        return db.insert_platform_evaluation_if_absent(
             row.agent_name, execution_id=row.id, completion=(status == "success"),
             archetype=resolve_intent(row.message, response=row.response)["kind"],
             checks=_timeout_checks())

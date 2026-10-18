@@ -3110,6 +3110,9 @@ class DatabaseManager:
     def upsert_platform_evaluation(self, agent_name, **kw):
         return self._evaluation_ops.upsert_platform_evaluation(agent_name, **kw)
 
+    def insert_platform_evaluation_if_absent(self, agent_name, **kw):
+        return self._evaluation_ops.insert_platform_evaluation_if_absent(agent_name, **kw)
+
     def latest_tier0_for_execution(self, execution_id):
         return self._evaluation_ops.latest_tier0_for_execution(execution_id)
 

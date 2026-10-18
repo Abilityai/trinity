@@ -194,6 +194,37 @@ def test_a_timeout_never_overwrites_a_grade_that_landed(db_backend, no_staged, m
                for c in row["checks"]["checks"]), "the late grade must win"
 
 
+def test_a_grade_landing_between_the_check_and_the_timeout_write_is_kept(
+        db_backend, no_staged, monkeypatch):
+    """The reverse race (review I1): `record_timeout` reads "no row", the slow
+    thread lands its grade, THEN the timeout row is written. The timeout write
+    is INSERT-only, so it loses to the grade instead of overwriting it with six
+    `evaluator_timeout` skips (the run is never re-picked, so that loss would
+    be permanent)."""
+    from database import db
+    _seed("ex-1")
+    graded = t0.evaluate_execution("ex-1")           # the grade lands first...
+    assert graded is not None
+    # ...but the timeout path's existence check read before it did.
+    monkeypatch.setattr(db, "latest_tier0_for_execution", lambda _id: None)
+    assert t0.record_timeout("ex-1") is None
+    row = _tier0_rows()["ex-1"]
+    assert count("agent_evaluations") == 1
+    assert row["id"] == graded["id"]
+    assert not any(c.get("reason") == "evaluator_timeout" for c in row["checks"]["checks"])
+    assert row["checks"] == graded["checks"]
+
+
+def test_a_late_grade_still_regrades_a_timeout_row_in_place(db_backend, no_staged):
+    """The intended direction stays open: timeout row first, real grade after."""
+    _seed("ex-1")
+    skipped = t0.record_timeout("ex-1")
+    assert skipped is not None
+    graded = t0.evaluate_execution("ex-1")
+    assert graded["id"] == skipped["id"] and count("agent_evaluations") == 1
+    assert not any(c.get("reason") == "evaluator_timeout" for c in graded["checks"]["checks"])
+
+
 def test_evaluation_runs_off_the_event_loop(db_backend, no_staged, monkeypatch):
     """Sync DB + regex work must not block the loop (the wait_for ledger entry)."""
     _seed("ex-1")
