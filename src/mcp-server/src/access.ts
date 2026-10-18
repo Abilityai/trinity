@@ -336,6 +336,9 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // so this route is closed for ent#629's purposes, not on its work list.
   get_metrics: { kind: "enforce", param: "agent" },
   get_objectives: { kind: "none", why: "self-scoped read; the backend self-gates the path agent (ent#666)" },
+  // --- evaluations.ts (ent#937) — the backend narrows an agent key to its own
+  // rows and the pairs it is a side of, and strips judge scores for a machine.
+  get_evaluation_summary: { kind: "enforce", param: "agent_name" },
   list_reports: { kind: "in-tool", how: REPORTS_GATE },
   get_report: { kind: "in-tool", how: "reports.ts resolves the report's agent, then " + REPORTS_GATE },
   // --- canvas.ts ---

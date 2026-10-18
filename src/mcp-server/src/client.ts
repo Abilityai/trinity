@@ -2579,6 +2579,27 @@ export class TrinityClient {
     );
   }
 
+  /**
+   * One agent's evaluation summary and failed runs (abilityai/trinity-enterprise#937).
+   * The backend decides the projection: an agent key reads its own rows (and the
+   * pairs it is a side of) and never a judge's score.
+   */
+  async getAgentEvaluationSummary(
+    agentName: string,
+    options: { period?: string; since?: string; until?: string; caller?: string } = {}
+  ): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams();
+    if (options.period) params.set("period", options.period);
+    if (options.since) params.set("since", options.since);
+    if (options.until) params.set("until", options.until);
+    if (options.caller) params.set("caller", options.caller);
+    const query = params.toString();
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/evaluations/summary${query ? `?${query}` : ""}`
+    );
+  }
+
   async getAgentObjectives(agentName: string): Promise<Record<string, unknown>> {
     return this.request(
       "GET",
