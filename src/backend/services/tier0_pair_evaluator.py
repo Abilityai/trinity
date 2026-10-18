@@ -24,6 +24,7 @@ counts, timestamps and scores — never response text.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
@@ -32,7 +33,8 @@ from typing import Any, Dict, List, Optional
 from database import db
 from db.evaluations import TIER0_PAIR_EVALUATOR
 from services.tier0_evaluator import (
-    BASELINE_MIN_RUNS, MAX_SCAN_CHARS, Check, _fail, _pass, _percentile, _skip, headline,
+    BASELINE_MIN_RUNS, EVALUATION_CONCURRENCY, EVALUATION_TIMEOUT_SECONDS, MAX_SCAN_CHARS,
+    SWEEP_LIMIT, SWEEP_LOOKBACK_HOURS, Check, _fail, _pass, _percentile, _skip, headline,
     _run_check,
 )
 from utils.helpers import parse_iso_timestamp, utc_now_iso
@@ -608,3 +610,81 @@ def evaluate_pair(execution_id: str) -> Optional[dict]:
     except Exception as e:  # noqa: BLE001 — log, never raise
         logger.warning("[tier0-pair] write failed for %s: %s", execution_id, type(e).__name__)
         return None
+
+
+# --- the sweep (phase 2 of tier0_sweep_service.run_cycle, TD-5) -----------------
+
+def _timeout_checks() -> Dict[str, Any]:
+    """Every pair check skipped as `evaluator_timeout` — the graded-row
+    vocabulary, so a reader needs no third shape; no metrics, none measured."""
+    results = [{"id": c.id, "tier": c.tier, "source": c.source, "status": "skip",
+                "reason": "evaluator_timeout", "evidence": {}} for c in CHECKS]
+    return {"schema": SCHEMA_VERSION, "evaluated_at": utc_now_iso(),
+            "headline": headline(results), "checks": results}
+
+
+def record_timeout(execution_id: str) -> Optional[dict]:
+    """Leave a pair row for a run whose pair evaluation outlived its bound,
+    so it is not re-picked every tick for as long as it keeps hanging.
+
+    INSERT-only (`insert_platform_evaluation_if_absent`): the slow thread may
+    land its grade at any moment, and a grade is never replaced by a skip; a
+    timeout row first and the late grade after re-grades in place through the
+    upsert. Only a pair candidate (a Tier-0 row naming a caller) gets one.
+    Never raises."""
+    try:
+        if db.latest_tier0_for_execution(execution_id, evaluator=TIER0_PAIR_EVALUATOR):
+            return None
+        tier0 = db.latest_tier0_for_execution(execution_id)
+        if not tier0 or not tier0.get("caller_agent"):
+            return None
+        return db.insert_platform_evaluation_if_absent(
+            tier0["agent_name"], execution_id=execution_id,
+            completion=tier0.get("completion"), archetype=tier0.get("archetype"),
+            checks=_timeout_checks(), evaluator=TIER0_PAIR_EVALUATOR)
+    except Exception as e:  # noqa: BLE001 — a bookkeeping row, never worth a raise
+        logger.warning("[tier0-pair] timeout row failed for %s: %s", execution_id,
+                       type(e).__name__)
+        return None
+
+
+async def sweep(*, limit: int = SWEEP_LIMIT, lookback_hours: int = SWEEP_LOOKBACK_HOURS,
+                timeout_seconds: float = EVALUATION_TIMEOUT_SECONDS,
+                concurrency: int = EVALUATION_CONCURRENCY) -> Dict[str, int]:
+    """One pair tick: grade up to `limit` pair candidates, each in a thread
+    behind a semaphore and under `wait_for(timeout_seconds)` — Tier-0's
+    bounds, so the phase delays the next tick by at most
+    `timeout_seconds × ceil(limit / concurrency)`. The Tier-0 sweep's settle
+    window already applies (a candidate hangs off a Tier-0 row). Runs inside
+    the Tier-0 cycle, under its lease; idempotent on the one-row index, so a
+    fail-open double leader leaves one row. Counts only; never raises."""
+    try:
+        ids = await asyncio.to_thread(db.unevaluated_pair_execution_ids, limit=limit,
+                                      lookback_hours=lookback_hours)
+    except Exception as e:  # noqa: BLE001 — an unreadable candidate list is an empty tick
+        logger.warning("[tier0-pair] candidate read failed: %s", type(e).__name__)
+        ids = []
+    result = {"candidates": len(ids), "evaluated": 0, "timed_out": 0, "failed": 0}
+    if not ids:
+        return result
+    sem = asyncio.Semaphore(max(1, int(concurrency)))
+
+    async def one(execution_id: str) -> str:
+        async with sem:
+            try:
+                row = await asyncio.wait_for(
+                    asyncio.to_thread(evaluate_pair, execution_id), timeout_seconds)
+                return "evaluated" if row is not None else "failed"
+            except asyncio.TimeoutError:
+                logger.warning("[tier0-pair] evaluation of %s exceeded %ss", execution_id,
+                               timeout_seconds)
+                await asyncio.to_thread(record_timeout, execution_id)
+                return "timed_out"
+            except Exception as e:  # noqa: BLE001 — evaluate_pair never raises; belt
+                logger.warning("[tier0-pair] evaluation of %s failed: %s", execution_id,
+                               type(e).__name__)
+                return "failed"
+
+    for outcome in await asyncio.gather(*(one(i) for i in ids)):
+        result[outcome] += 1
+    return result
