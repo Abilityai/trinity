@@ -22,9 +22,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from db.evaluations import TIER0_EVALUATOR, tier0_gate_outcome
+from db.evaluations import TIER0_EVALUATOR, TIER1_EVALUATOR_PREFIX, tier0_gate_outcome
 
-TIER1_EVALUATOR_PREFIX = "platform:tier1:"
 TIER1_KIND = "platform:tier1"
 MAX_WINDOW_DAYS = 92
 FAILED_LIMIT = 50
