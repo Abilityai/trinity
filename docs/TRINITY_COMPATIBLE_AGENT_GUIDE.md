@@ -1098,7 +1098,7 @@ To persist credentials across deployments:
 
 1. **Export**: Click "Export to Git" → encrypts `.env` and `.mcp.json` → writes `.credentials.enc`
 2. **Commit**: The `.credentials.enc` file is safe to commit (AES-256-GCM encrypted)
-3. **Auto-import**: On agent start, if `.credentials.enc` exists but `.env` doesn't, credentials are automatically decrypted and injected
+3. **Import**: `startup.sh` does not decrypt the file. The platform imports a `.credentials.enc` once the agent is ready, except on installs with no encryption key; there the owner imports it once with **Import from Git** on the Credentials tab (or the `import_credentials` MCP tool)
 
 ### Your Agent Should
 
