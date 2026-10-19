@@ -116,7 +116,7 @@
  "agent_config.py::get_agent_capacity": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/capacity",
-  "reason": "legacy",
+  "reason": "ent#875: own slots only below the owner tier (a slot carries the prompt preview)",
   "tier": "accessor"
  },
  "agent_config.py::get_agent_guardrails": {
@@ -147,7 +147,7 @@
  "agent_config.py::get_public_channel_model": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/public-channel-model",
-  "reason": "legacy",
+  "reason": "ent#875: which model public channels use, a setting with no conversation text",
   "tier": "accessor"
  },
  "agent_config.py::list_agent_capability_grants": {
@@ -244,21 +244,21 @@
  "agent_files.py::create_agent_folder_endpoint": {
   "method": "POST",
   "path": "/api/agents/{agent_name}/files/mkdir",
-  "reason": "legacy",
+  "reason": "ent#820: the tier is ruled per verb and path by file_path_policy.decide; a share holder is refused owner-tier paths",
   "tier": "accessor",
   "via": "create_agent_folder_logic"
  },
  "agent_files.py::delete_agent_file_endpoint": {
   "method": "DELETE",
   "path": "/api/agents/{agent_name}/files",
-  "reason": "legacy",
+  "reason": "ent#820: the tier is ruled per verb and path by file_path_policy.decide; a share holder is refused owner-tier paths",
   "tier": "accessor",
   "via": "delete_agent_file_logic"
  },
  "agent_files.py::download_agent_file_endpoint": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/files/download",
-  "reason": "legacy",
+  "reason": "ent#820: the tier is ruled per verb and path by file_path_policy.decide; a share holder is refused owner-tier paths",
   "tier": "accessor",
   "via": "download_agent_file_logic"
  },
@@ -354,7 +354,7 @@
  "agent_files.py::list_agent_files_endpoint": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/files",
-  "reason": "legacy",
+  "reason": "ent#820: the tier is ruled per verb and path by file_path_policy.decide; a share holder is refused owner-tier paths",
   "tier": "accessor",
   "via": "list_agent_files_logic"
  },
@@ -366,7 +366,7 @@
  "agent_files.py::preview_agent_file_endpoint": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/files/preview",
-  "reason": "legacy",
+  "reason": "ent#820: the tier is ruled per verb and path by file_path_policy.decide; a share holder is refused owner-tier paths",
   "tier": "accessor",
   "via": "preview_agent_file_logic"
  },
@@ -415,7 +415,7 @@
  "agent_files.py::update_agent_file_endpoint": {
   "method": "PUT",
   "path": "/api/agents/{agent_name}/files",
-  "reason": "legacy",
+  "reason": "ent#820: the tier is ruled per verb and path by file_path_policy.decide; a share holder is refused owner-tier paths",
   "tier": "accessor",
   "via": "update_agent_file_logic"
  },
@@ -509,13 +509,13 @@
  "agents.py::get_agent_logs_endpoint": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/logs",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "ent#875: the container's shared state, which holds every user's turns; a share holder is refused (assert_not_share_viewer), keys pass",
+  "tier": "owner"
  },
  "agents.py::get_agent_queue_status": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/queue",
-  "reason": "legacy",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
   "tier": "accessor"
  },
  "agents.py::get_agent_stats_endpoint": {
@@ -533,7 +533,7 @@
  "agents.py::get_circuit_breaker_endpoint": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/circuit-breaker",
-  "reason": "legacy",
+  "reason": "ent#875: the breaker state, no conversation text",
   "tier": "accessor"
  },
  "agents.py::get_mcp_exposed_endpoint": {
@@ -593,13 +593,13 @@
  "agents.py::start_agent_endpoint": {
   "method": "POST",
   "path": "/api/agents/{agent_name}/start",
-  "reason": "legacy",
+  "reason": "ent#875 ruling: open to share holders, because chat does not auto-start a stopped agent",
   "tier": "accessor"
  },
  "agents.py::stop_agent_endpoint": {
   "method": "POST",
   "path": "/api/agents/{agent_name}/stop",
-  "reason": "legacy",
+  "reason": "ent#875 ruling: stays open to share holders",
   "tier": "accessor"
  },
  "analytics.py::get_agent_analytics": {
@@ -734,8 +734,8 @@
  "chat.py::clear_agent_activity": {
   "method": "DELETE",
   "path": "/api/agents/{name}/activity",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "ent#875: the container's shared state, which holds every user's turns; a share holder is refused (assert_not_share_viewer), keys pass",
+  "tier": "owner"
  },
  "chat.py::close_chat_session": {
   "method": "POST",
@@ -751,20 +751,20 @@
  "chat.py::get_agent_activity": {
   "method": "GET",
   "path": "/api/agents/{name}/activity",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "ent#875: the container's shared state, which holds every user's turns; a share holder is refused (assert_not_share_viewer), keys pass",
+  "tier": "owner"
  },
  "chat.py::get_agent_activity_detail": {
   "method": "GET",
   "path": "/api/agents/{name}/activity/{tool_id}",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "ent#875: the container's shared state, which holds every user's turns; a share holder is refused (assert_not_share_viewer), keys pass",
+  "tier": "owner"
  },
  "chat.py::get_agent_chat_history": {
   "method": "GET",
   "path": "/api/agents/{name}/chat/history",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "ent#875: the container's shared state, which holds every user's turns; a share holder is refused (assert_not_share_viewer), keys pass",
+  "tier": "owner"
  },
  "chat.py::get_agent_chat_session": {
   "method": "GET",
@@ -781,13 +781,13 @@
  "chat.py::get_agent_model": {
   "method": "GET",
   "path": "/api/agents/{name}/model",
-  "reason": "legacy",
+  "reason": "ent#875: the model name is not a secret and the chat UI shows it",
   "tier": "accessor"
  },
  "chat.py::get_agent_running_executions": {
   "method": "GET",
   "path": "/api/agents/{name}/executions/running",
-  "reason": "legacy",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
   "tier": "accessor"
  },
  "chat.py::get_chat_session_detail": {
@@ -798,7 +798,7 @@
  "chat.py::get_persistent_chat_history": {
   "method": "GET",
   "path": "/api/agents/{name}/chat/history/persistent",
-  "reason": "legacy",
+  "reason": "ent#875: already the caller's own rows (user_id filtered before the limit, #629)",
   "tier": "accessor"
  },
  "chat.py::reset_agent_chat_history": {
@@ -809,19 +809,19 @@
  "chat.py::set_agent_model": {
   "method": "PUT",
   "path": "/api/agents/{name}/model",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "ent#875: changing the model changes every user's turns; owner tier",
+  "tier": "owner"
  },
  "chat.py::stream_execution_log": {
   "method": "GET",
   "path": "/api/agents/{name}/executions/{execution_id}/stream",
-  "reason": "legacy",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
   "tier": "accessor"
  },
  "chat.py::terminate_agent_execution": {
   "method": "POST",
   "path": "/api/agents/{name}/executions/{execution_id}/terminate",
-  "reason": "legacy",
+  "reason": "ent#875: a share holder ends only a turn they started (both ids resolved, uniform 404)",
   "tier": "accessor"
  },
  "compatibility.py::fix_compatibility": {
@@ -929,13 +929,13 @@
  "fan_out.py::fan_out": {
   "method": "POST",
   "path": "/api/agents/{name}/fan-out",
-  "reason": "legacy",
+  "reason": "ent#875: dispatch with the caller's own identity; the rows it creates carry their id",
   "tier": "accessor"
  },
  "fan_out.py::get_fan_out_status": {
   "method": "GET",
   "path": "/api/agents/{name}/fan-out/{fan_out_id}",
-  "reason": "legacy",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
   "tier": "accessor"
  },
  "git.py::bind_agent_to_own_repo": {
@@ -999,7 +999,7 @@
  "git.py::get_pull_sync_config": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/git/pull-sync",
-  "reason": "legacy",
+  "reason": "ent#875: a config flag, no repository content",
   "tier": "accessor"
  },
  "git.py::initialize_github_sync": {
@@ -1008,9 +1008,10 @@
   "tier": "owner"
  },
  "git.py::pull_from_github": {
+  "mentions_owner": true,
   "method": "POST",
   "path": "/api/agents/{agent_name}/git/pull",
-  "reason": "legacy",
+  "reason": "ent#875: a plain pull stays open to share holders; force_reset is owner tier inside the handler",
   "tier": "accessor"
  },
  "git.py::reset_to_main_preserve_state": {
@@ -1277,8 +1278,8 @@
  "schedules.py::disable_webhook_secret": {
   "method": "DELETE",
   "path": "/api/agents/{name}/schedules/{schedule_id}/webhook/secret",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
+  "tier": "resource"
  },
  "schedules.py::enable_schedule": {
   "method": "POST",
@@ -1288,19 +1289,19 @@
  "schedules.py::generate_webhook": {
   "method": "POST",
   "path": "/api/agents/{name}/schedules/{schedule_id}/webhook",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
+  "tier": "resource"
  },
  "schedules.py::generate_webhook_secret": {
   "method": "POST",
   "path": "/api/agents/{name}/schedules/{schedule_id}/webhook/secret",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
+  "tier": "resource"
  },
  "schedules.py::get_agent_executions": {
   "method": "GET",
   "path": "/api/agents/{name}/executions",
-  "reason": "legacy",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
   "tier": "accessor"
  },
  "schedules.py::get_agent_schedules_summary": {
@@ -1312,13 +1313,13 @@
  "schedules.py::get_execution": {
   "method": "GET",
   "path": "/api/agents/{name}/executions/{execution_id}",
-  "reason": "legacy",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
   "tier": "accessor"
  },
  "schedules.py::get_execution_log": {
   "method": "GET",
   "path": "/api/agents/{name}/executions/{execution_id}/log",
-  "reason": "legacy",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
   "tier": "accessor"
  },
  "schedules.py::get_schedule": {
@@ -1336,14 +1337,14 @@
  "schedules.py::get_schedule_executions": {
   "method": "GET",
   "path": "/api/agents/{name}/schedules/{schedule_id}/executions",
-  "reason": "legacy",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
   "tier": "accessor"
  },
  "schedules.py::get_webhook_status": {
   "method": "GET",
   "path": "/api/agents/{name}/schedules/{schedule_id}/webhook",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
+  "tier": "resource"
  },
  "schedules.py::list_agent_schedules": {
   "method": "GET",
@@ -1354,8 +1355,8 @@
  "schedules.py::revoke_webhook": {
   "method": "DELETE",
   "path": "/api/agents/{name}/schedules/{schedule_id}/webhook",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
+  "tier": "resource"
  },
  "schedules.py::trigger_schedule": {
   "method": "POST",
