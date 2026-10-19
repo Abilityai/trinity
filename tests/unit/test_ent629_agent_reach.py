@@ -390,6 +390,9 @@ def test_dispatch_routes_resolve_the_target_through_the_access_gate(module, rout
 #: the reason its principal is never an agent key, or its reach is decided
 #: otherwise.
 _EXEMPT = {
+    ("services/turn_tier_service.py", "_user_tier"):
+        "ent#926: rates the PERSON who started a turn (from the execution row), "
+        "never the requesting principal, so no agent-key reach is involved",
     ("dependencies.py", "can_manage_agent_skills"):
         "the skills.manage capability is the explicit grant to the owner's agents (ent#596)",
     ("routers/agent_files.py", "_can_view"):
