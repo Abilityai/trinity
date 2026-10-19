@@ -1377,11 +1377,14 @@ class OperatorQueueOperations:
         if conds is None:
             return []
 
-        # Sort: pending items by priority then age; ended items by WHEN THEY
-        # ENDED, newest first (trinity-enterprise#611, #627 AC6) — sorting a
-        # cancellation made this morning by the day the ask was filed buried it.
-        # A row that ended before the ledger falls back to its answer time, then
-        # to its filing time (no other timestamp exists for it).
+        # Sort: pending items by priority, then OLDEST FIRST (#3679): both
+        # clients read one capped page and show it oldest first, so a newest-
+        # first page dropped the asks that had waited longest the moment the
+        # queue outgrew the cap. Ended items by WHEN THEY ENDED, newest first
+        # (trinity-enterprise#611, #627 AC6) — sorting a cancellation made this
+        # morning by the day the ask was filed buried it. A row that ended
+        # before the ledger falls back to its answer time, then to its filing
+        # time (no other timestamp exists for it).
         is_pending = operator_queue.c.status == "pending"
         status_order = case((is_pending, 0), else_=1)
         priority_order = case(
@@ -1408,7 +1411,12 @@ class OperatorQueueOperations:
             stmt.order_by(
                 status_order,
                 pending_priority,
-                sort_time.desc(),
+                # Two age keys, one per group: `status_order` already separates
+                # pending from ended, so each key is NULL across the whole other
+                # group and NULL placement never decides an order (SQLite and
+                # PostgreSQL put NULLs at opposite ends).
+                case((is_pending, operator_queue.c.created_at), else_=None).asc(),
+                case((is_pending, None), else_=sort_time).desc(),
                 # #3059: the last key, so rows that tie on everything above
                 # (raised in the same instant) still order the same way on every
                 # read — which is what lets an offset page without overlapping

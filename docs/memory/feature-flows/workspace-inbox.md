@@ -111,7 +111,7 @@ Sign-in / reload on bare /workspace
                       row); the limit resets on a tab change, never on a poll; a selected row past
                       the window widens it (a ?item= at row 72 shows 72). Not virtualisation.
                       All's footer (§3g D-4b, allFooterNotes): "Answered, expired and cancelled
-                      asks drop off after 7 days."; "Showing your 200 most recent asks." when the
+                      asks drop off after 7 days."; "Showing your first 200 asks: the ones waiting longest come first." when the
                       asks read hit its cap (T16; server total is #3059); "Rooms aren't in the
                       Inbox yet…" only to a viewer with rooms. Empty All: "No chats or asks yet"
                       + a New chat link (/workspace?new=1)
