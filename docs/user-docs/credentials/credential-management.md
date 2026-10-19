@@ -14,7 +14,7 @@ Add, edit, and hot-reload credentials on agents without restarting them.
 
 ### The Setup Checklist
 
-Open the agent detail page and click the **Credentials** tab. The checklist answers three questions per credential:
+Open the agent detail page, click the **Settings** tab and pick **Storage** in the rail (`?tab=settings&section=storage`; an old `?tab=credentials` link lands there too). The **Credentials** section holds the checklist, which answers three questions per credential:
 
 | Column | Where it comes from |
 |--------|---------------------|
@@ -22,7 +22,7 @@ Open the agent detail page and click the **Credentials** tab. The checklist answ
 | **Is it set?** | A bounded probe of the agent's own `.env`, reporting key **names** that have a non-empty value. Values are never read or transmitted. |
 | **Where do I get it?** | The template author's `setup_url`, rendered with a canonical host so the link's label can never disagree with its destination |
 
-Fill in the values you have and submit — the checklist writes through the same owner-gated injection path as everything else on this tab.
+Fill in the values you have and submit — the checklist writes through the same owner-gated injection path as everything else in this section.
 
 The checklist renders even when the agent is stopped: you can see what an agent will need before starting it, with the live-status column honestly reported as unavailable. If the status probe fails, you are told so — a failed probe is never shown as "nothing configured".
 
@@ -61,7 +61,7 @@ The full contract is published at [`docs/schemas/trinity-agent-credentials.schem
 
 ### Adding credentials
 
-Add credentials using one of four methods on the **Credentials** tab:
+Add credentials using one of four methods in the **Credentials** section of **Settings › Storage**:
 
 - **Setup checklist** -- Per-variable inputs, with descriptions and setup links.
 - **Quick Inject** -- Paste `.env`-style KEY=VALUE pairs; they are merged into the agent's `.env`.
@@ -69,6 +69,8 @@ Add credentials using one of four methods on the **Credentials** tab:
 - **Import from Git** -- Decrypt and inject the `.credentials.enc` backup in the agent's workspace; **Export to Git** writes it.
 
 **Hot-reload:** paste or edit credentials on a running agent. The `.env` file is updated and the agent's next run sees the new values. No restart needed.
+
+**Restarts keep what you injected.** The `.env` generated from the template at creation is only a seed: on each start the container copies it into the workspace **only if no `.env` is there yet**. Values you added or changed later — and an `.env` you deliberately emptied — are left as they are.
 
 MCP server configuration is different. An `.env` injection does not rewrite `.mcp.json`; to change an MCP server's credential on a running agent, inject an updated `.mcp.json` directly (it is structurally validated first).
 

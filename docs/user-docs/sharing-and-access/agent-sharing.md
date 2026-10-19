@@ -1,6 +1,6 @@
 # Agent Sharing & Access
 
-Two owner-only tabs on the Agent Detail page control who can reach an agent: the **Access** tab manages the *people the agent is shared with* (they use it in the Workspace), and the **Sharing** tab manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
+Two owner-only surfaces on the Agent Detail page control who can reach an agent: **Settings › People** (the former Access tab) manages the *people the agent is shared with* (they use it in the Workspace), and the **Sharing** tab manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
 
 ## Concepts
 
@@ -9,11 +9,11 @@ Two owner-only tabs on the Agent Detail page control who can reach an agent: the
 - **Workspace roster** — Every email an agent is shared with can sign in to the [Workspace](workspace.md) and chat with it there. Sharing an agent to an email *is* that person's Workspace account; unsharing removes the agent from their roster.
 - **Access policy** — The per-agent Restricted/Open switch controlling whether unknown verified users may chat. See [Access Control](access-control.md) for the cross-channel verification model.
 
-## Access Tab — Trinity Operators
+## Settings › People — Trinity Operators
 
-The **Access** tab lists the people this agent is shared with.
+**Settings › People** lists the people this agent is shared with. It is the Access tab moved into the Settings home, unchanged.
 
-1. Open the agent detail page and click the **Access** tab (owner only).
+1. Open the agent detail page, click the **Settings** tab and pick **People** in the rail (owner only; `?tab=settings&section=people`, and an old `?tab=access` link lands there too).
 2. Enter an email and click **Add person**. The person can sign in to the [Workspace](workspace.md) with a code emailed to them. Sharing does **not** create a platform account or add the email to the login whitelist; whether someone also gets the operator UI is their platform role, which an admin sets on the person's row here or in **Settings → Access**.
 3. Each row shows a status badge:
    - **Active** — the email resolved to an existing Trinity account (shows username, role, and last-active time, or "never signed in"). An admin may see a role select on the row instead of the role label: the role applies on every agent, every change asks for confirmation, and an admin's own row stays read-only.
@@ -94,10 +94,11 @@ A read-only table of external channel users who have messaged the agent, aggrega
 
 ### Distribution
 
-Two collapsible panels for distributing the agent's output rather than granting access:
+One collapsible panel for distributing the agent's output rather than granting access:
 
 - **Public links** — shareable chat URLs; see [Public Links](public-links.md).
-- **File sharing** — signed download URLs for files the agent publishes.
+
+**File sharing** — signed download URLs for files the agent publishes — is under **Settings › Storage**, because it governs what leaves the agent's disk; see [Agent Files](../agents/agent-files.md#outbound-file-sharing).
 
 ## For Agents
 

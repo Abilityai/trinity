@@ -6,27 +6,34 @@ Per-agent settings for autonomy, read-only mode, resources, capabilities, execut
 
 Each agent has independent configuration options that control its behavior, resource usage, and execution constraints. Settings are managed through the Agent Detail page or the API.
 
-### The Settings Tab
+### The Settings Home
 
-The Agent Detail page has a **Settings** tab (visible to owners only) -- a sectioned home for per-agent configuration. Current sections:
+The Agent Detail page has one **Settings** tab (visible to owners only), pinned at the end of the tab strip — it never collapses into the **More ▾** menu. Inside it, a left rail lists panes, each answering one question. The pane you are on is in the URL as `?tab=settings&section=<pane>`, so a reload stays put and the browser's Back button steps between panes. On narrow windows the rail becomes a **Section** select above the pane.
 
-- **Guardrails** — see [Agent Guardrails](agent-guardrails.md)
-- **Permissions to change itself** — what the agent may change about itself and other agents on its own (below)
-- **Parallel Capacity** — below
-- **Expose via MCP** — publish the agent as a dedicated MCP tool; see [MCP Server](../integrations/mcp-server.md#dedicated-agent-tools-expose-via-mcp)
-- **Trinity access key** — the agent-scoped key the agent uses to call Trinity's own MCP tools, with health status and a **Regenerate** action (the running container is replaced to pick the new key up)
-- **Reliability** — the dispatch circuit breaker (below) and **Wake this agent when an ask it raised ends** (below)
-- **Git sync** — **Auto-sync to GitHub every 15 minutes**, **Pull changes from GitHub on every sync cycle**, and **Pause schedules while sync is failing**. Each applies on the next cycle with no restart. An agent with no GitHub repository shows a note pointing to the **Git** tab. See [GitHub Sync](../integrations/github-sync.md)
-- **Voice** — let the agent reply with spoken voice notes on messaging channels; see [Voice Replies](../advanced/voice-replies.md)
-- Further sections can appear on installations with an enterprise entitlement
+| Pane | `?section=` | Question | What it holds |
+|------|-------------|----------|---------------|
+| **General** | `general` | What this agent is | **Identity** — display name, agent id (**Rename…**), avatar (**Change…**, **Next emotion**), the template's description, tags. **Model and funding** — runtime, model, funding. **Execution** — execution timeout, parallel capacity, read-only mode, memory and CPU. **Template** — what the agent was deployed from, with a **Technical details** dialog holding the template metadata. **Danger zone** — reset the workspace to main (only when a repository is bound) and delete |
+| **Guardrails** | `guardrails` | What it may do | **Bounds** — guardrail rules behind **Manage rules**, [permissions to change itself](#permissions-to-change-itself), the number of skills that need approval with **Open Skills**. **Unprompted work** — autonomy, read-only here. **Checks** — cross-model validation, shown only when the instance has the matching entitlement. **Reliability** — the dispatch circuit breaker and wake-on-ask-ended |
+| **People** | `people` | Who works with it | The former Access tab, unchanged — see [Agent Sharing](../sharing-and-access/agent-sharing.md) |
+| **Channels** | `channels` | Where outsiders reach it | **Voice replies** (see [Voice Replies](../advanced/voice-replies.md)), and a row that opens the **Sharing** tab, which still holds chat policy, channels, public links and the client roster |
+| **Integrations** | `integrations` | What calls it, what it calls | **Programmatic access** — **Expose via MCP** and the agent's **Trinity access key** (see [MCP Server](../integrations/mcp-server.md#dedicated-agent-tools-expose-via-mcp)); rows that open the **Permissions**, **A2A** and **Payments** tabs, each shown only when you can see that tab |
+| **Storage** | `storage` | What it keeps and shares | **Repository** — the bound repository, **Bind to your own repo**, **GitHub authentication** and the **Sync** switches (see [GitHub Sync](../integrations/github-sync.md)). **Credentials** (see [Credential Management](../credentials/credential-management.md)). **Shared folders** and **File sharing** (see [Agent Files](agent-files.md)) |
 
-The remaining settings below are managed from the agent header controls, the Running/Autonomy toggles on the Dashboard, or the API.
+**Find a setting.** The search box above the rail filters the panes by the words you would use for a control — `timeout` keeps General, `token` and `folders` keep Storage — even when the word is not in a pane's name. A query that matches nothing says so and suggests words to try.
+
+**One restart banner.** Every change that waits for a restart is named in one bar at the top of Settings, whichever pane you are on: **File sharing**, **Shared folders**, **Memory and CPU**, **Guardrail rules**, **GitHub token** and **Funding**. The bar carries one button — **Restart now** for a running agent, **Start now** for a stopped one — and keeps its footprint when nothing is waiting (*Every change here is live*). The list clears when the agent actually comes up: Trinity settles it on the agent's status edge from stopped to running, not on the button, so a stop and start from the header settles it too, and a start that fails leaves every entry listed because nothing applied. After the restart each row re-reads the backend and lists itself again if its change still has not taken.
+
+**Who sees what.** Settings is owner-only. The system agent gets **General** (read-only), **Guardrails** (without the autonomy section) and **Integrations**. A `?section=` naming a pane you cannot see lands on the first pane you can.
+
+**Where the old tabs went.** The Info, Credentials, Access and Folders tabs are gone, and their old links still resolve: `?tab=info` opens General, `?tab=guardrails` opens Guardrails, `?tab=credentials` and `?tab=folders` open Storage, `?tab=access` opens People. The page header keeps identity, the running state and badges, the **Autonomy** chip and the **Workspace**, **Talk** and Start/Stop controls — nothing else. Live CPU, memory and spend are read on the **Overview** tab. The **Git** tab keeps the operational half of git: status, pending changes, recent commits, **Pull**, **Push** and **Refresh**.
+
+The sections below say which pane holds each setting. Everything is also available through the API.
 
 ### Permissions to Change Itself
 
 An agent's own key acts for its owner, so without a fence it could rewrite any agent its owner holds. Trinity fences those changes behind permissions that an instance admin grants per agent. No agent holds any of them by default. People and the system agent never need them.
 
-The **Permissions to change itself** card on the Settings tab shows one toggle per permission, with what it allows, what is refused without it, and who granted it and when:
+The **Permissions to change itself** card under **Settings › Guardrails › Bounds** shows one toggle per permission, with what it allows, what is refused without it, and who granted it and when:
 
 | Toggle | Permission | Lets the agent | Without it |
 |--------|-----------|----------------|------------|
@@ -55,15 +62,15 @@ The fence covers the platform's routes, not the agent's own container: an agent 
 
 How many tasks the agent may run concurrently (`max_parallel_tasks`, default 3). Work beyond the limit queues and drains as slots free up.
 
-- Set it in the Settings tab's **Parallel Capacity** section; the panel shows current slot usage ("using X / Y slots").
-- **Fleet ceiling (admin):** an admin caps the whole fleet via `GET`/`PUT /api/settings/max-parallel-tasks-ceiling` (default 10, range 1–32). Owners pick any value up to the ceiling. If an agent's stored value exceeds a later-lowered ceiling, the stored value is kept but the *effective* limit is clamped to the ceiling — the panel shows a notice when this applies.
+- Set it under **Settings › General › Execution › Parallel capacity**. The row shows the effective value in jobs, how many are running now and the fleet ceiling; the editor accepts a whole number from 1 to the ceiling.
+- **Fleet ceiling (admin):** an admin caps the whole fleet via `GET`/`PUT /api/settings/max-parallel-tasks-ceiling` (default 10, range 1–32). Owners pick any value up to the ceiling. If an agent's stored value exceeds a later-lowered ceiling, the stored value is kept but the *effective* limit is clamped to the ceiling — the row says so (*Stored N is above the fleet ceiling, so M applies*).
 - API: `GET /api/agents/{name}/capacity` returns the stored value, the ceiling, and the effective limit.
 
 ### Autonomy Mode
 
 Master gate for the agent's scheduled operations.
 
-- Toggle from the Dashboard (Grid tile or List row) or the Agent Detail header
+- Toggle from the Dashboard (Grid tile or List row) or the **Autonomy** chip in the Agent Detail header. **Settings › Guardrails › Unprompted work** shows the switch read-only for now; the chip stays the control
 - When disabled, none of the agent's schedules fire
 - The toggle does **not** change each schedule's own on/off switch: a schedule you disabled stays disabled when you turn autonomy back on, and one you left enabled resumes automatically
 - API: `GET /api/agents/{name}/autonomy` and `PUT /api/agents/{name}/autonomy`
@@ -72,7 +79,7 @@ Master gate for the agent's scheduled operations.
 
 Prevents modification of source files (`*.py`, `*.js`, etc.) inside the agent container.
 
-- Toggle in the Agent Header
+- Toggle under **Settings › General › Execution › Read-only mode**
 - Uses a `PreToolUse` hook to intercept `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` tool calls. Codex agents enforce it through the Codex sandbox instead
 - Blocked by default: source and config files (`*.py`, `*.js`, `*.ts`, `*.sh`, `*.yaml`, `*.json`, `CLAUDE.md`, `.claude/*`, `.env`, and similar)
 - Allowed by default: `content/*`, `output/*`, `reports/*`, `exports/*`, `*.log`, `*.txt` (generated files are permitted)
@@ -83,9 +90,9 @@ Prevents modification of source files (`*.py`, `*.js`, etc.) inside the agent co
 
 Per-agent memory and CPU limits, enforced at the container level (Linux cgroups).
 
-- Open the resource modal from the agent header (gear button, "Configure resources"). Each limit can also be left as "Inherit default".
+- Edit **Memory and CPU** under **Settings › General › Execution**. Each limit can also be left as **Inherit default**; the option names the platform default it inherits.
 - Memory options: 1g, 2g, 4g, 8g, 16g, 32g, 64g. CPU options: 1, 2, 4, 8, 16 cores.
-- Changes take effect on the next agent restart.
+- A change is saved at once and applied on the next restart: the row carries a *restart* badge and the bar at the top of Settings lists **Memory and CPU** until the agent comes back up. Nothing restarts on save.
 - **CPU is capped at the host's CPU count.** Docker refuses a CPU limit above the number of CPUs on the host. If you choose more cores than the host has, the container gets the host's CPU count instead and a warning is logged. The setting keeps the value you chose, so the agent is not recreated on every start.
 - API: `GET /api/agents/{name}/resources` and `PUT /api/agents/{name}/resources`
 - **Full capabilities mode**: grants containers system-level access (Docker socket, network tools) when needed
@@ -98,6 +105,9 @@ Per-agent memory and CPU limits, enforced at the container level (Linux cgroups)
 
 Configurable time limit for agent executions.
 
+- Edit **Execution timeout** under **Settings › General › Execution**. The control takes whole minutes, 1 to 120 (default 60); the API stores seconds. An empty, fractional or out-of-range value is refused before any request is sent, with a message that names the range.
+- When the backend refuses the save because an active schedule runs longer than the new cap, the row says how many schedules and how long the longest runs, and offers **Open Schedules**. Shorten that schedule first, or keep the cap at or above its timeout.
+- A saved timeout applies to new runs; a schedule or task can set a shorter timeout, never a longer one.
 - Range: 60--7200 seconds (default: 3600 seconds / 60 minutes).
 - Applies to all trigger methods: task, chat, schedule, MCP, and paid endpoints.
 - Slot TTL is set to the timeout value plus a 5-minute buffer.
@@ -116,7 +126,7 @@ How it behaves when enabled:
 
 Two switches must both be on for the breaker to engage: the per-agent toggle (owner-only) and the platform-wide `DISPATCH_BREAKER_ENABLED` environment variable (also off by default).
 
-When a breaker is open, the agent header and the agent's Dashboard tile show a "⚡ circuit open" badge, and the Overview tab's health panel shows a "Circuit open" chip. Switch the breaker on or off in **Settings → Reliability**, or via the API:
+When a breaker is open, the agent header and the agent's Dashboard tile show a "⚡ circuit open" badge, and the Overview tab's health panel shows a "Circuit open" chip. Switch the breaker on or off under **Settings › Guardrails › Reliability**, or via the API:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -126,7 +136,7 @@ When a breaker is open, the agent header and the agent's Dashboard tile show a "
 
 ### Wake When an Ask Ends
 
-How one of the agent's parked requests (an approval, a question) ended always reaches the agent, but by default it is only read on the agent's *next* turn. An agent with no schedule has no next turn, so an approved action would wait indefinitely. Turn on **Wake this agent when an ask it raised ends** in **Settings → Reliability** and the agent is woken for one turn when a person answers (trigger `operator_response`) — and also when an ask is cancelled or expires, so it stops waiting for an answer that will not come (trigger `operator_ending`, one turn per agent per cancellation sweep or expiry). Off by default.
+How one of the agent's parked requests (an approval, a question) ended always reaches the agent, but by default it is only read on the agent's *next* turn. An agent with no schedule has no next turn, so an approved action would wait indefinitely. Turn on **Wake this agent when an ask it raised ends** under **Settings › Guardrails › Reliability** and the agent is woken for one turn when a person answers (trigger `operator_response`) — and also when an ask is cancelled or expires, so it stops waiting for an answer that will not come (trigger `operator_ending`, one turn per agent per cancellation sweep or expiry). Off by default.
 
 - Each wake-up is one turn the owner pays for: one per answer, one per cancellation or expiry event. A stopped agent is not woken.
 
@@ -134,17 +144,18 @@ How one of the agent's parked requests (an approval, a question) ended always re
 - API: `GET /api/agents/{name}/operator-resume` and `PUT /api/agents/{name}/operator-resume` (`{"enabled": true}`)
 - See [Approvals](../automation/approvals.md) for the operator side, and for how an agent reads an ending back (`get_my_ask`).
 
-### Per-Agent API Key
+### Funding
 
-Controls which API key the agent uses for Claude.
+Controls which credential the agent uses for Claude: the platform API key or a Claude subscription.
 
-- Toggle between the platform API key and the user's own Claude subscription
-- The agent container is recreated when this setting changes
+- Choose under **Settings › General › Model and funding › Funding**: **Platform API key** or one of your subscriptions. The badge beside it reads **Subscription**, **API key** or **Not set**. The cost figures on Overview follow this choice
+- Trinity replaces the container as the switch requires; while the container's environment still disagrees with the saved choice, the bar at the top of Settings lists **Funding**
 
 ### Model Selection
 
 Choose the Claude model used for tasks and scheduled executions.
 
+- Change it under **Settings › General › Model and funding › Model**. The model is read from the agent, so the row can be read or changed only while the agent is running; stopped, it says *Start the agent to read or change its model*
 - Available models lead with the current generation: **Opus 5.5** (the most capable Opus, marked *(latest)*), **Fable 5.1** (most capable, best for the longest tasks) and **Sonnet 5** (fast and smart, with a 1M-token context window), followed by the prior Opus, Sonnet and Haiku generations. **Opus 5** and **Fable 5** are still offered and still supported; they are simply no longer the latest in their tiers.
 - Custom model input is supported.
 - If Claude Code refuses the model — an id it does not know, or one newer than the agent's Claude Code version — the run fails with error code `model_unsupported` (HTTP `400`) and the API's own message. It is not treated as an authentication failure, so the agent is not switched to another subscription or to the platform API key. Pick a supported model, or rebuild the base image so the agent runs a newer Claude Code.

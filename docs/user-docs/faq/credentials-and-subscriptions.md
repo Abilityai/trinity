@@ -8,7 +8,7 @@ Every agent keeps its credentials as files in its own container, following a sim
 
 ## How do I add or edit credentials on an agent?
 
-Open the agent's detail page and click the **Credentials** tab. You'll see the credentials the agent requires, each marked configured (green) or missing (red). Add values one of four ways: the **Setup checklist** (per-variable inputs with descriptions and setup links), **Quick Inject** (paste `.env`-style `KEY=VALUE` pairs, merged into the agent's `.env`), **Upload Credential File** (one file to a destination path — a service-account JSON, a TLS key, a kubeconfig), or **Import from Git** (decrypt the `.credentials.enc` backup in the agent's workspace; **Export to Git** writes it). There is no separate name/value entry form. See [Credential Management](../credentials/credential-management.md).
+Open the agent's detail page, click the **Settings** tab and pick **Storage** in the rail; the **Credentials** section is there (an old `?tab=credentials` link lands on it too). You'll see the credentials the agent requires, each marked configured (green) or missing (red). Add values one of four ways: the **Setup checklist** (per-variable inputs with descriptions and setup links), **Quick Inject** (paste `.env`-style `KEY=VALUE` pairs, merged into the agent's `.env`), **Upload Credential File** (one file to a destination path — a service-account JSON, a TLS key, a kubeconfig), or **Import from Git** (decrypt the `.credentials.enc` backup in the agent's workspace; **Export to Git** writes it). There is no separate name/value entry form. See [Credential Management](../credentials/credential-management.md).
 
 ## Can I change credentials on a running agent without restarting it?
 
@@ -20,7 +20,7 @@ Yes, for `.env`. When you paste or edit credentials on a running agent, Trinity 
 
 ## Do I need to re-enter credentials every time an agent restarts?
 
-No. Credential files live in the agent's home directory, which sits on a persistent volume that survives restarts and container recreation. One exception: a fresh agent created from a repository that has a `.credentials.enc` committed but no `.env` is filled in by the platform once the agent is ready, but not on installs with no encryption key. In that case the startup log says "this script does not decrypt it", and the owner imports it. Use **Import from Git** under Settings › Storage (or the import endpoint) once, and the credentials persist from then on. See [Credential Management](../credentials/credential-management.md).
+No. Credential files live in the agent's home directory, which sits on a persistent volume that survives restarts and container recreation. A restart does not overwrite them with the template's defaults either: the `.env` generated at creation is copied in only when the workspace has no `.env` yet, so values you injected later stay. One exception: a fresh agent created from a repository that has a `.credentials.enc` committed but no `.env` is filled in by the platform once the agent is ready, but not on installs with no encryption key. In that case the startup log says "this script does not decrypt it", and the owner imports it. Use **Import from Git** under Settings › Storage (or the import endpoint) once, and the credentials persist from then on. See [Credential Management](../credentials/credential-management.md).
 
 ## Why didn't my MCP server pick up a credential I just changed?
 
@@ -144,7 +144,7 @@ Export the credentials to a `.credentials.enc` file (**Export to Git** under Set
 
 ## How do I know which credentials an agent actually needs?
 
-The **Credentials** tab shows a per-variable checklist built from the agent's own live `template.yaml` — so a forked or hand-edited agent reports its real requirements, not its original template's. Each row shows what the credential is for, whether it is currently set (probed from the agent's `.env`; **names only**, values are never read or transmitted), and a link to where you obtain it. You can fill values in directly on the checklist. It renders for a stopped agent too, with the live-status column honestly marked unavailable. Reading it is owner-only and human-only. See [Credential Management](../credentials/credential-management.md).
+The **Credentials** section of **Settings › Storage** shows a per-variable checklist built from the agent's own live `template.yaml` — so a forked or hand-edited agent reports its real requirements, not its original template's. Each row shows what the credential is for, whether it is currently set (probed from the agent's `.env`; **names only**, values are never read or transmitted), and a link to where you obtain it. You can fill values in directly on the checklist. It renders for a stopped agent too, with the live-status column honestly marked unavailable. Reading it is owner-only and human-only. See [Credential Management](../credentials/credential-management.md).
 
 ## How does a template declare the credentials it needs?
 
