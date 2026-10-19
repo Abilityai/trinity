@@ -719,6 +719,12 @@
   "reason": "legacy",
   "tier": "accessor"
  },
+ "chat.py::arm_execution_report_back": {
+  "method": "POST",
+  "path": "/api/agents/{name}/executions/{execution_id}/report-back",
+  "reason": "the service 404s unless the caller dispatched the row (#3295), so a share holder cannot arm another person's execution",
+  "tier": "accessor"
+ },
  "chat.py::chat_with_agent": {
   "method": "POST",
   "path": "/api/agents/{name}/chat",
