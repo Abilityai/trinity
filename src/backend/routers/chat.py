@@ -796,10 +796,16 @@ async def set_agent_model(
 def _raise_model_route_error(name: str, e: httpx.HTTPError, unavailable: str, action: str):
     """#3677: an agent's own 4xx is the caller's answer (an invalid model names
     the valid ones), with its status and detail and no ERROR line; anything
-    else (unreachable, timed out, an agent 5xx) is still 503."""
+    else (unreachable, timed out, an agent 5xx) is still 503.
+
+    Not a 401: the agent's auth middleware answers 401 when the BACKEND's
+    per-agent token does not match (#1159; a rotated AGENT_AUTH_SECRET, an old
+    container). That is the platform's credential failing, not the caller's,
+    and a 401 reaching the browser signs the person out (platformSession's
+    `logout` verdict) on every load of the agent page. It stays a 503."""
     import logging
     response = getattr(e, "response", None) if isinstance(e, httpx.HTTPStatusError) else None
-    if response is not None and 400 <= response.status_code < 500:
+    if response is not None and 400 <= response.status_code < 500 and response.status_code != 401:
         try:
             detail = response.json().get("detail")
         except (ValueError, AttributeError):

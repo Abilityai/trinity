@@ -107,3 +107,14 @@ def test_an_unreachable_agent_still_logs_an_error(caplog):
     with caplog.at_level(logging.ERROR, logger="trinity.errors"):
         _status(handler)
     assert [r for r in caplog.records if r.name == "trinity.errors" and r.levelno == logging.ERROR]
+
+
+@pytest.mark.parametrize("method", ["put", "get"])
+def test_an_agent_401_is_the_platforms_failure_never_the_callers(method, caplog):
+    """The agent middleware's 401 means the backend's per-agent token was
+    refused (#1159). Passed through, the browser would sign the person out on
+    the agent page. It stays a 503 and an ERROR line."""
+    with caplog.at_level(logging.ERROR, logger="trinity.errors"):
+        status, _ = _status(lambda r: httpx.Response(401, json={"detail": "Unauthorized"}), method=method)
+    assert status == 503
+    assert [r for r in caplog.records if r.name == "trinity.errors" and r.levelno == logging.ERROR]
