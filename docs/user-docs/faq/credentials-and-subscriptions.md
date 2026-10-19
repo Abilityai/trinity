@@ -20,7 +20,7 @@ Yes, for `.env`. When you paste or edit credentials on a running agent, Trinity 
 
 ## Do I need to re-enter credentials every time an agent restarts?
 
-No. Credential files live in the agent's home directory, which sits on a persistent volume that survives restarts and container recreation. One thing that does *not* happen automatically: a fresh agent created from a repository that has a `.credentials.enc` committed but no `.env` is not filled in on startup — decrypting that file is the owner's step, and the agent's startup log says "encrypted credentials are not imported at startup". Use **Import from Git** on the Credentials tab (or the import endpoint) once, and the credentials persist from then on. See [Credential Management](../credentials/credential-management.md).
+No. Credential files live in the agent's home directory, which sits on a persistent volume that survives restarts and container recreation. One exception: a fresh agent created from a repository that has a `.credentials.enc` committed but no `.env` is filled in by the platform once the agent is ready, but not for subscription-mode agents or on installs with no encryption key. In those cases the startup log says "this script does not decrypt it", and the owner imports it. Use **Import from Git** on the Credentials tab (or the import endpoint) once, and the credentials persist from then on. See [Credential Management](../credentials/credential-management.md).
 
 ## Why didn't my MCP server pick up a credential I just changed?
 

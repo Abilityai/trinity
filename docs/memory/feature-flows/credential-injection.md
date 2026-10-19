@@ -263,19 +263,23 @@ async def import_credentials(
 
 ---
 
-## Flow 4: A committed `.credentials.enc` at startup (not imported — #3510)
+## Flow 4: A committed `.credentials.enc` at startup (imported by the backend, not by `startup.sh` — #3510)
 
-An agent that starts with a `.credentials.enc` and no `.env` is **not**
-auto-imported. Decrypting the file is the owner's decision — **Import from Git**
-on the Credentials tab, or the `import_credentials` MCP tool (Flow 3) — and the
-platform key never reaches the container. `docker/base-image/startup.sh` says so
-on stdout and names that action:
+`docker/base-image/startup.sh` never decrypts a committed `.credentials.enc`:
+the platform key never reaches the container. The **backend** imports it once
+the agent is ready — `lifecycle.inject_assigned_credentials()` →
+`credential_encryption.import_to_agent()`. That import is skipped for
+subscription-mode agents (#612), ephemeral agents, installs with no encryption
+key, and already-running containers; in those cases the owner imports it with
+**Import from Git** on the Credentials tab or the `import_credentials` MCP tool
+(Flow 3). The startup script says so on stdout:
 
 ```bash
 if [ -f ".credentials.enc" ] && [ ! -f ".env" ]; then
-    echo "Found .credentials.enc but no .env: encrypted credentials are not imported at startup."
-    echo "  The agent runs without them until its owner imports them:"
-    echo "  Credentials tab > Import from Git (or the import_credentials MCP tool)."
+    echo "Found .credentials.enc but no .env: this script does not decrypt it."
+    echo "  The platform imports it once the agent is ready (not for subscription"
+    echo "  agents or when no encryption key is configured). If .env is still missing,"
+    echo "  the owner imports it: Credentials tab > Import from Git (or the import_credentials MCP tool)."
 fi
 ```
 

@@ -9,7 +9,7 @@ Ruled 2026-10-15: the startup auto-import is removed (decrypting the file is
 the owner's Import from Git, and the platform key never reaches the container).
 This file pins both halves:
 
-* every literal `http://backend:8000/api/...` call in the agent image resolves
+* every `/api/...` call in the agent image (literal host or `{backend_url}`) resolves
   to a route the real app registers (read from the live route table, in a
   subprocess, through the #2996 census helper);
 * the scanner is not vacuous — it flags the old call against the same table;
@@ -30,7 +30,12 @@ pytestmark = pytest.mark.unit
 
 _ROOT = Path(__file__).resolve().parents[2]
 _IMAGE = _ROOT / "docker" / "base-image"
-_CALL = re.compile(r"http://backend:8000(/api/[A-Za-z0-9_\-./{}$]*)")
+# The literal host spelling, and the `f"{backend_url}/api/..."` /
+# `${TRINITY_BACKEND_URL}/api/...` forms every real call in the image uses today.
+_CALL = re.compile(
+    r"(?:http://backend:8000|\{(?:self\.)?(?:_?backend_url|BACKEND_URL)\}|\$\{?TRINITY_BACKEND_URL\}?)"
+    r"(/api/[A-Za-z0-9_\-./{}$]*)"
+)
 
 
 def _calls(text: str):
@@ -71,6 +76,8 @@ def resolves():
 
 
 def test_every_backend_call_in_the_agent_image_exists(resolves):
+    # Not vacuous: the image really does call the backend (heartbeat et al.).
+    assert _image_calls(), "the scanner found no backend calls in docker/base-image"
     missing = {call: files for call, files in _image_calls().items() if not resolves(call)}
     assert not missing, f"the agent image calls backend paths with no route: {missing}"
 
@@ -87,6 +94,7 @@ def test_startup_says_what_happens_to_an_encrypted_credentials_file():
     assert "decrypt-and-inject" not in startup
     assert "key may not be configured" not in startup          # the old wrong cause
     assert "Import from Git" in startup
+    assert "not imported at startup" not in startup           # the backend DOES import it
     block = startup[startup.index('if [ -f ".credentials.enc" ] && [ ! -f ".env" ]'):]
     assert "curl" not in block[: block.index("\nfi")]
 

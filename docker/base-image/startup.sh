@@ -681,16 +681,18 @@ if [ -f "/home/developer/.trinity/setup.sh" ]; then
 fi
 
 # === Encrypted credentials without a .env (#3510) ===
-# A committed .credentials.enc is NOT decrypted at startup. Decrypting it is the
-# owner's decision (Credentials tab > Import from Git, or the import_credentials
-# MCP tool), and the platform key never reaches this container. Earlier builds
-# called a backend route that never existed and blamed a missing key; say what
-# actually happens instead.
+# This script never decrypts a committed .credentials.enc: the platform key never
+# reaches this container. The BACKEND imports it once the agent is ready
+# (lifecycle.inject_assigned_credentials), except for subscription agents
+# (#612), ephemeral agents, installs with no encryption key, and agents that
+# were already running. Earlier builds called a backend route that never
+# existed and blamed a missing key; say what actually happens instead.
 cd /home/developer || exit 1
 if [ -f ".credentials.enc" ] && [ ! -f ".env" ]; then
-    echo "Found .credentials.enc but no .env: encrypted credentials are not imported at startup."
-    echo "  The agent runs without them until its owner imports them:"
-    echo "  Credentials tab > Import from Git (or the import_credentials MCP tool)."
+    echo "Found .credentials.enc but no .env: this script does not decrypt it."
+    echo "  The platform imports it once the agent is ready (not for subscription"
+    echo "  agents or when no encryption key is configured). If .env is still missing,"
+    echo "  the owner imports it: Credentials tab > Import from Git (or the import_credentials MCP tool)."
 fi
 
 # === Render .mcp.json.template (#2007) ===
@@ -701,8 +703,8 @@ fi
 # absent (a freshly-seeded Cornelius shipped three and ran with none).
 #
 # Runs AFTER the `.env` source (the /generated-creds copy above) so credentials
-# are present (a committed .credentials.enc is imported by the owner, not here —
-# #3510), and
+# are present (a committed .credentials.enc is imported by the backend after
+# the agent is ready, which can land after this renderer runs — #3510), and
 # merges rather than overwrites — the agent server's own `trinity` entry may be
 # written before or after this point. Substitution is confined to `env` blocks,
 # each rendered server is validated individually, and an unresolvable
