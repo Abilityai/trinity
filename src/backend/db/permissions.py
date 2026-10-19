@@ -66,8 +66,9 @@ class PermissionOperations:
 
         Args:
             accessible_agents: Optional set of agent names to filter by.
-                              If provided, only returns edges where BOTH
-                              source and target are in the set.
+                              If provided (even empty), only returns edges
+                              where BOTH source and target are in the set;
+                              None returns every edge.
 
         Returns list of {"source": str, "target": str} dicts.
         """
@@ -76,7 +77,7 @@ class PermissionOperations:
             agent_permissions.c.target_agent,
         )
 
-        if accessible_agents:
+        if accessible_agents is not None:
             # Filter at SQL level to avoid info leakage
             agent_list = list(accessible_agents)
             stmt = stmt.where(

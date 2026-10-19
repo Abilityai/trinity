@@ -14,7 +14,7 @@ roster refresh cannot drift apart.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -116,3 +116,23 @@ def resolve_ws_identity(username: str) -> Optional[Dict[str, Any]]:
         return None
     return {"email": email, "is_admin": False, "accessible_agents": list(agents or []),
             "allowed_types": allowed_types, "allowed_fields": allowed_fields}
+
+
+def event_stream_identity(key_info: Dict[str, Any], owner: Optional[Dict[str, Any]]) -> Tuple[bool, List[str]]:
+    """``/ws/events`` scope for an MCP key: ``(is_admin, accessible_agents)``.
+
+    Used at connect and on ``refresh``. A key resolves to its owner, so a user
+    key gets the owner's scope (admin ⇒ unfiltered). An AGENT key gets its reach
+    instead, as a non-admin slot (trinity-enterprise#872): it carries its
+    owner's role, and an admin slot is never filtered.
+    """
+    from database import db
+    from dependencies import agent_reach_names, owner_agent_names
+
+    role = (owner or {}).get("role")
+    email = key_info.get("user_email")
+    agent = key_info.get("agent_name") if key_info.get("scope") == "agent" else None
+    if isinstance(agent, str) and agent:
+        return False, sorted(agent_reach_names(agent, owner_agent_names(role, email)))
+    is_admin = role == "admin"
+    return is_admin, db.get_accessible_agent_names(email, is_admin)

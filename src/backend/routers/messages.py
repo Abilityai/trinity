@@ -16,7 +16,7 @@ from models import (
 )
 
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName, assert_agent_owner
+from dependencies import get_current_user, AuthorizedAgentByName, assert_agent_owner, require_person
 from db_models import User
 from services import role_addressing
 from services.idempotency_service import EffectInProgressError, EffectUnguardedError
@@ -179,12 +179,14 @@ def _recipient(agent_name: str, request: SendMessageRequest, current_user: User 
 async def update_proactive_setting(
     agent_name: str,
     request: ProactiveShareUpdate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_person),
 ):
     """
     Update the allow_proactive flag for a sharing record.
 
-    Only the agent owner or admin can modify this setting.
+    Only the agent owner or admin can modify this setting, and only as a
+    person: the flag records a person's consent, so no agent key sets it
+    (trinity-enterprise#872).
     """
     success = db.set_allow_proactive(
         agent_name=agent_name,

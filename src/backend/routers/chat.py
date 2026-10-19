@@ -19,6 +19,7 @@ from dependencies import (
     get_authorized_agent,
     get_owned_agent,
     assert_owns_or_admin,
+    is_fleet_admin,
     resolve_source_agent,
 )
 from services.agent_auth import agent_httpx_client
@@ -424,7 +425,9 @@ async def execute_parallel_task(
                 status_code=400,
                 detail="This execution was never assigned a resumable session.",
             )
-        if current_user.role != "admin" and not db.resume_session_belongs_to_user(
+        # trinity-enterprise#872: the admin bypass is for an admin PERSON; an
+        # agent key carrying its owner's role is checked for ownership too.
+        if not _sees_every_user(current_user) and not db.resume_session_belongs_to_user(
             name, rid, current_user.id
         ):
             raise HTTPException(status_code=404, detail="Session not found.")
@@ -853,7 +856,7 @@ def _sees_every_user(current_user: User) -> bool:
     so with an `agent_permissions` edge to B it read every user's chats with B
     — "may call" is not "may read everyone's conversations with it"
     (trinity-enterprise#629, #3346 review)."""
-    return current_user.role == "admin" and not getattr(current_user, "agent_name", None)
+    return is_fleet_admin(current_user)
 
 
 @router.get("/{name}/chat/sessions")
