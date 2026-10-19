@@ -156,6 +156,11 @@ cat > "$USER_DATA" <<USERDATA
 set -euo pipefail
 export ADMIN_PASSWORD='${ADMIN_PASSWORD_Q}'
 export TRINITY_IMAGE_TAG='${TRINITY_IMAGE_TAG_Q}'
+# cloud-init keeps its own copy of this script, password included, for the life
+# of the droplet. start.sh writes the password to .env, so once this script has
+# run (or failed) the copies are not needed. A reboot does not re-run
+# per-instance user-data.
+trap 'shred -u /var/lib/cloud/instances/*/user-data.txt* 2>/dev/null || true; rm -rf /var/lib/cloud/instances/*/user-data.txt* /var/lib/cloud/instances/*/scripts' EXIT
 exec > >(tee -a /var/log/trinity-install.log) 2>&1
 echo "=== Trinity install: \$(date -u +%FT%TZ) tag=\${TRINITY_IMAGE_TAG} ==="
 

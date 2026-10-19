@@ -228,3 +228,39 @@ def test_shquote_round_trips_through_a_shell(secret: str) -> None:
     )
     assert out.returncode == 0, out.stderr
     assert out.stdout == secret, f"round-trip changed the secret: {out.stdout!r}"
+
+
+@pytest.mark.parametrize("status", [0, 1], ids=["install-ok", "install-failed"])
+def test_first_boot_removes_cloud_inits_copies_of_the_password(
+    tmp_path: Path, status: int,
+) -> None:
+    """#3799: cloud-init keeps user-data on disk for the droplet's lifetime.
+
+    The generated script's own EXIT trap runs against a fake /var/lib/cloud
+    tree, on success and on a failed install.
+    """
+    password = "CorrectHorse!7Battery"
+    proc = _run_installer(tmp_path, snap=False, stdin=f"{password}\n{password}\n\n\ny\n")
+    assert "no public IP yet" in proc.stderr, proc.stderr
+    trap = next(
+        (l for l in (tmp_path / "user-data.sh").read_text().splitlines()
+         if l.startswith("trap ") and l.endswith(" EXIT")),
+        None,
+    )
+    assert trap, "the user-data has no EXIT trap cleaning cloud-init's copies"
+
+    cloud = tmp_path / "cloud"
+    inst = cloud / "instances" / "123456"
+    (inst / "scripts").mkdir(parents=True)
+    for f in ("user-data.txt", "user-data.txt.i", "scripts/part-001"):
+        (inst / f).write_text(f"export ADMIN_PASSWORD='{password}'\n")
+    (inst / "boot-finished").write_text("")
+
+    run = subprocess.run(
+        ["bash", "-c", f"set -euo pipefail\n{trap.replace('/var/lib/cloud', str(cloud))}\nexit {status}"],
+        capture_output=True, text=True, timeout=30, env={"PATH": "/usr/bin:/bin"},
+    )
+    assert run.returncode == status, run.stderr
+    leftover = [p for p in cloud.rglob("*") if p.is_file() and password in p.read_text()]
+    assert not leftover, f"password still on disk in {leftover}"
+    assert (inst / "boot-finished").exists(), "the trap removed more than the user-data copies"
