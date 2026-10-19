@@ -16,9 +16,9 @@ Two-part fix verified here:
    raised when ``.credentials.enc`` is absent, and the caller catches it
    explicitly. No more substring-match fragility.
 
-2. Subscription-mode agents short-circuit *before* the import path runs,
-   with a clear ``reason: "subscription_mode"`` so operators know the skip
-   is by design.
+2. (#3510, ruled 2026-10-19) Subscription-mode agents no longer skip the
+   import: their MCP keys live in the file. What #612 protected against, a
+   missing file reading as failed, is the clean skip in (1), with no retries.
 
 Module under test:
     src/backend/services/agent_service/lifecycle.py::inject_assigned_credentials
@@ -239,31 +239,38 @@ def _patch_get_service(**kwargs):
     )
 
 
-def test_subscription_mode_skips_import_with_clear_reason():
-    """The defining condition of #612: when an agent has a subscription
-    assigned, file-based credential injection is irrelevant and must NOT
-    surface as ``failed``. The skip reason must be unambiguous so operators
-    don't try to re-assign or recreate the container thinking something
-    broke."""
+def test_a_subscription_agent_imports_its_credentials_file_too():
+    """#3510 (ruled 2026-10-19): a subscription agent's committed
+    .credentials.enc carries its MCP keys and other non-Anthropic credentials;
+    the #612 skip dropped them silently. It is imported like any agent's."""
     _mock_db.get_agent_subscription_id.return_value = "sub-abc-123"
-
-    # If this fires, we've regressed — subscription agents must short-circuit
-    # before the encryption service is even consulted.
-    sentinel_should_not_be_called = AsyncMock(
-        side_effect=AssertionError("import_to_agent must not be called for subscription agents")
-    )
     mock_service = MagicMock()
-    mock_service.import_to_agent = sentinel_should_not_be_called
+    mock_service.import_to_agent = AsyncMock(return_value={".env": "...", ".mcp.json": "..."})
 
     with _patch_get_service(return_value=mock_service):
         result = _run(_mod.inject_assigned_credentials("sub-agent"))
 
-    sentinel_should_not_be_called.assert_not_awaited()
-    assert result["status"] == "skipped"
-    assert result["reason"] == "subscription_mode"
-    # Reason text should mention the env-var path so operators see WHY this
-    # is a skip-by-design and not an error to investigate.
-    assert "CLAUDE_CODE_OAUTH_TOKEN" in result.get("detail", "")
+    mock_service.import_to_agent.assert_awaited_once_with("sub-agent")
+    assert result["status"] == "success"
+    assert result["credential_count"] == 2
+
+
+def test_a_subscription_agent_without_the_file_is_a_clean_skip_with_no_retries():
+    """The #606/#612 harm, pinned where it lives: a subscription agent usually
+    has no .credentials.enc, and that must not read as failed or retry."""
+    _mock_db.get_agent_subscription_id.return_value = "sub-abc-123"
+    mock_service = MagicMock()
+    mock_service.import_to_agent = AsyncMock(
+        side_effect=_credential_encryption.CredentialsFileNotFoundError(
+            "No .credentials.enc file found in agent workspace"
+        )
+    )
+
+    with _patch_get_service(return_value=mock_service):
+        result = _run(_mod.inject_assigned_credentials("sub-agent"))
+
+    assert mock_service.import_to_agent.await_count == 1
+    assert result == {"status": "skipped", "reason": "no_credentials_enc_file"}
 
 
 # ── File-missing case via the new exception subclass (#612) ──────────────

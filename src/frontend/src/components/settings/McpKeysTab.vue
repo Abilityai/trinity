@@ -514,7 +514,11 @@ const mcpServerUrl = computed(() => {
 const fetchMcpUrl = async () => {
   try {
     const response = await axios.get('/api/settings/mcp-url')
-    configuredMcpUrl.value = response.data.url || null
+    // An https default_url means the server saw an HTTPS proxy, which this page
+    // cannot see (#2907). An http one is skipped: behind the Vite dev proxy the
+    // backend sees its own host, and the hostname fallback below is right.
+    const detected = response.data.default_url || ''
+    configuredMcpUrl.value = response.data.url || (detected.startsWith('https://') ? detected : null)
   } catch (error) {
     console.error('Failed to fetch MCP URL setting:', error)
   }

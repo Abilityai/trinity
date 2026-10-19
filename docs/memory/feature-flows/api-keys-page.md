@@ -54,7 +54,7 @@ onMounted(async () => {
 })
 ```
 
-**MCP URL**: `fetchMcpUrl()` calls `GET /api/settings/mcp-url` to get the admin-configured URL. If set, `mcpServerUrl` computed uses it; otherwise falls back to auto-detect from `window.location.hostname`. (#76)
+**MCP URL**: `fetchMcpUrl()` calls `GET /api/settings/mcp-url` to get the admin-configured URL. If set, `mcpServerUrl` computed uses it; otherwise it uses the response's server-detected `default_url` (`https://<host>/mcp` behind an HTTPS proxy, else `http://<host>:8080/mcp`, #2907), and falls back to `window.location.hostname` only before the fetch returns. (#76)
 
 ### Step 1: Fetch User Role
 ```javascript

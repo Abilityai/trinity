@@ -14,12 +14,16 @@
           works in the Workspace only, <span class="font-medium">operator</span> and above also get
           the operator UI. External clients who reach the agent through channels are managed on the
           <span class="font-medium">Sharing</span> tab.
+          A share lets them chat with the agent, see their own conversations, and browse and edit its
+          files, except credentials, runtime config and its instructions.
         </template>
         <template v-else>
           People this agent is shared with. They use it in the Workspace, signing in with an
           emailed code; whether someone also gets the operator UI is their platform role, which an
           admin sets in Settings → Access. External clients who reach the agent through channels are
           managed on the <span class="font-medium">Sharing</span> tab.
+          A share lets them chat with the agent, see their own conversations, and browse and edit its
+          files, except credentials, runtime config and its instructions.
         </template>
       </p>
     </div>
