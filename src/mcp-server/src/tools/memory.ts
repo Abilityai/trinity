@@ -31,7 +31,7 @@ export function createMemoryTools(client: TrinityClient, requireApiKey: boolean)
       name: "write_user_memory",
       description:
         "Persist facts about the user you are currently serving in an isolated, per-user memory store. " +
-        "Use this instead of writing to ~/.claude/projects/memory/ — that path is shared across ALL users " +
+        "Use this instead of Claude Code's auto-memory (under ~/.claude/projects/) or your repo's memory/ directory — both are shared across ALL users " +
         "of this agent and would leak one user's data to everyone else.\n\n" +
         "**When to use**: The user explicitly asks you to remember something, or you learn a fact " +
         "(name, preference, timezone, context) that would be useful in future sessions.\n\n" +
