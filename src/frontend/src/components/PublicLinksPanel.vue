@@ -25,6 +25,14 @@
       <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">Loading links...</p>
     </div>
 
+    <LoadFailed
+      v-else-if="loadError"
+      title="Couldn't load public links"
+      message="The link list failed to load. Your links are unchanged. Try again."
+      :detail="loadError"
+      @retry="loadLinks"
+    />
+
     <!-- Empty state -->
     <div v-else-if="links.length === 0" class="text-center py-12 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-dashed border-gray-300 dark:border-gray-700">
       <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -360,6 +368,7 @@ import { ref, onMounted, watch } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { publicLinkUrl } from '../utils/publicLinkUrl'
+import LoadFailed from './LoadFailed.vue'
 
 const props = defineProps({
   agentName: {
@@ -372,6 +381,7 @@ const authStore = useAuthStore()
 
 // State
 const loading = ref(false)
+const loadError = ref('')
 const links = ref([])
 const showCreateModal = ref(false)
 const editingLink = ref(null)
@@ -396,6 +406,7 @@ const formError = ref(null)
 // Load links
 const loadLinks = async () => {
   loading.value = true
+  loadError.value = ''
   try {
     const response = await axios.get(`/api/agents/${props.agentName}/public-links`, {
       headers: authStore.authHeader
@@ -405,6 +416,7 @@ const loadLinks = async () => {
     await loadAllSlackConnections()
   } catch (err) {
     console.error('Failed to load public links:', err)
+    loadError.value = String(err.response?.data?.detail || err.message || 'Request failed')
   } finally {
     loading.value = false
   }
