@@ -14,12 +14,15 @@ from typing import NoReturn, Optional
 
 from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ReportBackRequest, TaskExecutionStatus
 from dependencies import (
+    assert_not_share_viewer,
     capability_fence,
     get_current_user,
     get_authorized_agent,
     get_owned_agent,
     assert_owns_or_admin,
     resolve_source_agent,
+    row_is_viewers,
+    viewer_row_scope,
 )
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
@@ -515,6 +518,10 @@ async def get_agent_chat_history(
             if not chat_persistence_service.is_gate_message(m)
         ]
 
+    # ent#875: the container's own conversation holds every user's turns
+    # together; a share holder reads their own through chat/history/persistent.
+    assert_not_share_viewer(current_user, name)
+
     if container.status != "running":
         raise HTTPException(
             status_code=503,
@@ -626,6 +633,7 @@ async def get_agent_activity(
     current_user: User = Depends(get_current_user)
 ):
     """Get session activity for real-time monitoring."""
+    assert_not_share_viewer(current_user, name)  # ent#875: shared container state
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -672,6 +680,7 @@ async def get_agent_activity_detail(
     current_user: User = Depends(get_current_user)
 ):
     """Get full details for a specific tool call."""
+    assert_not_share_viewer(current_user, name)  # ent#875: shared container state
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -705,6 +714,7 @@ async def clear_agent_activity(
     current_user: User = Depends(get_current_user)
 ):
     """Clear session activity (called when starting a new session)."""
+    assert_not_share_viewer(current_user, name)  # ent#875: shared container state
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -770,7 +780,9 @@ async def get_agent_model(
 @router.put("/{name}/model", dependencies=[Depends(capability_fence("agents.manage"))])
 async def set_agent_model(
     request: ModelChangeRequest,
-    name: str = Depends(get_authorized_agent),
+    # ent#875: the model is the agent's for every user — owner tier. An agent key
+    # keeps its `agents.manage` capability fence on the route decorator.
+    name: str = Depends(get_owned_agent),
     current_user: User = Depends(get_current_user)
 ):
     """Set agent's model for subsequent messages."""
@@ -984,6 +996,21 @@ async def terminate_agent_execution(
     if not task_execution_id:
         task_execution_id = execution_id
 
+    # ent#875: below the owner tier a caller may end only a turn they started.
+    # Both ids must be rows of THIS agent that are the caller's (the agent
+    # process is addressed by one, the database row by the other), and a missing
+    # row is a refusal, not a pass. Uniform 404, the answer for an unknown id.
+    scope = viewer_row_scope(current_user, name)
+    if scope is not None:
+        for _eid in {execution_id, task_execution_id}:
+            _row = db.get_execution(_eid)
+            if (
+                not _row
+                or getattr(_row, "agent_name", None) != name
+                or not row_is_viewers(scope, getattr(_row, "source_user_id", None))
+            ):
+                raise HTTPException(status_code=404, detail="Execution not found in agent")
+
     # The termination orchestration (BACKLOG-001 queued-cancel, agent-proxy,
     # capacity force-release, #679 CANCELLED CAS, #1332 dispatch-activity close)
     # lives in chat_execution_service (Invariant #1). HTTP-free — it raises
@@ -1052,9 +1079,23 @@ async def get_agent_running_executions(
                 f"http://agent-{name}:8000/api/executions/running"
             )
             response.raise_for_status()
-            return response.json()
+            data = response.json()
     except httpx.HTTPError:
         return {"executions": []}
+
+    # ent#875: a share holder sees only the turns they started. An entry with no
+    # row of this agent's (or no id) is dropped, never passed through.
+    scope = viewer_row_scope(current_user, name)
+    if scope is not None and isinstance(data, dict):
+        kept = []
+        for entry in data.get("executions") or []:
+            row = db.get_execution(str(entry.get("execution_id", ""))) if isinstance(entry, dict) else None
+            if row and getattr(row, "agent_name", None) == name and row_is_viewers(
+                scope, getattr(row, "source_user_id", None)
+            ):
+                kept.append(entry)
+        data = {**data, "executions": kept}
+    return data
 
 
 # ============================================================================
@@ -1079,6 +1120,19 @@ async def stream_execution_log(
 
     Use this endpoint for live monitoring of running executions.
     """
+    # ent#875: a share holder streams only a turn they started — the row must be
+    # this agent's and theirs; anything else is the uniform "not found". The
+    # check precedes the stream, so nothing of another person's turn is read.
+    scope = viewer_row_scope(current_user, name)
+    if scope is not None:
+        _row = db.get_execution(execution_id)
+        if (
+            not _row
+            or getattr(_row, "agent_name", None) != name
+            or not row_is_viewers(scope, getattr(_row, "source_user_id", None))
+        ):
+            raise HTTPException(status_code=404, detail="Execution not found")
+
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")

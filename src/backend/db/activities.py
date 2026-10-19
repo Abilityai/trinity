@@ -577,9 +577,20 @@ class ActivityOperations:
                                 end_time: Optional[str] = None,
                                 activity_types: Optional[List[str]] = None,
                                 limit: int = 100,
-                                agent_names: Optional[List[str]] = None) -> List[Dict]:
+                                agent_names: Optional[List[str]] = None,
+                                *,
+                                own_rows_user_id: Optional[int] = None,
+                                own_rows_exempt_agents: Optional[List[str]] = None) -> List[Dict]:
         """
         Get activities across all agents in a time range.
+
+        `own_rows_user_id` (trinity-enterprise#875) narrows to the activities
+        that user started, on EVERY agent except `own_rows_exempt_agents` (the
+        agents the caller owns, which keep every row): narrowing is the default,
+        so an agent missing from the list is narrowed, never shown in full. An
+        activity's details carry the first 100 characters of the prompt, so the
+        narrowing is in the WHERE, before the LIMIT. A NULL `user_id` (system,
+        scheduled) never matches `=`: those rows are hidden on a shared agent.
         Optionally filter by activity types and by an access-control allow-list.
 
         #1265: ``agent_names`` pushes the per-user access filter into SQL so the
@@ -601,6 +612,13 @@ class ActivityOperations:
             if not agent_names:
                 return []
             conditions.append(agent_activities.c.agent_name.in_(agent_names))
+
+        if own_rows_user_id is not None:
+            mine = agent_activities.c.user_id == own_rows_user_id
+            if own_rows_exempt_agents:
+                conditions.append(or_(agent_activities.c.agent_name.in_(own_rows_exempt_agents), mine))
+            else:
+                conditions.append(mine)
 
         stmt = select(*_ACTIVITY_COLUMNS)
         if conditions:

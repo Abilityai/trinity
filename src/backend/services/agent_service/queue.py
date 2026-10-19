@@ -8,6 +8,8 @@ import logging
 
 from fastapi import HTTPException
 
+from database import db
+from dependencies import row_is_viewers, viewer_row_scope
 from models import User
 from services.capacity_manager import get_capacity_manager
 from services.docker_service import get_agent_container
@@ -40,9 +42,36 @@ async def get_agent_queue_status_logic(
         # /chat path is serial (max_concurrent=1); status endpoint historically
         # reflected /chat queue state.
         status = await capacity.get_status(agent_name, max_concurrent=1)
-        return status.model_dump()
+        data = status.model_dump()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get queue status: {str(e)}")
+    return _narrow_queue_status(data, agent_name, current_user)
+
+
+def _narrow_queue_status(data: dict, agent_name: str, current_user: User) -> dict:
+    """A share holder sees the prompts of the turns they started and no one
+    else's (trinity-enterprise#875). The running turn is shown only if it is
+    theirs; queued items are kept by `source_user_id`, which the in-memory queue
+    carries as a string. `is_busy` and `queue_length` are counts, not text, so
+    the caller still learns the agent is busy and how long the line is.
+
+    Owner, admin and key tiers get the status untouched."""
+    scope = viewer_row_scope(current_user, agent_name)
+    if scope is None:
+        return data
+    current = data.get("current_execution")
+    if current:
+        row = db.get_execution(str(current.get("id", "")))
+        mine = bool(row) and getattr(row, "agent_name", None) == agent_name and row_is_viewers(
+            scope, getattr(row, "source_user_id", None)
+        )
+        if not mine:
+            data["current_execution"] = None
+    data["queued_executions"] = [
+        item for item in (data.get("queued_executions") or [])
+        if row_is_viewers(scope, item.get("source_user_id"))
+    ]
+    return data
 
 
 async def clear_agent_queue_logic(

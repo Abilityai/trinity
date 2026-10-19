@@ -6188,6 +6188,61 @@
         "security"
       ],
       "description": "The in-container guard holds a shared person's turn to the Files API's paths (ent#926). Driven as Claude Code drives a hook: an ordinary path is allowed with no lookup; instruction files, skills, shell startup files, the Python user-site, transcripts and credentials are refused for share, unknown and unreachable and allowed for owner; project memory stays readable; Grep/Glob aimed at owner-only paths are refused; tilde, dotdot and double-slash spellings and a link into an owner-only path are judged by where they land; no execution id means no platform turn. The lookup is exercised over real HTTP (key, route, percent-encoded ids, 404/403/500/garbage/unknown tier/unreachable). Hook policy copy byte-identical to the backend's; drop-in registers the guard in exec form; the image ships hook, policy and drop-in root-owned. Mutations: policy check skipped, fail-open on unreachable, fail-open on share/unknown, links not followed, no-run-id denied and policy copy drift each turn it red."
+    },
+    {
+      "file": "unit/test_ent875_viewer_tier.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "The viewer tier (owner / share / key) as an allowlist both ways: unlisted scopes, a missing mcp_scope, the loopback JWT and a bare principal fail closed to share; a missing or malformed user id matches no row, never all; row_is_viewers compares the int column and the queue's string id; the shared-state refusal is fixed text."
+    },
+    {
+      "file": "unit/test_ent875_own_rows_sql.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "db",
+        "unit"
+      ],
+      "description": "A real SQLite with three users and the caller's rows the oldest: the per-user filter applies before the LIMIT on the agent list, a schedule's history, a fan-out batch, the fleet list (with search and OR-clause precedence, only on shared agents) and the activity timeline; NULL source_user_id is hidden; the unfiltered call is unchanged."
+    },
+    {
+      "file": "unit/test_ent875_exec_control_routes.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "auth",
+        "executions",
+        "unit"
+      ],
+      "description": "Every execution read and control route called with real tier resolution for owner, admin, share (JWT and user-scope key) and agent key, in both directions: list/detail/log/stream/running/queue/fan-out narrowing, the uniform 404, terminate needing both ids, shared-state 403, model and force_reset owner tier, the five webhook routes and can_manage_webhook; plus the route census and an AST guard over every router read of an execution row."
+    },
+    {
+      "file": "unit/test_ent926_runtime_turn_scope.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-19",
+      "categories": [
+        "agent",
+        "security"
+      ],
+      "description": "Gemini CLI and Codex refuse a shared person's turn before the CLI starts (ent#926, ruling 2026-10-19): agent_server/services/turn_scope.require_owner_tier lets an owner turn and a call with no execution id through, refuses share and unknown with a 403 naming the runtime, and refuses an unanswered lookup with a 503. The lookup is exercised over real HTTP (agent key, percent-encoded ids, 404 unknown, 500 and garbage unreachable, no key, refused connection). Wired at the top of GeminiRuntime and CodexRuntime execute and execute_headless: a share turn never reaches subprocess.Popen."
+    },
+    {
+      "file": "unit/test_ent926_agent_key_turn_scope.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-19",
+      "categories": [
+        "backend",
+        "auth",
+        "security"
+      ],
+      "description": "An agent's own key reads executions for the person whose turn it is (ent#926): the auth dependency records an agent key's X-Trinity-Execution-Id privately (never for a person, never serialized); an owner-tier turn, a scheduled turn, manual and no header keep the full view; a shared person's turn reads as share tier with that person's rows on every agent (fleet reads exempt none); a share turn with no platform user, another agent's execution and an unknown id read no rows; shared-state routes refuse it; system, ops and connector keys and persons are untouched."
     }
   ]
 }

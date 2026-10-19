@@ -496,6 +496,12 @@ class User(BaseModel):
     # One principal object per request (FastAPI caches `get_current_user`), so
     # it cannot outlive the request that earned it.
     _capability_reach: set = PrivateAttr(default_factory=set)
+    # trinity-enterprise#926: the raw `X-Trinity-Execution-Id` an AGENT-scoped
+    # key's request carried (#2392) — the turn the agent is acting in. Private
+    # like the reach set: written only by `dependencies.record_acting_turn`, from
+    # the request, never from a token, and never serialized. Read by the viewer
+    # helpers, which narrow a shared person's turn to that person's rows.
+    _acting_execution_id: Optional[str] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):
@@ -4104,6 +4110,11 @@ class ScheduleResponse(BaseModel):
     # it the field is silently dropped from every response — `ScheduleResponse`
     # is built with `**schedule.model_dump()`, and pydantic ignores extra keys.
     deliver_to_workspace_email: Optional[str] = None
+    # ent#875: whether THIS caller may mint, rotate, revoke or read the schedule's
+    # webhook (its creator, the agent owner, an admin). Computed server-side by
+    # the same predicate the webhook routes enforce — the client has no numeric
+    # user id to compare an owner id against, and the creator's id is not exposed.
+    can_manage_webhook: bool = True
 
     class Config:
         from_attributes = True
