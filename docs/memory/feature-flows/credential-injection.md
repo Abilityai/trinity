@@ -269,16 +269,19 @@ async def import_credentials(
 the platform key never reaches the container. The **backend** imports it once
 the agent is ready — `lifecycle.inject_assigned_credentials()` →
 `credential_encryption.import_to_agent()`. That import is skipped for
-subscription-mode agents (#612), ephemeral agents, installs with no encryption
-key, and already-running containers; in those cases the owner imports it with
-**Import from Git** on the Credentials tab or the `import_credentials` MCP tool
-(Flow 3). The startup script says so on stdout:
+ephemeral agents, installs with no encryption key, and already-running
+containers; in those cases the owner imports it with **Import from Git** on the
+Credentials tab or the `import_credentials` MCP tool (Flow 3). Subscription-mode
+agents import it too (#3510, ruled 2026-10-19): their MCP keys live there, and
+the agent server force-unsets Anthropic API-key variables at every spawn under
+subscription (#2114), so an imported `ANTHROPIC_API_KEY` cannot shadow the
+subscription. The startup script says so on stdout:
 
 ```bash
 if [ -f ".credentials.enc" ] && [ ! -f ".env" ]; then
     echo "Found .credentials.enc but no .env: this script does not decrypt it."
-    echo "  The platform imports it once the agent is ready (not for subscription"
-    echo "  agents or when no encryption key is configured). If .env is still missing,"
+    echo "  The platform imports it once the agent is ready (not when no encryption"
+    echo "  key is configured). If .env is still missing,"
     echo "  the owner imports it: Credentials tab > Import from Git (or the import_credentials MCP tool)."
 fi
 ```

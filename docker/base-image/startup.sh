@@ -683,15 +683,14 @@ fi
 # === Encrypted credentials without a .env (#3510) ===
 # This script never decrypts a committed .credentials.enc: the platform key never
 # reaches this container. The BACKEND imports it once the agent is ready
-# (lifecycle.inject_assigned_credentials), except for subscription agents
-# (#612), ephemeral agents, installs with no encryption key, and agents that
-# were already running. Earlier builds called a backend route that never
+# (lifecycle.inject_assigned_credentials), except for ephemeral agents,
+# installs with no encryption key, and agents that were already running. Earlier builds called a backend route that never
 # existed and blamed a missing key; say what actually happens instead.
 cd /home/developer || exit 1
 if [ -f ".credentials.enc" ] && [ ! -f ".env" ]; then
     echo "Found .credentials.enc but no .env: this script does not decrypt it."
-    echo "  The platform imports it once the agent is ready (not for subscription"
-    echo "  agents or when no encryption key is configured). If .env is still missing,"
+    echo "  The platform imports it once the agent is ready (not when no encryption"
+    echo "  key is configured). If .env is still missing,"
     echo "  the owner imports it: Credentials tab > Import from Git (or the import_credentials MCP tool)."
 fi
 
