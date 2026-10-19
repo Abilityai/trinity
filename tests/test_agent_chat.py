@@ -660,10 +660,9 @@ class TestModelManagementExtended:
 
         if response.status_code == 404:
             pytest.skip("Model endpoint not implemented")
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready")
 
-        # Should reject invalid model
+        # #3677: the agent's own rejection reaches the caller. A 503 here used to
+        # be skipped as "agent not ready", which hid that the 400 never arrived.
         assert_status_in(response, [400, 422])
 
     def test_set_model_persists(
