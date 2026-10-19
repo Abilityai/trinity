@@ -119,11 +119,10 @@ _TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-]{20,60}$")
 
 **Creation gate (#1445):** both `create_schedule` (`POST /{name}/schedules`) and `generate_webhook` reject an agent with no live `agent_ownership` row. The order is access-check → **404** on `not db.is_agent_live(name)` (never before the access check, so a low-priv caller can't distinguish "agent missing" from "access denied" — uniform 403). The db layer re-enforces it at the `db/schedules.py:create_schedule` chokepoint (`is_agent_live` → `None` → router 403), so every caller (router, MCP, system-manifest deploy) holds the no-orphan invariant. `is_agent_live` checks `agent_ownership.deleted_at IS NULL` **without joining `users`**, matching the token-lookup predicate exactly (`get_agent_owner` joins `users`, so it would false-negative a live agent whose owner-user row is missing — FKs are off platform-wide).
 
-`generate_webhook` calls `db.generate_webhook_token(schedule_id)` and builds the full URL from `request.base_url`:
+`generate_webhook` calls `db.generate_webhook_token(schedule_id)` and builds the full URL from `utils.public_url.public_base_url(request)`, so a proxy's `X-Forwarded-Proto: https` makes it `https://` (#3601; upgrade-only, never downgrades):
 ```python
-def _build_webhook_url(request_base_url: str, token: str) -> str:
-    base = str(request_base_url).rstrip("/")
-    return f"{base}/api/webhooks/{token}"
+def _build_webhook_url(request: Request, token: str) -> str:
+    return f"{public_base_url(request)}/api/webhooks/{token}"
 ```
 
 `revoke_webhook` calls `db.revoke_webhook_token(schedule_id)` and returns 204.
