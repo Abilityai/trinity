@@ -242,3 +242,44 @@ def test_the_task_path_answers_403_for_a_refused_turn():
     with patch.object(ces.idempotency_service, "fail"), pytest.raises(ces.ChatDispatchError) as exc:
         ces._map_task_failure("agent-a", result, idem=object())
     assert exc.value.status_code == 403
+
+
+# ---- emit-event: owner tier for PEOPLE; agent keys keep the #2973 sibling path ------------
+# CI 2026-10-19: making the route `OwnedAgent` also cut an agent's key off from
+# emitting "for" a sibling (#2973 / ent#614), which is supported. The restriction
+# ent#926 needs is on people the agent is merely shared with; an agent key acting
+# in a restricted turn is already refused by the standing-work fence on this route.
+
+class _Stop(Exception):
+    pass
+
+
+def _emit(principal, can_share):
+    from routers import event_subscriptions as ev
+    from models import EmitEventRequest
+    with patch.object(ev.db, "can_user_share_agent", lambda u, a: can_share), \
+            patch.object(ev.db, "find_matching_event_subscriptions", MagicMock(side_effect=_Stop)):
+        return asyncio.run(ev.emit_event_for_agent(AGENT, EmitEventRequest(event_type="work.done"), principal))
+
+
+def _person(username="mate"):
+    return SimpleNamespace(id=9, username=username, role="user", mcp_scope=None, agent_name=None,
+                           connector_agent=None, portal_delegate=False, is_event_loopback=False,
+                           vouched_source_agent=None)
+
+
+def test_a_person_the_agent_is_shared_with_cannot_emit_in_its_name():
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        _emit(_person(), can_share=False)
+    assert exc.value.status_code == 403
+
+
+def test_the_owner_and_an_agent_key_reach_the_emit():
+    with pytest.raises(_Stop):                                   # past the gate, into the emit
+        _emit(_person("owner"), can_share=True)
+    key = SimpleNamespace(id=1, username="owner", role="user", mcp_scope="agent", agent_name="sibling",
+                          connector_agent=None, portal_delegate=False, is_event_loopback=False,
+                          vouched_source_agent=None)
+    with pytest.raises(_Stop):
+        _emit(key, can_share=True)

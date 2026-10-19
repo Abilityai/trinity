@@ -911,7 +911,7 @@
  "event_subscriptions.py::emit_event_for_agent": {
   "method": "POST",
   "path": "/api/agents/{name}/emit-event",
-  "reason": "ent#926: subscriptions it fires are delivered as the platform, so only the owner (or the agent's own key) emits in the agent's name",
+  "reason": "ent#926: owner tier for people (assert_agent_owner in the handler; deliveries run as the platform). Agent keys keep the #2973 sibling-emit path, fenced in restricted turns",
   "tier": "owner"
  },
  "event_subscriptions.py::list_agent_events": {
