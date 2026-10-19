@@ -40,7 +40,7 @@ Yes. Taking the token out of agent remotes protects your install from the upgrad
 
 ## Is it safe to commit the `.credentials.enc` file to git?
 
-Yes — that is what it exists for. It is an AES-256-GCM encrypted archive of the agent's full credential set, safe to store in version control as an encrypted backup. Restoring it is a deliberate step: use **Import from Git** on the agent's Credentials tab (automatic import on startup is not currently available). The encryption key lives only in your platform's environment, and it can be rotated online without downtime or data loss. See [Credential Management](../credentials/credential-management.md).
+Yes — that is what it exists for. It is an AES-256-GCM encrypted archive of the agent's full credential set, safe to store in version control as an encrypted backup. Restoring it is a deliberate step: use **Import from Git** under the agent's Settings › Storage (automatic import on startup is not currently available). The encryption key lives only in your platform's environment, and it can be rotated online without downtime or data loss. See [Credential Management](../credentials/credential-management.md).
 
 ## What is recorded in the audit log?
 

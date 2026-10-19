@@ -7,7 +7,7 @@ Add, edit, and hot-reload credentials on agents without restarting them.
 - **Credential Injection** -- Direct file injection system. Credentials are written as `.env` (KEY=VALUE) and other allow-listed credential files directly to the agent container. `.mcp.json` is rendered from `.mcp.json.template` when the agent starts.
 - **Credential Vault** -- A platform-level store of named, encrypted credentials that an admin grants to agents, so an agent can fetch a shared secret by name at runtime instead of carrying its own injected copy. Additive to file injection. The vault itself is an enterprise capability; the MCP tools and the transcript scrub described below ship in every build.
 - **Credential Declaration** -- A template says which credentials its agent needs in `template.yaml`: `credentials:` lists the variable **names**, and the optional sibling `credential_setup:` describes each one.
-- **Setup Checklist** -- The per-variable view on the Credentials tab: what this agent needs, which are already set, and where to get the missing ones.
+- **Setup Checklist** -- The per-variable view under Settings › Storage: what this agent needs, which are already set, and where to get the missing ones.
 - **Encrypted Storage** -- Credentials can be exported to `.credentials.enc` files (AES-256-GCM encryption) for backup and import.
 
 ## How It Works
@@ -74,7 +74,7 @@ MCP server configuration is different. An `.env` injection does not rewrite `.mc
 
 ### Who can read credential files
 
-Reading an agent's credential files — `.env`, `.mcp.json`, key and certificate files, SSH and cloud credentials, the runtimes' login files — is for the agent's **owner** or an **admin**, signed in or with their own `user` key. Someone the agent is shared with keeps chatting with it, and the agent keeps using its credentials, but opening one of these files shows a message saying who to ask. Agent, system and connector keys cannot read them. When the Credentials tab cannot read a file it shows the server's message beside the file list and does not open the editor. The full list of files and the Files tab's behaviour are in [Agent Files → Reading credential files](../agents/agent-files.md#reading-credential-files).
+Reading an agent's credential files — `.env`, `.mcp.json`, key and certificate files, SSH and cloud credentials, the runtimes' login files — is for the agent's **owner** or an **admin**, signed in or with their own `user` key. Someone the agent is shared with keeps chatting with it, and the agent keeps using its credentials, but opening one of these files shows a message saying who to ask. Agent, system and connector keys cannot read them. When the Credentials section cannot read a file it shows the server's message beside the file list and does not open the editor. The full list of files and the Files tab's behaviour are in [Agent Files → Reading credential files](../agents/agent-files.md#reading-credential-files).
 
 ### Credential Pattern in the Agent
 
@@ -112,7 +112,7 @@ Injection accepts a curated set of credential file types, not just `.env`. Anyth
 
 - **Export** creates an encrypted `.credentials.enc` file for backup. It captures the **full injected credential set** — every allow-listed credential file present in the agent (discovered live), text and binary alike — not just `.env` and `.mcp.json`.
 - **Import** decrypts and injects credentials from an encrypted file. The archive is re-validated against the same path policy on the way in.
-- **Auto-import on startup is not currently available.** The agent's startup script still tries to import a `.credentials.enc` it finds without a `.env`, but the internal route it calls no longer exists, so the attempt is logged as "Could not auto-import credentials" and the agent starts without them. Use **Import** from the Credentials tab (or the import endpoint) instead.
+- **Auto-import on startup is not currently available.** The agent's startup script still tries to import a `.credentials.enc` it finds without a `.env`, but the internal route it calls no longer exists, so the attempt is logged as "Could not auto-import credentials" and the agent starts without them. Use **Import** from Settings › Storage (or the import endpoint) instead.
 
 ### Rotating the Encryption Key
 

@@ -39,7 +39,7 @@ As an agent owner I open one place to change what an agent is, what it may do, w
 1. A row learns a restart is due — from the backend (`restart_required` on file sharing / folders / api-key setting; memory/CPU override ≠ container label) or from a save that needs one (guardrails, GitHub token).
 2. It calls `agentRestart.report(agent, key, label, true)`.
 3. The banner lists the labels and offers **Restart now** (running) or **Start now** (stopped).
-4. AgentDetail stops (waiting for a real stop, #1126) and starts the agent, then `agentRestart.restarted(agent)` clears the list and bumps the epoch; rows watching the epoch re-read the backend and re-report anything still out of step.
+4. AgentDetail stops (waiting for a real stop, #1126) and starts the agent. The list is settled by the agent's **status edge** (stopped → running on the same agent), not by the button: `agentRestart.restarted(agent)` clears the list and bumps the epoch, and rows watching the epoch re-read the backend and re-report anything still out of step. So a manual stop/start from the header settles it too, and a start that fails (the lifecycle composable reports and returns normally) leaves every entry listed — nothing applied, nothing is cleared. Pinned by `tests/unit/agentSettingsRestart.mount.spec.js`.
 
 ## Backend
 

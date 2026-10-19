@@ -77,6 +77,7 @@
           <AgentAvatar :name="agent.name" :avatar-url="agent.avatar_url" size="md" />
         </template>
         <template #action>
+          <BaseButton v-if="canEdit && agent.avatar_url && hasAvatarPrompt" variant="ghost" size="sm" title="Show the next emotion in the set" @click="$emit('cycle-emotion')">Next emotion</BaseButton>
           <BaseButton v-if="canEdit" variant="secondary" size="sm" @click="$emit('open-avatar-modal')">Change…</BaseButton>
         </template>
       </SettingRow>
@@ -264,9 +265,11 @@
           <form class="space-y-2" @submit.prevent="saveResources">
             <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <BaseSelect v-model="draft.memory" label="Memory">
+                <option value="">Inherit default ({{ (resourceLimits.current_memory || '4g').toUpperCase() }})</option>
                 <option v-for="m in MEMORY_OPTIONS" :key="m" :value="m">{{ m.toUpperCase() }}</option>
               </BaseSelect>
               <BaseSelect v-model="draft.cpu" label="CPU cores">
+                <option value="">Inherit default ({{ resourceLimits.current_cpu || '2' }})</option>
                 <option v-for="c in CPU_OPTIONS" :key="c" :value="c">{{ c }}</option>
               </BaseSelect>
             </div>
@@ -382,7 +385,7 @@ const props = defineProps({
 })
 
 const emit = defineEmits([
-  'set-label', 'rename', 'open-avatar-modal', 'update-tags', 'add-tag', 'remove-tag',
+  'set-label', 'rename', 'open-avatar-modal', 'cycle-emotion', 'update-tags', 'add-tag', 'remove-tag',
   'change-subscription', 'toggle-read-only', 'save-resources', 'delete', 'navigate-tab', 'info-item-click',
 ])
 
@@ -423,7 +426,9 @@ function startEdit(which) {
   if (which === 'model') { draft.model = model.value || ''; model.saveError = '' }
   if (which === 'timeout') { draft.timeout = String(timeout.minutes); timeout.inputError = ''; timeout.saveError = '' }
   if (which === 'capacity') { draft.capacity = String(capacity.stored ?? capacity.effective); capacity.inputError = ''; capacity.saveError = '' }
-  if (which === 'resources') { draft.memory = effectiveMemory.value; draft.cpu = effectiveCpu.value }
+  // The draft holds the OVERRIDE, not the effective value: an empty choice is
+  // "inherit the platform default", which clears the per-agent row.
+  if (which === 'resources') { draft.memory = props.resourceLimits.memory || ''; draft.cpu = props.resourceLimits.cpu ? String(props.resourceLimits.cpu) : '' }
   nextTick(() => {
     const el = document.querySelector('[data-settings-pane] form input, [data-settings-pane] form select')
     el?.focus()
@@ -552,7 +557,13 @@ async function saveTimeout() {
 const capacity = reactive({ state: 'loading', stored: null, effective: null, ceiling: 10, active: 0, saving: false, inputError: '', saveError: '' })
 const capacityHint = computed(() => {
   const base = 'Jobs that may run at once. Beyond it, work queues.'
-  return capacity.state === 'loaded' ? `${base} ${capacity.active} running now; fleet ceiling ${capacity.ceiling}.` : base
+  if (capacity.state !== 'loaded') return base
+  // A stored value above the ceiling is clamped by the backend; say so, or the
+  // row shows a number the owner never typed with no reason given.
+  const clamped = capacity.stored !== null && capacity.stored > capacity.ceiling
+    ? ` Stored ${capacity.stored} is above the fleet ceiling, so ${capacity.effective} applies.`
+    : ''
+  return `${base} ${capacity.active} running now; fleet ceiling ${capacity.ceiling}.${clamped}`
 })
 async function loadCapacity() {
   if (capacity.effective === null) capacity.state = 'loading'
@@ -596,7 +607,7 @@ const resourcesPending = computed(() => {
   return !r.error && ((!!r.memory && r.memory !== r.current_memory) || (!!r.cpu && String(r.cpu) !== String(r.current_cpu)))
 })
 function saveResources() {
-  emit('save-resources', { memory: draft.memory, cpu: draft.cpu })
+  emit('save-resources', { memory: draft.memory || null, cpu: draft.cpu || null })
   editing.value = null
 }
 

@@ -154,4 +154,14 @@ describe('FileSharingPanel — restart goes to the one banner', () => {
     await mountPanel({ restartRequired: false })
     expect(useAgentRestartStore().pendingFor('atlas')).toEqual([])
   })
+
+  it('an in-place switch to another agent re-reads, and never carries the first agent\'s wait over', async () => {
+    const wrapper = await mountPanel({ restartRequired: true })
+    getFileSharingStatus.mockResolvedValue({ enabled: false, restart_required: false, volume_attached: false })
+    await wrapper.setProps({ agentName: 'bravo' })
+    await flushPromises()
+    expect(getFileSharingStatus).toHaveBeenLastCalledWith('bravo')
+    expect(useAgentRestartStore().pendingFor('bravo')).toEqual([])
+    expect(useAgentRestartStore().pendingFor('atlas').map((p) => p.label)).toEqual(['File sharing'])
+  })
 })

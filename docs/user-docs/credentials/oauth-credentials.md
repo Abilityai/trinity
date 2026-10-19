@@ -8,7 +8,7 @@ Trinity exposes a small OAuth2 helper API for four providers — Google, Slack, 
 2. `POST /api/oauth/{provider}/init` returns the provider's authorization URL (with a `state` value) for the scopes Trinity requests: Google `openid email profile` plus Drive, GitHub `repo user`, Slack `chat:write channels:read`, Notion none.
 3. Open that URL and approve access. The URL names `/api/oauth/{provider}/callback` on your backend as its redirect target.
 
-That callback route **does not exist** — the redirect lands on a 404 — and there is no OAuth button on an agent's Credentials tab, so approving access is not turned into a stored token. Once you hold a provider token, add it to the agent through the [Credentials tab](credential-management.md#adding-credentials) — as `KEY=VALUE` in `.env`, where the agent's `.mcp.json.template` picks it up through `${VAR}` placeholders.
+That callback route **does not exist** — the redirect lands on a 404 — and there is no OAuth button under an agent's Settings › Storage, so approving access is not turned into a stored token. Once you hold a provider token, add it to the agent through [Settings › Storage](credential-management.md#adding-credentials) — as `KEY=VALUE` in `.env`, where the agent's `.mcp.json.template` picks it up through `${VAR}` placeholders.
 
 ### Google sign-in links from inside an agent
 

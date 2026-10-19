@@ -66,7 +66,7 @@ On an agent in the pull pilot, a turn can be delivered again after its lease exp
 
 ### Shared Folder Configuration
 
-![Agent Folders tab showing Expose Shared Folder and Mount Shared Folders toggles with step-by-step workflow](../../screenshots/agent-folders.png)
+![Settings › Storage › Shared folders showing Expose Shared Folder and Mount Shared Folders toggles with step-by-step workflow](../../screenshots/agent-folders.png)
 
 Agents can share files via Docker volumes:
 

@@ -262,6 +262,14 @@ function relativeTime(iso) {
 }
 
 onMounted(loadStatus)
+// The page is kept alive across agents: an in-place switch must drop the
+// previous agent's status BEFORE the report below runs for the new name, or
+// the first agent's "restart required" is announced for the second.
+watch(() => props.agentName, () => {
+  status.value = { enabled: false, restart_required: false, volume_attached: false }
+  files.value = []
+  loadStatus()
+})
 
 const restartStore = useAgentRestartStore()
 

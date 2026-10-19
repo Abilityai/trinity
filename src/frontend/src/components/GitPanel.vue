@@ -242,6 +242,16 @@
               data-testid="git-push"
               @click="$emit('git-push')"
             >{{ gitHasChanges ? `Push (${gitChangesCount})` : 'Push' }}</BaseButton>
+            <BaseButton
+              variant="ghost"
+              size="sm"
+              :disabled="gitPulling || gitPushing"
+              :loading="gitLoading"
+              loading-label="Refreshing…"
+              title="Refresh git status"
+              data-testid="git-refresh"
+              @click="$emit('git-refresh')"
+            >Refresh</BaseButton>
             <span
               :class="[
                 'px-2 py-1 text-xs font-medium rounded-full',
@@ -333,7 +343,7 @@
            repository, the GitHub token and the sync settings live in
            Settings › Storage; this tab keeps status, changes, commits, pull
            and push. -->
-      <p class="text-[12.5px] text-gray-600 dark:text-gray-400 border-t border-gray-200 dark:border-gray-750 pt-4" data-testid="git-config-moved">
+      <p v-if="canConfigure" class="text-[12.5px] text-gray-600 dark:text-gray-400 border-t border-gray-200 dark:border-gray-750 pt-4" data-testid="git-config-moved">
         Repository binding, the GitHub token and auto-sync are in
         <router-link
           :to="{ query: { ...$route.query, tab: 'settings', section: 'storage' } }"
@@ -367,8 +377,12 @@ const props = defineProps({
   gitBehind: { type: Number, default: 0 },
   gitHasChanges: { type: Boolean, default: false },
   gitChangesCount: { type: Number, default: 0 },
+  gitLoading: { type: Boolean, default: false },
+  // Whether the viewer may reach Settings › Storage at all (owner-only); a
+  // shared operator gets the status without a link to a tab they do not have.
+  canConfigure: { type: Boolean, default: true },
 })
-defineEmits(['git-pull', 'git-push'])
+defineEmits(['git-pull', 'git-push', 'git-refresh'])
 
 const agentsStore = useAgentsStore()
 

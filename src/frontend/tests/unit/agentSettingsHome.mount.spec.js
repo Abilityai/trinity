@@ -139,6 +139,35 @@ describe('the one restart banner', () => {
   })
 })
 
+describe('General › Memory and CPU', () => {
+  const agent = { name: 'atlas', status: 'running', can_share: true, is_system: false, can_delete: true, runtime: 'claude-code' }
+
+  it('offers "Inherit default" so a per-agent override can be cleared, and saves it as null', async () => {
+    wrapper = mount(GeneralPane, {
+      props: { agent, resourceLimits: { memory: '8g', cpu: '4', current_memory: '8g', current_cpu: '4' } },
+      global: { plugins: [pinia], stubs: { InfoPanel: true, ModelSelector: true, TagsEditor: true } },
+      attachTo: document.body,
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="general-resources"] button').trigger('click')
+    const selects = wrapper.findAll('[data-testid="general-resources"] select')
+    expect(selects[0].find('option[value=""]').text()).toMatch(/inherit default/i)
+    await selects[0].setValue('')
+    await wrapper.get('[data-testid="general-resources"] form').trigger('submit')
+    expect(wrapper.emitted('save-resources')).toEqual([[{ memory: null, cpu: '4' }]])
+  })
+
+  it('names the fleet ceiling when a stored capacity is above it', async () => {
+    store.getAgentCapacity.mockResolvedValue({ max_parallel_tasks: 12, effective_max_parallel_tasks: 10, ceiling: 10, active_slots: 0 })
+    wrapper = mount(GeneralPane, {
+      props: { agent, resourceLimits: {} },
+      global: { plugins: [pinia], stubs: { InfoPanel: true, ModelSelector: true, TagsEditor: true } },
+    })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="general-capacity"]').text()).toMatch(/12 .*above the fleet ceiling/i)
+  })
+})
+
 describe('General › Execution timeout (ent#353)', () => {
   const agent = { name: 'atlas', status: 'running', can_share: true, is_system: false, can_delete: true, runtime: 'claude-code' }
 

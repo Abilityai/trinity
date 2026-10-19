@@ -35,6 +35,7 @@
         aria-busy="true"
       ><span class="sr-only">Loading live usage…</span></span>
       <template v-else>
+        <span v-if="agent.created" class="text-gray-600 dark:text-gray-400" :title="agent.created">Created {{ formatRelativeTime(agent.created) }}</span>
         <span class="text-gray-600 dark:text-gray-400">Stopped · allocated</span>
         <span class="font-mono text-gray-700 dark:text-gray-300">{{ resourceLimits.current_cpu || '2' }} CPU</span>
         <span class="font-mono text-gray-700 dark:text-gray-300">{{ (resourceLimits.current_memory || '4g').toUpperCase() }}</span>
@@ -83,6 +84,7 @@ import { computed } from 'vue'
 import SparklineChart from './SparklineChart.vue'
 import BaseBadge from './base/BaseBadge.vue'
 import { useFormatters } from '../composables'
+import { formatRelativeTime } from '../utils/timestamps'
 import { CANVAS_PALETTE } from '../utils/canvasPalette'
 
 const props = defineProps({

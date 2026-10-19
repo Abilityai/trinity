@@ -261,8 +261,11 @@
                 :git-behind="gitBehind"
                 :git-has-changes="gitHasChanges"
                 :git-changes-count="gitChangesCount"
+                :git-loading="gitLoading"
+                :can-configure="!!agent.can_share"
                 @git-pull="pullFromGithub"
                 @git-push="syncToGithub"
+                @git-refresh="refreshGitStatus"
               />
             </div>
 
@@ -300,6 +303,7 @@
                     @set-label="setAgentLabel"
                     @rename="renameAgent"
                     @open-avatar-modal="showAvatarModal = true"
+                    @cycle-emotion="cycleEmotion"
                     @update-tags="updateTags"
                     @add-tag="addTag"
                     @remove-tag="removeTag"
@@ -646,7 +650,6 @@ const {
 // Stats composable
 const {
   agentStats,
-  statsLoading,
   cpuHistory,
   memoryHistory,
   startStatsPolling,
@@ -919,9 +922,14 @@ async function restartForPendingChanges() {
       }
     }
     await startAgent()
+    // `startAgent` reports its own failure and returns normally, so only the
+    // agent's real status says whether the changes now apply. A start that
+    // failed applied nothing: the list stays as it was.
     await loadAgent()
-    restartStore.restarted(name)
-    await Promise.allSettled([loadResourceLimits(), loadApiKeySetting()])
+    if (agent.value?.status !== 'running') {
+      showNotification('The agent did not start, so the waiting changes are not applied yet. Fix the start, then try again.', 'error')
+      return
+    }
     showNotification('Agent restarted. The waiting changes now apply.', 'success')
   } catch (err) {
     showNotification(`Restart failed: ${err?.message || err}. The agent may be stopped — start it from the header.`, 'error')
@@ -929,6 +937,21 @@ async function restartForPendingChanges() {
     restarting.value = false
   }
 }
+
+// The container now runs what is stored — whichever button started it. The
+// banner's restart and a manual stop/start from the header both land here,
+// through the status edge: the list is cleared and the rows re-read.
+function settleRestart(name) {
+  restartStore.restarted(name)
+  return Promise.allSettled([loadResourceLimits(), loadApiKeySetting()])
+}
+watch(
+  () => [agent.value?.name, agent.value?.status],
+  ([name, status], [prevName, prevStatus] = []) => {
+    if (!name || name !== prevName) return
+    if (status === 'running' && prevStatus && prevStatus !== 'running') settleRestart(name)
+  }
+)
 
 // Rows whose state lives in this view report to the banner here; panels that
 // own their state (file sharing, folders, guardrails, the GitHub token) report
