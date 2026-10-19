@@ -44,7 +44,7 @@ Yes. Agent containers are created with Docker's `unless-stopped` restart policy,
 
 ## What survives an agent restart, and what survives a recreate?
 
-A plain stop/start keeps the same container, so everything in it survives — except `/tmp`, which is RAM-backed scratch space. A recreate replaces the container (this happens on resource, capability, or mount changes, per-agent API key changes, and image upgrades), but the agent's home directory `/home/developer` lives on a durable named Docker volume, so your workspace files and anything under `data/` survive recreates, image upgrades, template re-pulls, and subscription switches. A template re-pull resets git-tracked files to the template's main branch but never wipes untracked files. Only files written outside the home volume are lost on recreate. See [Agent Data & Portability](../agents/agent-data.md).
+A plain stop/start keeps the same container, so everything in it survives — except `/tmp`, which is RAM-backed scratch space. A recreate replaces the container (this happens on resource, capability, or mount changes, per-agent API key changes, and image upgrades), but the agent's home directory `/home/developer` lives on a durable named Docker volume, so your workspace files and anything under `data/` survive recreates, image upgrades, template re-pulls, and subscription switches. A reset to the template's main branch overwrites tracked files except those listed in `.trinity/persistent-state.yaml`, and never wipes untracked files; an ordinary pull merges and resets nothing. Only files written outside the home volume are lost on recreate. See [Agent Data & Portability](../agents/agent-data.md).
 
 ## How should I organise my agent's workspace?
 

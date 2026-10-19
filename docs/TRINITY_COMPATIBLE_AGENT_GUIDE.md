@@ -439,7 +439,7 @@ echo "canon at $(git -C "$HOME/canon" rev-parse --short HEAD)"
 - **`git pull --ff-only`, not `fetch` + `reset --hard`.** A reset on every start discards whatever the agent wrote in that clone since the last push. Use `fetch` + `reset --hard origin/<branch>` only for a clone the agent never writes to, and say so in a comment next to it.
 - **Present is not current.** Do not skip the refresh when the directory already exists; the volume outlives every restart, so an early exit pins the clone at whatever it was the first time.
 
-**Submodules** are for one case only: you need an exact pin of the other repo recorded in the agent's own history. Know the costs first. Agent creation does not initialise submodules, and the platform's git pull fails when the pinned pointer moves (#2366). A template **reset to main** keeps the files listed in `.trinity/persistent-state.yaml` (snapshot in `.trinity/backup/<ts>/`) and resets everything else; it rewrites the submodule pointer but does not re-checkout the submodule, so the checkout is left stale. (An ordinary pull merges and does not reset.) A gitignored side clone is untouched by all of these.
+**Submodules** are for one case only: you need an exact pin of the other repo recorded in the agent's own history. Know the costs first. Agent creation does not initialise submodules, and the platform's git pull fails when the pinned pointer moves (#2366). A template **reset to main** overwrites tracked files except those listed in `.trinity/persistent-state.yaml` (without that file, a default set: `workspace/`, `.trinity/`, `.mcp.json`, `.claude.json` and `.claude/.credentials.json`; the kept files are snapshotted to `.trinity/backup/<ts>/` first), and never touches untracked ones; it rewrites the submodule pointer but does not re-checkout the submodule, so the checkout is left stale. (An ordinary pull merges and does not reset.) A gitignored side clone is untouched by all of these.
 
 ### Why the `.gitignore` looks the way it does
 
@@ -484,7 +484,7 @@ data_paths:
 
 Why this matters:
 
-- **It's already durable.** `/home/developer` is a persistent Docker volume that survives container restarts, recreation, image upgrades, and template re-pulls (`git reset --hard`). You do **not** need a separate volume.
+- **It's already durable.** `/home/developer` is a persistent Docker volume that survives container restarts, recreation, image upgrades, template pulls and a reset to the template's main (`git reset --hard` touches only tracked files, and `data/` is untracked). You do **not** need a separate volume.
 - **It stays out of git.** When you declare `data_paths`, Trinity appends `data/` to your agent's `.gitignore` at creation, so runtime data is never committed (no repo bloat, no accidental data leak). A template shipping its own `.gitignore` should pre-include `data/`.
 - **It's portable.** The owner can export the data as a tar and import it into another agent/instance:
   - `POST /api/agents/{name}/data/export` — download a tar of `data/` (or `?format=base64` for small data inline).
@@ -716,7 +716,7 @@ git:
   push_enabled: true              # Only applies to Working Branch Mode
   commit_paths:                   # Paths auto-committed on sync (Working Branch Mode only)
     - memory/
-    - outputs/
+    - reports/
     - CLAUDE.md
   ignore_paths:
     - .mcp.json
@@ -2192,6 +2192,8 @@ The `ask_operator` tool description documents every field and each named refusal
 
 Agents manage their own memory. Trinity provides storage, not strategy. Each agent can implement memory however it sees fit.
 
+The recommended home is the repo-level `memory/`, committed, so it travels with the agent — see [Directory Structure](#directory-structure); it is shared across every user of the agent, so per-person facts go through `write_user_memory`.
+
 ### Example Structure (Optional)
 
 This is a suggested pattern, not a requirement:
@@ -2199,7 +2201,7 @@ This is a suggested pattern, not a requirement:
 ```
 memory/
 ├── context.md           # Long-term learned context
-├── preferences.json     # User preferences
+├── preferences.json     # Agent preferences (never a person's details — use write_user_memory)
 ├── session_notes/       # Per-session working notes
 │   └── 2025-12-05.md
 └── summaries/           # Compressed old context
@@ -2251,11 +2253,11 @@ When generating videos, save them to `content/videos/`.
 When exporting data, save to `content/exports/`.
 ```
 
-### outputs/ vs content/
+### reports/ vs content/
 
 | Directory | Synced to Git? | Use For |
 |-----------|---------------|---------|
-| `outputs/` | ✅ Yes | Small files you want versioned (reports, summaries) |
+| `reports/<kind>/` | ✅ Yes | Small dated files you want versioned (`reports/weekly/2026-10-19-summary.md`; see [Directory Structure](#directory-structure)). Older templates use `outputs/`, which still works |
 | `content/` | ❌ No | Large files that shouldn't be in Git (videos, audio) |
 
 ---
@@ -2417,7 +2419,7 @@ Before publishing, verify:
 ### Domain Focus
 - Keep CLAUDE.md focused on your agent's specialty
 - Let Trinity handle collaboration and infrastructure
-- Use outputs/ for generated content
+- Put versioned work products in named folders (`reports/<kind>/`, `docs/`); large media in `content/`
 
 ### Documentation
 - Keep documentation in a `docs/` folder
