@@ -49,6 +49,13 @@ const POLLED = [
 // answer stops it at 1. Bounded, never per-trigger.
 const LADDER = /\/api\/agent-dashboard\/[^/]+$/
 
+// One route, several questions (#3302). The NavBar's two badge counts
+// (`status=pending&limit=1`, `+priority=critical`) and the Overview's
+// per-agent count (`agent_name=…&status=pending&limit=1`) are different reads
+// of `/api/operator-queue`, so for this route "the same GET" means the same
+// query string too. A read repeated with the SAME query is still caught.
+const KEYED_BY_QUERY = [/^\/api\/operator-queue$/]
+
 test.beforeAll(async ({ baseURL }) => {
   api = await request.newContext({ baseURL })
   const loginResp = await api.post('/api/token', {
@@ -75,9 +82,11 @@ test.describe('agent detail — request de-duplication', () => {
 
     const counts = new Map()
     page.on('request', (req) => {
-      const path = new URL(req.url()).pathname
+      const url = new URL(req.url())
+      const path = url.pathname
       if (!path.startsWith('/api/')) return
-      counts.set(path, (counts.get(path) || 0) + 1)
+      const key = KEYED_BY_QUERY.some((re) => re.test(path)) ? path + url.search : path
+      counts.set(key, (counts.get(key) || 0) + 1)
     })
 
     await page.goto(`/agents/${TEST_AGENT}`)
