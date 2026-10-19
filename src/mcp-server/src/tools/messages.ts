@@ -66,9 +66,9 @@ export function createMessageTools(
       name: "send_message",
       description:
         "Send a proactive message to one person. Name the ROLE with `to` (primary — the person " +
-        "you serve — approver, or viewer); the platform resolves who fills it (ent#606). A role " +
-        "nobody fills, or that several people fill, is refused with a named reason; to reach " +
-        "the operators, raise an ask of type alert instead. " +
+        "you serve — approver, or viewer); the platform resolves who fills it (ent#606). " +
+        "When nobody holds the primary seat, the agent's owner receives it. Any other role " +
+        "nobody fills, or that several people fill, is refused with a named reason. " +
         "The recipient must have opted in to receive proactive messages from this agent " +
         "(allow_proactive flag must be set in their sharing record). " +
         "Messages are delivered via Telegram, Slack, or web based on the channel parameter. " +
