@@ -67,8 +67,18 @@ describe('repository', () => {
     expect(link.attributes('rel')).toContain('noopener')
     expect(link.text()).toContain('acme/alpha')
     expect(q('agent-header-branch').text()).toBe('trinity/alpha/abc')
-    expect(q('agent-header-git-changes').text()).toBe('3 changed')
-    expect(q('agent-header-git-behind').text()).toBe('2 behind')
+    expect(q('agent-header-git-changes').text()).toContain('3 changed')
+    expect(q('agent-header-git-behind').text()).toContain('2 behind')
+  })
+
+  it('each count carries a glyph that survives the narrow (phone) label', () => {
+    // Below `sm` only the glyph + number show (the 375px header has ~184px of
+    // content width); the words come back at `sm` and live in the tooltip.
+    render({ gitStatus: { ...GIT, ahead: 1 }, gitChangesCount: 3, gitBehind: 2 })
+    expect(q('agent-header-git-changes').text()).toContain('±')
+    expect(q('agent-header-git-ahead').text()).toContain('↑')
+    expect(q('agent-header-git-behind').text()).toContain('↓')
+    expect(q('agent-header-git-behind').attributes('title')).toContain('2 commit(s) on GitHub')
   })
 
   it('reads "in sync" when there is nothing to push or pull', () => {
@@ -80,15 +90,15 @@ describe('repository', () => {
 
   it('counts changed files and unpushed commits separately — one number would mean neither', () => {
     render({ gitStatus: { ...GIT, changes_count: 12, ahead: 1, behind: 0 }, gitChangesCount: 12, gitBehind: 0 })
-    expect(q('agent-header-git-changes').text()).toBe('12 changed')
-    expect(q('agent-header-git-ahead').text()).toBe('1 ahead')
+    expect(q('agent-header-git-changes').text()).toContain('12 changed')
+    expect(q('agent-header-git-ahead').text()).toContain('1 ahead')
     expect(q('agent-header-git-insync').exists()).toBe(false)
   })
 
   it('a clean tree with unpushed commits is not "in sync"', () => {
     render({ gitStatus: { ...GIT, changes_count: 0, ahead: 4, behind: 0 }, gitChangesCount: 0, gitBehind: 0 })
     expect(q('agent-header-git-changes').exists()).toBe(false)
-    expect(q('agent-header-git-ahead').text()).toBe('4 ahead')
+    expect(q('agent-header-git-ahead').text()).toContain('4 ahead')
     expect(q('agent-header-git-insync').exists()).toBe(false)
   })
 

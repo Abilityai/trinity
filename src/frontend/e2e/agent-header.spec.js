@@ -83,9 +83,9 @@ test.describe('the agent header (ent#950)', () => {
     await expect(repo.locator('a')).toHaveAttribute(
       'href', 'https://github.com/an-organisation-with-a-long-name/a-repository-with-an-even-longer-name',
     )
-    await expect(page.getByTestId('agent-header-git-changes')).toHaveText('12 changed')
-    await expect(page.getByTestId('agent-header-git-ahead')).toHaveText('1 ahead')
-    await expect(page.getByTestId('agent-header-git-behind')).toHaveText('7 behind')
+    await expect(page.getByTestId('agent-header-git-changes')).toContainText('12 changed')
+    await expect(page.getByTestId('agent-header-git-ahead')).toContainText('1 ahead')
+    await expect(page.getByTestId('agent-header-git-behind')).toContainText('7 behind')
 
     await expect(page.getByTestId('agent-header-tag')).toHaveCount(2)
     await expect(page.getByTestId('agent-header-tags-more')).toHaveText('+8')
@@ -119,6 +119,18 @@ test.describe('the agent header (ent#950)', () => {
       }))
       expect(r.scrollWidth, `body scrolls horizontally by ${r.scrollWidth - r.clientWidth}px`)
         .toBeLessThanOrEqual(r.clientWidth)
+      // Fitting is not enough: the first CI run of this spec fit nothing at
+      // 375px by crushing the repo name to zero width while the badges ran off
+      // the card. The name must stay legible, and every badge inside the card.
+      const fit = await page.evaluate(() => {
+        const card = document.querySelector('[data-testid="agent-header-meta"]').getBoundingClientRect()
+        const name = document.querySelector('[data-testid="agent-header-repo"] a').getBoundingClientRect()
+        const badges = [...document.querySelectorAll('[data-testid^="agent-header-git-"]')]
+          .map((b) => b.getBoundingClientRect().right)
+        return { nameWidth: name.width, cardRight: card.right, badgeRight: Math.max(...badges) }
+      })
+      expect(fit.nameWidth, 'repo name crushed').toBeGreaterThanOrEqual(64)
+      expect(fit.badgeRight, 'a git badge runs past the header').toBeLessThanOrEqual(fit.cardRight + 1)
     })
   }
 

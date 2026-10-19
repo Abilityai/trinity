@@ -68,15 +68,29 @@ describe('useAgentContextStats', () => {
     expect(store.calls).toBe(1)
   })
 
-  it('a second start does not run two intervals', async () => {
+  it('a start while already polling is a no-op — one page load fetches once (agent-detail-request-dedupe)', async () => {
+    // AgentDetail starts its polls from onMounted, onActivated (both fire on the
+    // FIRST mount of a KeepAlive'd view) and the running-status watcher. Each
+    // start re-fetching made `/api/agents/context-stats` the page's one
+    // duplicate request.
     const store = fakeStore()
     const { start } = useAgentContextStats(ref({ name: 'alpha' }), store)
     start()
     store.resolve(); await Promise.resolve(); await Promise.resolve()
     start()
-    store.resolve(); await Promise.resolve(); await Promise.resolve()
-    const before = store.calls
+    start()
+    expect(store.calls).toBe(1)
     vi.advanceTimersByTime(CONTEXT_POLL_MS)
-    expect(store.calls).toBe(before + 1)
+    expect(store.calls).toBe(2)
+  })
+
+  it('after a stop, a start fetches again (the page came back)', async () => {
+    const store = fakeStore()
+    const { start, stop } = useAgentContextStats(ref({ name: 'alpha' }), store)
+    start()
+    store.resolve(); await Promise.resolve(); await Promise.resolve()
+    stop()
+    start()
+    expect(store.calls).toBe(2)
   })
 })

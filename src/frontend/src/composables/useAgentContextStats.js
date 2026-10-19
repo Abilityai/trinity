@@ -44,7 +44,11 @@ export function useAgentContextStats(agentRef, networkStore) {
   }
 
   function start() {
-    stop()
+    // Idempotent while running: the page starts its polls from onMounted,
+    // onActivated (both fire on a KeepAlive view's first mount) and the
+    // running-status watcher, and a restart here would re-fetch for each —
+    // the duplicate `e2e/agent-detail-request-dedupe.spec.js` forbids.
+    if (timer) return
     refresh()
     timer = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return // PERF-269
