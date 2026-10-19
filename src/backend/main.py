@@ -17,7 +17,7 @@ import json
 import os
 import random
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, Query
@@ -130,7 +130,7 @@ from routers.loops import (
 from services.loop_service import set_websocket_manager as set_loop_ws_manager
 from routers.webhooks import router as webhooks_router  # Webhook triggers (WEBHOOK-001, #291)
 from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#550)
-from services.ws_identity_service import accessible_agents_for, resolve_ws_identity  # ent#467
+from services.ws_identity_service import accessible_agents_for, event_stream_identity, resolve_ws_identity  # ent#467, ent#872
 # Workspace / client portal — OSS core since ent#356 (was an entitled
 # enterprise module). Its own package rather than routers/: it moved
 # wholesale from the submodule, and keeping the vertical slice intact
@@ -271,6 +271,7 @@ class FilteredWebSocketManager:
         is_admin: bool,
         accessible_agents: List[str],
         last_event_id: Optional[str] = None,
+        roster_resolver: Optional[Callable[[], List[str]]] = None,
     ) -> None:
         async def _send(payload: dict) -> None:
             await websocket.send_json(payload)
@@ -281,6 +282,7 @@ class FilteredWebSocketManager:
             is_admin=is_admin,
             accessible_agents=accessible_agents,
             last_event_id=last_event_id,
+            roster_resolver=roster_resolver,
         )
         self._client_ids[websocket] = client_id
 
@@ -1686,10 +1688,9 @@ async def websocket_events_endpoint(
     if owner_is_workspace_only(user_data):
         await websocket.close(code=4003, reason="This account works in the Workspace")
         return
-    is_admin = user_data and user_data.get("role") == "admin"
-
-    # Get list of accessible agents for this user
-    accessible_agents = db.get_accessible_agent_names(user_email, is_admin)
+    # Get list of accessible agents for this key: its owner's, or — for an
+    # agent key — its reach (trinity-enterprise#872).
+    is_admin, accessible_agents = event_stream_identity(key_info, user_data)
 
     await websocket.accept()
     await websocket.send_json({
@@ -1699,10 +1700,20 @@ async def websocket_events_endpoint(
         "message": "Listening for events. Events filtered to your accessible agents."
     })
 
+    # An agent key's roster is its reach: re-read it (owner re-resolved) when an
+    # access-changing event arrives, so a spawned child appears without a
+    # reconnect (trinity-enterprise#872).
+    roster_resolver = None
+    if key_info.get("scope") == "agent" and not is_admin:
+        def roster_resolver() -> List[str]:
+            owner = db.get_user_by_username(key_info.get("user_id"))
+            return event_stream_identity(key_info, owner)[1]
+
     # Add to filtered connections manager — enables reconnect replay via #306.
     await filtered_manager.connect(
         websocket, user_email, is_admin, accessible_agents,
         last_event_id=validate_last_event_id(last_event_id),
+        roster_resolver=roster_resolver,
     )
 
     try:
@@ -1713,7 +1724,7 @@ async def websocket_events_endpoint(
                 await websocket.send_text("pong")
             elif data == "refresh":
                 # Refresh accessible agents list (e.g., after sharing changes)
-                accessible_agents = db.get_accessible_agent_names(user_email, is_admin)
+                _, accessible_agents = event_stream_identity(key_info, user_data)
                 filtered_manager.update_accessible_agents(websocket, accessible_agents)
                 await websocket.send_json({
                     "type": "refreshed",

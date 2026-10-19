@@ -16,6 +16,7 @@ Exposed over MCP as `get_fleet_sync_audit` (trinity-enterprise#707).
 """
 from fastapi import APIRouter, Depends
 
+from database import db
 from dependencies import get_current_user
 from models import User
 from services.agent_service.helpers import accessible_agent_names
@@ -27,4 +28,12 @@ router = APIRouter(prefix="/api/fleet", tags=["fleet"])
 @router.get("/sync-audit")
 async def fleet_sync_audit(current_user: User = Depends(get_current_user)):
     """Return a fleet-wide sync audit (per #390 AC)."""
-    return await build_fleet_sync_audit(agent_names=accessible_agent_names(current_user))
+    agent = getattr(current_user, "agent_name", None)
+    if isinstance(agent, str) and agent:
+        # trinity-enterprise#706 D12: an agent key's fleet sweep sees its
+        # owner's set (accessible_agent_names would narrow it to its reach).
+        names = None if current_user.role == "admin" else sorted(
+            db.get_accessible_agent_names(current_user.email or "", is_admin=False) or [])
+    else:
+        names = accessible_agent_names(current_user)
+    return await build_fleet_sync_audit(agent_names=names)
