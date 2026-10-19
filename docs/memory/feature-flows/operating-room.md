@@ -1,6 +1,7 @@
 # Operations (OPS-001)
 
 > **Status**: Implemented (Phases 1-4)
+> **Updated 2026-10-19 (#3302)**: no operator-queue count or list is a capped window any more. `utils/operatorQueueRead.js` reads EVERY pending ask (one 500-row offset page, then a keyset walk past it) and the newest ended asks after the pending section; Operations states the Resolved window ("340 resolved · latest 200 shown") and a partial pending read ("703 pending responses (500 shown)") in its subtitle; off the Operations page a queue event reads only the two counts (`limit=1` → `total`), and the NavBar reads them on mount; Clear All over 500 asks runs in agent-packed batches. See "Reading the queue without a window" below.
 > **Updated 2026-10-14 (trinity-enterprise#901)**: an agent WITHDRAWS one of its own pending asks that became moot — `withdraw_ask(request_id, reason)` → `POST /api/agents/{name}/operator-queue/{request_id}/withdraw` ends it `cancelled` / `disposed_by='agent'` with the reason and no successor. See "Withdrawing a pending ask" below.
 
 > **Updated 2026-10-05 (#3247)**: an agent REPLACES one of its own pending asks instead of re-asking — `ask_operator(replaces=<request_id>)` ends the predecessor (`disposed_by='agent'`, reason `replaced`) and creates the successor atomically; every composed turn lists the agent's pending asks. See "Replacing a pending ask" below.
@@ -132,38 +133,44 @@ Tab selection uses `?tab=` query parameter. `Operations.vue` reads `route.query.
 **Getters (computed):**
 - `openItems` -- Pending items sorted by priority order (critical=0, high=1, medium=2, low=3), then by created_at ascending
 - `resolvedItems` -- Items with status in `RESOLVED_STATUSES = ['responded', 'acknowledged', 'cancelled', 'expired']` (cancelled/expired added by #1017 -- previously cancelled items vanished from the UI entirely), sorted by `responded_at || created_at` descending (lines 53-61)
-- `pendingCount` -- Count of items with status=pending (drives NavBar badge)
-- `criticalCount` -- Count of pending items with priority=critical (drives badge color: red+pulse vs orange)
+- `pendingCount` -- The pending count every header shows (NavBar badge, subtitle, tab badge). Since #3302 it reads the `pendingTotal` ref, written by the list read (the complete pending set), by `fetchCounts` off the Operations page (`total`), and by an answer (optimistic decrement) — never derived from a window
+- `criticalCount` -- Pending critical asks, same writers (`criticalTotal`); a partial list read takes it from a `priority=critical&limit=1` read (drives badge color: red+pulse vs orange)
+- `pendingComplete` / `pendingCountExact` / `resolvedTotal` (#3302) -- whether the pending read finished, whether its count was verified, and how many asks ended in all (null = unknown) — the subtitle's stated totals
 - `openItemsByAgent` -- Open items grouped by agent_name
 - `getProfile(agentName)` -- Returns `{initials, color, role}` using deterministic hash of agent name against 8 Tailwind colors (legacy; `QueueCard` and `ResolvedCard` now use `AgentAvatar` component with real avatar images instead)
 
 **Actions:**
-- `fetchItems()` -- `GET /api/operator-queue?limit=200` with auth header (line 87-102)
+- `fetchItems()` -- the list read, `utils/operatorQueueRead.js::readQueueSnapshot` (#3302): today's `?limit=200` page first (one request for a normal queue), then a top-up of the ended window or a pending walk + an ended read past it only when that page cannot hold them. Single-flight with ONE trailing rerun (a burst of WS triggers costs one more read), and a write generation bumped by an acknowledged answer / bulk cancel / clear drops a read that left before it
+- `fetchCounts()` (#3302) -- the two counts alone (`status=pending&limit=1`, `+priority=critical`, read `total`); single-flight; failures keep the last value
+- `refresh()` (#3302) -- `fetchItems()` while a view renders the list (`startPolling` marks it live), `fetchCounts()` everywhere else; every WS trigger calls it
 - `respondToItem(id, response, responseText)` -- `POST /api/operator-queue/{id}/respond` with a body built by `utils/operatorQueue.js::queueResponseBody` (#2370 — the decision rides `response`, the note rides `response_text`, trimmed, empty → `null`; the ONE builder shared with `/m`), optimistic local update mirroring that body, auto-advance to next open item. On **409** (item left 'pending' under us, e.g. another operator's bulk-cancel landed first, #1017) **or 400** (already terminal) — `respondRefusedAsNotPending` — sets `error` to the shared attribution-free `QUEUE_RESPONSE_NOT_RECORDED` copy and refetches (`stores/operatorQueue.js` ~line 116-158; 404 "row gone" is treated the same). The refetch is **awaited and the copy assigned after it**: `fetchItems()` nulls `error` in its own synchronous prologue, so assigning first and calling it un-awaited destroyed the notice in the same tick. That was survivable while 409 was the only refused status, but `respondRefusedAsNotPending` also takes 400 and 404 — which previously fell through to the generic `apiErrorMessage` branch and *did* report — so the ordering had to be fixed with the widening or two statuses would have gone silent. A failed refetch's own message is deliberately overwritten by the not-recorded copy. Remaining under **#2377**: `Operations.vue` still renders `error` only as the `:detail` of the "Couldn't refresh the queue" banner, and `InlineError` puts `detail` inside a **collapsed `<details>` disclosure** — so the operator sees a headline about *refreshing* and must expand "Technical detail" to learn their answer was not recorded; the next 15s poll then clears it. Verified against the running stack: with the fix, the banner renders and the copy is one click away; without it, no banner renders at all. This is the fetch-error field carrying a verb outcome and it needs its own field/surface (#2377's own AC — of which "the store test asserts the notice is observable after a 409 and a 400" is now satisfied here)
-- `bulkCancel(ids)` -- `POST /api/operator-queue/bulk-cancel` via shared `api.js` client; refetches; returns `{cancelled, skipped}` (#1017, line 141-152)
+- `bulkCancel(ids)` -- `POST /api/operator-queue/bulk-cancel` via shared `api.js` client, in batches of ≤ 500 ids packed by agent (`utils/operatorQueue.js::bulkCancelBatches`, #3302 — each agent's asks end in one batch, so "one turn per agent" holds); refetches; returns `{cancelled, skipped, batch_ids}`. A batch failing after one landed refetches first, then sets `error` (#1017)
 - `clearResolved(agentName = null)` -- `POST /api/operator-queue/clear-resolved` via `api.js`; refetches; returns `{cleared}` (#1017, line 154-166)
 - `acknowledgeItem(id)` -- Shorthand that calls `respondToItem(id, 'acknowledged', '')` (line 168-170)
 - `toggleExpand(id)` -- Toggle expandedItemId AND disarm auto-expand (a human took control — #1927)
 - `maybeAutoExpand()` (#1927) -- expand the first open item iff armed and no OPEN item is already expanded (`utils/loadingState.js::decideAutoExpand` checks membership of `expandedItemId` in the open set, so an id answered while the operator was away never blocks the rule); consumes the armed bit. Called by `Operations.vue`'s `watch(() => store.openItems, …, { immediate: true })`
-- `handleWebSocketEvent(data)` -- Handles real-time updates from WebSocket; `operator_queue_cleared` triggers a full `fetchItems()` refetch (line 177-200)
-- `startPolling(interval)` -- Begin polling with initial fetch + setInterval (default 15s, called with 10s from Operations.vue at container level) (line 203-207)
-- `stopPolling()` -- Clear poll timer (line 209-214)
+- `handleWebSocketEvent(data)` -- Handles real-time updates from WebSocket; every refetching trigger (`_new`, `_responded`, `_cancelled`, `_cleared`, `_sync`) calls `refresh()` (#3302)
+- `startPolling(interval)` -- Begin polling with initial fetch + setInterval (default 15s, called with 10s from Operations.vue at container level); marks the list live
+- `stopPolling()` -- Clear poll timer; the list is no longer live
 
 ### API Calls
 
 ```javascript
-// List items (fetchItems)
-await axios.get('/api/operator-queue', {
-  params: { limit: 200 },
-  headers: authStore.authHeader
-})
+// List items (fetchItems, #3302) — the reader decides how many requests
+const snap = await readQueueSnapshot(
+  (params) => axios.get('/api/operator-queue', { params, headers: authStore.authHeader }),
+  { pageLimit: 200, endedLimit: 200 })   // page 1 = GET ?limit=200, as before
+
+// Counts only (fetchCounts, #3302) — off the Operations page
+await axios.get('/api/operator-queue', { params: { status: 'pending', limit: 1 } })                       // .total
+await axios.get('/api/operator-queue', { params: { status: 'pending', priority: 'critical', limit: 1 } }) // .total
 
 // Respond to item (respondToItem) — body from utils/operatorQueue.js (#2370)
 const body = queueResponseBody(response, responseText)  // { response, response_text: trimmed || null }
 await axios.post(`/api/operator-queue/${id}/respond`, body, { headers: authStore.authHeader })
 
 // Clear All on Needs Response tab (bulkCancel, #1017) — via shared api.js client
-await api.post('/api/operator-queue/bulk-cancel', { ids })   // -> {cancelled, skipped}
+await api.post('/api/operator-queue/bulk-cancel', { ids: batch })   // per agent-packed batch -> {cancelled, skipped, batch_id}
 
 // Clear All on Resolved tab (clearResolved, #1017)
 await api.post('/api/operator-queue/clear-resolved', { agent_name: agentName })  // -> {cleared}
@@ -284,6 +291,27 @@ view) render `decisionLabel(response)` → "Something else", and the Workspace
 Tests: `tests/unit/test_3242_something_else.py`, the extended #2376 AST guard,
 the five `*SomethingElse*` vitest specs, `src/mcp-server/src/operator_queue.test.ts`.
 
+### Reading the queue without a window (#3302)
+
+Every operator surface used to derive its counts and lists from ONE capped page of `GET /api/operator-queue`; past the cap the numbers stopped being true and nothing said so, and — the route lists pending rows first — 200 pending asks pushed every ended ask out of the desktop window. `src/frontend/src/utils/operatorQueueRead.js` is now the one read path; each caller passes its own client as `get(params)`.
+
+- **`readPendingQueue(get, {params})`** → `{items, total, complete}`: page 1 is an offset-mode `status=pending&limit=500` read (no walk → no Redis snapshot write); past it the read restarts as a keyset walk (`cursor=start` → `next_cursor`) whose rows REPLACE page 1, capped at 20 pages. A walk failure (503 no Redis, 410 expired, …) returns page 1; the cap or a page with more and no cursor returns what the walk read — both as `complete: false`. `total` is the set's size when complete, the route's `total` (possibly `null`, never shown as 0) when partial.
+- **`readQueueSnapshot(get, {pageLimit, endedLimit})`** → `{pending, pendingTotal, pendingComplete, ended, endedTotal, flags}`: page 1 is the unfiltered `?limit=pageLimit` read the surfaces always made. (A) no more rows → done; (B) page 1 reached an ended row → every pending ask is in it, and the ended window is topped up from `offset=pageLimit`; (C) page 1 is all pending → `readPendingQueue`, then the ended window from `offset = pending − 50` (an ask the later read shows ended leaves the pending set). Merges dedupe by id; any null input total gives a null `endedTotal`; an offset is never null (axios drops a null param).
+- **Order it relies on** — offset mode lists every pending row before every ended row, ended newest-ending first (`db/operator_queue.py::list_items`), pinned by `tests/unit/test_3302_queue_list_order.py`. A cursor walk orders differently (rows ended in its last 5 minutes sort with the pending), so only `status=pending` is ever walked.
+
+| Surface | Read |
+|---|---|
+| Operations (store `fetchItems`) | `readQueueSnapshot({pageLimit: 200, endedLimit: 200})`; subtitle "N pending responses (S shown)" when partial, Resolved tab "N resolved · latest 200 shown" |
+| NavBar badge (off Operations) | `fetchCounts`: `status=pending&limit=1` + `priority=critical` → `total`; on mount and on every queue event |
+| Fleet grid chips (`stores/fleetGrid.js`) | `readPendingQueue`; a partial read keeps the last complete map; overlapping triggers share the read |
+| `/m` Queue tab | `readQueueSnapshot({pageLimit: 100, endedLimit: 5})`; "Showing N of T pending" below the cards when partial; a partial read never prunes per-card state |
+| Agent Overview "needs attention" | `?agent_name=X&status=pending&limit=1` → `total` (was `/agents/{name}` `count`, a page length) |
+| Self-change permission requests | `readPendingQueue({agent_name})` |
+
+Cost: a normal queue is one request (unchanged); pending asks plus history past 200 rows is two; ≥ 200 pending is three or more.
+
+Guards that keep the multi-request read honest: every queue read goes through `utils/boundedHttp.js::http` (30 s — the reads are one-at-a-time, so a request that never settled would hold every later one); a read overtaken by an acknowledged write is read again (up to twice) so a refetch after a 409 shows what the agent changed; `/m`'s 15 s poll skips while a queue read is still in flight (answers and pull-to-refresh still call it directly); the NavBar's mount read is deferred a tick and skipped while a list is live, so on Operations the list read is the first queue request; the Overview's fallback for an unverified `total` is the page's own rows (a floor), never the number already on screen, because the panel is reused across agents.
+
 ### NavBar Badge
 
 `src/frontend/src/components/NavBar.vue`:
@@ -296,6 +324,7 @@ the five `*SomethingElse*` vitest specs, `src/mcp-server/src/operator_queue.test
 - Color: `bg-red-500 animate-pulse` when `hasCriticalOpsItem`, otherwise `bg-orange-500`
 - Badge hidden when `combinedOpsCount === 0`
 - NavBar starts polling for notifications (60s) on mount, stops on unmount
+- NavBar reads the queue's two counts on mount (`operatorQueueStore.fetchCounts()`, #3302) — before that the badge's queue part was 0 on every page but Operations until a queue event arrived. Deferred a tick and skipped while `listLive` (NavBar mounts before its page, and on Operations the page's list read covers the counts — so the list read stays the first queue request); skipped for a Workspace-only role
 - **Removed** (#1109): the separate Executions running-count badge (running count now lives inside the Executions tab's "N running now" strip). Earlier: standalone Events bell icon and Alerts bell icon.
 
 ### UX Behaviors
@@ -1120,6 +1149,7 @@ Clear All on **Resolved** instead calls `clearResolved()` -> `POST /api/operator
 
 | Date | Change |
 |------|--------|
+| 2026-10-19 | #3302 — no queue count or list is a capped window: `utils/operatorQueueRead.js` (pending walked complete, ended window read after the pending section, null totals kept null); store counts in refs with explicit writers, single-flight reads with a write generation, counts-only refresh off Operations, NavBar count read on mount, agent-packed bulk-cancel batches; Operations subtitle states the Resolved window and a partial pending read; fleet-grid chips, `/m`, the agent Overview count and the permission-request match read the same way. Order pinned by `tests/unit/test_3302_queue_list_order.py` |
 | 2026-10-06 | trinity-enterprise#815 — a broad `list_operator_queue` is complete within its limit: an agent key is narrowed to `{self} ∪ agent_permissions` and a machine's about-a-person rows are excluded in SQL before `LIMIT`; `agent_names` narrows; the list returns `total`, `has_more`, `next_offset`, `next_cursor` (+ `warnings`); an opt-in keyset walk (`cursor=start`) never repeats or skips a row while the queue changes (watermark margin + a Redis priority snapshot for platform alerts; the commit-lag bound logged at error); `permissions?strict=true` for the MCP's fail-loud permit read. |
 | 2026-10-05 | #3246 — platform alerts are conditions: one pending row per subject (updated in place, seen count, last seen), ended by the platform when the condition clears, a 14-day lifetime and a 7-day snooze. Four emitter families on the seam (headroom, skills adoption, system agent, circuit breaker); the rest follow in PR 2. Ending labels and the seen line on the queue surfaces. |
 | 2026-10-14 | trinity-enterprise#901 — an agent withdraws one of its own pending asks: `withdraw_ask(request_id, reason)` / `POST …/operator-queue/{request_id}/withdraw` ends it `cancelled` by `agent` with the reason and no successor through the replace's CAS (no deadline clause); 404 `ask_not_found`, 409 `ask_ended`, 422 `invalid_reason`, 200 `replayed`; `agent_ending` (`replaced` \| `withdrawn`) derived once server-side on every projection; Workspace `ending_reason` for a withdraw only; Inbox "Withdrawn by the agent" history row; Operating Room card shows the reason; "Withdraw what is moot." in both prompt twins. No new revision. Tests: `tests/unit/test_ent901_withdraw_ask.py`, MCP `operator_queue.test.ts` + `access-wiring.test.ts`, frontend `operatorQueueWithdraw.spec.js`, `portalInboxWithdrawn.mount.spec.js`, `resolvedCardWithdrawn.spec.js`. |

@@ -139,7 +139,10 @@ describe('the Operating Room store', () => {
       axios.get.mockResolvedValue({ data: { items: [], count: 0 } })
       const store = useOperatorQueueStore()
       store.handleWebSocketEvent({ type, data: { id: 'i1', agent_name: 'agent-a' } })
-      expect(axios.get).toHaveBeenCalledTimes(1)
+      // #3302: with no list on screen the refetch is the two count reads —
+      // still the access-controlled route, never a patch from the payload.
+      expect(axios.get).toHaveBeenCalled()
+      expect(axios.get.mock.calls.every(([url]) => url === '/api/operator-queue')).toBe(true)
     },
   )
 })

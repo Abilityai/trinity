@@ -18,6 +18,8 @@ import {
   widgetKey,
 } from '@/utils/gridWidgets'
 import { serverSkewMs } from '@/utils/timestamps'
+import { readPendingQueue } from '@/utils/operatorQueueRead'
+import { http } from '@/utils/boundedHttp'
 import {
   LAYOUT_KEY_V1,
   LAYOUT_KEY,
@@ -572,14 +574,32 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     }
   }
 
-  async function fetchOpQueuePending() {
+  // #3302: every pending ask, walked past the first page. The chip has nowhere
+  // to say "truncated", so a window would drop an agent whose asks all sit past
+  // it and report a younger oldest age. A read that cannot finish keeps the last
+  // complete map rather than silently dropping chips; overlapping triggers
+  // (interval, visibility, force) share the read in flight.
+  let _opQueueRead = null
+  let _opQueueHadComplete = false
+
+  function fetchOpQueuePending() {
+    if (!_opQueueRead) {
+      _opQueueRead = loadOpQueuePending().finally(() => { _opQueueRead = null })
+    }
+    return _opQueueRead
+  }
+
+  async function loadOpQueuePending() {
     try {
-      const res = await axios.get('/api/operator-queue', {
-        params: { status: 'pending', limit: 200 },
+      // Bounded: the shared read must settle, or every later refresh joins a hung one.
+      const read = await readPendingQueue((params) => http.get('/api/operator-queue', {
+        params,
         headers: authStore.authHeader,
-      })
+      }))
+      if (!read.complete && _opQueueHadComplete) return
+      if (read.complete) _opQueueHadComplete = true
       const map = {}
-      for (const item of res.data.items || []) {
+      for (const item of read.items) {
         const cur = map[item.agent_name] || {
           count: 0,
           oldestCreatedAt: null,

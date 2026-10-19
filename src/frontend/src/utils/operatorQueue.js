@@ -688,3 +688,42 @@ export function proposalRows(proposal) {
     value: typeof value === 'string' ? value : JSON.stringify(value),
   }))
 }
+
+/** `POST /api/operator-queue/bulk-cancel` takes at most this many ids (`models.BulkCancelRequest`). */
+export const BULK_CANCEL_MAX_IDS = 500
+
+/**
+ * #3302 — the bulk-cancel batches for a list longer than the route takes. The
+ * list is complete now, so Clear All can hold more than 500 asks. Each
+ * bulk-cancel ends its rows as ONE event, and the wake observer gives each
+ * agent one turn per event — so batches keep an agent's asks together (whole
+ * agents, in first-seen order, packed up to the limit) and Clear All still
+ * costs each agent one turn. Only an agent holding more than the limit by
+ * itself is split. `items` are `{id, agent_name}`; returns lists of ids.
+ */
+export function bulkCancelBatches(items, max = BULK_CANCEL_MAX_IDS) {
+  const byAgent = new Map()
+  for (const item of Array.isArray(items) ? items : []) {
+    const ids = byAgent.get(item.agent_name) || []
+    ids.push(item.id)
+    byAgent.set(item.agent_name, ids)
+  }
+  const batches = []
+  let batch = []
+  for (const ids of byAgent.values()) {
+    if (batch.length + ids.length > max && batch.length) {
+      batches.push(batch)
+      batch = []
+    }
+    for (let i = 0; i < ids.length; i += max) {
+      const part = ids.slice(i, i + max)
+      if (batch.length + part.length > max) {
+        batches.push(batch)
+        batch = []
+      }
+      batch = batch.concat(part)
+    }
+  }
+  if (batch.length) batches.push(batch)
+  return batches
+}

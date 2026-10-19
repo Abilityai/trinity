@@ -130,7 +130,9 @@ describe('store — a refused response becomes a notice and an acknowledged rese
     axios.get.mockResolvedValue({ data: { items: [], count: 0 } })
     const store = useOperatorQueueStore()
     store.handleWebSocketEvent({ type: 'operator_queue_sync', data: {} })
-    expect(axios.get).toHaveBeenCalledTimes(1)
+    // #3302: with no list on screen the refetch is the two count reads.
+    expect(axios.get).toHaveBeenCalled()
+    expect(axios.get.mock.calls.every(([url]) => url === '/api/operator-queue')).toBe(true)
   })
 })
 

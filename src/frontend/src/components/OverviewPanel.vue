@@ -17,6 +17,7 @@ import axios from 'axios'
 import { parseUTC } from '@/utils/timestamps'
 import { BUCKET_COLORS } from '@/utils/executionBuckets'
 import { formatSyncSummary, syncChip, syncPillClass, syncTextClass } from '@/utils/syncSummary'
+import { pendingCountOf } from '@/utils/operatorQueueRead'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
 import { useAgentsStore } from '../stores/agents'
@@ -211,7 +212,9 @@ async function loadSidecars() {
   const results = await Promise.allSettled([
     get('/api/executions/stats', { agent: name }),
     get(`/api/agents/${name}/notifications/count`),
-    get(`/api/operator-queue/agents/${name}`, { status: 'pending', limit: 100 }),
+    // #3302: the agent's pending count is the list route's `total` — the old
+    // per-agent read answered `count`, the length of a 100-row page.
+    get('/api/operator-queue', { agent_name: name, status: 'pending', limit: 1 }),
     get(`/api/agents/${name}/git/sync-state`),
     get(`/api/monitoring/agents/${name}`),
     get(`/api/monitoring/agents/${name}/history`, { check_type: 'network', hours: 168, limit: 1000 }),
@@ -236,7 +239,11 @@ async function loadSidecars() {
   if (agentInfo.status === 'fulfilled') info.value = agentInfo.value
   if (stats.status === 'fulfilled') live.value = stats.value.data
   if (notif.status === 'fulfilled') notifCount.value = notif.value.data?.pending_count || 0
-  if (opq.status === 'fulfilled') opQueuePending.value = opq.value.data?.count || 0
+  // An unverified total (null) falls back to the rows this page holds — a floor.
+  // Never the number on screen: the panel is reused across agents.
+  if (opq.status === 'fulfilled') {
+    opQueuePending.value = pendingCountOf(opq.value.data) ?? (Number(opq.value.data?.count) || 0)
+  }
   if (sync.status === 'fulfilled') syncState.value = sync.value.data || null
   if (hDetail.status === 'fulfilled') health.value = hDetail.value.data
   if (hHist.status === 'fulfilled') healthTrend.value = bucketHealth(hHist.value.data?.checks || [])

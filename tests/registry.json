@@ -5395,6 +5395,17 @@
       "description": "The opt-in keyset (cursor) walk on GET /api/operator-queue (trinity-enterprise#815): within one walk no id is returned twice and every row matching at the start and when reached is returned exactly once while the queue changes. Inserts ahead of and behind the cursor (incl. a file-seam row with an old created_at); all five pending→ended writers between pages (ordering as of a watermark W = start − 300 s); a status=pending walk with answers; a permission change mid-walk; platform-alert priority changes through the walk's Redis priority snapshot (fakeredis), an alert raised mid-walk pinned to rank 4; a hypothesis property test (derandomize) over random interleavings of every write. The commit-lag bound: a write stamped before the walk began is not repeated, and a commit past the margin is logged at error. Strict cursor decoding (422 naming cursor; cursor+offset 422; filter mismatch 422; expired walk 410; Redis unreachable or failing 503; the decoded-bytes cap isolated); a forged token never widens visibility; an over-cap sort key (incl. non-ASCII and quote-heavy legacy ids) ends the page with has_more true, next_cursor null and a warning, and every issued cursor decodes; offset mode's order is unchanged; the walk statement compiles on postgresql and sqlite with one set of shared expressions. Mutation-proven."
     },
     {
+      "file": "unit/test_3302_queue_list_order.py",
+      "feature": "#3302",
+      "added": "2026-10-19",
+      "categories": [
+        "backend",
+        "unit",
+        "database"
+      ],
+      "description": "Pins the offset-mode order of GET /api/operator-queue that the operator-queue UI reads past its first page (#3302, src/frontend/src/utils/operatorQueueRead.js): every pending row precedes every ended row whatever their priorities and timestamps; the rows after the pending section are the ended rows, newest ending first; offset pages concatenate to the whole order; total counts the page's own WHERE (filters, not the page); the undelivered and closed-by-filer flags are the same whatever status/limit/offset the read carries. Real router in a small FastAPI app over a fresh SQLite file. Mutation-proven (pending sorted last fails two tests)."
+    },
+    {
       "file": "mcp-server/src/operator_queue_list.test.ts",
       "feature": "abilityai/trinity-enterprise#815",
       "added": "2026-10-07",
