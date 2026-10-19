@@ -56,7 +56,7 @@ Chat messages are saved to the platform database and survive container restarts 
 
 ## Where can I see what a chat message cost?
 
-Every assistant reply is recorded with its cost, token usage, and execution time, and each session tracks cumulative cost across the conversation. For a per-run breakdown, the agent's **Tasks** tab lists each execution with its cost and a context-usage bar, plus a Total Cost rollup, and the Execution Detail page shows dedicated Cost and Context cards. The agent header also shows today's spend with a 7-day trend. The Workspace deliberately shows no cost or model figures — its band, Info tab and Work tab speak in outcomes — so for the numbers go to the agent's Tasks tab or the Executions page. See [Executions](../operations/executions.md).
+Every assistant reply is recorded with its cost, token usage, and execution time, and each session tracks cumulative cost across the conversation. For a per-run breakdown, the agent's **Tasks** tab lists each execution with its cost and a context-usage bar, plus a Total Cost rollup, and the Execution Detail page shows dedicated Cost and Context cards. The agent's Overview also shows today's spend with a 7-day trend. The Workspace deliberately shows no cost or model figures — its band, Info tab and Work tab speak in outcomes — so for the numbers go to the agent's Tasks tab or the Executions page. See [Executions](../operations/executions.md).
 
 ## Can several chats run on the same agent at once?
 

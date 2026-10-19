@@ -440,7 +440,7 @@
 - [How do I share an agent with a teammate?](sharing-access-and-monetization.md#how-do-i-share-an-agent-with-a-teammate)
 - [What can my teammate do with an agent I've shared with them?](sharing-access-and-monetization.md#what-can-my-teammate-do-with-an-agent-ive-shared-with-them)
 - [Why can't my teammate see my past conversations with a shared agent?](sharing-access-and-monetization.md#why-cant-my-teammate-see-my-past-conversations-with-a-shared-agent)
-- [What's the difference between the Access tab and the Sharing tab?](sharing-access-and-monetization.md#whats-the-difference-between-the-access-tab-and-the-sharing-tab)
+- [What's the difference between Settings › People and the Sharing tab?](sharing-access-and-monetization.md#whats-the-difference-between-settings--people-and-the-sharing-tab)
 - [What user roles does Trinity have and what can each one do?](sharing-access-and-monetization.md#what-user-roles-does-trinity-have-and-what-can-each-one-do)
 - [Who can create agents?](sharing-access-and-monetization.md#who-can-create-agents)
 - [Why am I getting an agent quota error when I create an agent?](sharing-access-and-monetization.md#why-am-i-getting-an-agent-quota-error-when-i-create-an-agent)

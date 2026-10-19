@@ -22,6 +22,8 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
+import { useAgentRestartStore } from '../../src/stores/agentRestart'
 
 const getFileSharingStatus = vi.fn()
 const listSharedFiles = vi.fn()
@@ -79,14 +81,16 @@ const files = [
   row('addressed-no-detail', { addressed_to: 'bob@example.com', audience_source: null }),
 ]
 
-async function mountPanel() {
-  getFileSharingStatus.mockResolvedValue({ enabled: true, restart_required: false, volume_attached: true })
+async function mountPanel({ restartRequired = false } = {}) {
+  getFileSharingStatus.mockResolvedValue({ enabled: true, restart_required: restartRequired, volume_attached: !restartRequired })
   listSharedFiles.mockResolvedValue({
     files,
     total_bytes: files.reduce((n, f) => n + f.size_bytes, 0),
     quota_bytes: 500 * 1024 * 1024,
   })
-  const wrapper = mount(FileSharingPanel, { props: { agentName: 'atlas' } })
+  const pinia = createPinia()
+  setActivePinia(pinia)
+  const wrapper = mount(FileSharingPanel, { props: { agentName: 'atlas' }, global: { plugins: [pinia] } })
   await flushPromises()
   return wrapper
 }
@@ -134,5 +138,30 @@ describe('FileSharingPanel — the "For" column', () => {
     await flushPromises()
 
     expect(writeText).toHaveBeenCalledWith(files[0].url)
+  })
+})
+
+// trinity-enterprise#888: the panel no longer draws its own restart banner. A
+// toggle whose volume is not mounted yet is reported to the page's ONE banner.
+describe('FileSharingPanel — restart goes to the one banner', () => {
+  it('reports "File sharing" while the backend says a restart is required', async () => {
+    const wrapper = await mountPanel({ restartRequired: true })
+    expect(useAgentRestartStore().pendingFor('atlas').map((p) => p.label)).toEqual(['File sharing'])
+    expect(wrapper.text()).not.toMatch(/restart the agent to mount/i)
+  })
+
+  it('reports nothing when the volume matches the toggle', async () => {
+    await mountPanel({ restartRequired: false })
+    expect(useAgentRestartStore().pendingFor('atlas')).toEqual([])
+  })
+
+  it('an in-place switch to another agent re-reads, and never carries the first agent\'s wait over', async () => {
+    const wrapper = await mountPanel({ restartRequired: true })
+    getFileSharingStatus.mockResolvedValue({ enabled: false, restart_required: false, volume_attached: false })
+    await wrapper.setProps({ agentName: 'bravo' })
+    await flushPromises()
+    expect(getFileSharingStatus).toHaveBeenLastCalledWith('bravo')
+    expect(useAgentRestartStore().pendingFor('bravo')).toEqual([])
+    expect(useAgentRestartStore().pendingFor('atlas').map((p) => p.label)).toEqual(['File sharing'])
   })
 })

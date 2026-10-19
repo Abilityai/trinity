@@ -21,7 +21,7 @@ The **Access** tab lists the people this agent is shared with.
 4. Each operator row also carries a **proactive-messaging toggle** — "allow this operator to receive proactive DMs from the agent." It is off by default; turn it on per operator to let the agent message that person unprompted. This is a **per-recipient** DM permission (`PUT /api/agents/{name}/shares/proactive`, body `{email, allow_proactive}`). Trinity records consent in three states — *not asked* (every new share), *declined* and *consented* — and only *consented* lets the agent send; the other two are both a no, kept apart so you can see whether anyone ever asked.
 5. Click **Remove** on a row to revoke access.
 
-On instances licensed for it, the Access tab also shows a **People this agent serves** section above this list: the agent's primary person, its other stakeholders, and the seat the agent holds or serves. Assigning someone there also shares the agent with them, because an assignment by itself grants no access; a row for someone the agent is not shared with carries a warning and **Share with them**. Without the entitlement the section is absent, and non-admins see it read-only.
+On instances licensed for it, Settings › People also shows a **People this agent serves** section above this list: the agent's primary person, its other stakeholders, and the seat the agent holds or serves. Assigning someone there also shares the agent with them, because an assignment by itself grants no access; a row for someone the agent is not shared with carries a warning and **Share with them**. Without the entitlement the section is absent, and non-admins see it read-only.
 
 The per-recipient DM toggle above is complemented on the channel side by the per-channel Slack consent — see [Slack Integration](../integrations/slack-integration.md). Platform-wide proactive-messaging rate caps are admin-configurable in **Settings**.
 
@@ -106,7 +106,7 @@ Two collapsible panels for distributing the agent's output rather than granting 
 | `/api/agents/{name}/share` | POST | Share agent with an email address |
 | `/api/agents/{name}/share/{email}` | DELETE | Remove a share |
 | `/api/agents/{name}/shares` | GET | List all shares for an agent; each carries `proactive_consent` (`not_asked`, `declined` or `consented`) |
-| `/api/agents/{name}/access` | GET | Roster of people the agent is shared with (active + pending) for the Access tab, with each row's `proactive_consent` |
+| `/api/agents/{name}/access` | GET | Roster of people the agent is shared with (active + pending) for Settings › People, with each row's `proactive_consent` |
 | `/api/agents/{name}/shares/proactive` | GET / PUT | Per-recipient proactive-DM permission; PUT body `{email, allow_proactive}` (owner/admin) |
 | `/api/agents/{name}/clients` | GET | External client roster (owner-only, read-only) |
 | `/api/enterprise/client-portal/agents/{name}/clients` | GET | Portal clients with last-seen, block and session state (owner/admin; the prefix is historical) |

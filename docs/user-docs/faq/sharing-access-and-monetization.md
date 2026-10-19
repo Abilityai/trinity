@@ -14,9 +14,9 @@ Shared operators get interact-level access: they can chat with the agent, run ta
 
 That's by design. Shared users see only their own chat messages with an agent — each person's conversation history is private to them. Only admins can see all messages. If your teammate needs the content of a past conversation, share it with them directly. See [Agent Sharing](../sharing-and-access/agent-sharing.md).
 
-## What's the difference between the Access tab and the Sharing tab?
+## What's the difference between Settings › People and the Sharing tab?
 
-The **Access** tab manages the people the agent is shared with — your teammates, who use it in the Workspace, and in the Trinity UI too if their role is `operator` or above. The **Sharing** tab manages external clients — people without a Trinity account who reach the agent through Slack, Telegram, WhatsApp, voice calls, public links, or the Workspace, identified by verified email. The Sharing tab also holds the Restricted/Open access switch with pending access requests, the **Public chat model** and **Additional instructions** that apply only to outside audiences (public links, channels, paid chat — never your own chats or schedules), channel configuration, a read-only client roster, and the public links and file sharing panels. See [Agent Sharing](../sharing-and-access/agent-sharing.md).
+**Settings › People** (formerly the Access tab) manages the people the agent is shared with — your teammates, who use it in the Workspace, and in the Trinity UI too if their role is `operator` or above. The **Sharing** tab manages external clients — people without a Trinity account who reach the agent through Slack, Telegram, WhatsApp, voice calls, public links, or the Workspace, identified by verified email. The Sharing tab also holds the Restricted/Open access switch with pending access requests, the **Public chat model** and **Additional instructions** that apply only to outside audiences (public links, channels, paid chat — never your own chats or schedules), channel configuration, a read-only client roster, and the public links panel; file sharing lives under Settings › Storage. See [Agent Sharing](../sharing-and-access/agent-sharing.md).
 
 ## What user roles does Trinity have and what can each one do?
 
@@ -32,7 +32,7 @@ Each role has a limit on how many agents it can own: by default creators get 10,
 
 ## What role does a new user get the first time they log in?
 
-The role comes from their email whitelist entry: each whitelisted email carries a default role that is assigned on first login, and it falls back to the basic **user** role if none was set. Adding someone through an agent's Access tab or approving their access request creates no account and no whitelist entry — they use the Workspace with an emailed code. A **user** account works in the Workspace only; an admin raises someone to `operator` or above via **Settings** → **Access** → **User Management** (or the role select on their Access-tab row) to give them the operator UI. See [Roles and Permissions](../getting-started/roles-and-permissions.md).
+The role comes from their email whitelist entry: each whitelisted email carries a default role that is assigned on first login, and it falls back to the basic **user** role if none was set. Adding someone through an agent's Settings › People or approving their access request creates no account and no whitelist entry — they use the Workspace with an emailed code. A **user** account works in the Workspace only; an admin raises someone to `operator` or above via **Settings** → **Access** → **User Management** (or the role select on their row there) to give them the operator UI. See [Roles and Permissions](../getting-started/roles-and-permissions.md).
 
 ## Can people sign up for my Trinity instance on their own?
 

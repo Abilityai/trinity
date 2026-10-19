@@ -7,7 +7,6 @@
     "src/frontend/src/components/AgentMcpKeyPanel.vue": 1,
     "src/frontend/src/components/AgentPermissionsMatrix.vue": 1,
     "src/frontend/src/components/AutonomyToggle.vue": 1,
-    "src/frontend/src/components/CapacityPanel.vue": 1,
     "src/frontend/src/components/ChannelConfigRow.vue": 1,
     "src/frontend/src/components/ChatPanel.vue": 1,
     "src/frontend/src/components/CompatibilityPanel.vue": 1,

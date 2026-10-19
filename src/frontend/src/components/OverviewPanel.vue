@@ -293,7 +293,10 @@ onMounted(() => {
             {{ info.description }}
           </p>
         </div>
+        <!-- trinity-enterprise#887: the Info tab is Settings › General now,
+             which is owner-only — so is this link. -->
         <button
+          v-if="agent.can_share"
           class="shrink-0 text-xs font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline"
           @click="emit('navigate-tab', 'info')"
         >Full details →</button>
