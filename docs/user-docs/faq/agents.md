@@ -46,6 +46,10 @@ Yes. Agent containers are created with Docker's `unless-stopped` restart policy,
 
 A plain stop/start keeps the same container, so everything in it survives — except `/tmp`, which is RAM-backed scratch space. A recreate replaces the container (this happens on resource, capability, or mount changes, per-agent API key changes, and image upgrades), but the agent's home directory `/home/developer` lives on a durable named Docker volume, so your workspace files and anything under `data/` survive recreates, image upgrades, template re-pulls, and subscription switches. A template re-pull resets git-tracked files to the template's main branch but never wipes untracked files. Only files written outside the home volume are lost on recreate. See [Agent Data & Portability](../agents/agent-data.md).
 
+## How should I organise my agent's workspace?
+
+Think in three zones. A few folders are owned by the platform, which reads or writes them by path: `data/`, `public/`, `uploads/`, `shared-out/`, `shared-in/`, `content/` and `.trinity/`; leave their names and places alone. Everything you version goes in the committed zone: identity and config files at the root, `.claude/` skills, `memory/`, `docs/`, dated `reports/<kind>/` files and `project_files/<slug>/`. Everything else lives only on the durable volume and is never committed: runtime state, scratch work in `$TMPDIR` (`~/.tmp/`, not `/tmp`), and side clones of other repos, each in its own gitignored folder. See [Directory Structure](../../TRINITY_COMPATIBLE_AGENT_GUIDE.md#directory-structure) in the Trinity-compatible agent guide.
+
 ## What happens when I delete an agent — is everything gone immediately?
 
 No. Deleting stops and removes the container immediately, but it is a soft delete: the workspace volumes, schedules, chat history, sharing records, permissions, and credentials are all preserved until a retention sweep purges them (default: 180 days). Schedules stop firing right away. During the retention window an admin can recover the agent — recovery restores the record but does not recreate the container, so start the agent afterwards. See [Managing Agents](../agents/managing-agents.md).
