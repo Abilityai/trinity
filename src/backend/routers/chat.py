@@ -759,12 +759,7 @@ async def get_agent_model(
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as e:
-        import logging
-        logging.getLogger("trinity.errors").error(f"Failed to get model info for {name}: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail="Failed to get model info"
-        )
+        _raise_model_route_error(name, e, "Failed to get model info", "get model info")
 
 
 @router.put("/{name}/model", dependencies=[Depends(capability_fence("agents.manage"))])
@@ -795,12 +790,28 @@ async def set_agent_model(
 
             return response.json()
     except httpx.HTTPError as e:
-        import logging
-        logging.getLogger("trinity.errors").error(f"Failed to set model for {name}: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail="Failed to set model"
+        _raise_model_route_error(name, e, "Failed to set model", "set model")
+
+
+def _raise_model_route_error(name: str, e: httpx.HTTPError, unavailable: str, action: str):
+    """#3677: an agent's own 4xx is the caller's answer (an invalid model names
+    the valid ones), with its status and detail and no ERROR line; anything
+    else (unreachable, timed out, an agent 5xx) is still 503."""
+    import logging
+    response = getattr(e, "response", None) if isinstance(e, httpx.HTTPStatusError) else None
+    if response is not None and 400 <= response.status_code < 500:
+        try:
+            detail = response.json().get("detail")
+        except (ValueError, AttributeError):
+            detail = None
+        if detail in (None, ""):
+            detail = (response.text or "").strip()[:500] or f"The agent refused to {action}"
+        logging.getLogger("trinity.errors").info(
+            f"Agent {name} refused to {action}: {response.status_code}"
         )
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    logging.getLogger("trinity.errors").error(f"Failed to {action} for {name}: {e}")
+    raise HTTPException(status_code=503, detail=unavailable)
 
 
 # Persistent Chat History Routes
