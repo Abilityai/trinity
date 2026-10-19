@@ -792,6 +792,7 @@ ROUTE_TIERS = {
     ("routers/git.py", "get_pull_sync_config"): "accessor: a config flag, no text",
     ("routers/git.py", "set_pull_sync_config"): "owner + person (already ruled)",
     ("routers/fan_out.py", "fan_out"): "dispatch with the caller's own key; the rows it makes carry their id",
+    ("routers/chat.py", "arm_execution_report_back"): "accessor + dispatcher-only (#3295): the service 404s unless the caller dispatched the row, and it reads nothing back",
 }
 
 _CENSUS_FILES = ("routers/schedules.py", "routers/chat.py", "routers/agents.py", "routers/git.py",
