@@ -50,7 +50,7 @@ HOME = "/home/developer"
 MAX_BLOCK_CHARS = 2600
 
 TIERS = (PromptTier.VERBOSE, PromptTier.MINIMAL)
-HOOKED_RUNTIMES = ("claude-code", "")
+HOOKED_RUNTIMES = ("claude-code", "claude", "")
 UNHOOKED_RUNTIMES = ("codex", "gemini", "some-future-runtime")
 
 
@@ -271,3 +271,30 @@ def test_codex_orientation_names_refresh_metric_definitions():
     assert "`refresh_metric_definitions`" in orientation
     assert "mcp__trinity__" not in rendered
     assert "`refresh_metric_definitions`" in _section(rendered)
+
+
+# T11 — a force-replace pull is the one path that deletes untracked files
+# (agent_server git router: `git reset --hard` then `git clean -fd`).
+def test_force_replace_pull_is_named_as_the_exception():
+    block = _section(_render(PromptTier.VERBOSE, "claude-code"))
+    assert "and never touches untracked ones. A force-replace pull" in block
+    assert "deletes untracked files that are not gitignored" in block
+    assert "through `git_pull`" in block
+
+
+# T12 — `data/` is gitignored only once `data_paths` is declared; it is not in
+# the base `.gitignore` patterns, so the block must not say it always is.
+def test_data_folder_ignore_is_conditional():
+    block = _section(_render(PromptTier.VERBOSE, "claude-code"))
+    assert "- `data/` — runtime data; the export/import boundary, gitignored once you declare `data_paths`" in block
+    assert not re.search(r"`data/`[^\n]*gitignored$", block, re.M), "data/ cited as always gitignored"
+
+
+# T13 — the agent server treats `claude` as Claude Code too (runtime_adapter,
+# execution_env), so it runs the guardrail hook and gets the hooked sentence.
+def test_claude_alias_gets_the_hooked_sentence():
+    hooked = platform_prompt_service._PATH_DENY_SENTENCE_HOOKED
+    unhooked = platform_prompt_service._PATH_DENY_SENTENCE_UNHOOKED
+    rendered = _render(PromptTier.VERBOSE, "claude")
+    assert hooked in rendered
+    assert unhooked not in rendered

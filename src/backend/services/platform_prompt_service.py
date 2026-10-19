@@ -239,10 +239,10 @@ So:
 
 ### Your environment
 
-You run as `developer` (UID 1000) in your own container. `/home/developer` is your workspace and a durable volume: it survives stop/start, recreate and image upgrades. `/tmp` is a small RAM tmpfs mounted noexec, so put scratch files under `$TMPDIR` (`~/.tmp`, on the volume). The clock is UTC. If your workspace is a git repo synced with an origin, a reset to the template's main overwrites tracked files except those listed in `.trinity/persistent-state.yaml` (without that file, a default set: `workspace/`, `.trinity/`, `.mcp.json`, `.claude.json` and `.claude/.credentials.json`), and never touches untracked ones.
+You run as `developer` (UID 1000) in your own container. `/home/developer` is your workspace and a durable volume: it survives stop/start, recreate and image upgrades. `/tmp` is a small RAM tmpfs mounted noexec, so put scratch files under `$TMPDIR` (`~/.tmp`, on the volume). The clock is UTC. If your workspace is a git repo synced with an origin, a reset to the template's main overwrites tracked files except those listed in `.trinity/persistent-state.yaml` (without that file, a default set: `workspace/`, `.trinity/`, `.mcp.json`, `.claude.json` and `.claude/.credentials.json`), and never touches untracked ones. A force-replace pull (offered when a pull conflicts, and through `git_pull`) is different: it resets to the remote and deletes untracked files that are not gitignored, so keep work you need committed or in a gitignored folder.
 
 Paths the platform creates or reads in your home:
-- `data/` — runtime data; the export/import boundary, gitignored
+- `data/` — runtime data; the export/import boundary, gitignored once you declare `data_paths`
 - `public/` — the only folder `share_file` reads
 - `uploads/` — files people attach in chat or through the API
 - `shared-out/`, `shared-in/<agent>/` — shared folders, when enabled
@@ -507,9 +507,10 @@ def render_platform_instructions(tier: PromptTier = PromptTier.VERBOSE) -> str:
 _CODEX_RUNTIMES = frozenset({"codex"})
 
 # Runtimes that run the agent-image file guardrail (trinity-enterprise#945). An
-# empty label is the default runtime, Claude Code. Every other value — Codex,
+# empty label is the default runtime, Claude Code; `claude` is its alias in the
+# agent server (runtime_adapter, execution_env). Every other value — Codex,
 # Gemini, anything new — is told nothing blocks the protected paths.
-_GUARDRAIL_HOOK_RUNTIMES = frozenset({"claude-code", ""})
+_GUARDRAIL_HOOK_RUNTIMES = frozenset({"claude-code", "claude", ""})
 
 # Prepended to the Codex variant. Intentionally avoids the literal
 # ``mcp__trinity__`` token so the stripped prompt contains it nowhere.
