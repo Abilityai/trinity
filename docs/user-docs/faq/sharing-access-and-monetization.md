@@ -4,7 +4,7 @@
 
 ## How do I share an agent with a teammate?
 
-Open the agent detail page, click the **Access** tab (visible to the owner), enter your teammate's email, and click **Add person**. They can then sign in to the Workspace with a code emailed to them and use the agent there. Sharing does not create a platform account or add the email to the login whitelist — whether they also get the operator UI is their platform role, which an admin sets on their row or in **Settings → Access**. Their row shows **Active** if they already have a Trinity account, or **Pending** ("No platform account — uses the Workspace"); each row also carries an off-by-default toggle that lets the agent message that person proactively. Click **Remove** on a row to revoke access at any time. See [Agent Sharing](../sharing-and-access/agent-sharing.md).
+Open the agent detail page, click the **Settings** tab and pick **People** in the rail (visible to the owner; it is the former Access tab), enter your teammate's email, and click **Add person**. They can then sign in to the Workspace with a code emailed to them and use the agent there. Sharing does not create a platform account or add the email to the login whitelist — whether they also get the operator UI is their platform role, which an admin sets on their row or in **Settings → Access**. Their row shows **Active** if they already have a Trinity account, or **Pending** ("No platform account — uses the Workspace"); each row also carries an off-by-default toggle that lets the agent message that person proactively. Click **Remove** on a row to revoke access at any time. See [Agent Sharing](../sharing-and-access/agent-sharing.md).
 
 ## What can my teammate do with an agent I've shared with them?
 
@@ -81,6 +81,10 @@ The backend builds a link as `FRONTEND_URL` + `/chat/{token}`, and `FRONTEND_URL
 ## Are public links rate limited?
 
 Yes, with fixed limits rather than per-link settings: 30 messages a minute per IP address and 60 a minute per link, plus a cap on how often one IP can look up links. Email verification codes are limited to 3 requests per email every 10 minutes. See [Public Links](../sharing-and-access/public-links.md#limitations).
+
+## What expiry values does a public link accept?
+
+A date and time, or none. In the **Create Public Link** dialog the **Expiration (optional)** field is a date-and-time picker; leave it empty and the link never expires. Over the API, `expires_at` is an ISO 8601 timestamp such as `2026-12-31T23:59:00Z`, omitted or empty for no expiry; any other value is refused with `422` and no link is written. Once the time passes, visitors get the expired notice and the link's card shows **Expired**; edit the link to move or clear the date. See [Public Links](../sharing-and-access/public-links.md).
 
 ## What's the difference between a public link, sharing, and the Workspace?
 

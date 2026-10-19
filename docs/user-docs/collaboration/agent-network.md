@@ -70,7 +70,7 @@ On an agent in the pull pilot, a turn can be delivered again after its lease exp
 
 Agents can share files via Docker volumes:
 
-1. On the **source agent**, open the **Folders** tab and enable **Expose Shared Folder**. Files placed in `/home/developer/shared-out` are made available to permitted agents.
+1. On the **source agent**, open **Settings › Storage › Shared folders** and enable **Expose Shared Folder**. Files placed in `/home/developer/shared-out` are made available to permitted agents.
 2. Grant the consuming agent permission via the **Permissions** tab.
 3. On the **consuming agent**, enable **Mount Shared Folders**. Exposed folders appear at `/home/developer/shared-in/{agent-name}`.
 4. Restart both agents to apply the volume mounts.
@@ -87,3 +87,4 @@ Removing the permission (or turning **Mount Shared Folders** off) takes the fold
 - [Event Subscriptions](./event-subscriptions.md) -- Pub/sub for inter-agent pipelines
 - [System Manifest](./system-manifest.md) -- Deploy multi-agent systems from a single file
 - [Scheduling](../automation/scheduling.md) -- Automated agent execution
+- [A2A Protocol](../integrations/a2a-protocol.md) -- Calling agents on another Trinity instance, or any A2A agent, including signed calls under AAuth
