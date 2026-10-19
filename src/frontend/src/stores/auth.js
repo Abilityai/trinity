@@ -22,6 +22,9 @@ export const useAuthStore = defineStore('auth', {
     // Runtime mode detection (from backend)
     emailAuthEnabled: null,  // Email-based authentication
     emailCodeLoginEnabled: null,  // ent#849: email-code form allowed (SSO policy can turn it off)
+    // #3655: can this install deliver email? false = no provider, codes go to the backend log.
+    // null (not read yet, or an older backend) reads as "yes", the old behaviour.
+    emailDeliveryAvailable: null,
     modeDetected: false,
     // Enterprise 2FA (#5): set when a login returns an MFA challenge instead
     // of a token. { token, enrolled, enrollmentRequired }. The Login view
@@ -89,6 +92,7 @@ export const useAuthStore = defineStore('auth', {
         // ent#849: an older backend has no field; it follows email_auth_enabled there.
         this.emailCodeLoginEnabled = this.emailAuthEnabled &&
           response.data.email_code_login_enabled !== false
+        this.emailDeliveryAvailable = response.data.email_delivery_available !== false
         this.modeDetected = true
 
         console.log(`🔐 Auth mode: EMAIL=${this.emailAuthEnabled}`)

@@ -47,7 +47,9 @@ from services.chat_title import (
 from config import PORTAL_SOURCE_CHANNEL
 from services import login_policy_gate, skill_gate_map_service, turn_context
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
-from services.channel_completion_report import COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED
+from services.channel_completion_report import (
+    COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED, COMPLETION_SOURCE_NOTICE,
+)
 
 from . import db
 from .models import (
@@ -1855,7 +1857,8 @@ VOICE_DELTA_HEADER = (
 # in both context blocks, told as the platform's note — the agent learns its
 # task came back and what it found, without being handed platform text as its
 # own words.
-_COMPLETION_SOURCES = frozenset({COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED})
+_COMPLETION_SOURCES = frozenset({COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED,
+                                 COMPLETION_SOURCE_NOTICE})
 
 
 _TITLE_MAX_CHARS = 60  # matches the sidebar's truncation width

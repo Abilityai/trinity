@@ -710,6 +710,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 | Date | Changes |
 |------|---------|
+| 2026-10-15 | **#3430**: bundled community-catalog pin bumped to `trinity-skills` **v0.5.0** (fresh-install seed only). v0.4.0 adds `project-status`; v0.5.0 adds `update-status` and brings `project-status` and `add-pipeline` onto the platform's current ask-id and 120-char escalation-title contracts (both failed on `dev` at v0.3.0). 40 skills, none dropped since v0.3.0. The guard floor rises to v0.5.0; existing instances keep their row (ent#529) and move with the user-doc steps. |
 | 2026-10-10 | **ent#692**: source management over MCP for admin principals (`src/mcp-server/src/tools/skill_sources.ts`) — fenced by principal, not transport. New idempotent `POST /api/skills/sources/apply` (keyed on the repo URL; `created`/`updated`/`unchanged`, 409 `ambiguous_source`); create accepts `priority`. `GET /api/skills/library/status` now carries `last_fleet_reinject` (counts only — the per-agent `failures` map stays on the admin routes), so whoever ran a sync can read its consequence. Sync tools report `ran` / `refused_busy` / `failed`. |
 | 2026-10-06 | **#3123**: bundled community-catalog pin bumped to `trinity-skills` **v0.3.0** (fresh-install seed only). The catalog gains `update-dashboard`, the playbook the metrics tiles already point users at, and drops the four retired `add-*` installers (now marketplace-only), giving 38 skills. The guard floor rises to v0.3.0, and `docs/user-docs/automation/skills-and-playbooks.md` joins `.env.example` in the parity check. Existing instances keep their row (ent#529); that user doc now carries the steps for moving one to a newer tag (`PUT /api/skills/sources/{id}`, then a full sync). |
 | 2026-09-30 | **ent#672**: the listing the sync produces now carries each skill's lifecycle keys — `deprecated` and `superseded_by` (the library's `superseded-by`) — parsed on every listing, never persisted, so a re-sync that drops the key clears the flag. Contract details: [skill-injection.md](skill-injection.md). |
@@ -721,5 +722,5 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 ---
 
-**Last Updated**: 2026-10-10
-**Status**: Verified - Updated for ent#692 source management over MCP
+**Last Updated**: 2026-10-15
+**Status**: Verified - Updated for #3430 bundled catalog pin v0.5.0
