@@ -868,8 +868,9 @@ async def request_access(request: Request):
     check_login_rate_limit(client_ip)
 
     # Parse request
-    body = await request.json()
-    email = (body.get("email") or "").lower().strip()
+    body = await _parse_body(request, dict)
+    email = body.get("email")
+    email = email.lower().strip() if isinstance(email, str) else ""
     if not email or "@" not in email:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

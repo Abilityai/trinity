@@ -80,3 +80,31 @@ def test_verify_malformed_body_counts_against_ip_limit(ctx, body):
     client, recorded = ctx
     assert _post(client, VERIFY, body).status_code == 422
     assert recorded == [(False, None)]
+
+
+# ---------------------------------------------------- POST /api/access/request
+
+ACCESS = "/api/access/request"
+
+
+@pytest.fixture
+def access(ctx, monkeypatch):
+    import routers.auth as ra
+
+    client, recorded = ctx
+    monkeypatch.setattr(ra.db, "get_setting_value", lambda k, d=None: "true"
+                        if k in ("email_auth_enabled", "public_access_requests_enabled") else d)
+    return client
+
+
+@pytest.mark.parametrize("body", ["not json", "null", '["a@example.com"]'])
+def test_access_request_malformed_body_is_422(access, body):
+    r = _post(access, ACCESS, body)
+    assert r.status_code == 422, r.text
+
+
+@pytest.mark.parametrize("body", [{}, {"email": None}, {"email": 123}, {"email": "no-at-sign"}])
+def test_access_request_bad_email_stays_400(access, body):
+    r = _post(access, ACCESS, body)
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == "Valid email address required"
