@@ -6,12 +6,12 @@ These endpoints require authentication and are used by agent owners
 to create, manage, and revoke public shareable links.
 """
 import json
-import logging
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import List
 
 from models import User
+from db.public_links import parse_link_expiry
 from database import db, PublicLinkCreate, PublicLinkUpdate, PublicLinkWithUrl
 from dependencies import get_current_user, OwnedAgentByName, CurrentUser
 from services.docker_service import get_agent_container
@@ -19,7 +19,6 @@ from config import FRONTEND_URL
 from services.settings_service import get_public_chat_url
 
 router = APIRouter(prefix="/api/agents", tags=["public-links"])
-logger = logging.getLogger(__name__)
 
 # WebSocket manager will be injected from main.py
 manager = None
@@ -44,17 +43,6 @@ def _build_external_url(token: str, link_type: str = "chat") -> str | None:
     return f"{public_chat_url}/chat/{token}"
 
 
-def _parse_expiry(link: dict) -> datetime | None:
-    """Parse a stored expiry; a malformed row renders without one so the list still loads (#3583)."""
-    if not link.get("expires_at"):
-        return None
-    try:
-        return datetime.fromisoformat(link["expires_at"])
-    except ValueError:
-        logger.warning("public link %s has unparseable expires_at", link["id"])
-        return None
-
-
 def _link_to_response(link: dict, include_usage: bool = True) -> PublicLinkWithUrl:
     """Convert a database link dict to response model with URL."""
     usage_stats = None
@@ -68,7 +56,7 @@ def _link_to_response(link: dict, include_usage: bool = True) -> PublicLinkWithU
         token=link["token"],
         created_by=link["created_by"],
         created_at=datetime.fromisoformat(link["created_at"]) if isinstance(link["created_at"], str) else link["created_at"],
-        expires_at=_parse_expiry(link),
+        expires_at=parse_link_expiry(link.get("expires_at")),
         enabled=link["enabled"],
         name=link.get("name"),
         link_type=link_type,
