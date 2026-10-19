@@ -420,9 +420,10 @@ async def get_work(email: str, names: List[str], chat_id: Optional[str] = None) 
             inflight_in_window += 1
     earlier_total = max(len(earlier_items), total - inflight_in_window)
 
-    # Steps: the #919 read, only for a rostered agent with exactly ONE in-flight
-    # row — an agent-written `updated_at` cannot say which of two runs an
-    # instance belongs to (review), so two running rows read `unknown`.
+    # Steps: the #919 read. With exactly ONE fresh in-flight row it is that
+    # run's steps. With several, an agent-written `updated_at` cannot say which
+    # run an instance belongs to (review), so reported stages read `unknown` —
+    # but an agent that publishes nothing reads `none` for all of them (#3357).
     by_agent: Dict[str, List[WorkItem]] = {}
     for it in now_items:
         if it.agent_name:
@@ -431,13 +432,29 @@ async def get_work(email: str, names: List[str], chat_id: Optional[str] = None) 
     async def steps_for(agent: str, item: WorkItem) -> None:
         item.steps = await pipeline_state.read_pipeline_steps(agent, item.started_at, roster)
 
+    async def steps_for_several(agent: str, items: List[WorkItem]) -> None:
+        # #3357: two live runs cannot be told apart by an agent-written
+        # `updated_at`, so REPORTED stages stay `unknown` — but most agents
+        # publish no pipeline at all, and that answer is the same for every
+        # run. Setting `unknown` without reading made a second run turn every
+        # card's steps into "could not be read" for an agent that never had
+        # steps to read. Read once, from the oldest run's start.
+        oldest = min((it.started_at for it in items if it.started_at), default=None)
+        result = await pipeline_state.read_pipeline_steps(agent, oldest, roster)
+        verdict = WorkSteps(state="none") if result.state == "none" else WorkSteps(state="unknown")
+        for it in items:
+            it.steps = verdict
+
     jobs = []
     for agent, items in by_agent.items():
-        if len(items) == 1 and not items[0].stale:
-            jobs.append(steps_for(agent, items[0]))
-        else:
-            for it in items:
+        fresh = [it for it in items if not it.stale]
+        for it in items:
+            if it.stale:
                 it.steps = WorkSteps(state="unknown")
+        if len(fresh) == 1:
+            jobs.append(steps_for(agent, fresh[0]))
+        elif fresh:
+            jobs.append(steps_for_several(agent, fresh))
     if jobs:
         await asyncio.gather(*jobs, return_exceptions=True)
     for it in now_items:

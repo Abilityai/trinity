@@ -284,6 +284,12 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
           + "only). Omit to let the platform infer "
           + "it from the value. Send it alone to re-label a credential already stored.",
         ),
+        auth_scheme: z.enum(["bearer", "aauth"]).optional().describe(
+          "How calls authenticate. 'bearer' (the default for a new endpoint) sends the stored "
+          + "credential. 'aauth' signs each call as the calling agent's own AAuth identity "
+          + "(aauth:<agent>@<this host>) — no credential is stored, switching to it clears one, "
+          + "and the peer must list that identity. Omit to keep the stored scheme.",
+        ),
       }),
       execute: async (
         params: {
@@ -293,9 +299,24 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
           credentials?: string;
           clear_credentials?: boolean;
           credential_kind?: "api_key" | "payment_token";
+          auth_scheme?: "bearer" | "aauth";
         },
         context?: { session?: McpAuthContext },
       ) => {
+        if (params.auth_scheme === "aauth" && params.credentials) {
+          // ent#862: an aauth endpoint holds no secret — the store refuses one.
+          // Refused here too, so the caller learns it without a round trip.
+          return JSON.stringify(
+            {
+              success: false,
+              error:
+                "An auth_scheme 'aauth' endpoint stores no credential: each call is signed "
+                + "as the calling agent. Drop `credentials`, or use auth_scheme 'bearer'.",
+              invalid: true,
+            },
+            null, 2,
+          );
+        }
         if (params.clear_credentials && params.credential_kind) {
           // Contradictory instructions about one slot (#3185). Refused here as
           // well as at the route, so the caller learns it without spending a
@@ -333,6 +354,7 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
             credentials: params.credentials,
             clear_credentials: params.clear_credentials,
             credential_kind: params.credential_kind,
+            auth_scheme: params.auth_scheme,
           });
           return ok({
             endpoint: result?.endpoint,

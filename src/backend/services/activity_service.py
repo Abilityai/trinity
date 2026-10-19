@@ -143,7 +143,9 @@ class ActivityService:
         activity_id: str,
         status: str = ActivityState.COMPLETED,
         details: Optional[Dict] = None,
-        error: Optional[str] = None
+        error: Optional[str] = None,
+        *,
+        completed_at: Optional[datetime] = None,
     ) -> bool:
         """
         Mark an activity as completed or failed.
@@ -153,6 +155,8 @@ class ActivityService:
             status: ActivityState value ("completed" or "failed")
             details: Additional details to merge with existing details
             error: Error message if failed
+            completed_at: #3589 — the instant the producer says the work
+                ended (the watchdog claim's `retained_at`); None stamps now
 
         Returns:
             bool: True if activity was found and updated
@@ -165,7 +169,8 @@ class ActivityService:
         # Update in database. #1804: the db layer is a lattice CAS returning a
         # tri-state outcome — ALREADY_CLOSED is a DESIGNED no-op (a second
         # closer refused, nothing clobbered), not a failure.
-        outcome = db.complete_activity(activity_id, status, details, error)
+        outcome = db.complete_activity(activity_id, status, details, error,
+                                       completed_at=completed_at)
 
         if outcome is ActivityCloseOutcome.UPDATED:
             # Broadcast via WebSocket
@@ -277,13 +282,26 @@ class ActivityService:
             )
             return False
 
+    @staticmethod
+    def _companion_close_details(execution, meta: Dict) -> Dict:
+        """The detail keys the push closers write (``complete_collaboration_activity``
+        / ``finalize_self_task``) — ONE builder for every companion closer, so
+        whichever closer wins the CAS persists the same shape (#2329, #3588)."""
+        details = {
+            "execution_id": execution.id,
+            "response_length": len(getattr(execution, "response", None) or ""),
+            "execution_time_ms": getattr(execution, "duration_ms", None),
+        }
+        if meta.get("is_self_task"):
+            # finalize_self_task records this; keep it whichever closer wins.
+            details["inject_result"] = meta.get("inject_result")
+        return details
+
     async def _close_queued_activities(self, execution_id, activity_state, error) -> None:
         """#2329: close the collaboration / self-task activity a queued row
         names, so a terminal written outside ``run_async_task`` (pull sink,
         lease-reaper park, watchdog) does not leave it ``started``. Backlog
-        expiry calls no closer; the 120-minute sweep covers it.
-        Details carry the keys the push closers write, because whichever
-        closer wins the CAS is the one whose details persist."""
+        expiry calls no closer; the 120-minute sweep covers it."""
         execution = db.get_execution(execution_id)
         # Only a row that is terminal NOW. The lease reaper closes the dead
         # attempt's dispatch activity as CANCELLED and re-queues the row with the
@@ -295,15 +313,7 @@ class ActivityService:
         ids = queued_activity_ids(raw)
         if not ids:
             return
-        details = {
-            "execution_id": execution_id,
-            "response_length": len(getattr(execution, "response", None) or ""),
-            "execution_time_ms": getattr(execution, "duration_ms", None),
-        }
-        meta = json.loads(raw)
-        if meta.get("is_self_task"):
-            # finalize_self_task records this; keep it whichever closer wins.
-            details["inject_result"] = meta.get("inject_result")
+        details = self._companion_close_details(execution, json.loads(raw))
         for aid in ids:
             await self.complete_activity(
                 activity_id=aid,
@@ -312,6 +322,81 @@ class ActivityService:
                 # Push closers record an error on FAILED only (#1332).
                 error=error if activity_state == ActivityState.FAILED else None,
             )
+
+    async def close_companion_activities(
+        self, execution_id: str, *, details_extra: Optional[Dict] = None
+    ) -> int:
+        """#3588: close every open companion (collaboration / self-task) activity
+        of a TERMINAL execution, deriving state AND instant from the persisted
+        row. Returns the number of companions closed.
+
+        Built for the watchdog claim, whose dispatch close runs inside
+        ``apply_result`` and never reaches ``_close_queued_activities`` — and
+        whose companions may have NO ``backlog_metadata`` at all (a
+        direct-dispatch ``/task`` hop, the issue's own repro). The lookup is
+        type-scoped on ``related_execution_id`` with the metadata ids as a belt.
+
+        **Everything is derived from the ROW, never from the caller's envelope**:
+        ``apply_result``'s failure branch returns the same result whether its
+        CAS won or lost (only the SUCCESS branch says RECONCILED), so "the claim
+        won" is not observable at the call site. Reading the row makes a lost
+        failure-style claim close companions in the terminal that actually
+        stands (e.g. CANCELLED from the cancel that won, at the cancel's
+        instant) — a close that can never disagree with the row. ``completed_at``
+        is the row's persisted instant (#3589: the claim threads ``retained_at``
+        into the row write, so row and companions agree by construction; when
+        ``retained_at`` was unreadable both carry the writer's now-stamp).
+
+        Fail-open: returns 0 and swallows on any error — it runs after a
+        committed terminal and must never affect it. Per-row ``complete_activity``
+        (WS broadcast per close) is deliberate: a claim is 1–2 companions on a
+        path that already broadcasts per claim; the bulk sweeps keep their
+        broadcast-free ``close_open_activities_for_executions``.
+        """
+        try:
+            execution = db.get_execution(execution_id)
+            # Terminal NOW — the same re-queue guard as _close_queued_activities.
+            if execution is None or execution.status not in TERMINAL_TASK_STATUSES:
+                return 0
+            activity_state = activity_state_for_terminal(execution.status)
+            raw = getattr(execution, "backlog_metadata", None)
+            ids = db.get_open_companion_activity_ids_for_execution(
+                execution_id,
+                extra_ids=queued_activity_ids(raw),
+                include_failed=execution.status in _AUTHORITATIVE_TERMINALS,
+            )
+            if not ids:
+                return 0
+            try:
+                meta = json.loads(raw) if raw else {}
+            except (TypeError, ValueError):
+                meta = {}
+            details = self._companion_close_details(execution, meta)
+            if details_extra:
+                details.update(details_extra)
+            error = (
+                getattr(execution, "error", None)
+                if activity_state == ActivityState.FAILED
+                else None
+            )
+            closed = 0
+            for aid in ids:
+                if await self.complete_activity(
+                    activity_id=aid,
+                    status=activity_state,
+                    details=details,
+                    error=error,
+                    completed_at=getattr(execution, "completed_at", None),
+                ):
+                    closed += 1
+            return closed
+        except Exception as e:  # noqa: BLE001 — never affect a committed terminal
+            logger.warning(
+                "[#3588] companion close failed for execution %s: %s",
+                execution_id,
+                e,
+            )
+            return 0
 
     def spawn_close_execution_activity(
         self,

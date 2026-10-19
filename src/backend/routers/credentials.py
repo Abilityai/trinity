@@ -22,7 +22,7 @@ from models import (
     CredentialRequirementsResponse,
 )
 from config import OAUTH_CONFIGS, BACKEND_URL
-from dependencies import get_current_user, require_admin, get_authorized_agent_by_name, get_owned_agent_by_name, reject_agent_principal
+from dependencies import get_current_user, require_admin, get_authorized_agent_by_name, get_owned_agent_by_name, human_only, reject_agent_principal
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, get_agent_status_from_container
 from services.mcp_validator import validate_mcp_config, McpValidationError
@@ -454,7 +454,7 @@ async def inject_credentials(
     )
 
 
-@router.post("/agents/{agent_name}/credentials/export")
+@router.post("/agents/{agent_name}/credentials/export", dependencies=[Depends(human_only)])
 async def export_credentials(
     request: Request,
     agent_name: str = Depends(get_owned_agent_by_name),
@@ -529,7 +529,7 @@ async def export_credentials(
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
 
-@router.post("/agents/{agent_name}/credentials/import")
+@router.post("/agents/{agent_name}/credentials/import", dependencies=[Depends(human_only)])
 async def import_credentials(
     request: Request,
     agent_name: str = Depends(get_owned_agent_by_name),

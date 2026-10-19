@@ -12,7 +12,7 @@ import logging
 from datetime import datetime
 from typing import NoReturn, Optional
 
-from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, TaskExecutionStatus
+from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ReportBackRequest, TaskExecutionStatus
 from dependencies import (
     capability_fence,
     get_current_user,
@@ -33,6 +33,7 @@ from services.capacity_manager import (
 )
 from services import dispatch_admission_service
 from services import chat_execution_service
+from services import chat_persistence_service
 from services.chat_signals import (
     ChatAdmissionReplay,
     ChatDispatchError,
@@ -510,6 +511,8 @@ async def get_agent_chat_history(
         return [
             {"role": m.role, "content": m.content, "timestamp": m.timestamp.isoformat()}
             for m in db.get_chat_messages(sessions[0].id)
+            # trinity#3526: a held gated request and its notice are not turns.
+            if not chat_persistence_service.is_gate_message(m)
         ]
 
     if container.status != "running":
@@ -826,7 +829,7 @@ async def get_persistent_chat_history(
     # Determine if user should see all messages or just their own
     # Agent owners can see all messages, others only see their own
     user_id_filter = None
-    if user_filter or current_user.role != "admin":
+    if user_filter or not _sees_every_user(current_user):
         # For non-admins, always filter to their own messages unless they're the owner
         # (Owner check would require checking agent_ownership table)
         user_id_filter = current_user.id
@@ -842,6 +845,15 @@ async def get_persistent_chat_history(
         "message_count": len(messages),
         "messages": [msg.model_dump() for msg in messages]
     }
+
+
+def _sees_every_user(current_user: User) -> bool:
+    """Whether a history read spans every user's conversations with the agent:
+    an admin PERSON, never an agent key. An agent key carries its owner's role,
+    so with an `agent_permissions` edge to B it read every user's chats with B
+    — "may call" is not "may read everyone's conversations with it"
+    (trinity-enterprise#629, #3346 review)."""
+    return current_user.role == "admin" and not getattr(current_user, "agent_name", None)
 
 
 @router.get("/{name}/chat/sessions")
@@ -864,7 +876,7 @@ async def get_agent_chat_sessions(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     # Non-admins only see their own sessions
-    user_id_filter = None if current_user.role == "admin" else current_user.id
+    user_id_filter = None if _sees_every_user(current_user) else current_user.id
 
     sessions = db.get_agent_chat_sessions(
         agent_name=name,
@@ -912,7 +924,7 @@ async def get_chat_session_detail(
     return {
         "session": session.model_dump(),
         "message_count": len(messages),
-        "messages": [msg.model_dump() for msg in messages]
+        "messages": chat_persistence_service.session_messages_view(name, messages),
     }
 
 
@@ -981,6 +993,36 @@ async def terminate_agent_execution(
             name=name,
             execution_id=execution_id,
             task_execution_id=task_execution_id,
+            current_user=current_user,
+        )
+    except ChatDispatchError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
+
+
+@router.post("/{name}/executions/{execution_id}/report-back")
+async def arm_execution_report_back(
+    execution_id: str,
+    request: ReportBackRequest,
+    name: str = Depends(get_authorized_agent),
+    current_user: User = Depends(get_current_user),
+):
+    """#3295: ask that a sequential ``/chat`` execution report its terminal into
+    the caller's conversation (Slack / Telegram / Workspace).
+
+    Called by the MCP server at the moment it hands the caller a receipt instead
+    of the reply — so a call that answered inline is never armed and cannot
+    post twice. The body names the CALLER's own turn; the execution inherits
+    that turn's channel context through the same provenance guard a ``/task``
+    child uses. Agent-callable by design: the arming agent is the one that
+    dispatched the row (the service checks that), and the capability it uses
+    — reporting into a conversation it is already serving — is the ent#224
+    consent-gated completion report, never a new send path.
+    """
+    try:
+        return await chat_execution_service.arm_chat_report_back(
+            name=name,
+            execution_id=execution_id,
+            request=request,
             current_user=current_user,
         )
     except ChatDispatchError as e:

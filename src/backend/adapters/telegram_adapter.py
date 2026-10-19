@@ -24,6 +24,7 @@ import httpx
 
 from database import db
 from adapters.base import ChannelAdapter, FileAttachment, NormalizedMessage, ChannelResponse
+from services import login_policy_gate
 from services.email_service import EmailService
 from services.telegram_group_context import fetch_can_read_all_group_messages
 
@@ -95,6 +96,21 @@ def _clear_pending_login(binding_id: int, user_id: str) -> None:
             r.delete(_get_pending_login_key(binding_id, user_id))
     except Exception as e:
         logger.warning(f"Redis unavailable for pending login clear: {e}")
+
+
+# ent#849: strong refs so a detached code send is not garbage-collected mid-flight.
+_login_code_tasks: set = set()
+
+
+async def _send_login_code_if_allowed(email: str) -> None:
+    """Mint and send a /login code off the reply path (policy-refused mode)."""
+    try:
+        if not login_policy_gate.email_code_allowed_for(email):
+            return
+        code = db.create_login_code(email, expiry_minutes=10)["code"]
+        await EmailService().send_verification_code(email, code)
+    except Exception:
+        logger.exception("Failed to issue /login code")
 
 
 class TelegramAdapter(ChannelAdapter):
@@ -924,6 +940,9 @@ class TelegramAdapter(ChannelAdapter):
                     "I don't have a pending login for you. Send "
                     "<code>/login your@email.com</code> first."
                 )
+            # ent#849: refused before redeeming, worded like a wrong code.
+            if not login_policy_gate.email_code_allowed_for(pending_email):
+                return "❌ Invalid or expired code. Try again or request a new one."
             result = db.verify_login_code(pending_email, arg)
             if not result:
                 return "❌ Invalid or expired code. Try again or request a new one."
@@ -963,6 +982,19 @@ class TelegramAdapter(ChannelAdapter):
         email = arg.lower()
         if "@" not in email or " " in email or len(email) > 254:
             return "That doesn't look like an email address. Try <code>/login you@example.com</code>."
+
+        # ent#849: while the login policy refuses email codes, every address
+        # takes the same background path: members get no code, and neither the
+        # reply nor its timing tells a member from an outsider.
+        if not login_policy_gate.email_code_allowed():
+            _set_pending_login(binding["id"], message.sender_id, email)
+            task = asyncio.create_task(_send_login_code_if_allowed(email))
+            _login_code_tasks.add(task)
+            task.add_done_callback(_login_code_tasks.discard)
+            return (
+                f"📧 Sent a 6-digit code to <code>{email}</code>.\n"
+                "Reply with <code>/login 123456</code> to finish verification."
+            )
 
         try:
             code_data = db.create_login_code(email, expiry_minutes=10)

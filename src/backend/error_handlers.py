@@ -95,3 +95,13 @@ async def skill_gate_error(request: Request, exc) -> JSONResponse:
     if isinstance(exc, SkillApprovalRequired):
         return JSONResponse(status_code=202, content=detail, headers=headers)
     return JSONResponse(status_code=exc.status_code, content={"detail": detail}, headers=headers)
+
+
+async def secret_setting_value_error(request: Request, exc) -> JSONResponse:
+    """The named 422 for a credential setting whose VALUE cannot be stored
+    (#3325) — e.g. an unpaired UTF-16 surrogate in a pasted API key.
+
+    The message is value-free by construction (``SecretSettingValueError`` names
+    the key only and is raised ``from None``), so it is safe to return as is.
+    """
+    return JSONResponse(status_code=422, content={"detail": str(exc)})

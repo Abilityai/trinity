@@ -21,6 +21,10 @@
       <GuardrailsPanel :agent-name="agentName" :notify="notify" />
     </section>
 
+    <!-- Section 1b: Permissions to change itself (trinity-enterprise#756); the
+         panel renders its own section card, and nothing for a non-owner. -->
+    <SelfChangePermissionsPanel :agent-name="agentName" />
+
     <!-- Section 2: Parallel Capacity (#506) -->
     <section class="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
       <CapacityPanel :agent-name="agentName" :notify="notify" />
@@ -59,6 +63,7 @@
 
 <script setup>
 import GuardrailsPanel from '../GuardrailsPanel.vue'
+import SelfChangePermissionsPanel from './SelfChangePermissionsPanel.vue'
 import CapacityPanel from '../CapacityPanel.vue'
 import McpExposedPanel from '../McpExposedPanel.vue'
 import AgentMcpKeyPanel from '../AgentMcpKeyPanel.vue'

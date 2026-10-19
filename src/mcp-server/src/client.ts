@@ -24,6 +24,7 @@ import type {
   ActivityTimelineResponse,
   OperatorQueueAskReadback,
   OperatorAskCreate,
+  OperatorAskWithdraw,
   OperatorAskReceipt,
   OperatorQueueItem,
   OperatorQueueListResponse,
@@ -106,6 +107,24 @@ export class ApiError extends Error {
     this.body = body;
     this.conflictType = headers?.get("X-Conflict-Type") ?? undefined;
     this.conflictClass = headers?.get("X-Conflict-Class") ?? undefined;
+  }
+}
+
+/**
+ * The operator floor's refusal (trinity-enterprise#837): a Workspace-only
+ * account is refused on operator routes with `403 {detail: {code:
+ * "workspace_only"}}`. A read that degrades to "none" on failure must pass this
+ * one through, or the caller reports a missing permission or a missing agent
+ * instead of the account's real situation.
+ */
+export function isWorkspaceOnlyRefusal(err: unknown): boolean {
+  if (!(err instanceof ApiError) || err.status !== 403) return false;
+  try {
+    const parsed = JSON.parse(err.body) as { detail?: unknown };
+    const d = (parsed?.detail ?? parsed) as { code?: unknown } | null;
+    return d?.code === "workspace_only";
+  } catch {
+    return false;
   }
 }
 
@@ -366,6 +385,86 @@ export interface DepthRefusal {
 export const INTER_AGENT_DEPTH_EXCEEDED = "inter_agent_depth_exceeded";
 
 /**
+ * #3244: a 429 from `/chat` that is NOT the admission refusal. Only
+ * `X-Trinity-Error-Code: capacity` proves nothing was dispatched; the usage /
+ * rate-limit 429 is raised after the agent ran the turn and its row was written
+ * `failed`, so "wait and re-send" would repeat what the partial run did. A
+ * RESULT that names that row, or — when the response names none — says the run
+ * may have started.
+ */
+export interface RateLimitedRun {
+  status: "rate_limited";
+  agent: string;
+  /** `X-Trinity-Error-Code` (e.g. `billing`); absent when the 429 carried none. */
+  code?: string;
+  /** The failed run, from `X-Trinity-Execution-Id`. */
+  execution_id?: string;
+  /** The agent's own error text. */
+  error?: string;
+  retryable: false;
+  message: string;
+}
+
+export const CAPACITY_ERROR_CODE = "capacity";
+
+/** An id safe to quote into a tool call the model is told to make. */
+const EXECUTION_ID_SHAPE = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * #3244: build the `RateLimitedRun` for a non-capacity 429. Never throws, and
+ * never passes on the backend's own "Please retry." (the auto-switch body).
+ */
+export function parseRateLimitedRun(
+  errorCode: string | null,
+  executionId: string | null,
+  body: string,
+  agent: string,
+): RateLimitedRun {
+  let error: string | undefined;
+  let switched = false;
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    const d = (parsed as { detail?: unknown })?.detail ?? parsed;
+    if (typeof d === "string") {
+      error = d;
+    } else if (d && typeof d === "object") {
+      const e = (d as { error?: unknown }).error;
+      if (typeof e === "string") error = e;
+      // #3470's exhausted-walk 429 carries `auto_switch: walk.summary()` — a
+      // non-empty dict whose `switched` is false — so the key's presence alone
+      // does not mean a switch happened. Read `switched` when the body says it;
+      // fall back to presence only for bodies that predate the key.
+      const autoSwitch = (d as { auto_switch?: unknown }).auto_switch;
+      const switchedFlag = (autoSwitch as { switched?: unknown } | null | undefined)?.switched;
+      switched = typeof switchedFlag === "boolean" ? switchedFlag : Boolean(autoSwitch);
+    }
+  } catch {
+    // not JSON (a proxy's 429): nothing to quote
+  }
+  const id = executionId && EXECUTION_ID_SHAPE.test(executionId) ? executionId : undefined;
+  return {
+    status: "rate_limited",
+    agent,
+    ...(errorCode ? { code: errorCode } : {}),
+    ...(id ? { execution_id: id } : {}),
+    ...(error ? { error } : {}),
+    retryable: false,
+    message: id
+      ? `The run on '${agent}' started and then failed on a usage or rate limit; it is recorded as failed. ` +
+        `Part of the work may already be done, so do not re-send this message as it is. ` +
+        (switched ? "The agent's subscription was switched after the failure. " : "") +
+        `Read what happened with get_execution_result(agent_name="${agent}", execution_id="${id}") and decide from that.`
+      : `'${agent}' answered with a rate limit (HTTP 429) that is not a queue-full refusal, so the run may have started. ` +
+        `Do not re-send yet: look for your exact message in list_recent_executions(agent_name="${agent}") ` +
+        `and read that run with get_execution_result.`,
+  };
+}
+
+export function isRateLimitedRun(value: unknown): value is RateLimitedRun {
+  return (value as { status?: unknown })?.status === "rate_limited";
+}
+
+/**
  * #2806: a `DepthRefusal` from a non-2xx response, or undefined for anything
  * else — including a 403 WITHOUT the code (access denial, SELF-EXEC-001), which
  * must keep throwing. Read defensively, like `extractIdempotencyExecutionId`:
@@ -429,6 +528,9 @@ export interface GateResult {
   request_id?: string;
   skills?: string[];
   approver_role?: string;
+  /** trinity-enterprise#848: what the approver shows as — a kind's name, or a
+   * canon role's ("Head of sales"). Absent from an older backend. */
+  approver_label?: string;
   expires_at?: string | null;
   /** trinity#3233: how the backend will tell this caller the outcome —
    * `agent_task`, `inbox`, or `none` (absent from an older backend = none). */
@@ -462,6 +564,7 @@ export function parseGateResult(
         request_id: typeof parsed.request_id === "string" ? parsed.request_id : undefined,
         skills: Array.isArray(parsed.skills) ? (parsed.skills as string[]) : undefined,
         approver_role: typeof parsed.approver_role === "string" ? parsed.approver_role : undefined,
+        approver_label: typeof parsed.approver_label === "string" ? parsed.approver_label : undefined,
         expires_at: typeof parsed.expires_at === "string" ? parsed.expires_at : null,
         outcome_delivery: delivery,
         retryable: false,
@@ -798,7 +901,8 @@ export class TrinityClient {
         owner: agent.owner || "unknown",
         is_shared: agent.is_shared || false,
       };
-    } catch {
+    } catch (err) {
+      if (isWorkspaceOnlyRefusal(err)) throw err;
       return null;
     }
   }
@@ -899,7 +1003,8 @@ export class TrinityClient {
         `/api/agents/${encodeURIComponent(sourceAgent)}/permissions`
       );
       return response.permitted_agents.map((a) => a.name);
-    } catch {
+    } catch (err) {
+      if (isWorkspaceOnlyRefusal(err)) throw err;
       return [];
     }
   }
@@ -907,9 +1012,23 @@ export class TrinityClient {
   /**
    * Check if source agent is permitted to call target agent (Phase 9.10)
    */
+  /**
+   * May `sourceAgent` call `targetAgent`? Decided by the backend from the
+   * database — the permission edge or the spawn record — never from the
+   * Docker-filtered permissions list, so a target with no container, a spawned
+   * child, or a Docker read fault no longer reads as "not permitted"
+   * (trinity-enterprise#629). Fails closed: any error is `false`.
+   */
   async isAgentPermitted(sourceAgent: string, targetAgent: string): Promise<boolean> {
-    const permitted = await this.getPermittedAgents(sourceAgent);
-    return permitted.includes(targetAgent);
+    try {
+      const response = await this.request<{ reachable: boolean }>(
+        "GET",
+        `/api/agents/${encodeURIComponent(sourceAgent)}/reach/${encodeURIComponent(targetAgent)}`
+      );
+      return response.reachable === true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -1118,7 +1237,8 @@ export class TrinityClient {
    * @param sourceAgent - Optional source agent name for agent-to-agent collaboration tracking
    * @param mcpKeyInfo - Optional MCP key info for execution origin tracking (AUDIT-001)
    *
-   * Returns ChatResponse on success, or a queue status object if agent is busy (429).
+   * Returns ChatResponse on success, a queue status object if admission refused
+   * the call (429 `capacity`), or a RateLimitedRun for any other 429 (#3244).
    */
   async chat(
     name: string,
@@ -1133,6 +1253,7 @@ export class TrinityClient {
     | Replayable<{ status: "queued_timeout"; agent: string; execution_id: string; message: string }>
     | DepthRefusal
     | GateResult
+    | RateLimitedRun
   > {
     // Prepare headers
     const headers: Record<string, string> = {
@@ -1242,6 +1363,22 @@ export class TrinityClient {
     const gate = await readGateResult(response, name);
     if (gate) return gate;
 
+    // #3244: only the admission refusal (#2919 `capacity`) is "agent busy" —
+    // nothing was dispatched. Every other 429 fails toward "the run may have
+    // started": the post-run usage limit (which names its failed row), and one
+    // with no code at all (a proxy, or a backend that sent none), since
+    // "nothing ran, retry" is the one answer that is unsafe when wrong.
+    if (response.status === 429 && response.headers.get("x-trinity-error-code") !== CAPACITY_ERROR_CODE) {
+      const limited = parseRateLimitedRun(
+        response.headers.get("x-trinity-error-code"),
+        response.headers.get("x-trinity-execution-id"),
+        await response.text(),
+        name,
+      );
+      debugLog(`[chat] 429 on '${name}' is not an admission refusal (code=${limited.code ?? "none"}, execution_id=${limited.execution_id ?? "none"}) (#3244)`);
+      return limited;
+    }
+
     // Handle 429 Too Many Requests (agent queue full)
     if (response.status === 429) {
       let details: Record<string, unknown> = {};
@@ -1272,6 +1409,21 @@ export class TrinityClient {
           debugLog(`[chat] 409 in-flight replay on '${name}' -> execution_id=${executionId} (#2661)`);
           return this.inFlightReplayReceipt(name, executionId);
         }
+      }
+      // #3295: the backend's OWN wait ran out (a pull pilot's `/chat`, #3127)
+      // while the turn keeps running. That is the same situation as our abort
+      // above — the caller will not get the reply — so it gets the same receipt
+      // through the same lookup, and can be armed to report back. Only reached
+      // when MCP_CHAT_TIMEOUT_MS outlasts the backend's wait; the window is
+      // derived from how long THIS call waited, as the abort path's is.
+      if (response.status === 504) {
+        debugLog(`[chat] backend 504 after ${Date.now() - startTime}ms on '${name}'; attempting execution-id lookup (#3295)`);
+        const receipt = await this.findRecentMcpExecution(name, mcpKeyInfo?.keyId, {
+          triggers: CHAT_RECOVERY_TRIGGERS,
+          message,
+          windowMs: Date.now() - startTime + 10_000,
+        });
+        if (receipt) return this.queuedTimeoutReceipt(name, receipt.id, timeoutMs);
       }
       const refusal = parseDepthRefusal(response.status, error, name);
       if (refusal) {
@@ -1610,6 +1762,65 @@ export class TrinityClient {
         `MCP-server timeout (${timeoutMs}ms) on chat_with_agent — the task is still running on '${name}'. ` +
         `${readNotResend(name, executionId)} A timeout is not a failure (#914).`,
     };
+  }
+
+  /**
+   * #3295: ask the backend to report a sequential `/chat` execution's terminal
+   * into the caller's conversation. Called only when `chat()` answered with a
+   * `queued_timeout` receipt — the one moment the caller is known NOT to get
+   * the reply, so a call that answers inline is never armed.
+   *
+   * Returns `true` (armed), `false` (the backend answered and refused: a 4xx,
+   * or 200 with `armed: false`), or `undefined` when the answer is unknown (own
+   * deadline hit, network error). The caller treats unknown as "requested":
+   * the backend may well have processed the arm after we stopped waiting, and
+   * the result's own wording already says requested is not a guarantee. Never
+   * throws — this rides the tail of a call that is already near the MCP
+   * gateway ceiling, so the deadline is short (`MCP_REPORT_BACK_ARM_TIMEOUT_MS`,
+   * default 2000).
+   */
+  async armChatReportBack(
+    name: string,
+    executionId: string,
+    parentExecutionId: string,
+    sourceAgent?: string,
+  ): Promise<boolean | undefined> {
+    if (!this.token) return undefined;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${this.token}`,
+      "X-Via-MCP": "true",
+    };
+    if (sourceAgent) headers["X-Source-Agent"] = sourceAgent;
+    const timeoutMs = Number(process.env.MCP_REPORT_BACK_ARM_TIMEOUT_MS || 2000);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/api/agents/${encodeURIComponent(name)}/executions/${encodeURIComponent(executionId)}/report-back`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ parent_execution_id: parentExecutionId }),
+          signal: controller.signal,
+        },
+      );
+      if (!response.ok) {
+        debugLog(`[chat] report-back arm refused for ${executionId} on '${name}': ${response.status} (#3295)`);
+        return false;
+      }
+      const body = (await response.json()) as { armed?: unknown; reason?: unknown };
+      if (body.armed !== true) {
+        debugLog(`[chat] report-back not armed for ${executionId} on '${name}': ${String(body.reason ?? "?")} (#3295)`);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      debugLog(`[chat] report-back arm for ${executionId} on '${name}' unresolved: ${(err as Error)?.message} (#3295)`);
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -2587,6 +2798,23 @@ export class TrinityClient {
       false,
       undefined,
       turn ? { "X-Trinity-Execution-Id": turn } : undefined,
+    );
+  }
+
+  /**
+   * End one of the agent's OWN pending asks with a reason and no successor
+   * (trinity-enterprise#901). Proxies
+   * POST /api/agents/{name}/operator-queue/{request_id}/withdraw: the backend
+   * answers only the agent's own key (or the system key as trinity-system),
+   * 200 with the receipt (`status: "withdrawn"`, or `"replayed"` when this
+   * agent already withdrew it). A refusal (404 ask_not_found / 409 ask_ended /
+   * 422 invalid_reason) is thrown as an ApiError carrying the named code.
+   */
+  async withdrawAsk(agentName: string, requestId: string, body: OperatorAskWithdraw): Promise<OperatorAskReceipt> {
+    return this.request<OperatorAskReceipt>(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/operator-queue/${encodeURIComponent(requestId)}/withdraw`,
+      body,
     );
   }
 
@@ -3808,6 +4036,7 @@ export class TrinityClient {
       clear_credentials?: boolean;
       /** `payment_token` makes the credential ride as x402 payment (#3185). */
       credential_kind?: "api_key" | "payment_token";
+      auth_scheme?: "bearer" | "aauth"; // ent#862
     },
   ): Promise<{ endpoint?: unknown; enabled?: boolean; hint?: string }> {
     return this.request<{ endpoint?: unknown; enabled?: boolean; hint?: string }>(
@@ -3910,6 +4139,35 @@ export class TrinityClient {
     return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/a2a/task`, body);
   }
 
+  /**
+   * Obtain (or resume obtaining) a person token for a resource as `name`
+   * (trinity-enterprise#878). Own-key only on the backend; the response never
+   * carries the token. Same bounded fetch as the A2A hop: the backend waits on
+   * the person server for up to `wait` + 8 s.
+   */
+  async requestPersonToken(
+    name: string,
+    body: {
+      resource: string;
+      pending_handle?: string;
+      wait?: number;
+      execution_id?: string;
+      trigger_source?: "mcp" | "api" | "script";
+    },
+  ): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/aauth/person-token`, body);
+  }
+
+  /**
+   * Call an allow-listed AAuth resource as `name`, or resume a pending call by
+   * its handle (trinity-enterprise#879). Own-key only on the backend; the
+   * response never carries a token. Same bounded fetch as the A2A hop: the
+   * backend's own budget is 25 s, under the 40 s gateway deadline.
+   */
+  async callAAuthResource(name: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/aauth/resource-call`, body);
+  }
+
   // --- Credential vault (trinity-enterprise#279) ----------------------------
   // Agent-facing discovery + fetch. Both are agent-scoped-key-only on the
   // backend; `request()` throws a typed `ApiError` on any non-2xx so the tool
@@ -3997,6 +4255,16 @@ export class TrinityClient {
 
   async setProjectHealth(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", this.projectPath(projectId, "/health"), turn, body);
+  }
+
+  /** trinity-enterprise#588: create a project on the agent's OWNER's behalf (projects.manage). */
+  async createProjectAsAgent(body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", "/api/enterprise/projects/agent/projects", turn, body);
+  }
+
+  /** trinity-enterprise#588: import one of the agent's OWN folder projects (projects.manage). */
+  async importProjectAsAgent(path: string, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", "/api/enterprise/projects/agent/projects/import", turn, { path });
   }
 
   // --- Role assignments (trinity-enterprise#500) ----------------------------

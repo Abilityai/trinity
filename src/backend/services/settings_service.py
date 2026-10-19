@@ -904,9 +904,6 @@ class SettingsService:
         """
         db.set_setting(TEMPLATE_REGISTRY_LKG_KEY, json.dumps(payload))
 
-    def clear_template_registry_lkg(self) -> None:
-        db.delete_setting(TEMPLATE_REGISTRY_LKG_KEY)
-
     def get_platform_default_model(self) -> str:
         """
         Return the platform-wide default Claude model (#831).
@@ -1032,6 +1029,36 @@ def resolve_github_pat(agent_name: Optional[str] = None,
     if global_pat:
         return global_pat, "global"
     return "", "none"
+
+
+def resolve_github_pat_candidates(agent_name: Optional[str] = None,
+                                  owner_id: Optional[int] = None) -> list:
+    """Every configured GitHub PAT tier, in ``resolve_github_pat``'s order (#3725).
+
+    Returns ``[(pat, tier), ...]`` — only tiers that hold a token, and each
+    token VALUE once (a per-user token equal to the global one is the same
+    credential and would get the same answer from GitHub, so the later tier is
+    dropped). The credential-free path is not an entry: an empty list means
+    "no token anywhere", and the caller owns what it does next.
+
+    This is the ladder the create path walks when the preferred tier cannot
+    read a template — a stale saved token must not mask a platform token that
+    can. ``resolve_github_pat`` stays the single-answer resolver; its first
+    answer is always this list's first entry.
+    """
+    candidates = []
+    if agent_name:
+        candidates.append((db.get_agent_github_pat(agent_name), "per_agent"))
+    if owner_id is not None:
+        candidates.append((db.get_user_github_pat(owner_id), "per_user"))
+    candidates.append((get_github_pat(), "global"))
+    seen = set()
+    ladder = []
+    for pat, tier in candidates:
+        if pat and pat not in seen:
+            seen.add(pat)
+            ladder.append((pat, tier))
+    return ladder
 
 
 def get_google_api_key() -> str:

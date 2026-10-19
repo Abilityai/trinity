@@ -40,6 +40,7 @@ vi.mock('axios', () => {
 
 import { useClientPortalStore } from '@/stores/clientPortal'
 import PortalInbox from '@/components/portal/PortalInbox.vue'
+import PortalInboxPane from '@/components/portal/PortalInboxPane.vue'
 
 globalThis.ResizeObserver = globalThis.ResizeObserver || class { observe() {} unobserve() {} disconnect() {} }
 
@@ -677,7 +678,7 @@ describe('answering an ask in the pane (D8)', () => {
 
 describe('a selection restored from the URL (D8)', () => {
   it('a deep-linked ask is held in place once answered, exactly as a clicked one is', async () => {
-    // §3g C1: Action is oldest-first among equals, so a2 (newer) is second.
+    // trinity-enterprise#856: Action opens Newest first, so a1 (older) is second.
     store.asks = [ask('a1', { created_at: iso(20) }), ask('a2', { created_at: iso(1) })]
     store.asksLoaded = true
     store.answerAsk = vi.fn(async (id) => {
@@ -686,16 +687,16 @@ describe('a selection restored from the URL (D8)', () => {
       return answered
     })
     // Reload / deep link: the URL names the item, nobody clicked it.
-    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:a2' } })
-    await w.find('[data-testid="inbox-ask-input-a2"]').setValue('yes')
-    await w.find('[data-testid="inbox-ask-input-a2"]').element.form.dispatchEvent(new Event('submit'))
+    const w = await mountInbox({}, { query: { tab: 'action', item: 'ask:a1' } })
+    await w.find('[data-testid="inbox-ask-input-a1"]').setValue('yes')
+    await w.find('[data-testid="inbox-ask-input-a1"]').element.form.dispatchEvent(new Event('submit'))
     await flushPromises()
-    expect(store.answerAsk).toHaveBeenCalledWith('a2', expect.anything())
-    expect(has(w, 'inbox-row-ask:a2')).toBe(true)
-    expect(has(w, 'inbox-row-ended-ask:a2')).toBe(true)
+    expect(store.answerAsk).toHaveBeenCalledWith('a1', expect.anything())
+    expect(has(w, 'inbox-row-ask:a1')).toBe(true)
+    expect(has(w, 'inbox-row-ended-ask:a1')).toBe(true)
     // …and it keeps its place: second, where the reader last saw it.
     const keys = w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))
-    expect(keys).toEqual(['ask:a1', 'ask:a2'])
+    expect(keys).toEqual(['ask:a2', 'ask:a1'])
   })
 })
 
@@ -902,21 +903,47 @@ describe('the pane header (§3g L5: stacked chrome, split order)', () => {
   })
 })
 
-describe('Open canvas (§3g C10, T6)', () => {
+describe('Open canvas is a chat action; an ask opens its own chat (§3g C10, #3714)', () => {
   const headerIds = (w) => w.find('[data-testid="inbox-pane"] header').findAll('[data-testid]')
     .map((el) => el.attributes('data-testid'))
-    .filter((id) => /^inbox-pane-(heading|open-canvas|mark-read|reply|open|more)$/.test(id))
+    .filter((id) => /^inbox-pane-(back|heading|open-canvas|mark-read|reply|open|more)$/.test(id))
+  // The fixture's ask defaults to `chat_id: null` and no `raised_in_turn`, so a
+  // positive case must set both or it is green for the wrong reason.
+  const fromChat = { chat_id: 's9', raised_in_turn: true }
 
-  it('split: leftmost of the actions on a chat, and on an ask; it asks the shell for the canvas', async () => {
-    store.asks = [ask('q1')]
-    store.asksLoaded = true
+  it('split: leftmost of the actions on a chat; it asks the shell for the canvas', async () => {
     const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], canvasCount: 2 }, { query: { tab: 'unread', item: 'thread:t1' } })
     expect(headerIds(w)).toEqual(['inbox-pane-heading', 'inbox-pane-open-canvas', 'inbox-pane-mark-read', 'inbox-pane-reply', 'inbox-pane-open'])
     await w.find('[data-testid="inbox-pane-open-canvas"]').trigger('click')
     expect(w.emitted('open-canvas')).toHaveLength(1)
-    await router.replace({ path: '/workspace/inbox', query: { tab: 'action', item: 'ask:q1' } })
-    await flushPromises()
-    expect(has(w, 'inbox-pane-open-canvas')).toBe(true)
+  })
+
+  it('split, an ask raised in a chat: no Open canvas — Open in chat sends the card\'s `open-thread`', async () => {
+    store.asks = [ask('q1', fromChat)]
+    store.asksLoaded = true
+    const w = await mountInbox({ canvasCount: 2 }, { query: { tab: 'action', item: 'ask:q1' } })
+    expect(headerIds(w)).toEqual(['inbox-pane-heading', 'inbox-pane-open'])
+    await w.find('[data-testid="inbox-pane-open"]').trigger('click')
+    expect(w.emitted('open-thread')?.at(-1)).toEqual([{ id: 's9', agent_name: 'scout' }])
+    expect(w.emitted('open-chat')).toBeUndefined()
+  })
+
+  it.each(['approval', 'question', 'alert'])('split, a %s ask: never Open canvas', async (kind) => {
+    store.asks = [ask('q1', { kind, ...fromChat })]
+    store.asksLoaded = true
+    const w = await mountInbox({ canvasCount: 2 }, { query: { tab: 'action', item: 'ask:q1' } })
+    expect(has(w, 'inbox-pane-open-canvas')).toBe(false)
+    expect(has(w, 'inbox-pane-open')).toBe(true)
+  })
+
+  it('split, a background ask: no actions at all, and the header keeps its reserved height', async () => {
+    store.asks = [ask('q1', { chat_id: 'main1', raised_in_turn: false })]
+    store.asksLoaded = true
+    const w = await mountInbox({ canvasCount: 2 }, { query: { tab: 'action', item: 'ask:q1' } })
+    expect(has(w, 'inbox-pane-actions')).toBe(false)
+    expect(has(w, 'inbox-pane-open-canvas')).toBe(false)
+    expect(has(w, 'inbox-pane-open')).toBe(false)
+    expect(w.find('[data-testid="inbox-pane"] header').classes()).toContain('min-h-[3.25rem]')
   })
 
   it('absent with no canvas', async () => {
@@ -924,7 +951,7 @@ describe('Open canvas (§3g C10, T6)', () => {
     expect(has(w, 'inbox-pane-open-canvas')).toBe(false)
   })
 
-  it('stacked: it lives in More', async () => {
+  it('stacked: on a chat it lives in More', async () => {
     phone = true
     stubMatchMedia()
     const w = await mountInbox({ threads: [thread('t1', { unread: 2 })], canvasCount: 1 }, { query: { tab: 'unread' } })
@@ -933,6 +960,45 @@ describe('Open canvas (§3g C10, T6)', () => {
     expect(headerIds(w)).not.toContain('inbox-pane-open-canvas')
     await w.find('[data-testid="inbox-pane-more"]').trigger('click')
     expect(w.find('[data-testid="inbox-pane-more-menu"] [data-testid="inbox-pane-open-canvas"]').exists()).toBe(true)
+  })
+
+  it('stacked, an ask raised in a chat: [Back] … [Open in chat] and no More — never an empty menu', async () => {
+    phone = true
+    stubMatchMedia()
+    store.asks = [ask('q1', fromChat)]
+    store.asksLoaded = true
+    const w = await mountInbox({ canvasCount: 1 }, { query: { tab: 'action' } })
+    await w.find('[data-testid="inbox-row-ask:q1"]').trigger('click')
+    await flushPromises()
+    expect(headerIds(w)).toEqual(['inbox-pane-back', 'inbox-pane-heading', 'inbox-pane-open'])
+    expect(has(w, 'inbox-pane-open-canvas')).toBe(false)
+    await w.find('[data-testid="inbox-pane-open"]').trigger('click')
+    expect(w.emitted('open-thread')?.at(-1)).toEqual([{ id: 's9', agent_name: 'scout' }])
+  })
+
+  it('stacked, a background ask: no More and no Open in chat', async () => {
+    phone = true
+    stubMatchMedia()
+    store.asks = [ask('q1')]
+    store.asksLoaded = true
+    const w = await mountInbox({ canvasCount: 1 }, { query: { tab: 'action' } })
+    await w.find('[data-testid="inbox-row-ask:q1"]').trigger('click')
+    await flushPromises()
+    expect(has(w, 'inbox-pane-more')).toBe(false)
+    expect(has(w, 'inbox-pane-open')).toBe(false)
+  })
+
+  it('a mention: no Open canvas either — it is a person\'s tag, not the agent\'s (T2)', async () => {
+    store.openMention = vi.fn(async () => ({
+      id: 'm1', agent_name: 'scout', state: 'unread', created_at: iso(3), tagged_by: 'Alice Archer',
+      conversation: { kind: 'room', id: null, label: 'Pricing review' },
+      can_see: false, message: null, context: [], can_let_you_in: [],
+    }))
+    const item = { key: 'mention:m1', type: 'mention', id: 'm1', agent_name: 'scout',
+      mention: { id: 'm1', tagged_by: 'Alice Archer', conversation: { kind: 'room', label: 'Pricing review' } } }
+    wrapper = mount(PortalInboxPane, { props: { item, canvasCount: 1 }, global: { plugins: [router] }, attachTo: document.body })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="inbox-pane-open-canvas"]').exists()).toBe(false)
   })
 })
 
@@ -1370,5 +1436,118 @@ describe('Action narrowed to one agent (§3g C2, ?from=)', () => {
     await flushPromises()
     expect(router.currentRoute.value.query.from).toBeUndefined()
     expect(facetsTabs(w).exists()).toBe(false)
+  })
+})
+
+describe('trinity-enterprise#856 — Action\'s sort: Newest by default, Urgency on a switch', () => {
+  // Newest and Urgency disagree: the old ask is critical and expires today.
+  const OLD_URGENT = () => ask('old', { priority: 'critical', created_at: iso(300), expires_at: new Date(NOW + 2 * 3600_000).toISOString() })
+  const NEW_PLAIN = () => ask('new', { priority: 'medium', created_at: iso(2) })
+  const rows = (w) => w.findAll('[data-inbox-row]').map((r) => r.attributes('data-inbox-row'))
+  const sortSelect = (w) => w.find('[data-testid="inbox-sort"]')
+  const KEY = 'trinity-workspace-inbox-sort:ada@example.com'
+  beforeEach(() => {
+    localStorage.setItem('auth0_user', JSON.stringify({ email: 'ada@example.com' }))
+    store.asks = [OLD_URGENT(), NEW_PLAIN()]
+    store.asksLoaded = true
+  })
+
+  it('opens Newest first, and the control names that order', async () => {
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    expect(rows(w)).toEqual(['ask:new', 'ask:old'])
+    expect(sortSelect(w).exists()).toBe(true)
+    expect(sortSelect(w).element.value).toBe('newest')
+    expect(sortSelect(w).attributes('aria-label')).toBe('Sort asks')
+    expect(sortSelect(w).findAll('option').map((o) => o.text())).toEqual(['Newest', 'Urgency'])
+  })
+
+  it('switching to Urgency re-sorts, writes ?sort= by replace, and remembers it for this viewer', async () => {
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    const push = vi.spyOn(router, 'push')
+    await sortSelect(w).setValue('urgency')
+    await flushPromises()
+    expect(router.currentRoute.value.query.sort).toBe('urgency')
+    expect(push).not.toHaveBeenCalled()
+    expect(localStorage.getItem(KEY)).toBe('urgency')
+    expect(rows(w)).toEqual(['ask:old', 'ask:new'])
+    expect(sortSelect(w).element.value).toBe('urgency')
+  })
+
+  it('?sort= in the URL wins over the memory; the memory wins over the default', async () => {
+    localStorage.setItem(KEY, 'urgency')
+    let w = await mountInbox({}, { query: { tab: 'action' } })
+    expect(rows(w)).toEqual(['ask:old', 'ask:new'])          // memory
+    w.unmount()
+    w = await mountInbox({}, { query: { tab: 'action', sort: 'newest' } })
+    expect(rows(w)).toEqual(['ask:new', 'ask:old'])          // URL
+    expect(localStorage.getItem(KEY)).toBe('urgency')         // a link does not overwrite the memory
+  })
+
+  it('another viewer on the same browser does not inherit the choice', async () => {
+    localStorage.setItem(KEY, 'urgency')
+    localStorage.setItem('auth0_user', JSON.stringify({ email: 'bob@example.com' }))
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    expect(rows(w)).toEqual(['ask:new', 'ask:old'])
+  })
+
+  it('an unknown ?sort= is ignored and leaves the URL', async () => {
+    const w = await mountInbox({}, { query: { tab: 'action', sort: 'loudest' } })
+    expect(rows(w)).toEqual(['ask:new', 'ask:old'])
+    expect(router.currentRoute.value.query.sort).toBeUndefined()
+  })
+
+  it('Unread and All have no sort control, and a stray ?sort= leaves the URL (T1)', async () => {
+    for (const tab of ['unread', 'all']) {
+      const w = await mountInbox({}, { query: { tab, sort: 'urgency' } })
+      expect(sortSelect(w).exists()).toBe(false)
+      expect(router.currentRoute.value.query.sort).toBeUndefined()
+      w.unmount()
+    }
+  })
+
+  it('a stray ?from= AND a stray ?sort= together both leave the URL in one replace (review I2)', async () => {
+    for (const tab of ['unread', 'all']) {
+      const w = await mountInbox({}, { query: { tab, from: 'relay', sort: 'newest' } })
+      await flushPromises()
+      expect(router.currentRoute.value.query).toEqual({ tab })
+      w.unmount()
+    }
+  })
+
+  it('a sort change is a new visit: held rows re-sort on the click, and only then', async () => {
+    store.asks = [ask('a1', { created_at: iso(30) }), ask('a2', { created_at: iso(5) })]
+    const w = await mountInbox({}, { query: { tab: 'action', sort: 'urgency' } })
+    expect(rows(w)).toEqual(['ask:a1', 'ask:a2'])            // equal priority: the longest-waiting first
+    // A poll raises a2 to critical: the visit holds still (principle 5).
+    store.asks = [ask('a1', { created_at: iso(30) }), ask('a2', { priority: 'critical', created_at: iso(5) })]
+    await flushPromises()
+    expect(rows(w)).toEqual(['ask:a1', 'ask:a2'])
+    await sortSelect(w).setValue('newest'); await flushPromises()
+    expect(rows(w)).toEqual(['ask:a2', 'ask:a1'])
+    await sortSelect(w).setValue('urgency'); await flushPromises()
+    expect(rows(w)).toEqual(['ask:a2', 'ask:a1'])            // a fresh visit sees the critical ask
+  })
+
+  it('the row marks that say WHY render in both orders (B7)', async () => {
+    for (const sort of ['newest', 'urgency']) {
+      const w = await mountInbox({}, { query: { tab: 'action', sort } })
+      const old = w.find('[data-testid="inbox-row-ask:old"]')
+      expect(old.find('[data-testid="inbox-row-badge-priority"]').exists()).toBe(true)
+      expect(old.find('[data-testid="inbox-row-badge-expiry"]').exists()).toBe(true)
+      w.unmount()
+    }
+  })
+
+  it('the head line keeps one box on every tab and in every state', async () => {
+    // The control lives inside the line's reserved 44px box, so switching tab
+    // (control on/off) or landing data (reserve → list) moves nothing.
+    store.asksLoaded = false
+    const w = await mountInbox({}, { query: { tab: 'action' } })
+    const box = (el) => el.classes().filter((c) => /^(h-|min-h-|py-|pt-|pb-)/.test(c)).sort()
+    const reserve = box(w.find('[data-testid="inbox-list-total-reserve"]'))
+    store.asksLoaded = true
+    await flushPromises()
+    expect(box(w.find('[data-testid="inbox-list-head"]'))).toEqual(reserve)
+    expect(reserve).toContain('h-11')
   })
 })

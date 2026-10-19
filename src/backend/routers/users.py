@@ -27,6 +27,7 @@ from services.platform_audit_service import AuditEventType, platform_audit_servi
 from dependencies import (
     require_admin,
     get_current_user,
+    workspace_route,
     reject_non_interactive_principal,
     require_interactive,
 )
@@ -281,6 +282,7 @@ async def clear_my_github_pat(current_user: User = Depends(require_interactive))
 
 
 @router.get("/me/preferences", response_model=UserPreferencesResponse)
+@workspace_route("the Workspace conversation reads the person's UI preferences")
 async def get_my_preferences(current_user: User = Depends(get_current_user)):
     """Every stored UI preference of the caller, in one round trip."""
     reject_non_interactive_principal(current_user)
@@ -288,6 +290,7 @@ async def get_my_preferences(current_user: User = Depends(get_current_user)):
 
 
 @router.put("/me/preferences/{key}", response_model=UserPreferenceRecord)
+@workspace_route("the Workspace conversation saves the person's UI preferences")
 async def put_my_preference(
     key: str,
     body: UserPreferenceWrite,
@@ -365,13 +368,19 @@ async def list_users(current_user: User = Depends(require_admin)):
 async def update_user_role(
     username: str,
     body: UserRoleUpdate,
+    request: Request,
     current_user: User = Depends(require_admin),
 ):
     """
     Change a user's role.
 
     Admin-only endpoint. Cannot demote yourself.
+
+    trinity-enterprise#837: a role applies on every agent, so changing one is a
+    grant — an interactive person only (`require_admin` alone admits
+    `trinity-system`'s key and an admin's user-scoped key), and audited.
     """
+    reject_non_interactive_principal(current_user)
     if username == current_user.username:
         raise HTTPException(status_code=400, detail="Cannot change your own role")
 
@@ -381,6 +390,18 @@ async def update_user_role(
             detail=f"Invalid role. Must be one of: {', '.join(sorted(VALID_ROLES))}"
         )
 
+    previous = db.get_user_by_username(username)
+    if not previous:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    # The whitelist row is the role an account created for this address gets —
+    # again after a re-bind — so it may never rank above the account: lowered
+    # with a demotion (no-ops included, which heals a row an earlier change left
+    # behind), never raised with a promotion. Written FIRST, so a failure leaves
+    # the role unchanged; the only partial state is a row already lowered.
+    if previous.get("email"):
+        db.cap_whitelist_default_role(previous["email"], body.role)
+
     try:
         updated = db.update_user_role(username, body.role)
     except ValueError as e:
@@ -388,6 +409,21 @@ async def update_user_role(
 
     if not updated:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    previous_role = previous.get("role")
+    if previous_role != updated["role"]:
+        await platform_audit_service.log(
+            event_type=AuditEventType.AUTHORIZATION,
+            event_action="role_change",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            target_type="user",
+            target_id=updated["username"],
+            endpoint=request.scope["path"],
+            request_id=getattr(request.state, "request_id", None),
+            details={"from": previous_role, "to": updated["role"]},
+        )
 
     return {
         "username": updated["username"],

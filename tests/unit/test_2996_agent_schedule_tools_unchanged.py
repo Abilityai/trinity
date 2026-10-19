@@ -50,7 +50,7 @@ AGENT = "sch2996-agent"
 def client(db_backend, monkeypatch):
     monkeypatch.setattr(dependencies, "get_breaker_redis", lambda: None)
     db.create_user(
-        UserCreate(username=OWNER, role="user", email="sch2996-owner@example.com")
+        UserCreate(username=OWNER, role="operator", email="sch2996-owner@example.com")
     )
     db.register_agent_owner(AGENT, OWNER)
     app = FastAPI()

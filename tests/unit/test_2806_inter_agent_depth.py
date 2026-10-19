@@ -96,13 +96,16 @@ class _Capacity:
 def world(db_backend, monkeypatch):
     """Two agents owned by one user, one foreign agent, and spies on the
     Redis/container-touching seams. Returns a namespace of handles."""
-    db.create_user(UserCreate(username=OWNER, role="user", email="owner@example.com"))
+    db.create_user(UserCreate(username=OWNER, role="operator", email="owner@example.com"))
     db.create_user(
-        UserCreate(username="depth-other", role="user", email="other@example.com")
+        UserCreate(username="depth-other", role="operator", email="other@example.com")
     )
     db.register_agent_owner(A, OWNER)
     db.register_agent_owner(B, OWNER)
     db.register_agent_owner(C_FOREIGN, "depth-other")
+    # ent#629: an agent key reaches a sibling only over an agent_permissions edge
+    # (the backend now holds what the MCP layer checks) — A calls B here.
+    db.add_agent_permission(A, B, created_by=OWNER)
     owner = db.get_user_by_username(OWNER)
 
     capacity = _Capacity()
@@ -127,7 +130,7 @@ def _agent_principal(world, agent=A, **extra) -> User:
         id=world.owner_id,
         username=OWNER,
         email="owner@example.com",
-        role="user",
+        role="operator",
         agent_name=agent,
         mcp_scope="agent",
         mcp_key_id="k-" + agent,
@@ -138,7 +141,7 @@ def _agent_principal(world, agent=A, **extra) -> User:
 
 def _human(world) -> User:
     return User(
-        id=world.owner_id, username=OWNER, email="owner@example.com", role="user"
+        id=world.owner_id, username=OWNER, email="owner@example.com", role="operator"
     )
 
 

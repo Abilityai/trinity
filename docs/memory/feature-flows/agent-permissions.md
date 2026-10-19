@@ -6,6 +6,7 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-10-15 | abilityai/trinity-enterprise#662: what an edge EXPOSES — a peer may invoke the callee's declared skills; a library-assigned one (individual or set-propagated) needs a per-skill grant. New section below. |
 | 2026-10-07 | trinity-enterprise#815: `GET /api/agents/{name}/permissions?strict=true` — one tri-state Docker snapshot, 503 when Docker cannot be read (never "200, no peers"); `getPermittedAgents(name, {strict: true})` throws instead of returning `[]`. Caller: the MCP's broad `list_operator_queue`. Without the flag, unchanged. |
 | 2026-02-19 | **BREAKING**: Changed default permissions to restrictive. New agents start with NO permissions (was: bidirectional with same-owner agents). Updated `grant_default_permissions()` to no-op. |
 | 2026-01-23 | Verified all line numbers against implementation. Updated router endpoints (641-681), database delegation (1070-1091), frontend component references (PermissionsPanel.vue). |
@@ -257,7 +258,7 @@ async def get_agent_permissions_logic(agent_name: str, current_user: User) -> di
     }
 ```
 
-**Strict mode (trinity-enterprise#815).** `?strict=true` (router `agent_files.py:287-297`) routes to `_strict_permissions` (`permissions.py:76`). The lenient path reads Docker twice through helpers that swallow faults: `get_agent_container` turns an error into a 404, and `get_accessible_agents` → `list_all_agents_fast` turns one into an empty fleet, so a Docker fault reads as "200, no peers". Strict mode reads `agent_container_states()` ONCE: `None` (Docker unreadable) is a **503**, an agent missing from the snapshot is a 404, and the permitted and available peers both come from that one snapshot plus the same DB visibility rules (admin sees every container, orphans included; otherwise owned or shared). Its entries are `{name, status, permitted}` (no `type`). The access check (403) runs first, as before. Without the flag the behaviour is unchanged (the frontend and the lenient MCP callers). Its caller is the MCP's broad `list_operator_queue` under an agent-scoped key (`client.ts getPermittedAgents(name, {strict: true})`), which must not mistake a fault for "no peers" when it decides whether the queue page is complete — see [operating-room.md](operating-room.md).
+**Strict mode (trinity-enterprise#815).** `?strict=true` (router `agent_files.py:285-295`) routes to `_strict_permissions` (`permissions.py:76`). The lenient path reads Docker twice through helpers that swallow faults: `get_agent_container` turns an error into a 404, and `get_accessible_agents` → `list_all_agents_fast` turns one into an empty fleet, so a Docker fault reads as "200, no peers". Strict mode reads `agent_container_states()` ONCE: `None` (Docker unreadable) is a **503**, an agent missing from the snapshot is a 404, and the permitted and available peers both come from that one snapshot plus the same DB visibility rules (admin sees every container, orphans included; otherwise owned or shared). Its entries are `{name, status, permitted}` (no `type`). The access check (403) runs first, as before. Without the flag the behaviour is unchanged (the frontend and the lenient MCP callers). Its caller is the MCP's broad `list_operator_queue` under an agent-scoped key (`client.ts getPermittedAgents(name, {strict: true})`), which must not mistake a fault for "no peers" when it decides whether the queue page is complete — see [operating-room.md](operating-room.md).
 
 ### Endpoint: PUT /api/agents/{name}/permissions
 
@@ -303,6 +304,50 @@ Adds a single permission. Returns `{status: "added"}` or `{status: "already_exis
 **Service**: `src/backend/services/agent_service/permissions.py:144-168`
 
 Removes a single permission. Returns `{status: "removed"}` or `{status: "not_found"}`.
+
+---
+
+## What an Edge Exposes — Declared Skills by Default (abilityai/trinity-enterprise#662)
+
+The edge decides *whether* the caller reaches the target; this decides *what* it may invoke there. **A peer may run what an agent declares; what an admin assigned needs a grant.**
+
+```
+peer agent B ──/task, /chat, fan-out, event──▶ backend
+   admission seam (dispatch_admission_service / chat_execution_service /task)
+   or execute_task backstop (task_execution_service._skill_gate_backstop)
+        └─▶ skill_gate_service.enforce(agent=A, requester, request_text, context_text)
+              └─▶ peer_skill_policy.enforce          ◀── runs FIRST, gated or not
+                    peer_of(A, requester)            → None for A itself, people, schedules,
+                                                       connectors, trinity-system → proceed
+                    _spawned(B, A)                   → B spawned A with its current key → proceed
+                                                       (parent → child only; ent#629 relation)
+                    library_assigned(A)              ← db.get_agent_skills(A), minus #2914 `conflict` rows
+                    granted_peer_skills(B, A)        ← agent_peer_skill_grants
+                    find_gated_invocations(text, library − granted)
+                       hit  → audit `peer_skill_refused` + SkillGateRefused(403, skill_not_granted)
+                       read failure → SkillGateRefused(503, peer_surface_unavailable)
+              └─▶ (then the ent#751 gate map, unchanged)
+```
+
+- The backstop used to return as soon as the gate map was empty; it now goes on to `enforce` whenever the agent holds a library skill (`peer_skill_policy.has_library_skills`, which answers True on a read failure so the refusal is named).
+- The refusal is the skill gate's `SkillGateRefused`, so `error_handlers.skill_gate_error` maps it (`X-Trinity-Error-Code: skill_not_granted`) and the MCP client's `isGateResult` already renders it as a named refusal on `chat_with_agent` / `fan_out`.
+
+**Grant surface** (`routers/agent_files.py`, beside the edge routes; `services/peer_skill_policy.py`; `db/peer_skill_grants.py`):
+
+| Endpoint | Gate | Behaviour |
+|---|---|---|
+| `GET /api/agents/{caller}/peer-skills` | `AuthorizedAgentByName` | per permitted target the viewer may open (and an agent key may reach): library skills, `granted` + who/when, `individual`, `assigned_by`, `not_granted` count — also the upgrade report |
+| `PUT /api/agents/{caller}/peer-skills/{target}/{skill}` | `require_admin` + `reject_non_interactive_principal` | grant; 422 `skill_not_assigned` / `self_grant` / `system_agent_not_grantable`, 404 unknown agent; returns `consent` |
+| `DELETE …/peer-skills/{target}/{skill}` | same | revoke; always allowed |
+| `GET /api/skills/peer-grants/drift` | `require_admin` | the honest upgrade: (caller, target, skill) pairs USED in the last 30 days (execution ledger × gate matcher) and now refused; `uses`, `last_used_at` |
+
+A grant goes with its edge: `db/permissions.py` `remove_permission` / `set_permissions` delete the grants on the edges they drop. Settings → Agents shows `PeerSkillDriftNotice.vue` (Grant per pair) while the report is non-empty; the per-agent list shows `last_used_at` and marks a spawned target (no grant needed).
+
+**Known gap**: matching reads the request text, so a peer that asks in prose without naming the skill is not caught (follow-up abilityai/trinity-enterprise#925: runtime skill-origin marker, #2914).
+
+**Frontend**: `PermissionsPanel.vue` renders `PeerSkillGrants.vue` under the edge list (store `getAgentPeerSkills` / `setAgentPeerSkillGrant`); an admin gets one `BaseToggle` per skill, everyone else a Granted / Not granted badge. It reloads after **Save Permissions**.
+
+**Tests**: `tests/unit/test_ent662_peer_skill_surface.py`, `src/frontend/tests/unit/peerSkillGrants.spec.js`, `src/mcp-server/src/tools/skills.test.ts` (`peer_needs_grant`).
 
 ---
 
@@ -579,7 +624,7 @@ Events logged to audit service:
 
 **File**: `tests/test_agent_permissions.py` (16 tests, all passing)
 
-**Journey**: `tests/journeys/test_j10_agent_calls_agent_journey.py` (J10, #2349) asserts the MCP-layer enforcement end to end with a real agent-scoped key — `list_agents` = self ∪ permitted, `chat_with_agent`/`fan_out` refused without an edge and admitted with one, and the delete cascade read back from the source agent's own permission list. `run_agent_loop` is refused without an edge too (trinity-enterprise#628): the MCP server gates it at registration through `src/mcp-server/src/access.ts` — `TOOL_ACCESS_POLICY` declares how every tool treats an agent target, `server.ts` refuses to register a tool without a row, and `enforce` rows run `checkAgentEdge` before the tool executes; the loop-id tools resolve the loop's agent first and answer a compound `not found or not accessible` on denial. This is a tool-surface gate: the REST route behind each tool is still owner-equivalent for an agent key (Invariant #8), which is trinity-enterprise#629's ruling.
+**Journey**: `tests/journeys/test_j10_agent_calls_agent_journey.py` (J10, #2349) asserts the MCP-layer enforcement end to end with a real agent-scoped key — `list_agents` = self ∪ permitted, `chat_with_agent`/`fan_out` refused without an edge and admitted with one, and the delete cascade read back from the source agent's own permission list. `run_agent_loop` is refused without an edge too (trinity-enterprise#628): the MCP server gates it at registration through `src/mcp-server/src/access.ts` — `TOOL_ACCESS_POLICY` declares how every tool treats an agent target, `server.ts` refuses to register a tool without a row, and `enforce` rows run `checkAgentEdge` before the tool executes; the loop-id tools resolve the loop's agent first and answer a compound `not found or not accessible` on denial. The backend holds the same line one hop down (trinity-enterprise#629): every per-agent REST route narrows an agent key to itself, its edge targets and the agents it spawned — owner-level routes to itself and its spawned agents — through `dependencies.agent_may_reach` under the four path helpers, the two imperative helpers and every inline access check (`tests/unit/test_ent629_agent_reach.py`).
 
 | Test Class | Tests | Coverage |
 |------------|-------|----------|

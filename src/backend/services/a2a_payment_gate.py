@@ -232,10 +232,6 @@ def payment_caller_allowed(agent_name: str, payer: Optional[str]) -> bool:
         return False
 
 
-class AllowlistRefused(Exception):
-    """The allow-list refused this payer after a successful verify (T7)."""
-
-
 async def run_a2a_paid_turn(
     *,
     agent_name: str,
@@ -247,8 +243,14 @@ async def run_a2a_paid_turn(
     payment_service,
     idem,
     db,
+    on_verified: Optional[Callable[[Any], None]] = None,
 ) -> paid_turn_service.PaidTurnOutcome:
     """One paid A2A turn, through the orchestrator the paid door runs.
+
+    `on_verified` (#3749, additive, default None = byte-identical behaviour) is
+    called with the verify result once the allow-list has ADMITTED the payer —
+    the router uses it to learn the wallet it may bind to the execution before
+    answering `working`; a refused payer never reaches it.
 
     Two A2A-specific decisions, both load-bearing:
 
@@ -271,6 +273,8 @@ async def run_a2a_paid_turn(
     """
     def _check_allowlist(verify_result) -> None:
         if payment_caller_allowed(agent_name, verify_result.payer):
+            if on_verified is not None:
+                on_verified(verify_result)
             return
         db.log_nevermined_payment(
             agent_name=agent_name,

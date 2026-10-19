@@ -129,6 +129,22 @@ describe("name conflicts (#2914)", () => {
     assert.equal(out.skills[0].delivery_status, "conflict");
     assert.equal(out.skills[1].delivery_status, null);
   });
+
+  // abilityai/trinity-enterprise#662: a peer may run what an agent declares;
+  // what an admin assigned needs a grant. The listing says which is which, so
+  // a caller can reason about the rule before it is refused.
+  it("get_agent_skills says a library skill needs a grant for a peer, and a conflict name does not", async () => {
+    const tools = makeTools([], [
+      { id: 1, agent_name: "acme-bot", skill_name: "backlog", assigned_by: "alice",
+        assigned_at: "2026-09-21T00:00:00Z", delivery_status: "conflict" },
+      { id: 2, agent_name: "acme-bot", skill_name: "research", assigned_by: "system",
+        assigned_at: "2026-09-21T00:00:00Z", delivery_status: null, individual: false },
+    ]);
+    const out = JSON.parse(await tools.getAgentSkills.execute({ agent_name: "acme-bot" }, {}));
+    assert.equal(out.skills[0].peer_needs_grant, false, "the agent's own copy runs: declared");
+    assert.equal(out.skills[1].peer_needs_grant, true, "set-propagated is library-assigned too");
+    assert.ok(tools.getAgentSkills.description.includes("skill_not_granted"));
+  });
 });
 
 // ent#530 — `set:<name>` routes to the set routes (same ent#596 fence); the

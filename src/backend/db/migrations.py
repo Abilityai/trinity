@@ -2992,6 +2992,33 @@ def _migrate_agent_ownership_a2a_exposed(cursor, conn):
     conn.commit()
 
 
+
+def _migrate_a2a_internal_scope(cursor, conn):
+    """trinity-enterprise#838 — A2A exposure scope and the keyless trusted caller.
+
+    ``agent_ownership.a2a_scope`` (``public`` | ``internal``, default
+    ``public`` — today's behaviour) and ``a2a_keyless_internal`` (default 1:
+    an internal-scope agent answers a trusted-network caller with no key), plus
+    ``schedule_executions.source_host``, the address a keyless trusted caller's
+    run is attributed to. Edition-agnostic OSS primitives the A2A server reads;
+    the scope WRITE is the entitled enterprise setter, like ``a2a_exposed``.
+    Mirrored by the Alembic revision 0096_a2a_internal_scope.
+    """
+    _safe_add_column(
+        cursor, "agent_ownership", "a2a_scope",
+        "ALTER TABLE agent_ownership ADD COLUMN a2a_scope TEXT DEFAULT 'public'",
+    )
+    _safe_add_column(
+        cursor, "agent_ownership", "a2a_keyless_internal",
+        "ALTER TABLE agent_ownership ADD COLUMN a2a_keyless_internal INTEGER DEFAULT 1",
+    )
+    _safe_add_column(
+        cursor, "schedule_executions", "source_host",
+        "ALTER TABLE schedule_executions ADD COLUMN source_host TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_operator_resume(cursor, conn):
     """ent#329 — owner opt-in: an operator answer re-triggers the agent.
 
@@ -3720,6 +3747,31 @@ def _migrate_operator_queue_ask_object(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_queue_replace(cursor, conn):
+    """#3247 — an agent replaces one of its OWN pending asks.
+
+    Two nullable TEXT link columns on `operator_queue`: `replaces` on the
+    successor (the predecessor row's uuid) and `replaced_by` on the predecessor
+    (the successor row's uuid). Both are stamped inside the one per-agent
+    locked transaction that ends the predecessor (`cancelled` /
+    `disposed_by='agent'` / `disposition_reason='replaced'`) and inserts the
+    successor, so each row is self-describing: a surface that holds only one
+    of the pair still knows the other.
+
+    No default and no backfill; nothing indexes them (nothing queries by them).
+    PostgreSQL twin: Alembic `0097_operator_queue_replace`.
+    """
+    for column in ("replaces", "replaced_by"):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for the replace link (#3247)",
+        )
+    conn.commit()
+
+
 def _migrate_channel_report_client(cursor, conn):
     """ent#457 review — WHICH client a portal channel context belongs to.
 
@@ -4389,6 +4441,25 @@ def _migrate_portal_messages_attachments(cursor, conn):
     )
     conn.commit()
 
+
+def _migrate_portal_messages_execution_id(cursor, conn):
+    """#3166 — each Workspace message names the turn that wrote it.
+
+    One nullable column on `enterprise_portal_messages`. Two turns on one thread
+    (the chat open in two tabs) wrote replies the client could not tell apart,
+    so a tab could show the other turn's answer as its own. Additive, no
+    backfill: old rows stay NULL and the client keeps its old matching for them.
+    Mirrored by the Alembic revision 0095_portal_messages_execution_id.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "execution_id",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN execution_id TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_portal_session_main_chat(cursor, conn):
     """ent#523 — the pinned Main chat, and the tombstone Reset leaves behind.
 
@@ -4732,7 +4803,7 @@ def _migrate_seat_ask_class_state_table(cursor, conn):
     (`autonomy_dial_service.LEVEL_KEY`). The live conjuncts (level, the agent's
     autonomy switch, the clock) are read, never written.
 
-    Mirrored by the Alembic revision 0096_seat_ask_class_state.
+    Mirrored by the Alembic revision 0100_seat_ask_class_state.
     """
     cursor.execute(
         """
@@ -5227,6 +5298,52 @@ WHERE status = 'pending'
 """
 
 
+def _migrate_proactive_consent_not_asked(cursor, conn):
+    """trinity-enterprise#817 — proactive consent says "not asked" apart from "no".
+
+    `agent_sharing.allow_proactive` was 0 by DEFAULT for every share, so "nobody
+    asked this person" and "this person declined" were one value. From now on
+    NULL = not asked, 0 = declined, 1 = consented, and a new share is written
+    NULL. The existing 0s are moved to NULL: the default wrote 0 for everyone,
+    so almost none of them was ever an answer (operator ruling 2026-10-06).
+
+    Data only — the column and its DDL are unchanged, so no table rebuild. Who
+    may be messaged is unchanged too: only 1 allows it, before and after.
+    Idempotent. Mirrored by Alembic 0098_proactive_consent_not_asked.
+    """
+    cursor.execute("UPDATE agent_sharing SET allow_proactive = NULL WHERE allow_proactive = 0")
+    conn.commit()
+
+def _migrate_agent_peer_skill_grants(cursor, conn):
+    """abilityai/trinity-enterprise#662 — a peer may run what an agent declares;
+    what an admin assigned needs a grant.
+
+    ``agent_peer_skill_grants`` holds the per-skill grant over an edge: caller X
+    may run library-assigned skill Y on target Z. Additive only. Nobody holds a
+    grant on upgrade — the safe default — and the Permissions panel shows each
+    edge's library skills as "not granted" until an admin opens them.
+
+    Idempotent. Mirrored by Alembic 0099_agent_peer_skill_grants.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_peer_skill_grants (
+            caller_agent TEXT NOT NULL,
+            target_agent TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            PRIMARY KEY (caller_agent, target_agent, skill_name)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_peer_skill_grants_target "
+        "ON agent_peer_skill_grants(target_agent)"
+    )
+    conn.commit()
+
+
 def _migrate_supersede_queue_flood_backlog(cursor, conn):
     """#3130: collapse the flood-alert backlog to one pending alert per agent.
 
@@ -5656,4 +5773,9 @@ MIGRATIONS = [
     ("platform_alert_responded_heal", _migrate_platform_alert_responded_heal),
     ("agent_skill_gates", _migrate_agent_skill_gates),
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
+    ("portal_messages_execution_id", _migrate_portal_messages_execution_id),
+    ("a2a_internal_scope", _migrate_a2a_internal_scope),
+    ("operator_queue_replace", _migrate_operator_queue_replace),
+    ("proactive_consent_not_asked", _migrate_proactive_consent_not_asked),
+    ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
 ]

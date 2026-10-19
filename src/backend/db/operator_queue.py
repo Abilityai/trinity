@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine, make_insert
 from .tables import operator_queue
+from .queue_mentions import not_a_tag_clause
 from utils.helpers import utc_now_iso, iso_cutoff, parse_iso_timestamp, to_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ WALK_WATERMARK_MARGIN_S = 300
 def _note_commit_lag(stamp: str) -> None:
     """After a pending → ended write commits: if it landed more than the walk
     margin after the timestamp it stamped, say so at error (ent#815). Called by
-    the five writers that end an ask, once their transaction is committed."""
+    every writer that ends an ask, once its transaction is committed."""
     lag = (datetime.now(timezone.utc) - parse_iso_timestamp(stamp)).total_seconds()
     if lag > WALK_WATERMARK_MARGIN_S:
         logger.error(
@@ -60,17 +61,38 @@ def _note_commit_lag(stamp: str) -> None:
 # "platform bypasses the boundary" exemption stops being solely load-bearing —
 # a caller that skips the service clamp still can't persist a multi-MB field.
 # An order of magnitude above the service caps (title 300 / question 4000 /
-# context 8 KiB / id 256).
+# context 8 KiB / id 256 / type 64).
 _DB_BELT_TITLE_MAX_BYTES = 4 * 1024
 _DB_BELT_QUESTION_MAX_BYTES = 16 * 1024
 _DB_BELT_CONTEXT_MAX_BYTES = 64 * 1024
 _DB_BELT_ID_MAX = 512
+_DB_BELT_TYPE_MAX_BYTES = 1024
 
 # trinity-enterprise#751: gate-raised rows (gated-skill approvals and the
 # gate's notices) never count toward an AGENT's pending budget — neither the
 # native ask cap nor the file poller's #1632 depth cap. The gate caps its own
 # raises. NULL `raised_by` is a legacy or file row, so it counts.
 _NOT_A_GATE_ROW = or_(operator_queue.c.raised_by.is_(None), operator_queue.c.raised_by != "gate")
+
+# trinity-enterprise#844: what the clock writes as `disposition_reason` when it
+# ends a pending ask. A gated-skill approval (`raised_by='gate'`) is the one
+# approval whose action the PLATFORM holds — expiry runs nothing. Every other
+# approval names an action the agent holds: the platform cannot tell whether it
+# went ahead unanswered, so the ending says so instead of reading exactly like a
+# stale ask nobody acted on. Questions and alerts name no action: NULL, as before.
+# Evaluated in the same compare-and-set UPDATE that ends the row, so only the
+# writer that won records it; rows that ended earlier are never rewritten.
+OUTCOME_UNKNOWN = "outcome_unknown"
+_TIMEOUT_REASON = case(
+    (and_(operator_queue.c.type == "approval", _NOT_A_GATE_ROW), OUTCOME_UNKNOWN),
+    else_=None,
+)
+
+# trinity-enterprise#631: person tags share the ledger but not the operator's
+# door. A tag is the reserved `mention-` id AND the type (`queue_mentions`), so
+# an agent row that merely names its type `mention` stays an ordinary, listed
+# ask. NULL-safe: a row with no type is a legacy agent row and stays listed.
+_NOT_A_MENTION = not_a_tag_clause()
 
 
 def _own_pending_conds(agent_name: str, exclude_request_id_prefixes=None) -> list:
@@ -96,6 +118,27 @@ def _own_pending_conds(agent_name: str, exclude_request_id_prefixes=None) -> lis
 # without a zone compared hours off (Invariant #16). Bounded so the per-cycle
 # sweep never holds an unbounded write set; the rest wait for the next cycle.
 _EXPIRY_BATCH_MAX = 500
+
+
+# #3247 T8: how many of the agent's pending proposals the duplicate guard reads.
+_PENDING_PROPOSAL_SCAN = 200
+
+
+def _canon_json(value) -> str:
+    """Key-order- and whitespace-insensitive form of a stored proposal."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+class _RollBack(Exception):
+    """Unwind a native create's transaction and answer with `outcome` (#3247).
+
+    Raised INSIDE `Engine.begin()` so the context manager rolls back (the CAS
+    on the predecessor included) and caught OUTSIDE it; never escapes.
+    """
+
+    def __init__(self, outcome: Dict):
+        super().__init__(outcome["outcome"])
+        self.outcome = outcome
 
 
 def _iso_z_deadline(value) -> Optional[str]:
@@ -135,7 +178,10 @@ def _operator_queue_prune_predicate(
     responded_cutoff = iso_cutoff(hours=resp_days * 24)
     return or_(
         and_(
-            operator_queue.c.status.in_(("acknowledged", "cancelled", "expired")),
+            # trinity-enterprise#631: a person tag that was READ is settled
+            # history like an acknowledged alert; an unread one (`delivered`)
+            # is never swept, like `pending`.
+            operator_queue.c.status.in_(("acknowledged", "cancelled", "expired", "read")),
             operator_queue.c.created_at < terminal_cutoff,
         ),
         and_(
@@ -202,6 +248,9 @@ class OperatorQueueOperations:
             # #3246 — the platform alert's condition key and its latest reading
             "subject": row["subject"],
             "last_seen_at": row["last_seen_at"],
+            # #3247 — the replace link, one uuid each way
+            "replaces": row["replaces"],
+            "replaced_by": row["replaced_by"],
         }
 
     # Columns selected for a full queue-item record, in the canonical order.
@@ -249,6 +298,8 @@ class OperatorQueueOperations:
         operator_queue.c.supersedes_expired,
         operator_queue.c.subject,  # #3246 — platform alerts: kind:key
         operator_queue.c.last_seen_at,
+        operator_queue.c.replaces,  # #3247 — the replace link
+        operator_queue.c.replaced_by,
     )
 
     def create_item(
@@ -332,6 +383,8 @@ class OperatorQueueOperations:
         proposal: Optional[Dict],
         supersedes_expired: Optional[str],
         exclude_request_id_prefixes=None,
+        replaces: Optional[str] = None,
+        guard_pending_proposal: bool = False,
     ) -> Dict:
         """Create an agent-raised ask, atomically per agent (trinity-enterprise#611).
 
@@ -361,6 +414,40 @@ class OperatorQueueOperations:
         `sync_state` stays NULL — there is no file entry to be out of sync with.
         Every platform column is a keyword-only argument, never read from
         `item` (the item is agent-authored).
+
+        `replaces` (#3247) — the uuid of one of the agent's OWN pending asks
+        that this ask replaces. Inside the same lock, after the replay check
+        and before the count: a compare-and-set ends the predecessor
+        (`cancelled` / `disposed_by='agent'` / `disposition_reason='replaced'`,
+        `replaced_by` = the uuid this call minted) if it is still pending, not
+        past its deadline, and carries `raised_by='agent'` under this agent —
+        the belt beneath the sink's ownership gate. The successor is inserted
+        with `replaces` = the predecessor's uuid. A replay never re-applies the
+        replace. Extra outcomes:
+        - `replaces_ended` — the predecessor already ended (a person's answer
+          always wins); `row` is None, `predecessor` is the row as it stands,
+          and NOTHING was written — except when it was still pending past its
+          deadline: then it is expired here as the clock would (`expired` /
+          `timeout`, `expired_now=True`) so the refusal names a state the row
+          really carries and `supersedes_expired` works at once.
+        - `replaces_not_own` — the row is not this agent's own pending
+          agent-raised ask (missing, another agent's, NULL raiser, gate);
+          nothing written, `predecessor` is the row if it is this agent's.
+        Over the cap after the CAS, or a colliding insert after it (a file
+        entry re-using the id landed between the replay check and the insert
+        on PostgreSQL), the WHOLE transaction rolls back: a half-replace — the
+        predecessor ended, no successor shown — must never commit. `created`
+        then also carries `predecessor` (post-CAS row).
+
+        `guard_pending_proposal` (#3247 T8) — refuse the ask when one of this
+        agent's own pending agent-raised approvals already carries the same
+        canonical `proposal`: outcome `already_pending` with that ask's
+        `request_id`, nothing written. Checked INSIDE this lock, after the
+        replace's compare-and-set (the ask it replaces is no longer pending on
+        this connection, so it is not a duplicate of itself) and before the
+        count, so two concurrent raises with one proposal have exactly one
+        winner; a refusal rolls the CAS back with everything else. The caller
+        decides when it applies (an agent's approval with a non-empty proposal).
         """
         request_id, values = self._insert_values(
             agent_name, item, channel=channel, raised_by=raised_by,
@@ -377,24 +464,193 @@ class OperatorQueueOperations:
             operator_queue.c.agent_name == agent_name,
             operator_queue.c.request_id == request_id,
         )
-        with get_engine().begin() as conn:
-            self._lock_agent_for_create(conn, agent_name)
-            existing = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
-            if existing:
-                return {"outcome": "replayed", "row": self._row_to_item(existing)}
-            if max_pending is not None:
-                pending = conn.execute(
-                    select(func.count()).where(and_(
-                        *_own_pending_conds(agent_name, exclude_request_id_prefixes)))
-                ).scalar() or 0
-                if pending >= max_pending:
-                    return {"outcome": "queue_full", "row": None}
-            inserted = bool(conn.execute(
-                make_insert(operator_queue).values(**values).on_conflict_do_nothing(
-                    index_elements=["agent_name", "request_id"])
-            ).rowcount)
+        values["replaces"] = replaces
+        predecessor = None
+        early = None
+        try:
+            with get_engine().begin() as conn:
+                self._lock_agent_for_create(conn, agent_name)
+                existing = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+                if existing:
+                    return {"outcome": "replayed", "row": self._row_to_item(existing)}
+                if replaces is not None:
+                    predecessor, refusal = self._replace_predecessor(
+                        conn, agent_name, replaces, values["id"])
+                    if refusal is not None:
+                        # commits: the only write on this path is the expire-now
+                        early = {**refusal, "row": None, "predecessor": predecessor}
+                if early is None:
+                    if guard_pending_proposal and proposal is not None:
+                        dup = self._pending_proposal_match(conn, agent_name, proposal)
+                        if dup is not None:
+                            raise _RollBack({"outcome": "already_pending", "row": None, "request_id": dup})
+                    if max_pending is not None:
+                        pending = conn.execute(
+                            select(func.count()).where(and_(
+                                *_own_pending_conds(agent_name, exclude_request_id_prefixes)))
+                        ).scalar() or 0
+                        if pending >= max_pending:
+                            if replaces is not None:
+                                raise _RollBack({"outcome": "queue_full", "row": None})
+                            return {"outcome": "queue_full", "row": None}
+                    inserted = bool(conn.execute(
+                        make_insert(operator_queue).values(**values).on_conflict_do_nothing(
+                            index_elements=["agent_name", "request_id"])
+                    ).rowcount)
+                    if not inserted and replaces is not None:
+                        raise _RollBack({"outcome": "replayed", "row": None})
+                    row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+        except _RollBack as rolled:
+            # `Engine.begin()` rolled the CAS back with the exception (the PG
+            # advisory xact lock released with it); the predecessor stands.
+            out = rolled.outcome
+            if out["outcome"] == "replayed":
+                with get_engine().connect() as conn:
+                    winner = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+                out["row"] = self._row_to_item(winner) if winner else None
+            return out
+        if predecessor is not None and (early is None or early.get("expired_now")):
+            # the replace's compare-and-set, or the expire-now beside it, ended
+            # the predecessor and that write is committed (ent#815)
+            _note_commit_lag(predecessor["disposed_at"])
+        if early is not None:
+            return early
+        out = {"outcome": "created" if inserted else "replayed", "row": self._row_to_item(row)}
+        if replaces is not None:
+            out["predecessor"] = predecessor
+        return out
+
+    def _replace_predecessor(
+        self, conn, agent_name: str, pred_id: str, new_id: str,
+    ) -> Tuple[Optional[Dict], Optional[Dict]]:
+        """End the predecessor of a replace by compare-and-set, on the create's
+        own connection (#3247). Returns `(predecessor_row, refusal)`: a won CAS
+        gives `(ended row, None)`; a lost one gives the row as it stands and the
+        outcome dict the create returns instead of inserting.
+
+        The replace's vocabulary over `_end_own_pending`: the predicate keeps
+        respond's deadline clause, so "denied by timeout" cannot be sidestepped
+        by a replace (an approval must never land late through a successor).
+        """
+        row, refusal = self._end_own_pending(
+            conn, agent_name, pred_id, reason="replaced", replaced_by=new_id, honour_deadline=True)
+        if refusal is None:
+            return row, None
+        if refusal["outcome"] == "not_own":
+            return row, {"outcome": "replaces_not_own"}
+        return row, {"outcome": "replaces_ended", "expired_now": refusal["expired_now"]}
+
+    def _end_own_pending(
+        self, conn, agent_name: str, row_id: str, *,
+        reason: str, replaced_by: Optional[str], honour_deadline: bool,
+    ) -> Tuple[Optional[Dict], Optional[Dict]]:
+        """The one compare-and-set an AGENT ends its own pending ask with — the
+        replace (#3247, `replaced_by` set, reason `replaced`) and the withdraw
+        (trinity-enterprise#901, `replaced_by` NULL, the agent's reason). Writes
+        `cancelled` / `disposition='cancelled'` / `disposed_by='agent'`, no
+        person's email. Returns `(row, refusal)`: a won CAS gives `(ended row,
+        None)`; a lost one gives the row as it stands and `{"outcome": "not_own"}`
+        (missing, another agent's, a NULL-raiser, a gate's) or `{"outcome":
+        "ended", "expired_now": bool}`.
+
+        The predicate is the ownership belt (`agent_name`, `raised_by='agent'`
+        on the column) plus `status='pending'`, so one writer sees `rowcount 1`
+        whatever races it — a person's answer, a cancel, the expiry sweep, the
+        other agent door. With `honour_deadline` (the replace) it also refuses a
+        row past its deadline, and — T5b — expires that row here as the clock
+        would, in this transaction, so the refusal states a real disposition
+        instead of a dead zone until the sweep. Without it (the withdraw, like
+        a person's `cancel_item`) a pending row past its deadline simply ends:
+        a withdraw lands no approval, so there is nothing to deny by timeout,
+        and recording it `expired` would call the agent's own close-out a
+        denial the C6 re-ask guard then holds against it.
+        """
+        now = utc_now_iso()
+        mine = and_(operator_queue.c.id == row_id, operator_queue.c.agent_name == agent_name)
+        conds = [mine, operator_queue.c.raised_by == "agent", operator_queue.c.status == "pending"]
+        if honour_deadline:
+            conds.append(or_(operator_queue.c.expires_at.is_(None), operator_queue.c.expires_at > now))
+        result = conn.execute(
+            update(operator_queue)
+            .where(and_(*conds))
+            .values(
+                status="cancelled",
+                disposition="cancelled",
+                disposed_at=now,
+                disposed_by="agent",
+                disposed_by_email=None,
+                disposition_reason=reason,
+                replaced_by=replaced_by,
+            )
+        )
+        if result.rowcount:
             row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
-        return {"outcome": "created" if inserted else "replayed", "row": self._row_to_item(row)}
+            return self._row_to_item(row), None
+        row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+        if row is None:
+            return None, {"outcome": "not_own"}
+        if row["status"] == "pending":
+            if (honour_deadline and row["expires_at"] is not None and row["expires_at"] <= now
+                    and row["raised_by"] == "agent"):
+                expired = conn.execute(
+                    update(operator_queue)
+                    .where(and_(mine, operator_queue.c.status == "pending"))
+                    .values(status="expired", disposition="expired",
+                            disposed_at=now, disposed_by="timeout",
+                            disposition_reason=_TIMEOUT_REASON)
+                ).rowcount
+                row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
+                return self._row_to_item(row), {"outcome": "ended", "expired_now": bool(expired)}
+            # pending but not this agent's own agent-raised ask: the belt held
+            return self._row_to_item(row), {"outcome": "not_own"}
+        return self._row_to_item(row), {"outcome": "ended", "expired_now": False}
+
+    def withdraw_item(self, agent_name: str, row_id: str, *, reason: str) -> Dict:
+        """The agent ends one of its OWN pending asks with a reason and no
+        successor (trinity-enterprise#901) — `_end_own_pending` without the
+        deadline clause, in its own transaction (the UPDATE first, so SQLite
+        takes the write lock at once). Returns `{"outcome": "withdrawn" |
+        "ended" | "not_own", "row"}`: `withdrawn` carries the row as the CAS
+        left it; `ended` the row as it stands (nothing written); `not_own` the
+        row when it is this agent's (a NULL-raiser or gate row), else None.
+        """
+        with get_engine().begin() as conn:
+            row, refusal = self._end_own_pending(
+                conn, agent_name, row_id, reason=reason, replaced_by=None, honour_deadline=False)
+        if refusal is None:
+            _note_commit_lag(row["disposed_at"])
+            return {"outcome": "withdrawn", "row": row}
+        return {"outcome": refusal["outcome"], "row": row}
+
+    @staticmethod
+    def _pending_proposal_match(conn, agent_name: str, proposal: Dict) -> Optional[str]:
+        """The `request_id` of this agent's own pending agent-raised APPROVAL that
+        carries `proposal` (canonical JSON), newest first, or None (#3247 T8).
+        Read on the create's connection, under its lock. An empty proposal is
+        not a proposal: `{}` never matches and is never matched."""
+        if not proposal:
+            return None
+        wanted = _canon_json(proposal)
+        rows = conn.execute(
+            select(operator_queue.c.request_id, operator_queue.c.proposal)
+            .where(and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.status == "pending",
+                operator_queue.c.raised_by == "agent",
+                operator_queue.c.type == "approval",
+                operator_queue.c.proposal.isnot(None),
+            ))
+            .order_by(operator_queue.c.created_at.desc())
+            .limit(_PENDING_PROPOSAL_SCAN)
+        ).all()
+        for request_id, stored in rows:
+            try:
+                parsed = json.loads(stored)
+            except (TypeError, ValueError):
+                continue
+            if parsed and _canon_json(parsed) == wanted:
+                return request_id
+        return None
 
     @staticmethod
     def _lock_agent_for_create(conn, agent_name: str) -> None:
@@ -448,6 +704,9 @@ class OperatorQueueOperations:
         question = item.get("question")
         if question and len(str(question).encode("utf-8")) > _DB_BELT_QUESTION_MAX_BYTES:
             raise ValueError(f"operator-queue 'question' exceeds {_DB_BELT_QUESTION_MAX_BYTES} bytes")
+        item_type = item.get("type")
+        if item_type and len(str(item_type).encode("utf-8")) > _DB_BELT_TYPE_MAX_BYTES:
+            raise ValueError(f"operator-queue 'type' exceeds {_DB_BELT_TYPE_MAX_BYTES} bytes")
 
         options_json = json.dumps(item.get("options")) if item.get("options") else None
         context_json = json.dumps(item.get("context")) if item.get("context") else None
@@ -743,6 +1002,75 @@ class OperatorQueueOperations:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_item(row) if row else None
 
+    def update_pending_problem_report(
+        self, agent_name: str, request_id: str, *, question: str, context: Dict,
+        now: Optional[str] = None,
+    ) -> bool:
+        """Rewrite a still-pending Workspace problem report's text (trinity#3521).
+
+        The Workspace records a thumbs-down on the click and sends the comment
+        as a second request with the same per-person / target / day id, which
+        `create_item`'s ON CONFLICT DO NOTHING turned into a no-op — the alert
+        kept saying there was no comment. This is the narrow update path that
+        `_problem_report_id`'s docstring placed at the sink.
+
+        Scoped by `(agent_name, request_id)` AND `type` AND `status='pending'`:
+        an item a person already ended is never rewritten or reopened, and a
+        row of another kind under the same id is never touched. Same db-sink
+        belts as an insert. Returns whether a row changed.
+        """
+        if question and len(str(question).encode("utf-8")) > _DB_BELT_QUESTION_MAX_BYTES:
+            raise ValueError(f"operator-queue 'question' exceeds {_DB_BELT_QUESTION_MAX_BYTES} bytes")
+        context_json = json.dumps(context) if context else None
+        if context_json and len(context_json.encode("utf-8")) > _DB_BELT_CONTEXT_MAX_BYTES:
+            raise ValueError(f"operator-queue 'context' exceeds {_DB_BELT_CONTEXT_MAX_BYTES} bytes")
+        stmt = (
+            update(operator_queue)
+            .where(and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.request_id == request_id,
+                operator_queue.c.type == "workspace_problem_report",
+                operator_queue.c.status == "pending",
+            ))
+            .values(question=question, context=context_json, last_seen_at=now or utc_now_iso())
+        )
+        with get_engine().begin() as conn:
+            return bool(conn.execute(stmt).rowcount)
+
+    def list_pending_proposals_for_agent(
+        self, agent_name: str, limit: int, raised_by: Optional[str] = None,
+    ) -> List[Dict]:
+        """`{id, request_id, proposal}` of this agent's PENDING asks that carry a
+        proposal, newest first (#3247 T8). With `raised_by`, only that raiser's.
+
+        Read by the native create's pending-proposal guard: an agent that
+        repeats the exact action it is already asking about is refused
+        `already_pending` unless the new ask replaces that one.
+        """
+        conditions = [
+            operator_queue.c.agent_name == agent_name,
+            operator_queue.c.status == "pending",
+            operator_queue.c.proposal.isnot(None),
+        ]
+        if raised_by is not None:
+            conditions.append(operator_queue.c.raised_by == raised_by)
+        stmt = (
+            select(operator_queue.c.id, operator_queue.c.request_id, operator_queue.c.proposal)
+            .where(and_(*conditions))
+            .order_by(operator_queue.c.created_at.desc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).all()
+        out = []
+        for item_id, request_id, proposal in rows:
+            try:
+                parsed = json.loads(proposal)
+            except (TypeError, ValueError):
+                continue
+            out.append({"id": item_id, "request_id": request_id, "proposal": parsed})
+        return out
+
     def list_expired_proposals_for_agent(
         self, agent_name: str, limit: int, raised_by: Optional[str] = None,
     ) -> List[Dict]:
@@ -780,6 +1108,36 @@ class OperatorQueueOperations:
                 continue
         return out
 
+    def list_pending_asks_for_agent(
+        self,
+        agent_name: str,
+        limit: int,
+        exclude_request_id_prefixes=None,
+    ) -> List[Dict]:
+        """The agent's own pending asks, OLDEST first (#3247 — the Execution
+        Context's `Pending asks` line).
+
+        Exactly the rows that spend the agent's open-ask budget
+        (`_own_pending_conds`), so the line and `queue_full` cannot disagree.
+        Oldest first: the stale duplicates a scheduled run piles up are the
+        oldest, and newest-first would hide them behind "and N more". The id,
+        type, who raised it and when it was filed — never a title, a question,
+        an answer or anything a person wrote.
+        """
+        stmt = (
+            select(
+                operator_queue.c.request_id,
+                operator_queue.c.type,
+                operator_queue.c.raised_by,
+                operator_queue.c.created_at,
+            )
+            .where(and_(*_own_pending_conds(agent_name, exclude_request_id_prefixes)))
+            .order_by(operator_queue.c.created_at.asc(), operator_queue.c.request_id.asc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            return [dict(r) for r in conn.execute(stmt).mappings().all()]
+
     def list_recent_endings_for_agent(
         self,
         agent_name: str,
@@ -790,8 +1148,10 @@ class OperatorQueueOperations:
         """The asks this agent raised that ENDED at or after `since`, newest first
         (trinity-enterprise#611 — the Execution Context line).
 
-        Ids and the ending only — `request_id`, `disposition`, `disposed_at` —
-        never a title, an answer or a reason: the line reaches every composed
+        Ids and the ending only — `request_id`, `disposition`, `disposed_at`,
+        `disposed_by` and `replaced_by` (#3247 / trinity-enterprise#901: an
+        `agent` ending reads `replaced` when `replaced_by` is set, `withdrawn`
+        otherwise) — never a title, an answer or a reason: the line reaches every composed
         turn. Only rows that carry the ledger (a row that ended before it has no
         ending time to show); platform alarms excluded by prefix (the agent
         raised none of them, ent#499).
@@ -801,6 +1161,8 @@ class OperatorQueueOperations:
                 operator_queue.c.request_id,
                 operator_queue.c.disposition,
                 operator_queue.c.disposed_at,
+                operator_queue.c.disposed_by,
+                operator_queue.c.replaced_by,
             )
             .where(
                 and_(
@@ -830,6 +1192,8 @@ class OperatorQueueOperations:
         types: Optional[Tuple[str, ...]] = None,
         context_contains: Optional[Tuple[str, ...]] = None,
         exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        owner_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        owner_agent_names: Optional[Set[str]] = None,
     ) -> Optional[list]:
         """The WHERE conditions `list_items`, `count_items` and
         `list_item_agent_names` share (#3059) — ONE definition, so a page, its
@@ -843,6 +1207,14 @@ class OperatorQueueOperations:
         conds = []
         if not include_cleared:
             conds.append(operator_queue.c.cleared_at.is_(None))  # #1017
+        # trinity-enterprise#631: a person's tag is addressed to that person and
+        # read through their own door (`db/queue_mentions.py`). It is never a
+        # row of the operator's queue — listed there it would show who tagged
+        # whom to anyone with access to the agent — so it is left out
+        # UNCONDITIONALLY: `type` is a query parameter of the operator's list
+        # route, so an exception for "a caller who names the type" was a door
+        # any sharee could open with `?type=mention`.
+        conds.append(_NOT_A_MENTION)
 
         if accessible_agent_names is not None:
             conds.append(operator_queue.c.agent_name.in_(sorted(accessible_agent_names)))
@@ -863,10 +1235,17 @@ class OperatorQueueOperations:
             # match NOTHING rather than silently widening to everyone's. The
             # other filters narrow a view the caller is already entitled to see;
             # this one decides entitlement, which is why it diverges.
-            conds.append(
-                func.lower(operator_queue.c.addressed_to_email)
-                == addressed_to_email.strip().lower()
-            )
+            #
+            # trinity-enterprise#816: an ask to a role SEVERAL people fill has no
+            # single addressee — it is addressed to every person in its
+            # platform-written `resolved_to` (the 2026-10-07 ruling: one row,
+            # delivered to each of them). So "addressed to this person" is the
+            # single addressee OR membership of `resolved_to`.
+            viewer = addressed_to_email.strip().lower()
+            conds.append(or_(
+                func.lower(operator_queue.c.addressed_to_email) == viewer,
+                self._resolved_to_contains(viewer),
+            ))
         if since:
             conds.append(operator_queue.c.created_at >= since)
         if hide_ended_before:
@@ -886,6 +1265,14 @@ class OperatorQueueOperations:
             escaped = fragment.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             conds.append(operator_queue.c.context.like(f"%{escaped}%", escape="\\"))
         conds.extend(self._request_id_not_prefixed_ci(exclude_request_id_prefixes))
+        # trinity-enterprise#866: an owner-only row (a client's complaint) is
+        # listed only for the agents in `owner_agent_names` — the caller's own.
+        # Same case-insensitive prefix comparison as the exclusion above.
+        if owner_only_request_id_prefixes:
+            owners = sorted(owner_agent_names or ())
+            for not_prefixed in self._request_id_not_prefixed_ci(owner_only_request_id_prefixes):
+                conds.append(or_(not_prefixed, operator_queue.c.agent_name.in_(owners))
+                             if owners else not_prefixed)
         return conds
 
     def count_items(self, **filters) -> int:
@@ -928,6 +1315,8 @@ class OperatorQueueOperations:
         types: Optional[Tuple[str, ...]] = None,
         context_contains: Optional[Tuple[str, ...]] = None,
         exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        owner_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        owner_agent_names: Optional[Set[str]] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
 
@@ -982,6 +1371,8 @@ class OperatorQueueOperations:
             hide_ended_before=hide_ended_before, types=types,
             context_contains=context_contains,
             exclude_request_id_prefixes=exclude_request_id_prefixes,
+            owner_only_request_id_prefixes=owner_only_request_id_prefixes,
+            owner_agent_names=owner_agent_names,
         )
         if conds is None:
             return []
@@ -1466,7 +1857,8 @@ class OperatorQueueOperations:
         still ``pending`` in the agent file). By retention age those rows are long
         settled, so they can be removed:
 
-        - ``acknowledged`` / ``cancelled`` / ``expired`` older than ``retention_days``;
+        - ``acknowledged`` / ``cancelled`` / ``expired`` — and a READ person tag
+          (``read``, trinity-enterprise#631) — older than ``retention_days``;
         - ``responded`` only older than the more generous ``responded_retention_days``
           — the write-back loop still has to deliver the operator's answer to the
           agent file, and a stopped agent picks it up on restart, so a young
@@ -1577,6 +1969,11 @@ class OperatorQueueOperations:
         UPDATE is the identity of the winner, so two overlapping sweeps (a Redis
         flap can briefly give two leaders) end — and later wake — each row once.
         Edge-triggered: a second pass over the same rows ends nothing.
+
+        trinity-enterprise#844: an approval whose action the platform does not
+        hold (anything but a gate's) is ended with `disposition_reason =
+        'outcome_unknown'` — the deadline passing says nothing about whether the
+        agent went ahead, and the record must not read as though it does.
         """
         now = utc_now_iso()
         candidates = (
@@ -1612,6 +2009,9 @@ class OperatorQueueOperations:
                         disposition="expired",
                         disposed_at=now,
                         disposed_by="timeout",
+                        # trinity-enterprise#844: an approval whose action the
+                        # platform did not hold ends as `outcome_unknown`.
+                        disposition_reason=_TIMEOUT_REASON,
                     )
                 )
                 if result.rowcount:
@@ -1647,7 +2047,8 @@ class OperatorQueueOperations:
             access_cond = operator_queue.c.agent_name.in_(sorted(accessible_agent_names))
 
         def _with_access(*conds):
-            all_conds = list(conds)
+            # trinity-enterprise#631: a person's tag is no operator's statistic.
+            all_conds = list(conds) + [_NOT_A_MENTION]
             if access_cond is not None:
                 all_conds.append(access_cond)
             return all_conds
@@ -1937,6 +2338,27 @@ class OperatorQueueOperations:
         "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
         "\u2028\u2029\u202f\u205f\u3000"
     )
+
+    @staticmethod
+    def _resolved_to_contains(email: str):
+        """`email` is one of the people in the row's `resolved_to`
+        (trinity-enterprise#816) — a SQL condition, so the Workspace list pages
+        and counts over exactly what it shows (#3059).
+
+        `resolved_to` is TEXT holding `json.dumps(list_of_emails)`
+        (`create_native_item`), so membership is the JSON-quoted email as a
+        substring: the quotes bound it, so `a@x.com` never matches
+        `aa@x.com` or `a@x.community`. LIKE-escaped, so a `_` or `%` in an
+        address matches only itself. Lower-cased on both sides (the writers
+        already store lower-case; the read must not depend on it). `lower` and
+        `LIKE … ESCAPE` behave the same on SQLite and PostgreSQL over this
+        ASCII text (`json.dumps` escapes anything else) — no dialect branch.
+        A NULL `resolved_to` matches nothing. An empty `email` matches nothing:
+        `""` JSON-quotes to `""`, which no stored list of addresses contains.
+        """
+        fragment = json.dumps(email).lower()
+        escaped = fragment.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return func.lower(operator_queue.c.resolved_to).like(f"%{escaped}%", escape="\\")
 
     @staticmethod
     def _request_id_not_prefixed_ci(prefixes):

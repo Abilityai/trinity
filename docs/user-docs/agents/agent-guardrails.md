@@ -1,6 +1,6 @@
 # Agent Guardrails
 
-Deterministic safety enforcement for autonomous agent execution. Prevents destructive commands, credential leaks, and runaway loops through infrastructure-level controls that agents cannot bypass.
+Deterministic safety enforcement inside the agent's container. Catches destructive commands, credential leaks, and runaway loops before they happen. These hooks are defence in depth against accidents, not the security boundary: the agent user has passwordless `sudo` in its own container, so a determined agent could get around them. The boundary that holds is outside the container: the credentials the agent was given, the platform calls its key may make, and the settings only a person can change. See [How Trinity Keeps Agents in Bounds](../guides/keeping-agents-in-bounds.md).
 
 ## Concepts
 
@@ -43,6 +43,9 @@ The `PreToolUse` hook on `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` blocks
 - `.credentials.enc` -- Encrypted credential backups
 - `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*` -- Cloud and SSH credentials
 - `~/.claude/settings.json`, `~/.claude/settings.local.json` -- Claude Code user settings
+- `~/.claude.json`, `~/.claude/.credentials.json` -- Claude Code's configuration and login
+- `~/.gemini/settings.json` -- Gemini runtime configuration
+- `~/.tmp/codex/*` -- Codex runtime login and MCP configuration
 - `~/.trinity/read-only-config.json` -- Read-only mode configuration fallback, used while the root-owned copy under `/opt/trinity/` is missing
 - `/opt/trinity/*` -- Platform guardrail hook scripts
 - `/etc/claude-code/*` -- The managed settings that register the hooks
@@ -175,4 +178,5 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 - [Agent Configuration](agent-configuration.md) -- Other per-agent settings
 - [Managing Agents](managing-agents.md) -- Start/stop to apply changes
 - [Monitoring](../operations/monitoring.md) -- View guardrail events in logs
+- [How Trinity Keeps Agents in Bounds](../guides/keeping-agents-in-bounds.md) -- The guardrails approach: where the real boundary sits, and what is available now
 - [Recommended Trinity Prompt](recommended-fleet-prompt.md) -- Fleet rules for behaviour that guardrails can't block

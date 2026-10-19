@@ -514,8 +514,8 @@ export interface OperatorQueueItem {
   // the ledger: read `status`).
   disposition?: string | null;        // answered | cancelled | dismissed | expired
   disposed_at?: string | null;
-  disposed_by?: string | null;        // person | timeout | platform (#3246)
-  disposition_reason?: string | null; // the operator's optional cancel reason, or the platform's (condition_cleared | superseded)
+  disposed_by?: string | null;        // person | timeout | platform (#3246) | agent (#3247: replaced its own ask)
+  disposition_reason?: string | null; // the operator's optional cancel reason, or the platform's (condition_cleared | superseded), or the clock's outcome_unknown (an expired approval the platform did not hold, trinity-enterprise#844)
 }
 
 /**
@@ -547,6 +547,18 @@ export interface OperatorQueueAskReadback {
   to_role?: string | null;
   proposal?: unknown;
   supersedes_expired?: string | null;
+  replaces?: string | null;      // #3247: the ask this one replaced (request_id on get_my_ask)
+  replaced_by?: string | null;   // #3247: the ask that replaced this one
+  agent_ending?: "replaced" | "withdrawn" | null;  // trinity-enterprise#901: which ending the agent authored
+}
+
+/**
+ * trinity-enterprise#901: the body of an agent withdrawing one of its own
+ * pending asks (POST /api/agents/{name}/operator-queue/{request_id}/withdraw).
+ * The backend refuses any other key (`extra="forbid"`).
+ */
+export interface OperatorAskWithdraw {
+  reason: string;
 }
 
 /**
@@ -566,6 +578,7 @@ export interface OperatorAskCreate {
   to?: "primary" | "approver" | "viewer" | "operator";
   expires_at?: string;
   supersedes_expired?: string;
+  replaces?: string;   // #3247: request_id of one of the agent's own PENDING asks
 }
 
 /**
@@ -573,7 +586,7 @@ export interface OperatorAskCreate {
  * ask went to, never a person's email. `differs` is present on a replay only.
  */
 export interface OperatorAskReceipt {
-  status: "created" | "replayed";
+  status: "created" | "replayed" | "withdrawn";   // withdrawn: trinity-enterprise#901
   id: string;
   request_id: string;
   raised_by: "agent" | "gate" | null;   // null: a replay of a row older than the column
@@ -587,6 +600,10 @@ export interface OperatorAskReceipt {
   expires_at?: string | null;
   wakes_on_ending: boolean;
   supersedes_expired?: string | null;
+  replaces?: string | null;      // #3247: request_id of the ask this one replaced
+  replaced_by?: string | null;   // #3247: request_id of the ask that replaced this one
+  disposed_by?: string | null;
+  agent_ending?: "replaced" | "withdrawn" | null;  // trinity-enterprise#901
   differs?: string[];
 }
 

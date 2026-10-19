@@ -70,18 +70,25 @@ describe('ent#523 — Main is pinned, archives stay reachable', () => {
     expect(tab.label).toBe(MAIN_TAB_LABEL)
   })
 
-  it('keeps the archived chat as a tab — the operator ruled it becomes the newest one', () => {
-    // "one system line in Main names the archived chat, which becomes the
-    // newest tab" (operator, 2026-09-06). An archive is an ordinary past chat,
-    // and hiding the thing the system line just pointed at is the one place
-    // the person is most likely to look next. Growth is bounded by
-    // OverflowTabs' counted "N more", not by hiding rows.
+  it('drops an archived chat from the strip — ent#841 reverses the ent#523 ruling', () => {
+    // Operator, 2026-10-08: closing a chat with its × archives it, and ONE
+    // archive rule covers Reset's retired Main too — an archived chat leaves
+    // the strip and is found in the sidebar's Archived group.
     const tabs = agentChatTabs([
       main(),
       chat('old', { archived_at: '2026-09-07T10:00:00Z', last_message_at: '2026-09-07T10:00:00Z' }),
       chat('older', { last_message_at: '2026-09-01T10:00:00Z' }),
     ], 'a')
-    expect(tabs.map((t) => t.id)).toEqual(['main', 'old', 'older'])
+    expect(tabs.map((t) => t.id)).toEqual(['main', 'older'])
+  })
+
+  it('keeps an archived chat that is ON SCREEN, so the strip never loses its selection', () => {
+    const tabs = agentChatTabs([
+      main(),
+      chat('old', { archived_at: '2026-09-07T10:00:00Z', last_message_at: '2026-09-07T10:00:00Z' }),
+    ], 'a', { activeId: 'old' })
+    expect(tabs.map((t) => t.id)).toEqual(['main', 'old'])
+    expect(tabs.find((t) => t.id === 'old').closable).toBe(false)
   })
 
   it('still sorts the rest by recency', () => {

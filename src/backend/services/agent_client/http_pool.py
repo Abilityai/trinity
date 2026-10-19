@@ -109,17 +109,6 @@ def _acquire_client(base_url: str) -> Tuple[httpx.AsyncClient, bool]:
     return client, True
 
 
-def _get_http_client(base_url: str) -> httpx.AsyncClient:
-    """Get or create an httpx client for a base URL.
-
-    Backward-compatible wrapper around `_acquire_client` that discards the
-    pooled-ness flag. Callers that need to close non-pooled clients should
-    use `_acquire_client` directly. (`_request` does.)
-    """
-    client, _ = _acquire_client(base_url)
-    return client
-
-
 async def close_all_clients():
     """Close all pooled HTTP clients. Call on app shutdown."""
     for client in _client_pool.values():

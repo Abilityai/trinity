@@ -34,11 +34,13 @@ from dependencies import (
     oauth2_scheme,
     reject_agent_principal,
     require_admin,
+    resolve_platform_user_unfloored,
 )
 from models import (
     REPORT_ROWS_PAGE_MAX,
     CanvasBulkDelete,
     CanvasPinRequest,
+    TaggablePerson,
     User,
 )
 from services.agent_auth import agent_httpx_client
@@ -1042,8 +1044,9 @@ def portal_agent_canvases(
     operator-only canvas stays invisible to a rostered client.
     """
     _require_roster(agent_name, principal.email, principal.is_platform)
-    # ent#534: a platform principal reads every audience (they already can on
-    # Agent Detail); an external client stays `roster`-only.
+    # ent#534: a platform principal reads every audience — an operator already
+    # can on Agent Detail, and a Workspace-only `user` keeps the team view by
+    # decision (#837); an external client stays `roster`-only.
     return {"agent_name": agent_name, "canvases": agent_page.canvases(
         agent_name, audience=agent_page.canvas_audience_for(principal.is_platform))}
 
@@ -1354,6 +1357,9 @@ async def portal_chat(
         # ent#610 — resolved (and refused, loudly) BEFORE anything is written.
         reply_context = service.reply_context(
             agent_name, email, body.session_id, getattr(body, "reply_to_message_id", None))
+        # trinity-enterprise#631 — the people this turn tags, refused by name
+        # BEFORE anything is written (same rule on the streaming path below).
+        person_tags = service.resolve_chat_tags(principal, agent_name, getattr(body, "tags", None))
         result = await service.portal_chat(agent_name, body.message, email, session_id=body.session_id,
                                           include_owned=include_owned,
                                           # #3265 — resolved against the caller's
@@ -1372,8 +1378,14 @@ async def portal_chat(
                                           model=requested_model,
                                           reply_context=reply_context,
                                           # trinity-enterprise#751: whether this
-                                          # route proved a person (self-approval).
-                                          gate_is_person=principal.is_person)
+                                          # route proved a person (self-approval);
+                                          # #3404: not `is_person` — a
+                                          # delegate-minted session is one, unproven.
+                                          gate_is_person=principal.self_approves,
+                                          gate_credential=principal.credential,
+                                          person_tags=person_tags)
+    except service.ChatTagError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
@@ -1545,7 +1557,7 @@ async def portal_voice_start(
     # The WebSocket's ownership gate (#600) is by platform user id, so the
     # session must carry it — resolved from the same token the principal came
     # from, the way `get_portal_principal` itself does.
-    user = await get_current_user(request, token)
+    user = await resolve_platform_user_unfloored(request, token)  # past the floor: a Workspace door (ent#837)
     from . import voice as workspace_voice
     try:
         result = await workspace_voice.start_workspace_voice(
@@ -1688,6 +1700,55 @@ def portal_rename_session(agent_name: str, session_id: str, body: PortalSessionR
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
+@router.put("/agents/{agent_name}/sessions/{session_id}/archive",
+            response_model=PortalSessionSummary)
+def portal_archive_session(agent_name: str, session_id: str,
+                           principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Close a chat (ent#841): archive it, never delete it. Idempotent."""
+    return _set_session_archived(agent_name, session_id, principal, True)
+
+
+@router.delete("/agents/{agent_name}/sessions/{session_id}/archive",
+               response_model=PortalSessionSummary)
+def portal_unarchive_session(agent_name: str, session_id: str,
+                             principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Reopen a closed chat (ent#841) — the Undo, and opening it from Archived."""
+    return _set_session_archived(agent_name, session_id, principal, False)
+
+
+def _set_session_archived(agent_name: str, session_id: str,
+                          principal: PortalPrincipal, archived: bool):
+    from services import rate_limiter
+
+    # A write, bounded per viewer like rename (one request per click).
+    rate_limiter.enforce(f"portal_archive:{principal.email}", 60, 60)
+    try:
+        return service.set_session_archived(
+            agent_name, principal.email, session_id, archived,
+            include_owned=principal.is_platform)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.get("/agents/{agent_name}/people", response_model=list[TaggablePerson])
+def portal_people(agent_name: str, q: str = Query("", max_length=64),
+                  principal: PortalPrincipal = Depends(get_portal_principal)):
+    """People who can be TAGGED in a chat with this agent (trinity-enterprise#631):
+    accounts on this instance that can already reach it, matching `q`.
+
+    The ent#450 shape: roster-scoped first (uniform 404), a query required,
+    capped, rate-limited — a picker, never a directory. A platform person only:
+    an external client is refused by name (the colleagues it would list are the
+    organisation's, an internal fact — #78)."""
+    from services import rate_limiter
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    rate_limiter.enforce(f"portal_people:{principal.email}", 120, 60)
+    try:
+        return service.chat_people(principal, agent_name, q)
+    except service.ChatTagError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
 @router.get("/agents/{agent_name}/history", response_model=PortalHistory)
 def portal_history(agent_name: str, session_id: str | None = None,
                    limit: int | None = Query(None, ge=1, le=50),
@@ -1710,7 +1771,8 @@ def portal_history(agent_name: str, session_id: str | None = None,
     include_owned = principal.is_platform
     try:
         return service.get_history(agent_name, email, session_id=session_id,
-                                   include_owned=include_owned, limit=limit)
+                                   include_owned=include_owned, limit=limit,
+                                   viewer_is_person=principal.is_person)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
@@ -2042,6 +2104,7 @@ async def portal_chat_stream(
         # ent#610 — same resolution on the streaming path (the ent#555 lesson).
         reply_context = service.reply_context(
             agent_name, email, body.session_id, getattr(body, "reply_to_message_id", None))
+        person_tags = service.resolve_chat_tags(principal, agent_name, getattr(body, "tags", None))
         started = await service.start_portal_turn(
             agent_name, body.message, email,
             session_id=body.session_id, include_owned=include_owned,
@@ -2056,11 +2119,16 @@ async def portal_chat_stream(
                 is_platform=principal.is_platform),
             model=requested_model,   # ent#403, same rule as the flag above
             reply_context=reply_context,
-            gate_is_person=principal.is_person,   # trinity-enterprise#751, same rule
+            gate_is_person=principal.self_approves,   # trinity-enterprise#751, same rule
+            gate_credential=principal.credential,     # #3404, same rule
             # #3265 — same resolution as the sync path above.
             attachments=await service.resolve_turn_attachments(
                 agent_name, email, getattr(body, "attachments", None)),
+            person_tags=person_tags,   # trinity-enterprise#631, same rule
         )
+    except service.ChatTagError as e:
+        idempotency_service.fail(decision)
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
     except ClientPortalError as e:
         idempotency_service.fail(decision)
         raise HTTPException(status_code=e.status_code, detail=e.detail)

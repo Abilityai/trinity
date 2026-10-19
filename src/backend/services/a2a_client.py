@@ -65,7 +65,7 @@ import ssl
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -116,6 +116,11 @@ A2A_MAX_RESPONSE_CHARS = 32 * 1024   # what the agent's context window can affor
 A2A_DIALECT_CACHE_TTL = 300.0
 
 _USER_AGENT = "Trinity-A2A-Client/1"
+
+#: ent#623: `signer(method, logical_url, body, content_type) -> headers`. When
+#: set, the RPC carries those headers INSTEAD of `Authorization`, computed over
+#: the logical URL (registered host, not the pinned IP) and the exact body bytes.
+RequestSigner = Callable[[str, str, bytes, str], Dict[str, str]]
 
 # --- x402 payment caps (#3185) ---------------------------------------------
 #: Ceiling on the body of a 402/403 — the ONLY statuses whose body we read.
@@ -675,8 +680,75 @@ def _card_url_for(validated: ValidatedPublicUrl) -> str:
     return urlunsplit((parts.scheme, parts.netloc, "/.well-known/agent-card.json", "", ""))
 
 
+async def fetch_card_for(
+    client: httpx.AsyncClient, validated: ValidatedPublicUrl, *, path_relative_first: bool
+) -> Dict[str, Any]:
+    """`fetch_card`, optionally trying `<registered>/.well-known/agent-card.json` first.
+
+    ent#623, `aauth` endpoints only: a Trinity peer serves its per-agent card
+    under the agent path (`/a2a/{name}/.well-known/agent-card.json`); its origin
+    card does not exist (behind nginx it is the SPA's `index.html` with a 200,
+    so a 404-triggered fallback would never fire). Same pin, same caps, same
+    uncredentialed fetch — only the path differs. Bearer endpoints keep the
+    origin-only rule.
+
+    Overlap (#3644 review I2): since trinity-enterprise#838 `fetch_card`'s own
+    `_card_urls_for` already tries the own-path card before the origin, so for
+    an `aauth` endpoint this wrapper's fallback re-fetches the own-path URL once
+    more before the origin, and falls back on any `card_http_error` status where
+    `fetch_card` moves on only on 404. Left as is deliberately; collapsing it
+    onto `fetch_card` is a follow-up.
+    """
+    parts = urlsplit(validated.url)
+    base_path = (parts.path or "").rstrip("/")
+    if path_relative_first and base_path:
+        relative = urlunsplit((parts.scheme, parts.netloc, base_path + "/.well-known/agent-card.json", "", ""))
+        try:
+            return await fetch_card(client, validated, card_url=relative)
+        except A2ACallError as exc:
+            # Fall back only when the peer has no usable card THERE. A timeout
+            # or an unreachable host must propagate: retrying the origin would
+            # add a second card budget on top of the first and push the call
+            # past `A2A_TOTAL_DEADLINE`, which cancels the signed POST after the
+            # peer may already have accepted it.
+            if exc.reason not in ("card_http_error", "card_invalid"):
+                raise
+    return await fetch_card(client, validated)
+
+
+_CARD_SUFFIX = "/.well-known/agent-card.json"
+
+
+def _card_urls_for(validated: ValidatedPublicUrl) -> List[str]:
+    """Where to look for the card, in order (trinity-enterprise#838).
+
+    * A registered URL that IS a card URL (ends ``/.well-known/agent-card.json``)
+      is fetched as given — the operator named the card.
+    * A registered URL with a path is an endpoint; its OWN card, under that
+      path, comes first. That is where a per-agent server publishes one: a
+      Trinity instance serves ``/a2a/<agent>/.well-known/agent-card.json`` and
+      nothing at its origin, so origin-only discovery could never reach another
+      Trinity's agent. This is the card of the endpoint the operator named, not
+      "a different agent's card" — the F5 concern was appending to a CARD URL,
+      which the first case now handles.
+    * The origin card last — today's rule, and the only one for a bare origin.
+
+    Every candidate is same-origin with the registered URL by construction,
+    and `resolve_rpc_target` still applies its pins to whichever card answers.
+    """
+    parts = urlsplit(validated.url)
+    path = (parts.path or "").rstrip("/")
+    origin = _card_url_for(validated)
+    if path.endswith(_CARD_SUFFIX):
+        return [urlunsplit((parts.scheme, parts.netloc, path, "", ""))]
+    if path:
+        own = urlunsplit((parts.scheme, parts.netloc, path + _CARD_SUFFIX, "", ""))
+        return [own, origin]
+    return [origin]
+
+
 async def fetch_card(
-    client: httpx.AsyncClient, validated: ValidatedPublicUrl
+    client: httpx.AsyncClient, validated: ValidatedPublicUrl, card_url: Optional[str] = None
 ) -> Dict[str, Any]:
     """Fetch the peer's Agent Card. **Uncredentialed**, pinned, capped.
 
@@ -687,10 +759,38 @@ async def fetch_card(
     import json
 
     address = validated.addresses[0]
-    raw = await _read_capped(
+    # ent#623: an explicit `card_url` is the only place to look; otherwise the
+    # ent#838 order (own path, then origin).
+    candidates = [card_url] if card_url else _card_urls_for(validated)
+    raw = None
+    for i, card_url in enumerate(candidates):
+        try:
+            raw = await _fetch_card_bytes(client, validated, address, card_url)
+            break
+        except A2ACallError as exc:
+            # Only "no card here" moves on to the next place to look; any other
+            # failure (redirect, size, timeout, a 5xx) is the answer.
+            if exc.reason != "card_http_error" or exc.remote_status != 404 \
+                    or i == len(candidates) - 1:
+                raise
+    try:
+        card = json.loads(raw.decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        raise A2ACallError(
+            "card_invalid",
+            "The A2A endpoint's agent card is not valid JSON.",
+        ) from None
+    if not isinstance(card, dict):
+        raise A2ACallError("card_invalid", "The A2A endpoint's agent card is not an object.")
+    return card
+
+
+async def _fetch_card_bytes(client: httpx.AsyncClient, validated: ValidatedPublicUrl,
+                            address: str, card_url: str) -> bytes:
+    return await _read_capped(
         client,
         "GET",
-        _pinned_url(_card_url_for(validated), address),
+        _pinned_url(card_url, address),
         sni=validated.hostname,
         host_header=_host_header(validated),
         max_bytes=A2A_CARD_MAX_BYTES,
@@ -703,16 +803,6 @@ async def fetch_card(
         # of the window and leave the CREDENTIALED send 15 s.
         timeout=httpx.Timeout(A2A_CARD_FETCH_TIMEOUT, connect=A2A_CONNECT_TIMEOUT),
     )
-    try:
-        card = json.loads(raw.decode("utf-8"))
-    except Exception:  # noqa: BLE001
-        raise A2ACallError(
-            "card_invalid",
-            "The A2A endpoint's agent card is not valid JSON.",
-        ) from None
-    if not isinstance(card, dict):
-        raise A2ACallError("card_invalid", "The A2A endpoint's agent card is not an object.")
-    return card
 
 
 def resolve_rpc_target(validated: ValidatedPublicUrl, card: Dict[str, Any]) -> str:
@@ -736,6 +826,10 @@ def resolve_rpc_target(validated: ValidatedPublicUrl, card: Dict[str, Any]) -> s
     declared = card.get("url")
     parts = urlsplit(validated.url)
     registered_path = (parts.path or "").rstrip("/")
+    if registered_path.endswith(_CARD_SUFFIX):
+        # ent#838: the operator registered the CARD, not an endpoint — the
+        # card's declared url is the target (still same-origin pinned below).
+        registered_path = ""
 
     if isinstance(declared, str) and declared.strip():
         declared = declared.strip()
@@ -1365,6 +1459,7 @@ async def _rpc(
     method: str,
     params: Dict[str, Any],
     *,
+    signer: Optional[RequestSigner] = None,
     credential_kind: str = "api_key",
     payment: Optional[Tuple[Optional[Dict[str, Any]], list]] = None,
 ) -> Dict[str, Any]:
@@ -1386,7 +1481,9 @@ async def _rpc(
 
     address = validated.addresses[0]
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if credential:
+    # ent#623: a signed (`aauth`) call carries the signature headers INSTEAD of
+    # a bearer; an aauth endpoint resolves with no credential anyway.
+    if credential and signer is None:
         headers["Authorization"] = f"Bearer {credential}"
 
     decoded, secrets = payment if payment is not None else _payment_context(
@@ -1407,6 +1504,9 @@ async def _rpc(
                 metadata[a2a_protocol.X402_PAYLOAD_KEY] = decoded
 
     envelope = a2a_protocol.build_request(uuid.uuid4().hex, method, params)
+    content = json.dumps(envelope).encode("utf-8")
+    if signer is not None:
+        headers.update(signer("POST", rpc_url, content, headers["Content-Type"]))
 
     raw = await _read_capped(
         client,
@@ -1416,7 +1516,7 @@ async def _rpc(
         host_header=_host_header(validated),
         max_bytes=A2A_RPC_MAX_BYTES,
         headers=headers,
-        content=json.dumps(envelope).encode("utf-8"),
+        content=content,
         error_prefix="rpc",
         secret=credential,
         secrets=secrets,
@@ -1470,6 +1570,7 @@ async def call_endpoint(
     task_id: Optional[str] = None,
     client_factory=None,
     validated: Optional[ValidatedPublicUrl] = None,
+    signer: Optional[RequestSigner] = None,
     credential_kind: str = "api_key",
 ) -> A2AResult:
     """Send one message to a registered A2A endpoint and return its answer.
@@ -1495,7 +1596,7 @@ async def call_endpoint(
         timeout = httpx.Timeout(A2A_RPC_TIMEOUT, connect=A2A_CONNECT_TIMEOUT)
         factory = client_factory or _http_client
         async with factory(timeout) as client:
-            card = await fetch_card(client, endpoint)
+            card = await fetch_card_for(client, endpoint, path_relative_first=signer is not None)
             try:
                 dialect = a2a_protocol.resolve_dialect(card.get("protocolVersion"))
             except UnsupportedProtocolVersion as exc:
@@ -1512,6 +1613,7 @@ async def call_endpoint(
             secrets = payment[1]
             body = await _rpc(
                 client, endpoint, rpc_url, credential, dialect.send_message, params,
+                signer=signer,
                 credential_kind=credential_kind, payment=payment,
             )
             result = _raise_for_rpc_error(body, credential, secrets)
@@ -1542,6 +1644,7 @@ async def get_task(
     task_id: str,
     client_factory=None,
     validated: Optional[ValidatedPublicUrl] = None,
+    signer: Optional[RequestSigner] = None,
     credential_kind: str = "api_key",
 ) -> A2AResult:
     """Poll a remote task by id (`tasks/get`) on the same resolved endpoint.
@@ -1558,7 +1661,7 @@ async def get_task(
             cache_key = _target_cache_key(endpoint)
             cached = _cached_target(cache_key)
             if cached is None:
-                card = await fetch_card(client, endpoint)
+                card = await fetch_card_for(client, endpoint, path_relative_first=signer is not None)
                 try:
                     dialect = a2a_protocol.resolve_dialect(card.get("protocolVersion"))
                 except UnsupportedProtocolVersion as exc:
@@ -1577,6 +1680,7 @@ async def get_task(
             secrets = payment[1]
             body = await _rpc(
                 client, endpoint, rpc_url, credential, dialect.get_task, {"id": task_id},
+                signer=signer,
                 credential_kind=credential_kind, payment=payment,
             )
             result = _raise_for_rpc_error(body, credential, secrets)

@@ -13,10 +13,11 @@ Trinity is the operating system for the AI-native company — open source, self-
 | **Server, build from source** | `docker compose -f docker-compose.prod.yml up -d` | Servers that build their own images (custom patches, enterprise overlay) | [Single Server → Build from source](deploying/single-server.md#option-b-build-from-source) |
 | **DigitalOcean Marketplace 1-Click** | Create a Droplet from the Trinity image | HTTPS at the Droplet's IP with zero input; claim the admin account in the browser; upgrade to a domain later | [Single Server → DigitalOcean 1-Click](deploying/single-server.md#digitalocean-marketplace-1-click) |
 | **DigitalOcean, from your terminal** | `scripts/deploy/trinity-do-create.sh` (needs `doctl`) | Same result as the 1-Click, but you choose the admin password before the Droplet exists | [Deploy on DigitalOcean](deploying/digitalocean.md) |
-| **AWS EC2** | `start.sh --provision --cloud aws --hosted --unattended` on your own Ubuntu 24.04 instance | HTTPS at the instance's IP; you claim the admin account with the EC2 instance ID. A CloudFormation template and a Marketplace listing are on the way | [Deploy on AWS](deploying/aws.md) |
+| **AWS Marketplace AMI** | Subscribe on the [AWS Marketplace listing](https://aws.amazon.com/marketplace/pp/prodview-q6f3biwa662o2), launch the AMI from the EC2 console | Trinity in your own AWS account and VPC with nothing to install: HTTPS at the instance's public IP, and you claim the admin account in the browser with the EC2 instance ID | [Deploy on AWS → Marketplace AMI](deploying/aws.md#aws-marketplace-ami) |
+| **AWS EC2, from a shell** | `start.sh --provision --cloud aws --hosted --unattended` on your own Ubuntu 24.04 instance | The same provisioned install on an instance you already have, or where you want the admin password set up front; a CloudFormation template ships in the repo | [Deploy on AWS](deploying/aws.md) |
 | **Vultr** | `start.sh --provision --cloud vultr --hosted --unattended` on your own Ubuntu 24.04 instance | The same provisioned install on a Vultr instance | [Single Server → Vultr](deploying/single-server.md#vultr) |
 
-All seven paths share one installer (`scripts/deploy/start.sh`), one `.env` contract, and one set of day-two procedures ([Upgrading](deploying/upgrading.md), [Backup and Restore](deploying/backup-and-restore.md), [Monitoring](deploying/monitoring.md)). Fresh server installs from prebuilt images run on a bundled PostgreSQL database; SQLite reached end-of-support on September 1, 2026 (see [Single Server → Database backend](deploying/single-server.md#database-backend)).
+All eight paths share one installer (`scripts/deploy/start.sh`), one `.env` contract, and one set of day-two procedures ([Upgrading](deploying/upgrading.md), [Backup and Restore](deploying/backup-and-restore.md), [Monitoring](deploying/monitoring.md)). Fresh server installs from prebuilt images run on a bundled PostgreSQL database; SQLite reached end-of-support on September 1, 2026 (see [Single Server → Database backend](deploying/single-server.md#database-backend)).
 
 ## Option A: Local, from Source
 
@@ -120,7 +121,9 @@ Step by step, from installing `doctl` to adding a domain: [Deploy on DigitalOcea
 
 ## Option E: AWS
 
-On your own EC2 instance (x86_64, 8 GiB, Ubuntu 24.04, public IPv4, security group open on 80 and 443), as root:
+**Marketplace AMI (nothing to install).** Trinity is on the [AWS Marketplace](https://aws.amazon.com/marketplace/pp/prodview-q6f3biwa662o2) as an AMI with Docker, Caddy, a host firewall and the Trinity release baked in, so first boot pulls nothing but the certificate. Subscribe, launch it on a large or xlarge instance (`t3a.large` and up) with a public IPv4 address and a security group open on 80 and 443, then open `https://<public-ip>/` once first boot finishes a few minutes later. The setup form asks for the **EC2 instance ID** before it creates the admin, so someone who finds the IP cannot claim it. The software is free; you pay AWS for the instance. Sizes, first boot and what to check: [Deploy on AWS → Marketplace AMI](deploying/aws.md#aws-marketplace-ami).
+
+**Script install (your own instance).** On your own EC2 instance (x86_64, 8 GiB, Ubuntu 24.04, public IPv4, security group open on 80 and 443), as root:
 
 ```bash
 git clone --depth 1 --branch <release-tag> https://github.com/abilityai/trinity.git /opt/trinity
@@ -128,7 +131,7 @@ cd /opt/trinity
 ./scripts/deploy/start.sh --provision --cloud aws --hosted --unattended
 ```
 
-It installs Docker, Caddy with a certificate for the instance's IP, and the host firewall, then Trinity. With no admin password supplied, the setup page asks for the **EC2 instance ID** before it creates the admin, so someone who finds the IP cannot claim it. A timer follows a changed public IP after a stop/start. Full procedure, the CloudFormation template, and recovery: [Deploy on AWS](deploying/aws.md).
+It installs Docker, Caddy with a certificate for the instance's IP, and the host firewall, then Trinity — the same result as the AMI, on an instance you already have, with the option to set the admin password up front (otherwise it takes the same instance-ID claim). On both paths a timer follows a changed public IP after a stop/start. Full procedure, the CloudFormation template, and recovery: [Deploy on AWS](deploying/aws.md).
 
 ## Key URLs (Self-Hosted)
 
@@ -280,7 +283,7 @@ claude  # launch the ops agent
 | `/rollback` | Rollback to previous commit + optional DB restore |
 | `/cleanup` | Prune Docker images, build cache, old backups |
 
-**Provisioning guides** (for new server setup): Hetzner, GCP, AWS, DigitalOcean, and localhost — all in `provision/`. The full skill list is in [Ops Agent](deploying/ops-agent.md).
+**Provisioning guides** (for new server setup): Hetzner, GCP, AWS, DigitalOcean, Vultr, and localhost — all in `provision/`. The full skill list is in [Ops Agent](deploying/ops-agent.md).
 
 ## Detailed Deployment Guides
 
@@ -290,7 +293,7 @@ Step-by-step guides for each deployment scenario:
 |---|---|
 | [Local Development](deploying/local-development.md) | Docker Desktop, dev compose, hot reload, what `start.sh` generates |
 | [Deploy on DigitalOcean](deploying/digitalocean.md) | One command from your terminal to an HTTPS Droplet: `doctl` and an optional domain; you connect Claude on first sign-in |
-| [Deploy on AWS](deploying/aws.md) | Script install on your own EC2 instance, the instance-ID admin claim, the IP-refresh timer, the CloudFormation template |
+| [Deploy on AWS](deploying/aws.md) | The Marketplace AMI, the script install on your own EC2 instance, the instance-ID admin claim, the IP-refresh timer, the CloudFormation template |
 | [Single Server](deploying/single-server.md) | Linux VPS: prebuilt images (`--hosted`) or build from source, the DigitalOcean 1-Click and installer script, Vultr, the database backend, every `.env` key and which compose forwards it, Redis dual-password setup, which compose files go together |
 | [Public Access](deploying/public-access.md) | Cloudflare Tunnel, TLS postures, webhook surface, Slack/Telegram/WhatsApp integrations, `/mcp` through the tunnel |
 | [Hardening a Marketplace Install](deploying/hardening.md) | Bare IP → domain → tunnel or private network, and how to verify each stage |

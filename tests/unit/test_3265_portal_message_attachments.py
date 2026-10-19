@@ -324,4 +324,7 @@ def test_portal_chat_stores_the_attachments_on_the_user_row(svc, monkeypatch):
     with pytest.raises(_Stop):
         asyncio.run(svc.portal_chat(AGENT, "here", CLIENT, session_id=THREAD, availability="running",
                                     turn_timeout_seconds=60, attachments=stored))
-    assert seen == {"content": "here", "voice_call_id": None, "attachments": stored}
+    # #3166: the turn id rides along too (None on this synchronous call, which
+    # stamps the row once its execution exists).
+    assert seen == {"content": "here", "voice_call_id": None, "attachments": stored,
+                    "execution_id": None}

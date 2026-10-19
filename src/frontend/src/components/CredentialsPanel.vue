@@ -81,6 +81,11 @@
           </div>
         </div>
 
+        <!-- ent#819: a refused read (credential files are owner-tier) names why -->
+        <div v-if="fileReadError" class="px-4 pb-3">
+          <InlineError :message="fileReadError" @dismiss="fileReadError = null" />
+        </div>
+
         <!-- Export/Import Buttons -->
         <div class="px-4 py-3 bg-gray-50 dark:bg-gray-900/50 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between">
           <div class="flex items-center space-x-3">
@@ -293,6 +298,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import { useNotification } from '../composables'
 import CredentialSetupChecklist from './CredentialSetupChecklist.vue'
+import InlineError from './InlineError.vue'
 
 const props = defineProps({
   agentName: {
@@ -332,6 +338,7 @@ const uploadResult = ref(null)
 const editingFile = ref(null)
 const editingContent = ref('')
 const savingFile = ref(false)
+const fileReadError = ref(null)
 
 // Computed
 const credentialFiles = computed(() => {
@@ -489,6 +496,10 @@ const readExistingEnv = async () => {
     return parseEnvText(content)
   } catch (err) {
     if (err.response?.status === 404) return {}
+    // ent#819: a refusal names its cause (e.g. owner-tier); say that, not "unreachable"
+    if (err.response?.status === 403 && err.response?.data?.code) {
+      throw new Error(err.response.data.detail)
+    }
     throw new Error(
       "Couldn't read this agent's current credentials, so nothing was written " +
       '(writing now would overwrite the credentials already configured). ' +
@@ -662,28 +673,37 @@ const importFromGit = async () => {
   }
 }
 
+const readFailureMessage = (err) => err.response?.data?.detail || 'Failed to read file'
+
 const viewFile = async (filename) => {
+  fileReadError.value = null
   try {
     const content = await agentsStore.downloadAgentFile(props.agentName, `/home/developer/${filename}`)
     editingFile.value = filename
     editingContent.value = content
   } catch (err) {
     console.error('Failed to read file:', err)
-    if (showNotification) {
-      showNotification('Failed to read file', 'error')
-    }
+    fileReadError.value = readFailureMessage(err)
   }
 }
 
+// ent#819: read first, open the editor only on content or a confirmed 404 (the
+// file does not exist yet). Any other failure keeps the editor closed: an empty
+// editor over a file that could not be read would save over it.
 const editFile = async (filename) => {
-  editingFile.value = filename
+  fileReadError.value = null
+  let content
   try {
-    const content = await agentsStore.downloadAgentFile(props.agentName, `/home/developer/${filename}`)
-    editingContent.value = content
+    content = await agentsStore.downloadAgentFile(props.agentName, `/home/developer/${filename}`)
   } catch (err) {
-    // File doesn't exist, start with empty content or placeholder
-    editingContent.value = ''
+    if (err.response?.status !== 404) {
+      fileReadError.value = readFailureMessage(err)
+      return
+    }
+    content = ''
   }
+  editingFile.value = filename
+  editingContent.value = content
 }
 
 const saveFile = async () => {

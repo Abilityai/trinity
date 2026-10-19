@@ -20,7 +20,7 @@ Clone the repository from GitHub, copy `.env.example` to `.env`, set `ADMIN_PASS
 
 ## Can I use Trinity without hosting it myself?
 
-Not as a hosted service: Trinity is self-hosted, and there is no managed Trinity hosting offering at the moment. The least infrastructure work is a server of your own. The Trinity 1-Click on the DigitalOcean Marketplace needs no terminal at all, and the DigitalOcean installer creates a Droplet with HTTPS from one command in your terminal. On AWS, a CloudFormation stack or `start.sh --provision --cloud aws` on an Ubuntu 24.04 instance does the same (a Marketplace listing is pending), and Vultr installs through its Marketplace from a first-boot script. `./scripts/deploy/start.sh --hosted` runs prebuilt images on any Linux VM, so nothing is built on the server. Self-hosting is free and keeps all data inside your own perimeter. See [Deploying Trinity](../guides/deploying-trinity.md) and [Deploy on DigitalOcean](../guides/deploying/digitalocean.md).
+Not as a hosted service: Trinity is self-hosted, and there is no managed Trinity hosting offering at the moment. The least infrastructure work is a server of your own. The Trinity 1-Click on the DigitalOcean Marketplace needs no terminal at all, and the DigitalOcean installer creates a Droplet with HTTPS from one command in your terminal. On AWS, the Trinity AMI on the AWS Marketplace launches into your own VPC with nothing to install, and `start.sh --provision --cloud aws` on an Ubuntu 24.04 instance (or the CloudFormation stack) does the same on an instance of your own. Vultr installs through its Marketplace from a first-boot script. `./scripts/deploy/start.sh --hosted` runs prebuilt images on any Linux VM, so nothing is built on the server. Self-hosting is free and keeps all data inside your own perimeter. See [Deploying Trinity](../guides/deploying-trinity.md) and [Deploy on DigitalOcean](../guides/deploying/digitalocean.md).
 
 ## What happens the first time I open Trinity in my browser?
 
@@ -54,6 +54,10 @@ Two common reasons: their address isn't on the email whitelist, or no email serv
 ## Why didn't I receive my 6-digit login code?
 
 The default email provider is `console`, which is meant for development — it prints the email (including the code) to the backend logs instead of sending it. For real delivery, add a Resend key and a sender address under Settings > Integrations — no `.env` edit needed ([Platform Keys](../credentials/platform-keys.md#email-provider-resend)) — or set `EMAIL_PROVIDER` in `.env` to `smtp`, `sendgrid`, or `resend` and fill in the matching credentials. Also confirm your address is on the whitelist, since codes only go to allowed emails. See [Setup](../getting-started/setup.md).
+
+## I requested a login code on localhost and nothing arrived — am I locked out?
+
+No. With no email provider configured — the default when first-run setup skipped the email key — Trinity sends no email: the code is written to the backend log, and the login page says so instead of "We sent a code". Read it with `docker compose logs backend` (look for the `EMAIL (console mode)` block) and type it into the code field. Or skip the code: choose **Admin Login** and sign in with the admin password from your `.env`. To get real emails, add an email provider key under **Settings → Integrations**. See [Platform Keys](../credentials/platform-keys.md#email-provider-resend).
 
 ## Why does nothing load when I open http://localhost?
 

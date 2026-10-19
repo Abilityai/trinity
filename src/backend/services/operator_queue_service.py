@@ -90,6 +90,10 @@ OPERATOR_QUEUE_TITLE_MAX = int(os.getenv("OPERATOR_QUEUE_TITLE_MAX", "300"))
 OPERATOR_QUEUE_QUESTION_MAX = int(os.getenv("OPERATOR_QUEUE_QUESTION_MAX", "4000"))
 OPERATOR_QUEUE_CONTEXT_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_CONTEXT_MAX_BYTES", "8192"))
 OPERATOR_QUEUE_OPTIONS_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_OPTIONS_MAX_BYTES", "4096"))
+# #3385: `type` is agent-authored free text. A plain constant, not an env knob:
+# it must stay above every platform type literal (the longest is 24 chars) or the
+# clamp would re-type a platform row.
+OPERATOR_QUEUE_TYPE_MAX = 64
 # #3243: the authoring caps on an agent's ask, refused (never truncated) on the
 # native path and held on the queue-file path. Floored at load so a mis-set env
 # cannot refuse every skill-gate approval (two short options) or every title.
@@ -259,6 +263,13 @@ _RESERVED_ID_PREFIXES = (
                            # an unreserved prefix would let it pre-create the id
                            # of the alert about its own configuration
     GATE_ASK_ID_PREFIX,    # platform-raised asks (trinity-enterprise#611 / #164)
+    # trinity-enterprise#631: a PERSON's tag of another person. Reserved so an
+    # agent can neither forge one through its queue file (nothing lets an
+    # agent tag a person) nor pre-create a tag's deterministic id and swallow
+    # it through ON CONFLICT; `is_platform_minted` then also keeps the row out
+    # of the agent's file and its answer wake. Literal, not imported: this
+    # module is a leaf the tag service imports from.
+    "mention-",
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a
@@ -329,7 +340,17 @@ def is_platform_minted(item) -> bool:
 # (trinity-enterprise#751: the approval card names the person who asked, the
 # notice the person who decided; `gate-` covers `gate-note-`). A subset of
 # `_RESERVED_ID_PREFIXES`, so no agent can mint a row into it.
-_ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-", "gate-")
+_ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-", "gate-",
+                               # trinity-enterprise#631: who tagged whom, in what
+                               "mention-")
+
+
+def is_person_tag(item: Optional[dict]) -> bool:
+    """trinity-enterprise#631: is this row a person's tag of another person —
+    the reserved `mention-` id AND the type, never the agent-authored type
+    alone? The operator's door answers such a row as not there."""
+    from db.queue_mentions import is_person_tag as _is_tag
+    return _is_tag(item)
 
 
 def is_about_a_person(item: dict) -> bool:
@@ -343,6 +364,22 @@ def is_about_a_person(item: dict) -> bool:
 # `is_about_a_person` — the list routes pass it to `_list_conditions` so the
 # exclusion runs BEFORE the limit. One tuple, read by SQL and Python alike.
 ABOUT_A_PERSON_ID_PREFIXES = _ABOUT_A_PERSON_ID_PREFIXES
+
+# trinity-enterprise#866: the rows about a person that are the agent OWNER's
+# alone. A Workspace client's complaint names the rater and quotes their words
+# (ent#499, trinity#3521); a person the agent is merely SHARED with is often a
+# client too, so reading it would tell one client which others rated the agent
+# and what they wrote — the facts `evaluations.py` already withholds from a
+# shared non-owner. Deliberately not the whole `_ABOUT_A_PERSON_ID_PREFIXES`:
+# a shared operator must still see and answer a skill gate's approval (`gate-`).
+OWNER_ONLY_ID_PREFIXES = ("workspace-problem-",)
+
+
+def is_owner_only(item: dict) -> bool:
+    """Is this row readable only by its agent's owner (and admins)? Compared
+    like `is_about_a_person`, so the SQL twin excludes exactly the same rows."""
+    candidate = item.get("request_id") or ""
+    return str(candidate).strip().lower().startswith(OWNER_ONLY_ID_PREFIXES)
 
 
 # ============================================================================
@@ -575,9 +612,15 @@ def list_for_principal(
     offset: int = 0,
     agent_names=None,
     cursor: Optional[str] = None,
+    owned_agents=None,
 ) -> dict:
     """One page of `GET /api/operator-queue` for this caller, with the fields
     that make it honest (trinity-enterprise#815).
+
+    `owned_agents` (trinity-enterprise#866): the agents this caller OWNS, or None
+    when the owner-only rule does not apply (an admin). With a set, an
+    owner-only row (`OWNER_ONLY_ID_PREFIXES`) is listed only for those agents —
+    a SQL condition like every other visibility filter, so `total` stays exact.
 
     Every visibility filter is a SQL condition on the one WHERE builder, so the
     page, `total` and the flags are computed over the same rows:
@@ -605,6 +648,9 @@ def list_for_principal(
     exclude = ABOUT_A_PERSON_ID_PREFIXES if exclude_about_a_person else None
     where = dict(filters, accessible_agent_names=agents,
                  exclude_request_id_prefixes=exclude)
+    if owned_agents is not None:
+        where.update(owner_only_request_id_prefixes=OWNER_ONLY_ID_PREFIXES,
+                     owner_agent_names=set(owned_agents))
     warnings = []
     next_cursor = None
     if cursor is None:
@@ -673,6 +719,28 @@ def _truncate_with_marker(text: str, max_len: int) -> str:
         return text
     keep = max(0, max_len - len(_TRUNC_MARKER))
     return text[:keep] + _TRUNC_MARKER
+
+
+def _bounded_type(value):
+    """#3385: the ingest bound on an agent-authored `type` — truncate-with-marker,
+    strings only. Shared by the clamp and the #2915 fingerprint so a clamped
+    row never reads as a rewrite of its own oversize entry."""
+    return _truncate_with_marker(value, OPERATOR_QUEUE_TYPE_MAX) if isinstance(value, str) else value
+
+
+def _scalar_text(value):
+    """#3314: a JSON number/bool title or question is stored as its text, so the
+    stored value is the same on every DB backend and the fingerprint can match it.
+    Anything else is returned unchanged (str, None, and containers — a non-empty
+    container still fails the insert, as today). A FALSY scalar (0, 0.0, False)
+    is also returned unchanged: `create_item` stores the `or`-default for it
+    ("Agent request" / "(no details provided)"), and rows ingested before this
+    fix carry that default too, so stringifying it here would fingerprint "0"
+    against a row that says "Agent request" and flip every such pre-fix row to
+    409 `item_diverged` on the next sync."""
+    if isinstance(value, (bool, int, float)) and value:
+        return str(value)
+    return value
 
 
 def _validated_addressee(agent_name: str, raw) -> Optional[str]:
@@ -838,6 +906,7 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     contract above still holds.
 
     - title / question: truncate-with-marker.
+    - type: truncate-with-marker (#3385).
     - context: non-dict → {} (fixes the create_item .get crash class); serialized
       > cap OR non-serializable → a marker object that preserves only a *valid*
       (≤EXECUTION_ID_MAX, id-shaped) execution_id.
@@ -852,13 +921,16 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     """
     out = dict(req)
 
-    title = out.get("title")
+    title = _scalar_text(out.get("title"))
     if isinstance(title, str):
         out["title"] = _truncate_with_marker(title, OPERATOR_QUEUE_TITLE_MAX)
 
-    question = out.get("question")
+    question = _scalar_text(out.get("question"))
     if isinstance(question, str):
         out["question"] = _truncate_with_marker(question, OPERATOR_QUEUE_QUESTION_MAX)
+
+    if "type" in out:
+        out["type"] = _bounded_type(out["type"])
 
     # ent#364: the addressee is an authorization decision, so it is resolved here
     # rather than trusted. Absent/invalid/off-roster → None, i.e. an operator ask.
@@ -1027,7 +1099,11 @@ def _normalise_expires(value) -> str:
 
 
 def _canonical_options(options) -> str:
-    if options is None:
+    # #3314: mirrors `db/operator_queue.py` storing `json.dumps(options) if
+    # item.get("options") else None` — a falsy value ([], "", {}, 0, False) is
+    # stored NULL, so it must canonicalise like None or the untouched entry
+    # reads as a rewrite.
+    if not options:
         return ""
     try:
         return json.dumps(options, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -1041,9 +1117,9 @@ def _entry_content(req: dict) -> dict:
     matches what the row stored at ingest byte for byte. `_clamp_ingested_item`
     itself is deliberately not called: it reads the roster and may create a
     workspace thread, and must never run speculatively."""
-    title = req.get("title")
+    title = _scalar_text(req.get("title"))
     title = _truncate_with_marker(title, OPERATOR_QUEUE_TITLE_MAX) if isinstance(title, str) else None
-    question = req.get("question")
+    question = _scalar_text(req.get("question"))
     question = _truncate_with_marker(question, OPERATOR_QUEUE_QUESTION_MAX) if isinstance(question, str) else None
     options = req.get("options")
     if options is not None:
@@ -1078,6 +1154,9 @@ def _row_content(row: dict) -> dict:
 
 
 def _comparable_type(value) -> str:
+    # #3385: bound BEFORE the empty-value default, so a row holding the clamped
+    # value and an entry still holding the raw one compare equal.
+    value = _bounded_type(value)
     return "question" if value in (None, "") else str(value)
 
 
@@ -2303,7 +2382,8 @@ class OperatorQueueSyncService:
                 agent_name, {"id": new_id, "sync_state": None, "sync_detail": None},
                 SYNC_CONFIRMED, None, now,
             )
-            # `type` is agent-authored free text the clamp does not bound; the
+            # `type` is agent-authored free text — the clamp bounds its length
+            # (#3385) but not its content; the
             # audit row is durable operator-visible state (G-04), so it carries
             # the folded token or `other` — never the string itself. `req_id`
             # passed the `_ID_RE` shape check above.

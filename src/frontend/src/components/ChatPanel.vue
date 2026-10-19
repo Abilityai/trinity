@@ -171,7 +171,7 @@ import { ChatMessages, ChatInput, ChatEmptyState } from './chat'
 import { shouldCancelOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../utils/turnCancel'
 import ModelSelector from './ModelSelector.vue'
 import { apiErrorMessage } from '../utils/apiError'
-import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
+import { isGateRefusal, pendingApprovalMessage, storedChatMessage } from '../utils/skillGate'
 import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } from '../utils/execution-status'
 
 const props = defineProps({
@@ -370,11 +370,12 @@ const selectSession = async (session, closeDropdown = true) => {
     })
 
     // Load messages from session (already ordered ASC by backend)
-    messages.value = (response.data.messages || []).map(msg => ({
+    messages.value = (response.data.messages || []).map(storedChatMessage).map(msg => ({
       role: msg.role,
       content: msg.content,
       timestamp: msg.timestamp,
       source: msg.source || 'text',
+      held: msg.held,
     }))
   } catch (err) {
     console.error('Failed to load session:', err)
@@ -410,15 +411,14 @@ const dismissResumeMode = () => {
 
 // Build context from conversation history
 const buildContextPrompt = (userMessage) => {
-  if (messages.value.length === 0) {
-    return userMessage
-  }
-
   // Build conversation context (last 10 exchanges). A held request and its
   // notice stay on screen but out of the context (trinity#3274): resent, the
   // gated command would hold every later turn — and ride along if one of
   // those were approved.
   const recentMessages = messages.value.filter(m => !m.held).slice(-20) // Last 20 messages (10 exchanges)
+  if (recentMessages.length === 0) {
+    return userMessage
+  }
   let context = '### Previous conversation:\n\n'
 
   for (const msg of recentMessages) {
@@ -585,6 +585,11 @@ const sendMessage = async (userMessage, files = []) => {
 
   error.value = null
 
+  // trinity#3163: the context is built from the conversation as it stands, so
+  // the message being sent reaches the agent once (under "Current message"),
+  // and a first message carries no history block.
+  const contextPrompt = buildContextPrompt(userMessage)
+
   // Add user message to chat immediately
   messages.value.push({
     role: 'user',
@@ -600,9 +605,6 @@ const sendMessage = async (userMessage, files = []) => {
   loadingText.value = 'Thinking...'
 
   try {
-    // Build context with conversation history
-    const contextPrompt = buildContextPrompt(userMessage)
-
     // Build request payload - use async_mode for SSE streaming (THINK-001)
     const payload = {
       message: contextPrompt,
@@ -635,6 +637,11 @@ const sendMessage = async (userMessage, files = []) => {
     if (held) {
       userEntry.held = true
       messages.value.push({ role: 'system', content: held, held: true, timestamp: new Date().toISOString() })
+      // trinity#3526: the request was saved to a conversation — stay in it.
+      if (submitResponse.data.chat_session_id) {
+        currentSessionId.value = submitResponse.data.chat_session_id
+        await loadSessions(false)
+      }
       return
     }
 

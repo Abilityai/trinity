@@ -217,7 +217,7 @@
 - **Admin surface**: `GET/PUT/DELETE /api/settings/template-registry`, registered **before** the `/{key}` catch-all (Invariant #4) like `/skills-library` and `/brain-orb`. Writes are `assert_admin` **+ `reject_agent_principal`** — a role gate answers *what role*, never *is this a human*, and `get_current_user` resolves an agent-scoped MCP key to its owner **carrying the owner's role**, so on a default admin-owned install any agent's injected `TRINITY_MCP_API_KEY` satisfies a bare admin gate (trinity-ops-agent#232 class). Here the consequence is direct: an agent could otherwise repoint the platform's template registry at a URL it controls. Both keys are additionally **422-blocked on the generic `PUT /api/settings/{key}`** (which takes an unvalidated `Dict[str, str]`) — without that the SSRF gate is one generic PUT away from being bypassed. Validate at the boundary **and** at the sink (#1525).
 - **Status is part of the contract**: `GET` returns `{last_fetch_at, last_status: ok|failed|disabled|never, last_error_code, template_count, stale, errors[]}`. This is what makes fail-open **visible** rather than silent — an operator whose registry 404s must see that from the panel, not by grepping logs (ent#236's "the panel must be able to show a *failing* auto-sync"). `last_error_code` is a fixed lowercase vocabulary (`unreachable`, `timeout`, `http_error`, `too_large`, `encoding_refused`, `parse_refused`, `unsupported_version`, `bad_shape`, `invalid_url`, `redirect`) — **never a raw exception string**, so a hostile server's response text cannot reach the panel.
 - **Honest cost — the GitHub cold-cache call count returns**: #1931's side-effect was "zero outbound GitHub calls on a cold metadata cache". A non-empty registry re-introduces one `template.yaml` fetch per listed repo per cold cache. At the 600 s per-repo TTL and `--workers 2` the steady state is `workers × windows/hr × entries` — `12 × entries` per hour at a 10-minute window. On an install with **no platform PAT** GitHub's anonymous limit is 60 req/hr per IP, so above ~5 entries the metadata fetch is rate-limited some of the time. Three things make this acceptable: it degrades gracefully by design (a 403 returns `{}` and `_build_template` falls back to the **registry-supplied** display fields, so the card still renders and only derived chips go empty — the concrete payoff of reusing the `admin_override` shape); it is not new (an admin curating 25 repos via TMPL-001 hits the same wall today); and a platform PAT raises the limit to 5000/hr and is already a first-class settings surface. `MAX_REGISTRY_TEMPLATES = 25` is sized against this, and the 3600 s registry TTL keeps the *registry's own* fetch off that budget entirely. **Operators listing more than ~5 repos without a platform PAT should configure one.**
-- **`fork_to_own` fails closed on unreadable metadata (the fix that gates default-ON)**: graceful display degradation is true for display fields and **false** for `fork_to_own`. `_fetch_template_yaml_result` distinguishes "no `template.yaml`" from "could not read it" and the catalog wrapper used to throw the reason away, so a rate-limited (403) fetch produced `fork_to_own: None` and `crud._apply_fork_to_own`'s `== "required"` test never fired — creating the agent **bound to the shared upstream template repo instead of a user-owned copy** (the ent#162 class, reached with no attacker). Pre-existing, but this feature converts it from unreachable to *expected*: it re-introduces per-repo fetches on a **default** install, ships default-ON, and its own arithmetic puts `N > 5` over the anonymous budget — while ent#137's curated fleet is very likely to include the `fork_to_own: required` agent. The creation path now **refuses** (`503`, `TEMPLATE_METADATA_UNAVAILABLE`) rather than treating unreadable as absent. **Which read decides is the whole fix**: both the availability verdict and the `fork_to_own` value come from the CREATION-path read (`crud._read_source_template` → `fetch_template_metadata_result_for_create`) — the PAT that will actually clone, at the requested ref, cache-bypassed — not from the catalog dict, whose `metadata_unavailable`/`fork_to_own` come from the global-platform-PAT, default-branch, 600 s-cached `_get_cached_metadata_result`. Reading the catalog failed in both directions: GitHub answers **404, not 403**, for a repo a token cannot see, so a *private* `fork_to_own: required` template readable only by the creator's per-user PAT (ent#162) classified as ABSENT and the gate passed — the precise outcome it exists to prevent, no attacker involved — while a shared 403 in the cache 503'd every non-forking `github:` create for the full TTL. Fixing only the availability half would not have closed the false pass: the *value* must come from the correctly-credentialed read too. Costs zero extra GitHub calls (it consumes the read ent#89 already makes for `schedules:`), and `required` declared by **either** read enforces, so the change can only remove a false pass, never add one. A clean **HTTP 404 is still "absent"**, so a repo that genuinely ships no `template.yaml` creates exactly as before. The trade is deliberate and is the `learnings.md` 2026-07-15 direction-of-failure rule applied to a gate: agent creation now depends on GitHub API reachability where it previously depended only on `git clone`, and a loud retryable refusal beats a silent wrong-repo binding. Regression-tested by `tests/unit/test_ent14_fork_to_own_failclosed.py`.
+- **`fork_to_own` fails closed on unreadable metadata (the fix that gates default-ON)**: graceful display degradation is true for display fields and **false** for `fork_to_own`. `_fetch_template_yaml_result` distinguishes "no `template.yaml`" from "could not read it" and the catalog wrapper used to throw the reason away, so a rate-limited (403) fetch produced `fork_to_own: None` and `crud._apply_fork_to_own`'s `== "required"` test never fired — creating the agent **bound to the shared upstream template repo instead of a user-owned copy** (the ent#162 class, reached with no attacker). Pre-existing, but this feature converts it from unreachable to *expected*: it re-introduces per-repo fetches on a **default** install, ships default-ON, and its own arithmetic puts `N > 5` over the anonymous budget — while ent#137's curated fleet is very likely to include the `fork_to_own: required` agent. The creation path now **refuses** (`503`, `TEMPLATE_METADATA_UNAVAILABLE`) rather than treating unreadable as absent. **Which read decides is the whole fix**: both the availability verdict and the `fork_to_own` value come from the CREATION-path read (`crud._read_source_template` → `fetch_template_metadata_result_for_create`) — the PAT that will actually clone, at the requested ref, cache-bypassed — not from the catalog dict, whose `metadata_unavailable`/`fork_to_own` come from the global-platform-PAT, default-branch, 600 s-cached `_get_cached_metadata_result`. Since #3725 that creation read is no longer one read with one platform-PAT remedy: when the preferred tier cannot read the template it walks the remaining tiers, then a credential-free SHA-pinned read, and the 503 names every tier tried — see FR-7 in [`github.md` §11.11](github.md#1111-pat-free-clone-of-public-templates-trinity-enterprise123). Reading the catalog failed in both directions: GitHub answers **404, not 403**, for a repo a token cannot see, so a *private* `fork_to_own: required` template readable only by the creator's per-user PAT (ent#162) classified as ABSENT and the gate passed — the precise outcome it exists to prevent, no attacker involved — while a shared 403 in the cache 503'd every non-forking `github:` create for the full TTL. Fixing only the availability half would not have closed the false pass: the *value* must come from the correctly-credentialed read too. Costs zero extra GitHub calls (it consumes the read ent#89 already makes for `schedules:`), and `required` declared by **either** read enforces, so the change can only remove a false pass, never add one. A clean **HTTP 404 is still "absent"**, so a repo that genuinely ships no `template.yaml` creates exactly as before. The trade is deliberate and is the `learnings.md` 2026-07-15 direction-of-failure rule applied to a gate: agent creation now depends on GitHub API reachability where it previously depended only on `git clone`, and a loud retryable refusal beats a silent wrong-repo binding. Regression-tested by `tests/unit/test_ent14_fork_to_own_failclosed.py`.
   - **Known adjacent defect, deliberately not fixed here**: `_get_cached_metadata`/`_fetch_all_metadata` write `_metadata_cache[repo] = (…, metadata, reason)` **unconditionally**, so a `{}` from a transient 403 overwrites a previously-good entry and is served for a full 600 s TTL. That is what turns the window from one request into ten minutes. It is strictly wider than the registry — the shared metadata cache serves every template path — so it is tracked separately. It no longer reaches the fail-closed gate at all: since the gate moved to the creation-path read, a poisoned cache entry degrades display fields and cannot make creation either refuse or pass wrongly. (Caching the *reason* alongside the empty metadata still keeps `metadata_unavailable` honest for the catalog surface.)
   - **`mcp_servers` and `resources` degrade the same way** on an unreadable `template.yaml`, silently falling back to defaults. Only `fork_to_own` has a security consequence, so only it fails closed — but the pattern is named here so the next reader does not have to rediscover it.
 - **`hidden` is inert on the GitHub half — a real local/github asymmetry**: `_build_local_template` sets it and `get_local_templates` filters on it, but `_build_template` never emits it and `_safe_build_github_template` never filters on it. So a registry cannot mark an entry hidden, *and* a listed repo whose own `template.yaml` says `hidden: true` is still shown. Neither is exploitable; the divergence is recorded so it is not rediscovered as a bug.
@@ -1479,7 +1479,9 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   `signal` (the shape it carries). `visibleTabs(tabs, session)` is the ONE gate
   for render AND mount: a tab whose door the session fails has no icon, no
   label and no mounted body, so nothing it would fetch is ever requested. An
-  unknown door fails closed. Fixed order Work · Loops · Canvas · Files.
+  unknown door fails closed. Fixed order (since trinity-enterprise#892) Info ·
+  Canvas · Files · Projects · Asks · Work · Loops; the tab a rail opens on is
+  still Work (`RAIL_DEFAULT_TAB`).
 - **AC-3 — the collapsed rail signals live activity without opening**: two
   shapes, one hue (principle 24) — *live now* (8px dot in a 3px ring,
   `motion-safe:animate-pulse`, static under reduced motion) and *updated since
@@ -1556,6 +1558,21 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   `⌥.` (ent#621) reaches it, the collapsed strip shows its dot and "Asks · 2
   asks", and the open strip's tab carries the count. A room lists every
   participant's asks grouped by agent, absence visible.
+- **AC-11 — the Asks tab is always present; the order reads Info · Canvas ·
+  Files · Projects · Asks · Work · Loops (trinity-enterprise#892)**: operator
+  ruling 2026-10-13 supersedes AC-10's presence rule. The Asks tab renders like
+  every other tab (door `AGENT` only), and with nothing waiting its body shows an
+  empty state that names the agent ("Nothing from scout is waiting on you…") with
+  **Open the Inbox** (the agent's asks home, `?tab=action&from=<agent>`). Its
+  body has all four states (`railAsksView`): a skeleton before the asks feed has
+  a verdict, LoadFailed for a failed first read, the empty state only after a
+  read succeeded with nothing waiting (a 404/403 verdict reads as empty), the
+  rows otherwise. Its "needs you" mark still appears only when an ask waits. No
+  tab moves when asks arrive or clear, so Asks no longer has to be last and
+  takes its place in the reading order. The default tab (Work) and a viewer's
+  remembered tab are unchanged; `⌥.` walks the new visual order. A session that
+  cannot see Work (an outside client) falls back to the first visible tab, which
+  is now Info.
 - **Not in this slice (recorded on the issue)**: the Work tab's content
   (#457), re-homing Loops / Canvas / Files (#472's second child), the sidebar /
   thread tab strip / top band / Agent-details panel / drop target of the
@@ -1845,7 +1862,8 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **AC-1 — the keys**: `⌘J`/`Ctrl+J` new chat with this agent (§5.21,
   unchanged); `⌥↓`/`⌥↑` next / previous **agent**; `⌥⇧↓`/`⌥⇧↑` next /
   previous **chat with this agent**; `⌘.`/`Ctrl+.` show or hide the rail;
-  `⌥.` next rail tab; `⌘/`/`Ctrl+/` the keyboard-shortcuts list.
+  `⌥.` next rail tab; `⌘/`/`Ctrl+/` the cursor into the sidebar's search
+  field (AC-11); `⌥/` the keyboard-shortcuts list.
 - **AC-2 — one declaration**: every chord lives in
   `src/frontend/src/components/portal/portalKeymap.js` (pure — no DOM, no
   store), with its scope, its owner, and its label. `keymapCollisions(map)`
@@ -1873,10 +1891,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   through `defaultPrevented` (the Esc protocol, the composer typeahead's bare
   arrows, which claim bare arrows only).
 - **AC-5 — suppression**: anything modal (`[aria-modal="true"]`, with a
-  per-action exemption so `⌘/` can close its own dialog and the rail sheet
+  per-action exemption so `⌥/` can close its own dialog and the rail sheet
   does not count as modal over the rail), the mobile drawer, and a live voice
   call suppress the moving and rail keys **silently**; `⌘J` keeps its own ask
-  during a call, and `⌘/` stays available. A held key does not walk the list
+  during a call, and `⌘/` and `⌥/` stay available. A held key does not walk the list
   (`e.repeat` resolves to nothing) and an IME composition is never a chord.
   The auto-repeat of a press the shell **claimed** is still swallowed
   (`heldKey` + `workspaceChord`), so a held `⌥.` cannot type `≥` into the
@@ -1903,7 +1921,7 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   that agent. An unsent new chat records nothing, so its draft is reached
   through the landing rule's own arms rather than a second rule. Every moving
   key focuses the composer afterwards.
-- **AC-9 — discoverable**: `⌘/` opens a shortcuts dialog built **from the
+- **AC-9 — discoverable**: `⌥/` opens a shortcuts dialog built **from the
   map**, so a key cannot ship without a row (the reserved chord is excluded —
   nothing binds it, and a dead row in a help dialog is worse than an
   undocumented key). The sidebar footer offers the same dialog, and every
@@ -1912,6 +1930,31 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **AC-10 — reserved, not bound**: `⌘K`/`Ctrl+K` is declared and
   **unhandled** — no `preventDefault`, no row in the list — so the browser's
   own behaviour stands until the search surface ships.
+- **AC-11 — the search key**: `⌘/`/`Ctrl+/` puts the cursor in the sidebar's
+  "Search agents and chats" field and selects what is in it — the Dashboard's
+  `/` filter key (§ fleet filter), with the modifier a key needs to work from
+  inside a text field. Pressed again while the field has focus it hands the
+  caret back to the message field. Below `sm` the sidebar is the drawer, so the
+  key opens it and focuses that instance's field. The field shows the chord
+  (a key cap while it is empty and unfocused, plus `title` and
+  `aria-keyshortcuts`). It is NOT the reserved `⌘K` surface: it focuses the
+  search that exists and adds none. The shortcuts list moved to `⌥/` to free
+  the chord, keeping the `⌘.` / `⌥.` pairing (the primary key acts, the Option
+  key steps to its neighbour).
+- **AC-12 — the tips panel**: the open rail carries a small panel pinned to its
+  bottom edge listing four headline chords (switch agent, switch chat, search,
+  new chat) and a button that opens the shortcuts dialog. It is **two rows of
+  two** and nothing else — no heading line, no footer: the close and the
+  open-the-list controls stack beside the rows. A pair of chords prints its
+  modifiers once (`⌥↑↓`, `Alt+Shift+↑↓` — `keyHintCompact`), and when the rail
+  is dragged narrow a label shortens (full text on hover) while a key cap never
+  wraps and a row never becomes two. Rows are derived from the map (`KEY_TIPS`
+  → `keyTipRows`), never typed. The collapsed strip carries
+  the same door as one icon button at its foot; the mobile sheet carries
+  neither. The panel is dismissible, and the dismissal is remembered per
+  browser (`localStorage['trinity-workspace-key-tips']`, a per-viewer
+  convenience — nothing is stored server-side); the sidebar footer button stays
+  as the way back to the full list.
 - **Not this slice**: a search/spotlight surface behind `⌘K`; remapping or
   disabling the chords in settings (they are modifier chords; nothing conflicts
   with typing); the mobile drawer's own Esc/focus-trap contract (#1923).
@@ -1924,6 +1967,7 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   `workspaceKeymap.mount.spec.js` (the shell: dispatch, the walk, the memory,
   the bails and suppression), `portalChatCycle.mount.spec.js`,
   `portalKeyList.mount.spec.js`, `portalKeyHints.mount.spec.js`,
+  `portalKeyTips.mount.spec.js` (the tips panel, both rail forms),
   `portalRosterRow.spec.js` (the bound and the handed-down order, mounted).
 - **Flow**: `docs/memory/feature-flows/workspace-chat-tabs-and-titles.md`
   (→ The key map); the landing rule it calls is
@@ -2454,10 +2498,11 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   names the two properties the tab form had to answer for (participant scoping,
   and dismissal vs switching) — §5.30 answers both.
 - Main is named by its **role** in the tab strip and the header and is not
-  renameable. An archived chat stays a tab — the operator ruled it “becomes the
-  newest tab” — and growth is bounded by `OverflowTabs`' counted “N more” rather
-  than by hiding rows; you simply never LAND in one by default. An unused Main is
-  filtered from the **sidebar** only.
+  renameable. ~~An archived chat stays a tab — the operator ruled it “becomes the
+  newest tab”.~~ ⚠️ **Superseded 2026-10-08 by §5.41** (ent#841): an archived
+  chat — Reset's retired Main included — leaves the strip and the sidebar's
+  active groups and is listed under **Archived**. An unused Main is filtered
+  from the **sidebar** only (unless it is starred, #3356).
 - The sidebar orders agents by most recent collaboration then name, applied
   before the collapse. This is **not** ent#491 (incubating): `orderRosterAgents`
   ships the order this AC states and leaves `primaryName` as its seam.
@@ -2582,6 +2627,14 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   (`comment_withheld`) is untouched. The operator sees the comment; the agent
   still does not — including through its own key: the operator queue's reads
   never return this item to a machine principal (trinity-enterprise#715).
+- **The agent's owner and admins only** (trinity-enterprise#866). A person the
+  agent is merely *shared* with is often a client too, so the alert — which names
+  the rater and quotes their words — is owner-only: the queue lists it to a
+  non-admin only for agents they own (a SQL condition, so `total` stays exact),
+  answers it by id as "not found", and refuses to acknowledge, cancel or
+  bulk-cancel it. The same facts `GET /evaluations` already withholds from a
+  shared non-owner. Only this kind is owner-only (`OWNER_ONLY_ID_PREFIXES`): a
+  shared operator still sees and answers a skill gate's approval.
 - **Routed through the budget, never allowlisted** (#1677). The volume here is
   driven by a *client* clicking, so this is an agent-influenceable emitter by
   the classification rule and goes through
@@ -2590,12 +2643,20 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   direct `create_operator_queue_item` would fail the CI emitter guard, and
   reusing the generic `alert` type would have made five unrelated alerts on that
   agent silence every problem report.
-- **One item per person per target, by construction.** The id is derived from
-  the evaluator and the target, so a re-rate hits `create_item`'s
-  `ON CONFLICT DO NOTHING`. **Stated residual**: `create_item` has no UPDATE
-  path, so an edited comment does not reach an item already raised — the same
-  residual ent#434's alert carries, and it is a shared fix, not a per-emitter
-  one.
+- **One item per person per target per UTC day, by construction.** The id is
+  derived from the evaluator, the target and the day, so a re-rate hits
+  `create_item`'s `ON CONFLICT DO NOTHING`.
+- **A comment sent after the rating reaches the item** (trinity#3521). The
+  Workspace records the thumbs-down on the click and sends the comment as a
+  second request, so the click has usually raised the item already. A request
+  that carries words rewrites the item's `question` and `context.has_comment`
+  through `db.update_pending_problem_report` — pending items of this type only,
+  so an item a person already ended is never rewritten or reopened. Only words
+  ever write text: a bare re-rate cannot erase a comment. The update adds no row,
+  so it spends no budget. Both requests run in the background, so the service
+  attaches once more after its own create (the click's create can land in
+  between). **Stated residual**: a comment sent after the operator ended that
+  day's item does not reach it; the next day's item carries the next report.
 - **Emitted off the response path.** `create_bounded_alert` is async and the
   rating route is a sync `def`, so the emit rides `BackgroundTasks` beside the
   existing `capture-feedback` dispatch. A rating is recorded whether or not the
@@ -3398,7 +3459,7 @@ to localStorage in the clear.
 - **Flow**: `docs/memory/feature-flows/workspace-drafts.md`
 
 ### 5.36 Workspace — the role card in Agent details: role, objectives with metric freshness, readiness (trinity-enterprise#527)
-- **Status**: ✅ Implemented (2026-09-21) — the Role + Readiness half; the relationship line waits for ent#500. OSS-core (Workspace).
+- **Status**: ✅ Implemented (2026-09-21); the role and the relationship line read the assignment record since 2026-10-07 (ent#811/#814 follow-up, the #3271 / ent#818 live check). OSS-core (Workspace).
 - **Requirement ID**: WORKSPACE_ROLE_CARD
 - **GitHub Issue**: abilityai/trinity-enterprise#527 (+ #663, the 1.0 gate on who flips readiness; + #676, 2026-09-30, the objectives cut over to the ent#666 join)
 - **Description**: When a companion has a role (Tandem, ent#497), the Info rail's
@@ -3409,17 +3470,24 @@ to localStorage in the clear.
 - **Files are truth, read through the platform, never a second store.** Everything the
   card shows about the role comes from the agent's own container on each read
   (`client_portal/role_card.py`, via the agent client — the same door the Files tab
-  uses): `template.yaml → x-role: {role, status, seat?}` (written by the
-  `create-agent:role-companion` wizard, #511) and `x-canon.clone_path` (default
-  `canon`); the role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
+  uses): `template.yaml → x-canon.clone_path` (default `canon`) and `x-role.status`
+  (the template's readiness claim, #511); the role file `<canon>/roles/<id>.yaml`
+  where `<id>` is **the seat on record** — the seat this agent serves for the
+  viewer (`assignment_provider.resolve_served_seat`: held → the viewer's own →
+  the primary's), never `x-role.role`. `seat_source` (holds / person / primary /
+  none) is rendered as words, never a person. No seat → `role.error = no_seat`
+  with the supported objectives still listed. **Your relationship** is the
+  viewer's assignment kind (`kinds_for` on the provider; primary / approver /
+  collaborator / viewer), "no assignment recorded" only when there is none.
+  The role file `<canon>/roles/<id>.yaml` and `<canon>/objectives/*.yaml`
   (framework §3.4 grammar — `owner: role:<id>` or `supporting_agents` names this
   agent). The role file is the card's own read; the objectives and their numbers
   are **not** — they come from the one objective ↔ metric join
   (`objective_join_service.read_objective_join`, §50 of
   `lifecycle-observability.md`), called in process with the template and the agent
   client the card already holds (trinity-enterprise#676). Nothing is cached or
-  copied platform-side. Every read is fail-soft and **named**: no `x-role` → no
-  card at all (the panel is unchanged, AC 5); a role file that cannot be read or
+  copied platform-side. Every read is fail-soft and **named**: no seat, no canon
+  and no `x-role` → no card at all (the panel is unchanged, AC 5); a role file that cannot be read or
   parsed → the card says so (`role.error`), never an empty role; a stopped agent
   → "the agent is stopped; the card reads its files when it runs"; objectives
   that could not be read → one line saying so (`objectives_error`), never an
@@ -3491,11 +3559,16 @@ to localStorage in the clear.
   for the verdict: a held brief is a `skipped` execution whose reason names the fix
   ("Held: … runs once its owner marks it ready"), a `schedule_execution_skipped` event, and
   advanced run times — never a failure, a retry or an alert. **Every ambiguity fails open
-  and is logged** (verdict call failed, container not running, Docker or template.yaml
-  unreadable within 3 s). The template is read only to learn whether the agent is a
-  companion; `x-role.status` is agent-writable and is never trusted (#663). Honest limit: an
-  *unstamped* companion can take itself out of scope (drop `x-role`, or stall the read into
-  fail-open); an owner's stamp is the one thing it cannot touch.
+  and is logged** (verdict call failed, stamp unreadable). `x-role.status` is
+  agent-writable and is never trusted (#663). **Who is a companion (trinity-enterprise#813,
+  ruling 2026-10-06):** asked only for an unstamped agent, and answered by the seat on
+  record (`assignment_provider.resolve_seat`), not the template — a companion is an agent
+  whose primary is assigned and holds a seat. An agent holding a seat itself (an autonomous
+  player), no primary with a seat, no seat lookup or a lookup error all read as "not a
+  companion", so the brief fires; each decision is logged with its reason. The template is
+  no longer read, so an agent cannot take itself out of scope by editing its own files —
+  the seat is admin-written. A companion template with no assigned primary therefore sends
+  its brief until its primary is assigned.
   - **Rollout (ruled 2026-09-24, amended from option 1 at plan review)**: a one-time,
     database-only seed on both migration tracks stamps `ready` (`changed_by =
     rollout:ent#689`) for every live agent with autonomy on and an enabled, non-deleted
@@ -3523,6 +3596,34 @@ to localStorage in the clear.
   paused only when it is true, so the list never claims a pause the card does not. The
   dashboard's 30 s agent poll patches `readiness`/`brief_held` in place, so a flip reaches an
   open tab without a reload.
+
+- **Objectives in plain words (trinity-enterprise#843, 2026-10-08).** The card answers a
+  client's question — "what is this agent for, and is it on track?" — not the canon's:
+  - **Owned first** under "What this agent is responsible for", each metric as one line
+    ("Runway: 7.2 months (target 12 months) · updated 2h ago"; no value yet reads
+    "not measured yet", never "— / 1").
+  - **Supported objectives** in a separate group, **collapsed by default** with a count
+    ("Also contributes to · N"), headings only — no metric rows, no per-metric warning.
+    Where another of the owner's agents actively declares one of its numbers it says
+    so **once per objective**, neutral: "Tracked by another agent". The card never
+    names that agent (external clients read it), and says nothing when no agent
+    declares the number. An agent that only supports objectives still shows the folded
+    group.
+  - **Readable metric names**: the declared label, else the label the *active*
+    declarations by the **same owner's** other live agents agree on (so a metric another
+    agent tracks shows by that agent's label — `db.metric_declarations_elsewhere`,
+    labels only, never who declared; an agent of another owner can never put text on
+    this card), else the code name turned into words (`runway_months` → "Runway (months)"). A raw snake_case
+    name never reaches the card; a failed lookup still falls back to words.
+  - **Warning colour only for real problems**: stale ("not updated recently"), behind /
+    off target, a file that was not read, an incomplete list. Findings that remain under a
+    metric are neutral notes; "not measured" and "tracked elsewhere" are not repeated.
+  - Horizons read "this quarter" / "this month" / "this year" / "this week".
+  - An objective may carry an optional **`client_heading`** in canon — a plain heading for
+    client screens; the card uses it and falls back to `statement`. (Convention half:
+    the canon objective format in trinity-pm.)
+  - Honest status is unchanged (principle 15); the operator agent page keeps the full
+    canon detail.
 
 ### 5.37 Workspace — the seat-level decision record: why a thing was approved, deferred or killed (trinity-enterprise#638)
 - **Status**: ✅ Implemented (2026-09-22). OSS-core (Workspace).
@@ -3565,9 +3666,10 @@ to localStorage in the clear.
   (`GET/POST /api/enterprise/client-portal/agents/{name}/decisions`,
   `POST …/decisions/{id}/actions`, `PortalAgentDecisions.vue`).
 - **Readers**: own seat always; the agent OWNER (`role_card._is_owner`) every seat,
-  writable; a stakeholder the assignment provider recognises through the optional seam
-  method `kinds_for(agent_name, reader_email) -> {kind, role_id}` every seat read-only
-  (per-agent in v1 — DEBT_INBOX 2026-09-22); no provider → own seat only. Writes: own
+  writable; nobody else. An assignment kind (`kinds_for(agent_name, reader_email) ->
+  {kind, role_id}`) does **not** widen the read: it answers the role card's
+  relationship line only, and a kind is per agent, not per role, so it would hand an
+  approver every person's decisions (#3660; per-role stakeholder reads are #3381). Writes: own
   seat, or the owner on a named seat; a foreign id is the uniform 404.
 - **Read into context**: the seat's active decisions (criterion first, bounded) ride the
   shared memory block on every turn — public link, channels, seat runs, Workspace — so
@@ -3736,7 +3838,7 @@ to localStorage in the clear.
 - **Three windows (tabs)**:
   | Tab | Membership | Source |
   |---|---|---|
-  | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked; ordered by urgency — expiring within 24h first (soonest first), then priority (critical > high > medium > low), then the longest-waiting (§3g C1) | the ONE asks list (`openAsks`) |
+  | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked; **Newest first by default** (raised time, newest first; ties on id), **Urgency on the sort control** — expiring within 24h first (soonest first), then priority (critical > high > medium > low), then the longest-waiting (§3g C1, unchanged); see *Action's sort* below (trinity-enterprise#856) | the ONE asks list (`openAsks`) |
   | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included | the sidebar's `threads` + `GET /chat-state?previews=true` |
   | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed; rooms wait for PR C), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule, the 200-ask read cap when hit, and — to a viewer with rooms — that rooms are not here yet (§3g D-4) | the same two lists |
 - **One unread model (AC 6)**: the unit of Unread is a **chat**, read through the existing
@@ -3825,8 +3927,10 @@ to localStorage in the clear.
   on the answered card; a second Enter while the answer is on its way sends nothing. In the
   Inbox pane the card's header carries the priority and the expiry (the row's badges), where
   the person decides — its context below the answer row does not repeat them.
-- **Open canvas (§3g C10)**: the pane offers "Open canvas" — on a chat or an ask — only when
-  the item's agent has a canvas this viewer can see; it opens the rail on that canvas.
+- **Open canvas (§3g C10)**: the pane offers "Open canvas" on a chat only, when the chat's
+  agent has a canvas this viewer can see; it opens the rail on that canvas. An ask's header
+  carries **Open in chat** for the chat whose turn raised it instead — none for a background
+  ask (#3714).
 - **Long tabs page (§3g SM / C4)**: every tab renders 50 rows, states "Showing 50 of 212", and
   offers "Show more" (50 at a time, focus to the first new row); the window resets when the tab
   changes, never on a refresh, and always includes the selected row.
@@ -3872,6 +3976,40 @@ to localStorage in the clear.
   When split, the tab's first row is previewed (the rail column does not pop in on the first
   click); the preview is never a read and never enters the URL — `?item=` holds only what the
   reader opened (§3g S5, T2).
+- **Action's sort — Newest by default, Urgency on a switch (trinity-enterprise#856, operator
+  ruling 2026-10-09)**: an inbox reads newest first; urgency is one click away, not the default.
+  - **AC B1** Action opens Newest first (`askRecencyCompare`: `created_at` desc, id desc — the
+    rule All already uses for its rows). **AC B2** the Urgency order is §3g C1, unchanged.
+  - **AC B3** the control is a `BaseSelect variant="ghost"` ("Newest" / "Urgency", named
+    "Sort asks") in the list's head line, beside the total. The line's 44px box is held on
+    every tab and in every state (loading, empty, failed), so switching tab or sort moves
+    nothing; the native select gives keyboard operation and the phone picker.
+  - **AC B4** the choice lives in `?sort=` (`newest` | `urgency`; anything else is ignored)
+    and in a per-viewer memory (`localStorage`, keyed by the viewer bucket the column widths
+    use). Precedence: the URL, then the memory, then Newest. A change writes both, through
+    `router.replace` (never a history entry). A refused storage degrades to session-only.
+  - **AC B5** a sort change starts a new visit of the list (`visitKey` carries the sort), so
+    the rows re-sort on the click and hold still after it, as on a tab change.
+  - **AC B6** `?from=` narrowing and paging work the same in both orders (the filter runs on
+    the sorted list).
+  - **AC B7** the row marks that say WHY an ask is urgent (priority, "Expires in …") render in
+    both orders.
+  - **T1 — Action only.** Unread and All are already recency, and Urgency means nothing for a
+    chat or a tag row; the control is not drawn there, and a stray `?sort=` on those tabs is
+    removed from the URL like a stray `?from=`.
+  - **T2 — the operator queue's Open tab (Operations) is left as it is**: priority, then the
+    longest-waiting — an operator's triage surface with its own semantics, outside the
+    Workspace and outside this change.
+  - **T3 — the rail's Asks list follows Action's default, passed explicitly**
+    (`actionItems(openAsks, now, INBOX_SORT_DEFAULT)`): its rows open the Inbox on Action,
+    which shows the same order. It has no control and does not read the viewer's memory.
+  - **T5 — inconsistencies recorded, not fixed here**: (i) an unknown priority ranks as
+    **medium** in the Workspace (a malformed priority must not bury an ask) and **last** in
+    the operator queue; (ii) expiry affects order **only in the Workspace** (the queue has no
+    expiry mark); (iii) within a priority the server returns pending asks **newest first**
+    (`db/operator_queue.py::list_items`) while both clients show the **longest-waiting
+    first**, so a page truncated at the read cap drops the oldest — a public bug listed in the
+    PR's handoffs, not fixed here (no endpoint change).
 - **Known properties (stated, not bugs)**:
   - A viewer who has never read anything has no baseline, so nothing counts for them — a first
     deliverable included (the inherited #557 rule).
@@ -3885,7 +4023,7 @@ to localStorage in the clear.
 - **Not in scope**: the editable "What would be sent" (09-20 ruling); #609; the `people_for`
   provider; `may_end` (rides #164); run pills with step labels (need a message→execution link).
 - **Flow**: `docs/memory/feature-flows/workspace-inbox.md`
-### 5.41 Workspace — the autonomy dial: what a companion may do unprompted (trinity-enterprise#641)
+### 5.44 Workspace — the autonomy dial: what a companion may do unprompted (trinity-enterprise#641)
 - **Status**: ✅ Implemented (2026-09-23). OSS-core (Workspace).
 - **Requirement ID**: WORKSPACE_AUTONOMY_DIAL
 - **GitHub Issue**: abilityai/trinity-enterprise#641 (canon `tandem-06-operations.md` §2.3, ruling P12; consumes §5.37's evidence)
@@ -3963,10 +4101,156 @@ to localStorage in the clear.
   the person reads and holds/releases in Agent details (`PortalAgentAutonomy.vue`,
   `GET /api/enterprise/client-portal/agents/{name}/autonomy`, `…/autonomy/actions`,
   `…/autonomy/guard`); admins set the level in Settings.
-- **Storage**: `seat_ask_class_state` (both tracks; Alembic `0096` ← `0094`; cleanup
+- **Storage**: `seat_ask_class_state` (both tracks; Alembic `0100` ← `0099`; cleanup
   CASCADE) holds ONLY the earned half + the hold + the guard metric. The level is one
   validated `system_settings` key (`autonomy_dial_level:instance`), not a table.
 - **Not in scope**: per-agent or per-seat levels (the instance level is the ceiling in
   v1); auto-feeding `guard_metric` from the §49 metric registry (set explicitly by the
   owner for now — DEBT_INBOX 2026-09-23).
 - **Flow**: `docs/memory/feature-flows/workspace-autonomy-dial.md`
+
+### 5.41 Workspace — close a chat from its tab, the tab's unread count, and a star that sticks (trinity-enterprise#841, abilityai/trinity#3356)
+- **Status**: ✅ Implemented (2026-10-08)
+- **Requirement ID**: WORKSPACE_CLOSE_CHAT
+- **GitHub Issue**: abilityai/trinity-enterprise#841, abilityai/trinity#3356
+- **Description**: Closing a chat takes one click: an **×** on its tab.
+  Closing **archives** the chat and never deletes it.
+- **Key Features**:
+  - Every chat tab but Main carries an × ("Archive chat"): revealed on
+    hover/focus from `sm:` up, always drawn on touch, a real button reachable by
+    keyboard, also on the rows of the strip's "N more" menu. One click, no
+    confirmation — nothing is lost. **Main cannot be closed** (no ×; the server
+    answers a named 409) — Reset is its retire action.
+  - **One archive rule (operator, 2026-10-08).** Closing sets the same
+    `archived_at` Reset's retired Main carries, and *every* archived chat leaves
+    the tab strip and the sidebar's active groups (Starred and the date groups).
+    This reverses §5.23's ent#523 ruling that a Reset archive "becomes the newest
+    tab". The chat on screen is the one exception — a deep link to an archived
+    chat still draws its tab.
+  - **Found and reopened.** The sidebar lists archived chats in a collapsed
+    **Archived · N** group. Opening one reopens it (clears `archived_at`) as an
+    ordinary active chat; a retired Main reopens with `is_main = 0`.
+  - **Undo.** A "Chat archived · Undo" toast follows a successful close (8 s);
+    Undo reopens the chat and returns to it if it was the open one. A refused
+    close reverts the tab and names the reason in an `InlineError` under the strip.
+  - **Neighbour on close.** Closing the open chat moves to the tab on its
+    right, else its left (Main is first, so there is one), else the agent page.
+  - **Starred chats** can be closed: the star (per-viewer chat state) is not
+    touched, the chat leaves Starred while archived, and reopening restores its
+    pinned place.
+  - **A reply in flight.** The × of the OPEN chat is inert while its reply is in
+    flight, with a tooltip saying why. A background chat can be closed mid-turn:
+    the reply still lands in the archived chat and is there on reopen.
+  - **Rooms are excluded**: the strip lists one agent's 1:1 chats, so a room has
+    no tab to close; a room keeps its own lifecycle.
+  - **Unread on the tab.** A chat with unread replies that is not on screen
+    shows the sidebar row's count on its tab, in the same solid blue
+    (`badgeVariant: 'primary'`), and in the "N more" menu. The strip is
+    fixed-width, so the count shortens that tab's label and moves nothing.
+  - **The star on the tab.** A starred chat's tab draws a filled star before its
+    label (the tab's own ink), in the strip and in the "N more" menu. Tabs are
+    192px (`w-48`, was 160) to carry the star, the count and the ×.
+  - **A star sticks on the first click (#3356).** A chat-state read already in
+    flight when the star is clicked used to answer with the pre-click state and
+    overwrite it. Local star writes (and tab closes) are now held over any read
+    issued before they settled (`createWriteGuard`). A starred, never-used Main
+    is listed in the sidebar so the header star has somewhere to show.
+- **API**: `PUT` / `DELETE /api/enterprise/client-portal/agents/{name}/sessions/{id}/archive`
+  (roster- then session-scoped, uniform 404, idempotent, 60/min per viewer). No schema change.
+
+### 5.42 Workspace — tag a person into a conversation; the tag reaches their Inbox (trinity-enterprise#631)
+- **Status**: ✅ Implemented (2026-10-10)
+- **Requirement ID**: WORKSPACE_PERSON_TAG
+- **GitHub Issue**: abilityai/trinity-enterprise#631 (the pointer half of epic ent#630; the seat stays incubating)
+- **Description**: In a 1:1 chat or a room, a person can `@` a colleague on the same
+  instance and that colleague is told. A tag is a **pointer, not a seat**: it changes no
+  membership and grants no access. Before this, `@` and a person's name was inert text that
+  looked like it worked (`resolve_mentions` matches agent participants only).
+- **One item, on the existing ledger**: each tagged person gets ONE item in their Workspace
+  Inbox — an `operator_queue` row (the ent#610 ledger) of type `mention`, addressed to them,
+  carrying who tagged them, which conversation and which message. Kind **Unread**, never
+  **Action**: the row starts `delivered` and becomes `read`, never `pending`, so no ask budget,
+  expiry, ending observer or operator badge can see it. No new store, no fifth notification
+  path, no schema change.
+- **Who may tag**: a person with a platform account (on the platform door or a platform
+  Workspace session). Refused by name: an agent key (`agents_cannot_tag`) — nothing lets an
+  agent tag a person on its own initiative, and `mention-` is a platform-reserved queue id
+  prefix so its queue file cannot forge one either; a non-person platform key; an external
+  Workspace client (`tagging_unavailable` — the colleagues it would list are the
+  organisation's, an internal fact, #78).
+- **Who may be tagged (the ent#450 pattern)**: an account that exists, is not suspended, has
+  an email (the Inbox's address) and can already reach one of the conversation's agents
+  (owner, shared, or an admin). The picker reads them from the server only once there is a
+  query, capped at 8 and rate-limited — never a directory. The same predicate answers the
+  send: an unknown name (or one outside that set — one refusal, so it is not an account
+  oracle) is refused **by name, with the reason**, before anything is written (`422
+  unknown_person`, `name`); so is tagging yourself and more than 10 people in one message.
+- **Bounded and idempotent**: tags are deduplicated case-insensitively, and the row's id is
+  derived from (conversation, message, person), so the same person named twice — or a
+  message delivered twice, or a retried turn — is one item.
+- **Stored, and distinct from a wake**: the message's `mentions` stay the agents to wake,
+  computed from the text exactly as before; a person is never a wake target. The person
+  pointer is stored apart, on the ledger, keyed to the message. The tags travel beside the
+  text (`tags: [email]` on the post), not parsed out of it.
+- **What the tagged person sees**: the Inbox lists the item in Unread (New) and All, counted
+  as one thing that came back. Opening it shows the tagged message with a few messages around
+  it **only when they could already see the conversation** (a live room participant, or an
+  admin on the platform door — the admin bypass never rides a portal session, #78). Otherwise
+  the item says they can't see it — not even the tagger's own words cross — and names who can
+  let them in (a room's moderator; for a 1:1 chat, the tagger, whose chat it is). No cost,
+  no execution id, no addressee in the projection. It is marked read once its card is on screen.
+- **What the tagger sees**: under their own message, each tagged person and how far it got —
+  "in their Inbox", "read", or "not delivered" (the message landed but the write failed).
+  Only on the sender's own messages; a room carries the whole-room map so a tag on an older
+  message turns read on the next poll.
+- **In-app only, said plainly**: the item lives in the Trinity Inbox; nothing is emailed
+  (out-of-app reach is ent#564). The card says so, and the tagger's marks say "in their Inbox".
+- **Operator door**: a person's tag is not the operator's queue — the Operating Room's list,
+  totals and item read leave `mention` rows out.
+- **API**: `POST /api/rooms/{id}/messages` and `POST …/client-portal/agents/{name}/chat[/stream]`
+  take optional `tags`; `GET /api/rooms/{id}/people?q=` and
+  `GET …/client-portal/agents/{name}/people?q=` (the picker); `GET /api/rooms/{id}` adds
+  `own_tags` and per-message `tags`; history rows carry `tags` on the reader's own messages;
+  `GET /api/enterprise/client-portal/mentions`, `GET …/mentions/{id}`, `POST …/mentions/{id}/read`.
+- **Flow**: `feature-flows/workspace-person-tag.md`.
+
+### 5.43 Workspace — recency that holds still (trinity-enterprise#856)
+
+- **Status**: 🚧 in progress (Part A — chat tabs and landing; Part B — Action's sort — is
+  specified in §5.40)
+- **Why**: the operator's 2026-10-09 ruling — a reply must change a badge, never a
+  position, while the person is looking at the strip; recency is the order you
+  ARRIVE to, not an order that re-sorts under the cursor.
+- **AC-1 — the arrival snapshot**: on arriving at an agent (any door — row, key,
+  deep link, `/c/:id`, bootstrap, Undo, Reset, the return from the Inbox or a
+  room) the shell takes ONE snapshot of that agent's chat order: Main first, then
+  recency, every non-room row of the agent including archived ones. It is taken by
+  one watcher keyed on the agent on stage (not by each door), retaken once when the
+  thread list first becomes trustworthy (a cold link), and cleared when no agent is
+  on stage — the Inbox, the unreachable notice, or a room whether opened from the
+  sidebar or reached by URL (Back, a link). Re-clicking the agent already on stage
+  keeps it.
+- **AC-2 — the strip holds still**: while the snapshot names the agent on stage,
+  the tabs are drawn in its order. A reply, a send, or a poll that re-sorts the
+  thread list changes a badge only. A chat born mid-visit sits directly after Main
+  (the provisional tab's slot), born chats among themselves by creation time. A
+  closed chat drops out and the gap closes; Undo returns it to its own slot. A
+  deep-linked archived chat is drawn at its arrival slot. The switch-chat keys and
+  close-next walk the same frozen order the eye reads.
+- **AC-3 — landing arms (operator ruling 2026-10-13)**, in order: **0** the agent's
+  most recent unarchived chat with an unread answer (Main included); **1** the chat
+  last open for that agent this session — in memory per tab, never persisted;
+  then the fresh-session arms of ent#784 (a drafted chat, the empty chat, a new
+  chat). A route-driven landing replaces the history entry, so Back does not loop.
+  **Behaviour change, by that ruling:** Back to `/workspace/a/:name`, or a click on
+  the agent's sidebar row, from one of that agent's chats now returns to the chat
+  left open in this session (arm 1) — before ent#856 it opened a fresh chat. This
+  is the landing the operator ruled for, not a side effect.
+- **AC-4 — forget on close**: closing (archiving) or losing a chat removes it from
+  the session's last-open memory (`forgetLastOpen`), on top of `agentLanding`'s
+  own validation.
+- **Out**: any endpoint or schema change.
+- **Tests**: `portalChatTabsHold.spec.js`, `portalAgentLandingUnread.spec.js`
+  (pure); `portalChatCycle.mount.spec.js`, `portalAgentLandingStage.mount.spec.js`,
+  `portalAgentLandingRemount.mount.spec.js` (mounted). Flow:
+  `feature-flows/workspace-chat-tabs-and-titles.md` § *The strip holds still*.

@@ -123,6 +123,7 @@
       <!-- Sidebar: persistent on desktop, drawer on mobile -->
       <div class="hidden sm:flex shrink-0 min-w-0 overflow-hidden sm:w-[var(--ws-sidebar,18rem)]">
         <PortalSidebar
+          ref="sidebarRef"
           :roster="orderedRoster"
           :active-agent-name="activeAgentName"
           :threads="sidebarThreads"
@@ -130,9 +131,12 @@
           :current-session-id="activeSessionId"
           :current-room-id="activeRoomIdFromRoute"
           :is-platform-session="store.isPlatformSession"
+          :workspace-only="workspaceOnly"
           :projects-available="store.projectsAvailable"
           :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
+          :settled="sidebarReady"
+          :threads-failed="store.sessionsFailed"
           v-model:search="search"
           :searching="searching"
           :search-results="searchResults"
@@ -145,6 +149,7 @@
           @open-keys="keyListOpen = true"
           @toggle-star="toggleStar"
           @sign-out="onSignOut"
+          @retry-threads="refreshThreads"
         />
       </div>
       <!-- #2617: `:value` is the EFFECTIVE width, not the desired one. The two
@@ -171,6 +176,7 @@
         <div class="absolute inset-0 bg-black/40" @click="mobileNav = false"></div>
         <div class="absolute inset-y-0 left-0">
           <PortalSidebar
+            ref="drawerSidebarRef"
             :roster="orderedRoster"
             :active-agent-name="activeAgentName"
             :threads="sidebarThreads"
@@ -178,9 +184,12 @@
             :current-session-id="activeSessionId"
             :current-room-id="activeRoomIdFromRoute"
             :is-platform-session="store.isPlatformSession"
+            :workspace-only="workspaceOnly"
             :projects-available="store.projectsAvailable"
             :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
+            :settled="sidebarReady"
+            :threads-failed="store.sessionsFailed"
             v-model:search="search"
             :searching="searching"
             :search-results="searchResults"
@@ -194,6 +203,7 @@
             @open-keys="() => { mobileNav = false; keyListOpen = true }"
             @toggle-star="toggleStar"
             @sign-out="onSignOut"
+            @retry-threads="refreshThreads"
           />
         </div>
       </div>
@@ -361,7 +371,7 @@
           :threads-loaded="threadsLoaded"
           :threads-failed="store.sessionsFailed || previewsFailed"
           :labels="inboxAgentLabels"
-          :is-platform="store.isPlatformSession"
+          :is-platform="store.isPlatformSession && !workspaceOnly"
           :mark-read="markRead"
           :rail-allowance="inboxRailAllowance"
           :canvas-count="inboxCanvases"
@@ -428,7 +438,9 @@
           :reply-target="replyTarget"
           :starred="isStarred('thread', activeSessionId || pendingSession)"
           :threads="threads"
+          :tab-order="tabOrder"
           :rename="renameChat"
+          :close-error="closeError"
           @switch-agent="switchAgent"
           @reply="setReplyTarget"
           @reply-done="replyTarget = null"
@@ -439,6 +451,8 @@
           @open-menu="mobileNav = true"
           @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
+          @close-chat="closeChat"
+          @dismiss-close-error="closeError = ''"
           @open-thread="openNewThread"
           @work-state="onWorkState"
           @open-work="openRailOn('work')"
@@ -569,7 +583,7 @@
                The two audiences need different ones: a signed-in user can go
                make an agent, an external client can only ask the person who
                invited them. -->
-          <template v-else-if="store.isPlatformSession">
+          <template v-else-if="store.isPlatformSession && !workspaceOnly">
             <p :class="STAGE_TITLE">No agents here yet</p>
             <p :class="STAGE_BODY">
               Agents you own, and agents shared with you, appear here.
@@ -580,7 +594,7 @@
             <p :class="STAGE_TITLE">No agents shared with you yet</p>
             <p :class="STAGE_BODY">
               Ask whoever invited you to share an agent with
-              <span class="font-medium">{{ store.clientEmail || 'your email' }}</span>.
+              <span class="font-medium">{{ store.clientEmail || authStore.user?.email || 'your email' }}</span>.
             </p>
           </template>
           <button class="sm:hidden mt-4 text-sm text-action-primary-600" @click="mobileNav = true">Open menu</button>
@@ -720,9 +734,12 @@
         :open="railState.open"
         :signals="railSignals"
         :participants="railParticipants"
+        :key-tips="!keyTipsDismissed"
         @update:open="setRailOpen"
         @update:active-tab="setRailTab"
         @see-hints="seeHints"
+        @open-keys="keyListOpen = true"
+        @dismiss-key-tips="dismissKeyTips"
       >
         <!-- ent#475: the three re-homed tabs dock into the shell's slots. Each
              body READS a shell-owned store (`usePortalRailFeeds`) and never
@@ -759,7 +776,8 @@
           />
         </template>
         <!-- ent#836: Asks — the agent's open asks, each a door into the Inbox.
-             Reads the one asks feed; present only while something waits. -->
+             Reads the one asks feed; always present, with an empty state
+             when nothing waits (ent#892). -->
         <template #tab-asks="{ participants }">
           <PortalRailAsks :participants="participants" />
         </template>
@@ -825,7 +843,8 @@
           @focus-composer="() => { railSheetOpen = false; focusConversationComposer() }"
         />
       </template>
-      <!-- ent#836: the sheet's own `#tab-asks`; a row's navigation closes it. -->
+      <!-- ent#836: the sheet's own `#tab-asks`; a row's navigation (or the
+           empty state's "Open the Inbox", ent#892) closes it. -->
       <template #tab-asks="{ participants }">
         <PortalRailAsks :participants="participants" @open="railSheetOpen = false" />
       </template>
@@ -851,7 +870,7 @@
          unmount it mid-sentence. -->
     <p class="sr-only" aria-live="polite" data-testid="ws-key-announce">{{ keyAnnouncement }}</p>
 
-    <!-- ent#621: `⌘/`. ALWAYS mounted and v-model driven — a `v-if` toggle
+    <!-- ent#621: `⌥/`. ALWAYS mounted and v-model driven — a `v-if` toggle
          unmounts past `BaseModal`'s close branch and focus never comes back to
          the message field. Rows come from the map, never from this template. -->
     <PortalKeyList
@@ -870,14 +889,23 @@
       @confirm="onPickerConfirm"
       @cancel="() => { pickerOpen = false; pickerError = null }"
     />
+    <!-- ent#841: Undo for the chat just closed from its tab. -->
+    <PortalUndoToast
+      :message="undoClose ? 'Chat archived' : ''"
+      :close-key="undoClose ? undoClose.seq : 0"
+      @undo="undoLastClose"
+      @dismiss="undoClose = null"
+    />
   </div>
 </template>
 
 <script setup>
+import PortalUndoToast from '@/components/portal/PortalUndoToast.vue'
 import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick, toRaw } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
+import { canvasReturnPath, isWorkspaceOnlyRole } from '@/utils/workspaceOnly'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
 import { safeStorage } from '@/utils/safeStorage'
@@ -951,21 +979,24 @@ import {
   // disagree about the number.
   totalUnread,
   // trinity-enterprise#610 §3g S4: the read's optimistic zero and its rollback.
-  optimisticRead, rollbackRead,
+  optimisticRead, rollbackRead, createWriteGuard, applyStarOverrides, agentChatTabs, tabOrderFrom,
   asksHomeRoute,
   // ent#836: the per-agent ask counts the sidebar's mark reads — handed to the
-  // rail's door gate (the Asks tab's presence) and its signal, so the tab and
-  // the mark cannot disagree.
+  // rail's Asks signal, so the tab's mark and the row's mark cannot disagree.
+  // (ent#892 removed the tab's presence rule; the counts no longer gate it.)
   asksByAgent,
   // ent#621 T6: the order the sidebar SHOWS is now computed here, once, and
   // passed down — so the switch-agent keys walk exactly what the eye reads.
   orderRosterAgents,
+  // #3672: the sidebar's one first-load verdict.
+  sidebarSettled,
 } from '@/components/portal/portalUtils'
 // ent#621 — the Workspace key map. The rules are pure and live there; this view
 // owns the one listener and the dispatch table (T3).
 import {
-  resolveWorkspaceKey, workspaceChord, keymapSuppressed, hasModalOpen, nextAgent, recordLastOpen,
+  resolveWorkspaceKey, workspaceChord, keymapSuppressed, hasModalOpen, nextAgent, recordLastOpen, forgetLastOpen,
   nextRailTab, keyListRows, hostPlatform, WORKSPACE_KEYMAP,
+  loadKeyTipsDismissed, saveKeyTipsDismissed,
 } from '@/components/portal/portalKeymap'
 // ent#557: the tab title's unread half. The router owns the label; this pushes
 // the count. See `utils/tabTitle.js` for why neither writes `document.title`.
@@ -980,6 +1011,9 @@ import {
 
 const store = useClientPortalStore()
 const authStore = useAuthStore()
+// trinity-enterprise#837 — a `user` works in the Workspace only: the next step
+// on an empty roster is the one an external client gets, not "Go to your agents".
+const workspaceOnly = computed(() => isWorkspaceOnlyRole(authStore.user?.role))
 // trinity-enterprise#657. Declared with its siblings rather than beside its
 // first reader (`decorate`, ~900 lines down): `onMainReset` reads it too, and a
 // `const` used above its declaration is a TDZ crash the moment any caller
@@ -1045,7 +1079,8 @@ async function onVerify() {
     // where the client was when their session lapsed, and until now nothing ever
     // read it back: the expired notice promises "pick up where you left off", so
     // it has to actually land there rather than on the roster root.
-    const resumeTo = store.resumePath
+    // trinity-enterprise#837: or the shared canvas whose "Sign in" sent them here.
+    const resumeTo = store.resumePath || canvasReturnPath(route.query.redirect)
     await store.verifyCode(email.value.trim().toLowerCase(), code.value.trim())
     await bootstrap()
     if (resumeTo && resumeTo !== route.fullPath) {
@@ -1086,6 +1121,25 @@ const convGen = ref(0)                // bumps on explicit thread switches → r
 // Deliberately a separate bit from `store.rosterLoaded`: that one says the
 // ROSTER reached a verdict, this one says the deep link did.
 const bootstrapResolved = ref(false)
+// #3672 — the sidebar's first-load verdict, LATCHED: once the list has landed
+// it never drops back to skeletons (a background refresh is invisible, §6), so
+// the next bootstrap's `bootstrapResolved = false` cannot re-flash it. It
+// resets only when the session ends, so the next person's first load is calm
+// too. The rule itself is `sidebarSettled` (pure, tested).
+const sidebarReady = ref(false)
+watch(
+  () => [store.isClientSignedIn, sidebarSettled({
+    resolved: bootstrapResolved.value,
+    asksLoaded: store.asksLoaded,
+    asksAbsent: store.asksAbsent,
+    asksFailed: store.asksFailed,
+  })],
+  ([signedIn, settled]) => {
+    if (!signedIn) sidebarReady.value = false
+    else if (settled) sidebarReady.value = true
+  },
+  { immediate: true },
+)
 
 const activeSessionId = computed(() => route.params.sessionId || null)
 const chatUnavailable = computed(() => !!activeSessionId.value && unavailableChatId.value === activeSessionId.value)
@@ -1126,7 +1180,7 @@ const unlandedAgentPage = computed(() => (
 const railFreePage = computed(() => unlandedAgentPage.value || (projectsRoute.value ? 'projects' : null))
 const activeAgent = computed(() => {
   if (isInboxRoute.value) {
-    return inboxSelectedAgent({ item: inboxSelection.value, threads: threads.value, asks: store.asks, agents: store.agents })
+    return inboxSelectedAgent({ item: inboxSelection.value, threads: threads.value, asks: store.asks, agents: store.agents, mentions: store.mentions })
   }
   // Never substitute a different agent for one the caller asked for by name.
   if (unreachableAgent.value) return null
@@ -1299,7 +1353,6 @@ const railTabs = computed(() => visibleTabs(RAIL_TABS, {
   isPlatform: store.isPlatformSession,
   participants: railParticipants.value,
   capabilities: { projects: store.projectsAvailable },
-  askCounts: railAskCounts.value,
 }))
 // Keyed on the route and the stage VERDICT — synchronous facts — never on data
 // still arriving (a room's participants land with its own fetch), so a live
@@ -1662,7 +1715,7 @@ const activeRoomCarryNotice = computed(() => (
     : null
 ))
 
-async function onEscalateToRoom({ agents, message, attachments = [] } = {}) {
+async function onEscalateToRoom({ agents, message, attachments = [], tags = [] } = {}) {
   if (escalating.value || !agents?.length) return
   escalating.value = true
   roomCarryNotice.value = null
@@ -1725,7 +1778,9 @@ async function onEscalateToRoom({ agents, message, attachments = [] } = {}) {
 
     if (message) {
       try {
-        await store.postRoomMessage(roomId, message)
+        // trinity-enterprise#631: the people the message tagged go with it.
+        if (tags && tags.length) await store.postRoomMessage(roomId, message, { tags })
+        else await store.postRoomMessage(roomId, message)
       } catch {
         // trinity-enterprise#657: the room is open in front of them, but the
         // 1:1's `send()` already emptied the composer, so without this the
@@ -1882,13 +1937,13 @@ function openAgentPage(name) {
 // is the arrival's focus mode: a key press IS a gesture (there is a keyboard in
 // the room by definition), so the keys ask for `'always'` where the route
 // watcher keeps ent#784's `'fine-pointer'`.
-function landOnAgent(name, { lastOpenSessionId = null, focus = 'fine-pointer' } = {}) {
+function landOnAgent(name, { lastOpenSessionId = null, focus = 'fine-pointer', replace = false } = {}) {
   if (!name) return
   // ent#551 class: `activeAgentName` feeds `convKey`, so writing it remounts
   // the conversation and ends a live call without a word. The click doors ask
   // first; back/forward and a typed `/workspace/a/:name` come through here, and
   // did not. Ask before touching anything.
-  if (guardLeaveCall(() => landOnAgent(name, { lastOpenSessionId, focus }))) return
+  if (guardLeaveCall(() => landOnAgent(name, { lastOpenSessionId, focus, replace }))) return
   // ent#621 Decision 34 — the guard is the FIRST thing, above the focus-mode
   // write and above `agentLanding`. It used to sit after the branch, which made
   // it a guard against re-minting and nothing else: the key path's own
@@ -1927,7 +1982,10 @@ function landOnAgent(name, { lastOpenSessionId = null, focus = 'fine-pointer' } 
     // (review) A landing on a chat with NO draft — the agent's empty one — is
     // restored by nothing, so that mount leaves focus on the sidebar row the
     // click came from. `focusLandedComposer` covers it under the same rule.
-    if (row) { openThread(row); focusLandedComposer(); return }
+    // ent#856: a ROUTE-driven landing replaces `/workspace/a/:name` with the
+    // chat it resolved to — pushed, Back would return to `/a/:name`, land on
+    // the same chat again and push again (a loop arm 1 makes the common case).
+    if (row) { openThread(row, { replace }); focusLandedComposer(); return }
   }
   unreachableAgent.value = null
   activeAgentName.value = name
@@ -2042,8 +2100,8 @@ function newChatWithAgent(name) {
   escapeStage()
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
-function openThread(t) {
-  if (guardLeaveCall(() => openThread(t))) return   // ent#534/ent#551: ask, then leave
+function openThread(t, { replace = false } = {}) {
+  if (guardLeaveCall(() => openThread(t, { replace }))) return   // ent#534/ent#551: ask, then leave
   unreachableAgent.value = null
   // Opening an existing thread is the opposite intent; clear it so a later
   // send does not still ask for a fresh one.
@@ -2051,11 +2109,16 @@ function openThread(t) {
   // ent#361: a room row in the merged sidebar opens the room, not a thread.
   if (t.is_room) { openRoom(t.id); return }
   const sid = t.id || t.session_id
+  // ent#841: opening a closed chat reopens it — the Archived group is where
+  // closed chats are found, and opening one there means "I want it back".
+  const listed = threads.value.find((x) => !x.is_room && (x.id || x.session_id) === sid)
+  if (listed?.archived_at) reopenChat(listed)
   markRead('thread', sid)
   activeAgentName.value = t.agent_name || activeAgentName.value
   pendingSession.value = sid; prefill.value = ''; convGen.value++
   search.value = ''
-  router.push(`/workspace/c/${sid}`)
+  if (replace) router.replace(`/workspace/c/${sid}`)
+  else router.push(`/workspace/c/${sid}`)
 }
 // trinity-enterprise#747: open a chat that may have just been created (Discuss)
 // — adopted through `openThread`, so the #3140 guard does not read an id the
@@ -2089,6 +2152,7 @@ function threadListTrusted() { return threadsLoaded.value && !store.sessionsFail
 // the person has already left must not blank the one they moved to.
 function onThreadMissing(id) {
   if (id && route.params.sessionId === id) {
+    forgetLastOpen(lastOpen, id)   // ent#856 AC 8: a chat that is gone is no one's last-open
     unavailableChatId.value = id
     pendingSession.value = null
   }
@@ -2110,6 +2174,10 @@ const chatState = ref({})
 const chatKey = (t) => `${t.is_room ? 'room' : 'thread'}:${t.id || t.session_id}`
 
 const isStarred = (kind, id) => !!(id && chatState.value[`${kind}:${id}`]?.starred)
+// #3356: star clicks outlive any chat-state read already in flight; ent#841's
+// tab close outlives any thread-list read the same way.
+const starGuard = createWriteGuard()
+const archiveGuard = createWriteGuard()
 
 // ent#523: what the SIDEBAR lists, which is not what the tab strip lists.
 //
@@ -2167,15 +2235,19 @@ async function refreshThreads() {
   // so a row's "N new" and its excerpt come from one response.
   const withPreviews = isInboxRoute.value
   let listOk = true
+  // #3356: stamped when the read LEAVES, so a star clicked while it is out
+  // survives its (pre-click) answer — see `createStarGuard`.
+  const readToken = starGuard.readStarted()
+  const archiveToken = archiveGuard.readStarted()
   const [list, state] = await Promise.all([
     store.fetchAllSessions().catch(() => { listOk = false; return store.lastSessions }),
     (withPreviews ? store.fetchChatState({ previews: true }) : store.fetchChatState()).catch(() => null),
   ])
   if (withPreviews) previewsFailed.value = !state
-  if (state && withPreviews) { chatState.value = state.state || {}; chatPreviews.value = state.previews || {} }
-  else if (state) chatState.value = state
+  if (state && withPreviews) { chatState.value = applyStarOverrides(state.state || {}, starGuard.live(readToken)); chatPreviews.value = state.previews || {} }
+  else if (state) chatState.value = applyStarOverrides(state, starGuard.live(readToken))
   if (listOk && !store.sessionsFailed && !(withPreviews && !state)) threadsLoaded.value = true
-  threads.value = decorate(list || [])
+  threads.value = decorate(applyArchiveOverrides(list || [], archiveGuard.live(archiveToken)))
   // ent#491: rank any agent this session has not ranked yet. Fills only missing
   // keys, so a refresh triggered by an incoming reply cannot walk back a send's
   // bump and re-sort the sidebar under the cursor.
@@ -2264,9 +2336,10 @@ async function settleTick(sessionId, last) {
   // List only. `fetchAllSessions` NEVER rejects — it flags `sessionsFailed` and
   // hands back the last good list — so without asking it, a flaky network reads
   // as "the title never changed" and would report a working generator broken.
+  const archiveToken = archiveGuard.readStarted()
   const list = await store.fetchAllSessions().catch(() => null)
   if (list === null || store.sessionsFailed) { clearTitleSettle(); return }
-  threads.value = decorate(list)
+  threads.value = decorate(applyArchiveOverrides(list, archiveGuard.live(archiveToken)))
   // /review: this replaces `threads` exactly as `refreshThreads` does, so it
   // owes the same ent#491 seeding — otherwise an agent this session has not
   // ranked stays unranked for as long as the cycle keeps overwriting the list.
@@ -2307,24 +2380,120 @@ const titleNotice = computed(() =>
 // Optimistic: a star is a personal bookmark, and waiting on a round trip to
 // redraw it makes the control feel broken. Reverted in place on failure so the
 // list never claims a star the server rejected.
+// #3356: the write is also registered with `starGuard`, so a chat-state read
+// that left before it landed cannot overwrite it — that overwrite is what made
+// the first click look lost and the second one "work".
 async function toggleStar(t) {
   const key = chatKey(t)
   const next = !t.starred
   const before = chatState.value[key]
   chatState.value = {
     ...chatState.value,
-    [key]: { ...(before || { kind: t.is_room ? 'room' : 'thread', id: t.id }), starred: next },
+    [key]: { ...(before || { kind: t.is_room ? 'room' : 'thread', id: t.id || t.session_id }), starred: next },
   }
   threads.value = decorate(threads.value)
+  const write = starGuard.begin(key, next)
   try {
     await store.setChatStar(t.is_room ? 'room' : 'thread', t.id || t.session_id, next)
+    starGuard.settle(key, write, true)
   } catch {
+    // A newer click on the same chat owns the screen now; this failure is moot.
+    if (!starGuard.settle(key, write, false)) return
     const reverted = { ...chatState.value }
     if (before) reverted[key] = before
     else delete reverted[key]
     chatState.value = reverted
     threads.value = decorate(threads.value)
   }
+}
+
+// ent#841: close a chat from its tab — ARCHIVE it, never delete it. One click,
+// no confirmation (nothing is lost), an Undo straight after.
+//
+// Optimistic like the star: the tab and the sidebar row leave at once, and if
+// the closed chat was on screen the strip moves to its neighbour — the tab to
+// the right, else the left (Main is always first, so there is one while the
+// pair has a Main; with none at all, the agent's own page). The write goes
+// through `archiveGuard` so a thread-list read already in flight cannot put the
+// tab back. A refusal reverts the move, returns the person to the chat if it
+// was open, and names the reason under the strip.
+const closeError = ref('')
+const undoClose = ref(null)   // { thread, wasActive, seq } for the toast's Undo
+let closeSeq = 0               // one per completed close: restarts the toast's clock
+
+function applyArchiveOverrides(list, live) {
+  if (!live.size) return list
+  return list.map((t) => (live.has(chatKey(t)) ? { ...t, archived_at: live.get(chatKey(t)) } : t))
+}
+
+function setArchivedLocally(key, value) {
+  threads.value = threads.value.map((x) => (chatKey(x) === key ? { ...x, archived_at: value } : x))
+}
+
+function refusalText(err, fallback) {
+  const d = err?.response?.data?.detail
+  return (typeof d === 'string' && d) || fallback
+}
+
+async function closeChat(t) {
+  if (!t || t.is_room || t.is_main || t.archived_at) return
+  const sid = t.id || t.session_id
+  const key = chatKey(t)
+  closeError.value = ''
+  const wasActive = (activeSessionId.value || pendingSession.value) === sid
+  let next = null
+  if (wasActive) {
+    // ent#856: close-next walks the frozen strip the eye reads, not a re-sort.
+    const tabs = agentChatTabs(threads.value, t.agent_name, { activeId: sid, order: tabOrder.value }).filter((x) => x.thread)
+    const i = tabs.findIndex((x) => x.id === sid)
+    next = (tabs[i + 1] || tabs[i - 1] || null)?.thread || null
+  }
+  forgetLastOpen(lastOpen, sid)   // ent#856 AC 8; Undo re-records it via `openThread`
+  const archivedAt = new Date().toISOString()
+  const write = archiveGuard.begin(key, archivedAt)
+  setArchivedLocally(key, archivedAt)
+  if (wasActive) {
+    if (next) openThread(next)
+    else openAgentPage(t.agent_name)
+  }
+  try {
+    await store.setThreadArchived(t.agent_name, sid, true)
+    archiveGuard.settle(key, write, true)
+    undoClose.value = { thread: { ...t, archived_at: null }, wasActive, seq: ++closeSeq }
+  } catch (err) {
+    if (!archiveGuard.settle(key, write, false)) return
+    setArchivedLocally(key, t.archived_at || null)
+    if (wasActive) openThread(t)
+    closeError.value = refusalText(err, "Couldn't archive this chat. Try again.")
+  }
+}
+
+// Reopen: the Undo, and opening a closed chat from the Archived group (or any
+// other place that lists it). Restores it as an active chat, star included —
+// the per-viewer star is never touched by a close.
+async function reopenChat(t) {
+  const sid = t.id || t.session_id
+  const key = chatKey(t)
+  const row = threads.value.find((x) => chatKey(x) === key)
+  const before = row ? row.archived_at : t.archived_at
+  const write = archiveGuard.begin(key, null)
+  setArchivedLocally(key, null)
+  try {
+    await store.setThreadArchived(t.agent_name, sid, false)
+    archiveGuard.settle(key, write, true)
+  } catch (err) {
+    if (!archiveGuard.settle(key, write, false)) return
+    setArchivedLocally(key, before || null)
+    closeError.value = refusalText(err, "Couldn't reopen this chat. Try again.")
+  }
+}
+
+function undoLastClose() {
+  const u = undoClose.value
+  undoClose.value = null
+  if (!u) return
+  reopenChat(u.thread)
+  if (u.wasActive) openThread(u.thread)
 }
 
 // ent#473: a person renames a chat. Optimistic like the star — the row and
@@ -2399,6 +2568,29 @@ watch([activeAgentName, pendingSession, startingNewChat], ([agent, sid, fresh]) 
     keyChanged: keyChanged || (fresh && !sid),
   })
 })
+
+// trinity-enterprise#856 — the arrival snapshot of the chat strip.
+//
+// `stageAgent` is the agent whose conversation is on stage, else null (the
+// Inbox, a room, the unreachable notice). ONE watcher on it is the only writer
+// of `tabOrder`, so every door — row, key, deep link, `/c/:id`, bootstrap, Undo,
+// Reset, the return from the Inbox or a room — goes through one rule, and take
+// and clear cannot run in the wrong order: a new agent takes a snapshot, null
+// clears it, the same agent keeps it (a re-click holds still). A snapshot taken
+// before the thread list could be trusted (a cold link) is `ids: null` —
+// untaken — and is retaken ONCE when it becomes trustworthy; a later poll never
+// retakes. In memory only, like `lastOpen`. A room counts by its URL as well as
+// by `openRoom`'s ref: Back/forward or a link to `/workspace/r/:id` never writes
+// the ref, and the room is on stage all the same.
+const stageAgent = computed(() => (!isInboxRoute.value && !activeRoomId.value && !activeRoomIdFromRoute.value
+  && !unreachableAgent.value ? activeAgentName.value || null : null))
+const tabOrder = ref(null)   // { agent, ids } | null
+watch([stageAgent, () => threadListTrusted()], ([agent, trusted]) => {
+  if (!agent) { tabOrder.value = null; return }
+  const cur = tabOrder.value
+  if (cur && cur.agent === agent && (cur.ids || !trusted)) return
+  tabOrder.value = { agent, ids: trusted ? tabOrderFrom(threads.value, agent) : null }
+}, { immediate: true })
 
 // What assistive tech hears after a key move. The shell says it once; the band,
 // the tab strip and the browser-tab title say it visually.
@@ -2485,7 +2677,36 @@ function stepRailTab() {
 
 const railTabLabel = (id) => (railTabs.value.find((t) => t.id === id) || {}).label || 'Rail'
 
-// ⌘/ — the key list. It toggles rather than only opening, because the chord
+// ⌘/ — the cursor into the sidebar's search field (the Dashboard's `/` filter
+// key, with the modifier a key needs to work from inside a text field). The
+// shell has TWO sidebars and asks the one on screen: the column at and above
+// `sm`, the drawer below it — which the key opens first, since a field inside
+// a closed drawer cannot take focus. Pressed again from the field, it hands the
+// caret back to the message field: the chord that took you there is the one
+// your hand is still on.
+const sidebarRef = ref(null)
+const drawerSidebarRef = ref(null)
+function focusSearch() {
+  if (isWideViewport(typeof window !== 'undefined' ? window : null)) {
+    if (sidebarRef.value?.searchHasFocus?.()) { focusConversationComposer(); return }
+    sidebarRef.value?.focusSearch?.()
+    return
+  }
+  mobileNav.value = true
+  nextTick(() => drawerSidebarRef.value?.focusSearch?.())
+}
+
+// The rail's shortcut tips — on until the person closes them, and the close is
+// remembered for this browser (a per-viewer convenience, so `localStorage`; a
+// storage that refuses just shows them again next load). The ref lives here,
+// beside `railState`, so a chat switch never brings a closed panel back.
+const keyTipsDismissed = ref(loadKeyTipsDismissed(safeStorage()))
+function dismissKeyTips() {
+  keyTipsDismissed.value = true
+  saveKeyTipsDismissed(safeStorage(), true)
+}
+
+// ⌥/ — the key list. It toggles rather than only opening, because the chord
 // that showed you the list is the chord your hand is already on; `key-list` is
 // the one action allowed to see through its own dialog (`MODAL_IGNORE`).
 const keyListOpen = ref(false)
@@ -2521,6 +2742,7 @@ const KEY_DISPATCH = Object.freeze({
   'chat-prev': () => stepChat(-1),
   'rail-toggle': toggleRail,
   'rail-tab-next': stepRailTab,
+  'search-focus': focusSearch,
   'key-list': () => { keyListOpen.value = !keyListOpen.value },
 })
 
@@ -2757,7 +2979,9 @@ watch([activeAgentPageName, () => threads.value.length], ([name], [prevName]) =>
   //     and has to land fresh. A thread URL carries no `agentName` param, so
   //     that hop always changes `name` and is never mistaken for a re-fire.
   if (name === prevName && activeAgentName.value === name) return
-  landOnAgent(name)
+  // ent#856: every door passes the session's last-open chat (landing arm 1),
+  // and this one replaces the history entry it lands from.
+  landOnAgent(name, { lastOpenSessionId: lastOpen.get(name) ?? null, replace: true })
 })
 
 // ent#547: the "close details on every agent change" watcher is retired with
@@ -2873,12 +3097,16 @@ function startAsksPoll() {
   stopAsksPoll()
   if (!store.isClientSignedIn) return
   store.fetchAsks()
+  // trinity-enterprise#631: the tags addressed to this person ride the same
+  // tick — a tag is a row, not an event, so a backgrounded tab loses nothing.
+  store.fetchMentions()
   asksTimer = setInterval(() => {
     // Visibility-aware: a backgrounded tab polls nothing. The next foreground
     // tick catches up, and an ask that arrived meanwhile is not lost — it is a
     // row, not an event.
     if (document.visibilityState !== 'visible') return
     store.fetchAsks()
+    store.fetchMentions()
     // ent#557: the SAME tick refreshes threads and their read state, which is
     // what makes an unread reply appear while the user is elsewhere in the
     // Workspace. `refreshThreads` was event-driven only — a send, a navigation,

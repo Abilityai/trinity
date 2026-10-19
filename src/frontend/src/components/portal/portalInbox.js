@@ -14,9 +14,11 @@
 
 import {
   STAGE_QUERY_KEYS, WORKSPACE_ROOT, WORKSPACE_INBOX, totalUnread, askBadgeTitle, unreadBadgeTitle,
+  askThreadLink,
 } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
 import { queueTypeLabel } from '@/utils/operatorQueue'
+import { mentionTitle } from './portalMentions'
 
 export const INBOX_TABS = ['action', 'unread', 'all']
 
@@ -51,8 +53,13 @@ const threadId = (t) => t?.id || t?.session_id || null
 // inline; it is mirrored here so the parity property ("every thread with an
 // arrival survives the sidebar filter") has something pure to run against.
 // Keep the two identical.
+//
+// abilityai/trinity#3356: a STARRED unused Main is listed. Starring is the
+// person saying "pin this", and the header star on a fresh agent's Main is
+// exactly where they do it — filtering the row out left a filled header star
+// with nothing in the Starred section, which read as a lost click.
 export function inSidebar(t) {
-  return !!t && !(t.is_main && !t.last_message_at)
+  return !!t && !(t.is_main && !t.last_message_at && !t.starred)
 }
 
 export function sidebarThreadsOf(threads) {
@@ -73,7 +80,8 @@ export function inboxLandingTarget({ path, params, query } = {}) {
   return WORKSPACE_INBOX
 }
 
-// ?item= values. `ask:<id>` and `thread:<id>`; ids may themselves contain ':'.
+// ?item= values. `ask:<id>`, `thread:<id>` and (trinity-enterprise#631)
+// `mention:<id>` — a person tagged you; ids may themselves contain ':'.
 export function itemKey(type, id) {
   return `${type}:${id}`
 }
@@ -83,7 +91,7 @@ export function parseItemKey(key) {
   const i = key.indexOf(':')
   if (i <= 0 || i === key.length - 1) return null
   const type = key.slice(0, i)
-  if (type !== 'ask' && type !== 'thread') return null
+  if (type !== 'ask' && type !== 'thread' && type !== 'mention') return null
   return { type, id: key.slice(i + 1) }
 }
 
@@ -111,6 +119,24 @@ function askItem(a) {
     ask: a,
   }
 }
+
+// trinity-enterprise#631: a person tagged you. Unread until opened, then read;
+// never Action — a tag asks for attention, not an answer.
+function mentionItem(m) {
+  return {
+    key: itemKey('mention', m.id),
+    type: 'mention',
+    id: m.id,
+    agent_name: m.agent_name,
+    title: mentionTitle(m),
+    status: m.state,
+    at: m.created_at || null,
+    mention: m,
+  }
+}
+
+const unreadMentions = (mentions) => (Array.isArray(mentions) ? mentions : [])
+  .filter((m) => m && m.id && m.state === 'unread')
 
 function threadItem(t, previews) {
   const id = threadId(t)
@@ -140,8 +166,9 @@ function threadItem(t, previews) {
 
 const byAtDesc = (a, b) => ts(b.at) - ts(a.at) || String(b.id).localeCompare(String(a.id))
 
-// §3g C1 (Andrii 2026-09-29: a 24h bucket plus the A10 badge): Action is
-// ordered by urgency, not recency. Asks expiring within a day lead, soonest
+// §3g C1 (Andrii 2026-09-29: a 24h bucket plus the A10 badge): Action's
+// URGENCY order — since trinity-enterprise#856 the order on the sort switch,
+// with Newest the default (below). Asks expiring within a day lead, soonest
 // first — the row's "Expires in …" badge is the reason it sits there; then
 // priority, an unknown one as medium; then the ask that has waited LONGEST.
 // Ties break on id so a poll can never swap two equal rows.
@@ -162,11 +189,62 @@ export function askUrgencyCompare(a, b, now = Date.now()) {
   return ts(a.created_at) - ts(b.created_at) || String(a.id).localeCompare(String(b.id))
 }
 
-// Action (D8): exactly `openAsks` — pending only — in urgency order (C1).
-export function actionItems(openAsks, now = Date.now()) {
+// trinity-enterprise#856 (operator ruling 2026-10-09): Action opens NEWEST
+// first — an inbox reads newest first — and C1's urgency order is one switch
+// away. Newest is `byAtDesc`'s rule over the ask's raised time: newest first,
+// ties on id descending, so a poll can never swap two equal rows.
+export const INBOX_SORTS = Object.freeze(['newest', 'urgency'])
+export const INBOX_SORT_DEFAULT = 'newest'
+export function normalizeInboxSort(v) {
+  return typeof v === 'string' && INBOX_SORTS.includes(v) ? v : null
+}
+export function askRecencyCompare(a, b) {
+  return ts(b.created_at) - ts(a.created_at) || String(b.id).localeCompare(String(a.id))
+}
+// The sort a tab shows: on Action, the URL (`?sort=`), then the viewer's
+// remembered choice, then Newest; an unknown value at either step is skipped,
+// never obeyed. Unread and All have no sort (they are recency already, and
+// Urgency means nothing for a chat), so null there.
+export function inboxSortFor(tab, query, stored) {
+  if (tab !== 'action') return null
+  return normalizeInboxSort(query) || normalizeInboxSort(stored) || INBOX_SORT_DEFAULT
+}
+// The remembered choice is per viewer — keyed by the identity bucket the
+// column widths use (`useColumnResize.resolveLayoutIdentity`), so one person's
+// choice on a shared browser is not the next login's. Fail-open: a storage that
+// is absent or throws (private mode, quota) costs the memory, nothing else.
+const INBOX_SORT_KEY_PREFIX = 'trinity-workspace-inbox-sort'
+export function inboxSortKey(who) {
+  return `${INBOX_SORT_KEY_PREFIX}:${String(who || '').trim().toLowerCase() || 'anon'}`
+}
+export function loadInboxSort(storage, who) {
+  try {
+    if (!storage || typeof storage.getItem !== 'function') return null
+    return normalizeInboxSort(storage.getItem(inboxSortKey(who)))
+  } catch {
+    return null
+  }
+}
+export function saveInboxSort(storage, who, sort) {
+  try {
+    const v = normalizeInboxSort(sort)
+    if (!v || !storage || typeof storage.setItem !== 'function') return false
+    storage.setItem(inboxSortKey(who), v)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// Action (D8): exactly `openAsks` — pending only — Newest first by default, or
+// in urgency order (C1) on the switch. An unknown sort is the default.
+export function actionItems(openAsks, now = Date.now(), sort = INBOX_SORT_DEFAULT) {
+  const cmp = normalizeInboxSort(sort) === 'urgency'
+    ? (a, b) => askUrgencyCompare(a, b, now)
+    : askRecencyCompare
   return (Array.isArray(openAsks) ? openAsks : [])
     .filter((a) => a && a.id && a.status === 'pending')
-    .sort((a, b) => askUrgencyCompare(a, b, now))
+    .sort(cmp)
     .map(askItem)
 }
 
@@ -224,21 +302,22 @@ export function activeAgentFilter(from, rows, selected = null) {
 // chat is an ordinary tab and `totalUnread` counts it — dropping it would break
 // Σ "N new" == came). Rooms are excluded: their unread is 0 until PR C.
 // Ordered by the latest arrival, falling back to the last message.
-export function unreadItems(threads, previews) {
-  return (Array.isArray(threads) ? threads : [])
+// trinity-enterprise#631: plus the tags not yet opened, in the same recency order.
+export function unreadItems(threads, previews, mentions = []) {
+  const chats = (Array.isArray(threads) ? threads : [])
     .filter((t) => t && !t.is_room && threadId(t) && (Number(t.unread) || 0) > 0)
     .map((t) => {
       const it = threadItem(t, previews)
       return { ...it, at: it.latest?.at || t.last_message_at || null }
     })
-    .sort(byAtDesc)
+  return [...chats, ...unreadMentions(mentions).map(mentionItem)].sort(byAtDesc)
 }
 
 // All: every chat (read or not, any age; rooms wait for PR C), merged with the
 // asks list — pending asks always, ended ones for 7 days. The server applies
 // that window too; the client guard stays for an ask that expired while it was
 // still listed as pending.
-export function allItems(threads, asks, previews, now = Date.now()) {
+export function allItems(threads, asks, previews, now = Date.now(), mentions = []) {
   const askCutoff = now - ENDED_ASK_WINDOW_DAYS * DAY_MS
   const chats = (Array.isArray(threads) ? threads : [])
     .filter((t) => t && !t.is_room && threadId(t))
@@ -247,7 +326,9 @@ export function allItems(threads, asks, previews, now = Date.now()) {
     .filter((a) => a && a.id)
     .map(askItem)
     .filter((it) => it.status === 'pending' || ts(it.at) >= askCutoff)
-  return [...chats, ...askRows].sort(byAtDesc)
+  // trinity-enterprise#631: every tag, read or not (the server keeps them).
+  const tags = (Array.isArray(mentions) ? mentions : []).filter((m) => m && m.id).map(mentionItem)
+  return [...chats, ...askRows, ...tags].sort(byAtDesc)
 }
 
 // §3g SM / C4: every tab renders at most `limit` rows, then "Show more". Not
@@ -278,10 +359,12 @@ export function allFooterNotes({ hasRooms = false, askCount = 0 } = {}) {
 
 // D13: the two counts on the pinned row. `came` is `totalUnread` over the SAME
 // `sidebarThreads` the sidebar sums, and the tab title (#557) shows.
-export function inboxCounts(threads, openAsks) {
+// trinity-enterprise#631: a tag not yet opened counts as one thing that came
+// back — it is Unread, never "needs you".
+export function inboxCounts(threads, openAsks, mentions = []) {
   return {
     needs: Array.isArray(openAsks) ? openAsks.length : 0,
-    came: totalUnread(threads),
+    came: totalUnread(threads) + unreadMentions(mentions).length,
   }
 }
 
@@ -306,14 +389,19 @@ export function listHeadLabel(tab, liveItems, fromLabel = null, droppedLabel = n
   if (!items.length) return fromLabel && tab === 'action' ? `Nothing waiting from ${fromLabel}` : 'All caught up'
   const chats = items.filter((it) => it && it.type === 'thread')
   const asks = items.filter((it) => it && it.type === 'ask')
+  const tags = items.filter((it) => it && it.type === 'mention')
   if (tab === 'action') return plural(asks.length, 'ask', 'asks') + (fromLabel ? ` from ${fromLabel}` : '')
   if (tab === 'unread') {
     const fresh = chats.reduce((sum, it) => sum + (Number(it.n) || 0), 0)
-    return `${plural(chats.length, 'chat', 'chats')} · ${capCount(fresh) || 0} new`
+    const parts = []
+    if (chats.length || !tags.length) parts.push(`${plural(chats.length, 'chat', 'chats')} · ${capCount(fresh) || 0} new`)
+    if (tags.length) parts.push(plural(tags.length, 'mention', 'mentions'))
+    return parts.join(' · ')
   }
   const parts = []
   if (chats.length) parts.push(plural(chats.length, 'chat', 'chats'))
   if (asks.length) parts.push(plural(asks.length, 'ask', 'asks'))
+  if (tags.length) parts.push(plural(tags.length, 'mention', 'mentions'))
   return parts.join(' · ')
 }
 
@@ -371,12 +459,14 @@ export function inboxBranchVisible({ isInboxRoute = false, stageState = 'loading
 // the `agents[0]` fallback, and never by writing `activeAgentName` (that would
 // mint a Main and retarget the conversation watchers). No selection, or an
 // agent no longer on the roster → null → no rail.
-export function inboxSelectedAgent({ item, threads = [], asks = [], agents = [] } = {}) {
+export function inboxSelectedAgent({ item, threads = [], asks = [], agents = [], mentions = [] } = {}) {
   const parsed = parseItemKey(item)
   if (!parsed) return null
   let name = null
   if (parsed.type === 'thread') {
     name = (Array.isArray(threads) ? threads : []).find((t) => threadId(t) === parsed.id)?.agent_name || null
+  } else if (parsed.type === 'mention') {
+    name = (Array.isArray(mentions) ? mentions : []).find((m) => m && m.id === parsed.id)?.agent_name || null
   } else {
     name = (Array.isArray(asks) ? asks : []).find((a) => a && a.id === parsed.id)?.agent_name || null
   }
@@ -419,6 +509,12 @@ function ghostOf(snap, live) {
     const t = live.thread ? live.thread(snap.id) : null
     if (!t) return null // deleted
     return { ...snap, n: Number(t.unread) || 0, readInPlace: true, ghost: true }
+  }
+  if (snap.type === 'mention') {
+    // A tag just read keeps its place, drawn read, until the selection moves.
+    const m = live.mention ? live.mention(snap.id) : null
+    if (!m) return null
+    return { ...snap, status: m.state, mention: m, readInPlace: m.state === 'read', ghost: true }
   }
   if (snap.type === 'ask') {
     const a = live.ask ? live.ask(snap.id) : null
@@ -492,12 +588,16 @@ export function stableRows(fresh, visit, live = {}) {
 // The one fallback for a selection the rendered rows do not hold — an old chat
 // (All stops at no age, but Unread and Action do not list it), a deep link, a
 // row past the window. Built from the shell's data by key, whatever the tab.
-export function resolveItem(key, { threads = [], asks = [], previews = {} } = {}) {
+export function resolveItem(key, { threads = [], asks = [], previews = {}, mentions = [] } = {}) {
   const parsed = parseItemKey(key)
   if (!parsed) return null
   if (parsed.type === 'thread') {
     const t = (Array.isArray(threads) ? threads : []).find((x) => threadId(x) === parsed.id)
     return t ? threadItem(t, previews) : null
+  }
+  if (parsed.type === 'mention') {
+    const m = (Array.isArray(mentions) ? mentions : []).find((x) => x && x.id === parsed.id)
+    return m ? mentionItem(m) : null
   }
   const a = (Array.isArray(asks) ? asks : []).find((x) => x && x.id === parsed.id)
   return a ? askItem(a) : null
@@ -593,8 +693,8 @@ export function paneRuns(messages) {
 
 // §3g C10: "Open canvas" appears only when there is a canvas to open — the
 // selected item's agent has one in the rail's canvas feed (which the rail loads
-// for that agent anyway), and the Canvas tab is one this session has. On chats
-// and asks alike (T6).
+// for that agent anyway), and the Canvas tab is one this session has. Shown on
+// chats only (#3714) — the pane gates it on the item type.
 export function inboxCanvasCount({ tabs = [], canvases = {}, agent = null } = {}) {
   if (!agent || !(Array.isArray(tabs) ? tabs : []).some((t) => t && t.id === 'canvas')) return 0
   const list = canvases && canvases[agent]
@@ -613,6 +713,15 @@ export function openInChatTarget(item) {
   return base
 }
 
+// #3714: the chat an ask came from — the turn that raised it (askThreadLink);
+// a background ask has none. {id, agent_name} | null — the `open-thread`
+// payload the ask card's own thread link sends.
+export function askOriginThread(item) {
+  if (!item || item.type !== 'ask') return null
+  const id = askThreadLink(item.ask)
+  return id ? { id, agent_name: item.ask?.agent_name || item.agent_name } : null
+}
+
 // agent name → the human-facing label, the sidebar's rule (`display_label`
 // trimmed, else the slug).
 export function agentLabels(agents) {
@@ -628,6 +737,8 @@ export function agentLabels(agents) {
 // carries the title, and repeating it there read as the same line twice
 // (sign-off). A chat is `agent · chat title`.
 export function paneHeading(item, agentLabel = '') {
+  // trinity-enterprise#631: a tag is a person's, not an agent's — name them.
+  if (item?.type === 'mention') return item.title || 'Mention'
   if (item?.type === 'ask') {
     const kind = queueTypeLabel(item.ask?.kind) || 'Question'
     return `${agentLabel} · ${kind}`

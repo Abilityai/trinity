@@ -11,8 +11,7 @@ The standalone scheduler owns arm/fire/reconcile. Covers:
   pending (retry) until attempts hit MAX → firing→failed (bounded, AC #3);
 - `_reconcile_reminders`: arm-once (idempotent), past-due → now+5s, stale-firing
   reclaim, a Z-suffixed fire_at reconciles without raising, table-absent no-op,
-  soft-deleted / autonomy-off agents not armed;
-- `reload_schedules()` rebuilds/reclaims reminder jobs (Codex C6).
+  soft-deleted / autonomy-off agents not armed.
 """
 
 # Path setup must happen before scheduler imports
@@ -349,17 +348,3 @@ def test_reconcile_autonomy_off_not_armed(initialized_db, mock_lock_manager):
     svc.scheduler.get_job.return_value = None
     svc._reconcile_reminders()
     svc.scheduler.add_job.assert_not_called()
-
-
-def test_reload_schedules_reclaims_reminders(initialized_db, mock_lock_manager):
-    _setup_reminders(initialized_db)
-    _insert_reminder(initialized_db, "r1")
-    db = SchedulerDatabase(database_path=initialized_db)
-    db.ensure_process_schedules_table()  # normally created by initialize()
-    svc = _service(db, mock_lock_manager)
-    svc.scheduler.get_jobs.return_value = []
-    svc.scheduler.get_job.return_value = None
-    svc.reload_schedules()
-    # the full-reload path also armed the reminder job (Codex C6)
-    ids = [c.kwargs.get("id") for c in svc.scheduler.add_job.call_args_list]
-    assert "reminder_r1" in ids

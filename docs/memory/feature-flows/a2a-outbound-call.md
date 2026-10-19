@@ -133,7 +133,7 @@ services/a2a_outbound_service.py
    │               dedup_label=<required>)
    ▼
 services/a2a_client.py               trust_env=False · follow_redirects=False
-   ├─ GET  {origin}/.well-known/agent-card.json   uncredentialed, ≤256 KiB
+   ├─ GET  {path}/.well-known/agent-card.json, then {origin}/… on 404 (ent#838)   uncredentialed, ≤256 KiB
    │        pinned IP · Host+SNI = registered hostname · identity encoding
    │        └─ same-origin pin on card.url · dialect from protocolVersion
    └─ POST {rpc_url}  Authorization: Bearer <credential>   ≤1 MiB, same pin
@@ -225,7 +225,8 @@ and `validate_a2a_endpoint_url` runs on **every call**:
 
 * HTTPS only — an `http://` row is refused at **use**, with a message telling
   the operator to re-register. Not silently upgraded: a client that quietly
-  rewrites a scheme is one that will quietly rewrite it back.
+  rewrites a scheme is one that will quietly rewrite it back. The one
+  exception is a host on the admin's outbound endpoint allowlist (below).
 * No userinfo — refused, never stripped (a stripped credential is one the
   operator believes is in use).
 * IDNA/A-label normalised **once**, so the parser and the resolver cannot
@@ -235,7 +236,17 @@ and `validate_a2a_endpoint_url` runs on **every call**:
   homograph lives.
 * **Every** address `getaddrinfo` returns must be public. One internal record
   among public ones refuses the whole endpoint — which record a resolver hands
-  out is not our choice.
+  out is not our choice. Same single exception as `http://`.
+* **Outbound endpoint allowlist** (trinity-enterprise#838, outbound-only since
+  trinity-enterprise#885; setting key `a2a_trusted_networks`, admin-only route
+  `GET/PUT /api/settings/a2a-trusted-networks`): when the public-HTTPS rule
+  refuses, `_validate_trusted_a2a_url` admits the endpoint only if its host
+  matches a name entry, or every address it resolves to is public or inside a
+  CIDR entry. Such an endpoint may be private/CGNAT (a tailnet peer) and
+  `http://`; metadata, loopback and the platform's own networks stay refused
+  whatever the list says. It runs at registration and again on every call, so
+  a name that later resolves outside the list is refused. Nothing inbound
+  reads the list (requirements `mcp.md` §32.7).
 * DNS failure is fatal, and resolution runs **off the event loop**: a
   synchronous `getaddrinfo` on a per-call agent path freezes an entire worker's
   loop, which no per-agent rate limit bounds.
@@ -279,11 +290,17 @@ sign.
   emits no explicit port**, so getting it wrong makes Trinity unreachable by
   its own rule and breaks #738 on day one;
 * `securitySchemes` **never** selects the credential;
-* the card is always derived from the **origin**, never by appending
-  `/.well-known/...` to a registered path (which would silently fetch a
-  different agent's card). If the registered URL carries a path, it is accepted
-  as the RPC target only when the card's `url` matches it exactly; ambiguity is
-  refused by name;
+* the card is looked up in a fixed order (trinity-enterprise#838):
+  1. a registered card URL is fetched as given;
+  2. else a registered path's own card, `{path}/.well-known/agent-card.json` —
+     where Trinity publishes one (it serves nothing at its origin, so origin-only
+     discovery never reached another Trinity's agent);
+  3. then the origin card.
+
+  Only a 404 moves on to the next; any other failure is the answer. Every
+  candidate is same-origin with the registered URL. If the registered URL
+  carries a path, it is accepted as the RPC target only when the card's `url`
+  matches it exactly; ambiguity is refused by name;
 * **no redirects** on either hop — a 3xx is a failure. The bounded
   re-validated redirect loops elsewhere (Slack, WhatsApp) exist because those
   vendors genuinely 302 to CDNs; A2A has no such requirement, and "no
@@ -360,8 +377,8 @@ agent an error object as if it were an answer.
 |---|---|---|
 | `endpoint_not_found` | 404 | No registered endpoint matched (or the seam refused) |
 | *(kill switch off)* | 404 | `A2A_OUTBOUND_ENABLED` off |
-| `endpoint_not_https` | 400 | A registry row holding `http://` |
-| `endpoint_private_address` | 400 | Resolved inside the perimeter |
+| `endpoint_not_https` | 400 | A registry row holding `http://`, host not on the outbound allowlist |
+| `endpoint_private_address` | 400 | Resolved inside the perimeter, host not on the outbound allowlist |
 | `endpoint_dns_failure` | 400 | Unresolvable, or resolution timed out |
 | `message_too_long` | 422 | Over the 100 000-char outbound cap |
 | `card_redirect` / `rpc_redirect` | 502 | A 3xx — a failure, not a hop |

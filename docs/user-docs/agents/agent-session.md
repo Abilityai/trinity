@@ -4,7 +4,7 @@ Trinity has two conversation surfaces, and the difference is memory.
 
 | Surface | Where | What the agent remembers |
 |---------|-------|--------------------------|
-| **Chat tab** on Agent Detail | `/agents/{name}?tab=chat` | Nothing. Each message starts fresh. |
+| **Chat tab** on Agent Detail | `/agents/{name}?tab=chat` | Nothing. Each message runs as a new agent session; the last 20 messages are included for context. |
 | **[Workspace](../sharing-and-access/workspace.md)** | `/workspace` | Everything — tool results, mid-task state, reasoning — carried across turns. |
 
 > **The Session tab is retired.** It was folded into the Chat tab as a mode, and that mode has now been removed in favour of the Workspace. Old `?tab=session` links redirect to `/workspace?agent=<name>`, and the Chat tab carries a **Continue in Workspace →** link, which opens the Workspace in its own browser tab. The underlying session API still exists (see [For Agents](#for-agents)); what went away is the second UI for it.

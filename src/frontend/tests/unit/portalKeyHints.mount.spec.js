@@ -72,7 +72,7 @@ describe('ent#621 — the sidebar shows the agent keys', () => {
     w.unmount()
   })
 
-  it('has a button for the key list, so a mouse reaches what ⌘/ reaches', async () => {
+  it('has a button for the key list, so a mouse reaches what ⌥/ reaches', async () => {
     const w = mountSidebar()
     const btn = w.find('[data-testid="portal-sidebar-keys"]')
     expect(btn.exists()).toBe(true)
@@ -140,6 +140,58 @@ describe('ent#621 — the chat strip shows the chat keys', () => {
     // The chat keys are NOT the agent keys: a tooltip that said `⌥↓` here
     // would teach the wrong chord for the control it sits on.
     expect(tab.attributes('aria-keyshortcuts')).toContain('Shift')
+    w.unmount()
+  })
+})
+
+describe('ent#621 (follow-up) — the search field shows and answers its key', () => {
+  const mountSidebar = (props = {}) => mount(PortalSidebar, {
+    attachTo: document.body,
+    props: {
+      roster: [{ name: 'scout' }, { name: 'sage' }],
+      activeAgentName: 'scout',
+      threads: [],
+      clientEmail: 'me@example.com',
+      ...props,
+    },
+    global: { plugins: [router] },
+  })
+  const field = (w) => w.find('input[type="search"]')
+  const cap = (w) => w.find('[data-testid="portal-sidebar-search-key"]')
+
+  it('carries the chord in both channels, read from the map', () => {
+    const w = mountSidebar()
+    expect(field(w).attributes('aria-keyshortcuts')).toBe(keyShortcutsFor('search-focus', P))
+    expect(field(w).attributes('title')).toContain(keyHint('search-focus', P))
+    expect(cap(w).exists()).toBe(true)
+    expect(cap(w).text()).toBe(keyHint('search-focus', P))
+    w.unmount()
+  })
+
+  it('the key cap steps aside for text and for focus', async () => {
+    // It sits where the field's own clear control appears, and a hint that
+    // covers what you are typing is worse than none.
+    const typed = mountSidebar({ search: 'sc' })
+    expect(cap(typed).exists()).toBe(false)
+    typed.unmount()
+
+    const w = mountSidebar()
+    await field(w).trigger('focus')
+    expect(cap(w).exists()).toBe(false)
+    await field(w).trigger('blur')
+    expect(cap(w).exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('exposes focusSearch(), which focuses the field and selects what is in it', async () => {
+    const w = mountSidebar({ search: 'scout' })
+    const el = field(w).element
+    expect(w.vm.searchHasFocus()).toBe(false)
+    w.vm.focusSearch()
+    expect(document.activeElement).toBe(el)
+    expect(w.vm.searchHasFocus()).toBe(true)
+    expect(el.selectionStart).toBe(0)
+    expect(el.selectionEnd).toBe('scout'.length)
     w.unmount()
   })
 })

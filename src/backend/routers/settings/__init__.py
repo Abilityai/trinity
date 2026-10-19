@@ -26,6 +26,7 @@ from database import SystemSetting
 
 from . import (
     autonomy_dial,
+    aauth,
     agent_defaults,
     credentials,
     provider_keys,
@@ -71,6 +72,7 @@ router.include_router(templates.router)
 router.include_router(mcp_url.router)
 router.include_router(agent_defaults.router)
 router.include_router(integrations.router)
+router.include_router(aauth.router)  # ent#862 the AAuth switch + issuer
 router.include_router(ops.router)
 # ent#641: validated, and BEFORE the `/{key}` catch-all (Invariant #4).
 router.include_router(autonomy_dial.router)

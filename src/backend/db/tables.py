@@ -120,6 +120,8 @@ agent_ownership = Table(
     Column("circuit_breaker_enabled", Integer),
     Column("mcp_exposed", Integer),
     Column("a2a_exposed", Integer),                # ent#157: A2A inbound-server exposure opt-in (default OFF)
+    Column("a2a_scope", Text, server_default="public"),          # inert since ent#885; drop under #746
+    Column("a2a_keyless_internal", Integer, server_default="1"),  # inert since ent#885; drop under #746
     # ent#329: owner opt-in — an operator answer re-triggers the agent. Default OFF:
     # a dispatch on respond spends money, so it is never unconditional. Per-AGENT and
     # not per-request, so hosting asks cannot hand a client a spend button (ent#430 AC #3).
@@ -301,6 +303,7 @@ schedule_executions = Table(
     # ent#457 review: WHICH human the channel context belongs to. Only the
     # portal leg reads it today — see `_resolve_portal`'s recipient check.
     Column("source_channel_client", Text),
+    Column("source_host", Text),                   # ent#838: a keyless trusted-network A2A caller's address
     # ent#555 — the canvas the user had open for this turn (context, not authority).
     Column("open_canvas_id", Text),
     # #2806 — agent-to-agent hops from a non-agent root; NULL = root (0).
@@ -551,6 +554,7 @@ enterprise_portal_messages = Table(
     Column("source", Text),         # ent#534: NULL typed | 'voice'
     Column("voice_call_id", Text),  # ent#534: groups one voice call's rows
     Column("attachments", Text),    # #3265: JSON list on a user turn
+    Column("execution_id", Text),   # #3166: the turn that wrote the row
 )
 
 # ent#359 — per-user star + read cursor for a Workspace chat of either kind
@@ -1132,6 +1136,19 @@ agent_capability_grants = Table(
     Column("granted_at", Text, nullable=False),
 )
 
+# abilityai/trinity-enterprise#662: caller X may run library-assigned skill Y on
+# target Z over their agent_permissions edge. Both agent columns are CASCADE
+# AgentRefs (db/agent_cleanup.py).
+agent_peer_skill_grants = Table(
+    "agent_peer_skill_grants",
+    metadata,
+    Column("caller_agent", Text, primary_key=True),
+    Column("target_agent", Text, primary_key=True),
+    Column("skill_name", Text, primary_key=True),
+    Column("granted_by", Text, nullable=False),
+    Column("granted_at", Text, nullable=False),
+)
+
 # ent#237: one row per git repo the skills library syncs from.
 skill_sources = Table(
     "skill_sources",
@@ -1522,9 +1539,9 @@ operator_queue = Table(
     # ledger reads from `status`.
     Column("disposition", Text),         # answered|cancelled|expired|dismissed
     Column("disposed_at", Text),
-    Column("disposed_by", Text),         # person|timeout|platform (#3130: superseded flood alarms)
+    Column("disposed_by", Text),         # person|timeout|platform (#3130: superseded flood alarms)|agent (#3247: replaced by its own successor)
     Column("disposed_by_email", Text),   # NULL for timeout; withheld from agent principals
-    Column("disposition_reason", Text),  # the operator's optional cancel reason
+    Column("disposition_reason", Text),  # the operator's optional cancel reason, or a closed token (ent#844: outcome_unknown on a timeout)
     Column("batch_id", Text),            # one uuid per bulk-cancel sweep
     # trinity-enterprise#611: the agent-raised ask. Platform-owned — written only
     # from keyword-only arguments, never from an agent's file entry.
@@ -1540,6 +1557,10 @@ operator_queue = Table(
     # the upgrade sweep: agent-raised asks and gates never carry a subject.
     Column("subject", Text),
     Column("last_seen_at", Text),
+    # #3247: an agent replaced one of its OWN pending asks. Both stamped in the
+    # one locked transaction that ends the predecessor and inserts the successor.
+    Column("replaces", Text),            # on the successor: the predecessor row's uuid
+    Column("replaced_by", Text),         # on the predecessor: the successor row's uuid
     Index(
         "uq_operator_queue_pending_subject",
         "agent_name", "subject",

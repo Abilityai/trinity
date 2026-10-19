@@ -99,6 +99,7 @@ _AGENT_ID_COLUMNS = (
     "target_agent",
     "subscriber_agent",
     "source_channel_agent",
+    "caller_agent",  # ent#662: agent_peer_skill_grants
 )
 
 _COL_RE = re.compile(

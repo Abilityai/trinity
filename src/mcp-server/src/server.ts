@@ -13,6 +13,7 @@ import { createChatTools } from "./tools/chat.js";
 import { createSystemTools } from "./tools/systems.js";
 import { createDocsTools } from "./tools/docs.js";
 import { createSkillsTools } from "./tools/skills.js";
+import { createSkillSourceTools } from "./tools/skill_sources.js";
 import { createRoomTools } from "./tools/rooms.js";  // ent#169 shared sessions
 import { createScheduleTools } from "./tools/schedules.js";
 import { createTagTools } from "./tools/tags.js";
@@ -42,6 +43,7 @@ import { createAuthTools } from "./tools/auth.js";
 import { createGitTools } from "./tools/git.js";
 import { createA2ATools } from "./tools/a2a.js";
 import { createA2ACallTools } from "./tools/a2a_call.js";
+import { createAAuthTools } from "./tools/aauth.js";
 import { createCredentialVaultTools } from "./tools/credential_vault.js";
 import { createProjectTools } from "./tools/projects.js";
 import { createAssignmentTools } from "./tools/assignments.js";
@@ -649,6 +651,7 @@ export async function createServer(config: ServerConfig = {}) {
     createSystemTools(client, requireApiKey),
     createDocsTools(),
     createSkillsTools(client, requireApiKey),
+    createSkillSourceTools(client, requireApiKey), // Library source management — admin principals only, own canAccess allow-list (ent#692)
     createScheduleTools(client, requireApiKey),
     createTagTools(client, requireApiKey),
     createNotificationTools(client, requireApiKey),
@@ -675,6 +678,7 @@ export async function createServer(config: ServerConfig = {}) {
     createRoomTools(client, requireApiKey),          // Shared sessions / rooms (ent#169)
     createA2ATools(client, requireApiKey),           // A2A control plane — exposure/card/allow-list/endpoints (ent#160)
     createA2ACallTools(client, requireApiKey),       // A2A runtime — outbound call_a2a_agent / get_a2a_task (#736)
+    createAAuthTools(client, requireApiKey),         // AAuth — request_person_token (ent#878), call_aauth_resource (ent#879); self-acting
     createCredentialVaultTools(client, requireApiKey), // Credential vault runtime — list/fetch (license-blind proxy, ent#279)
     createProjectTools(client, requireApiKey),       // Workspace Projects — list/get read tools (license-blind proxy, ent#661)
     createAssignmentTools(client, requireApiKey),     // Role assignments — read who an agent serves (license-blind proxy, ent#500)

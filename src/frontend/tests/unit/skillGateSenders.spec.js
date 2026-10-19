@@ -41,7 +41,7 @@ vi.mock('../../src/components/SparklineChart.vue', () => ({
 import axios from 'axios'
 import ChatPanel from '../../src/components/ChatPanel.vue'
 import DashboardPanel from '../../src/components/DashboardPanel.vue'
-import PlaybooksPanel from '../../src/components/PlaybooksPanel.vue'
+import SkillsTab from '../../src/components/skills/SkillsTab.vue'
 import TasksPanel from '../../src/components/TasksPanel.vue'
 import PublicChat from '../../src/views/PublicChat.vue'
 import { useAgentsStore } from '../../src/stores/agents'
@@ -123,6 +123,56 @@ describe('ChatPanel', () => {
     const second = axios.post.mock.calls.filter(c => c[0].endsWith('/task'))[1][1]
     expect(second.message).not.toContain('/pay-invoice')
     expect(second.message).not.toContain(NOTICE)
+  })
+
+  // trinity#3526 — the held request is saved to the conversation, so a reload
+  // shows it, with the decision once there is one, and still out of the history.
+  const DECIDED = 'Your request gate-abc to run the skill pay-invoice on fin was rejected; nothing was run.'
+  const stored = (gate) => ({ data: { messages: [
+    { role: 'user', content: '/pay-invoice 100 EUR', source: 'gate:gate-abc', timestamp: '2026-10-11T00:29:08Z', gate },
+    { role: 'system', content: NOTICE, source: 'gate:gate-abc', timestamp: '2026-10-11T00:29:08Z', gate },
+  ] } })
+  const reloaded = (gate) => ({
+    '/chat/sessions/s1': stored(gate),
+    '/chat/sessions': { data: { sessions: [{ id: 's1', status: 'active' }] } },
+  })
+
+  it('shows a saved held request and its notice after a reload', async () => {
+    serve(reloaded({ request_id: 'gate-abc', state: 'pending', text: null }))
+    const w = await chatPanel()
+    expect(w.text()).toContain('/pay-invoice 100 EUR')
+    expect(w.find('[data-testid="chat-system-line"]').text()).toBe(NOTICE)
+  })
+
+  it('shows the decision in place of the waiting notice once it is decided', async () => {
+    serve(reloaded({ request_id: 'gate-abc', state: 'denied', text: DECIDED }))
+    const w = await chatPanel()
+    expect(w.find('[data-testid="chat-system-line"]').text()).toBe(DECIDED)
+    expect(w.text()).not.toContain('waiting for a decision')
+  })
+
+  it('leaves a saved held request out of the next turn\'s history', async () => {
+    serve(reloaded({ request_id: 'gate-abc', state: 'denied', text: DECIDED }),
+      { '/task': PENDING })
+    const w = await chatPanel()
+    await w.vm.sendMessage('what is on today?')
+    await flush()
+    const sent = axios.post.mock.calls.find(c => c[0].endsWith('/task'))[1]
+    expect(sent.message).toBe('what is on today?')
+    expect(sent.chat_session_id).toBe('s1')
+  })
+
+  it('adopts the session the held request was saved to', async () => {
+    serve({ '/chat/sessions': { data: [] } },
+      { '/task': { ...PENDING, data: { ...PENDING.data, chat_session_id: 's9' } } })
+    const w = await chatPanel()
+    await w.vm.sendMessage('/pay-invoice 100 EUR')
+    await flush()
+    await w.vm.sendMessage('what is on today?')
+    await flush()
+    const second = axios.post.mock.calls.filter(c => c[0].endsWith('/task'))[1][1]
+    expect(second.chat_session_id).toBe('s9')
+    expect(second.create_new_session).toBe(false)
   })
 
   it('names a refusal instead of an object', async () => {
@@ -224,29 +274,34 @@ describe('TasksPanel', () => {
 })
 
 // ---------------------------------------------------------------------------
-// PlaybooksPanel — Run on a playbook (sync /task)
+// SkillsTab — Run on a skill (async /task; trinity-enterprise#754 merged the
+// Playbooks tab into it)
 // ---------------------------------------------------------------------------
 
-describe('PlaybooksPanel', () => {
-  async function playbooks(post) {
-    serve({ '/playbooks': { data: { skills: [] } } }, { '/task': post })
+describe('SkillsTab', () => {
+  async function skills(post) {
+    serve({ '/playbooks': { data: { skills: [{ name: 'pay-invoice', user_invocable: true, source: 'agent', dir: 'pay-invoice' }] } } },
+      { '/task': post })
     const notify = vi.fn()
-    wrapper = mount(PlaybooksPanel, { props: { agentName: AGENT, agentStatus: 'running', notify } })
+    wrapper = mount(SkillsTab, {
+      props: { agentName: AGENT, agentStatus: 'running', notify },
+      global: { stubs: { teleport: true, 'router-link': true } },
+    })
     await flush()
-    await wrapper.vm.runSkill({ name: 'pay-invoice', user_invocable: true })
+    await wrapper.find('[data-testid="skill-run-pay-invoice"]').trigger('click')
     await flush()
     return { w: wrapper, notify }
   }
 
   it('tells the notice and opens no run', async () => {
-    const { w, notify } = await playbooks(PENDING)
+    const { w, notify } = await skills(PENDING)
     expect(notify).toHaveBeenCalledWith(NOTICE, 'info', { timeout: 8000 })
     expect(w.emitted('run-with-instructions')).toBeUndefined()
     expect(w.text()).not.toContain('started')
   })
 
   it('names a refusal in the persistent error toast, not a 3-second one', async () => {
-    const { w, notify } = await playbooks(() => Promise.reject(refusal()))
+    const { w, notify } = await skills(() => Promise.reject(refusal()))
     expect(notify).toHaveBeenCalledWith(REFUSED, 'error')
     expect(w.text()).not.toContain('"code"')              // not the detail object as JSON
   })

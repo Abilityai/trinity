@@ -172,3 +172,23 @@ def test_message_id_is_declared_on_the_response_model():
     assert PortalChatResponse.model_fields["message_id"].default is None
     assert PortalChatResponse(response="x").message_id is None
     assert PortalChatResponse(response="x", message_id="m1").message_id == "m1"
+
+
+def test_ent754_the_sync_reply_says_whether_it_skipped_approval(chat, monkeypatch):
+    """trinity-enterprise#754: on the synchronous fallback the reply's answer is
+    all the bubble has before a reload, so it carries the same two flags the
+    history read does — for a person only (a machine caller reads both false). Declared on the model too,
+    or the route would drop them in silence (the lesson above)."""
+    svc, state = chat
+    from client_portal.models import PortalChatResponse
+    from database import db
+
+    monkeypatch.setattr(db, "get_self_approved_runs",
+                        lambda agent, ids: {"exec-7": f"person:{EMAIL}"} if "exec-7" in ids else {})
+
+    person = asyncio.run(svc.portal_chat(AGENT, "/pay", EMAIL, SESSION, execution_id="exec-7", gate_is_person=True))
+    machine = asyncio.run(svc.portal_chat(AGENT, "/pay", EMAIL, SESSION, execution_id="exec-7", gate_is_person=False))
+
+    shaped = PortalChatResponse.model_validate(person).model_dump()
+    assert (shaped["gate_self_approved"], shaped["gate_self_approved_by_viewer"]) == (True, True)
+    assert (machine["gate_self_approved"], machine["gate_self_approved_by_viewer"]) == (False, False)

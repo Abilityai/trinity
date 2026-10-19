@@ -84,7 +84,7 @@ reaper-touched row. The fix targets this single point.
 |---|-----|-------|----------|
 | **C1** | Claim subquery `FOR UPDATE SKIP LOCKED` (PG) + outer `status='queued'` re-check. | `db/schedules.py::claim_next_queued` | ✅ real-PG multi-process 0/25 double-claims; SQLite green |
 | **PG1** | Superseded by dev's **#1420** (`0008a_widen_alembic_version` + `env.py` `String(255)`); inherited on rebase. Session's duplicate `env.py` widening dropped; pull revisions renumbered `0016`/`0017`. | dev `migrations/env.py` (#1420) | ✅ fresh empty PG reaches head; PG suite 47/47 |
-| **B1** | Recreate pops `PULL_MODE_ENV_KEYS` before re-applying; the claim seam's agent-key path is allowlist-gated in `_pull_authorized` (internal-secret + result paths intentionally ungated so an in-flight result still lands). | `pull_mode.py`, `lifecycle.py`, `routers/internal.py` | ✅ unit |
+| **B1** | Recreate pops `PULL_MODE_ENV_KEYS` before re-applying — since #3590 through `pull_mode.apply_pull_mode_env`, the one owner of the idiom for all three env assemblers (create, drift recreate, #1559 rebuild-from-nothing; the rebuild used to skip it and stranded the pilot's queue); the claim seam's agent-key path is allowlist-gated in `_pull_authorized` (internal-secret + result paths intentionally ungated so an in-flight result still lands). | `pull_mode.py`, `lifecycle.py`, `routers/internal.py` | ✅ unit |
 | **B2** | `park_expired_lease` keeps `claim_token` → a late SUCCESS CAS-overwrites the parked FAILED row. | `db/schedules.py` | ✅ unit |
 | **B3** | Reaper creates the operator alert **before** the park write, parks **only if the alert persisted** → a failed alert leaves the row reapable, not invisible poison. | `lease_reaper_service.py` | ✅ unit |
 | **B5** (lost-result) | `requeue_expired_lease` keeps `claim_token` → the original worker's late SUCCESS finalizes the SAME queued row. | `db/schedules.py` | ✅ unit |
@@ -878,9 +878,12 @@ one signal the "canary green throughout" AC rests on.
 
 ### Rollback
 
-Remove the agent from `PULL_MODE_PILOT_AGENTS` → restart backend → **recreate the
-agent** (the flag only clears at create/recreate; `PULL_MODE_ENV_KEYS` is popped
-on recreate precisely so de-piloting takes effect). Queued rows are picked up by
+Remove the agent from `PULL_MODE_PILOT_AGENTS` → restart backend → **start the
+agent** (`POST /api/agents/{name}/start`: since #3590 the start-path drift chain
+compares the container's `TRINITY_PULL_MODE` flag with the allowlist via
+`check_pull_mode_env_matches` and recreates on a mismatch, in either direction;
+`PULL_MODE_ENV_KEYS` is popped on recreate precisely so de-piloting takes
+effect). Queued rows are picked up by
 the backend drain again as soon as the pilot guard stops matching, so in-flight
 work is not stranded.
 

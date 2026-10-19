@@ -171,9 +171,10 @@ describe('#2159 the roster is bounded and expandable', () => {
 
 describe('#2159 loading is distinguishable from empty', () => {
   it('renders a skeleton while loading with nothing yet', () => {
-    expect(source).toMatch(/v-if="loadingRoster && !roster\.length"/)
-    expect(source).toMatch(/aria-busy="true"/)
-    expect(source).toMatch(/Loading your agents/)
+    // #3672: the gate also holds until the whole list's first-load verdict, and
+    // the rows moved into PortalSkeleton's `sidebar-agents` variant (mounted,
+    // with its aria-busy and spoken line, in portalSidebarCalmLoad.mount.spec.js).
+    expect(source).toMatch(/v-if="!settled \|\| \(loadingRoster && !roster\.length\)" variant="sidebar-agents"/)
   })
 
   it('suppresses the empty state while loading', () => {

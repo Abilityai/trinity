@@ -261,10 +261,12 @@
                 <!-- #3246: one row per condition — how often the platform saw it. -->
                 <p v-if="queueSeenLine(item)" class="ops-card-type" data-testid="queue-seen-line">{{ queueSeenLine(item) }}</p>
                 <!-- #3115: agent-written markdown, rendered — never shown raw. -->
-                <AskMarkdown class="ops-card-message" :text="item.message || item.question || item.description" :prose="false" data-testid="queue-message" />
+                <AskMarkdown v-if="!item.gate" class="ops-card-message" :text="item.message || item.question || item.description" :prose="false" data-testid="queue-message" />
                 <!-- trinity-enterprise#611: the exact action this approval would run,
                      on the same card that offers the decision (desktop parity). -->
-                <QueueProposal v-if="item.proposal" :proposal="item.proposal" class="mt-2" />
+                <!-- trinity-enterprise#755: a gated-skill approval has its own card. -->
+                <GatedSkillRequest v-if="item.gate" :item="item" class="mt-2" />
+                <QueueProposal v-else-if="item.proposal" :proposal="item.proposal" class="mt-2" />
                 <!-- Controls switch on the item TYPE (desktop parity), and an
                      approval is never answered on one tap: select → restated
                      consequence → optional note → explicit Send. The decision
@@ -275,7 +277,11 @@
                      This inline step is deliberately p19-shaped — named verb,
                      restated consequence, the safe action first and focused —
                      and is NOT a confirm overlay (see the note on #1924). -->
-                <template v-if="queueResponseKind(item) === 'approval'">
+                <!-- trinity-enterprise#755: a gated-skill approval offers its
+                     controls only to a person it is addressed to; anyone else
+                     reads who it is waiting on, in the card above. -->
+                <template v-if="gateReadOnly(item)" />
+                <template v-else-if="queueResponseKind(item) === 'approval'">
                   <div class="ops-options" role="group" aria-label="Options">
                     <button
                       v-for="(opt, idx) in offeredChips(item)"
@@ -310,7 +316,7 @@
                       type="text"
                       enterkeyhint="done"
                       maxlength="4000"
-                      :placeholder="selectedOptions[item.id] === SOMETHING_ELSE ? 'What should it do instead?' : 'Add a note (optional)...'"
+                      :placeholder="selectedOptions[item.id] === SOMETHING_ELSE ? 'What should it do instead?' : (gateRejecting(item, selectedOptions[item.id]) ? 'Reason (optional) — the requester is told' : 'Add a note (optional)...')"
                       class="ops-response-input"
                       data-testid="queue-note"
                       :disabled="respondingItems[item.id]"
@@ -668,7 +674,7 @@ import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
 import AskMarkdown from '../components/operator/AskMarkdown.vue'
 import { apiErrorMessage } from '../utils/apiError'
-import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
+import { isGateRefusal, pendingApprovalMessage, storedChatMessage } from '../utils/skillGate'
 import { viewState, staleBannerMessage, listFrom } from '../utils/loadingState'
 import {
   queueResponseKind, buildQueueResponse, queueTypeLabel,
@@ -682,6 +688,8 @@ import { formatLocalDateTime } from '../utils/timestamps'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
 import QueueProposal from '../components/operator/QueueProposal.vue'
+import GatedSkillRequest from '../components/operator/GatedSkillRequest.vue'
+import { gateReadOnly, gateRejecting } from '../utils/skillGateCard'
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -1098,7 +1106,7 @@ async function selectSession(session) {
   showSessions.value = false
   try {
     const res = await http.get(`/api/agents/${chatAgent.value}/chat/sessions/${session.id}`)
-    chatMessages.value = res.data.messages || []
+    chatMessages.value = (res.data.messages || []).map(storedChatMessage)
     scrollChatToBottom()
   } catch (e) {
     console.error('Failed to load session:', e)
@@ -1128,6 +1136,11 @@ async function sendChatMessage() {
     chatInputEl.value.style.height = 'auto'
   }
 
+  // trinity#3163: the context is built from the conversation as it stands, so
+  // the message being sent reaches the agent once, and a first message carries
+  // no history.
+  const contextPrompt = buildContextPrompt(message)
+
   // Add user message immediately
   chatMessages.value.push({
     role: 'user',
@@ -1140,7 +1153,6 @@ async function sendChatMessage() {
   chatExecutionStatus.value = 'running'
 
   try {
-    const contextPrompt = buildContextPrompt(message)
     const payload = {
       message: contextPrompt,
       save_to_session: true,
@@ -1156,6 +1168,8 @@ async function sendChatMessage() {
     if (held) {
       userEntry.held = true
       chatMessages.value.push({ role: 'system', content: held, held: true, timestamp: new Date().toISOString() })
+      // trinity#3526: the request was saved to a conversation — stay in it.
+      if (submitRes.data.chat_session_id) chatSessionId.value = submitRes.data.chat_session_id
       return
     }
     const executionId = submitRes.data.execution_id

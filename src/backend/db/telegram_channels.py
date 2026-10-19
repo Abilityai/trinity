@@ -694,17 +694,6 @@ class TelegramChannelOperations:
             deleted = result.rowcount > 0
         return deleted
 
-    def delete_groups_for_binding(self, binding_id: int) -> int:
-        """Delete all group configs for a binding (when bot is disconnected)."""
-        with get_engine().begin() as conn:
-            result = conn.execute(
-                delete(telegram_group_configs).where(
-                    telegram_group_configs.c.binding_id == binding_id
-                )
-            )
-            count = result.rowcount
-        return count
-
     # =========================================================================
     # Group Verification (group_auth_mode support)
     # =========================================================================
