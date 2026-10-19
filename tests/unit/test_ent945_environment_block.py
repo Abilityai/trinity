@@ -152,6 +152,33 @@ class TestPathDeny:
             assert f"`{entry}`" in block, entry
 
 
+# T4b — the reset's default keep-set is the agent server's own default, exactly.
+AGENT_FILES_ROUTER = REPO_ROOT / "docker/base-image/agent_server/routers/files.py"
+
+
+def _agent_default_persistent_state() -> list[str]:
+    """`_DEFAULT_PERSISTENT_STATE` from the agent server, read without importing it."""
+    assert AGENT_FILES_ROUTER.is_file(), f"owner moved: {AGENT_FILES_ROUTER}"
+    for node in ast.parse(AGENT_FILES_ROUTER.read_text()).body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "_DEFAULT_PERSISTENT_STATE" for t in node.targets
+        ):
+            return list(ast.literal_eval(node.value))
+    pytest.fail("_DEFAULT_PERSISTENT_STATE is no longer a module-level constant in files.py")
+
+
+def test_reset_default_set_matches_the_agent_server():
+    block = _section(_render(PromptTier.VERBOSE, "claude-code"))
+    match = re.search(r"without that file, a default set: ([^)]*)\)", block)
+    assert match, "the reset sentence no longer names the default keep-set"
+    named = re.findall(r"`([^`]+)`", match.group(1))
+    expected = [p[: -len("**")] if p.endswith("/**") else p for p in _agent_default_persistent_state()]
+    assert named == expected, (
+        "files.py _DEFAULT_PERSISTENT_STATE changed: update the reset sentence in "
+        "platform_prompt_service.py so the prompt names the same paths"
+    )
+
+
 # T5 — reserved directories, each against the constant that owns it.
 class TestReservedDirectories:
     @pytest.mark.parametrize(

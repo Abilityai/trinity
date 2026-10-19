@@ -239,7 +239,7 @@ So:
 
 ### Your environment
 
-You run as `developer` (UID 1000) in your own container. `/home/developer` is your workspace and a durable volume: it survives stop/start, recreate and image upgrades. `/tmp` is a small RAM tmpfs mounted noexec, so put scratch files under `$TMPDIR` (`~/.tmp`, on the volume). The clock is UTC. If your workspace is a git repo synced with an origin, a reset to the template's main overwrites tracked files except those listed in `.trinity/persistent-state.yaml`, and never touches untracked ones.
+You run as `developer` (UID 1000) in your own container. `/home/developer` is your workspace and a durable volume: it survives stop/start, recreate and image upgrades. `/tmp` is a small RAM tmpfs mounted noexec, so put scratch files under `$TMPDIR` (`~/.tmp`, on the volume). The clock is UTC. If your workspace is a git repo synced with an origin, a reset to the template's main overwrites tracked files except those listed in `.trinity/persistent-state.yaml` (without that file, a default set: `workspace/`, `.trinity/`, `.mcp.json`, `.claude.json` and `.claude/.credentials.json`), and never touches untracked ones.
 
 Paths the platform creates or reads in your home:
 - `data/` — runtime data; the export/import boundary, gitignored
