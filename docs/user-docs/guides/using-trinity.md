@@ -77,8 +77,8 @@ Header actions:
 
 - **Start/Stop** — Toggle agent container state.
 - **Autonomy** — Enable/disable proactive (scheduled) operation. Turning it off holds schedules and reminders without erasing their individual on/off state, so turning it back on restores exactly what you had.
-- **Workspace** — Open this agent in the Workspace.
-- **Talk** — Start a voice call with the agent. The call opens in the Workspace and the conversation lives there, not in this page's chat.
+
+Below the name, the header also shows the bound GitHub repository (with its branch and how many changes wait to be pushed or pulled), the agent's tags (owners add and remove them with the pencil), and, for a running agent, a small ring showing how full its context window is. The Workspace and voice calls are reached from the navigation bar.
 
 There is no browser terminal on this page. Direct shell access is by SSH — see [Agent Terminal](../agents/agent-terminal.md).
 

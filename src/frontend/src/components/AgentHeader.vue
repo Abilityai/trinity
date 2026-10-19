@@ -1,13 +1,17 @@
 <template>
   <!--
-    The agent page header (trinity-enterprise#887, decision on trinity#966):
-    identity, the running state, the autonomy chip and the doors — nothing
-    else. Every control that used to sit here has one home now:
-      - label and id edits, the avatar prompt, tags, funding, read-only and
-        memory/CPU → Settings › General
+    The agent page header (trinity-enterprise#887, decision on trinity#966,
+    amended by trinity-enterprise#950): identity, the running state, the
+    autonomy chip, the bound repository with its git state, the tags and a
+    small context-window chart — nothing else. Every other control has one
+    home:
+      - label and id edits, the avatar prompt, the full tag editor, funding,
+        read-only and memory/CPU → Settings › General
       - delete → Settings › General › Danger zone (never a header button)
-      - git pull / push → the Git tab
+      - git pull / push / refresh → the Git tab
       - live CPU / memory and cost → Overview
+      - the Workspace and the voice call → the Workspace (nav), where the call
+        lives in the composer (ent#547); ent#950 removed the header doors
   -->
   <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg mb-4 relative">
     <!-- Overlapping Avatar (AVATAR-001) - centered on left edge of card (50% in, 50% out) -->
@@ -26,7 +30,7 @@
     <!-- Identity + doors -->
     <div class="p-4 pl-16 min-h-[8rem]">
       <!-- #2197 — `flex-wrap` + `gap-y-3`. Identity and the action buttons are
-           both rigid (a name, a Talk/Workspace pair, a Running toggle), so on a
+           both rigid (a name, the context chart, a Running toggle), so on a
            single non-wrapping row their combined min-content simply widened the
            PAGE at every width below ~1024px. Wrapping lets the actions drop to
            their own line; `min-w-0` on the identity block lets that flex item
@@ -80,6 +84,17 @@
               @toggle="$emit('toggle-autonomy')"
             />
           </div>
+          <AgentHeaderMeta
+            :can-edit="!!agent.can_share"
+            :git-status="gitStatus"
+            :git-changes-count="gitChangesCount"
+            :git-behind="gitBehind"
+            :tags="tags"
+            :all-tags="allTags"
+            @update-tags="$emit('update-tags', $event)"
+            @add-tag="$emit('add-tag', $event)"
+            @remove-tag="$emit('remove-tag', $event)"
+          />
         </div>
         <!-- Right: Primary Actions -->
         <!-- `gap-3`, not `space-x-3`: once this can wrap, a `space-x` row
@@ -102,56 +117,9 @@
               <path stroke-width="1.4" stroke-linecap="round" d="M12 3c3.2 2.4 3.2 15.6 0 18M12 3c-3.2 2.4-3.2 15.6 0 18" opacity="0.7" />
             </svg>
           </button>
-          <!-- Open in Workspace (ent#438). Was a voice-orb-plus-canvas page of
-               its own, gated on VOICE_ENABLED && GEMINI_API_KEY; the page is
-               retired and this now opens THE Workspace scoped to this agent.
-               No longer flag-gated and no longer BETA: the Workspace is a
-               first-class surface and needs no Gemini key, so gating this on
-               `workspaceAvailable` would hide a working link on every install
-               without one. Also no longer disabled while the agent is stopped —
-               the Workspace page reports availability itself (#2196), and a
-               dead button is a worse answer than a page that says why. -->
-          <button
-            @click="goToWorkspace"
-            class="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors text-action-primary-600 dark:text-action-primary-400 hover:bg-action-primary-50 dark:hover:bg-action-primary-900/30 border border-action-primary-200 dark:border-action-primary-700"
-            title="Open this agent in the Workspace"
-          >
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h8M8 14h5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            Workspace
-          </button>
-          <!-- Talk (#2559). A DOOR, not a surface: the voice call lives in the
-               Workspace conversation, and this opens it there with the call
-               starting. The chat-panel overlay that used to run a parallel call
-               from this page — its own start route, its own transcript home —
-               is retired; the mic glyph moved here with the affordance.
-
-               Same tab, deliberately: the navigation is same-document, which is
-               what lets `armVoiceAutoStart()`'s module-scoped one-shot survive
-               to the Workspace (a new tab is a fresh document, where it is
-               false by construction) and what keeps the Workspace's
-               `AudioContext` resumable from the click that started the call.
-
-               NOT gated, on purpose. The instance-wide voice flag this page
-               could gate on is the same boolean the Workspace itself checks, so
-               a gate here would buy nothing and cost two defects: the flag
-               arrives after first paint (a button that pops in a beat late) and
-               a failed flags fetch sets it false with no retry (a working
-               feature hidden, indistinguishable from an instance without
-               voice). The Workspace reports availability in words instead —
-               ent#438's ruling, applied consistently. -->
-          <button
-            @click="goToTalk"
-            data-testid="agent-talk"
-            class="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors text-action-primary-600 dark:text-action-primary-400 hover:bg-action-primary-50 dark:hover:bg-action-primary-900/30 border border-action-primary-200 dark:border-action-primary-700"
-            title="Talk to this agent by voice. The call opens in the Workspace, and the conversation lives there — not in this chat."
-          >
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4M12 15a3 3 0 003-3V5a3 3 0 00-6 0v7a3 3 0 003 3z" />
-            </svg>
-            Talk
-          </button>
+          <!-- Context window (ent#950): running agents only — a stopped agent
+               has no context to measure. -->
+          <AgentHeaderContext v-if="agent.status === 'running'" :stats="contextStats" />
           <!-- Running State Toggle -->
           <RunningStateToggle
             :model-value="agent.status === 'running'"
@@ -174,7 +142,8 @@ import BaseBadge from './base/BaseBadge.vue'
 import { agentDisplayName, hasDistinctLabel } from '../utils/agentName'
 import RunningStateToggle from './RunningStateToggle.vue'
 import AutonomyToggle from './AutonomyToggle.vue'
-import { armVoiceAutoStart } from './portal/portalVoiceMode'
+import AgentHeaderMeta from './AgentHeaderMeta.vue'
+import AgentHeaderContext from './AgentHeaderContext.vue'
 
 const props = defineProps({
   agent: {
@@ -205,10 +174,38 @@ const props = defineProps({
   brainAvailable: {
     type: Boolean,
     default: false
+  },
+  // ent#950 — the bound repo line. The live git status AgentDetail polls
+  // (useGitSync); null while stopped or not yet fetched.
+  gitStatus: {
+    type: Object,
+    default: null
+  },
+  gitChangesCount: {
+    type: Number,
+    default: 0
+  },
+  gitBehind: {
+    type: Number,
+    default: 0
+  },
+  // ent#950 — tags (ORG-001), same events the pre-#3798 header emitted.
+  tags: {
+    type: Array,
+    default: () => []
+  },
+  allTags: {
+    type: Array,
+    default: () => []
+  },
+  // ent#950 — this agent's entry in `stores/network.js::contextStats`, or null.
+  contextStats: {
+    type: Object,
+    default: null
   }
 })
 
-defineEmits(['toggle', 'toggle-autonomy'])
+defineEmits(['toggle', 'toggle-autonomy', 'update-tags', 'add-tag', 'remove-tag'])
 
 // ent#181: one resolution helper, never `label || name` inline — a name resolved
 // differently per surface shows one agent under two names (§1.3.1 FR-3).
@@ -216,21 +213,6 @@ const displayName = computed(() => agentDisplayName(props.agent))
 const showsSlug = computed(() => hasDistinctLabel(props.agent))
 
 const router = useRouter()
-
-function goToWorkspace() {
-  // ent#438 — one workspace. `?agent=` is the Workspace's own selection param;
-  // the retired per-agent route redirects here too, so an old bookmark and this
-  // button land in the same place.
-  router.push({ path: '/workspace', query: { agent: props.agent.name } })
-}
-
-function goToTalk() {
-  // The intent is armed IN THE APP, never by the URL alone (#2559). A pasted,
-  // bookmarked or mailed `?voice=1` arrives on a fresh document where `armed`
-  // is false, so it opens the conversation and starts nothing.
-  armVoiceAutoStart()
-  router.push({ path: '/workspace', query: { agent: props.agent.name, voice: '1' } })
-}
 
 function goToBrain() {
   router.push({ name: 'AgentBrainOrb', params: { name: props.agent.name } })

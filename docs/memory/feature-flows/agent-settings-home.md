@@ -1,6 +1,6 @@
 # Feature: Agent Settings home
 
-> trinity#966 decision · trinity-enterprise#887 (rail, General, restart banner, incl. #353 timeout) · #890 (Guardrails) · #888 (Storage) · #891 (People)
+> trinity#966 decision · trinity-enterprise#887 (rail, General, restart banner, incl. #353 timeout) · #890 (Guardrails) · #888 (Storage) · #891 (People) · #950 (header contents)
 
 ## Overview
 
@@ -33,6 +33,18 @@ As an agent owner I open one place to change what an agent is, what it may do, w
 | `ChannelsPane.vue` / `IntegrationsPane.vue` | Voice / Expose via MCP + Trinity access key, plus rows that open the tabs still holding the rest |
 | `components/AgentLiveStrip.vue` | Live CPU/memory and spend on Overview (moved from the header) |
 | `components/GitPanel.vue` | Gains Pull/Push (driven by AgentDetail's `useGitSync`); loses binding and token config |
+
+## The header (trinity-enterprise#950)
+
+The header is the one surface shown on every tab, so it carries what an operator checks before touching an agent, and nothing that has a home elsewhere.
+
+| Piece | Shows | Data |
+|---|---|---|
+| `AgentHeader.vue` | Avatar, name, slug, description, status / circuit / runtime / ghost / system / shared badges, autonomy chip, Brain door, Start/Stop | `agent` |
+| `AgentHeaderContext.vue` | Context-window ring + percent, running agents only; "—" until there is a reading (a 0 or `offline` probe is no reading) | `stores/network.js::contextStats[name]`, kept fresh by `composables/useAgentContextStats.js` (15 s, visibility-gated, no stacked requests); started/stopped in `AgentDetail`'s `startAllPolling` / `stopAllPolling` and status watcher because the page is KeepAlive-cached |
+| `AgentHeaderMeta.vue` | One reserved-height line: the bound repo (linked via `utils/gitRemote.js::repoFromRemote`), branch, "N changed" (files) and "N ahead" (unpushed commits) as separate badges, "N behind", or "in sync"; then two tag chips, a counted "+N" and the tag editor (`BaseModal` around `TagsEditor`, owners only) | `useGitSync().gitStatus` (shown only when `git_enabled` and an origin exists; cleared on agent switch and on stop), `agentTags` / `allTags`, the same `updateTags` / `addTag` / `removeTag` handlers Settings › General uses |
+
+Removed from the header by #950: the **Workspace** and **Talk** doors. The Workspace is in the nav and the voice call is the Workspace composer's Call control (ent#547). Pull / Push / Refresh stay on the Git tab.
 
 ## Restart flow
 

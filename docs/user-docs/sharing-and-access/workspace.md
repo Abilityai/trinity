@@ -17,7 +17,7 @@ Workspace lives at `/workspace` and ships in **every** build. The older `/portal
 - **Suggestions** — A short list headed **Suggested for you**, computed for you and the agent in front of you: what is waiting on you, and what you could do next. Platform users only.
 - **Seat** — You and one agent together. The agent's memory of you, and the decisions you and it record, belong to the seat. The [role card](#the-role-card) also uses *seat* for a business role a person or agent holds (*Head of Sales*); that seat decides which objectives the agent owns.
 
-> **The Workspace is also where voice lives.** A voice call runs inside a Workspace chat, with the agent's canvas beside the orb. Start one from the call button in the composer, or from **Talk** on the agent's Agent Detail page — see [Voice Chat](../advanced/voice-chat.md).
+> **The Workspace is also where voice lives.** A voice call runs inside a Workspace chat, with the agent's canvas beside the orb. Start one from the call button in the composer — see [Voice Chat](../advanced/voice-chat.md).
 
 ## How It Works
 

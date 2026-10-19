@@ -6,7 +6,7 @@ Each message on this tab runs as a new agent session, and the last 20 messages o
 
 For a conversation where the agent keeps its working memory between turns — tool results, mid-task state, reasoning — use the [Workspace](../sharing-and-access/workspace.md) instead. The Session-mode toggle that used to live here has been retired in its favour, and `?tab=session` links now redirect there.
 
-The tab is **text only**. Voice lives in the Workspace: the **Talk** button in the agent's header opens the Workspace on this agent with a call starting — see [Voice Chat](../advanced/voice-chat.md). Calls you had here before that change are still in their sessions, badged **Voice**.
+The tab is **text only**. Voice lives in the Workspace: open it from the navigation bar and use the composer's call button — see [Voice Chat](../advanced/voice-chat.md). Calls you had here before that change are still in their sessions, badged **Voice**.
 
 > 📺 **Watch:** [I Gave My AI Three Years of My Notes — Then Interviewed It (voice chat)](https://youtu.be/xflQTzarEBQ) *(May 2026)* · [all videos](../videos.md)
 
@@ -89,7 +89,7 @@ The Chat tab itself sends each message as an asynchronous `POST /api/agents/{nam
 
 - [Continuous Conversations](agent-session.md) — what resuming preserves, auto-compact, and the per-turn iteration cap
 - [Workspace](../sharing-and-access/workspace.md) — the chat surface that keeps working memory across turns
-- [Voice Chat](../advanced/voice-chat.md) — the real-time call, reached from **Talk** in the agent's header
+- [Voice Chat](../advanced/voice-chat.md) — the real-time call, started from the Workspace composer
 - Backend API Docs: http://localhost:8000/docs (full request/response schemas)
 - [Creating Agents](creating-agents.md)
 - [Managing Agents](managing-agents.md)

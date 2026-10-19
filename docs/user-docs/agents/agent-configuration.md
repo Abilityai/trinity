@@ -25,7 +25,7 @@ The Agent Detail page has one **Settings** tab (visible to owners only), pinned 
 
 **Who sees what.** Settings is owner-only. The system agent gets **General** (read-only), **Guardrails** (without the autonomy section) and **Integrations**. A `?section=` naming a pane you cannot see lands on the first pane you can.
 
-**Where the old tabs went.** The Info, Credentials, Access and Folders tabs are gone, and their old links still resolve: `?tab=info` opens General, `?tab=guardrails` opens Guardrails, `?tab=credentials` and `?tab=folders` open Storage, `?tab=access` opens People. The page header keeps identity, the running state and badges, the **Autonomy** chip and the **Workspace**, **Talk** and Start/Stop controls — nothing else. Live CPU, memory and spend are read on the **Overview** tab. The **Git** tab keeps the operational half of git: status, pending changes, recent commits, **Pull**, **Push** and **Refresh**.
+**Where the old tabs went.** The Info, Credentials, Access and Folders tabs are gone, and their old links still resolve: `?tab=info` opens General, `?tab=guardrails` opens Guardrails, `?tab=credentials` and `?tab=folders` open Storage, `?tab=access` opens People. The page header keeps identity, the running state and badges, the **Autonomy** chip, Start/Stop, the bound GitHub repository with its branch and push/pull counts, the tags (owners edit them from the header or here) and a small context-window ring — nothing else. Live CPU, memory and spend are read on the **Overview** tab. The **Git** tab keeps the operational half of git: status, pending changes, recent commits, **Pull**, **Push** and **Refresh**.
 
 The sections below say which pane holds each setting. Everything is also available through the API.
 

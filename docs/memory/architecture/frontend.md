@@ -49,7 +49,7 @@
 
 **Tab overflow — `components/OverflowTabs.vue` (#1114):** reusable "priority+" tab strip for Agent Detail: a hidden mirror row measures each tab's width plus a worst-case "More" button; the visible row renders what fits and collapses the rest into a "More ▾" menu. Re-measures on resize + `document.fonts.ready`; all-inline before first measure (no first-paint snap). The trigger reflects an overflowed active tab. Keyboard/touch accessible, dark-mode aware; `v-model` over `activeTab` so `?tab=` deep-linking is unaffected. **`fixedWidth` (#2579)** is an opt-in for a strip of *unbounded* labels — today only the Workspace chat tabs, whose labels are user and model text: every tab becomes `FIXED_TAB_WIDTH` (`'w-40'`, exported from a companion `<script>` block since `<script setup>` cannot carry a named export), the label clamps with `min-w-0 truncate`, and the full text rides `title=` on the button and the menu row. Default **false** and every width-related class — including the native tooltip — is gated on it, so Agent Detail / Library / `PortalRail` are unchanged by construction. Two of those classes are load-bearing, not cosmetic: `inlineCount` starts at `+Infinity`, so on first paint every tab renders inline, and a truncating label drops the button's min-content to padding — without `shrink-0` on the visible button (and `overflow-hidden` on the visible nav) flex squeezes the row to ~50px per tab for a frame while the `width: max-content` mirror still reports 160, which is the row-parity class the pinned-glyph comment exists about. The mirror takes the width class and nothing else: `getBoundingClientRect` returns the border box. Geometry is proven in `e2e/workspace-chat-tabs.spec.js` — the node-env unit specs can only pin class strings.
 
-**Agent Detail Overview tab (#1107):** `components/OverviewPanel.vue` is the default landing tab — owns "trend over the last few days"; since trinity-enterprise#887 it also leads with `AgentLiveStrip.vue` ("now + cost": live CPU/memory and spend, moved out of `AgentHeader`, which keeps identity, state, the autonomy chip and the doors only). Sections: About lead, needs-attention count + Operations link (hidden at zero), trend charts, health panel (uptime/latency clamped ≤7d by `agent_health_checks` retention), recent-activity drill-in, footprint chips. Charts: `StackedBarChart.vue` (CSS/flexbox) for executions-by-type; `TrendLineChart.vue` (uPlot) for line series. `InfoPanel.vue` leads with About + "What You Can Ask", `template.yaml` metadata behind a `<details>`; it renders inside Settings › General's "Technical details" dialog now (the Info tab is gone).
+**Agent Detail Overview tab (#1107):** `components/OverviewPanel.vue` is the default landing tab — owns "trend over the last few days"; since trinity-enterprise#887 it also leads with `AgentLiveStrip.vue` ("now + cost": live CPU/memory and spend, moved out of `AgentHeader`). The header (trinity-enterprise#950 amending #887) holds identity, running state, the autonomy chip, the Brain door, Start/Stop, a context-window ring (`AgentHeaderContext.vue`, running only, fed by `composables/useAgentContextStats.js` over `stores/network.js::fetchContextStats` — started/stopped by AgentDetail's `startAllPolling`/`stopAllPolling` because the page is KeepAlive-cached, so `onUnmounted` never fires on navigation; "—" for a 0/offline reading) and one reserved-height meta line (`AgentHeaderMeta.vue`): the bound repo from the live git status (`utils/gitRemote.js::repoFromRemote` builds the link from host + path, http(s)/ssh only) with changed / ahead / behind badges, then at most two tag chips, a counted "+N" and a `BaseModal` wrapping `TagsEditor`. AgentDetail clears `gitStatus` on agent switch and on stop so the header never shows a previous snapshot.. Sections: About lead, needs-attention count + Operations link (hidden at zero), trend charts, health panel (uptime/latency clamped ≤7d by `agent_health_checks` retention), recent-activity drill-in, footprint chips. Charts: `StackedBarChart.vue` (CSS/flexbox) for executions-by-type; `TrendLineChart.vue` (uPlot) for line series. `InfoPanel.vue` leads with About + "What You Can Ask", `template.yaml` metadata behind a `<details>`; it renders inside Settings › General's "Technical details" dialog now (the Info tab is gone).
 
 **Agent Settings home (trinity-enterprise#887):** `components/agent-settings/AgentSettingsHome.vue` is the rail (pane in `?section=`, resolved by `utils/agentSettings.js::resolveSettingsSection`, legacy tab ids via `LEGACY_TAB_SECTIONS` + `utils/agentTabs.js::TAB_ALIASES`) and hosts the panes AgentDetail slots in: `GeneralPane`, `GuardrailsPane`, `PeoplePane`, `ChannelsPane`, `IntegrationsPane`, `StoragePane`, built from `SettingsSection` + `SettingRow`. Moved panels take an `embedded` prop that drops their own card and heading. Restart-gated rows report to `stores/agentRestart.js`; `SettingsRestartBanner.vue` is the only restart banner, and `restarted()` bumps a per-agent epoch the rows watch to re-read.
 
@@ -92,7 +92,7 @@ chat at an arrival is a one-shot `?anchor=m:<id>|d:<id>` resolved by
 against `data-message-id` / `data-report-id` targets, with `useStickToBottom().detach()`
 so the ResizeObserver does not re-pin the view to the bottom.
 
-**Voice has one consumer, and Agent Detail has a door (#2559).** The orb
+**Voice has one consumer (#2559).** The orb
 (`components/chat/VoiceOverlay.vue`) and the session composable
 (`composables/useVoiceSession.js`) are mounted in exactly **one** place:
 `components/portal/PortalConversation.vue`, the Workspace conversation. The
@@ -100,16 +100,13 @@ chat-panel overlay on Agent Detail — a second front door with a second transcr
 home (`chat_messages.source='voice'`) and its own per-agent `/voice/status`
 probe — is retired; `ChatPanel.vue` and `chat/ChatInput.vue` carry no voice
 wiring, and `useVoiceSession` exposes `startWith`/`stop` but no longer the
-Agent-Detail-shaped `start()`. What Agent Detail offers instead is a **door**: an
-ungated `Talk` button in `AgentHeader.vue` beside the `Workspace` one, pushing
-`/workspace?agent=<name>&voice=1` in the same tab (same-document, so the
-Workspace's `AudioContext` stays resumable). It is ungated on purpose — the
-destination reports availability in words, per ent#438's ruling.
+Agent-Detail-shaped `start()`. Agent Detail offered an ungated `Talk` door into the Workspace call until trinity-enterprise#950 removed it (with the `Workspace` door) from `AgentHeader.vue`; the call starts from the Workspace composer.
 
 The `?voice=1` rule is a pure function in `components/portal/portalVoiceMode.js`
 (`voiceAutoStart`), alongside the module-scoped **armed** flag it reads. The flag
-is what makes the param safe: `armVoiceAutoStart()` is called by the Talk button
-before the push, and it lives exactly as long as the document, so a pasted,
+is what makes the param safe: `armVoiceAutoStart()` was called by the Talk door
+before the push (no in-app caller since trinity-enterprise#950, so the param is
+inert today), and it lives exactly as long as the document, so a pasted,
 bookmarked or mailed link — always a fresh document — is never honoured. A
 browser-activation heuristic cannot do that job: `Portal.vue` skips `bootstrap()`
 while signed out, so a pasted link survives unconsumed until exactly the sign-in
