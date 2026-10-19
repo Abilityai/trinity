@@ -939,7 +939,7 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
             # check would otherwise treat it as that human.
             if scope == OPS_SCOPE:
                 _enforce_ops_key_fence(request)
-            return User(
+            principal = User(
                 id=user["id"],
                 username=user["username"],
                 email=user.get("email"),
@@ -965,6 +965,8 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
                 mcp_key_id=mcp_key_info.get("key_id"),
                 mcp_key_name=mcp_key_info.get("key_name"),
             )
+            record_acting_turn(request, principal)
+            return principal
 
     # Both JWT and MCP key failed
     raise credentials_exception
@@ -2828,6 +2830,61 @@ def viewer_principal_kind(current_user: User) -> str:
     return "other"
 
 
+EXECUTION_ID_HEADER = "X-Trinity-Execution-Id"
+_MANUAL_EXECUTION_ID = "manual"
+_MAX_EXECUTION_ID_LEN = 128
+
+
+def record_acting_turn(request, principal: User) -> None:
+    """Note which turn an AGENT-scoped key is acting in (trinity-enterprise#926).
+
+    The MCP server forwards the spawning process's `TRINITY_EXECUTION_ID` as
+    `X-Trinity-Execution-Id` (#2392). Only an agent key's request is read: no
+    other principal acts for anyone else's turn."""
+    if getattr(principal, "mcp_scope", None) != "agent" or not principal.agent_name:
+        return
+    raw = request.headers.get(EXECUTION_ID_HEADER) if request is not None else None
+    if isinstance(raw, str) and raw and len(raw) <= _MAX_EXECUTION_ID_LEN:
+        principal._acting_execution_id = raw
+
+
+def acting_turn_user_id(current_user: User) -> Optional[int]:
+    """The person an agent key's reads are narrowed to, or None for the full view.
+
+    trinity-enterprise#875 left an agent's key at the full view; an agent acts
+    for whoever chats with it, so in a turn for a person the agent is merely
+    shared with, its own reads are that person's (ent#926):
+
+      * not an agent key, no header, or `manual` (no platform turn) -> None;
+      * the turn is `owner` tier (the owner, an admin, or something the owner
+        configured)                                                    -> None;
+      * a `share` turn -> its person's id; with no platform user (a public link,
+        a channel) -> `NO_ROWS_USER_ID`;
+      * an id that is not one of the key's agent's executions -> `NO_ROWS_USER_ID`.
+
+    The turn is the KEY's agent's, whatever agent the route names. Honest in a
+    share turn because that turn has no shell and cannot read the agent's key
+    (the turn-tier hook), so only the platform's MCP config sends the header."""
+    agent = getattr(current_user, "agent_name", None)
+    if getattr(current_user, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
+        return None
+    run = getattr(current_user, "_acting_execution_id", None)
+    if not run or run == _MANUAL_EXECUTION_ID:
+        return None
+    from services import turn_tier_service
+    tier = turn_tier_service.turn_tier(db, agent, run)
+    if tier == turn_tier_service.OWNER:
+        return None
+    if tier == turn_tier_service.SHARE:
+        uid = getattr(db.get_execution(run), "source_user_id", None)
+        try:
+            uid = int(uid)
+        except (TypeError, ValueError):
+            return NO_ROWS_USER_ID
+        return uid if uid > 0 else NO_ROWS_USER_ID
+    return NO_ROWS_USER_ID
+
+
 def agent_viewer_tier(current_user: User, agent_name: str) -> str:
     """The caller's tier on `agent_name`'s executions: owner, share or key.
 
@@ -2835,7 +2892,8 @@ def agent_viewer_tier(current_user: User, agent_name: str) -> str:
     the ent#629 reach bound), evaluated here without raising."""
     kind = viewer_principal_kind(current_user)
     if kind == "key":
-        return VIEWER_KEY
+        # ent#926: an agent's key in a shared person's turn reads as that person.
+        return VIEWER_SHARE if acting_turn_user_id(current_user) is not None else VIEWER_KEY
     if kind == "person" and db.can_user_share_agent(
         current_user.username, agent_name
     ) and agent_may_reach(current_user, agent_name, manage=True):
@@ -2876,6 +2934,9 @@ NO_ROWS_USER_ID = -1
 def viewer_row_scope(current_user: User, agent_name: str) -> Optional[int]:
     """The user id whose executions the caller may see on `agent_name`, or None
     when they may see every row (owner, admin, key tier)."""
+    acting = acting_turn_user_id(current_user)
+    if acting is not None:
+        return acting
     if agent_viewer_tier(current_user, agent_name) != VIEWER_SHARE:
         return None
     uid = getattr(current_user, "id", None)
