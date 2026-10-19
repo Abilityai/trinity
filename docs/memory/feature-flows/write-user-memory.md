@@ -1,7 +1,7 @@
 # Feature: write_user_memory MCP Tool (MEM-001, #888, #895)
 
 ## Overview
-Agents can persist per-user memory blobs scoped to a single (agent, user_email) pair. This replaces the unsafe pattern of writing to `~/.claude/projects/memory/`, which is shared across all users of an agent and leaks PII between sessions.
+Agents can persist per-user memory blobs scoped to a single (agent, user_email) pair. This replaces the unsafe pattern of writing to Claude Code's auto-memory (under `~/.claude/projects/`) or the repo's `memory/` directory — both are shared across all users of an agent and leak PII between sessions.
 
 **#895 update**: storage was split into two named sections so the agent-deliberate writes from this tool don't clobber the every-5-message conversation summarizer (and vice versa). The MCP wire format is unchanged — the tool still accepts a single `memory_text` field — but the backend now routes that value to the `agent_notes` section of the JSON blob stored on disk. Channel sessions (Slack/Telegram/WhatsApp) now also inject this memory into the agent's system prompt, gated on `verified_email and not is_group`.
 
@@ -9,7 +9,7 @@ Agents can persist per-user memory blobs scoped to a single (agent, user_email) 
 As an agent serving multiple users via public link / Slack / Telegram / WhatsApp, I want to remember facts about each individual user (name, preferences, timezone) so that future sessions are personalized — without contaminating any other user's context.
 
 ## The PII Leak it Fixed
-Before #888, agents that needed to remember user-specific facts had no safe write surface. The only available path was writing to the agent filesystem (`~/.claude/projects/memory/` or similar), which is a single shared namespace across all users of that agent. Writing a user's email, name, or preferences there made it visible to every other user that same agent served.
+Before #888, agents that needed to remember user-specific facts had no safe write surface. The only available path was writing to the agent filesystem (Claude Code's auto-memory under `~/.claude/projects/`, or similar), which is a single shared namespace across all users of that agent. Writing a user's email, name, or preferences there made it visible to every other user that same agent served.
 
 The fix is a server-side gated write: the agent never supplies a user email. The backend resolves it from the execution record, preventing an agent from writing memory for an arbitrary user.
 

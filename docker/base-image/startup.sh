@@ -691,29 +691,18 @@ if [ -f "/home/developer/.trinity/setup.sh" ]; then
     bash /home/developer/.trinity/setup.sh 2>&1 || echo "Warning: setup.sh had errors (continuing startup)"
 fi
 
-# === Auto-Import Encrypted Credentials ===
-# If .credentials.enc exists but .env doesn't, decrypt and inject credentials
-# This enables portable credential storage via git-committed encrypted files
+# === Encrypted credentials without a .env (#3510) ===
+# This script never decrypts a committed .credentials.enc: the platform key never
+# reaches this container. The BACKEND imports it once the agent is ready
+# (lifecycle.inject_assigned_credentials), except for ephemeral agents,
+# installs with no encryption key, and agents that were already running. Earlier builds called a backend route that never
+# existed and blamed a missing key; say what actually happens instead.
 cd /home/developer || exit 1
 if [ -f ".credentials.enc" ] && [ ! -f ".env" ]; then
-    echo "Found .credentials.enc without .env - attempting auto-import..."
-
-    # Wait for agent server to be ready (started above)
-    sleep 2
-
-    # Call internal backend endpoint to decrypt and inject
-    # Note: This requires CREDENTIAL_ENCRYPTION_KEY to be set on the backend
-    IMPORT_RESULT=$(curl -s -X POST "http://backend:8000/api/internal/decrypt-and-inject" \
-         -H "Content-Type: application/json" \
-         -d "{\"agent_name\": \"$AGENT_NAME\"}" 2>/dev/null || echo '{"status":"error"}')
-
-    if echo "$IMPORT_RESULT" | grep -q '"status":"success"'; then
-        echo "Auto-imported credentials from .credentials.enc"
-    elif echo "$IMPORT_RESULT" | grep -q '"status":"skipped"'; then
-        echo "Credential import skipped: $(echo "$IMPORT_RESULT" | grep -o '"reason":"[^"]*"' | cut -d'"' -f4)"
-    else
-        echo "Warning: Could not auto-import credentials (key may not be configured)"
-    fi
+    echo "Found .credentials.enc but no .env: this script does not decrypt it."
+    echo "  The platform imports it once the agent is ready (not when no encryption"
+    echo "  key is configured). If .env is still missing,"
+    echo "  the owner imports it: Credentials tab > Import from Git (or the import_credentials MCP tool)."
 fi
 
 # === Render .mcp.json.template (#2007) ===
@@ -723,8 +712,9 @@ fi
 # exist after the clone above — in here. So declared MCP servers were silently
 # absent (a freshly-seeded Cornelius shipped three and ran with none).
 #
-# Runs AFTER both `.env` sources (the /generated-creds copy and the
-# decrypt-and-inject fallback above) so credentials are present either way, and
+# Runs AFTER the `.env` source (the /generated-creds copy above) so credentials
+# are present (a committed .credentials.enc is imported by the backend after
+# the agent is ready, which can land after this renderer runs — #3510), and
 # merges rather than overwrites — the agent server's own `trinity` entry may be
 # written before or after this point. Substitution is confined to `env` blocks,
 # each rendered server is validated individually, and an unresolvable

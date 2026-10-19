@@ -1,6 +1,6 @@
 {
-  "generated": "2026-10-10",
-  "commit": "9dc65085e4890d69c5b7185f38d4c6658bc69c44",
+  "generated": "2026-10-19",
+  "commit": "59806875f2e382c2d79740845df02e9ab6d282db",
   "rule": "per-file counts of bare v-if/v-else-if loading gates may only shrink; see scripts/scan-loading-gates.mjs",
   "files": {
     "src/frontend/src/components/A2aPanel.vue": 1,
@@ -12,7 +12,6 @@
     "src/frontend/src/components/ChatPanel.vue": 1,
     "src/frontend/src/components/CompatibilityPanel.vue": 1,
     "src/frontend/src/components/ConnectorChannelPanel.vue": 1,
-    "src/frontend/src/components/CreateAgentModal.vue": 1,
     "src/frontend/src/components/CredentialSetupChecklist.vue": 1,
     "src/frontend/src/components/CredentialsPanel.vue": 2,
     "src/frontend/src/components/FilesPanel.vue": 1,
@@ -22,7 +21,7 @@
     "src/frontend/src/components/McpExposedPanel.vue": 1,
     "src/frontend/src/components/NeverminedPanel.vue": 1,
     "src/frontend/src/components/PermissionsPanel.vue": 1,
-    "src/frontend/src/components/PublicLinksPanel.vue": 2,
+    "src/frontend/src/components/PublicLinksPanel.vue": 1,
     "src/frontend/src/components/ReadOnlyToggle.vue": 1,
     "src/frontend/src/components/ReliabilityPanel.vue": 2,
     "src/frontend/src/components/RunningStateToggle.vue": 1,
@@ -56,7 +55,7 @@
     "src/frontend/src/views/enterprise/Audit.vue": 3
   },
   "totals": {
-    "bare_loading_gates": 67,
-    "files_with_gates": 52
+    "bare_loading_gates": 64,
+    "files_with_gates": 50
   }
 }

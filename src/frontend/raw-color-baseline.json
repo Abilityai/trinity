@@ -146,7 +146,7 @@
     },
     "src/frontend/src/components/CreateAgentModal.vue": {
       "raw_nongray": 0,
-      "raw_gray": 118,
+      "raw_gray": 62,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/CredentialSetupChecklist.vue": {
