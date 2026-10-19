@@ -44,8 +44,10 @@ def hook():
         yield _load("_turn_tier_guard", _HOOKS / "turn-tier-guard.py")
 
 
-def run(hook, monkeypatch, tool, tool_input, *, run_id="exec-1", tier="share"):
-    """Returns (exit code, asked) where asked says whether the platform was asked."""
+def run(hook, monkeypatch, tool, tool_input, *, run_id="exec-1", tier="share", shell=None, kind=None):
+    """Returns (exit code, asked) where asked says whether the platform was asked.
+    `shell` is the platform's shell answer; by default only the owner's turn has it."""
+    shell = (tier == "owner") if shell is None else shell
     asked = []
     monkeypatch.setattr(hook, "read_stdin_json", lambda: {"tool_name": tool, "tool_input": tool_input})
     monkeypatch.setattr(hook, "read_environ", lambda pid: (
@@ -56,6 +58,11 @@ def run(hook, monkeypatch, tool, tool_input, *, run_id="exec-1", tier="share"):
         asked.append((agent, run_))
         return tier
     monkeypatch.setattr(hook, "ask_tier", fake_ask)
+
+    def fake_turn(container, agent, run_):
+        asked.append((agent, run_))
+        return tier, shell, kind
+    monkeypatch.setattr(hook, "ask_turn", fake_turn)
     monkeypatch.setattr(hook, "log_event", lambda *a, **k: None)
     with pytest.raises(SystemExit) as exc:
         hook.run_hook(hook.main)
@@ -314,3 +321,35 @@ def test_a_shared_persons_turn_cannot_touch_the_subscription_token(hook, monkeyp
 def test_a_shared_persons_turn_cannot_forge_the_guard_log(hook, monkeypatch):
     code, asked = run(hook, monkeypatch, "Write", {"file_path": "/logs/guardrails.jsonl"})
     assert code == 2 and asked
+
+
+def test_a_channel_visitor_keeps_the_shell_while_the_owner_allows_it(hook, monkeypatch):
+    """`share` + shell: a Slack/Telegram/public-link turn on an agent whose owner
+    left `visitor_shell` on (the default). File paths still follow the share tier."""
+    assert run(hook, monkeypatch, "Bash", {"command": "ls"}, tier="share", shell=True)[0] == 0
+    code, _ = run(hook, monkeypatch, "Write", {"file_path": "/home/developer/CLAUDE.md"},
+                  tier="share", shell=True)
+    assert code == 2
+
+
+@pytest.mark.parametrize("body,expected", [
+    (b'{"tier": "share", "kind": "visitor", "shell": true}', ("share", True, "visitor")),
+    (b'{"tier": "share", "kind": "person", "shell": "yes"}', ("share", False, "person")),  # strict True
+    (b'{"tier": "owner"}', ("owner", False, None)),             # no answer is no shell
+    (b'{"tier": "share", "kind": "robot"}', ("share", False, None)),
+    (b'{"tier": "admin", "shell": true}', ("unreachable", False, None)),
+])
+def test_the_shell_answer_is_read_as_a_strict_true(hook, platform, body, expected):
+    _, url = platform
+    _Platform.body = body
+    assert hook.ask_turn(_container(url), "agent-a", "e1") == expected
+
+
+@pytest.mark.parametrize("kind,expected", [("visitor", "channel or a public link"),
+                                           ("person", "shared with")])
+def test_the_shell_refusal_names_who_the_turn_is_for(hook, monkeypatch, capsys, kind, expected):
+    """Found live 2026-10-19: a public-link visitor was told the turn was for
+    'a person the agent is shared with'."""
+    code, _ = run(hook, monkeypatch, "Bash", {"command": "ls"}, tier="share", shell=False, kind=kind)
+    assert code == 2
+    assert expected in capsys.readouterr().err

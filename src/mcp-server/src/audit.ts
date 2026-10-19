@@ -13,6 +13,7 @@
 
 import type { McpAuthContext, ToolOutcome } from "./types.js";
 import { ApiError } from "./client.js";
+import { runInTurn } from "./turn-context.js";
 
 /**
  * Where audit rows go. Injected by `createServer` (#2807) so the server's
@@ -199,7 +200,8 @@ export function withAudit<T>(
     const targetId = resolveTargetId(params) ?? boundTargetId;
 
     try {
-      const result = await execute(params, ctx);
+      // ent#926: every backend call the tool makes carries this request's turn.
+      const result = await runInTurn(authContext?.executionId, () => execute(params, ctx));
       // Read requestId AND outcome AFTER execute: a tool (e.g. git.ts) stamps
       // the former on the shared context object so this row carries the same
       // id it forwarded; a deny site stamps the latter (access.ts::accessDenied)

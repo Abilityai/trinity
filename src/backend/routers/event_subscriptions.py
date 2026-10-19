@@ -398,7 +398,9 @@ async def emit_event(
 
 @router.post("/agents/{name}/emit-event", response_model=AgentEvent, status_code=201)
 async def emit_event_for_agent(
-    name: AuthorizedAgent,
+    # ent#926: owner tier. Deliveries run as the platform (admin JWT), so a
+    # person the agent is merely shared with must not fire them in its name.
+    name: OwnedAgent,
     data: EmitEventRequest,
     current_user: User = Depends(get_current_user),
 ):

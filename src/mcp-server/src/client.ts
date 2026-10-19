@@ -4,6 +4,7 @@
  * Typed client for communicating with the Trinity Backend API.
  */
 
+import { currentTurn } from "./turn-context.js";
 import type {
   StartAgentResult,
   Agent,
@@ -760,6 +761,13 @@ export class TrinityClient {
         if (key.toLowerCase() === "authorization") continue;
         headers[key] = value;
       }
+    }
+
+    // trinity-enterprise#926: every backend call made while a tool runs carries
+    // that tool call's turn, unless the method set it itself. See turn-context.ts.
+    const turn = currentTurn();
+    if (turn && !Object.keys(headers).some((k) => k.toLowerCase() === "x-trinity-execution-id")) {
+      headers["X-Trinity-Execution-Id"] = turn;
     }
 
     // #905: forward a caller-supplied correlation id. The backend's

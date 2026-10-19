@@ -75,14 +75,17 @@ def test_a_garbage_user_id_fails_closed_to_share():
     assert _tier(_db(execution=_exec(user_id="x"), user=None)) == "share"
 
 
-@pytest.mark.parametrize("trigger", ["schedule", "system", "reminder", "loop", "self_task",
+@pytest.mark.parametrize("trigger", ["schedule", "system", "reminder", "loop",
                                      "validation", "webhook", "manual", "event"])
 def test_a_turn_the_owner_configured_acts_at_owner_tier(trigger):
     assert _tier(_db(execution=_exec(user_id=None, triggered_by=trigger))) == "owner"
 
 
 @pytest.mark.parametrize("trigger", ["public", "paid", "voip", "voice", "agent", "room",
-                                     "fan_out", "session", "mcp", "slack", "telegram", "", None])
+                                     "fan_out", "session", "mcp", "slack", "telegram", "", None,
+                                     # a self-task row always carries its caller; one that does
+                                     # not was dispatched in a visitor's turn (ent#926 2026-10-19)
+                                     "self_task"])
 def test_an_outside_caller_with_no_user_acts_at_share_tier(trigger):
     assert _tier(_db(execution=_exec(user_id=None, triggered_by=trigger))) == "share"
 
@@ -117,7 +120,8 @@ def _code(r):
 
 
 def test_the_route_answers_the_agents_own_key():
-    assert _call() == {"tier": "share"}
+    # A shared person: share tier, no shell. The answer names no person.
+    assert _call() == {"tier": "share", "kind": "person", "shell": False}
 
 
 def test_the_route_needs_a_bearer_token():
@@ -138,3 +142,103 @@ def test_the_route_refuses_every_key_but_the_agents_own(key):
 
 def test_the_route_404s_an_unknown_execution():
     assert _code(_call(tier_db=_db(execution=None))) == 404
+
+
+# ---- ent#926 2026-10-19: a schedule rates as its creator; visitors vs persons ----------
+
+def _sched_db(*, creator, creator_user, can_share, schedule_id="s1", trigger="schedule"):
+    db = _db(execution=_exec(user_id=None, triggered_by=trigger), user=creator_user, can_share=can_share)
+    db.get_execution.return_value.schedule_id = schedule_id
+    db.get_schedule.return_value = SimpleNamespace(owner_id=creator) if creator is not False else None
+    return db
+
+
+@pytest.mark.parametrize("trigger", ["schedule", "webhook", "retry", "validation", "manual"])
+def test_a_schedule_a_shared_person_created_runs_at_their_tier(trigger):
+    """They may create schedules (accessor route); the runs carry no user, and
+    used to read as the owner's by trigger label alone."""
+    from services import turn_tier_service as t
+    db = _sched_db(creator=9, creator_user={"username": "mate", "role": "operator"}, can_share=False,
+                   trigger=trigger)
+    assert t.turn_actor(db, AGENT, "e1") == ("share", "person", 9)
+
+
+def test_a_schedule_the_owner_created_runs_at_owner_tier():
+    from services import turn_tier_service as t
+    db = _sched_db(creator=1, creator_user={"username": "owner", "role": "user"}, can_share=True)
+    assert t.turn_actor(db, AGENT, "e1") == ("owner", None, None)
+
+
+def test_a_schedule_that_is_gone_fails_closed():
+    from services import turn_tier_service as t
+    db = _sched_db(creator=False, creator_user=None, can_share=False)
+    assert t.turn_actor(db, AGENT, "e1") == ("share", "visitor", None)
+
+
+def test_a_reminder_row_is_not_looked_up_as_a_schedule():
+    from services import turn_tier_service as t
+    db = _sched_db(creator=9, creator_user=None, can_share=False, schedule_id="__manual__", trigger="reminder")
+    assert t.turn_actor(db, AGENT, "e1") == ("owner", None, None)
+    db.get_schedule.assert_not_called()
+
+
+def test_a_channel_turn_is_a_visitor():
+    from services import turn_tier_service as t
+    db = _db(execution=_exec(user_id=None, triggered_by="slack"))
+    assert t.turn_actor(db, AGENT, "e1") == ("share", "visitor", None)
+
+
+@pytest.mark.parametrize("tier,kind,setting,expected", [
+    ("owner", None, {"visitor_shell": False}, True),       # the owner's turns always
+    ("share", "person", {}, False),                        # a shared person never
+    ("share", "person", {"visitor_shell": True}, False),
+    ("share", "visitor", {}, True),                        # default on: channels keep working
+    ("share", "visitor", {"visitor_shell": True}, True),
+    ("share", "visitor", {"visitor_shell": False}, False), # the owner turned it off
+    ("unknown", None, {}, False),
+])
+def test_who_gets_the_shell(tier, kind, setting, expected):
+    from services import turn_tier_service as t
+    db = MagicMock()
+    db.get_guardrails_config.return_value = setting
+    assert t.shell_allowed(db, AGENT, tier, kind) is expected
+    assert t.restricts_standing_work(db, AGENT, tier, kind) is (tier != "owner" and not expected)
+
+
+def test_an_unreadable_setting_keeps_the_default():
+    from services import turn_tier_service as t
+    db = MagicMock()
+    db.get_guardrails_config.side_effect = RuntimeError("db down")
+    assert t.shell_allowed(db, AGENT, "share", "visitor") is True
+
+
+def test_the_route_tells_a_visitor_its_shell_answer():
+    db = _db(execution=_exec(user_id=None, triggered_by="telegram"))
+    db.get_guardrails_config.return_value = {"visitor_shell": False}
+    assert _call(tier_db=db) == {"tier": "share", "kind": "visitor", "shell": False}
+
+
+# ---- a refused turn is a 403, never a retryable 503 (found live 2026-10-19) -------------
+
+def test_an_agent_403_classifies_as_turn_refused():
+    from services import chat_execution_service as ces
+    from services.execution_envelope import TaskExecutionErrorCode as C
+    assert ces._classify_agent_http_failure(403, "this agent runs on Gemini CLI") == C.TURN_REFUSED
+    assert ces._classify_agent_http_failure(503, "x") == C.AUTH          # unchanged
+
+
+def test_the_chat_path_answers_403_with_the_agents_sentence():
+    from services import chat_execution_service as ces
+    with pytest.raises(ces.ChatDispatchError) as exc:
+        asyncio.run(ces._apply_sub003_autoswitch("agent-a", "runs on Gemini CLI, owner only", 403, "e1"))
+    assert exc.value.status_code == 403
+    assert "Gemini CLI" in str(exc.value.detail)
+
+
+def test_the_task_path_answers_403_for_a_refused_turn():
+    from services import chat_execution_service as ces
+    from services.execution_envelope import TaskExecutionErrorCode as C
+    result = SimpleNamespace(status="failed", error="runs on Codex, owner only", error_code=C.TURN_REFUSED)
+    with patch.object(ces.idempotency_service, "fail"), pytest.raises(ces.ChatDispatchError) as exc:
+        ces._map_task_failure("agent-a", result, idem=object())
+    assert exc.value.status_code == 403

@@ -911,8 +911,8 @@
  "event_subscriptions.py::emit_event_for_agent": {
   "method": "POST",
   "path": "/api/agents/{name}/emit-event",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "ent#926: subscriptions it fires are delivered as the platform, so only the owner (or the agent's own key) emits in the agent's name",
+  "tier": "owner"
  },
  "event_subscriptions.py::list_agent_events": {
   "method": "GET",

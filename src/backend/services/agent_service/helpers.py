@@ -620,13 +620,18 @@ def check_guardrails_env_matches(container, agent_name: str) -> bool:
     env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
     current = env_dict.get("AGENT_GUARDRAILS", "")
 
-    desired = db.get_guardrails_config(agent_name) or {}
-    expected = _json.dumps(desired) if desired else ""
+    # ent#926: `visitor_shell` is read live by the backend on every turn, so a
+    # change to it alone must not recreate the container.
+    live = {"visitor_shell"}
+    desired = {k: v for k, v in (db.get_guardrails_config(agent_name) or {}).items() if k not in live}
 
     if not desired and not current:
         return True
     try:
-        return _json.loads(current or "{}") == desired
+        running = _json.loads(current or "{}")
+        if isinstance(running, dict):
+            running = {k: v for k, v in running.items() if k not in live}
+        return running == desired
     except (_json.JSONDecodeError, ValueError):
         return False
 

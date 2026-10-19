@@ -861,6 +861,8 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
                 mcp_key_name=mcp_key_info.get("key_name"),
             )
             record_acting_turn(request, principal)
+            if principal._acting_execution_id:
+                _enforce_standing_work_fence(request, principal)
             return principal
 
     # Both JWT and MCP key failed
@@ -2629,8 +2631,11 @@ def acting_turn_user_id(current_user: User) -> Optional[int]:
       * an id that is not one of the key's agent's executions -> `NO_ROWS_USER_ID`.
 
     The turn is the KEY's agent's, whatever agent the route names. Honest in a
-    share turn because that turn has no shell and cannot read the agent's key
-    (the turn-tier hook), so only the platform's MCP config sends the header."""
+    shared person's turn because that turn has no shell and cannot read the
+    agent's key (the turn-tier hook), so only the platform's MCP config sends
+    the header. A visitor's turn keeps the shell while the owner leaves
+    `visitor_shell` on, and a shell reaches everything the agent can: that is
+    the trust the toggle states, not a guarantee this function gives."""
     agent = getattr(current_user, "agent_name", None)
     if getattr(current_user, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
         return None
@@ -2638,17 +2643,50 @@ def acting_turn_user_id(current_user: User) -> Optional[int]:
     if not run or run == _MANUAL_EXECUTION_ID:
         return None
     from services import turn_tier_service
-    tier = turn_tier_service.turn_tier(db, agent, run)
+    tier, _kind, person = turn_tier_service.acting_turn(db, current_user)
     if tier == turn_tier_service.OWNER:
         return None
-    if tier == turn_tier_service.SHARE:
-        uid = getattr(db.get_execution(run), "source_user_id", None)
-        try:
-            uid = int(uid)
-        except (TypeError, ValueError):
-            return NO_ROWS_USER_ID
-        return uid if uid > 0 else NO_ROWS_USER_ID
-    return NO_ROWS_USER_ID
+    return person if person else NO_ROWS_USER_ID
+
+
+# Routes that set up work which later runs as the agent's owner: a schedule (and
+# its webhook), a loop, a reminder, an event and an event subscription. An agent
+# key acting in a turn that may not do that is refused here, at the one auth
+# entry point, like the ephemeral and ops fences (ent#926 ruling 2026-10-19).
+_STANDING_WORK_ROUTES = (
+    ("POST", re.compile(r"^/api/agents/[^/]+/schedules$")),
+    ("PUT", re.compile(r"^/api/agents/[^/]+/schedules/[^/]+$")),
+    ("POST", re.compile(r"^/api/agents/[^/]+/schedules/[^/]+/(enable|trigger|webhook|webhook/secret)$")),
+    ("POST", re.compile(r"^/api/agents/[^/]+/loops$")),
+    ("POST", re.compile(r"^/api/agents/[^/]+/reminders$")),
+    ("POST", re.compile(r"^/api/events$")),
+    ("POST", re.compile(r"^/api/agents/[^/]+/emit-event$")),
+    ("POST", re.compile(r"^/api/agents/[^/]+/event-subscriptions$")),
+    ("PUT", re.compile(r"^/api/event-subscriptions/[^/]+$")),
+)
+
+STANDING_WORK_REFUSED = (
+    "This turn is for a person the agent is shared with (or a visitor the owner has "
+    "limited), so it cannot set up work that runs later as the agent's owner: schedules, "
+    "loops, reminders and events. Ask the agent's owner to set it up."
+)
+
+
+def _enforce_standing_work_fence(request, principal: User) -> None:
+    method = (getattr(request, "method", "") or "").upper()
+    path = request.scope["path"] if hasattr(request, "scope") else ""
+    if not any(m == method and rx.match(path) for m, rx in _STANDING_WORK_ROUTES):
+        return
+    run = getattr(principal, "_acting_execution_id", None)
+    if not run or run == _MANUAL_EXECUTION_ID:
+        return
+    from services import turn_tier_service
+    acting = turn_tier_service.acting_turn(db, principal)
+    if acting is None:
+        return
+    tier, kind, _ = acting
+    if turn_tier_service.restricts_standing_work(db, principal.agent_name, tier, kind):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=STANDING_WORK_REFUSED)
 
 
 def agent_viewer_tier(current_user: User, agent_name: str) -> str:

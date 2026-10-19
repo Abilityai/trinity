@@ -29,13 +29,14 @@ from agent_server.services import codex_runtime, gemini_runtime, turn_scope
 pytestmark = pytest.mark.unit
 
 
-def _require(monkeypatch, tier, execution_id="exec-1"):
+def _require(monkeypatch, tier, execution_id="exec-1", may_run=None, kind=None):
     asked = []
+    may_run = (tier == "owner") if may_run is None else may_run
 
     async def fake_fetch(agent, run):
         asked.append((agent, run))
-        return tier
-    monkeypatch.setattr(turn_scope, "fetch_tier", fake_fetch)
+        return tier, may_run, kind
+    monkeypatch.setattr(turn_scope, "fetch_turn", fake_fetch)
     monkeypatch.setattr(turn_scope, "_agent_name", lambda: "agent-a")
     asyncio.run(turn_scope.require_owner_tier("Gemini CLI", execution_id))
     return asked
@@ -52,7 +53,8 @@ def test_a_shared_or_unknown_turn_is_refused_with_a_named_reason(monkeypatch, ti
     with pytest.raises(HTTPException) as exc:
         _require(monkeypatch, tier)
     assert exc.value.status_code == 403
-    assert "Gemini CLI" in exc.value.detail and "shared" in exc.value.detail
+    assert exc.value.detail["error_code"] == "turn_refused"
+    assert "Gemini CLI" in exc.value.detail["message"] and "shared" in exc.value.detail["message"]
 
 
 def test_no_answer_refuses_rather_than_running(monkeypatch):
@@ -148,8 +150,35 @@ def test_a_shared_persons_turn_never_starts_the_cli(monkeypatch, which, entry):
     rt = gem if which == "gemini" else cod
 
     async def share(agent, run):
-        return "share"
-    monkeypatch.setattr(turn_scope, "fetch_tier", share)
+        return "share", False, "person"
+    monkeypatch.setattr(turn_scope, "fetch_turn", share)
     with pytest.raises(HTTPException) as exc:
         asyncio.run(getattr(rt, entry)(prompt="hi", execution_id="exec-1"))
     assert exc.value.status_code == 403
+
+
+def test_a_channel_visitor_runs_while_the_owner_allows_it(monkeypatch):
+    """`share` with the platform's shell answer True: a Slack/Telegram/public-link
+    turn on an agent whose owner left `visitor_shell` on (the default)."""
+    assert _require(monkeypatch, "share", may_run=True) == [("agent-a", "exec-1")]
+
+
+@pytest.mark.parametrize("body,expected", [
+    ({"tier": "share", "kind": "visitor", "shell": True}, ("share", True, "visitor")),
+    ({"tier": "share", "kind": "person", "shell": "yes"}, ("share", False, "person")),
+    ({"tier": "owner"}, ("owner", False, None)),
+])
+def test_the_may_run_answer_is_a_strict_true(platform, body, expected):
+    platform.reply = (200, body)
+    try:
+        assert asyncio.run(turn_scope.fetch_turn("agent-a", "exec-1")) == expected
+    finally:
+        platform.reply = (200, {"tier": "owner"})
+
+
+def test_a_visitor_the_owner_limited_is_told_so_not_called_a_shared_person(monkeypatch):
+    with pytest.raises(HTTPException) as exc:
+        _require(monkeypatch, "share", may_run=False, kind="visitor")
+    assert exc.value.status_code == 403
+    assert "channel or a public link" in exc.value.detail["message"]
+    assert "shared with" not in exc.value.detail["message"]

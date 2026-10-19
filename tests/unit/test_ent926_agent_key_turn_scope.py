@@ -126,3 +126,123 @@ def test_the_auth_dependency_records_the_header_for_an_agent_key_only():
     assert person._acting_execution_id is None
     # Private: never serialized, so no token or response can carry it.
     assert "_acting_execution_id" not in key.model_dump()
+
+
+# ---- standing work: a restricted turn cannot set up what later runs as the owner -----------
+# (ruling 2026-10-19). Fired schedule/loop/reminder/event turns rate as owner when the
+# agent's key created them, because that key resolves to the owner.
+
+EXECUTIONS["e-visitor"] = SimpleNamespace(agent_name=AGENT, source_user_id=None, triggered_by="slack")
+
+
+class _Req:
+    def __init__(self, method, path):
+        self.method, self.scope = method, {"path": path}
+
+
+STANDING = [
+    ("POST", "/api/agents/agent-a/schedules"),
+    ("PUT", "/api/agents/agent-a/schedules/s1"),
+    ("POST", "/api/agents/agent-a/schedules/s1/enable"),
+    ("POST", "/api/agents/agent-a/schedules/s1/trigger"),
+    ("POST", "/api/agents/agent-a/schedules/s1/webhook"),
+    ("POST", "/api/agents/agent-a/schedules/s1/webhook/secret"),
+    ("POST", "/api/agents/agent-a/loops"),
+    ("POST", "/api/agents/agent-a/reminders"),
+    ("POST", "/api/events"),
+    ("POST", "/api/agents/agent-a/emit-event"),
+    ("POST", "/api/agents/agent-a/event-subscriptions"),
+    ("PUT", "/api/event-subscriptions/sub-1"),
+]
+
+
+@pytest.fixture
+def visitor_shell(monkeypatch):
+    setting = {}
+    monkeypatch.setattr(dep.db, "get_guardrails_config", lambda agent: setting)
+    return setting
+
+
+@pytest.mark.parametrize("method,path", STANDING)
+def test_a_shared_persons_turn_cannot_set_up_standing_work(method, path, visitor_shell):
+    with pytest.raises(dep.HTTPException) as exc:
+        dep._enforce_standing_work_fence(_Req(method, path), _key("e-mate"))
+    assert exc.value.status_code == 403 and "owner" in exc.value.detail
+
+
+@pytest.mark.parametrize("method,path", STANDING)
+def test_the_owners_turn_and_no_turn_may(method, path, visitor_shell):
+    for run in ("e-owner", "e-sched", "manual", None):
+        dep._enforce_standing_work_fence(_Req(method, path), _key(run))
+
+
+def test_a_visitor_may_while_the_owner_allows_it_and_not_after(visitor_shell):
+    req = _Req("POST", "/api/agents/agent-a/reminders")
+    dep._enforce_standing_work_fence(req, _key("e-visitor"))          # default on
+    visitor_shell["visitor_shell"] = False
+    with pytest.raises(dep.HTTPException):
+        dep._enforce_standing_work_fence(req, _key("e-visitor"))
+
+
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/api/agents/agent-a/schedules"),            # reading is not setting up
+    ("DELETE", "/api/agents/agent-a/schedules/s1"),       # removing standing work is fine
+    ("POST", "/api/agents/agent-a/schedules/s1/disable"),
+    ("POST", "/api/agents/agent-a/reminders/r1/cancel"),
+    ("POST", "/api/agents/agent-a/task"),                 # dispatch is scoped, not refused
+])
+def test_other_routes_are_not_fenced(method, path, visitor_shell):
+    dep._enforce_standing_work_fence(_Req(method, path), _key("e-mate"))
+
+
+def test_a_foreign_execution_id_is_refused_not_trusted(visitor_shell):
+    with pytest.raises(dep.HTTPException):
+        dep._enforce_standing_work_fence(_Req("POST", "/api/agents/agent-a/loops"), _key("e-other"))
+
+
+# ---- a turn the agent dispatches is no higher than its parent --------------------------------
+
+def test_a_turn_dispatched_for_a_shared_person_carries_that_person():
+    from services import turn_tier_service as t
+    principal = _key("e-mate")
+    USERS[MATE_ID]["email"] = "mate@example.com"
+    assert t.turn_origin_user_id(dep.db, principal) == MATE_ID
+    assert t.turn_origin_email(dep.db, principal, "owner@example.com") == "mate@example.com"
+
+
+def test_a_turn_dispatched_for_a_visitor_carries_no_user():
+    from services import turn_tier_service as t
+    principal = _key("e-visitor")
+    assert t.turn_origin_user_id(dep.db, principal) is None
+    assert t.turn_origin_email(dep.db, principal, "owner@example.com") is None
+
+
+@pytest.mark.parametrize("run", ["e-owner", "e-sched", "manual", None])
+def test_an_owner_turn_or_no_turn_dispatches_as_before(run):
+    from services import turn_tier_service as t
+    principal = _key(run)
+    assert t.turn_origin_user_id(dep.db, principal) == OWNER_ID
+    assert t.turn_origin_email(dep.db, principal, "owner@example.com") == "owner@example.com"
+
+
+def test_a_child_of_a_visitor_turn_rates_as_a_visitor_not_the_owner():
+    """`self_task` left the owner-configured list: a no-user self-task is a visitor's."""
+    from services import turn_tier_service as t
+    EXECUTIONS["e-child"] = SimpleNamespace(agent_name=AGENT, source_user_id=None, triggered_by="self_task")
+    assert t.turn_actor(dep.db, AGENT, "e-child") == ("share", "visitor", None)
+
+
+def test_no_row_is_stamped_with_the_bare_caller_id():
+    """Every site that stamps a new turn goes through turn_origin_user_id; a new
+    `source_user_id=current_user.id` would let an agent key dispatch as the owner."""
+    import ast
+    from pathlib import Path
+    root = Path(dep.__file__).resolve().parent
+    offenders = []
+    for path in list((root / "services").rglob("*.py")) + list((root / "routers").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (isinstance(node, ast.keyword) and node.arg == "source_user_id"
+                    and isinstance(node.value, ast.Attribute) and node.value.attr == "id"
+                    and isinstance(node.value.value, ast.Name) and node.value.value.id == "current_user"):
+                offenders.append(f"{path.relative_to(root)}:{node.value.lineno}")
+    assert offenders == [], f"use turn_tier_service.turn_origin_user_id: {offenders}"

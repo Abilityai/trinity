@@ -165,8 +165,22 @@
 - **Control verbs**: changing the model and `git pull` with `force_reset` are owner tier; webhook management is the schedule's creator, the agent owner or an admin; start and stop stay open to share holders.
 - **What a share holder will notice**: a shorter list (the panel says "you see the tasks you started"); no turns that carry no user id (Slack, Telegram, VoIP, public-link, scheduled and legacy runs); the MCP `get_chat_history` tool answers 403 for them (their own history is under `chat/history/persistent`).
 - **Upgrade**: webhook URLs minted before this change cannot be attributed to a minter; run `scripts/management/list_webhook_rotation_candidates.py` and rotate what it lists.
-- **Out of scope (recorded)**: loops (ent#837 known limit), `/ws` previews, the Workspace team view, the fleet-wide default tier (ent#926).
+- **Out of scope (recorded)**: loops (ent#837 known limit), `/ws` previews, the Workspace team view. The fleet-wide default tier is §2.12 (ent#926).
 - **Tests**: `tests/unit/test_ent875_viewer_tier.py`, `test_ent875_own_rows_sql.py`, `test_ent875_exec_control_routes.py`
 - **Flows**: `feature-flows/executions-dashboard.md`, `execution-termination.md`, `execution-queue.md`, `webhook-triggers.md`, `model-selection.md`
+
+---
+
+### 2.12 A Turn Is Held to What Its Person May Do (trinity-enterprise#926)
+- **Status**: ✅ Implemented (operator rulings 2026-10-16 and 2026-10-19)
+- **Rule**: an agent acts for whoever chats with it, so its own tools are held to that person's tier, decided by the platform from the execution row:
+  - **owner** — the owner, an admin, or something set up at owner tier (a schedule rates as its creator): everything, as before;
+  - **shared person** — the Files API's paths, no shell, no Gemini/Codex turn, no standing work (schedules, loops, reminders, events), reads of executions narrowed to their own;
+  - **visitor** (Slack, Telegram, WhatsApp, a public link, voice, a paid call) — the Files API's share paths; the shell, Gemini/Codex and standing work while the owner's **"Channel and public visitors may run commands"** switch is on.
+- **Owner setting**: `visitor_shell` in Settings › Guardrails (default **on**, so channel agents behave as before; saved immediately, applies to the next message, no restart). The switch's text states the trade-off: the shell reaches everything the agent can.
+- **Every new route that names an agent declares its tier**; the default is owner, and CI fails on an undeclared route (`tests/unit/agent_route_tiers.json`). Routes still at accessor tier only by the old default are a shrink-only list, ruled per route.
+- **What a shared person will notice**: the agent refuses to run commands or edit its own instructions for them and says so; on a Gemini or Codex agent their message is refused with a reason naming what the owner can do; asking the agent to set a reminder or a schedule is refused.
+- **Tests**: `tests/unit/test_ent926_turn_tier.py`, `test_ent926_turn_tier_hook.py`, `test_ent926_runtime_turn_scope.py`, `test_ent926_agent_key_turn_scope.py`, `test_ent926_agent_route_census.py`; `src/mcp-server/src/turn-context.test.ts`; `src/frontend/tests/unit/guardrailsVisitorShell.spec.js`
+- **Architecture**: `architecture/security.md` §5f, §5g
 
 ---

@@ -41,6 +41,10 @@ class TaskExecutionErrorCode(str, Enum):
     SKILL_NOT_FOUND = "skill_not_found"  # Slash-command message didn't resolve to an installed skill (#1410)
     EPHEMERAL_EXHAUSTED = "ephemeral_exhausted"  # Ghost agent budget spent — expired TTL or exec count (trinity-enterprise#69)
     MODEL_UNSUPPORTED = "model_unsupported"  # Claude Code refused the model — CLI too old or unknown id; never a subscription fault (#3012)
+    # The agent refused the turn for who it is for (ent#926): a Gemini/Codex
+    # runtime cannot scope a shared person's (or a limited visitor's) turn. A
+    # refusal, not an outage — answered 403 and never retried.
+    TURN_REFUSED = "turn_refused"
     # Agent-to-agent hop past inter_agent_max_chain_depth (#2806). Refused before
     # a row exists, so it only ever appears on the X-Trinity-Error-Code header.
     INTER_AGENT_DEPTH_EXCEEDED = "inter_agent_depth_exceeded"

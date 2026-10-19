@@ -26,8 +26,9 @@ The shell is owner tier (ent#926 ruling 2026-10-19). A command reaches files
 the file tools never see, no filter over a command string is sound, and the
 container cannot host an OS sandbox (no user namespaces, the reason Codex runs
 without its own). So a shared person's turn gets no Bash at all; the owner's
-turns and the turns the owner configured keep it. Every Bash call in a platform
-turn therefore asks the platform once.
+turns keep it, and so do channel and public-link visitors unless the owner
+turned the `visitor_shell` guardrail off. The platform answers that (`shell` in
+the turn-tier reply); every Bash call in a platform turn asks it once.
 """
 import json
 import os
@@ -57,6 +58,10 @@ COULD_NOT_CHECK = (
 SHELL_OWNER_ONLY = (
     "This turn is for a person the agent is shared with, and running commands is "
     "owner-only. Answer without the shell, or ask the agent's owner to run it."
+)
+SHELL_VISITOR_OFF = (
+    "This conversation comes from a channel or a public link, and the agent's owner "
+    "has turned off running commands for those. Answer without the shell."
 )
 OWNER_ONLY = (
     "This turn is for a person the agent is shared with, and that path is owner-only. "
@@ -109,15 +114,21 @@ def targets(tool: str, tool_input: dict) -> list:
 
 def ask_tier(container_env: dict, agent: str, run: str) -> str:
     """The platform's answer for this turn: owner | share | unknown | unreachable."""
+    return ask_turn(container_env, agent, run)[0]
+
+
+def ask_turn(container_env: dict, agent: str, run: str):
+    """(tier, shell, kind) for this turn; shell is False unless the platform says
+    True; kind is `person` or `visitor` for a share turn, else None."""
     import http.client
     from urllib.parse import quote, urlsplit
 
     key = container_env.get("TRINITY_MCP_API_KEY")
     if not key or not agent:
-        return "unreachable"
+        return "unreachable", False, None
     url = urlsplit(container_env.get("TRINITY_BACKEND_URL") or DEFAULT_BACKEND_URL)
     if url.scheme not in ("http", "https") or not url.hostname:
-        return "unreachable"
+        return "unreachable", False, None
     port = url.port or (443 if url.scheme == "https" else 80)
     path = url.path.rstrip("/") + TURN_TIER_PATH.format(agent=quote(agent, safe=""), run=quote(run, safe=""))
     connection = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
@@ -128,19 +139,23 @@ def ask_tier(container_env: dict, agent: str, run: str) -> str:
             response = conn.getresponse()
             body = response.read(RESPONSE_MAX_BYTES)
             if response.status == 404:
-                return "unknown"
+                return "unknown", False, None
             if response.status != 200:
-                return "unreachable"
-            tier = json.loads(body.decode("utf-8")).get("tier")
-            return tier if tier in ("owner", "share") else "unreachable"
+                return "unreachable", False, None
+            answer = json.loads(body.decode("utf-8"))
+            tier = answer.get("tier")
+            if tier not in ("owner", "share"):
+                return "unreachable", False, None
+            kind = answer.get("kind") if answer.get("kind") in ("person", "visitor") else None
+            return tier, answer.get("shell") is True, kind
         except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError):
             if attempt == 2:
-                return "unreachable"
+                return "unreachable", False, None
         except Exception:  # noqa: BLE001 - timeout, DNS, malformed body: no answer
-            return "unreachable"
+            return "unreachable", False, None
         finally:
             conn.close()
-    return "unreachable"
+    return "unreachable", False, None
 
 
 def turn_context():
@@ -156,16 +171,17 @@ def turn_context():
 
 
 def guard_shell(tool: str) -> None:
-    """The shell is owner tier: allow only a turn the platform says is the owner's."""
+    """The shell: allow only a turn the platform says may use it."""
     agent, run, container = turn_context()
     if not run:
         allow()  # no platform turn: a terminal or manual shell
-    tier = ask_tier(container, agent, run)
-    if tier == "owner":
+    tier, shell, kind = ask_turn(container, agent, run)
+    if shell:
         allow()
     if tier == "unreachable":
         deny(COULD_NOT_CHECK, tool=tool, verb="exec", tier=tier)
-    deny(SHELL_OWNER_ONLY, tool=tool, verb="exec", tier=tier)
+    reason = SHELL_VISITOR_OFF if kind == "visitor" else SHELL_OWNER_ONLY
+    deny(reason, tool=tool, verb="exec", tier=tier, kind=kind)
 
 
 def main() -> None:

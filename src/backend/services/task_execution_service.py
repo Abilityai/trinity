@@ -3130,6 +3130,10 @@ class TaskExecutionService:
         if model_rejected:
             logger.warning(f"[TaskExecService] Model rejected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.MODEL_UNSUPPORTED
+        elif agent_status_code == 403:
+            # ent#926: the agent refused the turn for who it is for (a runtime
+            # that cannot scope it). A refusal, not an outage or an auth fault.
+            error_code = TaskExecutionErrorCode.TURN_REFUSED
         elif agent_status_code == 503:
             logger.warning(f"[TaskExecService] Auth failure detected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.AUTH

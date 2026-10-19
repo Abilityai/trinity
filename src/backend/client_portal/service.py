@@ -178,6 +178,11 @@ PORTAL_FAILURE_CATEGORIES = (
     # failure. Not `invalid_model`: the client did not choose this model, so
     # there is no stored preference to clear. Only an operator can fix it.
     "model_unsupported",
+    # trinity-enterprise#926 — the agent's runtime (Gemini CLI, Codex) cannot hold
+    # a turn to what this person may do, so it refused it before starting. The
+    # agent's own sentence names the runtime and what the owner can change. Not
+    # retryable: resending meets the same refusal.
+    "turn_refused",
     # trinity-enterprise#751 — the message invokes a skill that needs a person's
     # approval and could not be put up for one (refused by name; nothing ran).
     # Not retryable: resending meets the same refusal. A request that WAS put up
@@ -3370,6 +3375,13 @@ async def portal_chat(agent_name: str, message: str, email: str,
                 "again won't help. An admin needs to update the agent image or "
                 "pick another model.",
                 category="model_unsupported", retryable=False,
+            )
+        if code == "TURN_REFUSED":
+            raise ClientPortalError(
+                403,
+                result.error or "This agent can't take this conversation on its current runtime. "
+                "Its owner can change that.",
+                category="turn_refused", retryable=False,
             )
         if code in ("AUTH", "BILLING"):
             # #2638: "re-sending re-fails" is only true while nothing changed

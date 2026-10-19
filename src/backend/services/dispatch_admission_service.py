@@ -30,6 +30,7 @@ from typing import Optional
 
 from models import User, ChatMessageRequest, ExecutionSource
 from database import db
+from services import turn_tier_service  # ent#926: a dispatched turn is no higher than its parent
 from services import idempotency_service, skill_gate_service
 from services.capacity_manager import (
     AcquireResult,
@@ -340,8 +341,8 @@ async def admit_chat_request(
         dispatch=skill_gate_service.frozen_dispatch(
             triggered_by=gate_trigger,
             model=request.model,
-            source_user_id=current_user.id,
-            source_user_email=current_user.email or current_user.username,
+            source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+            source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email or current_user.username),
             source_agent_name=x_source_agent,
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),

@@ -1664,7 +1664,8 @@ async def agent_execution_turn_tier(agent_name: str, execution_id: str, request:
     """Which tier a running turn acts for (trinity-enterprise#926).
 
     Asked by the guard hook inside the agent container before a file tool
-    reaches a path the shared policy keeps at owner tier. Same auth as the
+    reaches a path the shared policy keeps at owner tier or a shell command
+    runs, and by the Gemini/Codex runtimes before a turn starts. Same auth as the
     heartbeat: the agent's OWN agent-scoped MCP key, nothing else. A turn that
     is not found, or belongs to another agent, answers 404.
     """
@@ -1676,10 +1677,12 @@ async def agent_execution_turn_tier(agent_name: str, execution_id: str, request:
     res = db.validate_mcp_api_key(auth_header[7:], track_usage=False)
     if not heartbeat_service.authorize_heartbeat(res, agent_name):
         raise HTTPException(status_code=403, detail="Turn tier requires the agent's own MCP key")
-    tier = turn_tier_service.turn_tier(db, agent_name, execution_id)
+    tier, kind, _ = turn_tier_service.turn_actor(db, agent_name, execution_id)
     if tier == turn_tier_service.UNKNOWN:
         raise HTTPException(status_code=404, detail="Execution not found")
-    return {"tier": tier}
+    # `shell` also answers whether a Gemini/Codex runtime may run the turn.
+    # The person's identity is not part of the answer: the hook needs none.
+    return {"tier": tier, "kind": kind, "shell": turn_tier_service.shell_allowed(db, agent_name, tier, kind)}
 
 
 @router.post("/{agent_name}/executions/{execution_id}/result")
