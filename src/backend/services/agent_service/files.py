@@ -3,9 +3,7 @@ Agent Service Files - File browser operations.
 
 Handles file listing, download, preview, and delete for agent workspaces.
 """
-import fnmatch
 import logging
-import posixpath
 
 import httpx
 from fastapi import HTTPException, Request
@@ -14,6 +12,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from models import User
 from database import db
 from dependencies import agent_may_reach
+from services import file_path_policy as _policy
 from services.docker_service import execute_command_in_container, get_agent_container
 from services.docker_utils import container_reload
 from .helpers import agent_http_request
@@ -21,76 +20,18 @@ from .helpers import agent_http_request
 logger = logging.getLogger(__name__)
 
 
-# AISEC-C2 / #590 — backend-side deny list for PUT /api/agents/{name}/files.
-# Mirrors the `path_deny` list in docker/base-image/hooks/guardrails-baseline.json
-# so an authenticated owner cannot bypass the agent-server's EDIT_PROTECTED_PATHS
-# check by exploiting any future router/proxy gap. Defense in depth — the
-# agent-server still re-validates server-side. KEEP IN SYNC with both:
-#   - docker/base-image/hooks/guardrails-baseline.json::path_deny
-#   - docker/base-image/agent_server/routers/files.py::EDIT_PROTECTED_PATHS
-#
-# Credential paths (trinity-enterprise#819): never writable through these
-# routes, and owner-tier to read. To add a path: (1) here; (2)
-# hooks/guardrails-baseline.json::path_deny plus a guard002-smoke row; (3)
-# agent_server PROTECTED_PATHS / EDIT_PROTECTED_PATHS by file or parent name,
-# unless the name is too generic for a by-name match (say why here); (4) tests:
-# test_files_protected_paths (+ _EXPECTED_ANCHORS), the hook test, the
-# agent-server list test.
-#
-# Runtime config files (trinity-enterprise#823): each runtime's login and MCP
-# config. Gemini's `settings.json` and Codex's `auth.json` / `config.toml` are
-# too generic for the agent-server by-name lists; the agent server matches all
-# four on the resolved path instead (`_RUNTIME_CONFIG_PATHS`). Codex keeps them
-# in CODEX_HOME = $TMPDIR/codex = ~/.tmp/codex, so deleting `.tmp` is refused.
-_RUNTIME_CONFIG_PATTERNS = (
-    ".claude.json",
-    ".claude/.credentials.json",
-    ".gemini/settings.json",
-    ".tmp/codex/*",
-)
-_CREDENTIAL_PATH_PATTERNS = (
-    ".env",
-    ".env.*",
-    ".mcp.json",
-    ".mcp.json.template",
-    ".credentials.enc",
-    ".ssh/*",
-    ".aws/*",
-    ".gcp/*",
-    ".claude/settings.json",
-    ".claude/settings.local.json",
-    ".git/config",
-) + _RUNTIME_CONFIG_PATTERNS
-# Other spellings of a home-dir path: the agent server follows
-# /proc/self/{cwd,root}/... and /dev/fd/N back into the home dir.
-_PATH_ALIAS_PATTERNS = (
-    "/proc/*",
-    "/dev/*",
-)
-_FILE_WRITE_DENY_PATTERNS = _CREDENTIAL_PATH_PATTERNS + (
-    ".trinity/*",
-    ".git/*",
-    ".gitignore",
-    "/opt/trinity/*",
-    "/etc/claude-code/*",
-    "/etc/*",
-    "/sys/*",
-) + _PATH_ALIAS_PATTERNS
-# Trinity-managed copies that may hold credentials; write-denied already by `.trinity/*`.
-_TRINITY_CREDENTIAL_COPY_PATTERNS = (
-    ".trinity/git-credential",
-    ".trinity/backup/*",
-)
-# Secret file classes: owner-tier to read, deliberately NOT write-denied here
-# (the per-verb tier follows separately).
-_SECRET_FILE_CLASS_PATTERNS = (
-    ".kube/config",
-    ".config/gcloud/*",
-    "*.key",
-    "*.pem",
-    "*.p12",
-    "*.pfx",
-)
+# trinity-enterprise#820: every path class and the tier x verb table live in ONE
+# module, vendored byte-identical into the agent server (Invariant #5). The
+# names below are this module's spelling of it; to add a path, change
+# `services/file_path_policy.py`, copy it to
+# docker/base-image/agent_server/file_path_policy.py, and add the
+# hooks/guardrails-baseline.json::path_deny entry the parity test asks for.
+_RUNTIME_CONFIG_PATTERNS = _policy.RUNTIME_CONFIG_PATTERNS
+_CREDENTIAL_PATH_PATTERNS = _policy.CREDENTIAL_PATH_PATTERNS + _policy.RUNTIME_CONFIG_PATTERNS
+_PATH_ALIAS_PATTERNS = _policy.PATH_ALIAS_PATTERNS
+_FILE_WRITE_DENY_PATTERNS = _policy.FILE_WRITE_DENY_PATTERNS
+_TRINITY_CREDENTIAL_COPY_PATTERNS = _policy.TRINITY_CREDENTIAL_COPY_PATTERNS
+_SECRET_FILE_CLASS_PATTERNS = _policy.SECRET_FILE_CLASS_PATTERNS
 # The only owner-tier read patterns that are not also write-denied (pinned by
 # test_files_protected_paths).
 _OWNER_TIER_READ_ONLY_PATTERNS = _SECRET_FILE_CLASS_PATTERNS
@@ -100,97 +41,37 @@ _OWNER_TIER_READ_PATTERNS = (
     + _TRINITY_CREDENTIAL_COPY_PATTERNS
     + _OWNER_TIER_READ_ONLY_PATTERNS
 )
+_deny_anchor = _policy.deny_anchor
+_DENY_ANCHORS = _policy.DENY_ANCHORS
 
 
 def _normalize_user_path(raw: str) -> str:
-    """Reduce a user-supplied path to a stable absolute form for deny matching.
-
-    Resolves `..`/`.` segments lexically (no FS access — mirrors the agent-server
-    Path.resolve() guard). Non-absolute paths are anchored at /home/developer to
-    match how the agent-server interprets them (see agent_server/routers/files.py).
-    """
-    if not raw:
-        return ""
-    # posixpath.normpath collapses `..` and `.` lexically; fine for matching.
-    # It also keeps exactly two leading slashes (POSIX leaves `//` implementation-
-    # defined), while Linux and the agent server's resolve() read them as one —
-    # left alone, `//home/developer/.ssh/x` matched no path pattern and no fence
-    # (trinity-enterprise#792).
-    if raw.startswith("/"):
-        return posixpath.normpath("/" + raw.lstrip("/"))
-    return posixpath.normpath(posixpath.join("/home/developer", raw))
+    """A user path reduced to a stable absolute form, lexically (no FS access);
+    relative paths anchored at /home/developer, as the agent server reads them."""
+    return _policy.normalize(raw)
 
 
 def _matches_any(path: str, patterns) -> bool:
-    """True when the normalised `path` matches any of `patterns`.
-
-    Match strategy (mirrors docker/base-image/hooks/file-guardrail.py):
-    - basename match against any pattern (handles `.env`, `.mcp.json` etc.)
-    - full-path glob match (handles `.ssh/*`, `/opt/trinity/*` etc.)
-    - relative-form glob match against /home/developer-relative path
-    fnmatch's `*` crosses `/`, so `.trinity/backup/*` covers any depth.
-    """
-    normalized = _normalize_user_path(path)
-    if not normalized:
-        return False
-    basename = posixpath.basename(normalized)
-    rel_to_home = ""
-    if normalized.startswith("/home/developer/"):
-        rel_to_home = normalized[len("/home/developer/"):]
-    for pattern in patterns:
-        if fnmatch.fnmatch(basename, pattern):
-            return True
-        if fnmatch.fnmatch(normalized, pattern):
-            return True
-        if rel_to_home and fnmatch.fnmatch(rel_to_home, pattern):
-            return True
-    return False
+    """True when the normalised `path` matches any of `patterns`."""
+    return _policy.matches_any(_normalize_user_path(path), patterns)
 
 
 def _is_user_writable_path(path: str) -> bool:
-    """Reject writes to credential / runtime-config / Trinity-managed paths."""
-    return bool(_normalize_user_path(path)) and not _matches_any(path, _FILE_WRITE_DENY_PATTERNS)
+    """Reject writes to credential / runtime-config / Trinity-managed / git
+    metadata paths, for every caller (the route write floor)."""
+    return not _policy.write_denied(path)
 
 
 def _is_owner_tier_read_path(path: str) -> bool:
     """True when reading `path` takes the owner tier (trinity-enterprise#819).
     An empty path is owner-tier: it fails closed."""
-    return not _normalize_user_path(path) or _matches_any(path, _OWNER_TIER_READ_PATTERNS)
-
-
-def _deny_anchor(pattern: str) -> str:
-    """The fixed directory (or file) a path-anchored deny pattern lives under:
-    its literal prefix, cut back to the last `/` before the first glob char.
-    Relative patterns are anchored at /home/developer, as the matcher reads them."""
-    glob_at = min((i for i, c in enumerate(pattern) if c in "*?["), default=None)
-    head = pattern if glob_at is None else pattern[:pattern.rfind("/", 0, glob_at) + 1]
-    if not head.startswith("/"):
-        head = posixpath.join("/home/developer", head)
-    return head.rstrip("/") or "/"
-
-
-# trinity-enterprise#792: DELETE removes everything under a directory, so
-# deleting `.ssh` (or `.claude`, or the home dir) is the same act as deleting
-# `.ssh/authorized_keys`. The `/proc` anchor is load-bearing here:
-# `/proc/self/root/...` and `/proc/self/cwd/...` resolve into the home dir in
-# the agent container.
-_DENY_ANCHORS = tuple(_deny_anchor(p) for p in _FILE_WRITE_DENY_PATTERNS if "/" in p)
+    return _policy.owner_tier_read(path)
 
 
 def _is_user_deletable_path(path: str) -> bool:
-    """Reject deleting a protected path or any directory that holds one.
-
-    Only the path-anchored patterns can be checked that way. A basename pattern
-    (`.env`, `.credentials.enc`) can sit in any directory, so deleting a
-    directory that merely contains one is not refused here; the agent server's
-    own by-name `PROTECTED_PATHS` block applies on its side. Fails closed: an
-    empty path is refused (via the write check), and `/` holds every anchor.
-    """
-    if not _is_user_writable_path(path):
-        return False
-    normalized = _normalize_user_path(path)
-    head = normalized.rstrip("/")
-    return not any(a == normalized or a.startswith(head + "/") for a in _DENY_ANCHORS)
+    """Reject deleting a protected path or any directory that holds one
+    (trinity-enterprise#792). Fails closed on an empty path."""
+    return not _policy.delete_denied(path)
 
 
 # trinity-enterprise#819: reading a credential path takes the owner tier. The
@@ -348,8 +229,15 @@ _RESTART_REQUIRED_MESSAGE = (
 )
 
 
-async def _agent_reads_without_links(container, agent_name: str) -> bool:
-    """Does this container's agent server open reads without following links?
+# trinity-enterprise#820: the same probe for the write verbs. An agent on an
+# older image follows a link on PUT, mkdir and DELETE; until it restarts on the
+# current image, share holders' writes are refused (agent keys pass, audited).
+_WRITE_POLICY_PROBE_TOKEN = "_walk_dir_nofollow"
+_WRITE_POLICY_PROBE_CACHE: dict = {}
+
+
+async def _agent_server_has(container, agent_name: str, token: str, cache: dict) -> bool:
+    """Does this container's agent server source carry `token`?
     Cached per (container id, image id) only when the answer is conclusive:
     exit 0 (verified), or exit 1/2 with empty output (token or file absent;
     `grep -qs` prints nothing). The exec helper reports a Docker fault as
@@ -358,26 +246,38 @@ async def _agent_reads_without_links(container, agent_name: str) -> bool:
     image = (getattr(container, "attrs", None) or {}).get("Image")
     key = (getattr(container, "id", None), image)
     cacheable = all(key)
-    if cacheable and key in _READ_POLICY_PROBE_CACHE:
-        return _READ_POLICY_PROBE_CACHE[key]
+    if cacheable and key in cache:
+        return cache[key]
     try:
         result = await execute_command_in_container(
             f"agent-{agent_name}",
-            ["grep", "-qsF", "--", _READ_POLICY_PROBE_TOKEN, _READ_POLICY_PROBE_PATH],
+            ["grep", "-qsF", "--", token, _READ_POLICY_PROBE_PATH],
             timeout=_READ_POLICY_PROBE_TIMEOUT,
         )
     except Exception as e:  # noqa: BLE001 - inconclusive: fail safe, re-probe next time
-        logger.warning("Read-policy probe failed: agent=%s error=%s", agent_name, e)
+        logger.warning("File-policy probe failed: agent=%s token=%s error=%s", agent_name, token, e)
         return False
     code = result.get("exit_code")
     quiet = (result.get("output") or "").strip() == ""
     if result.get("timed_out") or code not in (0, 1, 2) or (code != 0 and not quiet):
-        logger.warning("Read-policy probe inconclusive: agent=%s exit=%s", agent_name, code)
+        logger.warning("File-policy probe inconclusive: agent=%s token=%s exit=%s", agent_name, token, code)
         return False
     verdict = code == 0   # 1: token absent, 2: file absent; both a property of the image
     if cacheable:
-        _READ_POLICY_PROBE_CACHE[key] = verdict
+        cache[key] = verdict
     return verdict
+
+
+async def _agent_reads_without_links(container, agent_name: str) -> bool:
+    """Does this container's agent server open reads without following links?"""
+    return await _agent_server_has(container, agent_name, _READ_POLICY_PROBE_TOKEN,
+                                   _READ_POLICY_PROBE_CACHE)
+
+
+async def _agent_writes_without_links(container, agent_name: str) -> bool:
+    """Do this container's write verbs refuse a link that changes a path's class?"""
+    return await _agent_server_has(container, agent_name, _WRITE_POLICY_PROBE_TOKEN,
+                                   _WRITE_POLICY_PROBE_CACHE)
 
 
 def _passes_owner_tier(current_user, agent_name: str) -> bool:
@@ -415,6 +315,121 @@ async def _refuse_below_owner_on_unverified_image(container, current_user, agent
     })
 
 
+def _caller_tier(current_user, agent_name: str) -> str:
+    """The Files tier (trinity-enterprise#820): OWNER is a person who passes the
+    owner gate (owner or admin), SHARE any other person (a share holder, by JWT
+    or by their own user-scope key), KEY every agent, system, connector or ops
+    key."""
+    from dependencies import is_person_principal
+    if _passes_owner_tier(current_user, agent_name):
+        return _policy.OWNER
+    if is_person_principal(current_user):
+        return _policy.SHARE
+    return _policy.KEY
+
+
+# trinity-enterprise#820: what a share holder is told when a path takes the
+# owner tier through these routes.
+_SHARE_TIER_MESSAGE = (
+    "Only the agent's owner or an admin can change this. A share covers the "
+    "agent's files except credentials, runtime config and its instructions."
+)
+
+
+def _tier_refusal_detail(code: str, path: str) -> dict:
+    if code == _policy.OWNER_TIER:
+        return {"code": code, "message": _SHARE_TIER_MESSAGE, "path": _normalize_user_path(path)}
+    return {"code": code, "message": f"Cannot change protected path: {path}",
+            "path": _normalize_user_path(path)}
+
+
+async def _audit_mutation(event_action, request, current_user, agent_name, path, status, tier,
+                          **extra) -> None:
+    """One row per write, delete or mkdir through these routes, and per tier
+    refusal (trinity-enterprise#820). Best-effort: an audit failure never turns
+    a refusal into a 500 nor fails a write that happened."""
+    try:
+        from services.platform_audit_service import platform_audit_service, AuditEventType
+        await platform_audit_service.log(
+            event_type=(AuditEventType.AUTHORIZATION if event_action.endswith("_refused")
+                        else AuditEventType.AGENT_FILES),
+            event_action=event_action,
+            source="api",
+            **_audit_actor(current_user),
+            actor_ip=request.client.host if request.client else None,
+            target_type="agent",
+            target_id=agent_name,
+            endpoint=request.scope["path"],
+            request_id=getattr(request.state, "request_id", None),
+            details={
+                "path": _normalize_user_path(path)[:512],
+                "status": status,
+                "method": request.method,
+                "tier": tier,
+                **extra,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("File mutation audit failed: action=%s agent=%s", event_action, agent_name)
+
+
+async def _enforce_tier(verb, path, current_user, request, agent_name, action) -> str:
+    """Refuse `verb` on `path` when the policy table says this caller's tier may
+    not use it; audit the refusal. Returns the tier for the success row."""
+    tier = _caller_tier(current_user, agent_name)
+    verdict = _policy.decide(tier, verb, path)
+    if not verdict.allowed:
+        logger.warning(
+            "File %s refused by tier: agent=%s path=%r user=%s tier=%s code=%s",
+            verb, agent_name, _normalize_user_path(path), current_user.username, tier, verdict.code,
+        )
+        await _audit_mutation(f"{action}_refused", request, current_user, agent_name, path, 403,
+                              tier, code=verdict.code)
+        raise HTTPException(status_code=403, detail=_tier_refusal_detail(verdict.code, path))
+    return tier
+
+
+async def _refuse_share_write_on_unverified_image(container, current_user, agent_name, path, tier) -> bool:
+    """Below the owner tier, a share holder writes only to an agent whose image
+    refuses class-changing links. Agent keys pass (their ent#164 / ent#596
+    grants keep working on old images); the success row records it. Returns
+    True when the image is verified."""
+    global _UNVERIFIED_IMAGE_REFUSALS
+    if tier == _policy.OWNER:
+        return True
+    if await _agent_writes_without_links(container, agent_name):
+        return True
+    if tier == _policy.KEY:
+        return False
+    _UNVERIFIED_IMAGE_REFUSALS += 1
+    logger.warning(
+        "File write refused until the agent restarts on the current image: "
+        "agent=%s path=%r user=%s refusals=%d",
+        agent_name, _normalize_user_path(path), current_user.username, _UNVERIFIED_IMAGE_REFUSALS,
+    )
+    raise HTTPException(status_code=403, detail={
+        "code": "agent_restart_required",
+        "message": _RESTART_REQUIRED_MESSAGE,
+        "path": _normalize_user_path(path),
+    })
+
+
+def _project_tree(nodes: list, tier: str) -> None:
+    """Flag each listed node with the verbs this caller cannot use on it
+    (trinity-enterprise#820), in place. The Files tab reads these flags; it
+    keeps no path list of its own."""
+    for node in nodes:
+        is_dir = node.get("type") == "directory"
+        verbs = _policy.restricted_verbs(tier, node.get("path") or "", is_dir=is_dir)
+        if node.get("type") == "link":
+            # Links are never opened or written through (only unlinked).
+            verbs = ["read", "write"] + [v for v in verbs if v == "delete"]
+        if verbs:
+            node["restricted"] = verbs
+        if is_dir:
+            _project_tree(node.get("children") or [], tier)
+
+
 async def _enforce_owner_tier_read(path, current_user, request, agent_name) -> None:
     """Refuse an owner-tier read unless the caller is a person who passes the
     owner tier (the agent's owner, or an admin). The PERSON gate runs first, so
@@ -450,21 +465,11 @@ async def _enforce_owner_tier_read(path, current_user, request, agent_name) -> N
 # `.claude/skills/x/SKILL.md` + `scripts/` into a sibling through `PUT /files`,
 # a route that checks only ACCESS. Humans and the system agent pass the
 # capability by scope, so the Files tab is unchanged for them.
-_SKILLS_DIR = "/home/developer/.claude/skills"
-
-
 def _touches_skills_dir(path: str, *, include_ancestors: bool = False) -> bool:
     """True for the skills dir or anything under it; with `include_ancestors`,
     also for any directory ABOVE it — deleting `.claude` (or the home dir)
     removes every skill as surely as deleting the skills dir does."""
-    normalized = _normalize_user_path(path)
-    if not normalized:
-        return False
-    if normalized == _SKILLS_DIR or normalized.startswith(_SKILLS_DIR + "/"):
-        return True
-    if include_ancestors:
-        return _SKILLS_DIR.startswith(normalized.rstrip("/") + "/")
-    return False
+    return _policy.SKILLS in _policy.classes(path, include_ancestors=include_ancestors)
 
 
 def _may_reach_for_path(current_user, agent_name, path, *, include_ancestors=False) -> bool:
@@ -491,32 +496,16 @@ def _may_reach_for_path(current_user, agent_name, path, *, include_ancestors=Fal
     return owner_owns_agent(current_user, agent_name)
 
 
-# trinity-enterprise#164: the agent's INSTRUCTIONS — its top-level CLAUDE.md /
-# AGENTS.md and everything under `.claude/` except the skills dir (which is
+# trinity-enterprise#164: the agent's INSTRUCTIONS — its top-level instruction
+# files (CLAUDE.md, CLAUDE.local.md, AGENTS.md, GEMINI.md, .gemini/GEMINI.md)
+# and everything under `.claude/` except the skills dir (which is
 # `skills.manage`, one permission per file class). A platform write there
 # changes how the agent behaves, so it takes `instructions.manage`. Only the
 # agent's own top-level files count: a `docs/CLAUDE.md` is an ordinary file.
-_HOME = "/home/developer"
-_INSTRUCTION_FILES = (f"{_HOME}/CLAUDE.md", f"{_HOME}/AGENTS.md")
-_CLAUDE_DIR = f"{_HOME}/.claude"
-
-
 def _touches_instructions(path: str, *, include_ancestors: bool = False) -> bool:
-    """True for CLAUDE.md, AGENTS.md, or `.claude/**` outside the skills dir;
-    with `include_ancestors`, also for a directory ABOVE them (deleting `.claude`
-    or the home dir removes the instructions as surely)."""
-    normalized = _normalize_user_path(path)
-    if not normalized:
-        return False
-    if normalized in _INSTRUCTION_FILES:
-        return True
-    if normalized.startswith(_CLAUDE_DIR + "/") and not _touches_skills_dir(normalized):
-        return True
-    if normalized == _CLAUDE_DIR:
-        return include_ancestors
-    if include_ancestors:
-        return _CLAUDE_DIR.startswith(normalized.rstrip("/") + "/")
-    return False
+    """True for an instruction file or `.claude/**` outside the skills dir;
+    with `include_ancestors`, also for a directory ABOVE them."""
+    return _policy.INSTRUCTIONS in _policy.classes(path, include_ancestors=include_ancestors)
 
 
 async def _require_skill_capability(path, current_user, request, agent_name, *, include_ancestors=False):
@@ -531,6 +520,31 @@ async def _require_skill_capability(path, current_user, request, agent_name, *, 
         await enforce_agent_capability(
             request, current_user, CAPABILITY_INSTRUCTIONS_MANAGE, target=agent_name
         )
+
+
+# trinity-enterprise#820: a hard link to a credential file (made by the agent
+# on request in chat) is a second name for it that no path pattern can see.
+# The agent server reports the link count of the file it opened; below the
+# owner tier a file with more than one name is not served. A pre-#820 image
+# sends no count and is served as before until it restarts.
+_NLINK_HEADER = "X-File-Nlink"
+_HARDLINK_MESSAGE = (
+    "This file has more than one name on disk, so it may be a credential under "
+    "another name. Ask the agent's owner or an admin to open it."
+)
+
+
+async def _refuse_hardlinked_read(response, request, current_user, agent_name, path) -> None:
+    try:
+        nlink = int(response.headers.get(_NLINK_HEADER, "1"))
+    except (TypeError, ValueError):
+        nlink = 1
+    if nlink <= 1 or _passes_owner_tier(current_user, agent_name):
+        return
+    await _audit_read("file_read_refused", request, current_user, agent_name, path, 403, "hardlink")
+    raise HTTPException(status_code=403, detail={
+        "code": "hardlinked_file", "message": _HARDLINK_MESSAGE, "path": _normalize_user_path(path),
+    })
 
 
 async def list_agent_files_logic(
@@ -554,6 +568,14 @@ async def list_agent_files_logic(
     if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
+    # ent#820: below the owner tier the list is projected — a share holder
+    # gets no hidden files and cannot list a hidden or credential directory.
+    _refuse_invalid_path(path)
+    tier = await _enforce_tier(_policy.LIST, path, current_user, request, agent_name, "file_list")
+    hidden_withheld = tier == _policy.SHARE
+    if hidden_withheld:
+        show_hidden = False
+
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -568,13 +590,18 @@ async def list_agent_files_logic(
             agent_name,
             "GET",
             "/api/files",
-            params={"path": path, "show_hidden": str(show_hidden).lower()},
+            # ent#820: send the path the checks above approved, not the raw input
+            params={"path": _normalize_user_path(path), "show_hidden": str(show_hidden).lower()},
             max_retries=3,
             retry_delay=1.0,
             timeout=30.0
         )
         if response.status_code == 200:
-            return response.json()
+            data = response.json()
+            _project_tree(data.get("tree") or [], tier)
+            data["tier"] = tier
+            data["hidden_withheld"] = hidden_withheld
+            return data
         else:
             raise HTTPException(
                 status_code=response.status_code,
@@ -635,6 +662,7 @@ async def download_agent_file_logic(
             timeout=60.0
         )
         if response.status_code == 200:
+            await _refuse_hardlinked_read(response, request, current_user, agent_name, path)
             return PlainTextResponse(content=response.text)
         else:
             await _raise_if_link_refusal(response, request, current_user, agent_name, path)
@@ -673,6 +701,7 @@ async def delete_agent_file_logic(
 
     # trinity-enterprise#792: the write deny list applies to DELETE too, and to
     # any directory that holds a protected path.
+    _refuse_invalid_path(path)
     if not _is_user_deletable_path(path):
         logger.warning(
             "File delete blocked at backend deny-list: agent=%s path=%s user=%s",
@@ -682,6 +711,8 @@ async def delete_agent_file_logic(
             status_code=403,
             detail=f"Cannot delete protected path: {path}"
         )
+    # ent#820: instructions, skills and files that run code take the owner tier.
+    tier = await _enforce_tier(_policy.DELETE, path, current_user, request, agent_name, "file_delete")
 
     container = get_agent_container(agent_name)
     if not container:
@@ -690,6 +721,7 @@ async def delete_agent_file_logic(
     await container_reload(container)
     if container.status != "running":
         raise HTTPException(status_code=400, detail="Agent must be running to delete files")
+    verified = await _refuse_share_write_on_unverified_image(container, current_user, agent_name, path, tier)
 
     try:
         # Call agent's internal file delete API with retry
@@ -705,6 +737,8 @@ async def delete_agent_file_logic(
         )
         if response.status_code == 200:
             result = response.json()
+            await _audit_mutation("file_delete", request, current_user, agent_name, path, 200, tier,
+                                  unverified_image=not verified)
             return result
         else:
             raise HTTPException(
@@ -772,6 +806,7 @@ async def preview_agent_file_logic(
                 detail=response.json().get("detail", f"Failed to preview: {response.text}")
             )
 
+        await _refuse_hardlinked_read(response, request, current_user, agent_name, path)
         content_type = response.headers.get("content-type", "application/octet-stream")
         content_disposition = response.headers.get("content-disposition")
 
@@ -822,6 +857,7 @@ async def update_agent_file_logic(
     # AISEC-C2 / #590: backend-side deny check before proxying to the agent.
     # Stops the .mcp.json RCE escalation at the platform boundary; the
     # agent-server still re-validates as defense in depth.
+    _refuse_invalid_path(path)
     if not _is_user_writable_path(path):
         logger.warning(
             "File write blocked at backend deny-list: agent=%s path=%s user=%s",
@@ -831,6 +867,8 @@ async def update_agent_file_logic(
             status_code=403,
             detail=f"Cannot edit protected path: {path}"
         )
+    # ent#820: instructions, skills and files that run code take the owner tier.
+    tier = await _enforce_tier(_policy.WRITE, path, current_user, request, agent_name, "file_write")
 
     container = get_agent_container(agent_name)
     if not container:
@@ -839,6 +877,7 @@ async def update_agent_file_logic(
     await container_reload(container)
     if container.status != "running":
         raise HTTPException(status_code=400, detail="Agent must be running to update files")
+    verified = await _refuse_share_write_on_unverified_image(container, current_user, agent_name, path, tier)
 
     try:
         # Call agent's internal file update API with retry
@@ -855,6 +894,8 @@ async def update_agent_file_logic(
         )
         if response.status_code == 200:
             result = response.json()
+            await _audit_mutation("file_write", request, current_user, agent_name, path, 200, tier,
+                                  unverified_image=not verified)
             return result
         else:
             raise HTTPException(
@@ -900,6 +941,7 @@ async def create_agent_folder_logic(
     # Same deny-list used for file writes — a folder under a credential /
     # Trinity-managed path is still a write into that path. The agent-server
     # re-validates as defense in depth.
+    _refuse_invalid_path(path)
     if not _is_user_writable_path(path):
         logger.warning(
             "Folder create blocked at backend deny-list: agent=%s path=%s user=%s",
@@ -909,6 +951,8 @@ async def create_agent_folder_logic(
             status_code=403,
             detail=f"Cannot create folder in protected path: {path}"
         )
+    # ent#820: a folder is a write; the same tier as PUT.
+    tier = await _enforce_tier(_policy.WRITE, path, current_user, request, agent_name, "file_mkdir")
 
     container = get_agent_container(agent_name)
     if not container:
@@ -917,6 +961,7 @@ async def create_agent_folder_logic(
     await container_reload(container)
     if container.status != "running":
         raise HTTPException(status_code=400, detail="Agent must be running to create folders")
+    verified = await _refuse_share_write_on_unverified_image(container, current_user, agent_name, path, tier)
 
     try:
         # Call agent's internal mkdir API with retry
@@ -931,7 +976,10 @@ async def create_agent_folder_logic(
             timeout=30.0
         )
         if response.status_code == 200:
-            return response.json()
+            result = response.json()
+            await _audit_mutation("file_mkdir", request, current_user, agent_name, path, 200, tier,
+                                  unverified_image=not verified)
+            return result
         else:
             raise HTTPException(
                 status_code=response.status_code,

@@ -49,6 +49,9 @@ class AuditEventType(str, Enum):
     # per day at the cap. An agent hitting its daily cap is the security-
     # relevant signal; a normal write is visible through the counts.
     METRICS = "metrics"
+    # trinity-enterprise#820 — one row per write / delete / mkdir through the
+    # agent Files routes (human clicks and capability writes, not a stream).
+    AGENT_FILES = "agent_files"
     SYSTEM = "system"
 
 
