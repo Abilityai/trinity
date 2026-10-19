@@ -496,6 +496,12 @@ class User(BaseModel):
     # One principal object per request (FastAPI caches `get_current_user`), so
     # it cannot outlive the request that earned it.
     _capability_reach: set = PrivateAttr(default_factory=set)
+    # trinity-enterprise#926: the raw `X-Trinity-Execution-Id` an AGENT-scoped
+    # key's request carried (#2392) — the turn the agent is acting in. Private
+    # like the reach set: written only by `dependencies.record_acting_turn`, from
+    # the request, never from a token, and never serialized. Read by the viewer
+    # helpers, which narrow a shared person's turn to that person's rows.
+    _acting_execution_id: Optional[str] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):

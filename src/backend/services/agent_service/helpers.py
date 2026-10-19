@@ -348,19 +348,22 @@ def viewer_own_rows(current_user: User) -> tuple:
     failure direction is "too few rows", not "everyone's rows".
 
     * `(None, None)` — no narrowing: an admin person, and agent/system/ops/
-      connector keys (ent#875 ruling: an agent reading executions stays full; the
-      fleet-wide default is ent#926).
+      connector keys — except an agent key acting in a shared person's turn,
+      which reads `(that person, [])` (ent#926, `acting_turn_user_id`).
     * `(uid, [owned names])` — narrow every agent except those the caller owns.
     * `(uid, [])` — narrow on EVERY agent: a principal this module does not list
       as a key (fails closed, like `viewer_principal_kind`'s "other").
 
     `uid` is `NO_ROWS_USER_ID` when the principal has no usable id, which
     matches no row — a missing id never reads as "no filter"."""
-    from dependencies import NO_ROWS_USER_ID, viewer_principal_kind
+    from dependencies import NO_ROWS_USER_ID, acting_turn_user_id, viewer_principal_kind
 
     kind = viewer_principal_kind(current_user)
     if kind == "key":
-        return None, None
+        # ent#926: an agent's key in a shared person's turn reads that person's
+        # rows on every agent; none is exempt (the key owner's agents are not theirs).
+        acting = acting_turn_user_id(current_user)
+        return (None, None) if acting is None else (acting, [])
     uid = getattr(current_user, "id", None)
     uid = uid if isinstance(uid, int) and not isinstance(uid, bool) and uid > 0 else NO_ROWS_USER_ID
     if kind == "other":
