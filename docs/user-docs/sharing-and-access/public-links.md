@@ -13,12 +13,13 @@ Shareable URLs that let unauthenticated users chat with agents. Supports optiona
 ## How It Works
 
 1. Open the agent detail page and go to the **Sharing** tab. Public links live under **Distribution → Public links**.
-2. Click **Create Link**. The **Create Public Link** dialog asks for a **Name (optional)** and an **Expiration (optional)**. Email verification and the allow-list come from the agent's access policy on the same tab, and apply across web, Telegram and Slack alike.
+2. Click **Create Link**. The **Create Public Link** dialog asks for a **Name (optional)** and an **Expiration (optional)** — a date-and-time picker; leave it empty for a link that never expires. An expired link shows **Expired** on its card and answers visitors with the expired notice; edit the link to move or clear the date. Email verification and the allow-list come from the agent's access policy on the same tab, and apply across web, Telegram and Slack alike.
 3. Copy the URL from the link's card (the copy icon) and share it. Editing a link later adds a **Link enabled** checkbox to switch it off without deleting it.
 4. Recipients open the URL. If the agent requires a verified email, they enter their email, receive a code and verify; then they chat. A verification lasts 24 hours in that browser. After that, the link shows the email form again with **Session expired. Please verify your email again.** If a message was being sent when the session ran out, its text comes back in the input after the visitor verifies. Visitors are never sent to the Trinity sign-in page, and a logged-in Trinity user who opens their own link stays signed in.
 5. Conversations persist -- the user can return later and continue where they left off. This holds for anonymous visitors too: reloading the page in the same browser brings the conversation back.
 6. **New** in the chat header starts a fresh session and clears the previous one.
-7. If the agent fails to answer a message, the visitor sees one plain line — *The agent couldn't respond right now. Your message is back in the box below — send it again to retry.* — and their message returns to the input. The technical error stays on the execution for you to read in [Executions](../operations/executions.md); visitors never see it. A stop reason, or a notice that a skill is waiting for approval, is still shown to the visitor because it is written for them.
+7. If the list of links fails to load, the panel says so with **Try again**; your links are unchanged. A refresh that fails after the list loaded keeps the list and shows a banner with the retry.
+8. If the agent fails to answer a message, the visitor sees one plain line — *The agent couldn't respond right now. Your message is back in the box below — send it again to retry.* — and their message returns to the input. The technical error stays on the execution for you to read in [Executions](../operations/executions.md); visitors never see it. A stop reason, or a notice that a skill is waiting for approval, is still shown to the visitor because it is written for them.
 
 **The link shown is always a full URL.** It uses the **Public URL** under **Settings → General** when one is set (the `external_url`), otherwise `FRONTEND_URL`. When neither is set, the Sharing tab completes the path with the address you opened Trinity on, so what you copy is a working `https://…/chat/{token}` URL rather than a bare `/chat/{token}` path. Set a public URL when the address you use internally is not the one outsiders can reach — see [Public Access](../guides/deploying/public-access.md).
 
@@ -48,8 +49,8 @@ When a Trinity user who is logged in opens a public chat link, a **history dropd
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/public-links` | GET | List public links |
-| `/api/agents/{name}/public-links` | POST | Create a public link |
-| `/api/agents/{name}/public-links/{id}` | PUT | Update a public link |
+| `/api/agents/{name}/public-links` | POST | Create a public link — `expires_at` is an ISO 8601 timestamp (`2026-12-31T23:59:00Z`), omitted or empty for no expiry; any other value is refused with `422` and nothing is written |
+| `/api/agents/{name}/public-links/{id}` | PUT | Update a public link — `expires_at` is validated the same way |
 | `/api/agents/{name}/public-links/{id}` | DELETE | Delete a public link |
 | `/api/public/chat/{token}` | POST | Send a message via public chat |
 | `/api/public/history/{token}` | GET | Retrieve chat history |
@@ -61,6 +62,7 @@ When a Trinity user who is logged in opens a public chat link, a **history dropd
 
 - Rate limits are fixed, not set per link: 30 messages a minute per IP address and 60 a minute per link, plus a cap on link lookups per IP. Verification codes are limited to 3 requests per email every 10 minutes.
 - Anonymous sessions have no cross-session continuity.
+- A link whose stored expiry cannot be read (a value written before validation existed) is treated as already expired: visitors get the expired notice and the owner's list shows it as expired, so it can be fixed or deleted.
 - Per-user memory requires email verification to be enabled.
 
 ## See Also

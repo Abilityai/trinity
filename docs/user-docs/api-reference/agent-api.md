@@ -10,7 +10,7 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents` | GET | List all agents. Each row carries `readiness` (`{status, changed_at, source}` for an agent whose owner stamped it `ready` or `calibrating`, otherwise `null`) and `brief_held` — see [Dashboard](../operations/dashboard.md#grid-view) |
+| `/api/agents` | GET | List the agents the caller may see — an admin every agent, anyone else their owned and shared agents, an agent-scoped key only its reach (itself, the agents it may call, the agents it spawned; see [Agent Permissions](../collaboration/agent-permissions.md)). Each row carries `readiness` (`{status, changed_at, source}` for an agent whose owner stamped it `ready` or `calibrating`, otherwise `null`) and `brief_held` — see [Dashboard](../operations/dashboard.md#grid-view) |
 | `/api/agents` | POST | Create agent. On a `github:` template, optional `kind` (`agent` default, or `deployment`); the response's `git_mode` says whether the agent pushes and why — see [GitHub Sync](../integrations/github-sync.md#creating-an-agent-with-sync) |
 | `/api/agents/{name}` | GET | Get agent details |
 | `/api/agents/{name}` | DELETE | Delete agent |
@@ -24,7 +24,7 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/info` | GET | Template metadata |
-| `/api/agents/{name}/files` | GET/PUT/DELETE | Workspace file tree / save a text file / delete a file — see [Agent Files](../agents/agent-files.md) |
+| `/api/agents/{name}/files` | GET/PUT/DELETE | Workspace file tree / save a text file / delete a file. Each verb is ruled per path and caller tier (owner, share, key); the tree flags each node with the verbs the caller may not use, and a refusal is `403` with a named code — see [Agent Files](../agents/agent-files.md#who-can-do-what) |
 | `/api/agents/{name}/files/download` | GET | Download file |
 | `/api/agents/{name}/logs` | GET | Container logs |
 | `/api/agents/{name}/stats` | GET | Live telemetry |

@@ -50,9 +50,9 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/AgentHeader.vue": {
-      "raw_nongray": 7,
-      "raw_gray": 125,
-      "hardcoded_colors": 3
+      "raw_nongray": 0,
+      "raw_gray": 9,
+      "hardcoded_colors": 0
     },
     "src/frontend/src/components/AgentListPanel.vue": {
       "raw_nongray": 28,
@@ -102,11 +102,6 @@
     "src/frontend/src/components/CapacityMeter.vue": {
       "raw_nongray": 0,
       "raw_gray": 4,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/CapacityPanel.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 14,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/ChannelConfigDialog.vue": {
@@ -210,8 +205,8 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/GitPanel.vue": {
-      "raw_nongray": 24,
-      "raw_gray": 152,
+      "raw_nongray": 17,
+      "raw_gray": 112,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/GuardrailsPanel.vue": {
@@ -347,11 +342,6 @@
     "src/frontend/src/components/ReportsPanelFleet.vue": {
       "raw_nongray": 7,
       "raw_gray": 57,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/ResourceModal.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 13,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/RunningStateToggle.vue": {
@@ -837,11 +827,6 @@
     "src/frontend/src/components/settings/RoomBudgetDefaultsPanel.vue": {
       "raw_nongray": 10,
       "raw_gray": 28,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/settings/SettingsPanel.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 16,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/settings/SsoPanel.vue": {

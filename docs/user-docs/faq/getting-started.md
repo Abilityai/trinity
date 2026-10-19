@@ -55,6 +55,10 @@ Two common reasons: their address isn't on the email whitelist, or no email serv
 
 The default email provider is `console`, which is meant for development — it prints the email (including the code) to the backend logs instead of sending it. For real delivery, add a Resend key and a sender address under Settings > Integrations — no `.env` edit needed ([Platform Keys](../credentials/platform-keys.md#email-provider-resend)) — or set `EMAIL_PROVIDER` in `.env` to `smtp`, `sendgrid`, or `resend` and fill in the matching credentials. Also confirm your address is on the whitelist, since codes only go to allowed emails. See [Setup](../getting-started/setup.md).
 
+## Why does the login page say no email provider is configured?
+
+Because this install cannot send email, so no code was sent. After you enter an address, the code step shows *No email provider is configured on this install, so no email was sent* whenever the email provider is `console` (the default when first-run setup skipped the email key) or a real provider is missing what it needs — its API key, or the SMTP host, user and password. The notice is the same for every address, since the request never reveals whether an address is allowed to sign in. Add an email provider key under **Settings → Integrations**, or set `EMAIL_PROVIDER` and its credentials in `.env`, and the page goes back to "We sent a code". See [Platform Keys](../credentials/platform-keys.md#email-provider-resend).
+
 ## I requested a login code on localhost and nothing arrived — am I locked out?
 
 No. With no email provider configured — the default when first-run setup skipped the email key — Trinity sends no email: the code is written to the backend log, and the login page says so instead of "We sent a code". Read it with `docker compose logs backend` (look for the `EMAIL (console mode)` block) and type it into the code field. Or skip the code: choose **Admin Login** and sign in with the admin password from your `.env`. To get real emails, add an email provider key under **Settings → Integrations**. See [Platform Keys](../credentials/platform-keys.md#email-provider-resend).

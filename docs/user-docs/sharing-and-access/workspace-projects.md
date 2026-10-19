@@ -45,7 +45,9 @@ Work on a project happens in chats. **Continue**, at the top of the Overview, is
 
 - **Continue with *agent*** reopens your newest chat on the project with that agent.
 - **Start with *agent*** — when you have no chat on the project yet — starts a new chat with that agent and links it to the project before it opens.
-- The other agents you can chat with are one click away beside it; **Work on it** below lists every agent on the project, including the ones you cannot use yet and why (its owner has not approved it, it is not on your list, or the project is archived).
+- The other agents you can chat with are one click away beside it; **Work on it** below lists every agent on the project, including the ones you cannot use yet and why (its owner has not approved it, it is not on your list, or the project is archived). When none of the project's agents is available to you yet, the card says so and points at **Work on it**.
+
+Under **Continue**, a one-time line says how a project moves — chats linked to it build it up, agents record decisions, deliverables and blockers in the **Log**, and the steward checks on it. **Got it** dismisses it for this browser.
 
 Chats are private. **My chats on this project** lists only yours; other members' chats appear as a count. Rooms you are in are linked from the side column.
 
@@ -70,7 +72,7 @@ The steward owns the project's health and the verification of finished work, and
 - **Health** — the steward (or the creator) sets **On track**, **At risk** or **Off track** with a short line; the Overview marks it **Update due** when the last one is more than two weeks old.
 - **The digest** — what needs the steward on each project they steward: tasks to verify, blocked or undecided tasks, tasks untouched for a week, open asks, a health update due, a project gone quiet. For a person it is the **I steward** tab on the Projects list; for an agent it is the `get_steward_digest` tool.
 
-The **Steward** card on the Overview shows who it is and the state behind that. For an agent steward: the last sweep (the last time it read its digest), its next scheduled run when it has one, the project's health and whether an update is due. It says **No sweep recorded yet** and **No sweep scheduled** plainly when that is the case, and **Scheduled** without a time when the schedule belongs to an agent you cannot read. For a person steward: the project's health and what is waiting on them, with **Open I steward** when the steward is you.
+The **Steward** card on the Overview shows who it is, the project's health as a badge, and the state behind that. With nobody named it reads *The creator stewards it until someone is named.* For an agent steward: the last sweep (the last time it read its digest), its next scheduled run when it has one, the project's health and whether an update is due. It says **No sweep recorded yet** and **No sweep scheduled** plainly when that is the case, and **Scheduled** without a time when the schedule belongs to an agent you cannot read. For a person steward: the project's health and what is waiting on them, with **Open I steward** when the steward is you.
 
 **An agent steward needs its own schedule.** Trinity does not run the steward; the platform only answers its questions. The agent-dev plugin's `/project-steward` skill is the sweep: on each run it reads the digest, verifies pending claims, dispatches labeled work, escalates stalls and open loops as asks, records the project's health with `set_project_health`, and writes one log entry per outcome. Give the steward agent a schedule for it (the skill ships a default weekday one) — without it, nothing moves between your chats, and the Steward card says so. The skills are described on the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
 

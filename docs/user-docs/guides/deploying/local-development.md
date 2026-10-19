@@ -56,6 +56,7 @@ The only edit a local install needs is **`ADMIN_PASSWORD`**. Everything else bel
 | `PUBLIC_CHAT_URL` | Public-facing URL for chat links and webhooks. Leave empty for local dev. |
 | `FRONTEND_URL` | Used for OAuth redirect callbacks. Leave empty for local dev. |
 | `TRINITY_DEFAULT_SYSTEM_MANIFEST` | Set to `disabled` to skip the starter fleet a fresh install seeds (see [First-Time Setup](../../getting-started/setup.md#your-starter-fleet)). |
+| `AAUTH_ENABLED` / `AAUTH_ISSUER` / `AAUTH_PROTOTYPE_ENABLED` / `AAUTH_PERSON_SERVER` / `AAUTH_RESOURCE_ALLOWLIST` | Forwarded by the dev compose, all off or empty by default. Only needed to test signed calls between two Trinity instances (AAuth); the issuer must be a public `https://` host, so a plain `localhost` stack cannot be a peer. An admin can set the same values at runtime in **Settings › Integrations**, and a saved value wins over `.env`. See [A2A Protocol → AAuth](../../integrations/a2a-protocol.md#aauth-agent-identity--trinity-to-trinity-without-a-shared-key). |
 
 ### Keys the dev compose does not forward
 
