@@ -12,6 +12,7 @@ import type { AddressInfo } from "node:net";
 import { TrinityClient } from "./client.js";
 import { withAudit } from "./audit.js";
 import { currentTurn, runInTurn } from "./turn-context.js";
+import { readFileSync } from "node:fs";
 
 describe("ent#926 the turn rides on every backend call", () => {
   let backend: Server;
@@ -64,6 +65,22 @@ describe("ent#926 the turn rides on every backend call", () => {
     await tool(() => client().raiseAsk("atlas", { title: "t" } as never, "exec-explicit"))(
       {}, { session: { executionId: "exec-ambient" } as never });
     assert.equal(seen[0].turn, "exec-explicit");
+  });
+
+  it("fanOut, which calls fetch directly, carries the turn too (found live 2026-10-19)", async () => {
+    seen.length = 0;
+    await tool(() => client().fanOut("atlas", [{ id: "t1", message: "m" }] as never))(
+      {}, { session: { executionId: "exec-share-2" } as never });
+    assert.equal(seen.find((s) => s.url.endsWith("/fan-out"))?.turn, "exec-share-2");
+  });
+
+  it("no method in client.ts calls fetch around turnFetch (guard)", () => {
+    // Every backend call must pass through turnFetch, or the turn silently drops
+    // and the backend reads "no platform turn" (open). A bare fetch( is how
+    // fanOut slipped past the first version of this fix.
+    const src = readFileSync(new URL("./client.ts", import.meta.url), "utf8");
+    const bare = src.split("\n").filter((l) => /(^|[^A-Za-z_.])fetch\(/.test(l) && !/turnFetch\(/.test(l));
+    assert.deepEqual(bare, []);
   });
 
   it("two concurrent tool calls never see each other's turn", async () => {

@@ -919,6 +919,17 @@ async def public_stream_execution(
 _PUBLIC_FAILURE_MESSAGE = "Failed to process your request. Please try again."
 
 
+def _public_failure_text(error):
+    """#3461's fixed line, except an agent's refusal of the turn (ent#926),
+    which a visitor must not be told to retry."""
+    from services import public_chat_service
+    from services.task_execution_service import _split_error_code
+    code, text = _split_error_code(error)
+    if public_chat_service.is_turn_refused(code, text or error):
+        return public_chat_service.PUBLIC_TURN_REFUSED_MESSAGE
+    return _PUBLIC_FAILURE_MESSAGE
+
+
 @router.get("/executions/{token}/{execution_id}/status")
 async def public_execution_status(
     token: str,
@@ -956,7 +967,7 @@ async def public_execution_status(
         # (`run_public_chat`); the detail stays on the row for the operator. A
         # cancel reason and a gate's notice are written for the visitor.
         "error": (
-            _PUBLIC_FAILURE_MESSAGE if execution.status == "failed"
+            _public_failure_text(execution.error) if execution.status == "failed"
             else execution.error if execution.status == "cancelled" or gate
             else None
         ),

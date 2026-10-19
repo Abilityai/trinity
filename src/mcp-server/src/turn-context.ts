@@ -31,3 +31,19 @@ export function runInTurn<R>(executionId: string | undefined, fn: () => R): R {
 export function currentTurn(): string | undefined {
   return store.getStore();
 }
+
+const TURN_HEADER = "X-Trinity-Execution-Id";
+
+/**
+ * `fetch` with the current turn added, unless the caller set the header itself.
+ * The one door every backend call in `TrinityClient` goes through: a method
+ * that called `fetch` directly sent no turn (fanOut did, until 2026-10-19), and
+ * the backend reads a missing header as "no platform turn", which is open.
+ */
+export function turnFetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
+  const turn = currentTurn();
+  if (!turn) return fetch(input, init);
+  const headers = new Headers(init.headers);
+  if (!headers.has(TURN_HEADER)) headers.set(TURN_HEADER, turn);
+  return fetch(input, { ...init, headers });
+}
