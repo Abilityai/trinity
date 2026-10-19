@@ -5,8 +5,15 @@
  * in src/backend/utils/helpers.py, including its ASCII alphabet and no cap.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, DOMWrapper } from '@vue/test-utils'
 import CreateAgentModal from '../../src/components/CreateAgentModal.vue'
+
+// #3792: the dialog sits in BaseModal, which teleports to <body>, so DOM
+// queries go through `dom()`. Not stubbed: test-utils' `teleport: true` stub
+// remounts its children on every parent render, which wipes child state (the
+// token field's override toggle) in a way the real Teleport never does.
+const dom = () => new DOMWrapper(document.body)
+afterEach(() => { document.body.innerHTML = '' })
 
 const createAgent = vi.fn()
 vi.mock('../../src/stores/agents', () => ({ useAgentsStore: () => ({ createAgent }) }))
@@ -26,15 +33,23 @@ async function mountModal(props = {}) {
   await flushPromises()
   return wrapper
 }
-const nameInput = (w) => w.get('input[placeholder="my-agent"]')
-const preview = (w) => w.find('#agent-name-preview')
-const submitButton = (w) => w.get('button[type="submit"]')
+const nameInput = (w) => dom().get('#agent-name')
+const preview = (w) => dom().find('#agent-name-preview')
+const submitButton = (w) => dom().get('button[type="submit"]')
 async function submit(w) {
-  await w.get('form').trigger('submit')
+  await dom().get('form').trigger('submit')
   await flushPromises()
 }
 async function pickTemplate(w, text) {
-  await w.findAll('div.cursor-pointer').find((card) => card.text().includes(text)).trigger('click')
+  await dom().findAll('[data-testid="source-option"]').find((card) => card.text().includes(text)).trigger('click')
+}
+
+// #3792: one Name field. The raw name still goes to the API (it owns the
+// sanitizer); the typed name rides along as the display name whenever it reads
+// differently from the ID, and is dropped over the backend's 120-char cap.
+const payloadFor = (raw, id) => {
+  const label = raw.trim()
+  return label && label !== id && label.length <= 120 ? { name: raw, display_label: label } : { name: raw }
 }
 
 beforeEach(() => {
@@ -64,7 +79,7 @@ describe('#3463 identifier preview', () => {
     expect(submitButton(w).element.disabled).toBe(false)
     expect(createAgent).not.toHaveBeenCalled()
     await submit(w)
-    expect(createAgent).toHaveBeenCalledExactlyOnceWith({ name: raw })
+    expect(createAgent).toHaveBeenCalledExactlyOnceWith(payloadFor(raw, expected))
   })
 
   it('updates the full preview while editing, including after an invalid value', async () => {
@@ -76,7 +91,7 @@ describe('#3463 identifier preview', () => {
     await nameInput(w).setValue('Second.Name_')
     expect(preview(w).get('code').text()).toBe('second.name_')
     expect(nameInput(w).attributes('aria-invalid')).toBeUndefined()
-    expect(w.find('[role="alert"]').exists()).toBe(false)
+    expect(dom().find('[role="alert"]').exists()).toBe(false)
     expect(createAgent).not.toHaveBeenCalled()
   })
 
@@ -90,28 +105,28 @@ describe('#3463 identifier preview', () => {
     expect(w.emitted('close')).toBeUndefined()
     expect(preview(w).exists()).toBe(false)
     expect(nameInput(w).attributes('aria-invalid')).toBe('true')
-    const error = w.get('[role="alert"]')
+    const error = dom().get('[role="alert"]')
     expect(error.text()).toContain('Enter a name with at least one ASCII letter or number')
     expect(error.text()).toContain('my-agent')
     expect(nameInput(w).attributes('aria-describedby')).toBe(error.attributes('id'))
     // The same form remains usable after correcting the name.
     await nameInput(w).setValue('Fixed Name')
     expect(submitButton(w).element.disabled).toBe(false)
-    expect(w.find('[role="alert"]').exists()).toBe(false)
+    expect(dom().find('[role="alert"]').exists()).toBe(false)
     await submit(w)
-    expect(createAgent).toHaveBeenCalledExactlyOnceWith({ name: 'Fixed Name' })
+    expect(createAgent).toHaveBeenCalledExactlyOnceWith({ name: 'Fixed Name', display_label: 'Fixed Name' })
   })
 
   it.each([
     ['', undefined],
     ['Scout', 'local:scout'],
     ['Helper', 'github:acme/helper'],
-    ['GitHub Repository', 'github:acme/custom'],
+    ['Import a GitHub repository', 'github:acme/custom'],
   ])('keeps the preview and raw payload on the %j selection path', async (selection, template) => {
     const w = await mountModal()
     if (selection) await pickTemplate(w, selection)
-    if (selection === 'GitHub Repository') {
-      await w.get('input[placeholder^="owner/repo"]').setValue('acme/custom')
+    if (selection === 'Import a GitHub repository') {
+      await dom().get('input[placeholder^="owner/repo"]').setValue('acme/custom')
     }
     await nameInput(w).setValue('bad@name!!!')
     expect(preview(w).get('code').text()).toBe('bad-name')
@@ -120,7 +135,7 @@ describe('#3463 identifier preview', () => {
     expect(createAgent).toHaveBeenCalledTimes(1)
     expect(createAgent.mock.calls[0][0]).toMatchObject({ name: 'bad@name!!!' })
     expect(createAgent.mock.calls[0][0].template).toBe(template)
-    if (selection === 'GitHub Repository') {
+    if (selection === 'Import a GitHub repository') {
       expect(createAgent.mock.calls[0][0]).toMatchObject({ import_intent: 'clone', kind: 'agent' })
     }
   })
@@ -133,6 +148,7 @@ describe('#3463 identifier preview', () => {
     await submit(w)
     expect(createAgent.mock.calls[0][0]).toEqual({
       name: 'Preset Name',
+      display_label: 'Preset Name',
       ...(initialTemplate !== 'missing:template' ? { template: initialTemplate } : {}),
     })
   })
