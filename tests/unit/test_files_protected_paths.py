@@ -233,12 +233,14 @@ _EXPECTED_ANCHORS = (
     "/home/developer/.claude/settings.json",
     "/home/developer/.claude/settings.local.json",
     "/home/developer/.git/config",          # ent#819
+    "/var/lib/trinity",                     # ent#926: the subscription token (#1089)
     "/home/developer/.claude/.credentials.json",   # ent#823
     "/home/developer/.gemini/settings.json",       # ent#823
     "/home/developer/.tmp/codex",                  # ent#823: deleting .tmp is refused
     "/home/developer/.trinity",
     "/home/developer/.git",
     "/opt/trinity",
+    "/logs",                                # ent#926: the guard hooks' evidence
     "/etc/claude-code",
     "/etc",
     "/sys",

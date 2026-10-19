@@ -161,7 +161,33 @@ def test_a_link_into_an_owner_only_path_is_judged_by_where_it_lands(hook, monkey
 
 
 def test_other_tools_are_none_of_its_business(hook, monkeypatch):
-    assert run(hook, monkeypatch, "Bash", {"command": "cat ~/CLAUDE.md"}) == (0, [])
+    assert run(hook, monkeypatch, "WebFetch", {"url": "https://example.com"}) == (0, [])
+
+
+# ---- the shell (ent#926 ruling 2026-10-19: a shared person's turn gets no shell) ----------
+# A command reaches files the file tools never see (`echo x >> CLAUDE.md` landed in the
+# 10-16 live run), and no path filter over a command string is sound. The container
+# cannot host an OS sandbox (no user namespaces), so the shell itself is owner tier.
+
+@pytest.mark.parametrize("command", ["ls", "echo x >> ~/CLAUDE.md", "python3 -c 'print(1)'"])
+def test_a_shared_persons_turn_gets_no_shell(hook, monkeypatch, command):
+    code, asked = run(hook, monkeypatch, "Bash", {"command": command}, tier="share")
+    assert code == 2 and asked == [("agent-a", "exec-1")]
+
+
+def test_the_owners_turn_keeps_the_shell(hook, monkeypatch):
+    assert run(hook, monkeypatch, "Bash", {"command": "echo x >> ~/CLAUDE.md"}, tier="owner") == (
+        0, [("agent-a", "exec-1")])
+
+
+@pytest.mark.parametrize("answer", ["unknown", "unreachable"])
+def test_no_answer_about_the_turn_keeps_the_shell_closed(hook, monkeypatch, answer):
+    code, _ = run(hook, monkeypatch, "Bash", {"command": "ls"}, tier=answer)
+    assert code == 2
+
+
+def test_a_shell_outside_a_platform_turn_asks_nobody(hook, monkeypatch):
+    assert run(hook, monkeypatch, "Bash", {"command": "ls"}, run_id="") == (0, [])
 
 
 # ---- the lookup itself, over real HTTP -----------------------------------------------------
@@ -237,11 +263,11 @@ def test_the_hooks_policy_copy_is_byte_identical_to_the_backends():
         "copy src/backend/services/file_path_policy.py to docker/base-image/hooks/file_path_policy.py")
 
 
-def test_the_drop_in_registers_the_guard_in_exec_form_for_the_file_tools():
+def test_the_drop_in_registers_the_guard_in_exec_form_for_the_file_tools_and_the_shell():
     drop_in = json.loads((_HOOKS / "managed-settings.d/60-turn-tier-guard.json").read_text())
     (entry,) = drop_in["hooks"]["PreToolUse"]
     assert set(entry["matcher"].split("|")) == {"Edit", "Write", "NotebookEdit", "MultiEdit",
-                                                "Read", "NotebookRead", "Grep", "Glob"}
+                                                "Read", "NotebookRead", "Grep", "Glob", "Bash"}
     (h,) = entry["hooks"]
     assert h["command"] == "/usr/bin/env"
     assert h["args"] == ["-i", "HOME=/home/developer", "/usr/local/bin/python3", "-I", "-S",
@@ -257,3 +283,34 @@ def test_the_image_ships_the_hook_its_policy_and_the_drop_in_root_owned():
                  "/etc/claude-code/managed-settings.d/60-turn-tier-guard.json"):
         assert line in dockerfile, line
     assert "chmod 0555 /opt/trinity/hooks/*.py" in dockerfile and "chown -R root:root /opt/trinity" in dockerfile
+
+
+# ---- agent-owned paths outside the home (ent#926 review 2026-10-19) -----------------------
+# The agent user owns /app (on PYTHONPATH: a `sitecustomize.py` there runs in every python
+# process; startup.sh runs at boot), /var/lib/trinity (the subscription token, #1089) and
+# /logs (this guard's own evidence). None of them is under the home, so none matched a class.
+
+@pytest.mark.parametrize("path", ["/app/sitecustomize.py", "/app/startup.sh",
+                                  "/app/agent_server/services/turn_scope.py"])
+def test_a_shared_persons_turn_cannot_write_code_the_agent_runs(hook, monkeypatch, path):
+    code, asked = run(hook, monkeypatch, "Write", {"file_path": path})
+    assert code == 2 and asked
+
+
+def test_the_owners_turn_may_write_under_app(hook, monkeypatch):
+    assert run(hook, monkeypatch, "Write", {"file_path": "/app/x.py"}, tier="owner")[0] == 0
+
+
+def test_reading_the_agent_server_code_stays_open(hook, monkeypatch):
+    assert run(hook, monkeypatch, "Read", {"file_path": "/app/startup.sh"}) == (0, [])
+
+
+@pytest.mark.parametrize("tool,verb_input", [("Read", "file_path"), ("Write", "file_path")])
+def test_a_shared_persons_turn_cannot_touch_the_subscription_token(hook, monkeypatch, tool, verb_input):
+    code, asked = run(hook, monkeypatch, tool, {verb_input: "/var/lib/trinity/oauth-token"})
+    assert code == 2 and asked
+
+
+def test_a_shared_persons_turn_cannot_forge_the_guard_log(hook, monkeypatch):
+    code, asked = run(hook, monkeypatch, "Write", {"file_path": "/logs/guardrails.jsonl"})
+    assert code == 2 and asked

@@ -149,6 +149,7 @@ PATTERN_INSTANCES = {
     ".claude/settings.json": ".claude/settings.json",
     ".claude/settings.local.json": ".claude/settings.local.json",
     ".git/config": ".git/config",
+    "/var/lib/trinity/*": "/var/lib/trinity/oauth-token",   # ent#926
     ".claude.json": ".claude.json",
     ".claude/.credentials.json": ".claude/.credentials.json",
     ".gemini/settings.json": ".gemini/settings.json",

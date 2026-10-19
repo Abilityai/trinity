@@ -22,9 +22,12 @@ not steer it). The agent cannot change that once the process is running. No
 execution id means no platform turn (a terminal or manual shell, owner-only
 surfaces) and the hook allows.
 
-Honest limit: this covers the file tools. A shell command can reach files these
-tools never see; the Bash guardrail and the container's permissions are the
-only fence there.
+The shell is owner tier (ent#926 ruling 2026-10-19). A command reaches files
+the file tools never see, no filter over a command string is sound, and the
+container cannot host an OS sandbox (no user namespaces, the reason Codex runs
+without its own). So a shared person's turn gets no Bash at all; the owner's
+turns and the turns the owner configured keep it. Every Bash call in a platform
+turn therefore asks the platform once.
 """
 import json
 import os
@@ -45,10 +48,15 @@ MAX_ID_LEN = 128
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 READ_TOOLS = {"Read", "NotebookRead"}
 SEARCH_TOOLS = {"Grep", "Glob"}
+SHELL_TOOLS = {"Bash"}
 
 COULD_NOT_CHECK = (
     "Trinity could not be reached to check whose turn this is, so this path was not "
     "touched. Do not do it another way; tell whoever asked that it could not be checked."
+)
+SHELL_OWNER_ONLY = (
+    "This turn is for a person the agent is shared with, and running commands is "
+    "owner-only. Answer without the shell, or ask the agent's owner to run it."
 )
 OWNER_ONLY = (
     "This turn is for a person the agent is shared with, and that path is owner-only. "
@@ -135,10 +143,37 @@ def ask_tier(container_env: dict, agent: str, run: str) -> str:
     return "unreachable"
 
 
+def turn_context():
+    """(agent, execution id, container env) for the running turn; run is '' when
+    there is no platform turn (a terminal or manual shell)."""
+    claude_env = read_environ(os.getppid())
+    run = claude_env.get("TRINITY_EXECUTION_ID") or ""
+    if len(run) > MAX_ID_LEN:
+        run = ""
+    container = read_environ(1)
+    agent = container.get("AGENT_NAME") or container.get("TRINITY_AGENT_NAME") or ""
+    return agent, run, container
+
+
+def guard_shell(tool: str) -> None:
+    """The shell is owner tier: allow only a turn the platform says is the owner's."""
+    agent, run, container = turn_context()
+    if not run:
+        allow()  # no platform turn: a terminal or manual shell
+    tier = ask_tier(container, agent, run)
+    if tier == "owner":
+        allow()
+    if tier == "unreachable":
+        deny(COULD_NOT_CHECK, tool=tool, verb="exec", tier=tier)
+    deny(SHELL_OWNER_ONLY, tool=tool, verb="exec", tier=tier)
+
+
 def main() -> None:
     data = read_stdin_json()
     tool = data.get("tool_name", "")
     tool_input = data.get("tool_input") or {}
+    if tool in SHELL_TOOLS:
+        guard_shell(tool)
     pairs = targets(tool, tool_input)
     if not pairs:
         allow()
@@ -154,13 +189,9 @@ def main() -> None:
     if not refused:
         allow()
 
-    claude_env = read_environ(os.getppid())
-    run = claude_env.get("TRINITY_EXECUTION_ID") or ""
-    if not run or len(run) > MAX_ID_LEN:
+    agent, run, container = turn_context()
+    if not run:
         allow()  # no platform turn: a terminal or manual shell
-
-    container = read_environ(1)
-    agent = container.get("AGENT_NAME") or container.get("TRINITY_AGENT_NAME") or ""
     tier = ask_tier(container, agent, run)
     verb, path, code = refused[0]
     if tier == "owner":

@@ -22,6 +22,17 @@ from agent_server.services import gemini_runtime  # noqa: E402
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _owner_turn(monkeypatch):
+    """Every turn here is the owner's, so the ent#926 tier check passes without a
+    platform to ask (the check itself: test_ent926_runtime_turn_scope.py)."""
+    from agent_server.services import turn_scope
+
+    async def owner(agent, run):
+        return "owner"
+    monkeypatch.setattr(turn_scope, "fetch_tier", owner)
+
+
 @pytest.fixture
 def runtime(monkeypatch):
     rt = gemini_runtime.GeminiRuntime()

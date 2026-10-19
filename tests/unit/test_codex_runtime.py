@@ -36,6 +36,18 @@ from agent_server.services.codex_runtime import (  # noqa: E402
 from agent_server.services.runtime_adapter import RuntimeCapabilities  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _owner_turn(monkeypatch):
+    """These tests are about the CLI, not about whose turn it is: every turn here
+    is the owner's, so the ent#926 tier check (test_ent926_runtime_turn_scope.py)
+    passes without a platform to ask."""
+    from agent_server.services import turn_scope
+
+    async def owner(agent, run):
+        return "owner"
+    monkeypatch.setattr(turn_scope, "fetch_tier", owner)
+
+
 # ---------------------------------------------------------------------------
 # calculate_codex_cost
 # ---------------------------------------------------------------------------

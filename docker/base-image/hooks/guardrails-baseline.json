@@ -65,7 +65,8 @@
     "/home/developer/.tmp/codex/*",
     "/home/developer/.trinity/read-only-config.json",
     "/opt/trinity/*",
-    "/etc/claude-code/*"
+    "/etc/claude-code/*",
+    "/var/lib/trinity/*"
   ],
   "credential_patterns": [
     {"name": "anthropic_api_key", "pattern": "sk-ant-[a-zA-Z0-9_-]{20,}"},

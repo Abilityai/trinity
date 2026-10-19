@@ -64,6 +64,7 @@ from .activity_tracking import complete_tool_execution, start_tool_execution
 from .execution_env import build_execution_env
 from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
+from . import turn_scope
 from .subprocess_lifecycle import (
     _capture_pgid,
     _drain_bounded,
@@ -1429,6 +1430,8 @@ class CodexRuntime(AgentRuntime):
                 status_code=503,
                 detail="Codex CLI is not available in this container",
             )
+        # ent#926: no hook scopes a shared person's turn here, so none runs.
+        await turn_scope.require_owner_tier("Codex", execution_id)
 
         resume_thread_id: Optional[str] = None
         if continue_session and agent_state.session_started and self._chat_thread_id:
@@ -1499,6 +1502,8 @@ class CodexRuntime(AgentRuntime):
                 status_code=503,
                 detail="Codex CLI is not available in this container",
             )
+        # ent#926: no hook scopes a shared person's turn here, so none runs.
+        await turn_scope.require_owner_tier("Codex", execution_id)
         if images:
             logger.warning("[Codex] images are not supported in the MVP — ignoring")
         if max_turns is not None:

@@ -38,6 +38,8 @@ CASES = {
         ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/notes.md"}}, 0),
         ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/CLAUDE.md"}}, 0),
         ({"tool_name": "Read", "tool_input": {"file_path": "/home/developer/notes.md"}}, 0),
+        # The shell is owner tier in a platform turn (ent#926); outside one it runs.
+        ({"tool_name": "Bash", "tool_input": {"command": "ls"}}, 0),
     ],
     "read-only-guard.py": [
         ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/app.py"}}, 2),
