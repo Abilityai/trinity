@@ -373,7 +373,11 @@ REDACTION_PLACEHOLDER = "***REDACTED***"
 # Git prints the full remote URL in common error lines, so any surface that persists
 # raw git output needs this redaction at the exit point (learnings 2026-07-14, #1595).
 # Mirrors the agent-side `_redact_url_userinfo` in docker/base-image/agent_server/routers/git.py.
-_URL_USERINFO_RE = re.compile(r'://[^/@\s]+@')
+# The userinfo span also stops at `"`, `<`, `>` and an escaped quote `\"` — none can
+# appear unencoded in userinfo, and they delimit JSON strings (nested ones too) and HTML
+# attributes; a bare `\` still matches (`CORP\user:pw@proxy`). Without this a compact
+# body like `{"iss":"https://h","sub":"a@h"}` was swallowed up to the next `@` (#3769).
+_URL_USERINFO_RE = re.compile(r'://(?:[^/@\s"\\<>]|\\(?!"))+@')
 
 
 def redact_url_userinfo(text: str) -> str:

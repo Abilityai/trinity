@@ -561,6 +561,7 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     "routers/agent_config.py::get_public_channel_model": ("GET /api/agents/{agent_name}/public-channel-model", "a non-sensitive read of this agent's own setting (access-level)"),
     "routers/agent_config.py::get_agent_guardrails": ("GET /api/agents/{agent_name}/guardrails", "a non-sensitive read of this agent's own setting (access-level)"),
     "routers/agent_config.py::list_agent_capability_grants": ("GET /api/agents/{agent_name}/capability-grants", "trinity-enterprise#164: an agent reads which self-change permissions it holds, so it knows when to raise a permission-request (owner-level; granting is interactive-admin)"),
+    "routers/agent_files.py::get_agent_peer_skills": ("GET /api/agents/{agent_name}/peer-skills", "abilityai/trinity-enterprise#662: a READ of what this agent's own edges expose — the library skills on its permitted targets and whether it may run each — so an agent can reason about a refusal before it is refused; targets filtered to what the viewer may open AND (for an agent key) reach; the grant itself is admin + interactive"),
     "routers/agent_files.py::get_agent_reach": ("GET /api/agents/{agent_name}/reach/{target}", "trinity-enterprise#629: the MCP agent-to-agent gate asks, with the CALLING agent's own key, whether it may call a target — the edge or the spawn record, a boolean; access as for GET .../permissions"),
     "routers/users.py::get_my_github_pat_status": (
         "GET /api/users/me/github-pat", "configured flags only, never the token (ent#162)"),
@@ -597,6 +598,12 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
         "PUT /api/agents/{agent_name}/skill-gates/{skill_name}", "ent#753 skills.manage USE on an owner-owned agent, never itself; persons pass assert_person + owner fence"),
     "routers/skill_gate.py::clear_agent_skill_gate": (
         "DELETE /api/agents/{agent_name}/skill-gates/{skill_name}", "ent#753 skills.manage USE on an owner-owned agent, never itself; persons pass assert_person + owner fence"),
+    # #3295: the MCP server arms a sequential /chat row's completion report with the
+    # CALLER's key when it hands back a receipt; the service admits only the row's own
+    # dispatcher and inherits the destination through the ent#265 provenance guard.
+    "routers/chat.py::arm_execution_report_back": (
+        "POST /api/agents/{name}/executions/{execution_id}/report-back",
+        "#3295 MCP report-back arm: the dispatcher of a /chat row (agent key = source_agent_name) asks for the consent-gated completion report; inheritance stays behind _inherited_channel_context"),
     # ent#703: the agent's pull loop reads its own switch every cycle with its own key.
     # The write (PUT .../git/pull-sync) is a setting, so it is person-only.
     "routers/git.py::get_pull_sync_config": (

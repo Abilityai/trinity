@@ -179,11 +179,11 @@
           @update:model-value="onApprover"
         >
           <option v-for="k in kindOptions.kinds" :key="k.kind" :value="k.kind" :disabled="!k.reachable">
-            {{ k.label }}{{ k.reachable ? '' : ' (nobody yet)' }}
+            {{ k.label }}{{ optionNote(k) }}
           </option>
           <optgroup v-if="kindOptions.roles.length" label="Roles">
             <option v-for="k in kindOptions.roles" :key="k.kind" :value="k.kind" :disabled="!k.reachable">
-              {{ k.label }}{{ k.reachable ? '' : ' (nobody yet)' }}
+              {{ k.label }}{{ optionNote(k) }}
             </option>
           </optgroup>
         </BaseSelect>
@@ -226,7 +226,8 @@ const description = computed(() => (props.card.missing ? '' : props.card.descrip
 const isRole = (kind) => typeof kind === 'string' && kind.startsWith('role:')
 const kindOptions = computed(() => {
   const list = props.approvers.length ? props.approvers : [{ kind: 'primary', reachable: true }]
-  const out = list.map((a) => ({ kind: a.kind, reachable: a.reachable !== false, label: kindOptionLabel(a.kind, a.label) }))
+  const out = list.map((a) => ({ kind: a.kind, reachable: a.reachable !== false, unreachable: a.unreachable,
+    label: kindOptionLabel(a.kind, a.label) }))
   // A gate whose kind this install no longer offers still shows what it is.
   const current = props.card.gate?.approver
   if (current && !out.some((o) => o.kind === current)) {
@@ -239,6 +240,9 @@ const kindOptions = computed(() => {
 // first kind that reaches someone NOW (never a bodiless reset to `primary`,
 // and never a default fixed when the card was drawn — the map is re-read
 // after every write). A pick holds the select until its write settles.
+// trinity-enterprise#881: why a kind can't be picked — nobody fills it, or its
+// people can't open this agent.
+const optionNote = (k) => (k.reachable ? '' : k.unreachable === 'not_shared' ? ' (not shared)' : ' (nobody yet)')
 const defaultKind = () => [...kindOptions.value.kinds, ...kindOptions.value.roles].find((k) => k.reachable)?.kind || 'primary'
 const pickedKind = ref(null)
 const selectedKind = computed(() => pickedKind.value || props.card.gate?.approver || defaultKind())

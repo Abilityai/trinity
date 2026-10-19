@@ -870,6 +870,8 @@ def _voice(monkeypatch, gates):
 
     monkeypatch.setattr(sgs, "list_skill_gates", lambda agent: gates)
     monkeypatch.setattr(sgs.role_addressing, "owner_email", lambda agent: "owner@example.com")
+    # trinity-enterprise#881: approvers here can open the agent; reach is pinned in test_ent881.
+    monkeypatch.setattr(sgs, "_can_open", lambda agent, email: True)
     client = MagicMock()
     client.task = AsyncMock(return_value=SimpleNamespace(response_text="done"))
     get_client = MagicMock(return_value=client)

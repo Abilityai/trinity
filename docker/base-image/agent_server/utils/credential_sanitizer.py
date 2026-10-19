@@ -516,8 +516,12 @@ def add_credential_value(value: Optional[str]) -> None:
 # every git subprocess carries a live PAT in its argv.
 #
 # Anchored on `://` and stopping at the first `@` before any `/`, so a path or
-# query containing `@` is untouched.
-_URL_USERINFO_RE = re.compile(r"(://)[^/@\s]+@")
+# query containing `@` is untouched. The span also stops at `"`, `<`, `>` and an
+# escaped quote `\"`: none can appear unencoded in userinfo, and they delimit JSON
+# strings (nested ones too) and HTML attributes, so compact JSON pairing a URL with
+# a later email is left intact (#3769); a bare `\` still matches (`CORP\user:pw@`).
+# Same pattern as the backend copy.
+_URL_USERINFO_RE = re.compile(r"(://)(?:[^/@\s\"\\<>]|\\(?!\"))+@")
 
 
 def redact_url_userinfo(text: str) -> str:

@@ -537,6 +537,16 @@ class ChatMessageRequest(BaseModel):
     model: Optional[str] = None  # Model alias: sonnet, opus, haiku, or full model name
 
 
+class ReportBackRequest(BaseModel):
+    """#3295: ask that a sequential ``/chat`` execution report its terminal into
+    the caller's conversation. Sent by the MCP server when a sequential call
+    ends in a receipt instead of the reply, naming the CALLER's own turn; the
+    row inherits that turn's channel context through the same provenance
+    guard a ``/task`` child uses (``_inherited_channel_context``)."""
+    model_config = ConfigDict(extra="forbid")
+    parent_execution_id: str = Field(min_length=1, max_length=128)
+
+
 class ModelChangeRequest(BaseModel):
     """Request model for changing agent's model."""
     model: str  # Model alias: sonnet, opus, haiku, or full model name
@@ -3875,6 +3885,8 @@ class SkillGateEntry(BaseModel):
     set_by_agent: Optional[str] = None
     set_at: Optional[str] = None
     approver_reachable: Optional[bool] = None
+    # trinity-enterprise#881: why nobody can approve — `unfilled` | `not_shared` — or null.
+    approver_unreachable: Optional[str] = None
 
 
 class SkillGateApproverStatus(BaseModel):
@@ -3891,6 +3903,9 @@ class SkillGateApproverStatus(BaseModel):
     viewer_fills: bool
     label: Optional[str] = None
     role_id: Optional[str] = None
+    # trinity-enterprise#881: why it reaches nobody — `unfilled` (nobody fills
+    # it) | `not_shared` (its people can't open the agent) — or null.
+    unreachable: Optional[str] = None
 
 
 class SkillGateMapResponse(BaseModel):
@@ -3916,7 +3931,9 @@ class SkillGateMapResponse(BaseModel):
 class SkillGateWriteResponse(BaseModel):
     """What `PUT .../skill-gates/{skill_name}` did. `warnings`:
     `approver_unassigned` (the approver kind reaches nobody now, so a gated
-    request would be refused) and `marker_not_written` (the running agent's
+    request would be refused), `approver_not_shared` (its people can't open
+    the agent, so they would never see the approval — trinity-enterprise#881)
+    and `marker_not_written` (the running agent's
     fail-closed marker could not be written; the check re-syncs it)."""
     agent_name: str
     skill_name: str
