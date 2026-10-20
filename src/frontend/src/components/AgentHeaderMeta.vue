@@ -22,7 +22,7 @@
     :class="showRepo && showTags
       ? 'mt-2 min-h-[3.25rem] sm:min-h-[1.5rem]'
       : showTags
-        ? 'min-h-[1.5rem] sm:w-[20rem] sm:shrink-0'
+        ? 'min-h-[1.5rem] flex-1 min-w-[8rem]'
         : 'min-h-[1.5rem]'"
     data-testid="agent-header-meta"
   >

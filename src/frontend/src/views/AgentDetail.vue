@@ -88,6 +88,8 @@
             :tags="agentTags"
             :all-tags="allTags"
             :context-stats="headerContextStats"
+            :slot-stats="headerSlotStats"
+            :working="headerWorking"
             :has-avatar-prompt="!!avatarIdentityPrompt"
             :read-only-loading="readOnlyLoading"
             :auth-status="authStatus"
@@ -718,6 +720,8 @@ const {
 const networkStore = useNetworkStore()
 const {
   stats: headerContextStats,
+  slots: headerSlotStats,       // ent#955: the capacity indicator
+  working: headerWorking,       // ent#955: WS working state, else polled activity
   start: startContextStatsPolling,
   stop: stopContextStatsPolling
 } = useAgentContextStats(agent, networkStore)
