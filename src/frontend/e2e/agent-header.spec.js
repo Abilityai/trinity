@@ -4,7 +4,7 @@ import { test, expect } from '@playwright/test'
  * trinity-enterprise#950 — the agent header after the ent#887 rewrite.
  *
  * The header shows the bound repository (linked, branch, changes / behind),
- * the tags (two chips and a counted "+N"), and a small context-window chart
+ * the tags (two chips and a counted "+N"); the context ring it once had went in ent#955
  * for a running agent. The Talk and Workspace doors are gone: the Workspace is
  * in the nav and the voice call lives in its composer (ent#547).
  *
@@ -96,7 +96,7 @@ async function stubAgent(page) {
 test.describe('the agent header (ent#950)', () => {
   test.beforeEach(async ({ page }) => { await stubAgent(page) })
 
-  test('@smoke shows repo, tags and context — and no Talk or Workspace door', async ({ page }) => {
+  test('@smoke shows repo and tags — and no Talk or Workspace door', async ({ page }) => {
     await page.goto(`/agents/${AGENT}`)
     const repo = page.getByTestId('agent-header-repo')
     await expect(repo).toBeVisible({ timeout: 20000 })
@@ -110,7 +110,6 @@ test.describe('the agent header (ent#950)', () => {
     await expect(page.getByTestId('agent-header-tag')).toHaveCount(2)
     await expect(page.getByTestId('agent-header-tags-more')).toHaveText('+8')
 
-    await expect(page.getByTestId('agent-header-context')).toHaveText('72%', { timeout: 20000 })
 
     await expect(page.getByTestId('agent-talk')).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Workspace', exact: true })).toHaveCount(0)
@@ -131,7 +130,6 @@ test.describe('the agent header (ent#950)', () => {
       await page.setViewportSize({ width, height: 812 })
       await page.goto(`/agents/${AGENT}`)
       await expect(page.getByTestId('agent-header-repo')).toBeVisible({ timeout: 20000 })
-      await expect(page.getByTestId('agent-header-context')).toHaveText('72%', { timeout: 20000 })
       await page.waitForTimeout(400) // tab-strip ResizeObserver settles after paint
       const r = await page.evaluate(() => ({
         scrollWidth: document.documentElement.scrollWidth,

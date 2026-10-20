@@ -8,7 +8,12 @@
          <main> to content width and shifting/narrowing the whole card on tab switch. -->
     <main :class="['w-full max-w-[1400px] mx-auto py-2 sm:px-6 lg:px-8', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
       <div :class="['px-4 sm:px-0 py-2', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
-        <div v-if="loading" class="text-center py-8">
+        <!-- Only while there is nothing on screen yet. On an in-app agent
+             switch the page is KeepAlive-cached and the previous agent stays
+             rendered until the new one lands (ent#955: ~100ms); a spinner
+             stacked above it pushed the whole header down 112px for that beat
+             and back. The switch is stale-while-loading, like a refresh. -->
+        <div v-if="loading && !agent" class="text-center py-8">
           <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-action-primary-500 mx-auto"></div>
         </div>
 
@@ -82,12 +87,28 @@
             :git-behind="gitBehind"
             :tags="agentTags"
             :all-tags="allTags"
-            :context-stats="headerContextStats"
+            :slot-stats="headerSlotStats"
+            :working="headerWorking"
+            :has-avatar-prompt="!!avatarIdentityPrompt"
+            :read-only-loading="readOnlyLoading"
+            :auth-status="authStatus"
+            :subscriptions="availableSubscriptions"
+            :subscription-changing="subscriptionChanging"
+            :agent-stats="agentStats"
+            :cpu-history="cpuHistory"
+            :memory-history="memoryHistory"
+            :resource-limits="resourceLimits"
+            :token-stats="tokenStats"
             @toggle="toggleRunning"
             @toggle-autonomy="toggleAutonomy"
+            @toggle-read-only="toggleReadOnly"
             @update-tags="updateTags"
             @add-tag="addTag"
             @remove-tag="removeTag"
+            @set-label="setAgentLabel"
+            @open-avatar-modal="showAvatarModal = true"
+            @cycle-emotion="cycleEmotion"
+            @change-subscription="changeSubscription"
           />
 
           <!-- Tabs -->
@@ -107,17 +128,6 @@
 
             <!-- Overview Tab Content (#1107 — default landing tab) -->
             <div v-if="activeTab === 'overview'" class="p-6 space-y-6">
-              <!-- trinity-enterprise#887: live usage and spend left the header;
-                   they are read here, where the agent's trend is read. -->
-              <AgentLiveStrip
-                :agent="agent"
-                :agent-stats="agentStats"
-                :cpu-history="cpuHistory"
-                :memory-history="memoryHistory"
-                :resource-limits="resourceLimits"
-                :token-stats="tokenStats"
-                :auth-status="authStatus"
-              />
               <OverviewPanel :agent="agent" @navigate-tab="handleOverviewNavigate" @open-task="handleOpenTask" />
             </div>
 
@@ -426,7 +436,6 @@ import TasksPanel from '../components/TasksPanel.vue'
 import GitPanel from '../components/GitPanel.vue'
 import DashboardPanel from '../components/DashboardPanel.vue'
 import DeclaredMetricsTiles from '../components/DeclaredMetricsTiles.vue'
-import AgentLiveStrip from '../components/AgentLiveStrip.vue'
 // trinity-enterprise#887/#888/#890/#891 — the Settings home and its panes
 import AgentSettingsHome from '../components/agent-settings/AgentSettingsHome.vue'
 import GeneralPane from '../components/agent-settings/GeneralPane.vue'
@@ -708,7 +717,8 @@ const {
 // watcher, since KeepAlive means onUnmounted never fires on navigation).
 const networkStore = useNetworkStore()
 const {
-  stats: headerContextStats,
+  slots: headerSlotStats,       // ent#955: the capacity indicator
+  working: headerWorking,       // ent#955: WS in-flight signal, fills a bar at once
   start: startContextStatsPolling,
   stop: stopContextStatsPolling
 } = useAgentContextStats(agent, networkStore)

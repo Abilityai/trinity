@@ -51,9 +51,9 @@ The Overview tab is a glanceable, database-backed summary. It renders even when 
 - **Recent activity** -- the last five executions; click one to open it in the Tasks tab.
 - **Footprint** -- schedule, skill, and share counts, plus git sync status.
 
-A **live strip** at the top of Overview shows the present: for a running agent, CPU and memory against their limits (with sparklines) and uptime; for a stopped one, when it was created and the CPU and memory allocated to it. Once the agent has run anything, a second line shows spend — today, a 7-day sparkline and trend, and lifetime cost and run count (API-price equivalents for a subscription-funded agent). Nothing in the strip is a control; the limits and funding are set under **Settings › General**.
+The agent header's second and third rows show the present: for a running agent, CPU and memory against their limits (with sparklines); for a stopped one, when it was created and the CPU and memory allocated to it. Once the agent has run anything, a second line shows spend — today, a 7-day sparkline and trend, and lifetime cost and run count (API-price equivalents for a subscription-funded agent). Nothing in the strip is a control; the limits and funding are set under **Settings › General**.
 
-The persistent header above the tabs holds the agent's identity (avatar, name, id, description), its running state and badges, the **Autonomy** chip and the Start/Stop switch. Below the name it shows:
+The persistent header above the tabs holds the agent's identity (avatar, name, id, description), its running state and badges, the **Autonomy** chip and the Start/Stop switch. As an owner you can edit the identity right there: the pencil beside the name edits the display name in place (Enter saves, Esc cancels, leave it empty to show the id), and hovering the avatar offers **Generate an avatar** when there is none, or **Change avatar prompt** and **Next emotion** when there is one. The same rows live under **Settings › General › Identity**, which is also the only place to rename the agent's id. Among the badges, the funding badge names what pays for the agent (a subscription or the API key); as an owner, click it to switch. The second row holds the **Autonomy** and **Read-only** switches, the tags, and the live CPU and memory sparklines. Below those the header shows:
 
 - **Repository** — when the agent is bound to a GitHub repository and running, the repo (a link to GitHub), the current branch, and how many changes are waiting to be pushed or pulled. Pull and Push are on the **Git** tab.
 - **Tags** — the first two tags, with a "+N" count for the rest. Owners click the pencil (or **Add tag**) to add and remove tags; the same editor is in **Settings › General**.
@@ -78,6 +78,7 @@ A start also delivers the agent's assigned skills, and the start response says h
 
 The **display label** is the friendly name shown across the UI — the header, agent pickers, search, sort, and the activity timeline. Editing it is the everyday "rename": it changes what people read without moving the immutable slug (`name`), so it never breaks URLs, MCP tool names, schedules, or webhooks. For most day-to-day relabeling, this is the change you want; the heavier [Rename](#rename) below moves the slug itself.
 
+- Edit it from the pencil beside the name in the agent header, or from **Settings › General › Identity › Display name**.
 - Owner-only. The label is non-unique (the slug guarantees uniqueness) and clears back to the slug when left blank.
 - Input is trimmed; control characters and line breaks are rejected with a named error.
 - There is no MCP tool for the display label — it is a UI/API-only, presentation-only change. (The MCP `rename_agent` tool moves the slug, not the label.)
@@ -108,7 +109,7 @@ Volume clean-up stays inside this Trinity installation. Each agent volume carrie
 
 ### Health and Status
 
-The agent header displays status (Running/Stopped). CPU and memory usage and uptime are in the live strip at the top of the **Overview** tab; telemetry auto-refreshes every 10 seconds.
+The agent header displays status (Running/Stopped). CPU and memory usage are on the header's second row; telemetry auto-refreshes every 10 seconds.
 
 Fleet-wide health for the agents you can access is at `GET /api/monitoring/status`; one agent's is at `GET /api/monitoring/agents/{name}`. Admins also have `GET /api/ops/fleet/health` — see [Monitoring](../operations/monitoring.md). Health levels, from best to worst: healthy, degraded, unhealthy, critical, unknown.
 

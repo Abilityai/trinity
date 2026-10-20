@@ -31,7 +31,7 @@ As an agent owner I open one place to change what an agent is, what it may do, w
 | `PeoplePane.vue` | `AccessPanel` embedded, unchanged |
 | `StoragePane.vue` + `GitHubAuthRow.vue` | Repository (bound repo, BindRepoPanel, GitHub token, git sync), Credentials, Shared folders, File sharing |
 | `ChannelsPane.vue` / `IntegrationsPane.vue` | Voice / Expose via MCP + Trinity access key, plus rows that open the tabs still holding the rest |
-| `components/AgentLiveStrip.vue` | Live CPU/memory and spend on Overview (moved from the header) |
+| ~~`components/AgentLiveStrip.vue`~~ | Deleted by trinity-enterprise#955 — live CPU/memory and the 7-day spend row render in the header again (rows 2 and 3 below) |
 | `components/GitPanel.vue` | Gains Pull/Push (driven by AgentDetail's `useGitSync`); loses binding and token config |
 
 ## The header (trinity-enterprise#950)
@@ -40,8 +40,7 @@ The header is the one surface shown on every tab, so it carries what an operator
 
 | Piece | Shows | Data |
 |---|---|---|
-| `AgentHeader.vue` | Avatar, name, slug, description, status / circuit / runtime / ghost / system / shared badges, autonomy chip, Brain door, Start/Stop | `agent` |
-| `AgentHeaderContext.vue` | Context-window ring + percent, running agents only; "—" until there is a reading (a 0 or `offline` probe is no reading) | `stores/network.js::contextStats[name]`, kept fresh by `composables/useAgentContextStats.js` (15 s, visibility-gated, no stacked requests); started/stopped in `AgentDetail`'s `startAllPolling` / `stopAllPolling` and status watcher because the page is KeepAlive-cached |
+| `AgentHeader.vue` | Four rows since trinity-enterprise#955 (the pre-#3798 shape, almost whole). **1** Avatar (owner hover: generate / change prompt / next emotion → `open-avatar-modal` / `cycle-emotion`), name with the owner's pencil editing the display label in place (editor inside the `h1`, label never slug, Enter/blur save, Esc cancels, empty clears → `set-label`), slug, description, status / circuit / runtime / ghost / system / shared badges and the funding badge with an overlaid subscription `<select>` (→ `change-subscription`); right: Brain door, the capacity bars (`CapacityMeter` alone — the dashboard's slot map, refreshed on the header's 15 s tick; no ring, no word, no count), Start/Stop. **2** Autonomy + Read-only toggles, tag chips, live CPU / MEM sparklines (no uptime, no gear). **3** 7-day spend row. **4** GitHub line when a repo is connected — no Pull / Push. The id rename stays in Settings only | `agent`, `hasAvatarPrompt`, `authStatus`, `subscriptions`, `agentStats`, `cpuHistory`, `memoryHistory`, `resourceLimits`, `tokenStats`, `gitStatus` |
 | `AgentHeaderMeta.vue` | One reserved-height line: the bound repo (linked via `utils/gitRemote.js::repoFromRemote`), branch, "N changed" (files) and "N ahead" (unpushed commits) as separate badges, "N behind", or "in sync" — below `sm` the branch hides and the counts show as ±N / ↑N / ↓N (words in the tooltip), and the counts wrap under the repo name rather than crush it; then two tag chips, a counted "+N" and the tag editor (`BaseModal` around `TagsEditor`, owners only) | `useGitSync().gitStatus` (shown only when `git_enabled` and an origin exists; cleared on agent switch and on stop), `agentTags` / `allTags`, the same `updateTags` / `addTag` / `removeTag` handlers Settings › General uses |
 
 Removed from the header by #950: the **Workspace** and **Talk** doors. The Workspace is in the nav and the voice call is the Workspace composer's Call control (ent#547). Pull / Push / Refresh stay on the Git tab.

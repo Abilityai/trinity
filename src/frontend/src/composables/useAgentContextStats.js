@@ -1,4 +1,4 @@
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 
 /**
  * trinity-enterprise#950 — keep this agent's context-window reading fresh for
@@ -31,13 +31,34 @@ export function useAgentContextStats(agentRef, networkStore) {
     return (name && networkStore.contextStats?.[name]) || null
   })
 
+  // ent#955: the header's capacity indicator reads the same per-agent slot
+  // map the dashboard meters do (`fetchSlotStats`, `GET /api/agents/slots`),
+  // refreshed on the same tick, so the header and the tile agree.
+  const slots = computed(() => {
+    const name = agentRef.value?.name
+    return (name && networkStore.slotStats?.[name]) || null
+  })
+
+  // ent#955: a short task finishes between two 15 s polls and never reaches
+  // the slot map — the WS activity event (`chat_start` / `schedule_start`,
+  // `stores/network.js::workingState`) lands the moment it starts AND the
+  // moment it ends. The header fills a bar on the start at once, and the map
+  // is re-read on BOTH edges: measured, re-reading only on the start left the
+  // bar lit for up to 15 s after a 5 s turn, until the next tick found the
+  // slot free.
+  const working = computed(() => {
+    const name = agentRef.value?.name
+    return (name && networkStore.workingState?.[name]) || null
+  })
+  watch(working, () => { refresh() })
+
   async function refresh() {
-    // The endpoint is fleet-wide; on a slow backend a new tick must not stack
-    // a second request behind the first.
+    // The endpoints are fleet-wide; on a slow backend a new tick must not
+    // stack a second request behind the first.
     if (inFlight) return
     inFlight = true
     try {
-      await networkStore.fetchContextStats()
+      await Promise.all([networkStore.fetchContextStats(), networkStore.fetchSlotStats()])
     } finally {
       inFlight = false
     }
@@ -63,5 +84,5 @@ export function useAgentContextStats(agentRef, networkStore) {
     }
   }
 
-  return { stats, start, stop, refresh }
+  return { stats, slots, working, start, stop, refresh }
 }

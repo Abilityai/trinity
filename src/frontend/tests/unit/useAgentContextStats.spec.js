@@ -11,11 +11,14 @@ import { ref } from 'vue'
 import { useAgentContextStats, CONTEXT_POLL_MS } from '../../src/composables/useAgentContextStats'
 
 function fakeStore() {
-  const store = { contextStats: {}, calls: 0, resolve: null }
+  const store = { contextStats: {}, slotStats: {}, calls: 0, resolve: null }
   store.fetchContextStats = vi.fn(() => {
     store.calls += 1
     return new Promise((r) => { store.resolve = r })
   })
+  // ent#955: the same tick refreshes the slot map for the header's capacity
+  // bars; it rides the context fetch's in-flight guard.
+  store.fetchSlotStats = vi.fn(() => Promise.resolve())
   return store
 }
 
