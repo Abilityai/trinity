@@ -705,11 +705,14 @@ def _own_scope(fn):
 
 
 def _raises_404(stmt):
+    """`raise HTTPException(404, …)` or `raise HTTPException(status_code=404, …)`."""
     exc = stmt.exc if isinstance(stmt, ast.Raise) else None
-    return (isinstance(exc, ast.Call)
-            and getattr(exc.func, "id", getattr(exc.func, "attr", None)) == "HTTPException"
-            and any(k.arg == "status_code" and isinstance(k.value, ast.Constant) and k.value.value == 404
-                    for k in exc.keywords))
+    if not (isinstance(exc, ast.Call)
+            and getattr(exc.func, "id", getattr(exc.func, "attr", None)) == "HTTPException"):
+        return False
+    status = exc.args[0] if exc.args else next(
+        (k.value for k in exc.keywords if k.arg == "status_code"), None)
+    return isinstance(status, ast.Constant) and status.value == 404
 
 
 def _refuses_a_person_row_first(fn, idx):
@@ -740,6 +743,22 @@ def _refuses_a_person_row_first(fn, idx):
 def _calls(fn, name):
     return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == name
                for n in ast.walk(fn))
+
+
+# What a failing door is told: the rule, so nobody has to read it out of the AST walk.
+_GATE_SHAPES = {
+    "_for_principal": (
+        "the handler must pass the rows it returns through `_for_principal`, the machine "
+        "projection that drops a row about a person"),
+    "is_about_a_person": (
+        "expected, directly in the handler body and above its first `return`: "
+        "`if not row or operator_queue_service.is_about_a_person(row): raise HTTPException(404, ...)` "
+        "with nothing else in that `if`, where `row` is bound in the handler from a `db.` lookup. "
+        "The predicate must be the module's own `is_about_a_person`, as a top-level `or` term "
+        "(never under `not` or `and`, never a wrapper or a local shadow), so a prefix added to it "
+        "covers this door too. Moving the lookup or the predicate into a helper changes the rule: "
+        "update `_refuses_a_person_row_first` in the same PR"),
+}
 
 
 class TestEveryDoorIsPlaced:
@@ -776,9 +795,9 @@ class TestEveryDoorIsPlaced:
         for key, gate in READ_GATES.items():
             fn = _handler(tree, key)
             if gate == "_for_principal":
-                assert _calls(fn, "_for_principal"), key
+                assert _calls(fn, "_for_principal"), f"{key}: {_GATE_SHAPES[gate]}"
             else:
-                assert _refuses_a_person_row_first(fn, idx), key
+                assert _refuses_a_person_row_first(fn, idx), f"{key}: {_GATE_SHAPES[gate]}"
 
     def test_a_person_only_door_refuses_a_machine_before_it_reads(self):
         """The doors §2 expects to answer `person_required` are the ones the #2996
@@ -1056,11 +1075,20 @@ def _table_reads(rel, text):
     """Enclosing qualnames in `text` that reach the ops classes or the
     `operator_queue` table past the accessors: an import of either, an attribute
     of a data module naming them (`tables.operator_queue`, `_queue_db.operator_queue`,
-    `db.tables.operator_queue`), or SQL text naming the table. Docstrings are prose."""
+    `db.tables.operator_queue`, through a module-level or a function-local alias),
+    the table by name (`metadata.tables['operator_queue']`, `sa.table('operator_queue')`),
+    or SQL text naming it. Docstrings are prose."""
     if not any(token in text for token in (*_OPS_CLASSES, "operator_queue")):
         return set()
     tree = ast.parse(text)
     idx = rc._FileIndex(rel, tree)
+    aliases = {}  # every import in the file, at any depth: local name -> dotted module
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.module and not n.level:
+            aliases.update({a.asname or a.name: f"{n.module}.{a.name}" for a in n.names})
+        elif isinstance(n, ast.Import):
+            aliases.update({a.asname or a.name.split(".")[0]: a.name if a.asname else a.name.split(".")[0]
+                            for a in n.names})
     prose = {id(n.body[0].value) for n in ast.walk(tree)
              if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
              and n.body and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}
@@ -1073,8 +1101,18 @@ def _table_reads(rel, text):
             hit = n.id in _OPS_CLASSES
         elif isinstance(n, ast.Attribute):
             owner = (idx.resolve(n) or ("", ""))[0]
-            chain = ".".join(reversed(_receiver_names(n.value)))
-            hit = n.attr in _OPS_CLASSES or (n.attr == "operator_queue" and _TABLE_HOMES & {owner, chain})
+            parts = list(reversed(_receiver_names(n.value)))
+            chain = ".".join(parts)
+            via_alias = ".".join([aliases[parts[0]], *parts[1:]]) if parts and parts[0] in aliases else ""
+            hit = n.attr in _OPS_CLASSES or (
+                n.attr == "operator_queue" and bool(_TABLE_HOMES & {owner, chain, via_alias}))
+        elif isinstance(n, ast.Subscript):
+            hit = (isinstance(n.slice, ast.Constant) and n.slice.value == "operator_queue"
+                   and "tables" in (getattr(n.value, "attr", None), getattr(n.value, "id", None)))
+        elif isinstance(n, ast.Call):
+            hit = (getattr(n.func, "id", getattr(n.func, "attr", None)) in ("table", "Table")
+                   and bool(n.args) and isinstance(n.args[0], ast.Constant)
+                   and n.args[0].value == "operator_queue")
         elif isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in prose:
             hit = bool(_RAW_SQL.search(n.value))
         else:
@@ -1166,16 +1204,23 @@ class TestEveryRowReadIsClassified:
 
     def test_the_table_detector_sees_every_spelling(self):
         spellings = {
-            "from db.tables import operator_queue": "from db.tables import operator_queue\n",
-            "the data module's re-export": "from db import operator_queue as q\nx = q.operator_queue\n",
-            "the full dotted path": "import db.tables\nx = db.tables.operator_queue\n",
-            "the ops class": "from db.operator_queue import OperatorQueueOperations\n",
-            "SQL text": "q = 'SELECT question FROM operator_queue WHERE id = :i'\n",
+            "from db.tables import operator_queue": ("from db.tables import operator_queue\n", "<module>"),
+            "the data module's re-export": ("from db import operator_queue as q\nx = q.operator_queue\n",
+                                            "<module>"),
+            "the full dotted path": ("import db.tables\nx = db.tables.operator_queue\n", "<module>"),
+            "a function-local alias": ("def f():\n    from db import tables as t\n"
+                                       "    return t.operator_queue\n", "f"),
+            "MetaData.tables by name": ("x = metadata.tables['operator_queue']\n", "<module>"),
+            "a lightweight table()": ("import sqlalchemy as sa\nx = sa.table('operator_queue')\n", "<module>"),
+            "the ops class": ("from db.operator_queue import OperatorQueueOperations\n", "<module>"),
+            "SQL text": ("q = 'SELECT question FROM operator_queue WHERE id = :i'\n", "<module>"),
         }
-        for what, text in spellings.items():
-            assert _table_reads("s.py", text) == {"<module>"}, what
+        for what, (text, where) in spellings.items():
+            assert _table_reads("s.py", text) == {where}, what
+        # Prose, a constant from the data module and an audit target's name are not reads.
         assert _table_reads("t.py", '"""Rows FROM operator_queue, in prose."""\n'
-                                    "from db.operator_queue import OUTCOME_UNKNOWN\n") == set()
+                                    "from db.operator_queue import OUTCOME_UNKNOWN\n"
+                                    "log(target_type='operator_queue', details={'operator_queue': 1})\n") == set()
 
     def test_the_observer_detector_sees_calls_and_decorators(self):
         text = ("register_ending_observer(_a)\n"
