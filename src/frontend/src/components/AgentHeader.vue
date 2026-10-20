@@ -94,8 +94,13 @@
            shrink below its content width so the actions wrap instead of the
            page widening (the name itself is not truncated). -->
       <div class="flex flex-wrap justify-between items-start gap-y-3">
-        <!-- Left: Agent Identity -->
-        <div class="min-w-0">
+        <!-- Left: Agent Identity. While the label is being edited the block
+             takes the row's remaining width (`flex-1`) so the editor's
+             `w-full` resolves against something definite — a content-sized
+             block would size the input by its intrinsic ~20ch and clip a
+             long name on select-all. At rest it stays content-sized, so the
+             pencil sits beside the name and nothing else moves. -->
+        <div class="min-w-0" :class="isEditingLabel ? 'flex-1' : ''">
           <!-- ent#955: the name edits in place. The editor renders INSIDE the
                h1 so it inherits the heading's type and ink (one footprint,
                nothing shifts), and it edits the LABEL (`display_label`) — the
@@ -104,13 +109,16 @@
                label, never the slug: pre-filling the slug invites someone to
                "edit" a name they never chose. -->
           <div class="flex items-center gap-2 min-w-0">
-            <h1 class="text-2xl font-bold text-gray-900 dark:text-white min-w-0">
+            <h1 class="text-2xl font-bold text-gray-900 dark:text-white min-w-0" :class="isEditingLabel ? 'flex-1' : ''">
+              <!-- `-mb-0.5` swallows the 2px underline so the rows below do
+                   not drop while editing; `text-inherit` keeps the heading's
+                   ink (preflight already gives the input the heading's font). -->
               <input
                 v-if="isEditingLabel"
                 ref="labelInput"
                 v-model="editedLabel"
                 type="text"
-                class="w-full max-w-md bg-transparent border-0 border-b-2 border-action-primary-500 focus:border-action-primary-600 dark:focus:border-action-primary-400 focus:outline-none focus:ring-0 py-0 px-0 text-inherit font-inherit"
+                class="block w-full max-w-md -mb-0.5 bg-transparent border-0 border-b-2 border-action-primary-500 focus:border-action-primary-600 dark:focus:border-action-primary-400 focus:outline-none focus:ring-0 py-0 px-0 text-inherit"
                 :placeholder="agent.name"
                 aria-label="Display name"
                 data-testid="agent-header-label-input"
