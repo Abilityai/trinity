@@ -1010,8 +1010,10 @@ def _origin(item: dict, run: Optional[dict], email: str):
             session = portal_db.get_portal_session(chat, agent, email)
             if session:
                 filed = item.get("created_at")
+                # trinity#3402: the person's own chat as they saw it, held turns too.
                 rows = portal_db.get_portal_messages(
                     agent, email, limit=ORIGIN_MESSAGES, session_id=chat, before=filed,
+                    include_held=True,
                 ) if filed else []
                 messages = []
                 for m in rows:
