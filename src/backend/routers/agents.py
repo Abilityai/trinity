@@ -502,6 +502,14 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     # edit and the surfaces disagree (§1.3.1 FR-3). One extra read; not the list
     # path, so a per-agent call is fine here.
     agent_dict["display_label"] = db.get_display_label(agent_name)
+    # #3872: whether a repository is bound, known at first paint. The header
+    # reserves its GitHub row on this so the live git status (an exec into the
+    # running container, seconds later) cannot push the tab strip down when it
+    # lands. The template string cannot be the signal — an agent deployed
+    # locally and bound afterwards carries a `local:` label (or none, #1811) —
+    # but the persisted git config is exactly what `_reconstruct_template_id`
+    # already treats as "GitHub-backed". One read, like the label above.
+    agent_dict["git_configured"] = db.get_git_config(agent_name) is not None
     agent_dict["can_delete"] = db.can_user_delete_agent(current_user.username, agent_name)
     agent_dict["autonomy_enabled"] = db.get_autonomy_enabled(agent_name)
     read_only_data = db.get_read_only_mode(agent_name)

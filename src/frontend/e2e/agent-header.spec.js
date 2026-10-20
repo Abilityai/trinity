@@ -63,6 +63,7 @@ async function stubAgent(page) {
     resources: { cpu: '1', memory: '1g' },
     container_id: 'e2e-agent-header-container',
     template: 'local:test-echo',
+    git_configured: true,
     runtime: 'claude-code',
     ephemeral: false,
     display_label: 'A header with everything in it',
@@ -152,6 +153,43 @@ test.describe('the agent header (ent#950)', () => {
       expect(fit.badgeRight, 'a git badge runs past the header').toBeLessThanOrEqual(fit.cardRight + 1)
     })
   }
+
+  test('@smoke the GitHub line landing moves nothing below the header (#3872)', async ({ page }) => {
+    // The live git status is an exec into the running container and lands
+    // seconds after first paint. The fixture agent is a LOCAL template bound
+    // afterwards (`git_configured`), the shape that used to pop: the row was
+    // reserved on the template string alone. Hold the status until the page
+    // has painted its reserved row, measure where the tab strip sits, release
+    // the status, and measure again — the strip must not have moved, and the
+    // row must be the same height before and after (principle 6).
+    let release
+    const held = new Promise((resolve) => { release = resolve })
+    await page.route(`**/api/agents/${AGENT}/git/status`, async (route) => {
+      await held
+      await route.fulfill(json(GIT_STATUS))
+    })
+
+    await page.goto(`/agents/${AGENT}`)
+    const row = page.getByTestId('agent-header-git')
+    await expect(row.locator('[aria-busy="true"]')).toBeVisible({ timeout: 20000 })
+    await page.waitForTimeout(300) // tab-strip ResizeObserver settles after paint
+    const before = await page.evaluate(() => ({
+      tabs: document.querySelector('[role="tablist"]').getBoundingClientRect().top,
+      row: document.querySelector('[data-testid="agent-header-git"]').getBoundingClientRect().height,
+    }))
+
+    release()
+    await expect(page.getByTestId('agent-header-repo')).toBeVisible()
+    await expect(page.getByTestId('agent-header-git-changes')).toContainText('12 changed')
+    await page.waitForTimeout(300)
+    const after = await page.evaluate(() => ({
+      tabs: document.querySelector('[role="tablist"]').getBoundingClientRect().top,
+      row: document.querySelector('[data-testid="agent-header-git"]').getBoundingClientRect().height,
+    }))
+
+    expect(after.row, 'row 4 changed height when the status landed').toBe(before.row)
+    expect(after.tabs, 'the tab strip moved when the status landed').toBe(before.tabs)
+  })
 
   test('@smoke the chat composer has no microphone', async ({ page }) => {
     // Carried over from the retired Talk-door spec: removing the header door
