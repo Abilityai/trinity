@@ -58,7 +58,6 @@ As a platform user, I want to add credentials to my agent so that MCP servers an
 | Agent Detail → Credentials Tab | `POST /api/agents/{name}/credentials/inject` | Inject files directly |
 | Agent Detail → Credentials Tab | `POST /api/agents/{name}/credentials/export` | Export to encrypted file |
 | Agent Detail → Credentials Tab | `POST /api/agents/{name}/credentials/import` | Import from encrypted file |
-| Agent Startup | `POST /api/internal/decrypt-and-inject` | Auto-import on start |
 
 ---
 
@@ -264,43 +263,35 @@ async def import_credentials(
 
 ---
 
-## Flow 4: Auto-Import on Agent Startup
+## Flow 4: A committed `.credentials.enc` at startup (imported by the backend, not by `startup.sh` — #3510)
 
-### Overview
-When an agent starts and has `.credentials.enc` but no `.env`, automatically decrypt and inject credentials.
+`docker/base-image/startup.sh` never decrypts a committed `.credentials.enc`:
+the platform key never reaches the container. The **backend** imports it once
+the agent is ready — `lifecycle.inject_assigned_credentials()` →
+`credential_encryption.import_to_agent()`. That import is skipped for
+ephemeral agents, installs with no encryption key, and already-running
+containers; in those cases the owner imports it with **Import from Git** on the
+Credentials tab or the `import_credentials` MCP tool (Flow 3). Subscription-mode
+agents import it too (#3510, ruled 2026-10-19): their MCP keys live there, and
+the agent server force-unsets Anthropic API-key variables at every spawn under
+subscription (#2114), so an imported `ANTHROPIC_API_KEY` cannot shadow the
+subscription. The startup script says so on stdout:
 
-### Startup Script (`docker/base-image/startup.sh`)
 ```bash
-# Auto-import encrypted credentials if .env doesn't exist
 if [ -f ".credentials.enc" ] && [ ! -f ".env" ]; then
-    echo "Found .credentials.enc without .env, importing credentials..."
-    curl -s -X POST "http://backend:8000/api/internal/decrypt-and-inject" \
-         -H "Content-Type: application/json" \
-         -d "{\"agent_name\": \"$AGENT_NAME\"}" || echo "Failed to import credentials"
+    echo "Found .credentials.enc but no .env: this script does not decrypt it."
+    echo "  The platform imports it once the agent is ready (not when no encryption"
+    echo "  key is configured). If .env is still missing,"
+    echo "  the owner imports it: Credentials tab > Import from Git (or the import_credentials MCP tool)."
 fi
 ```
 
-### Internal Endpoint (`src/backend/routers/internal.py`)
-```python
-@router.post("/decrypt-and-inject")
-async def decrypt_and_inject(request: InternalDecryptInjectRequest):
-    """Internal endpoint for agent startup - X-Internal-Secret via the router's verify_internal_secret dependency."""
-    encryption_service = CredentialEncryptionService()
-
-    # Read encrypted file from agent
-    enc_files = await encryption_service.read_agent_credential_files(
-        request.agent_name, ['.credentials.enc']
-    )
-
-    if '.credentials.enc' not in enc_files:
-        return {"status": "skipped", "reason": "No .credentials.enc found"}
-
-    # Decrypt and write
-    files = encryption_service.decrypt(enc_files['.credentials.enc'])
-    await encryption_service.write_agent_credential_files(request.agent_name, files)
-
-    return {"status": "success", "files_written": list(files.keys())}
-```
+Until #3510 the script called `POST /api/internal/decrypt-and-inject`, a route
+that never existed, so the path failed on every start and blamed a missing
+encryption key. An agent-callable decrypt was ruled out on 2026-10-15: the file
+lives in the agent's own home, so the agent could stage another agent's blob
+there and have the platform decrypt it. `tests/unit/test_3510_startup_backend_paths.py`
+fails if the agent image calls a backend path the app does not register.
 
 ---
 

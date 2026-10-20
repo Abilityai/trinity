@@ -1,6 +1,31 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3725_public_template_tokenless_metadata.py",
+      "feature": "abilityai/trinity#3725",
+      "added": "2026-10-14",
+      "categories": [
+        "backend",
+        "templates",
+        "github",
+        "unit"
+      ],
+      "description": "A public github: template's metadata read walks the remaining token tiers, then a credential-free SHA-pinned read, before the ent#14 gate refuses; helpers, raw reader and the chain's read decisions."
+    },
+    {
+      "file": "unit/test_3725_identity_and_validation.py",
+      "feature": "abilityai/trinity#3725",
+      "added": "2026-10-14",
+      "categories": [
+        "backend",
+        "templates",
+        "github",
+        "security",
+        "unit"
+      ],
+      "description": "The chain's effect on the create: 403 git re-check in _validate_github_access, 401 identity swap (never persisted, never on fork), git_mode.token_tier / rejected_token_tier, token dedupe, non-default git base fail-closed, no token in any log record."
+    },
+    {
       "file": "unit/test_ent862_aauth_settings.py",
       "feature": "abilityai/trinity-enterprise#862",
       "added": "2026-10-13",
@@ -643,9 +668,9 @@
     },
     {
       "file": "unit/test_2545_skill_source_pin.py",
-      "feature": "#2545, #3123",
+      "feature": "#2545, #3123, #3430",
       "added": "2026-09-06",
-      "updated": "2026-10-06",
+      "updated": "2026-10-15",
       "categories": [
         "backend",
         "skills",
@@ -653,7 +678,7 @@
         "docs",
         "unit"
       ],
-      "description": "Bundled community skills-catalog pin guard (static, parses SOURCE so a shell override cannot leak in): `config.DEFAULT_SKILL_SOURCE_REF` is a vX.Y.Z tag at or above the floor v0.3.0 (#3123: the first trinity-skills release with `update-dashboard`, the playbook the metrics tiles name; #2545 set v0.2.0); `.env.example` and `docs/user-docs/automation/skills-and-playbooks.md` state the same default (exactly one regex match in the doc); the fresh-install seed note reports the configured ref."
+      "description": "Bundled community skills-catalog pin guard (static, parses SOURCE so a shell override cannot leak in): `config.DEFAULT_SKILL_SOURCE_REF` is a vX.Y.Z tag at or above the floor v0.5.0 (#3430: the first trinity-skills release whose `project-status` and `add-pipeline` match the platform's ask-id and escalation-title contracts; #3123 set v0.3.0, #2545 v0.2.0); `.env.example` and `docs/user-docs/automation/skills-and-playbooks.md` state the same default (exactly one regex match in the doc); the fresh-install seed note reports the configured ref."
     },
     {
       "file": "unit/test_3246_platform_alert_surfaces.py",
@@ -4200,6 +4225,18 @@
       "description": "POST /api/agents/{name}/aauth/resource-call through TestClient over the real ladder and the scripted resource + person server: uniform 404 while inert for every body shape, the agent's OWN key only (human, sibling, system → 403 aauth_agent_only) BEFORE the allow-list is consulted, the discriminated call-XOR-resume body with bounded fields, no request or response field can carry a token (token_kind is a three-word Literal; field sets pinned); a result through the full chain with status/body/budget/token_kind/challenges and an audit row whose details name the outcome and never a token, the body, the justification or an id; the second call reuses the auth token with zero PS trips; the same dedup_label replays the snapshot without a second send (body is not identity); a pending outcome RELEASES the effect claim so the post-consent retry runs for real; resume by handle polls the PS with Prefer: wait and re-sends the STORED body outside the guard, then handle_unknown is an expired outcome; denied / approval-pending are 200 outcomes with do_not_retry; refusals are mapped errors (403 resource_not_allowed, 409 person_server_unconfigured, 503 state_unavailable as AUTHORIZATION rows before egress; 402 / 429 + retry_after / 502 unsupported_requirement as EXECUTION rows after it); a POST timeout is 504 with possibly_executed; an in-flight duplicate is 409; a missing execution id runs unguarded or is refused 422 on a pull agent; GET sends no body and the justification is INFO-logged not audited; snapshot round-trip; registered in main.py after the person-token router with the # mcp: header; the path resolves beside the agent catch-all; the gate helpers are the person-token router's."
     },
     {
+      "file": "unit/test_ent928_aauth_four_party.py",
+      "feature": "abilityai/trinity-enterprise#928",
+      "added": "2026-10-15",
+      "categories": [
+        "backend",
+        "security",
+        "a2a",
+        "unit"
+      ],
+      "description": "AAuth four-party resources (resource token aud = access server), no network: verify_resource_token accepts a four-party aud only when it is a strict https://host server identifier whose /.well-known/aauth-access.json is fetchable and names itself as issuer — the fetch runs only AFTER the resource's signature verifies, a three-party aud never dials anything, every refusal (no document, issuer mismatch, issuer missing, private address, timeout, non-https / port / path / IP / malformed aud) is the named check `aud` with no person-server call; discovery.access_server_metadata document rules, the outbound public-URL validator on its path, positive and negative caches; inspect_auth_token per mode (four-party: iss = the AS, dwk = aauth-access.json; three-party: iss = PS, dwk = aauth-person.json; ps must be ours in both; cross-mode tokens refused; HeldAuthToken.iss is the real issuer); the ladder end to end: the resource token goes to OUR PS's auth_token_endpoint carrying the AS aud, the AS receives only its metadata fetch, the AS-minted token is held under its issuer and reused on the second call with no PS trip, a PS-minted token answering a four-party exchange is refused and nothing held, a pending (202) record carries as_url and the poll holds the same rule, an older record without as_url stays three-party, snapshot/replay and audit details carry auth_mode + access_server and never a token."
+    },
+    {
       "file": "mcp-server/src/tools/aauth.test.ts",
       "feature": "abilityai/trinity-enterprise#878, abilityai/trinity-enterprise#879",
       "added": "2026-10-13",
@@ -6063,6 +6100,64 @@
         "auth"
       ],
       "description": "trinity-enterprise#848: gate map API for role:<id> approvers: PUT saved lower-cased when this agent's roster names the role; unknown_role / approver_unavailable (OSS, no roster answer) / invalid_approver refused with nothing written; named-but-unfilled saved with approver_unassigned; deadline-only PUT on a stored role gate passes on OSS; GET lists roles after kinds with label + role_id through the response model, booleans only; viewer_fills agrees with enforce; stored role gates report reach via approver_people; the MCP set_skill_gate regex accepts exactly what the backend parses."
+    },
+    {
+      "file": "unit/test_ent901_withdraw_ask.py",
+      "feature": "abilityai/trinity-enterprise#901",
+      "added": "2026-10-14",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "trinity-enterprise#901 checkpoint A: an agent withdraws its own pending ask with a reason and no successor. The shared compare-and-set (`_end_own_pending`) ends the row cancelled/agent/reason with replaced_by NULL and no deadline clause (a pending row past its deadline is withdrawn, like a person's cancel); a person's answer, cancel or the sweep wins and nothing is written; NULL-raiser, gate and another agent's rows are not_own; replace still runs through the shared writer. `agent_ending_kind` tells replaced from withdrawn by the link, never the reason's text. The sink: uniform 404 ask_not_found (unknown / another's / gate / platform / about-a-person), 409 ask_ended with ids+enums only, 200 replayed on a repeat (differs on a changed reason), 422 invalid_reason, agent-keyed `withdrawn` audit row without the text, one thin trigger, no wake. The route: get_self_acting_agent 403 for every other principal, receipt and readback redacted and carrying agent_ending; the #2996 census lists it as agent-callable."
+    },
+    {
+      "file": "unit/test_ent662_peer_skill_surface.py",
+      "feature": "abilityai/trinity-enterprise#662",
+      "added": "2026-10-15",
+      "categories": [
+        "backend",
+        "security",
+        "skills"
+      ],
+      "description": "A peer may run what an agent declares; what an admin assigned needs a grant (ent#662). At the real seam (skill_gate_service.enforce over the per-process SQLite, no gates set): a peer invoking an individually assigned OR set-propagated library skill is refused 403 skill_not_granted naming caller, callee and only the ungranted names; declared skills, a #2914 conflict name, a granted skill, the agent itself, a person, a schedule, a connector and trinity-system pass; a grant is per caller x target x skill and revocable; a name hidden in the context text is read too. The execute_task backstop applies the rule on an agent with no gates. An unreadable assignment table refuses a peer (503 peer_surface_unavailable) and leaves a person alone. Every refusal is one audit row. The grant routes: admin on PUT/DELETE read off the real dependant graph, an admin's MCP key refused, 422 skill_not_assigned / self / system agent, idempotent with a consent line and audited, and the per-edge read filters targets by viewer access. Both migration tracks and both CASCADE AgentRefs. Mutations: removing the enforce hook turns 8 red; restoring the backstop early return turns the backstop test red. Follow-ups: a parent runs every skill on an agent it spawned with its current key, a child calling its parent still needs a grant, a stale spawn key is no parent (symmetric-exemption and no-exemption mutations each red); removing an edge or a full replace that drops it deletes its grants and only its grants (cascade mutation red); the drift report lists only (edge x library skill) pairs USED in the last 30 days and not granted, with uses + last_used_at, off the real execution ledger read; the drift route is admin-only; the per-edge view carries last_used_at."
+    },
+    {
+      "file": "unit/test_ent820_files_tier_census.py",
+      "feature": "trinity-enterprise#820",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "files",
+        "auth",
+        "audit",
+        "unit"
+      ],
+      "description": "The agent Files surface's ruled tier per verb: every /files route in routers/agent_files.py has a census row and runs its gate; the file_path_policy.decide() table for owner, share and key; a share holder (JWT or user-scope key) refused instruction, skills and run-code writes; owner/admin/agent-key paths kept; one audit row per write/delete/mkdir; share holders refused on an unverified image while agent keys pass; the projected list (hidden withheld, restricted flags); hard-linked reads refused below the owner tier."
+    },
+    {
+      "file": "unit/test_ent820_path_policy_parity.py",
+      "feature": "trinity-enterprise#820",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "agent",
+        "files",
+        "unit"
+      ],
+      "description": "file_path_policy.py is byte-identical in the backend and the agent server, stdlib-only, and the copy the agent server loads; guardrails-baseline.json path_deny and the policy agree both ways; the agent server's platform floor is a subset of the backend route floor and leaves platform writers their paths."
+    },
+    {
+      "file": "unit/test_ent820_agent_server_no_follow_writes.py",
+      "feature": "trinity-enterprise#820",
+      "added": "2026-10-16",
+      "categories": [
+        "agent",
+        "files",
+        "unit"
+      ],
+      "description": "The agent server's PUT/mkdir/DELETE/list refuse a link that changes a path's class, keep same-class links, never write through a final link, delete a link as itself, never descend a link in the list (node cap), use resolved-path containment (#3032), CAS without following links, survive a crashed tmp file, keep file mode, refuse nested/bare git metadata, report the link count on reads, and still serve every platform writer."
     }
   ]
 }

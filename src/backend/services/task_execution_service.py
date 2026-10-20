@@ -52,7 +52,7 @@ from services.dispatch_breaker import DispatchBreaker
 from services.execution_integrity import derive_turn_integrity
 from services import event_dispatch_service
 from services import channel_completion_report
-from services import skill_gate_service
+from services import peer_skill_policy, skill_gate_service
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.platform_audit_service import AuditEventType, platform_audit_service
 # #2048: stdlib-only leaf by construction, so this cannot cycle back through the
@@ -1994,12 +1994,15 @@ class TaskExecutionService:
         so the caller answers pending / refused instead of dispatching.
         """
         try:
-            # The gate map first: while nothing is gated (the common case, and
-            # every install until gates are set) this is the only read.
+            # The gate map first: while nothing is gated and the agent holds no
+            # library skill (the common case) these are the only reads.
+            # abilityai/trinity-enterprise#662: an agent with library skills
+            # but no gates still goes through `enforce`, whose peer check is
+            # the rule for what an edge exposes.
             gates = skill_gate_service.read_gates(agent_name)
-            if not gates:
+            if not gates and not peer_skill_policy.has_library_skills(agent_name):
                 return
-            if execution_id:
+            if gates and execution_id:
                 approved = db.get_gate_request_by_dispatched_execution(execution_id)
                 if (approved and approved.get("agent_name") == agent_name
                         and approved.get("state") in APPROVED_RUN_STATES):

@@ -576,6 +576,36 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // abilityai/trinity-enterprise#662: what each edge of this agent exposes —
+    // the library skills on its permitted targets and which it may run.
+    async getAgentPeerSkills(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/peer-skills`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // The honest upgrade (admin): agent-to-agent calls that used a library
+    // skill in the last 30 days and are now refused for want of a grant.
+    async getPeerSkillDrift() {
+      const authStore = useAuthStore()
+      const response = await axios.get('/api/skills/peer-grants/drift', {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // Grant (or revoke) one library skill on `target` to caller `name` (admin).
+    async setAgentPeerSkillGrant(name, target, skill, granted) {
+      const authStore = useAuthStore()
+      const url = `/api/agents/${name}/peer-skills/${encodeURIComponent(target)}/${encodeURIComponent(skill)}`
+      const response = granted
+        ? await axios.put(url, {}, { headers: authStore.authHeader })
+        : await axios.delete(url, { headers: authStore.authHeader })
+      return response.data
+    },
+
     // ent#84: one gated read for the fleet permissions matrix — returns both
     // axes (accessible, non-system agents) and every caller→target grant edge
     // among them with provenance (granted_by / granted_at). Entitlement-gated
@@ -1042,16 +1072,9 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
-    async registerA2aEndpoint(name, { name: label, url, credentials }) {
-      const authStore = useAuthStore()
-      const body = { name: label, url }
-      if (credentials) body.credentials = credentials
-      const response = await axios.post(`/api/enterprise/a2a/${name}/endpoints`, body, {
-        headers: authStore.authHeader
-      })
-      return response.data
-    },
-
+    // ent#898: no registerA2aEndpoint — outbound endpoints are registered in
+    // the platform-wide registry (stores/a2aFederation.js), the only list
+    // call_a2a_agent resolves. Remove stays, to clear per-agent rows.
     async removeA2aEndpoint(name, endpointId) {
       const authStore = useAuthStore()
       const response = await axios.delete(`/api/enterprise/a2a/${name}/endpoints/${endpointId}`, {
@@ -1173,6 +1196,36 @@ export const useAgentsStore = defineStore('agents', {
       const response = await axios.put(`/api/agents/${name}/capacity`, {
         max_parallel_tasks: maxParallelTasks
       }, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // Execution timeout (TIMEOUT-001 / #665) — the per-agent cap every run
+    // inherits. Surfaced in Settings › General (trinity-enterprise#353).
+    async getAgentTimeout(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/timeout`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setAgentTimeout(name, seconds) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/timeout`, {
+        execution_timeout_seconds: seconds
+      }, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // S3 (#384) — adopt origin/main as the new baseline, keeping instance
+    // state. Settings › General › Danger zone (trinity-enterprise#887).
+    async resetToMainPreserveState(name) {
+      const authStore = useAuthStore()
+      const response = await axios.post(`/api/agents/${name}/git/reset-to-main-preserve-state`, {}, {
         headers: authStore.authHeader
       })
       return response.data

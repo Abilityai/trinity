@@ -5276,6 +5276,56 @@ def _migrate_proactive_consent_not_asked(cursor, conn):
     cursor.execute("UPDATE agent_sharing SET allow_proactive = NULL WHERE allow_proactive = 0")
     conn.commit()
 
+def _migrate_admin_email_not_username(cursor, conn):
+    """#3554 — the provisioned admin has no sign-in email.
+
+    The PostgreSQL admin seed wrote ``email = username`` ("admin"), which is
+    truthy, so the first-run "Sign-in email" step never appeared. Clears the
+    value where it still equals the username and is not an address (no ``@``);
+    a real email, even one equal to its username, is kept. Data only.
+
+    Idempotent. Mirrored by Alembic 0100_admin_email_not_username.
+    """
+    cursor.execute("PRAGMA table_info(users)")
+    cols = {row[1] for row in cursor.fetchall()}
+    if not {"username", "email"} <= cols:   # a pre-username schema has nothing to clear
+        return
+    cursor.execute(
+        "UPDATE users SET email = NULL WHERE email = username AND email NOT LIKE '%@%'"
+    )
+    conn.commit()
+
+
+def _migrate_agent_peer_skill_grants(cursor, conn):
+    """abilityai/trinity-enterprise#662 — a peer may run what an agent declares;
+    what an admin assigned needs a grant.
+
+    ``agent_peer_skill_grants`` holds the per-skill grant over an edge: caller X
+    may run library-assigned skill Y on target Z. Additive only. Nobody holds a
+    grant on upgrade — the safe default — and the Permissions panel shows each
+    edge's library skills as "not granted" until an admin opens them.
+
+    Idempotent. Mirrored by Alembic 0099_agent_peer_skill_grants.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_peer_skill_grants (
+            caller_agent TEXT NOT NULL,
+            target_agent TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            PRIMARY KEY (caller_agent, target_agent, skill_name)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_peer_skill_grants_target "
+        "ON agent_peer_skill_grants(target_agent)"
+    )
+    conn.commit()
+
+
 def _migrate_supersede_queue_flood_backlog(cursor, conn):
     """#3130: collapse the flood-alert backlog to one pending alert per agent.
 
@@ -5708,4 +5758,6 @@ MIGRATIONS = [
     ("a2a_internal_scope", _migrate_a2a_internal_scope),
     ("operator_queue_replace", _migrate_operator_queue_replace),
     ("proactive_consent_not_asked", _migrate_proactive_consent_not_asked),
+    ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
+    ("admin_email_not_username", _migrate_admin_email_not_username),
 ]

@@ -1,13 +1,15 @@
 <template>
   <div>
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Trinity access key</h3>
-    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      The agent-scoped key this agent uses to call Trinity's own MCP tools. It is
-      what makes the
-      <span class="font-medium">Permissions</span> matrix apply — a container
-      configured with somebody's personal key acts as that person instead, and
-      the matrix is silently bypassed.
-    </p>
+    <template v-if="!embedded">
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Trinity access key</h3>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+        The agent-scoped key this agent uses to call Trinity's own MCP tools. It is
+        what makes the
+        <span class="font-medium">Permissions</span> matrix apply — a container
+        configured with somebody's personal key acts as that person instead, and
+        the matrix is silently bypassed.
+      </p>
+    </template>
 
     <div v-if="loading" class="text-sm text-gray-400">Loading…</div>
 
@@ -108,6 +110,9 @@ const props = defineProps({
   agentName: { type: String, required: true },
   // Positional (message, type) — same contract as the other settings panels.
   notify: { type: Function, default: null },
+  // trinity-enterprise#887: inside an agent Settings pane the row supplies
+  // the title and description, so the panel drops its own.
+  embedded: { type: Boolean, default: false },
 })
 
 function notifyUser(message, type = 'success') {

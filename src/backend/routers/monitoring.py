@@ -212,8 +212,14 @@ async def get_fleet_status(
 
     # Filter to accessible agents (unless admin)
     if current_user.role != "admin":
-        accessible = get_accessible_agents(current_user)
-        accessible_names = {a["name"] for a in accessible}
+        agent = getattr(current_user, "agent_name", None)
+        if isinstance(agent, str) and agent:
+            # trinity-enterprise#706 D12: an agent key's fleet sweep sees its
+            # owner's set (get_accessible_agents would narrow it to its reach).
+            accessible_names = set(db.get_accessible_agent_names(
+                current_user.email or "", is_admin=False) or [])
+        else:
+            accessible_names = {a["name"] for a in get_accessible_agents(current_user)}
         agent_names = [n for n in all_agent_names if n in accessible_names]
     else:
         agent_names = all_agent_names
