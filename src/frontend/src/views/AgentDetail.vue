@@ -83,11 +83,15 @@
             :tags="agentTags"
             :all-tags="allTags"
             :context-stats="headerContextStats"
+            :has-avatar-prompt="!!avatarIdentityPrompt"
             @toggle="toggleRunning"
             @toggle-autonomy="toggleAutonomy"
             @update-tags="updateTags"
             @add-tag="addTag"
             @remove-tag="removeTag"
+            @set-label="setAgentLabel"
+            @open-avatar-modal="showAvatarModal = true"
+            @cycle-emotion="cycleEmotion"
           />
 
           <!-- Tabs -->
