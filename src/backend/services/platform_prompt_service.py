@@ -356,6 +356,7 @@ _GUARDRAIL_PATH_DENY: tuple[str, ...] = (
     "/home/developer/.trinity/read-only-config.json",
     "/opt/trinity/*",
     "/etc/claude-code/*",
+    "/var/lib/trinity/*",
 )
 _PATH_DENY_LIST = ", ".join(f"`{p}`" for p in _GUARDRAIL_PATH_DENY)
 # Only Claude Code runs the file guardrail hook, and only on its Write/Edit
