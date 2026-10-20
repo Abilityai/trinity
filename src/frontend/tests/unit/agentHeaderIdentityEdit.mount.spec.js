@@ -202,6 +202,66 @@ describe('the avatar overlay', () => {
   })
 })
 
+describe('the restored rows (pre-#3798 shape)', () => {
+  const AUTH = { auth_mode: 'subscription', subscription_name: 'team-max' }
+  const SUBS = [{ id: 1, name: 'team-max' }, { id: 2, name: 'solo' }]
+  const STATS = { cpu_percent: 12, memory_percent: 40, memory_used_bytes: 400 * 1024 * 1024, uptime_seconds: 3600 }
+  const TOKENS = { lifetime_executions: 5, lifetime_cost: 1.5, cost_24h: 0.2, avg_daily_cost: 0.1, trend_cost_pct: 100, daily_breakdown: [{ cost: 0.1 }, { cost: 0.2 }] }
+
+  it('the funding badge names the subscription and its overlaid select switches it', async () => {
+    render({ authStatus: AUTH, subscriptions: SUBS })
+    expect(q('agent-header-funding').text()).toContain('team-max')
+    const select = q('agent-header-funding-select')
+    expect(select.exists()).toBe(true)
+    await select.setValue('solo')
+    expect(wrapper.emitted('change-subscription')).toEqual([['solo']])
+  })
+
+  it('a viewer sees the funding badge but no switcher', () => {
+    render({ agent: baseAgent({ can_share: false }), authStatus: AUTH, subscriptions: SUBS })
+    expect(q('agent-header-funding').exists()).toBe(true)
+    expect(q('agent-header-funding-select').exists()).toBe(false)
+  })
+
+  it('the read-only toggle and the resources gear reach the page', async () => {
+    render()
+    await wrapper.find('[aria-label^="Read-only mode"]').trigger('click')
+    expect(wrapper.emitted('toggle-read-only')).toHaveLength(1)
+    await q('agent-header-resources').trigger('click')
+    expect(wrapper.emitted('open-resources')).toHaveLength(1)
+  })
+
+  it('a running agent shows live CPU / MEM / uptime against its limits', () => {
+    render({ agentStats: STATS, resourceLimits: { current_cpu: '2', current_memory: '4g' } })
+    const live = q('agent-header-live').text()
+    expect(live).toContain('12%')
+    expect(live).toContain('/ 2 cores')
+    expect(live).toContain('4G')
+  })
+
+  it('a stopped agent shows its allocation instead', () => {
+    render({ agent: baseAgent({ status: 'stopped', created: '2026-10-01T00:00:00Z' }), resourceLimits: { current_cpu: '2', current_memory: '4g' } })
+    const live = q('agent-header-live').text()
+    expect(live).toContain('2 CPU')
+    expect(live).toContain('4G')
+  })
+
+  it('the 7-day spend row renders once the agent has run anything', () => {
+    render({ authStatus: AUTH, tokenStats: TOKENS })
+    const cost = q('agent-header-cost').text()
+    expect(cost).toContain('7d')
+    expect(cost).toContain('Today')
+    expect(cost).toContain('≈')
+    expect(cost).toContain('5 runs')
+    expect(cost).toContain('vs avg')
+  })
+
+  it('no spend row before the first run', () => {
+    render({ tokenStats: { ...TOKENS, lifetime_executions: 0 } })
+    expect(q('agent-header-cost').exists()).toBe(false)
+  })
+})
+
 describe('the page wires the header to the same handlers as Settings › General', () => {
   const Blank = { render: () => h('div') }
   let page

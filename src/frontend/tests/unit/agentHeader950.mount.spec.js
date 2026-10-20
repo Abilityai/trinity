@@ -13,10 +13,20 @@
  *     reading — including the backend's 0 for an offline probe;
  *   - the doors are gone.
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { nextTick } from 'vue'
+
+// ent#955: the header renders sparklines again, and their module-level theme
+// read asks `matchMedia`, which jsdom does not ship — so the stub must land
+// before the import graph evaluates (imports hoist; this hoists above them).
+vi.hoisted(() => {
+  window.matchMedia = () => ({
+    matches: false, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+  })
+})
+
 import AgentHeader from '../../src/components/AgentHeader.vue'
 
 const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/:p(.*)*', component: { template: '<div/>' } }] })
@@ -59,16 +69,21 @@ describe('the doors are gone', () => {
 })
 
 describe('repository', () => {
-  it('shows the bound repo, linked, with branch, changes and behind', () => {
-    render({ gitStatus: GIT, gitChangesCount: 3, gitBehind: 2 })
+  it('shows the bound repo, linked, with branch, commit, changes and behind — and no Pull / Push', () => {
+    render({ gitStatus: { ...GIT, last_commit: { short_sha: 'abc1234', message: 'm', author: 'a', date: 'd' } }, gitChangesCount: 3, gitBehind: 2 })
     const link = q('agent-header-repo').find('a')
     expect(link.attributes('href')).toBe('https://github.com/acme/alpha')
     expect(link.attributes('target')).toBe('_blank')
     expect(link.attributes('rel')).toContain('noopener')
     expect(link.text()).toContain('acme/alpha')
     expect(q('agent-header-branch').text()).toBe('trinity/alpha/abc')
+    expect(q('agent-header-commit').text()).toBe('abc1234')
     expect(q('agent-header-git-changes').text()).toContain('3 changed')
     expect(q('agent-header-git-behind').text()).toContain('2 behind')
+    // ent#955: the GitHub line is back as its own row, verbs stay on the Git tab
+    expect(q('agent-header-git').exists()).toBe(true)
+    const labels = wrapper.findAll('button').map(b => b.text())
+    expect(labels.some(t => /^Pull|^Push/.test(t))).toBe(false)
   })
 
   it('each count carries a glyph that survives the narrow (phone) label', () => {

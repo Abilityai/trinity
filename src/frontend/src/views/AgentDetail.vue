@@ -84,30 +84,27 @@
             :all-tags="allTags"
             :context-stats="headerContextStats"
             :has-avatar-prompt="!!avatarIdentityPrompt"
+            :read-only-loading="readOnlyLoading"
+            :auth-status="authStatus"
+            :subscriptions="availableSubscriptions"
+            :subscription-changing="subscriptionChanging"
+            :agent-stats="agentStats"
+            :cpu-history="cpuHistory"
+            :memory-history="memoryHistory"
+            :resource-limits="resourceLimits"
+            :token-stats="tokenStats"
             @toggle="toggleRunning"
             @toggle-autonomy="toggleAutonomy"
+            @toggle-read-only="toggleReadOnly"
             @update-tags="updateTags"
             @add-tag="addTag"
             @remove-tag="removeTag"
             @set-label="setAgentLabel"
             @open-avatar-modal="showAvatarModal = true"
             @cycle-emotion="cycleEmotion"
-          >
-            <!-- ent#955: live usage and the 7-day spend row are back in the
-                 header (they left for Overview in trinity-enterprise#887). -->
-            <template #strip>
-              <AgentLiveStrip
-                embedded
-                :agent="agent"
-                :agent-stats="agentStats"
-                :cpu-history="cpuHistory"
-                :memory-history="memoryHistory"
-                :resource-limits="resourceLimits"
-                :token-stats="tokenStats"
-                :auth-status="authStatus"
-              />
-            </template>
-          </AgentHeader>
+            @change-subscription="changeSubscription"
+            @open-resources="selectTab('settings', { query: { section: 'general' } })"
+          />
 
           <!-- Tabs -->
           <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : '']">
@@ -434,7 +431,6 @@ import TasksPanel from '../components/TasksPanel.vue'
 import GitPanel from '../components/GitPanel.vue'
 import DashboardPanel from '../components/DashboardPanel.vue'
 import DeclaredMetricsTiles from '../components/DeclaredMetricsTiles.vue'
-import AgentLiveStrip from '../components/AgentLiveStrip.vue'
 // trinity-enterprise#887/#888/#890/#891 — the Settings home and its panes
 import AgentSettingsHome from '../components/agent-settings/AgentSettingsHome.vue'
 import GeneralPane from '../components/agent-settings/GeneralPane.vue'
