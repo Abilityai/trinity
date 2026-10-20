@@ -116,7 +116,14 @@ ROOM_MAX_CHAIN_DEPTH = 8
 
 # The INBOUND cap: what a person, a workspace client or an agent calling the API
 # may post as one message (it mirrors `RoomMessageCreate.max_length`).
-MAX_CONTENT_CHARS = 8000
+# #3706: 100,000, the operator 1:1 chat limit (`models.py`) and the Workspace
+# chat limit (`PortalChatRequest.message`), so a person can paste a reference
+# document for the agents to work from. What an agent is SHOWN is bounded separately by
+# `ROOM_TRANSCRIPT_BUDGET_CHARS`, so this number does not set the size of a
+# wake. Kept at or below `MAX_AGENT_REPLY_CHARS`: `_fit_transcript` keeps two
+# messages whole (the newest and this agent's ask), and two at the larger of
+# these bounds must fit the transcript budget.
+MAX_CONTENT_CHARS = 100_000
 # #3210: the engine's own post of a turn's reply is NOT inbound, and was held to
 # the cap above anyway — so a 9,000-character research brief, the ordinary output
 # of a room turn, was billed and then discarded without a line. A reply has its
@@ -133,9 +140,10 @@ AGENT_REPLY_TAIL_CHARS = 10_000
 # #3210: the transcript one wake hands its agent. Raising the reply bound raises
 # what the NEXT agent is shown, and an unbounded transcript only moves the
 # failure one hop along: the turn overflows its context, and a cold wake repeats
-# it on every retry. 240,000 is what a cold wake could already receive
-# (ROOM_COLD_CONTEXT_MESSAGES x MAX_CONTENT_CHARS), so a room of ordinary
-# messages is shown exactly what it was.
+# it on every retry. A room of ordinary messages fits whole. It is a literal on
+# purpose: ROOM_COLD_CONTEXT_MESSAGES x MAX_CONTENT_CHARS is 3,000,000, far
+# past an agent's context. It must stay above 2 x max(MAX_CONTENT_CHARS, MAX_AGENT_REPLY_CHARS),
+# the two messages `_fit_transcript` always keeps whole.
 ROOM_TRANSCRIPT_BUDGET_CHARS = 240_000
 ROOM_TURN_TIMEOUT_SECONDS = 300
 # #3114: how long a room turn waits for a pull pilot's worker to claim it. A

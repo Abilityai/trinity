@@ -2764,7 +2764,7 @@ def validate_requested_model(raw: str | None, *, is_platform: bool) -> str | Non
         # echoed. `PortalChatRequest.model` is deliberately unvalidated at the
         # payload layer (a length rule there would refuse before the 403 that
         # this principal has no control at all), and every sibling field on that
-        # model IS bounded — `message` is `max_length=8000`. Without this an
+        # model IS bounded — `message` is `max_length=100_000`. Without this an
         # authenticated caller can post a megabyte-long `model` and have it
         # echoed verbatim into the error body. Truncated rather than dropped:
         # naming what was refused is the whole point of the message.
