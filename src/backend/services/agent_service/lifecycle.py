@@ -134,25 +134,13 @@ async def inject_assigned_credentials(agent_name: str, max_retries: int = 3, ret
         get_credential_encryption_service,
     )
 
-    # #612: subscription-mode agents authenticate via CLAUDE_CODE_OAUTH_TOKEN
-    # env var set at container creation (SUB-002). They do not need (and
-    # typically do not have) a .credentials.enc file. Attempting the import
-    # would either silently succeed-noop or surface a misleading "failed"
-    # status that prompts operators to take corrective action (re-assigning
-    # the subscription, recreating the container) — when nothing is wrong.
-    # Short-circuit to a clear skipped status before the import path runs.
-    if db.get_agent_subscription_id(agent_name):
-        logger.debug(
-            f"Skipping .credentials.enc import for {agent_name}: "
-            f"subscription mode (auth via CLAUDE_CODE_OAUTH_TOKEN env var)"
-        )
-        return {
-            "status": "skipped",
-            "reason": "subscription_mode",
-            "detail": "agent authenticates via CLAUDE_CODE_OAUTH_TOKEN; "
-                      "file-based credential injection is not used",
-        }
-
+    # #3510 (ruled 2026-10-19): subscription-mode agents import a committed
+    # .credentials.enc too. Their MCP keys and other non-Anthropic credentials
+    # live there, and the #612 skip dropped them silently. Safe for auth: under
+    # subscription the agent server force-unsets Anthropic API-key variables at
+    # every spawn (#2114), so an imported ANTHROPIC_API_KEY cannot shadow the
+    # subscription. The #606/#612 harm was a MISSING file read as a failure;
+    # that is the clean `no_credentials_enc_file` skip below, with no retries.
     try:
         encryption_service = get_credential_encryption_service()
     except ValueError as e:

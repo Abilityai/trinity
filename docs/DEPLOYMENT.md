@@ -153,6 +153,12 @@ one of these before putting an instance on a public address:
 Plain HTTP on a public IPv4 with none of the above is the one combination to
 avoid: credentials and JWTs cross the network in the clear.
 
+The webhook URLs and the auto-detected MCP URL Trinity shows take their scheme
+from the proxy's `X-Forwarded-Proto`: a proxy that sends `https` gets
+`https://<host>/api/webhooks/…` and `https://<host>/mcp`. A proxy that sends no
+such header gets `http://` URLs; set **Settings → MCP Server URL** to override
+the MCP one.
+
 The `cloudflared` service is **profile-gated** (`profiles: ["tunnel"]`), so it
 does not start just because `TUNNEL_TOKEN` is set. `start.sh --hosted` activates
 the profile for you when the token is present; any other invocation needs it

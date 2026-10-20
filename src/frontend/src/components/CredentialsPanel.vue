@@ -1,5 +1,7 @@
 <template>
-  <div class="p-6 space-y-6">
+  <!-- `embedded` (trinity-enterprise#888): a section of Settings › Storage,
+       whose column already supplies the gutter. -->
+  <div class="space-y-6" :class="{ 'p-6': !embedded }">
     <!-- Loading State -->
     <div v-if="loading" class="text-center py-8">
       <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
@@ -308,6 +310,10 @@ const props = defineProps({
   agentStatus: {
     type: String,
     default: 'stopped'
+  },
+  embedded: {
+    type: Boolean,
+    default: false
   }
 })
 

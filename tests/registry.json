@@ -6156,6 +6156,42 @@
         "unit"
       ],
       "description": "Every execution read and control route called with real tier resolution for owner, admin, share (JWT and user-scope key) and agent key, in both directions: list/detail/log/stream/running/queue/fan-out narrowing, the uniform 404, terminate needing both ids, shared-state 403, model and force_reset owner tier, the five webhook routes and can_manage_webhook; plus the route census and an AST guard over every router read of an execution row."
+    },
+    {
+      "file": "unit/test_ent820_files_tier_census.py",
+      "feature": "trinity-enterprise#820",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "files",
+        "auth",
+        "audit",
+        "unit"
+      ],
+      "description": "The agent Files surface's ruled tier per verb: every /files route in routers/agent_files.py has a census row and runs its gate; the file_path_policy.decide() table for owner, share and key; a share holder (JWT or user-scope key) refused instruction, skills and run-code writes; owner/admin/agent-key paths kept; one audit row per write/delete/mkdir; share holders refused on an unverified image while agent keys pass; the projected list (hidden withheld, restricted flags); hard-linked reads refused below the owner tier."
+    },
+    {
+      "file": "unit/test_ent820_path_policy_parity.py",
+      "feature": "trinity-enterprise#820",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "agent",
+        "files",
+        "unit"
+      ],
+      "description": "file_path_policy.py is byte-identical in the backend and the agent server, stdlib-only, and the copy the agent server loads; guardrails-baseline.json path_deny and the policy agree both ways; the agent server's platform floor is a subset of the backend route floor and leaves platform writers their paths."
+    },
+    {
+      "file": "unit/test_ent820_agent_server_no_follow_writes.py",
+      "feature": "trinity-enterprise#820",
+      "added": "2026-10-16",
+      "categories": [
+        "agent",
+        "files",
+        "unit"
+      ],
+      "description": "The agent server's PUT/mkdir/DELETE/list refuse a link that changes a path's class, keep same-class links, never write through a final link, delete a link as itself, never descend a link in the list (node cap), use resolved-path containment (#3032), CAS without following links, survive a crashed tmp file, keep file mode, refuse nested/bare git metadata, report the link count on reads, and still serve every platform writer."
     }
   ]
 }

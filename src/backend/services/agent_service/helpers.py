@@ -15,6 +15,7 @@ from fastapi import HTTPException
 
 from models import User, AgentStatus
 from database import db
+from dependencies import principal_reach
 from db.agents import SYSTEM_AGENT_NAME
 from services.docker_service import (
     docker_client,
@@ -225,7 +226,12 @@ def visible_agent_names(current_user: User) -> Optional[set]:
     shared — except the DB set also contains the caller's OWN agents that
     currently have no container (#1747 documents that state as routine). It
     never contains somebody else's agent.
+
+    An agent key gets its reach, never None (trinity-enterprise#872).
     """
+    reach = principal_reach(current_user)
+    if reach is not None:
+        return reach
     if current_user.role == "admin":
         return None
     metadata = db.get_all_agent_metadata(current_user.email or "")
@@ -246,7 +252,12 @@ def get_accessible_agents(current_user: User) -> list:
 
     OPTIMIZED: Uses batch query to fetch all metadata in 2 queries total
     instead of 8-10 queries per agent (N+1 problem fix).
+
+    An agent key sees only its reach (trinity-enterprise#872): it carries its
+    owner's role, so the admin branch below would otherwise list every agent.
     """
+    reach = principal_reach(current_user)
+
     # Fast Docker call (no stats) - avoids slow Docker API calls
     all_agents = list_all_agents_fast()
 
@@ -265,6 +276,8 @@ def get_accessible_agents(current_user: User) -> list:
     for agent in all_agents:
         agent_dict = agent.dict() if hasattr(agent, 'dict') else dict(agent)
         agent_name = agent_dict.get("name")
+        if reach is not None and agent_name not in reach:
+            continue
 
         # Get metadata from batch result (not individual queries)
         metadata = all_metadata.get(agent_name)
@@ -327,7 +340,14 @@ def accessible_agent_names(current_user: User) -> Optional[List[str]]:
     Returns None for admins (no filter — see every agent).
     Returns a list (possibly empty) for non-admins.
     Used by fleet-level endpoints that filter schedule_executions by agent_name.
+
+    An agent key gets its reach, from the DB, never None (trinity-enterprise#872),
+    so `narrow_to_agent` access-gates its `?agent=` and a stopped child's
+    history still shows.
     """
+    reach = principal_reach(current_user)
+    if reach is not None:
+        return sorted(reach)
     if current_user.role == "admin":
         return None
     return [a["name"] for a in get_accessible_agents(current_user)]

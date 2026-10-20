@@ -2,25 +2,14 @@ import { test, expect } from '@playwright/test'
 import { agentExists, missingAgentReason } from './helpers/agent-probe.js'
 
 /**
- * trinity#2559 — Talk on Agent Detail is a door into the Workspace voice call.
+ * The Workspace `?voice=` one-shot (trinity#2559) seen from the outside.
  *
- * The `@smoke` cases prove the whole hand-off WITHOUT a microphone, a provider
- * key, or a real call: the roster is stubbed to report voice available and the
- * Workspace start POST is fulfilled at the network boundary, so what is checked
- * is the wiring — the click navigates, the intent survives the navigation, the
- * start request is ISSUED, the URL is cleaned, and nothing asks the retired
- * `/voice/status`. That tier matters because `.github/workflows/frontend-e2e.yml`
- * runs `npm run test:e2e:smoke` (= `--grep @smoke`), so `@interactive` runs on a
- * laptop and never again; a source-grep spec cannot catch a sibling PR breaking
- * `defineExpose` on rebase, and this can.
- *
- * `route.fulfill()` with a hand-built body is the house pattern (see
- * `agent-not-found.spec.js`). Patching `**\/api\/settings\/feature-flags` and the
- * portal roster has no precedent in this suite — the technique is new here, not
- * borrowed.
- *
- * The `@interactive` cases need fake media devices and a live provider; they
- * carry the rules that only a real call can show.
+ * These cases used to live in `agent-detail-talk-door.spec.js`, beside the
+ * Agent Detail Talk button that armed the one-shot. trinity-enterprise#950
+ * removed that button from the agent header; what stays is the Workspace's own
+ * contract — a pasted, bookmarked or mailed `?voice=1` starts nothing (a fresh
+ * document is never armed) and the key is stripped from the URL in every
+ * branch. The rule itself is unit-tested in `tests/unit/portalVoiceMode.spec.js`.
  */
 
 // The @smoke tier is HERMETIC — a synthetic name that exists only in the route
@@ -33,7 +22,7 @@ import { agentExists, missingAgentReason } from './helpers/agent-probe.js'
 //  2. Even given an agent, the CI admin is bootstrapped from `ADMIN_PASSWORD`
 //     with **no email**, and `client_portal/portal_auth.py:147` 403s a platform
 //     principal without one — so `GET /my-agents` cannot answer, the roster is
-//     empty, and the door lands on "You don't have access" instead of the call.
+//     empty, and the Workspace lands on "You don't have access" instead of the call.
 //
 // Both were observed, not predicted: with a describe-level probe the whole tier
 // reported `5 skipped`, and with a real agent the load-bearing case failed on an
@@ -42,7 +31,7 @@ import { agentExists, missingAgentReason } from './helpers/agent-probe.js'
 // `workspace-absorbs-session.spec.js:30-32` states the rule this file broke: the
 // existence probe belongs INSIDE the @interactive test, never in a
 // describe-level `beforeEach`, or it takes the @smoke tier down with it.
-const AGENT = 'e2e-talk-door'
+const AGENT = 'e2e-voice-query'
 
 // The @interactive tier is the opposite: a REAL agent, on the caller's Workspace
 // roster (shared ∪ owned — there is no admin arm), because only a real call can
@@ -54,8 +43,6 @@ const API = '**/api/enterprise/client-portal'
 const VOICE_START = `${API}/agents/*/voice/start`
 const ROSTER = `${API}/my-agents*`
 const SESSIONS = `${API}/sessions`
-const FLAGS = '**/api/settings/feature-flags'
-const VOICE_STATUS = '**/api/agents/*/voice/status'
 
 const json = (body) => ({
   status: 200,
@@ -134,92 +121,7 @@ async function stubWorkspaceVoice(page) {
   })))
 }
 
-/**
- * Make Agent Detail render a header for the synthetic agent.
- *
- * Talk lives in `AgentHeader`, which only renders once `agent` resolves — so
- * without this the page is "Agent not found" and every `getByTestId('agent-talk')`
- * times out. `GET /api/agents/{name}` is the single call `agents.js::fetchAgent`
- * makes; the shape is a real `trinity-system` payload trimmed to the fields the
- * header reads. Everything else Agent Detail fetches (info, token stats,
- * dashboard) tolerates a 404, which is what the un-stubbed backend returns.
- */
-async function stubAgentDetail(page) {
-  await page.route(`**/api/agents/${AGENT}`, (route) => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({
-      name: AGENT,
-      status: 'running',
-      port: 2299,
-      created: new Date().toISOString(),
-      resources: { cpu: '1', memory: '1g' },
-      container_id: 'e2e-talk-door-container',
-      template: 'local:test-echo',
-      runtime: 'claude-code',
-      ephemeral: false,
-      display_label: null,
-      owner: 'admin',
-      is_owner: true,
-      is_shared: false,
-      is_system: false,
-      can_share: true,
-      can_delete: true,
-      autonomy_enabled: false,
-      read_only_enabled: false,
-      avatar_url: null,
-      shares: [],
-      circuit_breaker: null,
-    }),
-  }))
-}
-
-test.describe('the Talk door', () => {
-  test.beforeEach(async ({ page }) => { await stubAgentDetail(page) })
-
-  test('@smoke clicking Talk lands in the Workspace and STARTS the call', async ({ page }) => {
-    const starts = countRequests(page, (u) => /\/client-portal\/agents\/[^/]+\/voice\/start/.test(u))
-    const statusProbes = countRequests(page, (u) => /\/api\/agents\/[^/]+\/voice\/status/.test(u))
-    await stubWorkspaceVoice(page)
-
-    await page.goto(`/agents/${AGENT}`)
-    const talk = page.getByTestId('agent-talk')
-    await expect(talk).toBeVisible({ timeout: 20000 })
-    await talk.click()
-
-    await page.waitForURL(/\/workspace/, { timeout: 20000 })
-
-    // The call was actually requested. Asserting only that nothing threw would
-    // pass with a null ref: the hand-off is `conversationRef.value
-    // ?.startVoiceCall?.()`, which silently consumes the intent when the ref is
-    // not there.
-    await expect.poll(() => starts.length, { timeout: 20000 }).toBeGreaterThan(0)
-
-    // The agent came along, and the one-shot key did not linger.
-    const url = new URL(page.url())
-    expect(url.searchParams.get('voice')).toBeNull()
-    expect(page.url()).toMatch(new RegExp(`agent=${AGENT}|/workspace/c/`))
-
-    // The retired per-agent probe is gone for good.
-    expect(statusProbes).toEqual([])
-  })
-
-  test('@smoke Talk is present even when the platform voice flag is off', async ({ page }) => {
-    // #2559 G-1: the door is UNGATED. The destination owns availability and
-    // says why it cannot start; a gate here would only add a cold-load pop-in
-    // and a sticky-false hide on a failed flags fetch.
-    await page.route(FLAGS, async (route) => {
-      const response = await route.fetch()
-      const body = await response.json().catch(() => null)
-      if (!body) return route.fulfill({ response })
-      body.voice_available = false
-      return route.fulfill({ response, json: body })
-    })
-
-    await page.goto(`/agents/${AGENT}`)
-    await expect(page.getByTestId('agent-talk')).toBeVisible({ timeout: 20000 })
-  })
-
+test.describe('the Workspace ?voice= one-shot', () => {
   test('@smoke a pasted ?voice=1 link starts NOTHING, and is cleaned up', async ({ page }) => {
     // The armed one-shot, from the outside: this document was never armed, so
     // the conversation opens and no call is requested. `navigator.userActivation`
@@ -258,18 +160,6 @@ test.describe('the Talk door', () => {
   })
 })
 
-test.describe('nothing on Agent Detail offers voice any more', () => {
-  test.beforeEach(async ({ page }) => { await stubAgentDetail(page) })
-
-  test('@smoke the chat composer has no microphone', async ({ page }) => {
-    await page.goto(`/agents/${AGENT}?tab=chat`)
-    await expect(page.getByTestId('agent-talk')).toBeVisible({ timeout: 20000 })
-    // The mic carried this exact title; it moved to the header as Talk.
-    await expect(page.locator('button[title="Start voice conversation"]')).toHaveCount(0)
-    await expect(page.locator('button[title="Voice session active"]')).toHaveCount(0)
-  })
-})
-
 /**
  * Patch only the capability bit on the LIVE roster, leaving the agent list real.
  *
@@ -295,34 +185,16 @@ async function patchLiveRosterVoice(page) {
   })
 }
 
-test.describe('@interactive the call itself', () => {
+test.describe('@interactive the ?voice= one-shot against a real agent', () => {
   test.use({ permissions: ['microphone'] })
 
-  // #2199, and `workspace-absorbs-session.spec.js:30-32`: the probe is INSIDE
-  // this describe, never at file level, so it cannot sterilise the @smoke tier.
+  // #2199: the probe is INSIDE this describe, never at file level, so it
+  // cannot sterilise the @smoke tier.
   test.beforeEach(async ({ baseURL }) => {
     test.skip(
       !(await agentExists(INTERACTIVE_AGENT, { baseURL })),
       missingAgentReason(INTERACTIVE_AGENT, 'TALK_AGENT'),
     )
-  })
-
-  test('Talk lands on the agent and the orb comes up', async ({ page }) => {
-    await patchLiveRosterVoice(page)
-
-    await page.goto(`/agents/${INTERACTIVE_AGENT}`)
-    await page.getByTestId('agent-talk').click()
-    await page.waitForURL(/\/workspace/, { timeout: 20000 })
-
-    const orb = page.getByTestId('portal-voice-call')
-    const line = page.getByTestId('portal-voice-line')
-    await expect(orb.or(line).first()).toBeVisible({ timeout: 30000 })
-
-    // Whatever it says, it must not be the two reasons that mean the roster
-    // patch failed rather than the call.
-    const text = await line.textContent().catch(() => '')
-    expect(text || '').not.toContain('Voice is turned off on this instance.')
-    expect(text || '').not.toContain('No voice provider key is configured on this instance.')
   })
 
   test('signing in on a pasted ?voice=1 link still starts nothing', async ({ page, context }) => {

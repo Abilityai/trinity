@@ -144,13 +144,19 @@ def test_startup_retires_the_legacy_in_tree_copy_only_on_an_exact_match():
 def test_both_paths_stay_in_the_write_deny_lists():
     """Belt and braces, not the primary control — but a regression here would
     silently re-open the Bash route to the registration."""
-    files_py = (_ROOT / "src" / "backend" / "services" / "agent_service" / "files.py").read_text()
+    # trinity-enterprise#820: the route write floor lives in one policy module
+    # (vendored into the agent server); ask it, rather than grep a source file.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_test345_policy", str(_ROOT / "src" / "backend" / "services" / "file_path_policy.py"))
+    policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy)
     baseline = json.loads((_BASE / "hooks" / "guardrails-baseline.json").read_text())
     deny = baseline.get("path_deny") or []
 
-    assert "/etc/claude-code/*" in files_py
+    assert policy.write_denied("/etc/claude-code/managed-settings.json")
     assert "/etc/claude-code/*" in deny
     # The old location stays denied too: pre-ent#345 agents still have the file,
     # and an agent-authored one could still carry `permissions`.
-    assert ".claude/settings.json" in files_py
+    assert policy.write_denied("/home/developer/.claude/settings.json")
     assert "/home/developer/.claude/settings.json" in deny

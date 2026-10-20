@@ -394,13 +394,20 @@ async def get_all_agent_slots(
     Returns:
     - agents: Dict mapping agent_name to {"max": N, "active": M}
     - timestamp: ISO timestamp of response
+
+    Scoped to the agents the caller may see (trinity-enterprise#872): an admin
+    person every agent, anyone else their visible set, an agent key its reach.
     """
     from db_models import BulkSlotState
     from services.capacity_manager import get_capacity_manager
+    from services.agent_service.helpers import visible_agent_names
     from datetime import datetime
 
     # Get all agents with their capacities
     agent_capacities = db.get_all_agents_parallel_capacity()
+    visible = visible_agent_names(current_user)  # None = sees every agent
+    if visible is not None:
+        agent_capacities = {n: c for n, c in agent_capacities.items() if n in visible}
 
     # CAPACITY-CONSOLIDATE (#428): bulk capacity meter via CapacityManager.
     capacity = get_capacity_manager()
@@ -439,7 +446,6 @@ async def get_all_permission_edges(
     """
     # Get accessible agents once (not N times)
     accessible = {a['name'] for a in get_accessible_agents(current_user)}
-
     # Single DB query filtered at SQL level
     edges = db.get_all_permission_edges(accessible)
 

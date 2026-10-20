@@ -1535,12 +1535,20 @@ def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
 # target (`_admit_capability_reach`), and only that request's reach checks see
 # it. Holding `schedules.manage` therefore reaches a sibling's schedule routes
 # and nothing else; the gate never has to know which capability a route checked.
+def agent_principal_name(current_user) -> Optional[str]:
+    """The agent an agent-scoped principal acts as, else None.
+
+    `isinstance`, not truthiness: a bare MagicMock principal (older suites)
+    carries a truthy mock attribute and is not an agent. The one predicate the
+    per-agent gate and the fleet narrowing share (trinity-enterprise#872)."""
+    agent = getattr(current_user, "agent_name", None)
+    return agent if isinstance(agent, str) and agent else None
+
+
 def agent_may_reach(current_user, target_agent: str, *, manage: bool = False) -> bool:
     """False only when an agent-scoped principal is outside its reach."""
-    agent = getattr(current_user, "agent_name", None)
-    # `isinstance`, not truthiness: a bare MagicMock principal (older suites)
-    # carries a truthy mock attribute and is not an agent.
-    if not isinstance(agent, str) or not agent:
+    agent = agent_principal_name(current_user)
+    if agent is None:
         return True
     if target_agent == agent:
         return True
@@ -1583,6 +1591,76 @@ def _has_edge(agent_name: str, target_agent: str) -> bool:
         logger.warning("[ent#629] edge lookup %s -> %s failed; treating as no edge",
                        agent_name, target_agent)
         return False
+
+
+# ----------------------------------------------------------------------------
+# Fleet reach (trinity-enterprise#872)
+# ----------------------------------------------------------------------------
+# The set form of `agent_may_reach`'s USE tier, for routes that take no single
+# agent in the path (lists, counts, timelines, the event stream). Every roster
+# accessor intersects with it, so an agent key's fleet view is its reach and
+# never its owner's. Per-request capability reach is deliberately NOT included:
+# it is earned per route, and a fleet list is no such route.
+
+def agent_reach_names(agent_name: str, owner_names: Optional[set] = None) -> set:
+    """{self} ∪ its `agent_permissions` edges ∪ the agents it spawned with the
+    key it holds now. `owner_names` is the owner's accessible set, or None for
+    an admin owner (every agent). Pure DB; every read fails closed, keeping self."""
+    try:
+        edges = set(db.get_permitted_agents(agent_name) or [])
+    except Exception:
+        logger.warning("[ent#872] edge list for %s failed; treating as no edges", agent_name)
+        edges = set()
+    try:  # one query, same key-id rule as `_spawned_by_caller`
+        key = db.get_agent_mcp_api_key(agent_name)
+        spawned = set(db.list_agents_spawned_by_key(agent_name, key.id)) if key else set()
+    except Exception:
+        logger.warning("[ent#872] spawned list for %s failed; treating as none", agent_name)
+        spawned = set()
+    reach = edges | spawned
+    if owner_names is not None:
+        reach &= set(owner_names)
+    return reach | {agent_name}
+
+
+def owner_agent_names(role: Optional[str], email: Optional[str]) -> Optional[set]:
+    """The owner bound for `agent_reach_names`: None for an admin owner, else the
+    agents the owner may access. No email or a failed read is the empty set."""
+    if role == "admin":
+        return None
+    if not email:
+        return set()
+    try:
+        return set(db.get_accessible_agent_names(email, is_admin=False) or [])
+    except Exception:
+        logger.warning("[ent#872] owner roster read failed; bounding reach to self")
+        return set()
+
+
+def principal_reach(current_user) -> Optional[set]:
+    """An agent principal's fleet reach, or None for every other principal.
+
+    Memoized on the principal (one object per request, like `_capability_reach`),
+    so a route that consults it through several accessors reads the DB once."""
+    agent = agent_principal_name(current_user)
+    if agent is None:
+        return None
+    cached = getattr(current_user, "_fleet_reach", None)
+    if isinstance(cached, set):
+        return set(cached)
+    reach = agent_reach_names(agent, owner_agent_names(
+        getattr(current_user, "role", None), getattr(current_user, "email", None)))
+    try:
+        current_user._fleet_reach = set(reach)
+    except Exception:  # a stand-in principal without the private slot
+        pass
+    return reach
+
+
+def is_fleet_admin(current_user) -> bool:
+    """An admin that sees every agent: the admin role on anything but an agent
+    key, which carries its owner's role (trinity-enterprise#872)."""
+    return getattr(current_user, "role", None) == "admin" and agent_principal_name(current_user) is None
 
 
 def _reject_connector_principal(current_user: User) -> None:

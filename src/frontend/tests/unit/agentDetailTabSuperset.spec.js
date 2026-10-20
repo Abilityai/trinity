@@ -43,12 +43,14 @@ const NON_OWNER = { ...OWNER, canShare: false }
 // The five the old list forgot. Named individually so a regression says which.
 // trinity-enterprise#754 retired the fifth, `playbooks`: it merged into Skills
 // and is now an alias (asserted below), never a tab of its own.
+// trinity-enterprise#891 did the same to `access`: it is Settings › People, and
+// its old link still lands there through the alias.
 const PREVIOUSLY_UNREACHABLE = ['a2a', 'loops', 'access', 'nevermined']
 
 describe('#2153 the deep-link superset', () => {
   for (const id of PREVIOUSLY_UNREACHABLE) {
-    it(`includes '${id}', which the old DEEP_LINK_TABS omitted`, () => {
-      expect(idsFor(OWNER)).toContain(id)
+    it(`resolves '${id}', which the old DEEP_LINK_TABS omitted`, () => {
+      expect(idsFor(OWNER)).toContain(TAB_ALIASES[id] || id)
     })
   }
 
@@ -88,7 +90,9 @@ describe('#2153 a non-owner still cannot reach owner-only tabs', () => {
 
   it('still offers the shared tabs to a non-owner', () => {
     const ids = idsFor(NON_OWNER)
-    for (const id of ['overview', 'tasks', 'chat', 'reports', 'schedules', 'loops', 'skills', 'info']) {
+    // trinity-enterprise#887: `info` is Settings › General now, which is
+    // owner-only like the Settings tab has always been.
+    for (const id of ['overview', 'tasks', 'chat', 'reports', 'schedules', 'loops', 'skills']) {
       expect(ids).toContain(id)
     }
   })

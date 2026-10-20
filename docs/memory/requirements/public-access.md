@@ -949,11 +949,12 @@ spoken replies (#2157) stay as composer affordances.
   second provider). Disabled WITH the reason when the instance cannot ("voice is
   turned off" / "no voice provider key"), never a dead button. Portal-token
   clients never see it. Distinct from the per-agent `voice_available` (TTS).
-- **FR-1b — The Talk door (#2559)**: `/workspace?agent=<name>&voice=1` starts the
+- **FR-1b — The `?voice=1` one-shot (#2559)**: `/workspace?agent=<name>&voice=1` starts the
   call on landing. The param alone is **not** authority: it is honoured only when
   the intent was **armed in the app** (`armVoiceAutoStart()` in
-  `portalVoiceMode.js`, called by `AgentHeader`'s Talk button before the
-  `router.push`), the agent actually landed, and the principal is a platform
+  `portalVoiceMode.js`; its only caller was `AgentHeader`'s Talk door, removed by
+  trinity-enterprise#950, so today nothing in the app arms it and the param is
+  always inert — the call starts from the composer's Call control), the agent actually landed, and the principal is a platform
   session. The armed flag is a module-scoped `let`, so it lives exactly as long
   as the document — a pasted, bookmarked or mailed link arrives on a fresh
   document and can never be armed, including the signed-out case where the

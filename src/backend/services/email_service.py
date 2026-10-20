@@ -6,6 +6,7 @@ Supports multiple providers:
 - smtp: Standard SMTP
 - sendgrid: SendGrid API
 """
+import asyncio
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -22,6 +23,10 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Socket timeout for each SMTP connect/read (#3637). Without it a slow or
+# unreachable server holds the send thread until the OS gives up on the socket.
+SMTP_TIMEOUT_SECONDS = 30
 
 
 class EmailService:
@@ -129,7 +134,10 @@ class EmailService:
             if provider == "console":
                 return self._send_console(to_email, subject, body)
             elif provider == "smtp":
-                return self._send_smtp(to_email, subject, body, html_body, from_address)
+                # smtplib is synchronous: run it off the event loop (#3637).
+                return await asyncio.to_thread(
+                    self._send_smtp, to_email, subject, body, html_body, from_address
+                )
             elif provider == "sendgrid":
                 return await self._send_sendgrid(to_email, subject, body, html_body, from_address)
             elif provider == "resend":
@@ -240,7 +248,7 @@ If you didn't request this code, you can safely ignore this email.
                 msg.attach(MIMEText(html_body, "html"))
 
             # Connect and send
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as server:
                 server.starttls()
                 server.login(SMTP_USER, SMTP_PASSWORD)
                 server.sendmail(from_address, to_email, msg.as_string())

@@ -27,6 +27,12 @@
 - **Status**: ✅ Implemented
 - **Description**: Share agents with team members
 - **Key Features**: Share via email, access levels (Owner/Shared/Admin), sharing tab for owners
+- **What a share grants (trinity-enterprise#820, operator ruling 2026-10-15)**: one flat grant, no tier column on `agent_sharing`. A share holder chats with the agent, sees their own conversations, and browses and edits the agent's files **except** credentials, runtime config and its instructions. On the Files surface that is ruled per verb by one policy (`services/file_path_policy.py`, vendored into the agent server):
+  - **Owner tier** (the agent's owner or an admin, as a person): instruction files (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, `.gemini/GEMINI.md`, `.claude/**` including skills), files that run code (`.gitconfig`, `.config/git/**`, `.bashrc`, `.bash_profile`, `.profile`, `.zshrc`, `.local/bin/**`), reading credential/secret-class files (ent#819), listing hidden or credential directories.
+  - **Refused for every caller**: writing or deleting credentials, runtime config, `.trinity`, git metadata at any depth (including bare-repo `hooks/` and `config`), system paths; deleting any `CLAUDE.md`.
+  - **Agent keys** keep their capability path (`instructions.manage` ent#164, `skills.manage` ent#596) and are refused files that run code.
+  - Below the owner tier the list withholds hidden files and flags each node with the verbs the caller cannot use; every write, delete and mkdir writes an audit row.
+  - The Access tab states the grant in one sentence.
 
 ### 2.5 User Role Model (ROLE-001)
 - **Status**: ✅ Implemented (2026-03-20)

@@ -572,6 +572,19 @@ export function agentEmptyChat(threads, agentName) {
   return id(empty[0]) || null
 }
 
+/**
+ * #3795: does this transcript still read as a NEW chat?
+ *
+ * True when nothing in it is a turn — only `system` lines, the platform speaking
+ * about the thread. Reset (ent#523) leaves exactly one such line in the Main it
+ * mints, and the backend already counts that row as empty (`message_count` is
+ * not bumped, so `agentEmptyChat` lands on it). The renderer must agree, or the
+ * signpost hides the briefing it was meant to sit above.
+ */
+export function isNewChatTranscript(messages) {
+  return !(Array.isArray(messages) ? messages : []).some((m) => m && m.role !== 'system')
+}
+
 // #2579: is this thread inside the window where a generated title may still
 // land? Two `touch_portal_session(added=1)` calls happen per exchange (the
 // user's message and the reply), and `_title_plan` gates on the PRE-turn

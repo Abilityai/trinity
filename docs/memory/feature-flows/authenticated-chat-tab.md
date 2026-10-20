@@ -9,8 +9,8 @@ A dedicated **Chat** tab in the Agent Detail page that provides a simple, clean 
 > **This tab is text only (#2559).** It used to carry a second front door for
 > voice — a mic in the composer, an orb over the thread, and a transcript written
 > back into *this* chat. That is retired: the call lives in the Workspace
-> conversation, and the header's **Talk** button is a door into it
-> (`/workspace?agent=<name>&voice=1`). Voice rows already written into these
+> conversation (the header's **Talk** door into it was removed by
+> trinity-enterprise#950; start a call from the Workspace composer). Voice rows already written into these
 > chats still render, badged as spoken — `ChatBubble` reads
 > `source === 'voice'` and is deliberately untouched. See
 > [voice-chat.md](voice-chat.md).

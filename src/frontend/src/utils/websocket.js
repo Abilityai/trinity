@@ -2,6 +2,7 @@ import { ref } from 'vue'
 import axios from 'axios'
 import { readStoredToken } from './platformSession'
 import { useAgentsStore } from '../stores/agents'
+import { useNetworkStore } from '../stores/network'
 import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useExecutionsStore } from '../stores/executions'
@@ -41,6 +42,7 @@ export function reconnectWebSocket() {
 
 export function useWebSocket() {
   const agentsStore = useAgentsStore()
+  const networkStore = useNetworkStore()
   const notificationsStore = useNotificationsStore()
   const operatorQueueStore = useOperatorQueueStore()
   const executionsStore = useExecutionsStore()
@@ -200,6 +202,13 @@ export function useWebSocket() {
         }
         if (data.type === 'agent_activity') {
           if (operatorStores) executionsStore.handleWebSocketEvent(data)
+          // ent#955: the fleet store's WS-driven `workingState` (the agent
+          // header's capacity bars, the dashboard tile's "working" chip) used
+          // to update only through the store's OWN socket, which the Dashboard
+          // opens on mount and closes on unmount — so on the agent page a
+          // 10-second task never lit the bars. This app-wide socket carries
+          // the same `agent_activity` events; feed them through.
+          if (operatorStores) networkStore.handleActivityStatusChange(data)
           // ent#475: a TERMINAL activity on a Workspace participant means it
           // may have rewritten a canvas or shared a file — the rail's feed
           // store re-reads (debounced) through the access-controlled routes.
