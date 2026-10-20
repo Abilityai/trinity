@@ -9,8 +9,7 @@
  *     status says a repo is bound; never a non-http(s) href;
  *   - tags: chips render, the set is capped with a counted "+N", and an owner
  *     edits through the same update-tags / add-tag / remove-tag events;
- *   - context: hidden for a stopped agent, "—" (never 0%) while there is no
- *     reading — including the backend's 0 for an offline probe;
+ *   - (the context ring of ent#950 was dropped by ent#955 — capacity bars only);
  *   - the doors are gone.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -161,31 +160,5 @@ describe('tags', () => {
   it('a viewer with no tags gets no empty chrome', () => {
     render({ agent: baseAgent({ can_share: false }), tags: [] })
     expect(q('agent-header-tags').exists()).toBe(false)
-  })
-})
-
-describe('context chart', () => {
-  it('is hidden for a stopped agent', () => {
-    render({ agent: baseAgent({ status: 'stopped' }), contextStats: { contextPercent: 40, contextUsed: 80000, contextMax: 200000, activityState: 'offline' } })
-    expect(q('agent-header-context').exists()).toBe(false)
-  })
-
-  it('shows "—" and no arc before stats arrive', () => {
-    render({ contextStats: null })
-    expect(q('agent-header-context').text()).toBe('—')
-    expect(q('agent-header-context-arc').exists()).toBe(false)
-  })
-
-  it('treats the backend\'s 0 for an offline probe as no reading, not 0%', () => {
-    render({ contextStats: { contextPercent: 0, contextUsed: 0, contextMax: 200000, activityState: 'offline' } })
-    expect(q('agent-header-context').text()).toBe('—')
-    expect(q('agent-header-context').text()).not.toContain('0%')
-  })
-
-  it('shows the percentage with a level-coloured arc', () => {
-    render({ contextStats: { contextPercent: 91.6, contextUsed: 183000, contextMax: 200000, activityState: 'idle' } })
-    expect(q('agent-header-context').text()).toBe('92%')
-    expect(q('agent-header-context-arc').classes().join(' ')).toContain('stroke-status-danger-500')
-    expect(q('agent-header-context').attributes('title')).toContain('183k / 200k')
   })
 })

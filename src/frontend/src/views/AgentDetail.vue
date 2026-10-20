@@ -87,9 +87,7 @@
             :git-behind="gitBehind"
             :tags="agentTags"
             :all-tags="allTags"
-            :context-stats="headerContextStats"
             :slot-stats="headerSlotStats"
-            :working="headerWorking"
             :has-avatar-prompt="!!avatarIdentityPrompt"
             :read-only-loading="readOnlyLoading"
             :auth-status="authStatus"
@@ -718,9 +716,7 @@ const {
 // watcher, since KeepAlive means onUnmounted never fires on navigation).
 const networkStore = useNetworkStore()
 const {
-  stats: headerContextStats,
   slots: headerSlotStats,       // ent#955: the capacity indicator
-  working: headerWorking,       // ent#955: WS working state, else polled activity
   start: startContextStatsPolling,
   stop: stopContextStatsPolling
 } = useAgentContextStats(agent, networkStore)

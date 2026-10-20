@@ -39,25 +39,13 @@ export function useAgentContextStats(agentRef, networkStore) {
     return (name && networkStore.slotStats?.[name]) || null
   })
 
-  // "Working" the way the fleet tile decides it: a WS-observed in-flight
-  // execution first (instant), else the polled activity state (15s).
-  const working = computed(() => {
-    const name = agentRef.value?.name
-    if (!name) return null
-    const ws = networkStore.workingState?.[name]
-    if (ws) return ws
-    const s = stats.value
-    if (s?.activityState === 'active') return { since: s.lastActivityTime || null }
-    return null
-  })
-
   async function refresh() {
     // The endpoints are fleet-wide; on a slow backend a new tick must not
     // stack a second request behind the first.
     if (inFlight) return
     inFlight = true
     try {
-      await Promise.all([networkStore.fetchContextStats(), networkStore.fetchSlotStats?.()])
+      await Promise.all([networkStore.fetchContextStats(), networkStore.fetchSlotStats()])
     } finally {
       inFlight = false
     }
@@ -83,5 +71,5 @@ export function useAgentContextStats(agentRef, networkStore) {
     }
   }
 
-  return { stats, slots, working, start, stop, refresh }
+  return { stats, slots, start, stop, refresh }
 }

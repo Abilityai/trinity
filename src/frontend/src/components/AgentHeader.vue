@@ -10,7 +10,7 @@
       row 1  identity — avatar (hover: generate / change prompt / next
              emotion), name (pencil edits the DISPLAY LABEL in place), slug,
              description, badges incl. the funding badge that doubles as the
-             subscription switcher; right: Brain door, context ring, Start/Stop
+             subscription switcher; right: Brain door, capacity bars, Start/Stop
       row 2  autonomy and read-only toggles, tags; right: live CPU / memory
              sparklines against their limits (a stopped agent shows its
              allocation) — no uptime, no gear (operator, 2026-10-19)
@@ -257,31 +257,18 @@
               <path stroke-width="1.4" stroke-linecap="round" d="M12 3c3.2 2.4 3.2 15.6 0 18M12 3c-3.2 2.4-3.2 15.6 0 18" opacity="0.7" />
             </svg>
           </button>
-          <!-- Activity + capacity (ent#955): the dashboard's slot meter with a
-               word. A working agent reads "Working" on a pulsing green dot and
-               the bars fill as slots are taken; idle reads "Idle" on a quiet
-               dot. Running agents only, like the ring beside it. One fact per
-               element: the badge says the state, the meter says the slots. -->
-          <div
-            v-if="agent.status === 'running'"
-            class="flex items-center gap-2"
-            :title="activityTitle"
-            data-testid="agent-header-activity"
-          >
-            <BaseBadge :variant="isWorking ? 'success' : 'neutral'" size="sm">
-              <span
-                class="h-1.5 w-1.5 flex-none rounded-full bg-current"
-                :class="isWorking ? 'animate-pulse motion-reduce:animate-none' : ''"
-                aria-hidden="true"
-              ></span>
-              {{ isWorking ? 'Working' : 'Idle' }}
-            </BaseBadge>
-            <CapacityMeter v-if="slotStats" :active="activeSlots" :max="slotStats.max" :height="18" :width="14" />
-            <span v-if="slotStats" class="font-mono tabular-nums text-[11px] text-gray-600 dark:text-gray-400" data-testid="agent-header-slots">{{ activeSlots }}/{{ slotStats.max }}</span>
-          </div>
-          <!-- Context window (ent#950): running agents only — a stopped agent
-               has no context to measure. -->
-          <AgentHeaderContext v-if="agent.status === 'running'" :stats="contextStats" />
+          <!-- Capacity (ent#955): the dashboard's slot meter, and only that —
+               the bars fill (green → amber → red) as the agent's parallel
+               slots are taken, pulsing at full. Running agents only; its own
+               tooltip names the slots. No word, no count, no ring (operator). -->
+          <CapacityMeter
+            v-if="agent.status === 'running' && slotStats"
+            :active="slotStats.active"
+            :max="slotStats.max"
+            :height="22"
+            :width="16"
+            data-testid="agent-header-capacity"
+          />
           <!-- Running State Toggle -->
           <RunningStateToggle
             :model-value="agent.status === 'running'"
@@ -472,7 +459,6 @@ import RunningStateToggle from './RunningStateToggle.vue'
 import AutonomyToggle from './AutonomyToggle.vue'
 import ReadOnlyToggle from './ReadOnlyToggle.vue'
 import AgentHeaderMeta from './AgentHeaderMeta.vue'
-import AgentHeaderContext from './AgentHeaderContext.vue'
 import CapacityMeter from './CapacityMeter.vue'
 import SparklineChart from './SparklineChart.vue'
 import { useFormatters } from '../composables'
@@ -579,20 +565,9 @@ const props = defineProps({
     type: Array,
     default: () => []
   },
-  // ent#950 — this agent's entry in `stores/network.js::contextStats`, or null.
-  contextStats: {
-    type: Object,
-    default: null
-  },
   // ent#955 — this agent's `{ active, max }` from `stores/network.js::slotStats`
   // (the dashboard meters' map), or null before the first poll.
   slotStats: {
-    type: Object,
-    default: null
-  },
-  // ent#955 — `{ since }` while an execution is in flight (WS fast path, else
-  // the polled activity state), null when idle.
-  working: {
     type: Object,
     default: null
   }
@@ -704,19 +679,6 @@ const trendClass = computed(() => {
 // names an origin. AgentDetail clears `gitStatus` on stop and on agent switch,
 // so a stopped agent never shows a previous snapshot.
 const gitBound = computed(() => !!(props.gitStatus?.git_enabled && props.gitStatus?.remote_url))
-
-// ent#955 — activity + capacity. "Working" is either signal: the WS-observed
-// execution (instant) or a taken slot (15s poll); the slot count never reads
-// below the working state, so the bars and the word cannot disagree.
-const activeSlots = computed(() => {
-  const polled = props.slotStats?.active || 0
-  return props.working && polled === 0 ? 1 : polled
-})
-const isWorking = computed(() => !!props.working || activeSlots.value > 0)
-const activityTitle = computed(() => {
-  const slots = props.slotStats ? ` — ${activeSlots.value} of ${props.slotStats.max} slot${props.slotStats.max === 1 ? '' : 's'} in use` : ''
-  return (isWorking.value ? 'Executing now' : 'No execution in flight') + slots
-})
 // The one fact about the repository known at first paint: an agent deployed
 // from a `github:` template has one. (`agent.git_mode` is null for these on a
 // live payload, so it cannot be the signal.) Reserves row 4 so it never pops.
