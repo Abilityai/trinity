@@ -6158,6 +6158,18 @@
         "unit"
       ],
       "description": "The agent server's PUT/mkdir/DELETE/list refuse a link that changes a path's class, keep same-class links, never write through a final link, delete a link as itself, never descend a link in the list (node cap), use resolved-path containment (#3032), CAS without following links, survive a crashed tmp file, keep file mode, refuse nested/bare git metadata, report the link count on reads, and still serve every platform writer."
+    },
+    {
+      "file": "unit/test_3751_a2a_bearer_task_scope.py",
+      "feature": "#3751",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "a2a",
+        "auth",
+        "unit"
+      ],
+      "description": "Bearer A2A tasks/get and tasks/cancel answer only for the credential that started the task through A2A, through the real _dispatch_jsonrpc: the starter (key, JWT, agent key, shared user) reads and cancels its own (running and queued); a sibling agent key of the same owner, the owner's key, the owner signed in, a shared user, an admin and the system key get Task not found on get and cancel, with no terminate/queued-cancel/audit; the refusal is byte-identical to an unknown id; same-principal rows not triggered by a2a, rows with no starting user and a re-minted key are refused; the row _mint_a2a_execution writes is pollable by its caller only; AAuth still goes through execution_owned_by. Mutations: removing the gate turns 21 red, removing the triggered_by check turns 5 red."
     }
   ]
 }
