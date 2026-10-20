@@ -6169,6 +6169,16 @@
         "agent-lifecycle"
       ],
       "description": "recreate_container_with_updated_config re-bakes AGENT_NAME and the trinity.agent-name label from the live name beside TRINITY_AGENT_AUTH_TOKEN (driven through the real recreate, red before the fix on the replayed old name); check_agent_name_env_matches flags a present-and-different env or label, matches absent values and unreadable attrs; start_agent_internal recreates a stuck renamed agent on COLD start only and leaves never-renamed and running agents alone."
+    },
+    {
+      "file": "unit/test_2891_randomly_guard.py",
+      "feature": "#2891",
+      "added": "2026-10-20",
+      "categories": [
+        "unit",
+        "devex"
+      ],
+      "description": "The pytest-randomly guard (tests/testing_utils/randomly_guard.py, via the tests/testkit symlink): opted_in reads the invocation (--randomly-seed, -p randomly, -prandomly, TRINITY_RANDOM_ORDER=1, PYTEST_ADDOPTS); enforce raises a UsageError naming both ways out when the plugin is active and the run did not opt in, is a no-op without the plugin, and passes an explicit seed or the env opt-in; the banner names the seed and how to reproduce/disable; both conftests (tests/ and the sealed unit/ island) wire it with tryfirst, and the four run-*.sh scripts pin -p no:randomly."
     }
   ]
 }

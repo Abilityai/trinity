@@ -434,3 +434,21 @@ def pytest_collectstart(collector):
             _v = _SYS_MODULES_BASELINE_VALUES.get(_k)
             if _v is not None:
                 sys.modules[_k] = _v
+
+
+# ---------------------------------------------------------------------------
+# #2891: a silently randomized run refuses to start; an opted-in one announces
+# its seed. Both conftests call the same policy (`testkit/randomly_guard.py`),
+# because this island never loads the parent conftest (`norecursedirs = ..`).
+# ---------------------------------------------------------------------------
+from testkit import randomly_guard as _randomly_guard_2891  # noqa: E402
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config):
+    _randomly_guard_2891.enforce(config)
+
+
+def pytest_sessionstart(session):
+    _randomly_guard_2891.announce(session)
+
