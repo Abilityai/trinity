@@ -69,7 +69,10 @@ let wrapper
 function render(props = {}) {
   wrapper = mount(AgentHeader, {
     props: { agent: baseAgent(), ...props },
-    global: { plugins: [router] },
+    // The sparklines draw on a canvas 2D context jsdom does not provide (an
+    // async `clearRect` on null surfaces as an unhandled error and fails the
+    // run); nothing here asserts on the drawing, so the chart is stubbed.
+    global: { plugins: [router], stubs: { SparklineChart: true } },
     attachTo: document.body,
   })
   return wrapper
