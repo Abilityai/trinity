@@ -504,6 +504,9 @@ class User(BaseModel):
     _acting_execution_id: Optional[str] = PrivateAttr(default=None)
     # The turn_tier_service answer for it, computed once per request.
     _acting_turn_cache: Optional[tuple] = PrivateAttr(default=None)
+    # trinity-enterprise#872: `dependencies.principal_reach`'s per-request memo of
+    # an agent key's fleet reach. Private, never serialized; None until read.
+    _fleet_reach: Optional[set] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):
@@ -1539,10 +1542,6 @@ class CredentialImportResponse(BaseModel):
     files_imported: List[str]
     message: str
 
-
-class InternalDecryptInjectRequest(BaseModel):
-    """Request for internal decrypt-and-inject (startup.sh)."""
-    agent_name: str
 
 # ============================================================================
 # Guided Credential Setup (trinity-enterprise#127)

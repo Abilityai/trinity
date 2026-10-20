@@ -23,6 +23,7 @@ This guide covers both directions:
 | **JSON-RPC endpoint** | `POST {base}/a2a/{agent}` — the A2A task endpoint (spec v0.3.x): `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`. |
 | **Inbound allow-list** | Optional per-agent list of caller account emails permitted to task the agent. Empty = any authenticated owner/shared caller. |
 | **Outbound endpoints** | External A2A endpoints (+ optional credentials) agents may call — one platform-wide list, managed in **Settings › Integrations**. |
+| **AAuth identity** | `aauth:<agent-name>@<issuer-host>` — how an agent on one Trinity instance is known to another once AAuth is on. The calling instance signs each call with a key only it holds; the receiving instance verifies the signature and admits only identities listed on the target agent's inbound allow-list. No shared secret. See [AAuth agent identity](#aauth-agent-identity--trinity-to-trinity-without-a-shared-key). |
 
 ---
 
@@ -39,7 +40,7 @@ Open the agent's detail page and select the **A2A** tab.
 
    ![The Agent Card URL section — the public discovery URL with a one-click Copy button.](../../screenshots/a2a-card-url.png)
 3. **Review the advertised skills** — exactly what an external caller sees on the card (derived from the agent's `template.yaml` capabilities).
-4. **Manage the inbound allow-list** (optional) — add the account emails of callers that may task the agent. Leave it empty to allow any authenticated owner/shared caller.
+4. **Manage the inbound allow-list** (optional) — add the account emails of callers that may task the agent. Leave it empty to allow any authenticated owner/shared caller. When AAuth is on, this is also where you list the `aauth:<agent>@<host>` identities of agents on other instances that may task this agent — for those, an empty list means nobody (see [Inbound allow-list](#inbound-allow-list)).
 5. **Outbound endpoints** are not registered here. The tab links to **Settings › Integrations**, where an admin manages the platform-wide list `call_a2a_agent` reads — see *[Outbound endpoints](#outbound-endpoints)*.
 
 ### Using MCP (drive it from an agent / automation)
@@ -52,7 +53,7 @@ The same controls are available as MCP tools, so you can expose and configure ag
 | `set_agent_a2a_exposure` | Toggle A2A exposure on/off |
 | `get_agent_a2a_card` | Fetch the served Agent Card JSON |
 | `set_a2a_inbound_allowlist` | Add/remove inbound identities |
-| `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint` | Manage the **platform-wide** outbound endpoint list — the one `call_a2a_agent` resolves against, and the same list the [Part 3](#register-an-endpoint-admin-human-only) routes manage. `agent_name` is accepted but ignored, because the list is not per-agent |
+| `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint` | Manage the **platform-wide** outbound endpoint list — the one `call_a2a_agent` resolves against, and the same list the [Part 3](#register-an-endpoint-admin-human-only) routes manage. `register_a2a_endpoint` takes `auth_scheme` (`bearer` or `aauth`) to choose how calls to that endpoint authenticate. `agent_name` is accepted but ignored, because the list is not per-agent |
 
 Exposure and credential operations are **owner/admin and human-only** — an agent-scoped key can't flip its own exposure. Reads use the standard agent-access gate.
 
@@ -87,6 +88,8 @@ curl -s http://localhost/a2a/new_cool_agent/.well-known/agent-card.json | jq
 ### 2. Authenticate — a Trinity MCP API key
 
 Issue an MCP key from **Settings → MCP Keys** (or the API) and share it with the external client. It's a `trinity_mcp_…` key, sent as `Authorization: Bearer $TOKEN` on every task call; unauthenticated calls fail closed with `401`. The examples below assume you've exported it: `export TOKEN=trinity_mcp_…`.
+
+An agent on **another Trinity instance** needs no key when both instances have AAuth on: its call is signed with its own identity instead, and the key step above is skipped — see [AAuth agent identity](#aauth-agent-identity--trinity-to-trinity-without-a-shared-key). While AAuth is live here, the `401` an unauthenticated call gets also carries `Accept-Signature`, `Accept-Signature-Scheme: jwt` and `AAuth-Requirement: requirement=agent-token`, so an AAuth-aware client learns it may sign instead.
 
 ### 3. Task — JSON-RPC 2.0
 
@@ -151,7 +154,9 @@ By default, any caller authenticated as an owner/shared identity for the agent m
 
 **Use the caller's Trinity account email** — the identity Trinity compares against is the calling account's email, falling back to its username when the account has no email. A DID or caller URL will never match, so a list containing only those denies every real caller.
 
-> **The allow-list is a restriction, not a security boundary.** It layers on top of authentication — every caller has already passed the `401` and the owner/shared access check before it is consulted. It also **fails open**: if the policy backend errors, the request is allowed rather than denied, matching Trinity's availability bias. Don't rely on it as the only thing standing between an untrusted caller and the agent; that job belongs to authentication and sharing.
+**AAuth callers are listed by identity.** An agent calling from another Trinity instance over AAuth has no Trinity key, so this list is the only thing that admits it: add its `aauth:<agent>@<issuer-host>` identity, exactly as the calling instance's Settings page shows it. For AAuth callers the list **fails closed** — an empty list means nobody, and a policy error refuses rather than admits. The calling instance's host must appear in at least one `aauth:` entry before Trinity will even fetch that instance's keys, so a stranger cannot make your backend go and look up a domain nobody listed. See [AAuth agent identity](#aauth-agent-identity--trinity-to-trinity-without-a-shared-key).
+
+> **The allow-list is a restriction, not a security boundary.** It layers on top of authentication — every caller has already passed the `401` and the owner/shared access check before it is consulted. For callers holding a Trinity key it also **fails open**: if the policy backend errors, the request is allowed rather than denied, matching Trinity's availability bias (an AAuth caller is refused on the same error, because nothing else has authenticated it). Don't rely on it as the only thing standing between an untrusted caller and the agent; that job belongs to authentication and sharing.
 
 ---
 
@@ -246,7 +251,7 @@ an error event, because a status code cannot be sent once the stream has opened.
 
 ## Outbound endpoints
 
-The external A2A endpoints agents may call (name + URL + optional credential) are **one platform-wide list**, the one `call_a2a_agent` resolves. An admin manages it in **Settings › Integrations**, with the routes in [Part 3](#register-an-endpoint-admin-human-only), or with `register_a2a_endpoint`; all three address the same list. Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one.
+The external A2A endpoints agents may call (name + URL + optional credential) are **one platform-wide list**, the one `call_a2a_agent` resolves. An admin manages it on the **Outbound A2A endpoints** panel in **Settings › Integrations**, with the routes in [Part 3](#register-an-endpoint-admin-human-only), or with `register_a2a_endpoint`; all three address the same list. Each endpoint has an authentication scheme: **Bearer credential** (the stored credential goes out as `Authorization: Bearer`) or **AAuth** (the call is signed as the calling agent and no credential is stored — see [AAuth agent identity](#aauth-agent-identity--trinity-to-trinity-without-a-shared-key)). Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one.
 
 > **Endpoints registered on an agent's A2A tab before 1.0.** Earlier builds had a register form on the agent's A2A tab. It wrote a separate per-agent list that `call_a2a_agent` never read, so those endpoints answered `endpoint_not_found`. The form is gone. If any such rows remain, the tab lists them as **not callable** with a **Remove** button: re-add the ones you need in Settings › Integrations, then remove them from the tab.
 
@@ -277,7 +282,7 @@ curl -X PUT http://localhost:8000/api/settings/a2a_outbound_enabled \
 
 Once a stored setting exists it wins in both directions, and the environment variable is ignored until you clear the row with `DELETE /api/settings/a2a_outbound_enabled`. If `.env` says `true` and the feature still looks off, that stored row is why.
 
-The endpoint registry has a panel in **Settings › Integrations** (admin), beside the routes below.
+In the UI, the same switch is **Allow outbound A2A calls** on the **Outbound A2A endpoints** panel in **Settings › Integrations** (admin only); the panel reads **Calls allowed** or **Calls off** beside it, and warns that a registered endpoint cannot be called while the switch is off.
 
 ### Register an endpoint (admin, human-only)
 
@@ -299,6 +304,9 @@ Registry rules worth knowing before your first attempt:
 - **Credentials must be printable ASCII with no whitespace or line breaks** (≤8192 chars). A token pasted with a trailing newline is rejected with `422` — that is the single most common first-try failure.
 - **Up to 50 endpoints**, and each URL is SSRF-validated when you register it *and* re-validated on every call.
 - **If the credential is a payment token, say so — or let Trinity notice.** `"credential_kind": "payment_token"` makes Trinity attach it as an x402 payment — the `x402.payment.payload` metadata plus the `payment-signature` header — **in addition to** the `Authorization: Bearer` header every credentialed call already carries, not instead of it. You can leave the field out: Trinity infers it from the value, so a token pasted straight from a paid provider works without you knowing the field exists. The response tells you which it concluded. Send `credential_kind` **alone** (no `credentials`) to re-label a secret you already stored, and note that it cannot be combined with `clear_credentials` — that pair is rejected with `422` rather than guessing which you meant.
+- **Pick the authentication scheme.** `"auth_scheme"` is `bearer` (the default for a new endpoint) or `aauth`. An `aauth` endpoint holds **no** credential — sending one is refused with `422`, and switching an existing endpoint to `aauth` drops the one it had — and its URL must be `https://` on the default port, because the remote verifies the signed host against its own issuer, which carries no port. Omit the field on an update to keep the stored scheme: renaming or repointing an endpoint never silently turns an AAuth one into a bearer one. See [AAuth agent identity](#aauth-agent-identity--trinity-to-trinity-without-a-shared-key).
+
+The **Outbound A2A endpoints** panel does the same from the browser. Its table shows each endpoint's **Name**, **URL** and **Auth** (`Bearer · credential stored`, `Bearer · no credential` or `AAuth · signed as the agent`) with **Edit** and **Remove** per row; the **Register an endpoint** form below it takes **Name**, **A2A URL**, **Authentication** (**Bearer credential** or **AAuth (signed as the agent)**) and, for bearer only, a **Credential** (leave it blank on an edit to keep the stored one). Editing a bearer endpoint over to AAuth warns that saving drops the stored credential; **Remove** asks for confirmation and deletes any stored credential with the endpoint.
 
 ```bash
 # List them (credentials are never returned — only whether one is set)
@@ -324,7 +332,10 @@ register_a2a_endpoint(name        = "research-partner",
                       credentials = "their-api-token",
                       # optional — inferred from the value when omitted;
                       # "payment_token" for an x402 token bought after a 402
-                      credential_kind = "api_key")      # -> { endpoint, outbound_enabled }
+                      credential_kind = "api_key",
+                      # optional — "bearer" (default) or "aauth" (signed as the
+                      # calling agent; no credentials allowed); omit to keep
+                      auth_scheme     = "bearer")       # -> { endpoint, outbound_enabled }
 list_a2a_endpoints()                                    # -> { endpoints, outbound_enabled }
 remove_a2a_endpoint(endpoint_id = "research-partner")    # id or name; first match wins
 ```
@@ -406,7 +417,10 @@ A few behaviors that surprise people, all deliberate: the **calling agent's cont
 
 ### Trinity → Trinity
 
-Register the remote instance's agent endpoint (`https://their-trinity.example.com/a2a/their-agent`) with a **Trinity MCP API key from that instance** as the credential. Both sides speak A2A v0.3, so it works with no extra configuration.
+Two ways, both over A2A v0.3 with no protocol configuration:
+
+- **With a key.** Register the remote instance's agent endpoint (`https://their-trinity.example.com/a2a/their-agent`) with a **Trinity MCP API key from that instance** as the credential. The remote sees the call as whoever owns that key.
+- **Without a key.** Turn on AAuth on both instances and register the endpoint with **Authentication: AAuth**. Each call is then signed as the calling agent (`aauth:<agent>@<your-host>`), and the remote admits it only if that identity is on the target agent's inbound allow-list. Nothing is issued, stored or rotated on either side. See [AAuth agent identity](#aauth-agent-identity--trinity-to-trinity-without-a-shared-key).
 
 ### Between your own instances on a private network
 
@@ -438,6 +452,9 @@ A call that arrives without a key gets `401`, whichever network it comes from.
 | `endpoint_private_address` (400) | The hostname resolves inside your network and is not on the outbound endpoint allowlist |
 | `card_origin_mismatch` (502) | The remote's agent card points somewhere other than the registered host. Trinity refuses: a card cannot redirect a credentialed call |
 | `endpoint_dns_failure` (400) | The hostname does not resolve. Trinity treats a DNS failure as fatal rather than retrying blindly |
+| `aauth_agent_only` (403) | The endpoint uses the AAuth scheme and the caller is not the agent's **own** key. Only the agent itself may place a signed call — an owner, a shared user or an admin cannot make the backend sign as the agent |
+| `aauth_disabled` (400) | The endpoint uses the AAuth scheme but AAuth is off, or has no valid issuer, on **this** instance. Turn it on in **Settings › Integrations** |
+| `rpc_forbidden` (502) on an AAuth endpoint | The remote verified the signature but the calling agent's identity is not on the target agent's inbound allow-list there. Ask that instance's admin to add `aauth:<agent>@<your-host>` |
 | `card_url_ambiguous` (502) | The remote's card declares a URL that doesn't unambiguously match what you registered. Register the origin, or a URL matching the card's declared `url` exactly |
 | `unsupported_protocol_version` (502) | The remote speaks A2A `1.x`, which Trinity deliberately refuses — there is no peer to verify that dialect against |
 | `payment_required` (402) | The remote charges for this call. `detail.payment` carries its price and plan — relay it to a person once and stop; nothing an agent can do changes the answer |
@@ -458,6 +475,85 @@ That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: 
 
 ---
 
+## AAuth agent identity — Trinity to Trinity without a shared key
+
+AAuth lets an agent on one Trinity instance call an agent on another **as itself**. The calling instance signs every call with a key only it holds, and sends an agent token naming the caller as `aauth:<agent-name>@<issuer-host>`. The receiving instance fetches the caller's published key set over HTTPS, verifies the token and the signature over the exact request, and admits the call only if that identity is on the target agent's inbound allow-list. No MCP key is minted, stored or rotated on either side, and a captured request cannot be replayed. The wire is still A2A JSON-RPC over `POST /a2a/{agent}`: AAuth changes how the caller is authenticated, not how it talks. It is **off by default**; with it off, nothing in this section exists and A2A behaves exactly as described above.
+
+What the receiving instance actually checks is that the caller controls the key published at `https://<issuer-host>/.well-known/…` — it says nothing about who runs that instance. Listing `aauth:x@partner.example.com` is trusting whoever controls that domain, and one instance key signs for every agent on it, so the unit of trust is the peer **instance**, not one agent. An allow-list entry means that remote agent may ask yours for anything it can do; revoking it is deleting the entry.
+
+### Turn it on (admin, in the browser)
+
+Open **Settings › Integrations** (admin only) and find the **Calls between Trinity instances (AAuth)** panel. Its badge reads **Off**, **On, inactive** or **Live**.
+
+1. **Set the issuer.** In **Issuer — this instance's public HTTPS host**, enter the origin other instances reach this one on — `https://trinity.example.com` — and press **Save**. The issuer is this instance's AAuth identity domain, so it is strict: `https://`, a lowercase DNS host name with a dot, no port, no path, no IP address. Nothing is repaired for you; a value that needs fixing is refused by name (`invalid_issuer`). It **must equal the host in the agents' Agent Card URLs** (`PUBLIC_CHAT_URL`), because the caller signs the host from the card and the callee verifies against its issuer — a mismatch fails every call. Changing a live issuer asks for confirmation (**Change issuer**), because every agent here becomes `aauth:<agent>@<new host>` and peers that listed the old identities refuse their calls until they list the new ones.
+2. **Flip "Sign and accept agent-to-agent calls" on.** Switched on without a valid issuer, the panel shows **On, inactive** and a warning — AAuth is then off in effect: nothing is published, signed or accepted. With a valid issuer it reads **Live**.
+3. **Read the "Ready to call another instance?" checklist.** It names what a call to another instance still needs, each item with its next step: *Issuer set to this instance's public HTTPS host*, *AAuth switched on*, *Outbound A2A calls allowed* (the switch on the **Outbound A2A endpoints** panel below) and *An endpoint registered with the AAuth scheme*. The instance being called also needs AAuth on and must list your calling agent's identity on the agent it calls.
+
+The panel prints the identity your agents carry — `aauth:<agent-name>@<issuer host>` — which is the string the other instance's admin adds to their agent's inbound allow-list. Each value shows whether it came from the settings row or from `AAUTH_ENABLED` / `AAUTH_ISSUER` in `.env`; switching it in the panel overrides the environment from then on, in both directions, until the row is cleared. The **What this does not protect against** disclosure under the panel lists the limits worth reading once: the instance key signs for every agent; identities are keyed by agent **name** (a renamed agent is a new identity, and a deleted name re-created later inherits what peers granted the old one); replay protection needs Redis and refuses calls while Redis is unavailable; a proxy that rewrites signed headers breaks every call.
+
+The same settings are `GET` / `PUT /api/settings/aauth`. The read is admin-only; the write is admin **and interactive** — an MCP key of any scope is refused, because publishing this instance's key and choosing what every agent is called are grants. `PUT` writes only the fields you send (`enabled`, `issuer`, and the prototype fields below), answers `422` with `invalid_issuer` / `invalid_person_server` / `invalid_resource_allowlist` for a value it will not store, and is audited. The generic `PUT`/`DELETE /api/settings/{key}` refuses every `aauth_*` key, so this route is the only door. For a first boot you can seed the same values with `AAUTH_ENABLED` and `AAUTH_ISSUER` in `.env` (see [Single-Server Deployment → `.env` reference](../guides/deploying/single-server.md#env-reference)).
+
+### Call an agent on another instance
+
+On the **calling** instance: register the remote agent's A2A URL on the **Outbound A2A endpoints** panel with **Authentication** set to **AAuth (signed as the agent)** (or `auth_scheme: "aauth"` through `register_a2a_endpoint` / `PUT /api/settings/a2a-endpoints`). The URL must be `https://` on the default port, and the endpoint stores no credential. Then the agent calls it exactly as any other endpoint: `call_a2a_agent(endpoint="…", message=…, dedup_label=…)`.
+
+On the **receiving** instance: AAuth on, the target agent exposed over A2A, and the caller's identity on that agent's inbound allow-list (`aauth:<agent>@<calling-host>`). A peer on a private network must also be on the outbound endpoint allowlist of the caller and serve HTTPS with a certificate the caller trusts — AAuth never relaxes the HTTPS rule.
+
+Three things differ from a bearer call:
+
+- **Only the agent's own key may place it.** For a bearer endpoint, an owner, shared user or admin calling `POST /api/agents/{agent}/a2a/call` only changes who is attributed; for an AAuth endpoint it would let a person make the backend sign *as the agent*, so anyone but the agent itself is refused `403 aauth_agent_only`. The agent's injected MCP key is the right caller.
+- **The card is fetched under the agent's path first.** A Trinity peer serves its card at `/a2a/{agent}/.well-known/agent-card.json`, so for an AAuth endpoint Trinity looks there before the origin root.
+- **The remote's `403` means "not listed".** The signature verified; the identity is not on that agent's allow-list. It comes back as `rpc_forbidden` — ask the other admin to add the identity, and never retry with a different endpoint.
+
+The activity row and the audit row for the call record `auth: aauth` — never a token.
+
+### Accept calls from another instance
+
+With AAuth live, an exposed agent's Agent Card gains a second security scheme, `aauth`, **after** `bearerAuth`, so an AAuth-unaware client that takes the first entry still sees bearer. A signed request — one carrying a `Signature-Key` header — takes the AAuth path on `POST /a2a/{agent}`; everything else is the bearer path, unchanged. Trinity verifies cheapest-first and reads the body last: exposure (an unexposed agent is the uniform `404`), header shape, the token's claims, then the **trusted-issuer pre-gate** — the caller's host must appear in at least one `aauth:` entry on this agent's allow-list before any network fetch — then the caller's published metadata and key set (same-origin, one 8-second deadline, cached), the token signature, the signature over the request including the body digest, a replay check in Redis, and finally the exact allow-list membership. The task then runs through the same dispatch path as any other trigger, with **no Trinity user** attached: no owner role travels with an AAuth caller.
+
+| Answer | Meaning |
+|---|---|
+| `401` + `Signature-Error: error=<code>` (problem-details body) | The signature, token, digest or replay check failed — `invalid_signature`, `invalid_jwt`, `expired_jwt`, `unknown_key`, `issuer_mismatch`, `clock_skew`, … |
+| `403` | Verified, but the identity is not on this agent's inbound allow-list. Nothing is wrong with the signature |
+| `404` | The agent is not exposed, or does not exist — indistinguishable on purpose |
+| `503` | Redis is unavailable, so the replay check cannot run. AAuth refuses rather than admit a request it cannot prove unique |
+
+Limits on the inbound side: `message/stream` is refused for AAuth callers (`message/send` and polling only), and an AAuth caller can `tasks/get` / `tasks/cancel` only tasks it started. Every decision is audited with actor type `external_agent` and the identity — a refused signature is recorded only once the token itself verified, so a stranger cannot fill your audit log with identities it invented. Accepting signed calls relies on the per-agent inbound allow-list, which is part of the A2A inbound capability: an instance where the **A2A** tab is hidden can sign outbound calls but accepts none.
+
+### Discovery routes and `whoami`
+
+While AAuth is live, the instance publishes three unauthenticated documents (rate limited per IP, like the card route). Peers fetch them; you do not need to.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/.well-known/aauth-agent.json` | GET | Who this instance is as an agent provider: `issuer`, `jwks_uri`, accepted signature algorithms |
+| `/.well-known/aauth-jwks.json` | GET | The public key agent tokens from this instance verify against |
+| `/.well-known/aauth-resource.json` | GET | How to call this instance's agents: `access_mode: agent-token`, the signature window, the extra signed components |
+
+All three answer a uniform `404` unless AAuth is live, so a default install publishes nothing. The front door must route `/.well-known/aauth-*` to the backend: the production nginx config does; the dev server's proxy does not, which is one more reason a local `localhost` stack cannot be an AAuth peer.
+
+To prove the setup against a verifier that is not Trinity, run the operator diagnostic inside the backend container. It signs one request as the named agent to AAuth's public `whoami` service, which fetches your well-known documents over the internet and echoes the identity it verified:
+
+```bash
+docker exec trinity-backend python -m services.aauth.whoami my-agent
+```
+
+It needs AAuth live and the issuer's well-known documents reachable from the internet; exit code `0` means the remote verifier answered `200`. It is deliberately a CLI, not an endpoint: signing as an agent is placed only on the A2A call path.
+
+### What happens when it is off
+
+Off, or on without a valid issuer (**On, inactive**), AAuth is inert rather than half-on: the three well-known documents answer `404`, Agent Cards are byte-identical to a build without AAuth, a signed inbound request falls through to the ordinary bearer `401`, an outbound call to an `aauth` endpoint is refused `400 aauth_disabled`, and the `whoami` diagnostic exits with *AAuth signing unavailable*. The instance key, created on first use and stored encrypted with the other platform credentials, stays put; it is never regenerated on its own, because a silent new key would change this instance's identity under every peer that trusts it.
+
+### Prototypes: acting for the owner, and calling AAuth resources
+
+Two further legs of AAuth ship as **prototypes behind a second switch**, `AAUTH_PROTOTYPE_ENABLED` (`prototype_enabled` on `PUT /api/settings/aauth`). They need the main switch too; the **Calls between Trinity instances (AAuth)** panel only reports them (*Person-token and resource-calling prototypes: on/off*) — there is no UI to configure them, and their MCP tools answer `aauth_disabled: true` while either switch is off. Expect them to change.
+
+**Person-token binding** — an agent proves *whose* agent it is. The agent calls `request_person_token(resource)` (self-acting: agent-scoped key only, no `agent_name`). Trinity signs a request to the person server named in `AAUTH_PERSON_SERVER` / `person_server` (`https://<host>`, same strict rule as the issuer; unset answers `409 person_server_unconfigured`). The first time, the answer is `pending` with a link and a code: the agent must relay them **only to its owner, privately** — whoever approves first at the person server becomes the person the agent acts for — and call again with `pending_handle` after `retry_after` seconds until the outcome is `issued`. The token is held by the platform and never shown to the agent, which sees only its metadata; `refused` outcomes (`denied`, `expired`, `gone`) are final. Route: `POST /api/agents/{agent}/aauth/person-token`.
+
+**Resource calling** — an agent calls an external AAuth-protected API as itself. `call_aauth_resource(resource, method, path, body, justification, dedup_label)` sends `{resource}{path}` signed as the agent and climbs the resource's requirement ladder for it: agent token, then the owner's person token, then an auth token the person server mints against the resource's challenge (a resource that delegates to its own access server is supported; the token still goes through your person server). The agent gets `result` with the resource's answer (capped, every token scrubbed), `token_kind` and the `challenges` it met; `interaction_required` / `pending` with a handle when the owner must consent; or `denied` / `expired` / `refusal` with `do_not_retry`. A later call with a new `dedup_label` reuses the held auth token with no new consent. The resource must be on the **fail-closed allowlist** `AAUTH_RESOURCE_ALLOWLIST` / `resource_allowlist` — a comma-separated list or JSON array of `https://<host>` origins, admin-only; unset, malformed or one bad entry means **no** resource is callable, and an unlisted one is `403 resource_not_allowed`. Only the agent's own key may call (`403 aauth_agent_only`). Route: `POST /api/agents/{agent}/aauth/resource-call`; both prototype routes answer the uniform `404` while the prototypes are off.
+
+---
+
 ## Behavior & security notes
 
 - **Safe by default** — exposure is OFF for every agent until you turn it on; a non-exposed or non-existent agent returns a uniform `404` (no way to enumerate which agents exist).
@@ -466,7 +562,8 @@ That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: 
 - **Stopped agents** still serve a card (from container labels); tasking a stopped/unreachable agent returns a structured JSON-RPC error, never a 5xx.
 - **Every inbound task is audit-logged** (`source=a2a`, with the caller identity).
 - **Outbound is off by default too**, and an agent can only reach endpoints an administrator registered by name — it can never supply a URL of its own, so a prompt injection cannot aim Trinity at an address of the attacker's choosing.
-- **An agent may only call as itself.** Sharing an agent lets someone reach it; it does not let one agent spend another agent's registered endpoint credential.
+- **An agent may only call as itself.** Sharing an agent lets someone reach it; it does not let one agent spend another agent's registered endpoint credential. On an AAuth endpoint this goes one step further: only the agent's own key may place the call, so no person can make the backend sign as the agent.
+- **AAuth publishes a key, not a secret, and only once you turn it on.** Off by default; off (or on without a valid issuer) it publishes nothing, signs nothing and accepts nothing. On, an AAuth caller never becomes a Trinity user — no role travels with it, and it is admitted only by an exact entry on the target agent's inbound allow-list, which fails closed. Changing the AAuth switch or issuer is admin, browser-session-only and audited ([AAuth agent identity](#aauth-agent-identity--trinity-to-trinity-without-a-shared-key)).
 - **Outbound calls are audit-logged** with the endpoint name and the remote **host** — never the full URL, the message, or the credential. For a payment token the audit row records the *kind*, never the value, and a completed payment is recorded so you can see money leaving.
 - **A priced remote is never paid automatically.** Trinity reads a 402 and can attach a token an administrator stored; it never purchases, never retries a priced call, and never replays a stored "payment required" answer after you have paid.
 - **What a remote sends back is treated as untrusted text, including its price.** The payment details that reach an agent are a fixed, size-capped shape with the credential scrubbed out — a remote cannot smuggle extra instructions or your own token back through the price it quotes.
@@ -493,6 +590,19 @@ That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: 
 
 The two agent routes return `404` while outbound calling is off. The three settings routes are **not** gated by the flag: an admin can register endpoints before switching the feature on, which is the intended order. They are also the routes behind `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint`, so the MCP tools and these routes cannot disagree.
 
+### AAuth routes
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| GET | `/.well-known/aauth-agent.json` | none (`404` unless AAuth is live) | Agent-provider metadata |
+| GET | `/.well-known/aauth-jwks.json` | none (`404` unless live) | This instance's public key set |
+| GET | `/.well-known/aauth-resource.json` | none (`404` unless live) | Resource metadata for the A2A task endpoint |
+| POST | `/a2a/{agent}` | a `Signature-Key`-signed request (AAuth) **or** Bearer | The same task endpoint; a signed request takes the AAuth path |
+| GET | `/api/settings/aauth` | admin | The switches, issuer, person server and resource allowlist, each with its source, plus `live` and the readiness checklist |
+| PUT | `/api/settings/aauth` | admin, **interactive only** (no MCP key of any scope) | Change any of them; partial; `422 invalid_*`; audited |
+| POST | `/api/agents/{agent}/aauth/person-token` | the agent's **own** key | Prototype: obtain or resume a person-token binding (`404` while the prototypes are off) |
+| POST | `/api/agents/{agent}/aauth/resource-call` | the agent's **own** key | Prototype: call an allow-listed AAuth resource, or resume a pending call (`404` while off) |
+
 `GET /api/settings/a2a-endpoints` answers `{"endpoints": [{"id": …, "name": …, "url": …, "has_credentials": true, "credential_kind": "api_key"}], "enabled": false}` — credentials are write-only and never echoed back, and `enabled` is a second way to confirm the flag. `credential_kind` appears only where a credential is stored (`api_key` or `payment_token`), with `credential_single_use: true` alongside it when the stored payment token is good for one settlement.
 
 ### JSON-RPC methods
@@ -514,7 +624,7 @@ The two agent routes return `404` while outbound calling is off. The three setti
 | `-32602` | Invalid params (e.g. no message text) |
 | `-32001` | Task not found |
 
-Auth failures are transport-level `401`; exposure/allow-list failures are `404`/`403`. On a priced agent, an unpaid call is `402` and a rejected payment token is `403`.
+Auth failures are transport-level `401`; exposure/allow-list failures are `404`/`403`. On a priced agent, an unpaid call is `402` and a rejected payment token is `403`. An AAuth signature failure is a `401` carrying `Signature-Error: error=<code>` with a problem-details body; a verified AAuth identity that is not allow-listed is `403`.
 
 ---
 
@@ -530,3 +640,4 @@ Auth failures are transport-level `401`; exposure/allow-list failures are `404`/
 
 - [A2A Protocol specification](https://a2a-protocol.org) — the canonical spec
 - [a2aproject/A2A](https://github.com/a2aproject/A2A) — reference implementations
+- [AAuth protocol draft](https://datatracker.ietf.org/doc/draft-hardt-oauth-aauth-protocol/) — the agent identity, person-token and resource flows Trinity's AAuth support follows

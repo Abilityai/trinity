@@ -972,7 +972,10 @@ class ChannelMessageRouter:
         outbound_files = []
         send_text = response_text
         try:
-            send_text, outbound_files = self._extract_outbound_files(response_text)
+            # Telegram renders code inline across ordered messages. Extracting
+            # it here used to leave placeholders for files it never uploaded.
+            if channel != "telegram":
+                send_text, outbound_files = self._extract_outbound_files(response_text)
             if outbound_files:
                 logger.info(
                     f"[ROUTER:{channel}] Extracted {len(outbound_files)} outbound file(s) "

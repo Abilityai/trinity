@@ -16,6 +16,7 @@ from fastapi import HTTPException
 
 from models import User
 from database import db
+from dependencies import is_fleet_admin
 from services.agent_auth import build_agent_auth_headers
 from services.model_context import DEFAULT_CONTEXT_WINDOW
 from services.docker_service import get_agent_container
@@ -287,9 +288,12 @@ async def get_agents_context_stats_logic(
 
     all_stats = running_stats + stopped_stats
 
-    # Update cache (PERF-269)
-    _context_stats_cache["data"] = all_stats
-    _context_stats_cache["timestamp"] = now
+    # Update cache (PERF-269). Only a caller that sees every agent writes it:
+    # the cache is read back filtered, so a narrower caller's subset would hide
+    # the rest of the fleet from the next admin (trinity-enterprise#872).
+    if is_fleet_admin(current_user):
+        _context_stats_cache["data"] = all_stats
+        _context_stats_cache["timestamp"] = now
 
     return {"agents": all_stats}
 

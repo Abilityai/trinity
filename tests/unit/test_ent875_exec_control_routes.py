@@ -453,10 +453,15 @@ def _own_rows(monkeypatch, owned=("a-owned",), shared=("a-shared",)):
     # run reloads the helpers module, `helpers` here and the function the route
     # holds are different module objects, so patch the globals of every copy the
     # code under test can reach (CI orders tests differently from a local run).
-    monkeypatch.setattr(helpers, "get_accessible_agents", fake)
+    # Each dict is patched once, with setitem only: monkeypatch undoes every
+    # setattr before any setitem, so mixing the two on one dict restored the fake
+    # after the test and leaked it into later files (ent#872's accessor tests).
+    scopes = {id(helpers.__dict__): helpers.__dict__}
     for fn in (helpers.viewer_own_rows, getattr(executions, "viewer_own_rows", None)):
         if fn is not None:
-            monkeypatch.setitem(fn.__globals__, "get_accessible_agents", fake)
+            scopes.setdefault(id(fn.__globals__), fn.__globals__)
+    for scope in scopes.values():
+        monkeypatch.setitem(scope, "get_accessible_agents", fake)
     return helpers
 
 

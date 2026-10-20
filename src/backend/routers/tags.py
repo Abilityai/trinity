@@ -12,7 +12,8 @@ from typing import List, Optional
 
 from database import db
 from db.tags import ORG_TAG_PREFIXES
-from dependencies import get_current_user, AuthorizedAgent, OwnedAgent
+from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, is_fleet_admin
+from services.agent_service.helpers import visible_agent_names
 from db_models import User, AgentTagList, AgentTagsUpdate, AllTagsResponse, TagWithCount
 
 
@@ -81,16 +82,27 @@ def _guard_org_namespace(current_user: User, touched: List[str]) -> None:
 @router.get("/tags", response_model=AllTagsResponse)
 async def list_all_tags(current_user: User = Depends(get_current_user)):
     """
-    List all unique tags with agent counts.
+    List all unique tags with agent counts, over the agents the caller may see
+    (an admin person: every agent).
 
     Returns tags sorted by count (descending), then alphabetically.
     """
-    tags = db.list_all_tags()
-    if current_user.role != "admin":
-        # trinity-enterprise#305: this endpoint is fleet-wide (bare GROUP BY,
-        # no owner scoping) and org namespaces would expose every department
-        # name + headcount and every manager agent name (`reports-to-<agent>`)
-        # to any authenticated user. Org tags are an operator surface — the
+    visible = visible_agent_names(current_user)
+    if visible is not None:
+        # trinity-enterprise#872: count only the agents the caller may see — an
+        # agent key its reach, a non-admin person their owned and shared agents.
+        counts: dict = {}
+        for agent_tags in db.get_tags_for_agents(sorted(visible)).values():
+            for tag in agent_tags:
+                counts[tag] = counts.get(tag, 0) + 1
+        tags = [TagWithCount(tag=t, count=n)
+                for t, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+    else:
+        tags = db.list_all_tags()
+    if not is_fleet_admin(current_user):
+        # trinity-enterprise#305: org namespaces carry department names +
+        # headcounts and manager agent names (`reports-to-<agent>`). Org tags
+        # are an operator surface — the
         # overlay reads them per-agent through access-controlled routes, and
         # generic tag surfaces hide them via `isOrgTag` anyway, so non-admins
         # lose nothing they could render.

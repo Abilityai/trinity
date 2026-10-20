@@ -625,6 +625,10 @@ def _previous_version_stubs(monkeypatch, stopped: dict, started: dict):
         deploy_mod, "get_next_version_name", lambda n: f"{n}-2", raising=True
     )
     monkeypatch.setattr(deploy_mod.db, "get_agents_by_owner", lambda u: ["agent-v1"], raising=True)
+    # The caller owns agent-v1 (trinity-enterprise#872 owner check).
+    monkeypatch.setattr(
+        deploy_mod.db, "can_user_share_agent", lambda u, n: n == "agent-v1", raising=True
+    )
     monkeypatch.setattr(
         deploy_mod, "get_agent_container",
         lambda name: SimpleNamespace(name=name), raising=True,

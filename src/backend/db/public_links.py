@@ -14,6 +14,7 @@ public API of ``PublicLinkOperations`` is unchanged.
 """
 
 import json
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
@@ -73,12 +74,35 @@ def _encode_memory_blob(agent_notes: str, conversation_summary: str) -> str:
     )
 
 
+logger = logging.getLogger(__name__)
+
+
 def _parse_aware(dt_str: str) -> datetime:
     """Parse an ISO datetime string, ensuring the result is timezone-aware (UTC)."""
     dt = datetime.fromisoformat(dt_str)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+# A stored expiry that does not parse reads as this instant: already expired.
+UNREADABLE_EXPIRY = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def parse_link_expiry(value: Optional[str]) -> Optional[datetime]:
+    """A link's `expires_at` as an aware datetime, None for no expiry (#3583).
+
+    Fails closed: an unparseable stored value returns UNREADABLE_EXPIRY, so
+    the public check treats the link as expired and the owner list shows it
+    as expired.
+    """
+    if not value:
+        return None
+    try:
+        return _parse_aware(value)
+    except ValueError:
+        logger.warning("public link has unparseable expires_at; treating as expired")
+        return UNREADABLE_EXPIRY
 
 
 class PublicLinkOperations:
@@ -298,10 +322,9 @@ class PublicLinkOperations:
         if not link["enabled"]:
             return False, "disabled", None
 
-        if link["expires_at"]:
-            expires = _parse_aware(link["expires_at"])
-            if _utcnow() > expires:
-                return False, "expired", None
+        expires = parse_link_expiry(link["expires_at"])
+        if expires and _utcnow() > expires:
+            return False, "expired", None
 
         return True, None, link
 

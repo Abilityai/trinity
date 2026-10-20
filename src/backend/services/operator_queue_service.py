@@ -28,6 +28,7 @@ from typing import Optional, Sequence, Tuple
 
 from database import db
 from db import operator_queue as _queue_db
+from dependencies import principal_reach
 from redis_breaker_util import get_breaker_redis
 from services import ask_service, rate_limiter
 from services.operator_queue_choices import (
@@ -402,9 +403,10 @@ AGENT_NAMES_MAX = 500
 
 
 def narrow_to_agent_key(current_user, accessible):
-    """The agents an AGENT-scoped key's queue read covers: `{self} ∪ permitted`
-    intersected with its owner's accessible set (or the bare set when the owner
-    is an admin, `accessible is None`). Every other principal — a person's JWT
+    """The agents an AGENT-scoped key's queue read covers: its reach
+    (`dependencies.principal_reach`: itself, its edges, the agents it spawned,
+    trinity-enterprise#872) intersected with its owner's accessible set (or the
+    bare set when the owner is an admin, `accessible is None`). Every other principal — a person's JWT
     or user key, a system key, the event loopback — gets `accessible` back
     unchanged (trinity-enterprise#815).
 
@@ -417,14 +419,13 @@ def narrow_to_agent_key(current_user, accessible):
     Keyed on `mcp_scope` / `agent_name` directly, never `acting_agent_name()`,
     which maps a system key to `trinity-system` and would narrow the system
     agent. Pure DB (`agent_permissions`, the ent#727 precedent): no Docker read,
-    so a Docker fault cannot shrink the set.
+    so a Docker fault cannot shrink the set; a failed read keeps only itself.
     """
     if getattr(current_user, "mcp_scope", None) != "agent":
         return accessible
-    agent = getattr(current_user, "agent_name", None)
-    if not agent:
+    allowed = principal_reach(current_user)
+    if allowed is None:
         raise QueueListError(403, "agent key carries no agent identity")
-    allowed = {agent} | set(db.get_permitted_agents(agent))
     return allowed if accessible is None else allowed & set(accessible)
 
 
