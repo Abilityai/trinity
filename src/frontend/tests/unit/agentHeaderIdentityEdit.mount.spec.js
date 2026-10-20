@@ -226,12 +226,12 @@ describe('the restored rows (pre-#3798 shape)', () => {
     expect(q('agent-header-funding-select').exists()).toBe(false)
   })
 
-  it('the read-only toggle and the resources gear reach the page', async () => {
-    render()
+  it('the read-only toggle reaches the page; no gear and no uptime in the live cluster', async () => {
+    render({ agentStats: STATS, resourceLimits: { current_cpu: '2', current_memory: '4g' } })
     await wrapper.find('[aria-label^="Read-only mode"]').trigger('click')
     expect(wrapper.emitted('toggle-read-only')).toHaveLength(1)
-    await q('agent-header-resources').trigger('click')
-    expect(wrapper.emitted('open-resources')).toHaveLength(1)
+    expect(q('agent-header-resources').exists()).toBe(false)
+    expect(q('agent-header-live').find('[title="Uptime"]').exists()).toBe(false)
   })
 
   it('a running agent shows live CPU / MEM / uptime against its limits', () => {

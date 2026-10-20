@@ -11,9 +11,9 @@
              emotion), name (pencil edits the DISPLAY LABEL in place), slug,
              description, badges incl. the funding badge that doubles as the
              subscription switcher; right: Brain door, context ring, Start/Stop
-      row 2  autonomy and read-only toggles, tags; right: live CPU / memory /
-             uptime sparklines (a stopped agent shows its allocation) and a
-             gear that opens Settings › General for memory / CPU
+      row 2  autonomy and read-only toggles, tags; right: live CPU / memory
+             sparklines against their limits (a stopped agent shows its
+             allocation) — no uptime, no gear (operator, 2026-10-19)
       row 3  the 7-day spend row (sparkline, today, trend vs avg, lifetime)
       row 4  the GitHub line — repo, branch, commit, changed / ahead / behind —
              only when a repository is connected; Pull / Push / Refresh stay
@@ -346,7 +346,7 @@
            a right cluster that changed width when the stats landed decided
            whether the row wrapped — the tab strip moved 32px a beat after
            paint. Right-aligned inside the reserved box. -->
-      <div class="flex flex-wrap sm:flex-nowrap items-center ml-auto gap-x-4 gap-y-1 text-xs min-h-[20px] sm:min-w-[30rem] sm:shrink-0 sm:justify-end" data-testid="agent-header-live">
+      <div class="flex flex-wrap sm:flex-nowrap items-center ml-auto gap-x-4 gap-y-1 text-xs min-h-[20px] sm:min-w-[24rem] sm:shrink-0 sm:justify-end" data-testid="agent-header-live">
         <!-- When running: live stats with sparklines -->
         <template v-if="agent.status === 'running' && agentStats">
           <div class="flex items-center gap-1.5">
@@ -363,7 +363,6 @@
             <!-- #1126: configured max memory, so live usage reads against the ceiling -->
             <span class="font-mono text-gray-600 dark:text-gray-400">/ {{ (resourceLimits.current_memory || '4g').toUpperCase() }}</span>
           </div>
-          <span class="font-mono tabular-nums text-gray-600 dark:text-gray-400 w-16 text-right" title="Uptime">{{ formatUptime(agentStats.uptime_seconds) }}</span>
         </template>
         <!-- Running, first sample not in yet: a skeleton the width of the cluster -->
         <span
@@ -378,21 +377,6 @@
           <span class="font-mono text-gray-600 dark:text-gray-400">{{ resourceLimits.current_cpu || '2' }} CPU</span>
           <span class="font-mono text-gray-600 dark:text-gray-400">{{ (resourceLimits.current_memory || '4g').toUpperCase() }}</span>
         </template>
-        <!-- Resource config: memory / CPU live in Settings › General since ent#887 -->
-        <button
-          v-if="canEditIdentity"
-          type="button"
-          class="p-1.5 text-gray-600 dark:text-gray-400 hover:text-action-primary-600 dark:hover:text-action-primary-400 hover:bg-gray-100 dark:hover:bg-gray-750 rounded transition-colors shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
-          title="Memory and CPU — opens Settings › General"
-          aria-label="Configure memory and CPU"
-          data-testid="agent-header-resources"
-          @click="$emit('open-resources')"
-        >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
-        </button>
       </div>
     </div>
 
@@ -617,10 +601,9 @@ const props = defineProps({
 // ent#955: `set-label`, `open-avatar-modal`, `cycle-emotion`, `toggle-read-only`
 // and `change-subscription` are the SAME events Settings › General's rows emit
 // — AgentDetail owns one handler per verb and both surfaces rejoin it.
-// `open-resources` opens Settings › General (memory / CPU live there, ent#887).
 const emit = defineEmits([
   'toggle', 'toggle-autonomy', 'toggle-read-only', 'update-tags', 'add-tag', 'remove-tag',
-  'set-label', 'open-avatar-modal', 'cycle-emotion', 'change-subscription', 'open-resources',
+  'set-label', 'open-avatar-modal', 'cycle-emotion', 'change-subscription',
 ])
 
 // ent#181: one resolution helper, never `label || name` inline — a name resolved
@@ -680,7 +663,7 @@ const MEMORY_COLOR = CANVAS_PALETTE[7]
 const COST_COLOR = CANVAS_PALETTE[2]
 const UNREPORTED = 'Cost is not reported under this auth — token-based tracking only'
 
-const { formatBytes, formatUptime, formatCost } = useFormatters()
+const { formatBytes, formatCost } = useFormatters()
 
 // Status text is the 700 tier in light and the 400 tier in dark (#2201).
 function loadClass(pct) {

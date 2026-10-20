@@ -110,7 +110,6 @@
             @open-avatar-modal="showAvatarModal = true"
             @cycle-emotion="cycleEmotion"
             @change-subscription="changeSubscription"
-            @open-resources="selectTab('settings', { query: { section: 'general' } })"
           />
 
           <!-- Tabs -->
