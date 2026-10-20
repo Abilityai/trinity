@@ -5314,6 +5314,26 @@ def _migrate_proactive_consent_not_asked(cursor, conn):
     cursor.execute("UPDATE agent_sharing SET allow_proactive = NULL WHERE allow_proactive = 0")
     conn.commit()
 
+def _migrate_admin_email_not_username(cursor, conn):
+    """#3554 — the provisioned admin has no sign-in email.
+
+    The PostgreSQL admin seed wrote ``email = username`` ("admin"), which is
+    truthy, so the first-run "Sign-in email" step never appeared. Clears the
+    value where it still equals the username and is not an address (no ``@``);
+    a real email, even one equal to its username, is kept. Data only.
+
+    Idempotent. Mirrored by Alembic 0100_admin_email_not_username.
+    """
+    cursor.execute("PRAGMA table_info(users)")
+    cols = {row[1] for row in cursor.fetchall()}
+    if not {"username", "email"} <= cols:   # a pre-username schema has nothing to clear
+        return
+    cursor.execute(
+        "UPDATE users SET email = NULL WHERE email = username AND email NOT LIKE '%@%'"
+    )
+    conn.commit()
+
+
 def _migrate_agent_peer_skill_grants(cursor, conn):
     """abilityai/trinity-enterprise#662 — a peer may run what an agent declares;
     what an admin assigned needs a grant.
@@ -5778,4 +5798,5 @@ MIGRATIONS = [
     ("operator_queue_replace", _migrate_operator_queue_replace),
     ("proactive_consent_not_asked", _migrate_proactive_consent_not_asked),
     ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
+    ("admin_email_not_username", _migrate_admin_email_not_username),
 ]

@@ -18,7 +18,7 @@ API endpoints for agent chat, voice, streaming, and public chat access.
 | `/api/agents/{name}/chat/history` | GET | The agent's current `/chat` conversation |
 | `/api/agents/{name}/chat/history` | DELETE | Reset the `/chat` conversation so the next turn starts fresh (owner or admin) |
 | `/api/agents/{name}/chat/session` | GET | Current `/chat` session info, including context usage |
-| `/api/agents/{name}/model` | GET / PUT | Read or set the model the agent uses for subsequent messages |
+| `/api/agents/{name}/model` | GET / PUT | Read or set the model the agent uses for subsequent messages. An agent's own refusal (for example `400` for an invalid model, naming the valid ones) reaches you with its status and detail; an unreachable agent or an agent error answers `503` |
 | `/api/agents/{name}/activity` | GET / DELETE | Session activity summary; clear it |
 | `/api/agents/{name}/activity/{tool_id}` | GET | Full detail of one tool call |
 

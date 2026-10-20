@@ -275,19 +275,21 @@
       </div>
     </div>
 
-    <!-- Distribution: content/links sharing — not client access (#18 nudge) -->
+    <!-- Web — public chat links outsiders open in a browser. This block was
+         "Distribution"; trinity-enterprise#888 moved File sharing to
+         Settings › Storage (it governs what leaves the disk, not reach). -->
     <div>
-      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Distribution</h4>
+      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Web</h4>
       <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
-        Share generated files and public chat links. This is about distributing output, not granting client access.
+        Public chat links outsiders open in a browser. Shared files are under
+        <router-link
+          :to="{ query: { ...$route.query, tab: 'settings', section: 'storage' } }"
+          class="font-medium text-action-primary-600 hover:text-action-primary-700 dark:text-action-primary-400 dark:hover:text-action-primary-300"
+        >Settings › Storage</router-link>.
       </p>
       <div class="space-y-2">
         <ChannelDisclosure title="Public links" subtitle="Shareable public chat URLs" icon="🔗">
           <PublicLinksPanel :agent-name="agentName" />
-        </ChannelDisclosure>
-
-        <ChannelDisclosure title="File sharing" subtitle="Outbound shared files" icon="📂">
-          <FileSharingPanel :agent-name="agentName" />
         </ChannelDisclosure>
       </div>
     </div>
@@ -311,7 +313,6 @@ import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
 import VoipChannelPanel from './VoipChannelPanel.vue'
 import ConnectorChannelPanel from './ConnectorChannelPanel.vue'
 import PortalClientsPanel from './PortalClientsPanel.vue'
-import FileSharingPanel from './FileSharingPanel.vue'
 
 const props = defineProps({
   agentName: {

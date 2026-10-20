@@ -283,6 +283,9 @@ class TestDeletablePaths:
         "/proc/self/root/home/developer/.claude/skills",
         "/proc/self/cwd/.ssh",
         "/proc/thread-self/root/home/developer/.ssh",
+        # ent#820: the agent server refuses it by name; the route floor now
+        # says so too, so the Files tab does not offer a Delete that fails
+        "CLAUDE.md", "docs/CLAUDE.md",
     ])
     def test_refused(self, path):
         assert files._is_user_deletable_path(path) is False
@@ -293,7 +296,6 @@ class TestDeletablePaths:
         ".sshX", ".claude/settings.jsonX", "x/.ssh", "/etcX",
         # a string prefix of an anchor is not a directory above it
         "/home/developer/.ss", "/et", "/home/dev", ".claude/settings",
-        "CLAUDE.md",          # the agent server's own by-name block decides this one
     ])
     def test_allowed(self, path):
         assert files._is_user_deletable_path(path) is True
@@ -399,6 +401,9 @@ def _call(fn, path):
 @pytest.fixture
 def routes(monkeypatch):
     monkeypatch.setattr(files.db, "can_user_access_agent", lambda u, a: True)
+    # ent#820: these are the floors as the OWNER meets them; the tier below the
+    # owner is pinned in test_ent820_files_tier_census.py.
+    monkeypatch.setattr(files, "_passes_owner_tier", lambda u, a: True)
     # Past every gate, the next thing each logic function does is look up the
     # container; "Agent not found" is the observable proof nothing refused it.
     monkeypatch.setattr(files, "get_agent_container", lambda name: None)
@@ -479,6 +484,7 @@ def test_the_agent_receives_the_path_that_was_checked(monkeypatch, fn, path, for
     """The check and the action read one string: the agent is sent the
     normalised path the deny list approved, never the raw input."""
     monkeypatch.setattr(files.db, "can_user_access_agent", lambda u, a: True)
+    monkeypatch.setattr(files, "_passes_owner_tier", lambda u, a: True)   # the owner (ent#820)
     monkeypatch.setattr(files, "get_agent_container", lambda name: SimpleNamespace(status="running"))
     monkeypatch.setattr(files, "container_reload", AsyncMock())
     sent = AsyncMock(return_value=SimpleNamespace(status_code=200, json=lambda: {"success": True}))
@@ -492,7 +498,13 @@ def test_the_agent_receives_the_path_that_was_checked(monkeypatch, fn, path, for
 
 # The only owner-tier read patterns that are NOT write-denied. Pinned as a
 # literal: a new read-only entry is a reviewed decision, not a side effect.
-_EXPECTED_READ_ONLY = (".kube/config", ".config/gcloud/*", "*.key", "*.pem", "*.p12", "*.pfx")
+_EXPECTED_READ_ONLY = (
+    ".kube/config", ".config/gcloud/*",
+    # ent#820 review: fixed-name credential files a share holder must not read
+    ".netrc", ".git-credentials", ".docker/config.json", ".config/gh/hosts.yml",
+    ".gemini/oauth_creds.json",
+    "*.key", "*.pem", "*.p12", "*.pfx",
+)
 
 
 def test_the_read_only_owner_tier_patterns_are_the_reviewed_set():

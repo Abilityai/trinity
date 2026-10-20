@@ -10,7 +10,7 @@ Trinity serves plain HTTP; no compose file carries an HTTPS listener or a certif
 |---|---|---|
 | **Cloudflare Tunnel** (this page) | HTTPS at a real hostname, no inbound ports open at all | The default for a public instance. Nothing to renew. |
 | **Private network** (Tailscale / WireGuard / VPC) | Encrypted transport; the instance is not on the public internet | Teams and webhook sources that can all reach the VPN. Inbound integrations (Telegram, WhatsApp, VoIP, webhook triggers) do not work without a public hostname. |
-| **Reverse proxy you run** (Caddy / nginx + Let's Encrypt) | HTTPS at your own domain | You already operate a proxy. |
+| **Reverse proxy you run** (Caddy / nginx + Let's Encrypt) | HTTPS at your own domain | You already operate a proxy. Have it send `X-Forwarded-Proto: https` on every request — Trinity reads that header to show `https://` webhook and MCP URLs (see [Webhook URLs](#webhook-urls-after-enabling-public-access)). |
 
 Plain HTTP on a public IP with none of the above is the one combination to avoid. An instance prepared by `start.sh --provision` (the DigitalOcean 1-Click or installer script, an AWS or Vultr install) ships its own Caddy with a short-lived certificate for the instance's IP, and on the DigitalOcean and AWS paths the **Secure this instance** step of the first-run setup presents the tunnel below as the second hardening stage, after a domain — see [Single Server → DigitalOcean 1-Click](single-server.md#digitalocean-marketplace-1-click).
 
@@ -139,11 +139,13 @@ Once `PUBLIC_CHAT_URL` is set and the tunnel is connected, Trinity constructs we
 |---|---|
 | Telegram | `{PUBLIC_CHAT_URL}/api/telegram/webhook/{secret}` |
 | WhatsApp (Twilio) | `{PUBLIC_CHAT_URL}/api/whatsapp/webhook/{secret}` |
-| Schedule webhooks | `{PUBLIC_CHAT_URL}/api/webhooks/{token}` |
+| Schedule webhooks | `https://<the host you opened Trinity on>/api/webhooks/{token}` — see below |
 
 Copy the URL shown in the UI into the respective third-party dashboard (Telegram BotFather, Twilio console, etc.).
 
-MCP clients off-VPN connect to `{PUBLIC_CHAT_URL}/mcp` with an MCP API key (**Settings → MCP Keys**); **Settings → MCP Keys → MCP Server URL** sets the URL the UI shows to users.
+**Schedule webhook URLs and the auto-detected MCP URL follow the proxy, not `PUBLIC_CHAT_URL`.** Their host is the one you opened Trinity on, and their scheme comes from the `X-Forwarded-Proto` header the proxy in front of Trinity sends: a proxy that sends `https` (a Cloudflare Tunnel, or your own proxy configured as above) gets `https://<host>/api/webhooks/{token}` and `https://<host>/mcp`. A proxy that sends no such header, or Trinity opened directly on its own port, gets `http://` URLs. The scheme is only ever upgraded by that header, never downgraded. So open Trinity through its public address before you copy a schedule's webhook URL.
+
+MCP clients off-VPN connect to `{PUBLIC_CHAT_URL}/mcp` with an MCP API key (**Settings → MCP Keys**). The URL the UI shows to users is auto-detected the same way — `https://<host>/mcp` behind an HTTPS proxy, `http://<host>:8080/mcp` otherwise; **Settings → MCP Keys → MCP Server URL** overrides it.
 
 ## Security Notes
 

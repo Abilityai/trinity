@@ -96,7 +96,7 @@ class TestNoLiveDocSendsYouThere:
         # is what made the old `or` branch always true) and silently drops the
         # top of the comment as soon as it grows.
         start = src.index("# Paths that cannot be edited via the file-write endpoint.")
-        block = src[start:src.index("EDIT_PROTECTED_PATHS = [")]
+        block = src[start:src.index("EDIT_PROTECTED_PATHS = ")]
         # The backend route is `/api/agents/{name}/credentials/inject`; the
         # first draft asserted `/api/credentials/inject`, which is not a path
         # that exists anywhere — and it went unnoticed because the `or` branch

@@ -361,45 +361,112 @@ just deleting the file.
 
 ## Directory Structure
 
-Every Trinity-compatible agent follows this structure:
+This is a convention, not a mechanism. The platform reads and writes a fixed set of paths by name; everything else is yours to arrange. Two facts shape it: inside the container the git repo root is `/home/developer` (`$HOME`, #1703), and that directory is a durable volume that outlives the container (it survives stop/start, recreate and image upgrades). So the useful question for any folder is not "where does it go in the tree" but "which zone is it in".
 
-```
-my-agent/
-├── .git/
-├── .gitignore                     # CRITICAL: excludes secrets
-│
-├── CLAUDE.md                      # Agent instructions
-├── README.md                      # Human documentation
-├── template.yaml                  # Trinity metadata + credential schema
+### Recommended workspace layout
+
+Three zones: **Ⓟ platform-owned** (the platform reads or writes it by path — do not rename or reorganise it), **Ⓒ committed** (your agent, versioned in git) and **Ⓥ volume-only** (lives on the durable volume, never committed).
+
+```text
+/home/developer/                   # repo root = $HOME (#1703); a durable volume
+├── .gitignore               Ⓒ     # derived from the zones, see below
+├── CLAUDE.md                Ⓒ     # agent instructions
+├── README.md                Ⓒ     # human documentation
+├── template.yaml            Ⓒ     # Trinity metadata + credential schema
+├── .mcp.json.template       Ⓒ     # MCP config with ${VAR} placeholders (.mcp.json is derived, never committed)
+├── .env.example             Ⓒ     # documents required credentials (.env itself is never committed)
+├── dashboard.yaml           Ⓒ     # optional; see Agent Dashboard
 │
 ├── .claude/
-│   ├── agents/                    # Agent's own sub-agents (optional)
-│   ├── commands/                  # Slash commands (optional)
-│   ├── skills/                    # Symlinks to assigned platform skills (auto-managed)
-│   ├── skills-library/            # Read-only mount of all platform skills
-│   └── settings.local.json        # Claude Code settings
+│   ├── skills/<name>/       Ⓒ     # your own skills and the library skills assigned to you
+│   ├── agents/              Ⓒ     # sub-agents (optional)
+│   └── commands/            Ⓒ     # slash commands (optional)
 │
-├── .mcp.json.template             # MCP config with ${VAR} placeholders
-├── .env.example                   # Documents required credentials
+├── memory/                  Ⓒ     # the agent's memory — one named directory, committed
+├── docs/                    Ⓒ     # agent documentation, including intent docs
+├── reports/<kind>/          Ⓒ     # dated, append-only: reports/<kind>/YYYY-MM-DD-<slug>.md
+├── project_files/<slug>/    Ⓒ     # one folder per managed project (inside follows the project standard)
+├── scripts/                 Ⓒ     # helper scripts (optional)
 │
-├── docs/                          # Agent documentation (recommended)
-│   └── ...
+├── data/                    Ⓟ Ⓥ   # runtime state; the export/import boundary (data_paths)
+├── public/                  Ⓟ     # the only folder share_file reads
+├── uploads/                 Ⓟ     # files people attach in chat or through the API
+├── shared-out/              Ⓟ     # shared folder you expose (when enabled)
+├── shared-in/<agent>/       Ⓟ     # shared folders you consume (when enabled)
+├── content/                 Ⓟ Ⓥ   # large generated media; created at start, gitignored
+├── .trinity/                Ⓟ     # shared with the platform — see the zone table
 │
-├── outputs/                       # Generated content (COMMITTED)
-│   ├── reports/
-│   └── data/
-│
-├── content/                       # Large generated assets (NOT COMMITTED)
-│   ├── videos/                    # Generated video files
-│   ├── audio/                     # Generated audio files
-│   ├── images/                    # Generated images
-│   └── exports/                   # Data exports, large files
-│
-├── data/                          # Runtime data — SQLite DBs, datasets (NOT COMMITTED; see data_paths)
-│
-├── scripts/                       # Helper scripts (optional)
-└── resources/                     # Static resources (optional)
+├── .tmp/                    Ⓥ     # $TMPDIR — the one scratch directory
+└── <role>/                  Ⓥ     # a side clone of another repo, e.g. canon/
 ```
+
+| Zone | What lives there | Committed? | Who writes it |
+|------|------------------|------------|---------------|
+| Ⓟ Platform-owned | `data/`, `public/`, `uploads/`, `shared-out/`, `shared-in/<agent>/`, `content/`, `.trinity/` | `data/` never (gitignored once you declare `data_paths`); `content/` never. Of `.trinity/`, only the re-includes in the [`.gitignore` list](#5-gitignore-required) (`setup.sh`, `pipelines/`, `plugins.yaml`, …) | The platform and the agent. `.trinity/` is reserved by the platform, but the agent itself writes `operator-queue.json`, `persistent-state.yaml` and `pipelines/` there; people cannot edit it from the Files tab |
+| Ⓒ Committed workspace | Identity and config files at the root, `.claude/{skills,agents,commands}/`, `memory/`, `docs/`, `reports/<kind>/`, `project_files/<slug>/`, `scripts/` | Yes | The author and the agent |
+| Ⓥ Volume-only runtime | `data/`, `content/`, `$TMPDIR` (`~/.tmp/`), side clones | No — they persist on the volume, not in git | The agent |
+
+Notes on individual entries:
+
+- **`project_files/<slug>/`** is the managed-project folder; its inside (charter, tasks, log) is defined by the project standard in the [agent-dev plugin](user-docs/abilities/agent-dev-plugin.md), not here. A *shared* project lives in the fleet's canon repo at `projects/<slug>/` instead, which is why the agent-repo folder is not called `projects/`.
+- **`reports/<kind>/`** holds dated, append-only files (`reports/weekly/2026-10-19-summary.md`). Never rewrite last period's file; add the next one.
+- **Scratch goes in `$TMPDIR`** (`~/.tmp/`), which the platform sets, creates and gitignores, and which is exec-capable because it is on the volume. Work in one subdirectory per job (`~/.tmp/<job>/`) and remove only that subdirectory; never clear `~/.tmp` wholesale — `~/.tmp/codex/` holds the Codex login, and pip/npm use it too. Do not use `/tmp`: it is a small RAM-backed `noexec` tmpfs, sized by the operator, and lost on recreate.
+- **`.claude/skills/<name>/`** is a plain directory per skill: your own skills and the library skills assigned to you both land there (see [Platform Skills](#platform-skills)).
+
+### Three rules that matter more than the tree
+
+1. **The root holds only identity and config files.** `CLAUDE.md`, `README.md`, `template.yaml`, `.mcp.json.template`, `.env.example`, `.gitignore`, and `dashboard.yaml` if you have one. Work products go in a named folder (`reports/`, `docs/`, `project_files/<slug>/`), never loose at the root.
+2. **Derived files are regenerated, never hand-edited.** `.mcp.json` is written from `.mcp.json.template` by credential injection; `dashboard.yaml` is written by its `/update-dashboard` playbook if you have one; the two managed regions of `.gitignore` are rewritten on every sync. Change the source, then regenerate.
+3. **Memory goes in one named directory: the repo-level `memory/`, committed** so it travels with the agent to every instance. It is also shared across all users of the agent and committed to git, so no user's personal details go there — use `write_user_memory` for per-person facts. Claude Code's auto-memory under `~/.claude/projects/` (it writes `~/.claude/projects/<cwd-slug>/memory/`) is gitignored, local to this volume and shared across all users of the agent; do not treat it as the agent's memory, and never put personal data there either. See [Memory Management](#memory-management).
+
+### Other repositories in the workspace
+
+When the agent needs another repo's files (a canon, a shared library, a dataset repo), use a **gitignored side clone**: one top-level directory per clone, named for its role (`canon/`, `styleguide/`, …), added to your own `.gitignore` rules. There is no wrapper directory; the fleet's canon layer already clones to `canon/`, and a marketplace installer that clones a repo picks its own directory name the same way.
+
+Keep the clone current from `.trinity/setup.sh`, which runs on every container start:
+
+```bash
+# in .trinity/setup.sh — clone if missing, fast-forward if present, print the sha
+if [ ! -d "$HOME/canon/.git" ]; then
+  git clone https://github.com/your-org/your-canon.git "$HOME/canon"
+else
+  git -C "$HOME/canon" pull --ff-only || echo "canon: not fast-forwardable, left as is"
+fi
+echo "canon at $(git -C "$HOME/canon" rev-parse --short HEAD)"
+```
+
+- **No token in the URL, and no secret in `setup.sh`.** A token in a clone URL is written into that clone's `.git/config` in plain text and shows up in the process table on every fetch, and `setup.sh` is committed. If the clone needs authentication, let a git credential helper supply it — the platform keeps tokens out of its own remote URLs for the same reason — and put durable credentials through [Credential Management](#credential-management).
+- **`git pull --ff-only`, not `fetch` + `reset --hard`.** A reset on every start discards whatever the agent wrote in that clone since the last push. Use `fetch` + `reset --hard origin/<branch>` only for a clone the agent never writes to, and say so in a comment next to it.
+- **Present is not current.** Do not skip the refresh when the directory already exists; the volume outlives every restart, so an early exit pins the clone at whatever it was the first time.
+
+**Submodules** are for one case only: you need an exact pin of the other repo recorded in the agent's own history. Know the costs first. Agent creation does not initialise submodules, and the platform's git pull fails when the pinned pointer moves (#2366). A template **reset to main** overwrites tracked files except those listed in `.trinity/persistent-state.yaml` (without that file, a default set: `workspace/`, `.trinity/`, `.mcp.json`, `.claude.json` and `.claude/.credentials.json`; the kept files are snapshotted to `.trinity/backup/<ts>/` first), and never touches untracked ones; it rewrites the submodule pointer but does not re-checkout the submodule, so the checkout is left stale. A force-replace pull (offered when a pull conflicts, and through the MCP `git_pull` tool) is different: it resets to the remote and deletes untracked files that are not gitignored, so keep work you need committed or in a gitignored folder. (An ordinary pull rebases onto the remote and does not reset.) A gitignored side clone is untouched by all of these.
+
+### Why the `.gitignore` looks the way it does
+
+The [`.gitignore` list](#5-gitignore-required) under Required Files is the zones written down. Do not copy it; read it as:
+
+```text
+Credentials (.env, .env.*, .mcp.json, *.pem, *.key, .ssh/) -> never committed, by any zone
+Shell init / history, .cache/, .local/, .npm/             -> instance-specific; belong to this container
+.trinity/* plus its ! re-includes                         -> platform-owned; only the files you author are committed
+.tmp/                                                     -> volume-only scratch ($TMPDIR)
+content/, *.db/*.sqlite, node_modules/, .venv/, caches    -> volume-only runtime and bulk data
+data/ (added when you declare data_paths)                 -> platform-owned, volume-only
+.claude/projects/, sessions/, todos/, ...                 -> Claude Code's own runtime state on the volume
+```
+
+The one thing the list cannot know is *your* volume-only directories. Add one line per side clone (`canon/`) to your own rules, between the two managed regions. Everything else in the committed zone is committed by default.
+
+### Sources
+
+- [Runtime Data (`data_paths`)](#runtime-data-data_paths--1169) and [Agent data](user-docs/agents/agent-data.md) — `data/`
+- [Shared Folders](#shared-folders) and [Agent network](user-docs/collaboration/agent-network.md) — `shared-out/`, `shared-in/`
+- [Agent files](user-docs/agents/agent-files.md) — `public/`, `share_file`, uploads
+- [Content Folder Convention](#content-folder-convention) — `content/`
+- [Package Persistence](#package-persistence) — `.trinity/setup.sh`
+- [Memory Management](#memory-management) — `memory/`
+- [Agent-dev plugin](user-docs/abilities/agent-dev-plugin.md) — `project_files/<slug>/` and the project standard
+- The platform instructions injected into every agent's system prompt, whose "Your environment" block names the same platform-owned paths
 
 ---
 
@@ -417,7 +484,7 @@ data_paths:
 
 Why this matters:
 
-- **It's already durable.** `/home/developer` is a persistent Docker volume that survives container restarts, recreation, image upgrades, and template re-pulls (`git reset --hard`). You do **not** need a separate volume.
+- **It's already durable.** `/home/developer` is a persistent Docker volume that survives container restarts, recreation, image upgrades, template pulls and a reset to the template's main (`git reset --hard` touches only tracked files, and `data/` is untracked). The exception is a force-replace pull (offered when a pull conflicts, and through the MCP `git_pull` tool): it also runs `git clean -fd`, which deletes untracked `data/` unless you declare `data_paths`, so that `data/` is gitignored. You do **not** need a separate volume.
 - **It stays out of git.** When you declare `data_paths`, Trinity appends `data/` to your agent's `.gitignore` at creation, so runtime data is never committed (no repo bloat, no accidental data leak). A template shipping its own `.gitignore` should pre-include `data/`.
 - **It's portable.** The owner can export the data as a tar and import it into another agent/instance:
   - `POST /api/agents/{name}/data/export` — download a tar of `data/` (or `?format=base64` for small data inline).
@@ -649,7 +716,7 @@ git:
   push_enabled: true              # Only applies to Working Branch Mode
   commit_paths:                   # Paths auto-committed on sync (Working Branch Mode only)
     - memory/
-    - outputs/
+    - reports/
     - CLAUDE.md
   ignore_paths:
     - .mcp.json
@@ -1031,7 +1098,7 @@ To persist credentials across deployments:
 
 1. **Export**: Click "Export to Git" → encrypts `.env` and `.mcp.json` → writes `.credentials.enc`
 2. **Commit**: The `.credentials.enc` file is safe to commit (AES-256-GCM encrypted)
-3. **Auto-import**: On agent start, if `.credentials.enc` exists but `.env` doesn't, credentials are automatically decrypted and injected
+3. **Import**: `startup.sh` does not decrypt the file. The platform imports a `.credentials.enc` once the agent is ready, except on installs with no encryption key; there the owner imports it once with **Import from Git** on the Credentials tab (or the `import_credentials` MCP tool)
 
 ### Your Agent Should
 
@@ -2125,6 +2192,8 @@ The `ask_operator` tool description documents every field and each named refusal
 
 Agents manage their own memory. Trinity provides storage, not strategy. Each agent can implement memory however it sees fit.
 
+The recommended home is the repo-level `memory/`, committed, so it travels with the agent — see [Directory Structure](#directory-structure); it is shared across every user of the agent, so per-person facts go through `write_user_memory`.
+
 ### Example Structure (Optional)
 
 This is a suggested pattern, not a requirement:
@@ -2132,7 +2201,7 @@ This is a suggested pattern, not a requirement:
 ```
 memory/
 ├── context.md           # Long-term learned context
-├── preferences.json     # User preferences
+├── preferences.json     # Agent preferences (never a person's details — use write_user_memory)
 ├── session_notes/       # Per-session working notes
 │   └── 2025-12-05.md
 └── summaries/           # Compressed old context
@@ -2184,11 +2253,11 @@ When generating videos, save them to `content/videos/`.
 When exporting data, save to `content/exports/`.
 ```
 
-### outputs/ vs content/
+### reports/ vs content/
 
 | Directory | Synced to Git? | Use For |
 |-----------|---------------|---------|
-| `outputs/` | ✅ Yes | Small files you want versioned (reports, summaries) |
+| `reports/<kind>/` | ✅ Yes | Small dated files you want versioned (`reports/weekly/2026-10-19-summary.md`; see [Directory Structure](#directory-structure)). Older templates use `outputs/`, which still works |
 | `content/` | ❌ No | Large files that shouldn't be in Git (videos, audio) |
 
 ---
@@ -2350,7 +2419,7 @@ Before publishing, verify:
 ### Domain Focus
 - Keep CLAUDE.md focused on your agent's specialty
 - Let Trinity handle collaboration and infrastructure
-- Use outputs/ for generated content
+- Put versioned work products in named folders (`reports/<kind>/`, `docs/`); large media in `content/`
 
 ### Documentation
 - Keep documentation in a `docs/` folder
@@ -2446,6 +2515,7 @@ Closing stdout only (not stderr) preserves error messages from a failing
 
 | Date | Changes |
 |------|---------|
+| 2026-10-19 | **Recommended workspace layout (#3797)**: Directory Structure restated as three zones (platform-owned / committed / volume-only), with three rules (root holds identity and config only; derived files are regenerated; memory goes in the committed `memory/`), `project_files/<slug>/`, `$TMPDIR` scratch, gitignored side clones vs submodules (#2366), and the `.gitignore` read as a consequence of the zones. Removes the stale `.claude/skills-library/` mount line |
 | 2026-09-22 | **Reading metrics (ent#479)**: added `get_metrics` and the one `2 x cadence` staleness rule (declare a `cadence:` or your metric can never be called stale); declared metrics render as Dashboard tiles with no `dashboard.yaml`; `dashboard.yaml` widgets may bind `metric: <name>`, with the placeholder-`value:` rule for agents on a pre-#479 base image, and a binding to a **retired** metric is refused (`metric_retired`) rather than shown as current. **`metrics.json` is retired** — unread, never served, reported as D-010, with migration steps; the container's `GET /api/metrics` is retired in place and answers `410` with the superseded payload |
 | 2026-09-06 | **Widget Types**: stated as a closed set; no chart/badge/countdown widget exists (#2110) |
 | 2026-02-05 | **Credential System Refactor (CRED-002)**: Updated Credential Management section for new simplified system; Direct file injection replaces Redis-based assignments; Export/Import with encrypted `.credentials.enc` for git storage; Auto-import on agent startup |

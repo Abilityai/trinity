@@ -54,7 +54,7 @@ The agent's `origin` remote carries no token. On every fetch, pull, and push, gi
 
 ### Turning auto-sync on or off
 
-Auto-sync commits and pushes the agent's changes every 15 minutes. Turn it on or off in the agent's **Settings** tab, under **Git sync**. The same section holds **Pull changes from GitHub on every sync cycle** (see [Pulling changes from GitHub](#pulling-changes-from-github)) and **Pause schedules while sync is failing**. All three switches take effect on the agent's next cycle, with no restart: the agent reads each setting at the start of every cycle. An agent with no GitHub repository shows a note pointing you to the **Git** tab instead.
+Auto-sync commits and pushes the agent's changes every 15 minutes. Turn it on or off under **Settings › Storage › Repository › Sync**. The same section holds **Pull changes from GitHub on every sync cycle** (see [Pulling changes from GitHub](#pulling-changes-from-github)) and **Pause schedules while sync is failing**. All three switches take effect on the agent's next cycle, with no restart: the agent reads each setting at the start of every cycle. An agent with no repository shows *Not connected to a repository* in its **GitHub repository** row instead, and the sync switches are absent.
 
 Each cycle fetches the agent's branch first. If someone else pushed to it, the agent rebases its own commits on top and pushes. The push only succeeds if the branch has not moved again since the fetch, so another writer's commits are never overwritten. When the rebase conflicts, the cycle aborts the rebase, leaves the repository as it was, and records `diverged: rebase conflict on <branch>` as a sync failure. Trinity never resolves the conflict for you.
 
@@ -76,10 +76,12 @@ The pull outcome appears in the agent's sync state: `last_pull_at`, `last_pull_s
 
 ### Using sync in the UI
 
-1. Open the agent detail page to see Git status (branch, last sync, pending changes, `ahead`/`behind` counts).
-2. Click **Pull** to fetch the latest commits from the remote.
-3. Click **Sync** to run a full sync operation (pull-only in Source mode; pull + push in Working Branch mode).
-4. View the git log to inspect recent commits.
+1. Open the agent detail page and click the **Git** tab to see Git status (branch, binding badge, last sync, pending changes, `ahead`/`behind` counts).
+2. Click **Pull** to fetch the latest commits from the remote — the button counts the commits you are behind.
+3. Click **Push** to commit and push the pending changes (pull-only in Source mode; pull + push in Working Branch mode) — the button counts them.
+4. Click **Refresh** to re-read the status, and read **Recent Commits** below it.
+
+The Git tab keeps only the operational half of git. Binding the repository, the GitHub token and the auto-sync switches are configuration and live under **Settings › Storage › Repository**; the tab ends with a link there.
 
 ### What a Push does to `.gitignore`
 
@@ -157,7 +159,7 @@ Agents created without a Git repository can be connected after the fact:
 
 ### Binding an agent to a repository you own
 
-An agent created from a **public** template clones with no token — it works, it learns, it accumulates a workspace, but it cannot push anywhere. **Bind to your own repo** on the agent's **Git** tab is how you take ownership of it in place, without recreating the agent.
+An agent created from a **public** template clones with no token — it works, it learns, it accumulates a workspace, but it cannot push anywhere. **Bind to your own repo** under **Settings › Storage › Repository** is how you take ownership of it in place, without recreating the agent.
 
 What it does, in order:
 
@@ -177,7 +179,7 @@ Requirements and refusals:
 - Owner-only and **human-only** — there is deliberately no MCP tool, because binding requires putting your personal token in the request.
 - Working-Branch-mode agents are refused (they need a branch re-reservation), as are agents with no Git configuration at all, including local-template agents and the system agent.
 - A destination that already contains unrelated commits, or that another agent is already bound to, is refused rather than overwritten.
-- A retry after a partial failure is safe. Re-submitting the same destination resumes; **Bind status** on the Git tab reports what the database and the live container each believe, so you can tell whether a lost response actually completed.
+- A retry after a partial failure is safe. Re-submitting the same destination resumes; **Bind status** in the same section reports what the database and the live container each believe, so you can tell whether a lost response actually completed.
 
 After binding, the agent pushes normally and appears on all git-sync surfaces.
 
@@ -245,7 +247,7 @@ Trailing slashes are stripped automatically. Defaults target `github.com` and `h
 
 MCP tools: `initialize_github_sync`, `get_git_status`, `git_sync`, `get_git_log`, `git_pull`, `get_git_sync_state`, `reset_to_main_preserve_state`, and fleet-wide `get_fleet_sync_audit` (scoped to the agents you can access; an agent key sees its owner's). Mutating tools are owner-only; a shared key gets read and pull.
 
-There is no MCP tool for binding to your own repository — it requires your personal token. The auto-sync, pull-sync and schedule-pause switches have no MCP tools either; use the **Settings** tab or the endpoints above.
+There is no MCP tool for binding to your own repository — it requires your personal token. The auto-sync, pull-sync and schedule-pause switches have no MCP tools either; use **Settings › Storage › Repository › Sync** or the endpoints above.
 
 See [Backend API Docs](http://localhost:8000/docs) for full request/response schemas.
 

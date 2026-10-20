@@ -11,6 +11,7 @@ from dependencies import (
     OPS_SCOPE,
     PORTAL_DELEGATE_SCOPE,
     _reject_connector_principal,
+    agent_principal_name,
     assert_admin,
     get_current_user,
     reject_agent_principal,
@@ -186,7 +187,13 @@ async def get_mcp_api_key_endpoint(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """Get details of a specific MCP API key."""
+    """Get details of a specific MCP API key.
+
+    An agent key reads only its own key (trinity-enterprise#872): it resolves to
+    its owner, whose other keys (siblings' included) are not its to read.
+    """
+    if agent_principal_name(current_user) is not None and key_id != current_user.mcp_key_id:
+        raise HTTPException(status_code=404, detail="MCP API key not found")
     key = db.get_mcp_api_key(key_id, current_user.username)
 
     if not key:

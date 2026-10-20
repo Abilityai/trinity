@@ -496,6 +496,9 @@ class User(BaseModel):
     # One principal object per request (FastAPI caches `get_current_user`), so
     # it cannot outlive the request that earned it.
     _capability_reach: set = PrivateAttr(default_factory=set)
+    # trinity-enterprise#872: `dependencies.principal_reach`'s per-request memo of
+    # an agent key's fleet reach. Private, never serialized; None until read.
+    _fleet_reach: Optional[set] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):
@@ -1531,10 +1534,6 @@ class CredentialImportResponse(BaseModel):
     files_imported: List[str]
     message: str
 
-
-class InternalDecryptInjectRequest(BaseModel):
-    """Request for internal decrypt-and-inject (startup.sh)."""
-    agent_name: str
 
 # ============================================================================
 # Guided Credential Setup (trinity-enterprise#127)

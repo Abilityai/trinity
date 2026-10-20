@@ -85,7 +85,7 @@ Set the runtime in the template's `template.yaml`:
 
 A Codex agent reads its identity and instructions from `AGENTS.md`. At startup Trinity copies the template's `CLAUDE.md` to `AGENTS.md` when the workspace has none, so a single instruction file works across runtimes; an `AGENTS.md` you ship yourself is left as it is.
 
-Trinity's MCP tools are available to Codex agents. Codex references tools by their bare name (no `mcp__trinity__` prefix); Trinity adjusts the platform prompt automatically so the agent calls them correctly.
+Trinity's MCP tools are available to Codex agents. Codex references tools by their bare name (no `mcp__trinity__` prefix); Trinity adjusts the platform prompt automatically so the agent calls them correctly. The prompt's protected-paths sentence is adjusted per runtime too: only Claude Code runs the file guardrail hook on its Write and Edit tools, so a Codex or Gemini agent is told plainly that nothing in its runtime blocks writes to credential and platform paths and that the rule is its own to keep (see [Recommended Trinity Prompt](recommended-fleet-prompt.md#what-the-trinity-prompt-is)).
 
 There is no API or MCP endpoint to switch an agent's runtime after creation. See the full API reference at `http://localhost:8000/docs`.
 

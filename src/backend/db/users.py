@@ -256,7 +256,10 @@ class UserOperations:
                 username=username,
                 password_hash=hashed_password,
                 role="admin",
-                email=username,
+                # No email: the admin is provisioned from ADMIN_PASSWORD, and
+                # the first-run "Sign-in email" step is pending while it has
+                # none. `email=username` made it read "admin" (#3554); the
+                # SQLite seed already leaves it NULL.
                 created_at=now,
                 updated_at=now,
             ))

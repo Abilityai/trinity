@@ -54,18 +54,18 @@ somewhere true.
 
 Two knock-on edits, both of which would otherwise leave dead behaviour:
 
-- `AgentHeader`'s Workspace button now opens `/workspace?agent=`, is no longer
-  gated on `workspaceAvailable`, and is no longer disabled while the agent is
-  stopped. The Workspace reports availability itself (#2196), and a dead button
-  is a worse answer than a page that says why.
+- `AgentHeader`'s Workspace button opened `/workspace?agent=`, ungated and never
+  disabled while the agent was stopped — the Workspace reports availability
+  itself (#2196). trinity-enterprise#950 later removed the button; the Workspace
+  is reached from the nav.
 - The voice call starts its session with `workspace_mode` on. **This is
   load-bearing, not a bonus**: the retired page was the only caller that passed
   it, so bridging the voice panel to the canvas while leaving it unreachable
   would have been dead code wearing a fix's name. Since #2559 the caller is the
   **Workspace** call (`client_portal/voice.py::start_workspace_voice`,
   `workspace_mode=True` + `canvas_audience="operator"`), not `ChatPanel`'s
-  retired overlay — so a call reached through Agent Detail's Talk door still
-  draws on the same durable canvas this tab renders.
+  retired overlay — so a Workspace call draws on the same durable canvas this
+  tab renders.
 
 ## Storage
 

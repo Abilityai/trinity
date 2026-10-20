@@ -708,7 +708,7 @@ WEBSOCKET_ROUTES = frozenset({
 
 # The exact size of the frozen baseline. Lower it in the same change that
 # removes an entry; it never goes up.
-FROZEN_BASELINE_COUNT = 355
+FROZEN_BASELINE_COUNT = 348
 
 
 def load_baseline(path: Path = BASELINE_PATH) -> Dict[str, str]:

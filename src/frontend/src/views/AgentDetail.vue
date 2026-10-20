@@ -8,7 +8,12 @@
          <main> to content width and shifting/narrowing the whole card on tab switch. -->
     <main :class="['w-full max-w-[1400px] mx-auto py-2 sm:px-6 lg:px-8', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
       <div :class="['px-4 sm:px-0 py-2', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
-        <div v-if="loading" class="text-center py-8">
+        <!-- Only while there is nothing on screen yet. On an in-app agent
+             switch the page is KeepAlive-cached and the previous agent stays
+             rendered until the new one lands (ent#955: ~100ms); a spinner
+             stacked above it pushed the whole header down 112px for that beat
+             and back. The switch is stale-while-loading, like a refresh. -->
+        <div v-if="loading && !agent" class="text-center py-8">
           <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-action-primary-500 mx-auto"></div>
         </div>
 
@@ -72,62 +77,58 @@
           <!-- Agent Header Component -->
           <AgentHeader
             :agent="agent"
-            :auth-status="authStatus"
-            :subscriptions="availableSubscriptions"
-            :subscription-changing="subscriptionChanging"
             :action-loading="actionLoading"
             :autonomy-loading="autonomyLoading"
-            :read-only-loading="readOnlyLoading"
-            :agent-stats="agentStats"
-            :stats-loading="statsLoading"
-            :cpu-history="cpuHistory"
-            :memory-history="memoryHistory"
-            :resource-limits="resourceLimits"
-            :has-git-sync="hasGitSync"
+            :description="agentDescription"
+            :emotion-avatar-url="emotionAvatarUrl"
+            :brain-available="sessionsStore.brainOrbAvailable && hasBrainOrb"
             :git-status="gitStatus"
-            :git-loading="gitLoading"
-            :git-syncing="gitSyncing"
-            :git-pulling="gitPulling"
-            :git-has-changes="gitHasChanges"
             :git-changes-count="gitChangesCount"
             :git-behind="gitBehind"
             :tags="agentTags"
             :all-tags="allTags"
+            :slot-stats="headerSlotStats"
+            :working="headerWorking"
+            :has-avatar-prompt="!!avatarIdentityPrompt"
+            :read-only-loading="readOnlyLoading"
+            :auth-status="authStatus"
+            :subscriptions="availableSubscriptions"
+            :subscription-changing="subscriptionChanging"
+            :agent-stats="agentStats"
+            :cpu-history="cpuHistory"
+            :memory-history="memoryHistory"
+            :resource-limits="resourceLimits"
             :token-stats="tokenStats"
             @toggle="toggleRunning"
-            @delete="deleteAgent"
             @toggle-autonomy="toggleAutonomy"
             @toggle-read-only="toggleReadOnly"
-            @open-resource-modal="showResourceModal = true"
-            @git-pull="pullFromGithub"
-            @git-push="syncToGithub"
-            @git-refresh="refreshGitStatus"
             @update-tags="updateTags"
             @add-tag="addTag"
             @remove-tag="removeTag"
-            @rename="renameAgent"
             @set-label="setAgentLabel"
             @open-avatar-modal="showAvatarModal = true"
             @cycle-emotion="cycleEmotion"
             @change-subscription="changeSubscription"
-            :has-avatar-prompt="!!avatarIdentityPrompt"
-            :emotion-avatar-url="emotionAvatarUrl"
-            :brain-available="sessionsStore.brainOrbAvailable && hasBrainOrb"
           />
 
           <!-- Tabs -->
           <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : '']">
             <!-- #1114: tabs overflow into a "More ▾" dropdown instead of horizontal scroll -->
-            <OverflowTabs :tabs="visibleTabs" v-model="activeTab" />
-
-            <!-- Overview Tab Content (#1107 — default landing tab) -->
-            <div v-if="activeTab === 'overview'" class="p-6">
-              <OverviewPanel :agent="agent" @navigate-tab="handleOverviewNavigate" @open-task="handleOpenTask" />
+            <!-- trinity-enterprise#887: Settings is pinned at the end of the
+                 strip, outside the overflow — the one configuration home is
+                 never a "More ▾" item. Same primitive, a one-tab instance. -->
+            <div class="flex">
+              <div class="flex-1 min-w-0">
+                <OverflowTabs :tabs="workingTabs" v-model="activeTab" />
+              </div>
+              <div v-if="settingsTab.length" class="shrink-0 w-28">
+                <OverflowTabs :tabs="settingsTab" v-model="activeTab" />
+              </div>
             </div>
 
-            <!-- Info Tab Content -->
-            <div v-if="activeTab === 'info'" class="p-6">
-              <InfoPanel :agent-name="agent.name" :agent-status="agent.status" @item-click="handleInfoItemClick" />
+            <!-- Overview Tab Content (#1107 — default landing tab) -->
+            <div v-if="activeTab === 'overview'" class="p-6 space-y-6">
+              <OverviewPanel :agent="agent" @navigate-tab="handleOverviewNavigate" @open-task="handleOpenTask" />
             </div>
 
             <!-- Brain Tab Content (#60) — settings + launch, not an auto-jump -->
@@ -206,11 +207,6 @@
               <LogsPanel :agent-name="agent.name" :agent-status="agent.status" />
             </div>
 
-            <!-- Credentials Tab Content -->
-            <div v-if="activeTab === 'credentials'">
-              <CredentialsPanel :agent-name="agent.name" :agent-status="agent.status" />
-            </div>
-
             <!-- Nevermined Payments Tab Content -->
             <div v-if="activeTab === 'nevermined'">
               <NeverminedPanel :agent-name="agent.name" :can-edit="agent.can_share" />
@@ -222,11 +218,6 @@
             </div>
 
             <!-- Sharing Tab Content -->
-            <!-- Access Tab Content (#17 — Trinity operators) -->
-            <div v-if="activeTab === 'access' && agent.can_share">
-              <AccessPanel :agent-name="agent.name" :agent-owner="agent.owner" />
-            </div>
-
             <div v-if="activeTab === 'sharing' && agent.can_share">
               <SharingPanel
                 :agent-name="agent.name"
@@ -281,7 +272,20 @@
 
             <!-- Git Tab Content -->
             <div v-if="activeTab === 'git'" class="p-6">
-              <GitPanel :agent-name="agent.name" :agent-status="agent.status" />
+              <GitPanel
+                :agent-name="agent.name"
+                :agent-status="agent.status"
+                :git-pulling="gitPulling"
+                :git-pushing="gitSyncing"
+                :git-behind="gitBehind"
+                :git-has-changes="gitHasChanges"
+                :git-changes-count="gitChangesCount"
+                :git-loading="gitLoading"
+                :can-configure="!!agent.can_share"
+                @git-pull="pullFromGithub"
+                @git-push="syncToGithub"
+                @git-refresh="refreshGitStatus"
+              />
             </div>
 
             <!-- Files Tab Content -->
@@ -289,34 +293,82 @@
               <FilesPanel :agent-name="agent.name" :agent-status="agent.status" />
             </div>
 
-            <!-- Shared Folders Tab Content -->
-            <div v-if="activeTab === 'folders'" class="p-6">
-              <FoldersPanel :agent-name="agent.name" :agent-status="agent.status" :can-share="agent.can_share" />
-            </div>
-
-            <!-- Settings Tab Content (#1108) — sectioned home for per-agent
-                 config; Guardrails (GUARD-001 UI, #967) is section #1 -->
-            <div v-if="activeTab === 'settings' && agent.can_share" class="p-6 space-y-6">
-              <SettingsPanel :agent-name="agent.name" :notify="showNotification" />
-              <!-- ent#277: renders only when the entitlement is present. -->
-              <CrossModelValidationPanel :agent-name="agent.name" />
+            <!-- Settings Tab Content — the one configuration home
+                 (trinity-enterprise#887, trinity#966): a rail of panes, the
+                 pane in `?section=`, one restart banner above it. -->
+            <div v-if="activeTab === 'settings' && agent.can_share" class="p-6">
+              <AgentSettingsHome
+                :agent-name="agent.name"
+                :agent-status="agent.status"
+                :sections="visibleSettingsSections"
+                :restarting="restarting"
+                @restart="restartForPendingChanges"
+              >
+                <template #default="{ section }">
+                  <GeneralPane
+                    v-if="section === 'general'"
+                    :agent="agent"
+                    :auth-status="authStatus"
+                    :subscriptions="availableSubscriptions"
+                    :subscription-changing="subscriptionChanging"
+                    :read-only-loading="readOnlyLoading"
+                    :tags="agentTags"
+                    :all-tags="allTags"
+                    :resource-limits="resourceLimits"
+                    :resources-saving="resourceLimitsLoading"
+                    :has-avatar-prompt="!!avatarIdentityPrompt"
+                    :has-git-sync="hasGitSync"
+                    :notify="showNotification"
+                    @set-label="setAgentLabel"
+                    @rename="renameAgent"
+                    @open-avatar-modal="showAvatarModal = true"
+                    @cycle-emotion="cycleEmotion"
+                    @update-tags="updateTags"
+                    @add-tag="addTag"
+                    @remove-tag="removeTag"
+                    @change-subscription="changeSubscription"
+                    @toggle-read-only="toggleReadOnly"
+                    @save-resources="saveResourceLimits"
+                    @delete="deleteAgent"
+                    @navigate-tab="handleOverviewNavigate"
+                    @info-item-click="handleInfoItemClick"
+                  />
+                  <GuardrailsPane
+                    v-else-if="section === 'guardrails'"
+                    :agent-name="agent.name"
+                    :autonomy-enabled="!!agent.autonomy_enabled"
+                    :is-system="!!agent.is_system"
+                    :notify="showNotification"
+                    @navigate-tab="handleOverviewNavigate"
+                  />
+                  <PeoplePane v-else-if="section === 'people'" :agent-name="agent.name" :agent-owner="agent.owner" />
+                  <ChannelsPane
+                    v-else-if="section === 'channels'"
+                    :agent-name="agent.name"
+                    :has-sharing-tab="visibleTabIds.includes('sharing')"
+                    @navigate-tab="handleOverviewNavigate"
+                  />
+                  <IntegrationsPane
+                    v-else-if="section === 'integrations'"
+                    :agent-name="agent.name"
+                    :visible-tab-ids="visibleTabIds"
+                    :notify="showNotification"
+                    @navigate-tab="handleOverviewNavigate"
+                  />
+                  <StoragePane
+                    v-else-if="section === 'storage'"
+                    :agent-name="agent.name"
+                    :agent-status="agent.status"
+                    :notify="showNotification"
+                  />
+                </template>
+              </AgentSettingsHome>
             </div>
 
           </div>
         </div>
       </div>
     </main>
-
-    <!-- Resource Modal -->
-    <ResourceModal
-      :show="showResourceModal"
-      :resource-limits="resourceLimits"
-      :loading="resourceLimitsLoading"
-      @update:show="showResourceModal = $event"
-      @update:memory="resourceLimits.memory = $event"
-      @update:cpu="resourceLimits.cpu = $event"
-      @save="saveResourceLimits"
-    />
 
     <!-- Avatar Generate Modal (AVATAR-001) -->
     <AvatarGenerateModal
@@ -361,6 +413,8 @@ import { useAuthStore } from '../stores/auth'
 import { useSessionsStore } from '../stores/sessions'  // SESSION_TAB_2026-04 Phase 3
 import { emotionCacheVersion, emotionAvatarUrl as buildEmotionUrl } from '../utils/avatarEmotion'
 import { buildTabs, TAB_ALIASES } from '../utils/agentTabs'
+import { settingsSections, LEGACY_TAB_SECTIONS } from '../utils/agentSettings'
+import { useAgentRestartStore } from '../stores/agentRestart'
 import NavBar from '../components/NavBar.vue'
 
 // Component name for KeepAlive matching
@@ -380,22 +434,23 @@ import ReportsPanel from '../components/ReportsPanel.vue'
 import AgentCanvasTab from '../components/canvas/AgentCanvasTab.vue'
 import TasksPanel from '../components/TasksPanel.vue'
 import GitPanel from '../components/GitPanel.vue'
-import InfoPanel from '../components/InfoPanel.vue'
 import DashboardPanel from '../components/DashboardPanel.vue'
 import DeclaredMetricsTiles from '../components/DeclaredMetricsTiles.vue'
-import FoldersPanel from '../components/FoldersPanel.vue'
-import SettingsPanel from '../components/settings/SettingsPanel.vue'
-import CrossModelValidationPanel from '../components/CrossModelValidationPanel.vue'
+// trinity-enterprise#887/#888/#890/#891 — the Settings home and its panes
+import AgentSettingsHome from '../components/agent-settings/AgentSettingsHome.vue'
+import GeneralPane from '../components/agent-settings/GeneralPane.vue'
+import GuardrailsPane from '../components/agent-settings/GuardrailsPane.vue'
+import PeoplePane from '../components/agent-settings/PeoplePane.vue'
+import ChannelsPane from '../components/agent-settings/ChannelsPane.vue'
+import IntegrationsPane from '../components/agent-settings/IntegrationsPane.vue'
+import StoragePane from '../components/agent-settings/StoragePane.vue'
 
 // Panel Components (newly extracted)
 import AgentHeader from '../components/AgentHeader.vue'
 import BrainPanel from '../components/BrainPanel.vue'
-import ResourceModal from '../components/ResourceModal.vue'
 import AvatarGenerateModal from '../components/AvatarGenerateModal.vue'
 import LogsPanel from '../components/LogsPanel.vue'
-import CredentialsPanel from '../components/CredentialsPanel.vue'
 import SharingPanel from '../components/SharingPanel.vue'
-import AccessPanel from '../components/AccessPanel.vue'
 import PermissionsPanel from '../components/PermissionsPanel.vue'
 import FilesPanel from '../components/FilesPanel.vue'
 import TerminalPanelContent from '../components/TerminalPanelContent.vue'
@@ -411,6 +466,8 @@ import { useAgentLifecycle } from '../composables/useAgentLifecycle'
 import { useAgentStats } from '../composables/useAgentStats'
 import { useAgentTerminal } from '../composables/useAgentTerminal'
 import { useGitSync } from '../composables/useGitSync'
+import { useAgentContextStats } from '../composables/useAgentContextStats'  // trinity-enterprise#950
+import { useNetworkStore } from '../stores/network'
 import { useAgentSettings } from '../composables/useAgentSettings'
 import { useSessionActivity } from '../composables/useSessionActivity'
 import { useTabRoute } from '../composables/useTabRoute'
@@ -551,7 +608,6 @@ function redirectRetiredSessionLink() {
 // `flex-1 min-h-0 overflow-y-auto` scroll region (see TasksPanel).
 const FULLSCREEN_TABS = ['chat', 'tasks']
 const isFullscreenTab = computed(() => FULLSCREEN_TABS.includes(activeTab.value))
-const showResourceModal = ref(false)
 const showAvatarModal = ref(false)
 const avatarIdentityPrompt = ref('')
 const avatarHasReference = ref(false)
@@ -571,6 +627,10 @@ const hasDeclaredMetrics = ref(false)
 // #58 (trinity-enterprise) — Brain Orb: per-agent half of the gate. True when the
 // agent's template.yaml declares the generalizable `brain-orb` capability token.
 const hasBrainOrb = ref(false)
+// trinity-enterprise#887: what the agent is, in one line, for the header. Read
+// from the same /info answer the brain-orb probe already fetches — no request
+// of its own; Settings › General shows the same text.
+const agentDescription = ref('')
 
 // Tags state (ORG-001)
 const agentTags = ref([])
@@ -610,7 +670,6 @@ const {
 // Stats composable
 const {
   agentStats,
-  statsLoading,
   cpuHistory,
   memoryHistory,
   startStatsPolling,
@@ -651,6 +710,18 @@ const {
   startGitStatusPolling,
   stopGitStatusPolling
 } = useGitSync(agent, agentsStore, showNotification)
+
+// trinity-enterprise#950: the header's context chart reads the same fleet
+// context-stats map the dashboard tile does; this page keeps it fresh while
+// the agent runs (start/stop ride startAllPolling/stopAllPolling + the status
+// watcher, since KeepAlive means onUnmounted never fires on navigation).
+const networkStore = useNetworkStore()
+const {
+  slots: headerSlotStats,       // ent#955: the capacity indicator
+  working: headerWorking,       // ent#955: WS in-flight signal, fills a bar at once
+  start: startContextStatsPolling,
+  stop: stopContextStatsPolling
+} = useAgentContextStats(agent, networkStore)
 
 // Autonomy mode state
 const autonomyLoading = ref(false)
@@ -850,51 +921,86 @@ async function waitForAgentStatus(targets, timeoutMs = 30000, intervalMs = 1000)
   return false
 }
 
-async function saveResourceLimits() {
-  // Check if values actually changed. Compare against the effective (current_*)
-  // values; an empty override means "inherit", which equals current.
-  const newMemory = resourceLimits.value.memory || resourceLimits.value.current_memory
-  const newCpu = resourceLimits.value.cpu || resourceLimits.value.current_cpu
-  const oldMemory = resourceLimits.value.current_memory
-  const oldCpu = resourceLimits.value.current_cpu
-  const valuesChanged = newMemory !== oldMemory || newCpu !== oldCpu
-
-  // #1126: don't restart if the save didn't actually persist.
+// trinity-enterprise#887: memory and CPU are edited in Settings › General and
+// SAVED, not applied — the container picks them up on its next start. The
+// change joins the page's one restart banner instead of restarting the agent
+// out from under whatever it is running (the old dialog restarted at once).
+async function saveResourceLimits({ memory, cpu }) {
+  resourceLimits.value = { ...resourceLimits.value, memory, cpu }
   const saved = await updateResourceLimits()
-  if (!saved) return  // composable already surfaced the error
-  showResourceModal.value = false
+  // A failed save already surfaced its message; re-read either way so the row
+  // shows what is stored, never the draft.
+  await loadResourceLimits()
+  return saved
+}
 
-  // If values changed and agent is running, restart it to apply the new limits.
-  if (valuesChanged && agent.value?.status === 'running') {
-    showNotification('Restarting agent to apply new resource limits...', 'info')
-    try {
+// The one restart behind the Settings banner. A running agent is stopped and
+// started (#1126: the start waits for the container to really be stopped); a
+// stopped one is simply started, which applies the same changes.
+const restartStore = useAgentRestartStore()
+const restarting = ref(false)
+
+async function restartForPendingChanges() {
+  if (!agent.value || restarting.value) return
+  restarting.value = true
+  const name = agent.value.name
+  try {
+    if (agent.value.status === 'running') {
       await stopAgent()
-      // #1126: gate the start on the container actually being stopped rather
-      // than a fixed 1s sleep (insufficient under load → "sometimes works").
       const stopped = await waitForAgentStatus(['stopped', 'exited', 'created'])
       if (!stopped) {
-        showNotification(
-          'Agent did not stop within 30s — not restarting automatically. Start it manually to apply the new limits.',
-          'error',
-        )
+        showNotification('The agent did not stop within 30s, so it was not restarted. Try again, or stop and start it from the header.', 'error')
         return
       }
-      await startAgent()
-      // Refresh effective values so the header/dialog reflect the applied limits.
-      await loadAgent()
-      await loadResourceLimits()
-      showNotification('Agent restarted with new resource limits.', 'success')
-    } catch (err) {
-      showNotification(
-        `Restart failed: ${err?.message || err}. The agent may be stopped — start it manually.`,
-        'error',
-      )
     }
-  } else {
-    // No restart needed — still refresh the effective values shown in the UI.
-    await loadResourceLimits()
+    await startAgent()
+    // `startAgent` reports its own failure and returns normally, so only the
+    // agent's real status says whether the changes now apply. A start that
+    // failed applied nothing: the list stays as it was.
+    await loadAgent()
+    if (agent.value?.status !== 'running') {
+      showNotification('The agent did not start, so the waiting changes are not applied yet. Fix the start, then try again.', 'error')
+      return
+    }
+    showNotification('Agent restarted. The waiting changes now apply.', 'success')
+  } catch (err) {
+    showNotification(`Restart failed: ${err?.message || err}. The agent may be stopped — start it from the header.`, 'error')
+  } finally {
+    restarting.value = false
   }
 }
+
+// The container now runs what is stored — whichever button started it. The
+// banner's restart and a manual stop/start from the header both land here,
+// through the status edge: the list is cleared and the rows re-read.
+function settleRestart(name) {
+  restartStore.restarted(name)
+  return Promise.allSettled([loadResourceLimits(), loadApiKeySetting()])
+}
+watch(
+  () => [agent.value?.name, agent.value?.status],
+  ([name, status], [prevName, prevStatus] = []) => {
+    if (!name || name !== prevName) return
+    if (status === 'running' && prevStatus && prevStatus !== 'running') settleRestart(name)
+  }
+)
+
+// Rows whose state lives in this view report to the banner here; panels that
+// own their state (file sharing, folders, guardrails, the GitHub token) report
+// from inside themselves.
+watch(
+  () => [agent.value?.name, resourceLimits.value],
+  ([name, r]) => {
+    if (!name) return
+    const pending = !r.error && ((!!r.memory && r.memory !== r.current_memory) || (!!r.cpu && String(r.cpu) !== String(r.current_cpu)))
+    restartStore.report(name, 'resources', 'Memory and CPU', pending)
+  },
+  { deep: true }
+)
+watch(
+  () => [agent.value?.name, apiKeySetting.value?.restart_required],
+  ([name, pending]) => { if (name) restartStore.report(name, 'funding', 'Funding', !!pending) }
+)
 
 // Session activity composable
 const {
@@ -919,6 +1025,14 @@ const visibleTabs = computed(() => buildTabs({
   a2aVisible: sessionsStore.a2aAvailable,
   gitSync: hasGitSync.value,
 }))
+
+const visibleTabIds = computed(() => visibleTabs.value.map((t) => t.id))
+// The working strip, and Settings on its own at the end (trinity#966).
+const workingTabs = computed(() => visibleTabs.value.filter((t) => t.id !== 'settings'))
+const settingsTab = computed(() => visibleTabs.value.filter((t) => t.id === 'settings'))
+
+// The Settings rail's panes for this viewer (trinity-enterprise#887).
+const visibleSettingsSections = computed(() => settingsSections({ isSystem: !!agent.value?.is_system }))
 
 // Every id the page can ever render, derived from the builder above rather than
 // restated. This is what a `?tab=` value is resolved against BEFORE the agent
@@ -1236,6 +1350,7 @@ async function checkBrainOrbCapability() {
     const info = await agentsStore.getAgentInfo(agent.value.name)
     const caps = Array.isArray(info?.capabilities) ? info.capabilities : []
     hasBrainOrb.value = caps.includes('brain-orb')
+    agentDescription.value = info?.tagline || info?.description || ''
   } catch {
     hasBrainOrb.value = false
   }
@@ -1317,9 +1432,13 @@ watch(() => route.params.name, async (newName, oldName) => {
     resetDashboardProbe()
     // Reset tags for new agent
     agentTags.value = []
+    // ent#950: the header shows the repo on every tab now, so agent A's git
+    // status must not render under agent B's name until B's first poll lands.
+    gitStatus.value = null
     // Reset auth status for new agent
     authStatus.value = null
     tokenStats.value = null
+    agentDescription.value = ''
     // DEPRECATED: Terminal tab hidden (candidate for removal)
     // if (terminalRef.value?.disconnect) {
     //   terminalRef.value.disconnect()
@@ -1365,6 +1484,7 @@ watch(() => agent.value?.status, async (newStatus) => {
   if (newStatus === 'running') {
     startStatsPolling()
     startActivityPolling()
+    startContextStatsPolling()
     if (hasGitSync.value) {
       startGitStatusPolling()
     }
@@ -1385,6 +1505,10 @@ watch(() => agent.value?.status, async (newStatus) => {
     stopStatsPolling()
     stopActivityPolling()
     stopGitStatusPolling()
+    stopContextStatsPolling()
+    // ent#950: loadGitStatus no-ops for a stopped agent and would leave the
+    // last running snapshot in the header (and its counts on the Git tab).
+    gitStatus.value = null
     resetSessionActivity()
     // Don't reset hasDashboard — DB cache keeps the tab visible
     // so users can still see the last known dashboard state
@@ -1403,6 +1527,7 @@ function startAllPolling() {
   if (agent.value?.status === 'running') {
     startStatsPolling()
     startActivityPolling()
+    startContextStatsPolling()
     if (hasGitSync.value) {
       startGitStatusPolling()
     }
@@ -1414,6 +1539,7 @@ function stopAllPolling() {
   stopStatsPolling()
   stopActivityPolling()
   stopGitStatusPolling()
+  stopContextStatsPolling()
 }
 
 // Initialize on mount
@@ -1549,8 +1675,15 @@ onUnmounted(() => {
 // Overview tab (#1107): navigate to another tab, or open a specific execution
 // in the Tasks tab (deep-link via ?execution= which TasksPanel consumes).
 const handleOverviewNavigate = (tabId) => {
-  if (visibleTabs.value.some(t => t.id === tabId)) {
-    activeTab.value = tabId
+  // trinity-enterprise#887: a tab that became a Settings pane (info,
+  // credentials, folders, access, guardrails) opens that pane, in one
+  // navigation so the section rides with the tab.
+  const target = TAB_ALIASES[tabId] || tabId
+  if (!visibleTabs.value.some(t => t.id === target)) return
+  if (target === 'settings' && LEGACY_TAB_SECTIONS[tabId]) {
+    selectTab('settings', { query: { section: LEGACY_TAB_SECTIONS[tabId] } })
+  } else {
+    activeTab.value = target
   }
 }
 
