@@ -172,9 +172,13 @@ test.describe('the agent header (ent#950)', () => {
     await page.goto(`/agents/${AGENT}`)
     const row = page.getByTestId('agent-header-git')
     await expect(row.locator('[aria-busy="true"]')).toBeVisible({ timeout: 20000 })
+    // The strip below the header is what must not move. (OverflowTabs only
+    // takes `role="tablist"` when given a label; AgentDetail's instances are
+    // unlabeled, so the card is addressed by its own test id.)
+    await expect(page.getByTestId('agent-tabs')).toBeVisible()
     await page.waitForTimeout(300) // tab-strip ResizeObserver settles after paint
     const before = await page.evaluate(() => ({
-      tabs: document.querySelector('[role="tablist"]').getBoundingClientRect().top,
+      tabs: document.querySelector('[data-testid="agent-tabs"]').getBoundingClientRect().top,
       row: document.querySelector('[data-testid="agent-header-git"]').getBoundingClientRect().height,
     }))
 
@@ -183,7 +187,7 @@ test.describe('the agent header (ent#950)', () => {
     await expect(page.getByTestId('agent-header-git-changes')).toContainText('12 changed')
     await page.waitForTimeout(300)
     const after = await page.evaluate(() => ({
-      tabs: document.querySelector('[role="tablist"]').getBoundingClientRect().top,
+      tabs: document.querySelector('[data-testid="agent-tabs"]').getBoundingClientRect().top,
       row: document.querySelector('[data-testid="agent-header-git"]').getBoundingClientRect().height,
     }))
 
