@@ -77,8 +77,17 @@
             :description="agentDescription"
             :emotion-avatar-url="emotionAvatarUrl"
             :brain-available="sessionsStore.brainOrbAvailable && hasBrainOrb"
+            :git-status="gitStatus"
+            :git-changes-count="gitChangesCount"
+            :git-behind="gitBehind"
+            :tags="agentTags"
+            :all-tags="allTags"
+            :context-stats="headerContextStats"
             @toggle="toggleRunning"
             @toggle-autonomy="toggleAutonomy"
+            @update-tags="updateTags"
+            @add-tag="addTag"
+            @remove-tag="removeTag"
           />
 
           <!-- Tabs -->
@@ -448,6 +457,8 @@ import { useAgentLifecycle } from '../composables/useAgentLifecycle'
 import { useAgentStats } from '../composables/useAgentStats'
 import { useAgentTerminal } from '../composables/useAgentTerminal'
 import { useGitSync } from '../composables/useGitSync'
+import { useAgentContextStats } from '../composables/useAgentContextStats'  // trinity-enterprise#950
+import { useNetworkStore } from '../stores/network'
 import { useAgentSettings } from '../composables/useAgentSettings'
 import { useSessionActivity } from '../composables/useSessionActivity'
 import { useTabRoute } from '../composables/useTabRoute'
@@ -690,6 +701,17 @@ const {
   startGitStatusPolling,
   stopGitStatusPolling
 } = useGitSync(agent, agentsStore, showNotification)
+
+// trinity-enterprise#950: the header's context chart reads the same fleet
+// context-stats map the dashboard tile does; this page keeps it fresh while
+// the agent runs (start/stop ride startAllPolling/stopAllPolling + the status
+// watcher, since KeepAlive means onUnmounted never fires on navigation).
+const networkStore = useNetworkStore()
+const {
+  stats: headerContextStats,
+  start: startContextStatsPolling,
+  stop: stopContextStatsPolling
+} = useAgentContextStats(agent, networkStore)
 
 // Autonomy mode state
 const autonomyLoading = ref(false)
@@ -1400,6 +1422,9 @@ watch(() => route.params.name, async (newName, oldName) => {
     resetDashboardProbe()
     // Reset tags for new agent
     agentTags.value = []
+    // ent#950: the header shows the repo on every tab now, so agent A's git
+    // status must not render under agent B's name until B's first poll lands.
+    gitStatus.value = null
     // Reset auth status for new agent
     authStatus.value = null
     tokenStats.value = null
@@ -1449,6 +1474,7 @@ watch(() => agent.value?.status, async (newStatus) => {
   if (newStatus === 'running') {
     startStatsPolling()
     startActivityPolling()
+    startContextStatsPolling()
     if (hasGitSync.value) {
       startGitStatusPolling()
     }
@@ -1469,6 +1495,10 @@ watch(() => agent.value?.status, async (newStatus) => {
     stopStatsPolling()
     stopActivityPolling()
     stopGitStatusPolling()
+    stopContextStatsPolling()
+    // ent#950: loadGitStatus no-ops for a stopped agent and would leave the
+    // last running snapshot in the header (and its counts on the Git tab).
+    gitStatus.value = null
     resetSessionActivity()
     // Don't reset hasDashboard — DB cache keeps the tab visible
     // so users can still see the last known dashboard state
@@ -1487,6 +1517,7 @@ function startAllPolling() {
   if (agent.value?.status === 'running') {
     startStatsPolling()
     startActivityPolling()
+    startContextStatsPolling()
     if (hasGitSync.value) {
       startGitStatusPolling()
     }
@@ -1498,6 +1529,7 @@ function stopAllPolling() {
   stopStatsPolling()
   stopActivityPolling()
   stopGitStatusPolling()
+  stopContextStatsPolling()
 }
 
 // Initialize on mount

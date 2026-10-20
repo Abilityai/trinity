@@ -53,10 +53,13 @@ The Overview tab is a glanceable, database-backed summary. It renders even when 
 
 A **live strip** at the top of Overview shows the present: for a running agent, CPU and memory against their limits (with sparklines) and uptime; for a stopped one, when it was created and the CPU and memory allocated to it. Once the agent has run anything, a second line shows spend — today, a 7-day sparkline and trend, and lifetime cost and run count (API-price equivalents for a subscription-funded agent). Nothing in the strip is a control; the limits and funding are set under **Settings › General**.
 
-The persistent header above the tabs holds the agent's identity (avatar, name, id, description), its running state and badges, the **Autonomy** chip and the Start/Stop switch. Two of its buttons are doors into other surfaces:
+The persistent header above the tabs holds the agent's identity (avatar, name, id, description), its running state and badges, the **Autonomy** chip and the Start/Stop switch. Below the name it shows:
 
-- **Workspace** opens this agent in the [Workspace](../sharing-and-access/workspace.md) — the conversation surface where you and the agent work together.
-- **Talk** starts a voice call with this agent. The call opens in the Workspace and the conversation lives there, not in this page's Chat tab — see [Voice Chat](../advanced/voice-chat.md).
+- **Repository** — when the agent is bound to a GitHub repository and running, the repo (a link to GitHub), the current branch, and how many changes are waiting to be pushed or pulled. Pull and Push are on the **Git** tab.
+- **Tags** — the first two tags, with a "+N" count for the rest. Owners click the pencil (or **Add tag**) to add and remove tags; the same editor is in **Settings › General**.
+- **Context** — for a running agent, a small ring showing how full its context window is. It reads "—" until there is a reading.
+
+To work with the agent in the [Workspace](../sharing-and-access/workspace.md) or start a voice call, open the Workspace from the navigation bar — see [Voice Chat](../advanced/voice-chat.md).
 
 - **API:** `GET /api/agents/{name}/analytics?window=7d|14d|30d`
 
