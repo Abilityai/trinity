@@ -376,7 +376,9 @@ def viewer_own_rows(current_user: User) -> tuple:
 
     `uid` is `NO_ROWS_USER_ID` when the principal has no usable id, which
     matches no row — a missing id never reads as "no filter"."""
-    from dependencies import NO_ROWS_USER_ID, acting_turn_user_id, viewer_principal_kind
+    from dependencies import (
+        NO_ROWS_USER_ID, acting_turn_user_id, is_fleet_admin, viewer_principal_kind,
+    )
 
     kind = viewer_principal_kind(current_user)
     if kind == "key":
@@ -388,7 +390,7 @@ def viewer_own_rows(current_user: User) -> tuple:
     uid = uid if isinstance(uid, int) and not isinstance(uid, bool) and uid > 0 else NO_ROWS_USER_ID
     if kind == "other":
         return uid, []
-    if current_user.role == "admin":
+    if is_fleet_admin(current_user):
         return None, None
     owned = [a["name"] for a in get_accessible_agents(current_user) if a.get("is_owner")]
     return uid, owned
