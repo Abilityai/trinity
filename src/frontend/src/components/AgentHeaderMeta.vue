@@ -24,7 +24,7 @@
       : showTags
         ? 'min-h-[1.5rem] flex-1 min-w-[8rem]'
         : 'min-h-[1.5rem]'"
-    data-testid="agent-header-meta"
+    :data-testid="showRepo ? 'agent-header-meta' : 'agent-header-meta-tags'"
   >
     <!-- Repository. Two inner groups so the counts can drop to their own
          line instead of crushing the name: at 375px the header has ~184px of

@@ -333,7 +333,7 @@
            a right cluster that changed width when the stats landed decided
            whether the row wrapped — the tab strip moved 32px a beat after
            paint. Right-aligned inside the reserved box. -->
-      <div class="flex flex-wrap sm:flex-nowrap items-center ml-auto gap-x-4 gap-y-1 text-xs min-h-[20px] sm:min-w-[24rem] sm:shrink-0 sm:justify-end" data-testid="agent-header-live">
+      <div class="flex flex-wrap sm:flex-nowrap items-center ml-auto gap-x-4 gap-y-1 text-xs min-h-[20px] min-w-0 max-w-full sm:min-w-[24rem] sm:shrink-0 sm:justify-end" data-testid="agent-header-live">
         <!-- When running: live stats with sparklines -->
         <template v-if="agent.status === 'running' && agentStats">
           <div class="flex items-center gap-1.5">
@@ -354,7 +354,7 @@
         <!-- Running, first sample not in yet: a skeleton the width of the cluster -->
         <span
           v-else-if="agent.status === 'running'"
-          class="block h-3 w-64 rounded bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"
+          class="block h-3 w-64 max-w-full rounded bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"
           aria-busy="true"
         ><span class="sr-only">Loading live usage…</span></span>
         <!-- When stopped: resource allocation -->
@@ -378,7 +378,7 @@
     >
       <span
         v-if="tokenStats === null"
-        class="block h-3 w-72 rounded bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"
+        class="block h-3 w-72 max-w-full rounded bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"
         aria-busy="true"
       ><span class="sr-only">Loading spend…</span></span>
       <span v-else-if="!(tokenStats.lifetime_executions > 0)" class="text-gray-600 dark:text-gray-400" data-testid="agent-header-cost-empty">No spend yet — the 7-day trend appears after the first run.</span>
@@ -438,7 +438,7 @@
       />
       <span
         v-else-if="agent.status === 'running' && gitStatus === null"
-        class="block h-3 w-72 rounded bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"
+        class="block h-3 w-72 max-w-full rounded bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"
         aria-busy="true"
       ><span class="sr-only">Loading repository state…</span></span>
       <span v-else class="text-[12.5px] text-gray-600 dark:text-gray-400" data-testid="agent-header-git-idle">
