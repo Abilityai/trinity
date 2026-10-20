@@ -6169,6 +6169,18 @@
         "agent-lifecycle"
       ],
       "description": "recreate_container_with_updated_config re-bakes AGENT_NAME and the trinity.agent-name label from the live name beside TRINITY_AGENT_AUTH_TOKEN (driven through the real recreate, red before the fix on the replayed old name); check_agent_name_env_matches flags a present-and-different env or label, matches absent values and unreadable attrs; start_agent_internal recreates a stuck renamed agent on COLD start only and leaves never-renamed and running agents alone."
+    },
+    {
+      "file": "unit/test_ent860_room_wake_access.py",
+      "feature": "trinity-enterprise#860",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "rooms",
+        "auth",
+        "unit"
+      ],
+      "description": "Through the real shared_sessions._after_landing: every principal is re-checked at wake time with the room-creation rule (_assert_can_reach_agent). A platform member still shared wakes the agent; one whose access is gone does not, and the room gets the 'could not be reached' line; a Workspace principal is held to its roster, never the platform ACL; an agent reply is held to the access of the person whose turn started the chain; a deleted agent is not woken. Mutation: reverting the service turns the 3 platform/agent-chain tests red."
     }
   ]
 }
