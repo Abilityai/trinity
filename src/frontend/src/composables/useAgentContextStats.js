@@ -1,4 +1,4 @@
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 
 /**
  * trinity-enterprise#950 — keep this agent's context-window reading fresh for
@@ -39,6 +39,17 @@ export function useAgentContextStats(agentRef, networkStore) {
     return (name && networkStore.slotStats?.[name]) || null
   })
 
+  // ent#955: a short task finishes between two 15 s polls and never reaches
+  // the slot map — the WS activity event (`chat_start` / `schedule_start`,
+  // `stores/network.js::workingState`) lands the moment it starts. The header
+  // fills a bar on it at once, and the map is re-read right away so the real
+  // count follows without waiting for the tick.
+  const working = computed(() => {
+    const name = agentRef.value?.name
+    return (name && networkStore.workingState?.[name]) || null
+  })
+  watch(working, (w) => { if (w) refresh() })
+
   async function refresh() {
     // The endpoints are fleet-wide; on a slow backend a new tick must not
     // stack a second request behind the first.
@@ -71,5 +82,5 @@ export function useAgentContextStats(agentRef, networkStore) {
     }
   }
 
-  return { stats, slots, start, stop, refresh }
+  return { stats, slots, working, start, stop, refresh }
 }

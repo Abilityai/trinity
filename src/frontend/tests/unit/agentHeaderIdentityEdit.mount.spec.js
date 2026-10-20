@@ -293,6 +293,10 @@ describe('the restored rows (pre-#3798 shape)', () => {
     expect(q('agent-header-context').exists()).toBe(false)
     expect(wrapper.text()).not.toMatch(/Idle|Working/)
     wrapper.unmount()
+    // A short run: the WS signal lands before the 15 s slot poll — one bar lights at once.
+    render({ slotStats: { active: 0, max: 3 }, working: { since: '2026-10-19T00:00:00Z' } })
+    expect(q('agent-header-capacity').attributes('title')).toBe('1/3 slots')
+    wrapper.unmount()
     render({ agent: baseAgent({ status: 'stopped' }), slotStats: { active: 0, max: 3 } })
     expect(q('agent-header-capacity').exists()).toBe(false)
   })

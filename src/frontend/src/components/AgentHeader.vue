@@ -263,7 +263,7 @@
                tooltip names the slots. No word, no count, no ring (operator). -->
           <CapacityMeter
             v-if="agent.status === 'running' && slotStats"
-            :active="slotStats.active"
+            :active="activeSlots"
             :max="slotStats.max"
             :height="22"
             :width="16"
@@ -570,6 +570,12 @@ const props = defineProps({
   slotStats: {
     type: Object,
     default: null
+  },
+  // ent#955 — `{ since }` while a WS-observed execution is in flight, else
+  // null. A short run ends between two slot polls; this lights a bar at once.
+  working: {
+    type: Object,
+    default: null
   }
 })
 
@@ -678,6 +684,13 @@ const trendClass = computed(() => {
 // A repository is "connected" when the live status says git is enabled AND
 // names an origin. AgentDetail clears `gitStatus` on stop and on agent switch,
 // so a stopped agent never shows a previous snapshot.
+// The bars never read below the WS signal: a run the poll has not seen yet
+// still takes one slot on screen.
+const activeSlots = computed(() => {
+  const polled = props.slotStats?.active || 0
+  return props.working && polled === 0 ? 1 : polled
+})
+
 const gitBound = computed(() => !!(props.gitStatus?.git_enabled && props.gitStatus?.remote_url))
 // The one fact about the repository known at first paint: an agent deployed
 // from a `github:` template has one. (`agent.git_mode` is null for these on a
