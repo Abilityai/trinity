@@ -31,7 +31,7 @@ As an agent owner I open one place to change what an agent is, what it may do, w
 | `PeoplePane.vue` | `AccessPanel` embedded, unchanged |
 | `StoragePane.vue` + `GitHubAuthRow.vue` | Repository (bound repo, BindRepoPanel, GitHub token, git sync), Credentials, Shared folders, File sharing |
 | `ChannelsPane.vue` / `IntegrationsPane.vue` | Voice / Expose via MCP + Trinity access key, plus rows that open the tabs still holding the rest |
-| `components/AgentLiveStrip.vue` | Live CPU/memory and spend on Overview (moved from the header) |
+| `components/AgentLiveStrip.vue` | Live CPU/memory and the 7-day spend row — back in the header's `strip` slot as the card's bottom rows (`embedded`) since trinity-enterprise#955; Overview no longer renders it |
 | `components/GitPanel.vue` | Gains Pull/Push (driven by AgentDetail's `useGitSync`); loses binding and token config |
 
 ## The header (trinity-enterprise#950)

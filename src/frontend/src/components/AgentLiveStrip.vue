@@ -9,8 +9,12 @@
     Same footprint in every state: a running agent with no sample yet shows a
     skeleton line where the numbers will be, a stopped one its allocation.
   -->
+  <!-- `embedded` (trinity-enterprise#955): rendered as the header card's
+       bottom rows — a top rule instead of its own card chrome. The two arms
+       are mutually exclusive (#2662), and the border colour is shared. -->
   <div
-    class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-750 rounded-lg shadow-sm px-4 py-3 space-y-2 text-[12.5px]"
+    class="border-gray-200 dark:border-gray-750 px-4 py-3 space-y-2 text-[12.5px]"
+    :class="embedded ? 'border-t' : 'bg-white dark:bg-gray-800 border rounded-lg shadow-sm'"
     data-testid="agent-live-strip"
   >
     <div class="flex flex-wrap items-center gap-x-5 gap-y-2 min-h-[20px]">
@@ -95,6 +99,8 @@ const props = defineProps({
   resourceLimits: { type: Object, default: () => ({}) },
   tokenStats: { type: Object, default: null },
   authStatus: { type: Object, default: null },
+  // ent#955: true when slotted into the header card (no card chrome of its own).
+  embedded: { type: Boolean, default: false },
 })
 
 // uPlot strokes take a colour value, not a class; the palette module states

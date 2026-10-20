@@ -92,7 +92,22 @@
             @set-label="setAgentLabel"
             @open-avatar-modal="showAvatarModal = true"
             @cycle-emotion="cycleEmotion"
-          />
+          >
+            <!-- ent#955: live usage and the 7-day spend row are back in the
+                 header (they left for Overview in trinity-enterprise#887). -->
+            <template #strip>
+              <AgentLiveStrip
+                embedded
+                :agent="agent"
+                :agent-stats="agentStats"
+                :cpu-history="cpuHistory"
+                :memory-history="memoryHistory"
+                :resource-limits="resourceLimits"
+                :token-stats="tokenStats"
+                :auth-status="authStatus"
+              />
+            </template>
+          </AgentHeader>
 
           <!-- Tabs -->
           <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : '']">
@@ -111,17 +126,6 @@
 
             <!-- Overview Tab Content (#1107 — default landing tab) -->
             <div v-if="activeTab === 'overview'" class="p-6 space-y-6">
-              <!-- trinity-enterprise#887: live usage and spend left the header;
-                   they are read here, where the agent's trend is read. -->
-              <AgentLiveStrip
-                :agent="agent"
-                :agent-stats="agentStats"
-                :cpu-history="cpuHistory"
-                :memory-history="memoryHistory"
-                :resource-limits="resourceLimits"
-                :token-stats="tokenStats"
-                :auth-status="authStatus"
-              />
               <OverviewPanel :agent="agent" @navigate-tab="handleOverviewNavigate" @open-task="handleOpenTask" />
             </div>
 

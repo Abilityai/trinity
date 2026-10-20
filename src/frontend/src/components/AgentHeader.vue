@@ -241,6 +241,11 @@
         </div>
       </div>
     </div>
+    <!-- ent#955: the live strip — CPU / memory now, and the 7-day spend row —
+         is back as the card's bottom rows, where it sat before #3798. The page
+         slots `AgentLiveStrip` here (`embedded`), so the strip stays one
+         component with one data path. -->
+    <slot name="strip" />
   </div>
 </template>
 
