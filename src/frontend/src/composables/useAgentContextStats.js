@@ -41,14 +41,16 @@ export function useAgentContextStats(agentRef, networkStore) {
 
   // ent#955: a short task finishes between two 15 s polls and never reaches
   // the slot map — the WS activity event (`chat_start` / `schedule_start`,
-  // `stores/network.js::workingState`) lands the moment it starts. The header
-  // fills a bar on it at once, and the map is re-read right away so the real
-  // count follows without waiting for the tick.
+  // `stores/network.js::workingState`) lands the moment it starts AND the
+  // moment it ends. The header fills a bar on the start at once, and the map
+  // is re-read on BOTH edges: measured, re-reading only on the start left the
+  // bar lit for up to 15 s after a 5 s turn, until the next tick found the
+  // slot free.
   const working = computed(() => {
     const name = agentRef.value?.name
     return (name && networkStore.workingState?.[name]) || null
   })
-  watch(working, (w) => { if (w) refresh() })
+  watch(working, () => { refresh() })
 
   async function refresh() {
     // The endpoints are fleet-wide; on a slow backend a new tick must not
