@@ -635,7 +635,14 @@ def check_pull_mode_env_matches(container, agent_name: str) -> bool:
     except Exception:  # noqa: BLE001 — attrs absent or shaped differently
         return True
     baked = env_dict.get("TRINITY_PULL_MODE", "").strip().lower() == "true"
-    return baked == bool(is_pull_pilot_agent(agent_name))
+    piloted = bool(is_pull_pilot_agent(agent_name))
+    if baked != piloted:
+        return False
+    # #3814: a piloted system agent also needs the URL its worker polls with
+    # (regular agents always carry it). Without it the pool never starts.
+    if piloted and is_system_agent_name(agent_name):
+        return bool(env_dict.get("TRINITY_BACKEND_URL"))
+    return True
 
 
 def check_agent_auth_token_env_matches(container, agent_name: str) -> bool:
@@ -655,6 +662,33 @@ def check_agent_auth_token_env_matches(container, agent_name: str) -> bool:
     env_list = container.attrs.get("Config", {}).get("Env", [])
     env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
     return env_dict.get("TRINITY_AGENT_AUTH_TOKEN") == derive_agent_token(agent_name)
+
+
+def check_agent_name_env_matches(container, agent_name: str) -> bool:
+    """#3813: the container's ``AGENT_NAME`` env and ``trinity.agent-name``
+    label name the agent's CURRENT name. ``False`` (→ recreate) when either is
+    present and different.
+
+    Rename moves only the Docker container name. The first start after it
+    recreates via the token predicate above, and that recreate now re-bakes the
+    name too. This predicate repairs agents that went through that recreate
+    before it did: token current, name stale, so nothing else fires. The agent
+    server reads ``AGENT_NAME`` for ``/health``, the heartbeat, pull worker ids,
+    the result callback and git auto-sync, all of which 403 under the old name.
+
+    Absent values match: every create site bakes both, and an absent value is
+    never a drift verdict (same rule as ``check_pull_mode_env_matches``).
+    Unreadable attrs match, never a 500 on the start path.
+    """
+    try:
+        config = container.attrs.get("Config", {}) or {}
+        env_list = config.get("Env", []) or []
+        env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
+        label = (config.get("Labels") or {}).get("trinity.agent-name")
+    except Exception:  # noqa: BLE001 — attrs absent or shaped differently
+        return True
+    env_name = env_dict.get("AGENT_NAME")
+    return (env_name is None or env_name == agent_name) and (label is None or label == agent_name)
 
 
 def check_agent_mcp_key_matches(container, agent_name: str) -> bool:

@@ -26,7 +26,7 @@ import httpx
 
 from config import CORS_ORIGINS, VOICE_ENABLED
 from models import User
-from dependencies import get_current_user, owner_is_workspace_only, scope_may_open_event_stream, workspace_route
+from dependencies import get_current_user, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, workspace_route
 from services.docker_service import docker_client, list_all_agents_fast
 from utils.helpers import utc_now_iso
 
@@ -1681,6 +1681,12 @@ async def websocket_events_endpoint(
     user_email = key_info.get("user_email")
     # Determine if admin by checking user role
     user_data = db.get_user_by_username(key_info.get("user_id"))  # user_id is actually username
+    # #995 — a suspended owner's key is refused here as on every other door
+    # (`get_current_user`, `/ws`). Same close as an inactive key: the holder
+    # learns nothing more than "this key does not work".
+    if owner_is_suspended(user_data):
+        await websocket.close(code=4001, reason="Invalid or inactive MCP API key")
+        return
     # ent#837 — the event stream is an operator surface, and this handler never
     # runs `get_current_user`, so the operator floor is applied here: a key whose
     # owner is Workspace-only (including one minted before the upgrade) does not
