@@ -259,9 +259,35 @@ describe('the restored rows (pre-#3798 shape)', () => {
     expect(cost).toContain('vs avg')
   })
 
-  it('no spend row before the first run', () => {
+  it('the spend row keeps its footprint: skeleton in flight, "no spend yet" after a first run-less fetch', () => {
+    render({ tokenStats: null })
+    expect(q('agent-header-cost').exists()).toBe(true)
+    expect(q('agent-header-cost').find('[aria-busy="true"]').exists()).toBe(true)
+    wrapper.unmount()
     render({ tokenStats: { ...TOKENS, lifetime_executions: 0 } })
-    expect(q('agent-header-cost').exists()).toBe(false)
+    expect(q('agent-header-cost-empty').exists()).toBe(true)
+    expect(q('agent-header-cost').text()).not.toContain('Today')
+  })
+
+  it('the GitHub row is reserved up front for a github: template, and only then', () => {
+    // Running, status in flight: skeleton, no pop later.
+    render({ agent: baseAgent({ template: 'github:acme/alpha' }), gitStatus: null })
+    expect(q('agent-header-git').exists()).toBe(true)
+    expect(q('agent-header-git').find('[aria-busy="true"]').exists()).toBe(true)
+    wrapper.unmount()
+    // Stopped: the status cannot be read, the row says so at the same height.
+    render({ agent: baseAgent({ template: 'github:acme/alpha', status: 'stopped' }), gitStatus: null })
+    expect(q('agent-header-git-idle').text()).toContain('start it')
+    wrapper.unmount()
+    // A local template with no status: no row at all.
+    render({ agent: baseAgent({ template: 'local:alpha' }), gitStatus: null })
+    expect(q('agent-header-git').exists()).toBe(false)
+  })
+
+  it('the funding badge keeps its footprint while the auth status is in flight', () => {
+    render({ authStatus: null })
+    expect(q('agent-header-funding-skeleton').exists()).toBe(true)
+    expect(q('agent-header-funding').exists()).toBe(false)
   })
 })
 

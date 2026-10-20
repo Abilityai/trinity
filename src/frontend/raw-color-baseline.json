@@ -51,7 +51,7 @@
     },
     "src/frontend/src/components/AgentHeader.vue": {
       "raw_nongray": 0,
-      "raw_gray": 53,
+      "raw_gray": 63,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/AgentListPanel.vue": {

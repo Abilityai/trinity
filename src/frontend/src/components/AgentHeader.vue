@@ -151,7 +151,10 @@
           <!-- ent#181 FR-4: the slug is what URLs, MCP keys, containers and
                volumes key on — keep it visible when a label hides it. While
                the label is being edited this line carries the hint instead. -->
-          <div v-if="isEditingLabel || showsSlug || description" class="mt-0.5 flex flex-wrap items-baseline gap-x-2 text-[12.5px] text-gray-600 dark:text-gray-400">
+          <!-- Always rendered at one line's height: the description arrives
+               with the template info a beat after first paint, and a line
+               that appeared with it pushed every row below (principle 4). -->
+          <div class="mt-0.5 min-h-[1.25rem] flex flex-wrap items-baseline gap-x-2 text-[12.5px] text-gray-600 dark:text-gray-400">
             <template v-if="isEditingLabel">
               <span data-testid="agent-header-label-hint">
                 Display name — Enter saves, Esc cancels; leave it empty to show the id
@@ -195,7 +198,15 @@
                  badge names what pays for this agent; for an owner a native
                  select is overlaid on it, so switching is one click here as
                  well as in Settings › General › Model and funding. -->
-            <div v-if="authStatus" class="relative inline-flex items-center" data-testid="agent-header-funding">
+            <!-- Reserved while the auth status is in flight, so the badge row
+                 does not re-wrap when it lands. -->
+            <span
+              v-if="!authStatus"
+              class="inline-block h-5 w-16 rounded-full bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"
+              aria-busy="true"
+              data-testid="agent-header-funding-skeleton"
+            ><span class="sr-only">Loading funding…</span></span>
+            <div v-else class="relative inline-flex items-center" data-testid="agent-header-funding">
               <BaseBadge
                 :variant="authStatus.auth_mode === 'subscription' ? 'autonomous' : authStatus.auth_mode === 'api_key' ? 'neutral' : 'danger'"
                 size="sm"
@@ -305,7 +316,12 @@
            once the row wraps it simply starts the second line. The inner
            `flex-wrap` matters on its own: the running-stats set is ~374px, wider
            than a 375px phone's content box all by itself. -->
-      <div class="flex flex-wrap items-center ml-auto gap-x-4 gap-y-1 text-xs min-h-[20px]" data-testid="agent-header-live">
+      <!-- Fixed width from `sm` up (principle 6): the skeleton, the stopped
+           allocation and the running cluster are three different widths, and
+           a right cluster that changed width when the stats landed decided
+           whether the row wrapped — the tab strip moved 32px a beat after
+           paint. Right-aligned inside the reserved box. -->
+      <div class="flex flex-wrap items-center ml-auto gap-x-4 gap-y-1 text-xs min-h-[20px] sm:w-[26rem] sm:shrink-0 sm:justify-end" data-testid="agent-header-live">
         <!-- When running: live stats with sparklines -->
         <template v-if="agent.status === 'running' && agentStats">
           <div class="flex items-center gap-1.5">
@@ -356,11 +372,21 @@
     </div>
 
     <!-- ROW 3: the 7-day spend row — sparkline + today vs average trend -->
+    <!-- Always rendered at one line's height (principle 4): the stats land a
+         beat after first paint, and a row that appeared with them pushed the
+         tab strip down on every agent page load. Skeleton while in flight,
+         an honest "no spend yet" after a first fetch that found no runs. -->
     <div
-      v-if="tokenStats && tokenStats.lifetime_executions > 0"
-      class="px-4 py-2 border-t border-gray-100 dark:border-gray-750 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs"
+      class="px-4 py-2 border-t border-gray-100 dark:border-gray-750 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs min-h-[2.25rem]"
       data-testid="agent-header-cost"
     >
+      <span
+        v-if="tokenStats === null"
+        class="block h-3 w-72 rounded bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"
+        aria-busy="true"
+      ><span class="sr-only">Loading spend…</span></span>
+      <span v-else-if="!(tokenStats.lifetime_executions > 0)" class="text-gray-600 dark:text-gray-400" data-testid="agent-header-cost-empty">No spend yet — the 7-day trend appears after the first run.</span>
+      <template v-else>
       <!-- #471 Tier 0: subscription usage is shown as API-price equivalents,
            never presented as a bill. -->
       <BaseBadge
@@ -391,21 +417,37 @@
         <span aria-hidden="true">·</span>
         <span class="font-mono tabular-nums">{{ tokenStats.lifetime_executions }} runs</span>
       </div>
+      </template>
     </div>
 
     <!-- ROW 4: the GitHub line — only when a repository is connected. No
-         Pull / Push / Refresh here (the Git tab owns the verbs). -->
+         Pull / Push / Refresh here (the Git tab owns the verbs). The live
+         status lands after first paint, so the row is RESERVED up front for
+         an agent whose template is a GitHub repository (`gitExpected`): a
+         skeleton while the status is in flight, a sentence while the agent
+         is stopped (the status is only readable from a running container),
+         and the line once it is bound. A local-template agent gets the row
+         only if its status turns out to name a remote. -->
     <div
-      v-if="gitBound"
-      class="px-4 py-2 border-t border-gray-100 dark:border-gray-750 flex items-center min-w-0"
+      v-if="gitBound || gitExpected"
+      class="px-4 py-2 border-t border-gray-100 dark:border-gray-750 flex items-center min-w-0 min-h-[2.25rem]"
       data-testid="agent-header-git"
     >
       <AgentHeaderMeta
+        v-if="gitBound"
         :show-tags="false"
         :git-status="gitStatus"
         :git-changes-count="gitChangesCount"
         :git-behind="gitBehind"
       />
+      <span
+        v-else-if="agent.status === 'running' && gitStatus === null"
+        class="block h-3 w-72 rounded bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"
+        aria-busy="true"
+      ><span class="sr-only">Loading repository state…</span></span>
+      <span v-else class="text-[12.5px] text-gray-600 dark:text-gray-400" data-testid="agent-header-git-idle">
+        {{ agent.status === 'running' ? 'No repository connected.' : 'Repository state is read from the running agent — start it to see the branch and sync.' }}
+      </span>
     </div>
   </div>
 </template>
@@ -641,6 +683,10 @@ const trendClass = computed(() => {
 // names an origin. AgentDetail clears `gitStatus` on stop and on agent switch,
 // so a stopped agent never shows a previous snapshot.
 const gitBound = computed(() => !!(props.gitStatus?.git_enabled && props.gitStatus?.remote_url))
+// The one fact about the repository known at first paint: an agent deployed
+// from a `github:` template has one. (`agent.git_mode` is null for these on a
+// live payload, so it cannot be the signal.) Reserves row 4 so it never pops.
+const gitExpected = computed(() => typeof props.agent.template === 'string' && props.agent.template.startsWith('github:'))
 
 const router = useRouter()
 

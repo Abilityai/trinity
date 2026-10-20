@@ -19,7 +19,11 @@
        a single half reserves one row. -->
   <div
     class="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0"
-    :class="showRepo && showTags ? 'mt-2 min-h-[3.25rem] sm:min-h-[1.5rem]' : 'min-h-[1.5rem]'"
+    :class="showRepo && showTags
+      ? 'mt-2 min-h-[3.25rem] sm:min-h-[1.5rem]'
+      : showTags
+        ? 'min-h-[1.5rem] sm:w-[20rem] sm:shrink-0'
+        : 'min-h-[1.5rem]'"
     data-testid="agent-header-meta"
   >
     <!-- Repository. Two inner groups so the counts can drop to their own
