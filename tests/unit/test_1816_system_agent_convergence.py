@@ -202,7 +202,7 @@ def created_spec(monkeypatch):
 
 
 def _all_eight_predicates(container, agent_name="trinity-system"):
-    """Evaluate the exact eight predicates ``start_agent_internal`` composes
+    """Evaluate the config predicates ``start_agent_internal`` composes
     into ``needs_recreation`` (``lifecycle.py``). Returns {name: bool}."""
     from services.agent_service import helpers
     from services.agent_service.file_sharing import check_public_folder_mount_matches
@@ -222,6 +222,7 @@ def _all_eight_predicates(container, agent_name="trinity-system"):
         "agent_auth_token": helpers.check_agent_auth_token_env_matches(
             container, agent_name
         ),
+        "agent_name_env": helpers.check_agent_name_env_matches(container, agent_name),
     }
 
 
