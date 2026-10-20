@@ -58,6 +58,26 @@ before an envelope exists to carry an error.
    This one is a *restriction on an already-authenticated caller*, not a
    security boundary: it runs last, and it fails open.
 
+## Who may poll or cancel a task (#3751)
+
+Each door binds a task handle to the caller that minted it:
+
+| Door | Binding |
+|---|---|
+| Bearer (MCP key or JWT) | `routers/a2a.py::_bearer_started_by` — the row's `triggered_by == "a2a"`, `source_user_id == caller.id` (never None), `source_mcp_key_id == caller.mcp_key_id` (None on both sides for a JWT) |
+| AAuth | `aauth_inbound.execution_owned_by(exec_id, identity)` |
+| Paid | `_payer_for_task` — the payer bound to the row |
+
+The key id, not the user id, is the bearer identity: every agent key of one
+owner resolves to that owner's user id and role, so the user id alone would let a
+sibling agent poll another agent's task. There is no owner/admin override for the
+same reason. A refusal is the unknown-id `Task not found` (no existence oracle),
+and a refused `tasks/cancel` signals nothing. A re-minted key loses its in-flight
+tasks, as it loses its `messageId` namespace. This scopes the A2A task handle
+only; `GET /api/agents/{name}/executions/{id}` and its terminate route are the
+execution REST surface (trinity-enterprise#875). Pinned by
+`tests/unit/test_3751_a2a_bearer_task_scope.py`.
+
 ## `messageId` dedup — why the scope carries the caller
 
 Invariant #18 wants a re-delivered task to not double-execute, and A2A's

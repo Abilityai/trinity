@@ -41,6 +41,7 @@ pytestmark = pytest.mark.unit
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 _CRUD = _BACKEND / "services" / "agent_service" / "crud.py"
 _LIFECYCLE = _BACKEND / "services" / "agent_service" / "lifecycle.py"
+_SYSTEM_AGENT = _BACKEND / "services" / "system_agent_service.py"
 
 PILOT = "b9-pull"
 
@@ -360,6 +361,7 @@ def test_start_leaves_a_matching_pilot_alone(monkeypatch):
 _WRITERS = {
     _CRUD: {"_build_env_vars"},
     _LIFECYCLE: {"recreate_container_with_updated_config", "recreate_missing_container"},
+    _SYSTEM_AGENT: {"_create_system_agent"},  # #3814: the system agent can be a pilot
 }
 
 
@@ -412,11 +414,7 @@ _TAIL = "_provision_folders_and_run_agent_container"
 _KNOWN_RUNNERS = {
     "agent_service/crud.py::_create_agent_container": "env from _build_env_vars (pinned in _WRITERS)",
     f"agent_service/lifecycle.py::{_TAIL}": "env from its callers (each must apply the helper, below)",
-    "system_agent_service.py::_create_system_agent": (
-        "trinity-system assembles its own env and is not a pull pilot; if an operator "
-        "ever lists it, check_pull_mode_env_matches recreates it on its next cold start "
-        "through the drift path, which applies the helper"
-    ),
+    "system_agent_service.py::_create_system_agent": "applies the helper itself (pinned in _WRITERS, #3814)",
 }
 
 
