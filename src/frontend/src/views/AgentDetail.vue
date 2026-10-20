@@ -8,7 +8,12 @@
          <main> to content width and shifting/narrowing the whole card on tab switch. -->
     <main :class="['w-full max-w-[1400px] mx-auto py-2 sm:px-6 lg:px-8', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
       <div :class="['px-4 sm:px-0 py-2', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
-        <div v-if="loading" class="text-center py-8">
+        <!-- Only while there is nothing on screen yet. On an in-app agent
+             switch the page is KeepAlive-cached and the previous agent stays
+             rendered until the new one lands (ent#955: ~100ms); a spinner
+             stacked above it pushed the whole header down 112px for that beat
+             and back. The switch is stale-while-loading, like a refresh. -->
+        <div v-if="loading && !agent" class="text-center py-8">
           <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-action-primary-500 mx-auto"></div>
         </div>
 
