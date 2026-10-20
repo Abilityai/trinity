@@ -236,11 +236,9 @@ class TestEnv:
 
         monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", "")
         env = {"TRINITY_PULL_MODE": "true", "TRINITY_BACKEND_URL": "http://backend:8000"}
-        with patch("services.heartbeat_service.clear_heartbeat") as clear:
-            apply_pull_mode_env(SYS, env)
+        apply_pull_mode_env(SYS, env)
         assert "TRINITY_PULL_MODE" not in env
         assert "TRINITY_BACKEND_URL" not in env
-        clear.assert_called_once_with(SYS)
 
     def test_regular_agent_backend_url_untouched(self, monkeypatch):
         from services.agent_service.pull_mode import apply_pull_mode_env
@@ -313,6 +311,14 @@ class TestBootReport:
         observe.assert_not_called()
         clear.assert_called_once_with(SYS, "system_agent_pull_drift", SYS)
         assert not any("#3814" in r.getMessage() for r in caplog.records)
+
+    def test_a_legacy_row_with_the_prefix_parses_to_this_kind(self):
+        from services import platform_alerts
+
+        match = platform_alerts.derive_legacy_subject(
+            "base-image-stale-pull-trinity-system-2026-10-20T10:00:00Z", {}
+        )
+        assert match.kind == "system_agent_pull_drift"
 
     def test_the_kind_is_registered_under_a_reserved_prefix(self):
         from services import platform_alerts

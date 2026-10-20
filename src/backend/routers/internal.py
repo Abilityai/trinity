@@ -84,7 +84,7 @@ router = APIRouter(
 pull_router = APIRouter(prefix="/api/internal", tags=["internal"])
 
 _PULL_AUTH_DENIED = (
-    "Pull seam requires a valid X-Internal-Secret or the agent's own agent-scoped MCP key"
+    "Pull seam requires a valid X-Internal-Secret or the agent's own MCP key"
 )
 
 

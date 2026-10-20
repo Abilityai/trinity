@@ -249,6 +249,22 @@ def test_boot_reports_the_pull_state_of_a_running_system_agent(sas, monkeypatch)
     sas.start_agent_internal.assert_not_awaited()
 
 
+def test_boot_reports_the_pull_state_before_a_fresh_create(sas, monkeypatch):
+    """#3814 AC d on a fresh install: no container yet, the WARN still fires."""
+    monkeypatch.setattr(sas, "get_agent_container", lambda name: None)
+    monkeypatch.setattr(
+        sas.SystemAgentService, "_create_system_agent", AsyncMock(return_value={})
+    )
+    seen = []
+    monkeypatch.setattr(
+        sas.SystemAgentService, "_report_pull_mode", lambda self, c: seen.append(c)
+    )
+
+    _run(sas.SystemAgentService().ensure_deployed())
+
+    assert seen == [None]
+
+
 def test_running_and_current_is_the_quiet_path(sas, monkeypatch):
     monkeypatch.setattr(sas, "check_base_image_state", AsyncMock(return_value="match"))
     monkeypatch.setattr(sas, "start_agent_internal", AsyncMock())
@@ -1104,6 +1120,22 @@ def test_restart_delegates_and_reads_a_FRESH_container_for_the_response(
     assert result["success"] is True
     assert result["recreated"] is True
     assert result["recreate_reason"] == "image_drift"
+
+
+def test_restart_re_reports_the_pull_state_of_the_new_container(rsa, monkeypatch):
+    """#3814: restart is the remedy the pull-drift alert names, so it re-reads
+    the REPLACEMENT container and the alert ends here, not at the next boot."""
+    replacement = _Container(status="running")
+    monkeypatch.setattr(rsa, "get_agent_container", lambda name: replacement)
+    monkeypatch.setattr(rsa, "start_agent_internal", AsyncMock(return_value={}))
+    seen = []
+    monkeypatch.setattr(
+        type(rsa.system_agent_service), "_report_pull_mode", lambda self, c: seen.append(c)
+    )
+
+    _run(rsa.restart_system_agent(MagicMock(), _human_caller()))
+
+    assert seen == [replacement]
 
 
 def test_restart_reports_the_skill_delivery_of_the_start(rsa, monkeypatch):

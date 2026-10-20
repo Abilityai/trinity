@@ -324,6 +324,7 @@ _LEGACY_PARSERS: Tuple[Tuple[str, str, Callable], ...] = (
     ("sub-headroom-", "subscription_headroom", _headroom),
     ("skills-legacy-adoption-", "skills_legacy_adoption", _legacy_adoption),
     ("base-image-stale-start-", "system_agent_start_failed", _rx(r"(.+)-\d+")),
+    ("base-image-stale-pull-", "system_agent_pull_drift", _rx(rf"(.+)-{_TS}")),
     ("base-image-stale-", "base_image_stale", _rx(rf"(.+)-{_TS}")),
     ("cb-dormant-", "circuit_dormant", _rx(rf"(.+)-{_TS}")),
     ("skills-reconcile-", "skills_reconcile_refused", _rx(r"(.+)-\d+")),

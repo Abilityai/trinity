@@ -301,6 +301,7 @@ class SystemAgentService:
                 return result
 
         # System agent doesn't exist - create it
+        self._report_pull_mode(None)
         try:
             creation_result = await self._create_system_agent()
             result["action"] = "created"

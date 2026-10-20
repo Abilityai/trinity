@@ -16,7 +16,7 @@ they are deliberately separate flags — not a duplicated one.
 
 **Auth (least-privilege, #307/#1159).** The worker authenticates to the two pull
 seams (``/api/internal/next-task`` + ``/api/internal/tasks/{id}/result``) with the
-agent's OWN agent-scoped MCP key — already injected into every agent as
+agent's OWN MCP key (agent-scoped; the system agent's own system-scoped key, #3814) — already injected into every agent as
 ``TRINITY_MCP_API_KEY`` — mirroring ``heartbeat.py`` / ``result_callback.py``. The
 seams accept that scoped key (validated via ``authorize_heartbeat``) as an
 alternate to the internal secret, so the master ``INTERNAL_API_SECRET`` is NEVER
@@ -119,12 +119,9 @@ def apply_pull_mode_env(agent_name: str, env_vars: Dict[str, str]) -> None:
     # #3814: the system agent carries no TRINITY_BACKEND_URL (#1816), and the
     # pull worker cannot start without it. It gets the URL while piloted and
     # loses it otherwise — also on a pre-#1816 container that still had it.
-    # De-pilot drops the heartbeat `seen` marker (no TTL) so the orchestrator
-    # does not read as a lost heartbeat once it stops beating.
+    # Every caller recreates the container, and each recreate path already
+    # clears the heartbeat `seen` marker (`clear_agent_breakers`).
     if agent_name == SYSTEM_AGENT_NAME:
+        env_vars.pop("TRINITY_BACKEND_URL", None)
         if "TRINITY_PULL_MODE" in env_vars:
             env_vars["TRINITY_BACKEND_URL"] = os.getenv("TRINITY_BACKEND_URL", "http://backend:8000")
-        elif env_vars.pop("TRINITY_BACKEND_URL", None) is not None:
-            from services import heartbeat_service
-
-            heartbeat_service.clear_heartbeat(agent_name)
