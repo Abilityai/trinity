@@ -43,7 +43,7 @@ _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from db_harness import count as _count, db_backend, sqlite_only_backend  # noqa: E402,F401
+from db_harness import count as _count, db_backend  # noqa: E402,F401
 
 import services.skill_gate_service as _GATE  # noqa: E402
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateRefused  # noqa: E402
@@ -255,18 +255,46 @@ def test_held_rows_are_left_out_by_default_and_a_verdict_never_unmarks(db_backen
         assert callable(getattr(DatabaseManager, name, None)), name
 
 
-def test_the_registered_migration_adds_the_columns_and_the_table_twice_safely(sqlite_only_backend):
-    """Run through the MIGRATIONS registry, on the OLD shape (the 2026-10-01 learning)."""
-    import os
+# The shapes from before this change, written out: a fresh schema built from
+# `db/schema.py` already has the new columns, and dropping them again needs
+# SQLite's DROP COLUMN, which cannot rewrite these tables' DDL on every SQLite
+# build (a comment sits before their last column).
+_OLD_SHAPE = (
+    "CREATE TABLE public_chat_messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, "
+    "role TEXT NOT NULL, content TEXT NOT NULL, timestamp TEXT NOT NULL, cost REAL, "
+    "sender_email TEXT, sender_label TEXT)",
+    "CREATE TABLE enterprise_portal_messages (id TEXT PRIMARY KEY, agent_name TEXT NOT NULL, "
+    "client_email TEXT NOT NULL, session_id TEXT, role TEXT NOT NULL, content TEXT NOT NULL, "
+    "cost REAL, created_at TEXT NOT NULL, source TEXT, voice_call_id TEXT, attachments TEXT, "
+    "execution_id TEXT)",
+)
+
+
+def test_the_registered_migration_upgrades_the_old_shape_twice_safely(tmp_path):
+    """Run through the MIGRATIONS registry on the OLD shape (the 2026-10-01
+    learning): the columns and the table appear, and the backfill marks a
+    Workspace turn a gate record names — and nothing else — exactly once."""
     import sqlite3
 
     from db import migrations
+    from db.schema import TABLES
 
-    conn = sqlite3.connect(os.environ["TRINITY_DB_PATH"])
-    conn.execute("DROP TABLE IF EXISTS room_gate_holds")
-    for table in ("public_chat_messages", "enterprise_portal_messages"):
-        if "gate_hold" in [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]:
-            conn.execute(f"ALTER TABLE {table} DROP COLUMN gate_hold")
+    conn = sqlite3.connect(tmp_path / "old.db")
+    for ddl in _OLD_SHAPE:
+        conn.execute(ddl)
+    conn.execute(TABLES["skill_gate_requests"])
+    rows = [("u-held", "user", HELD, "ex-held"), ("n-held", "assistant", "Not run: …", "ex-held"),
+            ("u-ok", "user", "hello", "ex-ok"), ("old", "user", "no turn id", None)]
+    for mid, role, content, eid in rows:
+        conn.execute("INSERT INTO enterprise_portal_messages (id, agent_name, client_email, "
+                     "session_id, role, content, created_at, execution_id) "
+                     "VALUES (?, 'fin', 'c@example.com', 'ps', ?, ?, '2026-10-20T10:00:00Z', ?)",
+                     (mid, role, content, eid))
+    for rid, origin in (("gate-old", "ex-held"), ("gate-noorigin", None)):
+        conn.execute("INSERT INTO skill_gate_requests (request_id, agent_name, skills, request_text, "
+                     "requester_kind, requester_key, origin_execution_id, dispatch, state, created_at) "
+                     "VALUES (?, 'fin', '[]', '', 'person', 'person:c', ?, '{}', 'pending', 't')",
+                     (rid, origin))
     conn.commit()
 
     migrate = dict(migrations.MIGRATIONS)["held_gate_turns"]
@@ -276,9 +304,10 @@ def test_the_registered_migration_adds_the_columns_and_the_table_twice_safely(sq
 
     for table in ("public_chat_messages", "enterprise_portal_messages"):
         assert "gate_hold" in [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
-    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+    assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'room_gate_holds'").fetchone()
+    marks = dict(conn.execute("SELECT id, gate_hold FROM enterprise_portal_messages"))
     conn.close()
-    assert "room_gate_holds" in names
+    assert marks == {"u-held": "gate-old", "n-held": "gate-old", "u-ok": None, "old": None}
 
 
 def test_the_alembic_revision_carries_the_same_change():
