@@ -221,6 +221,18 @@ describe('readQueueSnapshot — complete pending, the newest ended window, and h
     expect(snap.ended.every((r) => r.status !== 'pending')).toBe(true)
   })
 
+  it('C: a partial walk with an unverified total asks the one-row count where the pending section ends — the Resolved window is not falsely empty', async () => {
+    const q = makeQueue([...rowsOf(23), ...rowsOf(6, { prefix: 'e', status: 'expired' })], {
+      uncarriable: true,
+      totalNullWhen: (params) => params.limit !== 1, // the belt fired on the walk's pages, not on a one-row read
+    })
+    const snap = await readQueueSnapshot(q.get, opts)
+    expect(snap.pendingComplete).toBe(false)
+    expect(q.calls).toContainEqual({ status: 'pending', limit: 1 })
+    expect(snap.pendingTotal).toBe(23)
+    expect(snap.ended).toHaveLength(6)
+  })
+
   it('an unverified page-1 total never becomes a negative or invented ended total', async () => {
     const q = makeQueue([...rowsOf(4), ...rowsOf(25, { prefix: 'e', status: 'responded' })], { totalNull: true })
     const snap = await readQueueSnapshot(q.get, opts)

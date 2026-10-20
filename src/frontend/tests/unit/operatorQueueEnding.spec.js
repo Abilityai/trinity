@@ -141,8 +141,8 @@ describe('the Operating Room store', () => {
       store.handleWebSocketEvent({ type, data: { id: 'i1', agent_name: 'agent-a' } })
       // #3302: with no list on screen the refetch is the two count reads —
       // still the access-controlled route, never a patch from the payload.
-      expect(axios.get).toHaveBeenCalled()
-      expect(axios.get.mock.calls.every(([url]) => url === '/api/operator-queue')).toBe(true)
+      expect(axios.get.mock.calls.map(([url]) => url)).toEqual(['/api/operator-queue', '/api/operator-queue'])
+      expect(axios.get.mock.calls.map(([, config]) => config.params)).toEqual([{ status: 'pending', limit: 1 }, { status: 'pending', priority: 'critical', limit: 1 }])
     },
   )
 })

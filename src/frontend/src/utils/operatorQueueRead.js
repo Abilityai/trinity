@@ -168,14 +168,22 @@ export async function readQueueSnapshot(get, {
 
   // C
   const walk = await readPendingQueue(get, { pageLimit: walkPageLimit, maxPages })
-  const sqlPending = walk.total ?? walk.items.length // an offset is never null: axios drops a null param
+  // A partial walk whose page could not verify `total` does not say where the
+  // pending section ends; a one-row read's `total` still does (its single row
+  // is rarely the one withheld). The offset is never null: axios drops a null
+  // param, which would read from 0 and show an empty Resolved window.
+  const counted = walk.complete || walk.total != null
+    ? null
+    : pendingCountOf(bodyOf(await get({ status: 'pending', limit: 1 })))
+  const walkTotal = walk.total ?? counted
+  const sqlPending = walkTotal ?? walk.items.length
   const margin = Math.min(sqlPending, ENDED_READ_MARGIN)
   const after = bodyOf(await get({ limit: endedLimit + margin, offset: sqlPending - margin }))
   const endedNow = uniqueById(rowsOf(after).filter((r) => !isPendingRow(r)))
   const endedIds = new Set(endedNow.map((r) => r.id))
   pending = walk.items.filter((r) => !endedIds.has(r.id))
   const moved = walk.items.length - pending.length
-  const pendingTotal = walk.complete ? pending.length : minus(walk.total, moved, pending.length)
+  const pendingTotal = walk.complete ? pending.length : minus(walkTotal, moved, pending.length)
   ended = endedNow.slice(0, endedLimit)
   return {
     pending, pendingTotal, pendingComplete: walk.complete,

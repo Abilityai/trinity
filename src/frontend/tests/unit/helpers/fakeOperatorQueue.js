@@ -13,7 +13,7 @@
  *   - the two flags on every page, whatever the filters.
  *
  * `opts` injects what the route can do to a reader: `totalNull` (the projection
- * belt fired), `walkError` (a status the walk answers with — 503 when Redis is
+ * belt fired; `totalNullWhen(params)` limits it to the reads it matches), `walkError` (a status the walk answers with — 503 when Redis is
  * down — on `start` or on a later page), `uncarriable` (a page that has more but
  * cannot issue a cursor), `fail(params, n)` (reject this call), and
  * `between(n, rows)` — runs after the n-th call (1-based) so a spec can raise,
@@ -70,7 +70,7 @@ export function makeQueue(rows, opts = {}) {
         undelivered_count: opts.undelivered ?? 0,
         closed_by_filer_count: opts.closedByFiler ?? 0,
       }
-      const total = opts.totalNull ? null : matching.length
+      const total = opts.totalNull || (opts.totalNullWhen && opts.totalNullWhen(params)) ? null : matching.length
       let page
       let hasMore
       let nextOffset = null

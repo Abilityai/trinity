@@ -42,6 +42,12 @@ const POLLED = [
   /\/api\/agents\/[^/]+\/git\/status$/,   // git status poll
   /\/api\/notifications\/count$/,
   /\/api\/agents\/[^/]+\/notifications\/count$/,
+  // #3302: the NavBar's two operator-queue badge counts. Read on mount and
+  // again on every queue WebSocket event, the way the notification count above
+  // is polled; a key carries its query (KEYED_BY_QUERY below). The Overview's
+  // per-agent count (`agent_name=…`) is NOT exempt: it is read once per mount.
+  /^\/api\/operator-queue\?status=pending&limit=1$/,
+  /^\/api\/operator-queue\?status=pending&priority=critical&limit=1$/,
 ]
 
 // The boot retry ladder for a dashboard-less agent. One probe may legitimately

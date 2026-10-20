@@ -106,11 +106,10 @@ describe('operatorQueue store — counts and lists past the old 200-row window (
     store.handleWebSocketEvent({ type: 'operator_queue_new', data: {} })
     await flush()
 
-    expect(listReads(queue)).toEqual([])
-    expect(queue.calls).toEqual(expect.arrayContaining([
+    expect(queue.calls).toEqual([
       { status: 'pending', limit: 1 },
       { status: 'pending', priority: 'critical', limit: 1 },
-    ]))
+    ])
     expect(store.pendingCount).toBe(264)
     expect(store.criticalCount).toBe(4)
   })
@@ -169,6 +168,55 @@ describe('operatorQueue store — counts and lists past the old 200-row window (
     await awaited
     expect(store.items.find((i) => i.id === b).sync_state).toBe('changed')
     expect(store.items.find((i) => i.id === a).status).toBe('responded')
+  })
+
+  it('the not-recorded notice survives the read a queue event queued behind the refetch', async () => {
+    // A 409 means someone else ended the ask, and that ending broadcasts — so a
+    // queue event landing while the respond's refetch is out is the common case.
+    const queue = makeQueue(rowsOf(2))
+    const { hold } = serve(queue)
+    store.startPolling(60_000) // read 1
+    await flush()
+    axios.post.mockRejectedValueOnce({ response: { status: 409, data: { detail: 'gone' } } })
+    const release = hold(2) // the respond's refetch
+    const answering = store.respondToItem(store.openItems[0].id, 'yes', '')
+    await flush()
+    store.handleWebSocketEvent({ type: 'operator_queue_cancelled', data: {} })
+    release()
+    expect(await answering).toBe(false)
+    await flush()
+    expect(store.error).toBe(QUEUE_RESPONSE_NOT_RECORDED)
+  })
+
+  it('the not-recorded notice also survives when the refetch joins a read that was already out', async () => {
+    const queue = makeQueue(rowsOf(2))
+    const { hold } = serve(queue)
+    await store.fetchItems() // read 1
+    const id = store.openItems[0].id
+    const release = hold(2)
+    store.fetchItems() // read 2 — a poll — is out when the answer is refused
+    axios.post.mockRejectedValueOnce({ response: { status: 409, data: { detail: 'gone' } } })
+    const answering = store.respondToItem(id, 'yes', '') // its refetch joins read 2 and queues one more
+    await flush()
+    release()
+    expect(await answering).toBe(false)
+    await flush()
+    expect(store.error).toBe(QUEUE_RESPONSE_NOT_RECORDED)
+  })
+
+  it('an answer marks the row on screen even when a read replaced the list while the POST was out', async () => {
+    serve(makeQueue(rowsOf(3)))
+    await store.fetchItems()
+    const id = store.openItems[0].id
+    let resolvePost
+    axios.post.mockImplementationOnce(() => new Promise((r) => { resolvePost = r }))
+    const answering = store.respondToItem(id, 'yes', '')
+    await store.fetchItems() // lands while the POST is out: new row objects
+    resolvePost({ data: {} })
+    expect(await answering).toBe(true)
+    expect(store.items.find((i) => i.id === id).status).toBe('responded')
+    expect(store.openItems).toHaveLength(2)
+    expect(store.pendingCount).toBe(2)
   })
 
   it('an answer takes the badge down at once, critical included', async () => {

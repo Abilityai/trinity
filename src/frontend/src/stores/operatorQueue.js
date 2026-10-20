@@ -148,19 +148,32 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   // #3302: one read at a time, plus ONE more for every trigger that lands while
   // it runs. A read can take several requests now, and a sync trigger can fire
   // every 5 s on every open tab; a sequence guard would still SEND them all.
+  // Every caller's promise settles when the chain DRAINS, not when its own run
+  // ends: a caller that awaits a read and then writes `error` (the 409 notice, a
+  // failed bulk cancel) must write after the reads queued behind it, whose
+  // prologue would otherwise clear the notice before it renders. A chain is
+  // capped; a trigger past the cap starts the next chain.
+  const MAX_CHAINED_READS = 3
+
   function coalesced(run) {
-    let running = null
-    let again = null
+    let chain = null
+    let again = false
     function start() {
-      if (running) {
-        if (!again) {
-          const next = () => { again = null; return start() }
-          again = running.then(next, next)
-        }
-        return again
+      if (chain) {
+        again = true
+        return chain
       }
-      running = run().finally(() => { running = null })
-      return running
+      chain = (async () => {
+        let runs = 0
+        do {
+          again = false
+          await run() // never rejects: each run records its own failure
+          runs += 1
+        } while (again && runs < MAX_CHAINED_READS)
+        chain = null
+        if (again) start()
+      })()
+      return chain
     }
     return start
   }
@@ -257,17 +270,20 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
       // #3302: recorded. A read already out still carries this ask as pending,
       // and the counts are no longer derived from the rows, so both move here.
       writeGen += 1
-      if (item.status === 'pending') {
+      // A read that landed while the POST was out replaced the row objects:
+      // update the row on screen, and count it only if it is still pending there.
+      const row = items.value.find(i => i.id === id) || item
+      if (row.status === 'pending') {
         pendingTotal.value = Math.max(0, pendingTotal.value - 1)
-        if (item.priority === 'critical') criticalTotal.value = Math.max(0, criticalTotal.value - 1)
+        if (row.priority === 'critical') criticalTotal.value = Math.max(0, criticalTotal.value - 1)
       }
 
       // Optimistic update — mirror the body that was sent
-      item.status = 'responded'
-      item.response = body.response
-      item.response_text = body.response_text
-      item.responded_by_email = authStore.userEmail || authStore.user?.username
-      item.responded_at = new Date().toISOString()
+      row.status = 'responded'
+      row.response = body.response
+      row.response_text = body.response_text
+      row.responded_by_email = authStore.userEmail || authStore.user?.username
+      row.responded_at = new Date().toISOString()
       expandedItemId.value = null
 
       // Auto-advance: expand next open item
