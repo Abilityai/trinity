@@ -635,7 +635,14 @@ def check_pull_mode_env_matches(container, agent_name: str) -> bool:
     except Exception:  # noqa: BLE001 — attrs absent or shaped differently
         return True
     baked = env_dict.get("TRINITY_PULL_MODE", "").strip().lower() == "true"
-    return baked == bool(is_pull_pilot_agent(agent_name))
+    piloted = bool(is_pull_pilot_agent(agent_name))
+    if baked != piloted:
+        return False
+    # #3814: a piloted system agent also needs the URL its worker polls with
+    # (regular agents always carry it). Without it the pool never starts.
+    if piloted and is_system_agent_name(agent_name):
+        return bool(env_dict.get("TRINITY_BACKEND_URL"))
+    return True
 
 
 def check_agent_auth_token_env_matches(container, agent_name: str) -> bool:

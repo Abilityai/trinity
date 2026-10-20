@@ -30,6 +30,7 @@ import logging
 import os
 from typing import Dict
 
+from db.agents import SYSTEM_AGENT_NAME
 # The predicates live in the LEAF module `services/pull_pilot.py` and are
 # re-exported here so every existing importer keeps working. They CANNOT live in
 # this file: `services/agent_service/__init__.py` eagerly imports the whole
@@ -114,3 +115,16 @@ def apply_pull_mode_env(agent_name: str, env_vars: Dict[str, str]) -> None:
     for key in PULL_MODE_ENV_KEYS:
         env_vars.pop(key, None)
     env_vars.update(pull_mode_env_vars(agent_name))
+
+    # #3814: the system agent carries no TRINITY_BACKEND_URL (#1816), and the
+    # pull worker cannot start without it. It gets the URL while piloted and
+    # loses it otherwise — also on a pre-#1816 container that still had it.
+    # De-pilot drops the heartbeat `seen` marker (no TTL) so the orchestrator
+    # does not read as a lost heartbeat once it stops beating.
+    if agent_name == SYSTEM_AGENT_NAME:
+        if "TRINITY_PULL_MODE" in env_vars:
+            env_vars["TRINITY_BACKEND_URL"] = os.getenv("TRINITY_BACKEND_URL", "http://backend:8000")
+        elif env_vars.pop("TRINITY_BACKEND_URL", None) is not None:
+            from services import heartbeat_service
+
+            heartbeat_service.clear_heartbeat(agent_name)

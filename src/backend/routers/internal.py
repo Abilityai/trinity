@@ -102,8 +102,9 @@ def _pull_authorized(request: Request, agent_name: str) -> bool:
     """Dual-auth predicate for a pull seam bound to ``agent_name``: the trusted
     backend (valid internal secret) OR the agent's OWN agent-scoped MCP key,
     reusing ``heartbeat_service.authorize_heartbeat`` (the same "an agent may act
-    only on itself" rule that gates the heartbeat + #1083 callback). A
-    user/system/mismatched key ⇒ False (caller raises 403)."""
+    only on itself" rule that gates the heartbeat + #1083 callback). The
+    system agent's own system-scoped key qualifies for its own name (#3814).
+    A user or mismatched key ⇒ False (caller raises 403)."""
     if _internal_secret_valid(request):
         return True
     # #1081 B1: the agent-key (worker) path is additionally gated on the pilot
@@ -138,7 +139,7 @@ async def internal_next_task(request: Request, agent_name: str, worker_id: str):
 
     Auth (dual): a valid ``X-Internal-Secret`` (trusted backend) OR the agent's
     own agent-scoped MCP key bound to ``agent_name`` — an agent may only claim
-    its OWN queue. A user/system/mismatched scoped key → 403.
+    its OWN queue. A user or mismatched key → 403 (the system agent's key qualifies for its own name only, #3814).
 
     Query params: ``agent_name`` + ``worker_id``. On success returns the §3.1
     claim response (envelope frame + lease metadata). When the queue is empty it
@@ -172,7 +173,7 @@ async def internal_task_result(
     ``agent_name`` must equal the execution's) — an agent may only report results
     for its OWN executions. This ownership gate is IN ADDITION to the
     ``claim_token`` CAS below (which independently blocks a stale/wrong-token
-    write). A user/system/non-agent key → 403; an unknown OR not-owned execution
+    write). A user or unbound key → 403; an unknown OR not-owned execution
     → a **uniform 404** (self-uniform enumeration-safety, Invariant #186 — a
     404/403 split would leak the existence of another agent's execution id).
 
@@ -192,7 +193,9 @@ async def internal_task_result(
     # check; the agent path requires the scoped key to OWN this execution.
     if not _internal_secret_valid(request):
         key = _validated_agent_key(request)
-        if not (key and key.get("scope") == "agent"):
+        # A key that cannot act for its OWN bound name (user, connector, an
+        # unbound system key) is refused before any lookup (#3814).
+        if not (key and heartbeat_service.authorize_heartbeat(key, key.get("agent_name"))):
             raise HTTPException(status_code=403, detail=_PULL_AUTH_DENIED)
         execution = db.get_execution(execution_id)
         if execution is None or not heartbeat_service.authorize_heartbeat(
