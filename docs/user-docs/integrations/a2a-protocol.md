@@ -144,6 +144,8 @@ end, and the result is waiting on `tasks/get`.
 
 **Poll / cancel:** `tasks/get` and `tasks/cancel` take `{ "id": "<taskId>" }`. The `taskId` is the id from the send response, including a `working` one. A task the agent refused to run (a gated skill, for example) reads as `rejected` with the reason. It never stays `working`.
 
+**Who may poll a task.** Only the credential that sent it. A task started with an API key can be polled and cancelled with that same key, and a task you sent while signed in, by you while signed in. Every other caller, including the agent's owner, an admin, and another key or agent of the same account, gets `Task not found`: the same answer as an id that does not exist. A key that is replaced (an agent's key is re-issued when the agent is recovered, for example) can no longer poll tasks the old key sent. To see every run of an agent, use its Executions view in Trinity.
+
 > **Idempotency.** Re-sending the same `messageId` returns the original task **without re-executing** — safe to retry on a dropped connection. While that task is still running, the re-send returns it as `working` with the same id. Once it has finished, the re-send returns the completed Task. **Poll; don't re-send under a new `messageId`**, which would run the work twice.
 
 ---

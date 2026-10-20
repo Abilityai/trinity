@@ -1854,6 +1854,14 @@ def owner_is_workspace_only(owner_row: Optional[dict]) -> bool:
     return is_workspace_only_role((owner_row or {}).get("role"))
 
 
+def owner_is_suspended(owner_row: Optional[dict]) -> bool:
+    """A door that resolves a key's owner ROW itself (`/ws/events`) applies the
+    #995 deactivation check `get_current_user` and `/ws` apply: a suspended
+    owner's still-active key is refused. An unresolvable owner is refused by
+    `owner_is_workspace_only`, so None reads as "not suspended" here."""
+    return bool((owner_row or {}).get("suspended_at"))
+
+
 def require_role(min_role: str):
     """
     Dependency factory that requires the current user to have at least `min_role`.
