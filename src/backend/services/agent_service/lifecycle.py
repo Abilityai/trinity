@@ -1170,16 +1170,12 @@ async def recreate_container_with_updated_config(
     # #1098 TMPDIR idiom above).
     #
     # #1816: EXCEPT for the system agent. This env var is the agent-side
-    # heartbeat loop's gate, and heartbeat_service.authorize_heartbeat accepts
-    # ONLY `scope == "agent"` keys — trinity-system's key is `scope == "system"`,
-    # so arming it buys nothing and costs a permanent 5-second 403 loop
-    # (swallowed agent-side, ~17k backend log lines/day). Matters now because
-    # #1816 makes this recreate a ROUTINE path for the system agent (boot with
-    # the container stopped → base-image adoption), where before it was
-    # incidental. The system agent also has no #1083 result callback and no
-    # #1081 pull worker, so the other two consumers are moot too. Whether the
-    # orchestrator SHOULD be visible to fleet health is a separate design
-    # question (#1816 §10).
+    # heartbeat loop's gate, and #1816 makes this recreate a ROUTINE path for
+    # the system agent (boot with the container stopped → base-image
+    # adoption). Whether the orchestrator SHOULD be visible to fleet health is
+    # a separate design question (#1816 §10). A piloted system agent is the
+    # exception: its pull worker needs the URL, so apply_pull_mode_env below
+    # sets it then and removes it otherwise (#3814).
     if not is_system_agent_name(agent_name):
         env_vars.setdefault(
             'TRINITY_BACKEND_URL',

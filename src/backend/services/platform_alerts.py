@@ -136,6 +136,7 @@ _BUILTIN_KINDS = (
     Kind("skills_legacy_adoption", "skills-legacy-adoption-", _D, CLEARS_HOOK),
     Kind("base_image_stale", "base-image-stale-", _N, CLEARS_HOOK),
     Kind("system_agent_start_failed", "base-image-stale-start-", _N, CLEARS_HOOK),
+    Kind("system_agent_pull_drift", "base-image-stale-pull-", _N, CLEARS_HOOK),  # #3814
     Kind("circuit_dormant", "cb-dormant-", _N, CLEARS_HOOK),
     # -- every other in-repo platform emitter -----------------------------
     Kind("skills_reconcile_refused", "skills-reconcile-", _N, CLEARS_HOOK),
@@ -323,6 +324,7 @@ _LEGACY_PARSERS: Tuple[Tuple[str, str, Callable], ...] = (
     ("sub-headroom-", "subscription_headroom", _headroom),
     ("skills-legacy-adoption-", "skills_legacy_adoption", _legacy_adoption),
     ("base-image-stale-start-", "system_agent_start_failed", _rx(r"(.+)-\d+")),
+    ("base-image-stale-pull-", "system_agent_pull_drift", _rx(rf"(.+)-{_TS}")),
     ("base-image-stale-", "base_image_stale", _rx(rf"(.+)-{_TS}")),
     ("cb-dormant-", "circuit_dormant", _rx(rf"(.+)-{_TS}")),
     ("skills-reconcile-", "skills_reconcile_refused", _rx(r"(.+)-\d+")),
