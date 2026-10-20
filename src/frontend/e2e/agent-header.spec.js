@@ -32,6 +32,26 @@ const GIT_STATUS = {
   behind: 7,
 }
 
+// Name the offender on failure (the #2197 spec's helper): the widest element
+// not inside a clipping ancestor. A bare scrollWidth says only that the page
+// is broken — the first two runs of this spec needed a screenshot to say by what.
+const BLAME = () => {
+  const vw = document.documentElement.clientWidth
+  const clipped = (el) => {
+    for (let a = el.parentElement; a; a = a.parentElement) {
+      if (getComputedStyle(a).overflowX !== 'visible' && a.getBoundingClientRect().right <= vw + 1) return true
+    }
+    return false
+  }
+  const hits = []
+  for (const el of document.querySelectorAll('body *')) {
+    const r = el.getBoundingClientRect()
+    if ((r.width === 0 && r.height === 0) || r.right <= vw + 1 || clipped(el)) continue
+    hits.push(`${el.tagName}.${String(el.className).split(' ').slice(0, 3).join('.')} +${Math.round(r.right - vw)}px "${(el.textContent || '').trim().slice(0, 24)}"`)
+  }
+  return hits.slice(0, 3)
+}
+
 const json = (body) => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
 
 async function stubAgent(page) {
@@ -117,7 +137,8 @@ test.describe('the agent header (ent#950)', () => {
         scrollWidth: document.documentElement.scrollWidth,
         clientWidth: document.documentElement.clientWidth,
       }))
-      expect(r.scrollWidth, `body scrolls horizontally by ${r.scrollWidth - r.clientWidth}px`)
+      const blame = r.scrollWidth > r.clientWidth ? await page.evaluate(BLAME) : []
+      expect(r.scrollWidth, `body scrolls horizontally by ${r.scrollWidth - r.clientWidth}px. Widest unclipped: ${blame.join(' | ') || 'none found'}`)
         .toBeLessThanOrEqual(r.clientWidth)
       // Fitting is not enough: the first CI run of this spec fit nothing at
       // 375px by crushing the repo name to zero width while the badges ran off
