@@ -303,14 +303,14 @@ Every operator surface used to derive its counts and lists from ONE capped page 
 |---|---|
 | Operations (store `fetchItems`) | `readQueueSnapshot({pageLimit: 200, endedLimit: 200})`; subtitle "N pending responses (S shown)" when partial, Resolved tab "N resolved · latest 200 shown" |
 | NavBar badge (off Operations) | `fetchCounts`: `status=pending&limit=1` + `priority=critical` → `total`; on mount and on every queue event |
-| Fleet grid chips (`stores/fleetGrid.js`) | `readPendingQueue`; a partial read keeps the last complete map; overlapping triggers share the read |
+| Fleet grid chips (`stores/fleetGrid.js`) | `readPendingQueue`; a partial read keeps the last complete map for 5 minutes (`OP_QUEUE_PARTIAL_GRACE_MS`), then shows the partial one; overlapping triggers share the read |
 | `/m` Queue tab | `readQueueSnapshot({pageLimit: 100, endedLimit: 5})`; "Showing N of T pending" below the cards when partial; a partial read never prunes per-card state |
-| Agent Overview "needs attention" | `?agent_name=X&status=pending&limit=1` → `total` (was `/agents/{name}` `count`, a page length) |
+| Agent Overview "needs attention" | `?agent_name=X&status=pending&limit=1` → `total` (was `/agents/{name}` `count`, a page length); an unverified `total` is answered exactly — the page's rows when it has no more, else one read of the agent's pending asks |
 | Self-change permission requests | `readPendingQueue({agent_name})` |
 
 Cost: a normal queue is one request (unchanged); pending asks plus history past 200 rows is two; ≥ 200 pending is three or more.
 
-Guards that keep the multi-request read honest: every queue read goes through `utils/boundedHttp.js::http` (30 s — the reads are one-at-a-time, so a request that never settled would hold every later one); a read overtaken by an acknowledged write is read again (up to twice) so a refetch after a 409 shows what the agent changed; `/m`'s 15 s poll skips while a queue read is still in flight (answers and pull-to-refresh still call it directly); the NavBar's mount read is deferred a tick and skipped while a list is live, so on Operations the list read is the first queue request; the Overview's fallback for an unverified `total` is the page's own rows (a floor), never the number already on screen, because the panel is reused across agents.
+Guards that keep the multi-request read honest: every queue read goes through `utils/boundedHttp.js::http` (30 s — the reads are one-at-a-time, so a request that never settled would hold every later one); a read overtaken by an acknowledged write is read again (up to twice) so a refetch after a 409 shows what the agent changed; `/m`'s 15 s poll skips while a queue read is still in flight (answers and pull-to-refresh still call it directly); the NavBar's mount read is deferred a tick and skipped while a list is live, so on Operations the list read is the first queue request; the Overview answers an unverified `total` exactly — the page's own rows when it has no more, else one read of the agent's pending asks, written only while the page still shows that agent — never with the number already on screen, because the panel is reused across agents; a count read that lands after a list went live is dropped, because the list read owns the counts then.
 
 ### NavBar Badge
 

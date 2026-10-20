@@ -177,6 +177,10 @@ export async function readQueueSnapshot(get, {
     : pendingCountOf(bodyOf(await get({ status: 'pending', limit: 1 })))
   const walkTotal = walk.total ?? counted
   const sqlPending = walkTotal ?? walk.items.length
+  // The margin absorbs asks that ended while the walk ran. If more than that
+  // ended first (another operator's Clear All), the newest of them sit before
+  // the offset and stay in `pending` for this read; the ending's own WebSocket
+  // trigger queues the next read, which corrects it.
   const margin = Math.min(sqlPending, ENDED_READ_MARGIN)
   const after = bodyOf(await get({ limit: endedLimit + margin, offset: sqlPending - margin }))
   const endedNow = uniqueById(rowsOf(after).filter((r) => !isPendingRow(r)))

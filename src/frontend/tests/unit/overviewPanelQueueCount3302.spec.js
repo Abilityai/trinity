@@ -14,11 +14,19 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 let queueBody = null
+// the agent's pending list, served to the one-read fallback (limit 500)
+let walkBody = null
+let walkGate = null // when set, the fallback read waits for it
 const NAME = 'overview-agent'
 
 vi.mock('axios', () => {
-  const get = vi.fn(async (url) => {
-    if (url === '/api/operator-queue') return { data: queueBody }
+  const get = vi.fn(async (url, config) => {
+    if (url === '/api/operator-queue') {
+      if (config?.params?.limit !== 500) return { data: queueBody }
+      const body = walkBody
+      if (walkGate) await walkGate
+      return { data: body }
+    }
     if (url === `/api/operator-queue/agents/${NAME}`) {
       // the old per-agent route: `count` is the page length, capped at the limit
       return { data: { agent_name: NAME, items: [], count: Math.min(queueBody?.total ?? 0, 100) } }
@@ -57,6 +65,7 @@ describe('Overview — needs attention counts every pending ask (#3302)', () => 
   beforeEach(() => {
     setActivePinia(createPinia())
     axios.get.mockClear()
+    walkGate = null
   })
 
   it('reads the agent\'s pending total from the list route, not a page length', async () => {
@@ -68,12 +77,51 @@ describe('Overview — needs attention counts every pending ask (#3302)', () => 
     expect(wrapper.find('[data-testid="needs-attention"]').text()).toContain('142 items need attention')
   })
 
-  it('an unverified total falls back to the rows the page holds — a floor, never another agent\'s count', async () => {
+  // `total` is null only when the route withheld a row it was not this viewer's
+  // to see — so on a one-row page the visible count is 0 or unknown, never 1.
+  const queueReads = () => axios.get.mock.calls.filter(([url]) => url === '/api/operator-queue')
+
+  it('an unverified total with no more rows is exactly the rows the page holds (0), with no extra read', async () => {
+    queueBody = { items: [], count: 0, total: null, has_more: false }
+    const wrapper = await mountPanel()
+    expect(wrapper.find('[data-testid="needs-attention"]').text()).toContain('2 items need attention')
+    expect(queueReads()).toHaveLength(1)
+  })
+
+  it('an unverified total with more rows reads the agent\'s pending asks once and counts them', async () => {
+    queueBody = { items: [], count: 0, total: null, has_more: true }
+    walkBody = { items: Array.from({ length: 7 }, (_, i) => ({ id: `w${i}`, status: 'pending' })), count: 7, total: null, has_more: false }
+    const wrapper = await mountPanel()
+    expect(queueReads().map(([, config]) => config.params)).toEqual([
+      { agent_name: NAME, status: 'pending', limit: 1 },
+      { agent_name: NAME, status: 'pending', limit: 500 },
+    ])
+    expect(wrapper.find('[data-testid="needs-attention"]').text()).toContain('9 items need attention')
+  })
+
+  it('a fallback read still out when the page switches agents never writes into the new agent', async () => {
+    queueBody = { items: [], count: 0, total: null, has_more: true }
+    walkBody = { items: Array.from({ length: 40 }, (_, i) => ({ id: `a${i}`, status: 'pending' })), count: 40, total: null, has_more: false }
+    let open
+    walkGate = new Promise((r) => { open = r })
+    const wrapper = await mountPanel() // agent A's fallback read is out
+    queueBody = { items: [{ id: 'b' }], count: 1, total: 4, has_more: true }
+    await wrapper.setProps({ agent: { name: 'other-agent', status: 'running' } })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="needs-attention"]').text()).toContain('6 items need attention')
+    open() // A's 40 arrives after the switch
+    walkGate = null
+    await flushPromises()
+    expect(wrapper.find('[data-testid="needs-attention"]').text()).toContain('6 items need attention')
+  })
+
+  it('an agent switch never carries the previous agent\'s count, even when the new total is unverified', async () => {
     queueBody = { items: [{ id: 'one' }], count: 1, total: 140, has_more: true }
     const wrapper = await mountPanel()
     expect(wrapper.find('[data-testid="needs-attention"]').text()).toContain('142 items need attention')
     // the panel is reused when the page switches agents
-    queueBody = { items: [{ id: 'two' }], count: 1, total: null, has_more: true }
+    queueBody = { items: [], count: 0, total: null, has_more: true }
+    walkBody = { items: [{ id: 'x', status: 'pending' }], count: 1, total: null, has_more: false }
     await wrapper.setProps({ agent: { name: 'other-agent', status: 'running' } })
     await flushPromises()
     expect(wrapper.find('[data-testid="needs-attention"]').text()).toContain('3 items need attention')

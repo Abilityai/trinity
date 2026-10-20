@@ -226,7 +226,10 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
         queueGet({ status: 'pending', limit: 1 }),
         queueGet({ status: 'pending', priority: 'critical', limit: 1 }),
       ])
-      if (gen !== writeGen) return
+      // Dropped when an answer overtook it, and when a view renders the list by
+      // the time it lands: the list read owns the counts then, and a count read
+      // started on another page could otherwise paint an older total over it.
+      if (gen !== writeGen || listLive.value) return
       const pending = pendingCountOf(all.data)
       const criticalPending = pendingCountOf(critical.data)
       // An unverified total keeps the number already on screen.

@@ -40,7 +40,7 @@ vi.mock('axios', () => {
 })
 
 import axios from 'axios'
-import { useFleetGridStore } from '@/stores/fleetGrid'
+import { useFleetGridStore, OP_QUEUE_PARTIAL_GRACE_MS } from '@/stores/fleetGrid'
 import { makeQueue, rowsOf } from './helpers/fakeOperatorQueue'
 import { REQUEST_TIMEOUT_MS } from '@/utils/boundedHttp'
 
@@ -88,6 +88,27 @@ describe('fleet grid — operator-queue chip data past the old 200-row page (#33
     opts.walkError = { status: 503, on: 'start' }
     await store.refreshBatchData()
     expect(store.opQueuePending['agent-late']?.count).toBe(5)
+  })
+
+  it('the last complete map is trusted only for a grace period; after it, partial reads are shown', async () => {
+    // Redis down with more than a page pending makes EVERY read partial; the
+    // chips must not stay frozen on a map from before the outage forever.
+    const opts = {}
+    serve(makeQueue(fleet(520), opts))
+    const store = useFleetGridStore()
+    const now = vi.spyOn(Date, 'now')
+    const t0 = Date.parse('2026-10-20T12:00:00Z')
+    now.mockReturnValue(t0)
+    await store.refreshBatchData() // complete
+    opts.walkError = { status: 503, on: 'start' }
+    now.mockReturnValue(t0 + 60_000)
+    await store.refreshBatchData() // partial, inside the grace period: last complete map kept
+    expect(store.opQueuePending['agent-late']?.count).toBe(5)
+    now.mockReturnValue(t0 + OP_QUEUE_PARTIAL_GRACE_MS + 1_000)
+    await store.refreshBatchData() // partial, past it: the partial map, which cannot see agent-late
+    expect(store.opQueuePending['agent-late']).toBeUndefined()
+    expect(Object.keys(store.opQueuePending).length).toBeGreaterThan(0)
+    now.mockRestore()
   })
 
   it('the chip read is bounded, so a hung request cannot hold the shared read forever', async () => {

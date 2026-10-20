@@ -66,7 +66,7 @@ views/Dashboard.vue          mode toggle, grid pane (v-if), Tidy up / Reset pill
 | Success meter, tasks/cost/last-run, schedules chip | fleet `GET /api/agents/execution-stats` (15s poll) |
 | ⚡ circuit open chip | `GET /api/agents/slots` → `circuit_breakers` map (#526) |
 | ⟳ sync chip — `↑ahead ↓behind · N dirty · pushed <age> ago`, kind from the backend `state` (red crit / yellow warn / green calm, none for unknown), reason — recommendation on hover (`utils/syncSummary.js::syncChip`, ent#707; replaced the `sync failing ×N` and `git ✓` chips) | `GET /api/agents/sync-health` (#389, batch) |
-| ⚠ needs response / approval pending chip | `GET /api/operator-queue?status=pending` (batch, grouped per agent) — every pending ask, walked past the first 500-row page (`utils/operatorQueueRead.js::readPendingQueue`, #3302); a read that cannot finish keeps the last complete map, and overlapping triggers share one read |
+| ⚠ needs response / approval pending chip | `GET /api/operator-queue?status=pending` (batch, grouped per agent) — every pending ask, walked past the first 500-row page (`utils/operatorQueueRead.js::readPendingQueue`, #3302); a read that cannot finish keeps the last complete map for 5 minutes, then shows the partial one, and overlapping triggers share one read |
 | ▶ working + elapsed timer | WS `agent_activity` events → `workingState` map, reconciled by the context-stats poll; fallback `activityState === 'active'` |
 
 ### Identity zone — the label leads, the slug follows (#2358)

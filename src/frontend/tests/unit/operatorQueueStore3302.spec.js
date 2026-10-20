@@ -125,6 +125,41 @@ describe('operatorQueue store — counts and lists past the old 200-row window (
     expect(listReads(queue).length).toBeGreaterThan(before)
   })
 
+  it('a count read that lands after the list went live does not overwrite the list\'s count', async () => {
+    // Started on another page by a queue event, slower than the list read the
+    // Operations page then makes: the list owns the counts once it is live.
+    const queue = makeQueue(rowsOf(5))
+    const { hold } = serve(queue)
+    const releaseAll = hold(1)
+    const releaseCritical = hold(2)
+    store.fetchCounts() // answered now (5 pending), delivered late
+    Object.assign(queue.rows[0], { status: 'responded', disposed_at: '2026-12-01T00:00:00Z' })
+    store.startPolling(60_000) // read 3: the list, 4 pending
+    await flush()
+    expect(store.pendingCount).toBe(4)
+    releaseAll()
+    releaseCritical()
+    await flush()
+    expect(store.pendingCount).toBe(4)
+    expect(store.openItems).toHaveLength(4)
+  })
+
+  it('a count read overtaken by an answer is dropped, not painted over the answer', async () => {
+    const queue = makeQueue(rowsOf(5))
+    const { hold } = serve(queue)
+    await store.fetchItems() // read 1: the list, not live
+    const releaseAll = hold(2)
+    const releaseCritical = hold(3)
+    store.fetchCounts() // answered now (5 pending), delivered late
+    axios.post.mockResolvedValueOnce({ data: {} })
+    await store.respondToItem(store.openItems[0].id, 'yes', '')
+    expect(store.pendingCount).toBe(4)
+    releaseAll()
+    releaseCritical()
+    await flush()
+    expect(store.pendingCount).toBe(4)
+  })
+
   it('a burst of triggers while a read is out costs one more read, not one per trigger', async () => {
     const queue = makeQueue(rowsOf(3))
     const { hold } = serve(queue)
