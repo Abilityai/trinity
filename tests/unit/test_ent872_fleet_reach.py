@@ -814,6 +814,8 @@ _ALLOW = {
         "background cleanup loop: no principal",
     ("services/skills_sync_service.py", "_eligible_agents"):
         "background sweep, or the skills-library route behind require_admin + reject_agent_principal",
+    ("services/turn_tier_service.py", "turn_tier"):
+        "the role compared is the turn starter's user row (a person), never the caller's; selects no roster",
     ("services/ws_identity_service.py", "event_stream_identity"):
         "an agent key returns agent_reach_names as a non-admin slot before the role compare",
     ("services/ws_identity_service.py", "accessible_agents_for"):
