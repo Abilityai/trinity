@@ -1,6 +1,7 @@
 """
 FastAPI dependencies for the Trinity backend.
 """
+import json
 import logging
 import re
 import secrets
@@ -24,6 +25,15 @@ logger = logging.getLogger(__name__)
 # threat (UnderDefense 3.3.4) is Low/CVSS 2.0 and backend restarts already
 # rotate SECRET_KEY (invalidating every token).
 _JWT_REVOKED_PREFIX = "jwt:revoked:"
+
+# Per-user platform-session cutoff (#3825): "sign this account out everywhere
+# else", written when its password is changed. Same shape as the portal cutoff
+# below (a per-`jti` blacklist cannot name every token a user holds): one key per
+# username holding `{"at": <epoch>, "keep": <jti>}`; a session token whose `iat`
+# is at or before `at` is refused, except the one `keep` names — the fresh token
+# the change handed back to the person who made it. Reads fail open like the
+# `jti` check; the TTL outlives the longest platform token.
+_USER_SESSIONS_REVOKED_PREFIX = "trinity:user_sessions_revoked:"
 
 # Bulk portal-session revocation (trinity-enterprise#281): "log this client out
 # everywhere, now". A per-`jti` blacklist cannot express it — `jti` is random per
@@ -164,6 +174,60 @@ def is_token_revoked(jti: Optional[str]) -> bool:
         return False
 
 
+def revoke_user_sessions(username: str, keep_jti: Optional[str] = None) -> bool:
+    """Refuse every platform session token `username` was issued up to now,
+    except `keep_jti` (#3825). True when the cutoff was durably written, so the
+    caller can report honestly on a Redis outage."""
+    if not username:
+        return False
+    r = get_breaker_redis()
+    if r is None:
+        logger.warning("[auth] user session revoke skipped — Redis unavailable")
+        return False
+    from config import ACCESS_TOKEN_EXPIRE_MINUTES
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    try:
+        r.setex(
+            f"{_USER_SESSIONS_REVOKED_PREFIX}{username}",
+            ACCESS_TOKEN_EXPIRE_MINUTES * 60 + 60,  # + slack for clock skew
+            json.dumps({"at": now, "keep": keep_jti}),
+        )
+        return True
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] revoke_user_sessions failed: {exc}")
+        return False
+
+
+def session_predates_user_revoke(payload: dict) -> bool:
+    """True when this platform token was issued before its user's #3825 cutoff.
+
+    A token with no `iat` (minted before #3825) cannot be shown to post-date the
+    cutoff, so it is refused — but only for a user who HAS a cutoff, i.e. who
+    changed their password, which is the kill switch it is meant to be."""
+    username = payload.get("sub")
+    r = get_breaker_redis() if username else None
+    if r is None:
+        return False
+    try:
+        raw = r.get(f"{_USER_SESSIONS_REVOKED_PREFIX}{username}")
+        if raw is None:
+            return False
+        cutoff = json.loads(raw.decode() if isinstance(raw, (bytes, bytearray)) else raw)
+        at = int(cutoff["at"])
+        keep = cutoff.get("keep")
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] session_predates_user_revoke failed (fail-open): {exc}")
+        return False
+    if keep and payload.get("jti") == keep:
+        return False
+    iat = payload.get("iat")
+    try:
+        return iat is None or int(iat) <= at
+    except (TypeError, ValueError):
+        return True
+
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 # ent#554 — the same scheme with `auto_error=False`, so a route can accept an
@@ -233,6 +297,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None, m
         "mode": mode,  # Track auth mode to prevent dev/prod token mixing
         "jti": secrets.token_urlsafe(16),  # #187: per-token id for revocation
     })
+    # #3825: dates the token for the per-user session cutoff. A caller that
+    # supplies its own `iat` (the portal session, ent#375) keeps it.
+    to_encode.setdefault("iat", int(datetime.now(timezone.utc).timestamp()))
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -645,6 +712,9 @@ def decode_token(token: str) -> Optional[dict]:
         # #187 — a token revoked via logout is no longer valid (also for WS).
         if is_token_revoked(payload.get("jti")):
             return None
+        # #3825 — nor one issued before the user changed their password.
+        if session_predates_user_revoke(payload):
+            return None
 
         # Get full user record from database
         user = db.get_user_by_username(username)
@@ -735,6 +805,9 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
 
         # #187 — reject a token revoked via logout.
         if is_token_revoked(payload.get("jti")):
+            raise credentials_exception
+        # #3825 — reject a session issued before the user changed their password.
+        if session_predates_user_revoke(payload):
             raise credentials_exception
 
         user = db.get_user_by_username(username)

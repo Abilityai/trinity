@@ -1941,6 +1941,7 @@ async def get_version(current_user: User = Depends(get_current_user)):
 async def get_current_user_info(current_user: User = Depends(get_current_user)):
     """Get current user information."""
     from database import db
+    from utils.admin_identity import is_usable_password_hash
     user_data = db.get_user_by_username(current_user.username)
     if user_data:
         return {
@@ -1948,9 +1949,12 @@ async def get_current_user_info(current_user: User = Depends(get_current_user)):
             "email": user_data.get("email"),
             "name": user_data.get("name"),
             "picture": user_data.get("picture"),
-            "role": user_data["role"]
+            "role": user_data["role"],
+            # #3825: whether this account can change a password in Settings —
+            # a boolean only, never the hash. Email-only accounts have none.
+            "has_password": is_usable_password_hash(user_data.get("password")),
         }
-    return {"username": current_user.username, "role": current_user.role}
+    return {"username": current_user.username, "role": current_user.role, "has_password": False}
 
 
 if __name__ == "__main__":
