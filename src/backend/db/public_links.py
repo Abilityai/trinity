@@ -222,11 +222,14 @@ class PublicLinkOperations:
         link_id: str,
         name: Optional[str] = None,
         enabled: Optional[bool] = None,
-        expires_at: Optional[str] = None
+        expires_at: Optional[str] = None,
+        clear_expiry: bool = False,
     ) -> Optional[dict]:
         """Update a public link.
 
         Email verification is agent-level (agent_ownership.require_email).
+        `expires_at=None` means "unchanged"; `clear_expiry=True` removes the
+        expiry (#3584 — the Edit dialog had no way to).
         """
         values = {}
 
@@ -234,7 +237,9 @@ class PublicLinkOperations:
             values["name"] = name
         if enabled is not None:
             values["enabled"] = 1 if enabled else 0
-        if expires_at is not None:
+        if clear_expiry:
+            values["expires_at"] = None
+        elif expires_at is not None:
             values["expires_at"] = expires_at
 
         if not values:

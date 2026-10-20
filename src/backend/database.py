@@ -2719,8 +2719,9 @@ class DatabaseManager:
         return self._public_link_ops.list_agent_public_links(agent_name)
 
     def update_public_link(self, link_id: str, name: str = None, enabled: bool = None,
-                           expires_at: str = None):
-        return self._public_link_ops.update_public_link(link_id, name, enabled, expires_at)
+                           expires_at: str = None, clear_expiry: bool = False):
+        return self._public_link_ops.update_public_link(
+            link_id, name, enabled, expires_at, clear_expiry=clear_expiry)
 
     def delete_public_link(self, link_id: str):
         return self._public_link_ops.delete_public_link(link_id)

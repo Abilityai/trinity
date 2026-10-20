@@ -6169,6 +6169,17 @@
         "agent-lifecycle"
       ],
       "description": "recreate_container_with_updated_config re-bakes AGENT_NAME and the trinity.agent-name label from the live name beside TRINITY_AGENT_AUTH_TOKEN (driven through the real recreate, red before the fix on the replayed old name); check_agent_name_env_matches flags a present-and-different env or label, matches absent values and unreadable attrs; start_agent_internal recreates a stuck renamed agent on COLD start only and leaves never-renamed and running agents alone."
+    },
+    {
+      "file": "unit/test_3584_public_link_clear_expiry.py",
+      "feature": "#3584",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "public-links",
+        "unit"
+      ],
+      "description": "A public link's expiry can be removed, and only on purpose: on real SQLite, update_public_link(clear_expiry=True) sets expires_at NULL, an update without an expiry (rename, toggle) keeps it, a new one replaces it; through the real PUT handler, an expires_at sent as null or empty clears it (model_fields_set), one left out is kept, one sent is stored. The frontend half (local-time datetime-local round trip, untouched Save omits the expiry, cleared field sends null) is src/frontend/tests/unit/publicLinkExpiry.spec.js. Mutations: reverting the router turns 6 red; reverting PublicLinksPanel.vue turns 7 frontend tests red."
     }
   ]
 }
