@@ -232,6 +232,39 @@ def test_running_with_unknown_reports_honestly_and_never_alarms(sas, monkeypatch
     sas.start_agent_internal.assert_not_awaited()
 
 
+def test_boot_reports_the_pull_state_of_a_running_system_agent(sas, monkeypatch):
+    """#3814: a running system agent is never recreated, so boot is where a
+    piloted orchestrator with no worker gets reported. Read-only like the rest
+    of this branch."""
+    monkeypatch.setattr(sas, "check_base_image_state", AsyncMock(return_value="match"))
+    monkeypatch.setattr(sas, "start_agent_internal", AsyncMock())
+    seen = []
+    monkeypatch.setattr(
+        sas.SystemAgentService, "_report_pull_mode", lambda self, c: seen.append(c)
+    )
+
+    _run(sas.SystemAgentService().ensure_deployed())
+
+    assert seen == [sas._container_under_test]
+    sas.start_agent_internal.assert_not_awaited()
+
+
+def test_boot_reports_the_pull_state_before_a_fresh_create(sas, monkeypatch):
+    """#3814 AC d on a fresh install: no container yet, the WARN still fires."""
+    monkeypatch.setattr(sas, "get_agent_container", lambda name: None)
+    monkeypatch.setattr(
+        sas.SystemAgentService, "_create_system_agent", AsyncMock(return_value={})
+    )
+    seen = []
+    monkeypatch.setattr(
+        sas.SystemAgentService, "_report_pull_mode", lambda self, c: seen.append(c)
+    )
+
+    _run(sas.SystemAgentService().ensure_deployed())
+
+    assert seen == [None]
+
+
 def test_running_and_current_is_the_quiet_path(sas, monkeypatch):
     monkeypatch.setattr(sas, "check_base_image_state", AsyncMock(return_value="match"))
     monkeypatch.setattr(sas, "start_agent_internal", AsyncMock())
@@ -864,17 +897,31 @@ def test_recreate_honours_an_explicit_full_capabilities_override(recreate_captur
     assert captured["full_capabilities"] is True
 
 
-def test_recreate_does_not_arm_the_system_agents_heartbeat(recreate_capture):
-    """TRINITY_BACKEND_URL gates the agent-side heartbeat loop, and
-    authorize_heartbeat accepts only scope='agent' keys — the system agent's is
-    scope='system', so arming it is a permanent 5s 403 loop. #1816 makes this
-    recreate a ROUTINE path for it."""
+def test_recreate_does_not_arm_the_system_agents_heartbeat(recreate_capture, monkeypatch):
+    """TRINITY_BACKEND_URL gates the agent-side heartbeat loop, and whether the
+    orchestrator belongs in fleet health is #1816 §10's open question. Off unless
+    it is a pull pilot (#3814). #1816 makes this recreate a ROUTINE path for it."""
+    monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", "")
     mod, captured = recreate_capture
     old = _Container()
 
     _run(mod.recreate_container_with_updated_config("trinity-system", old, "system"))
 
     assert "TRINITY_BACKEND_URL" not in captured["env_vars"]
+
+
+def test_recreate_arms_a_piloted_system_agents_pull_worker(recreate_capture, monkeypatch):
+    """#3814: a piloted system agent's worker polls TRINITY_BACKEND_URL with its
+    own system-scoped key; without the URL the pool never starts while the
+    backend routes its turns to the durable queue."""
+    monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", "trinity-system")
+    mod, captured = recreate_capture
+    old = _Container()
+
+    _run(mod.recreate_container_with_updated_config("trinity-system", old, "system"))
+
+    assert captured["env_vars"].get("TRINITY_PULL_MODE") == "true"
+    assert captured["env_vars"].get("TRINITY_BACKEND_URL")
 
 
 def test_recreate_still_arms_a_regular_agents_backend_url(recreate_capture):
@@ -1073,6 +1120,22 @@ def test_restart_delegates_and_reads_a_FRESH_container_for_the_response(
     assert result["success"] is True
     assert result["recreated"] is True
     assert result["recreate_reason"] == "image_drift"
+
+
+def test_restart_re_reports_the_pull_state_of_the_new_container(rsa, monkeypatch):
+    """#3814: restart is the remedy the pull-drift alert names, so it re-reads
+    the REPLACEMENT container and the alert ends here, not at the next boot."""
+    replacement = _Container(status="running")
+    monkeypatch.setattr(rsa, "get_agent_container", lambda name: replacement)
+    monkeypatch.setattr(rsa, "start_agent_internal", AsyncMock(return_value={}))
+    seen = []
+    monkeypatch.setattr(
+        type(rsa.system_agent_service), "_report_pull_mode", lambda self, c: seen.append(c)
+    )
+
+    _run(rsa.restart_system_agent(MagicMock(), _human_caller()))
+
+    assert seen == [replacement]
 
 
 def test_restart_reports_the_skill_delivery_of_the_start(rsa, monkeypatch):
