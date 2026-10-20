@@ -6194,6 +6194,18 @@
       "description": "/ws/events applies the #995 account-state check the other doors apply: dependencies.owner_is_suspended truth table (executed); the handler checks it on the owner row it resolves, closes and returns before accept() (shape check, main.py is not importable in the unit island); the close is identical to an inactive key's. Mutation: removing the guard turns both placement tests red."
     },
     {
+      "file": "unit/test_ent860_room_wake_access.py",
+      "feature": "trinity-enterprise#860",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "rooms",
+        "auth",
+        "unit"
+      ],
+      "description": "Through the real shared_sessions._after_landing: every principal is re-checked at wake time with the room-creation rule (_assert_can_reach_agent). A platform member still shared wakes the agent; one whose access is gone does not, and the room gets the 'could not be reached' line; a Workspace principal is held to its roster, never the platform ACL; an agent reply is held to the access of the person whose turn started the chain; a deleted agent is not woken. Mutation: reverting the service turns the 3 platform/agent-chain tests red."
+    },
+    {
       "file": "unit/test_3390_module_split_guard.py",
       "feature": "#3390",
       "added": "2026-10-20",
