@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Optional
 
 from database import db
+from utils.admin_identity import admin_username
 from models import User
 from services.docker_service import docker_client
 from services.cornelius_agent_service import cornelius_agent_service
@@ -62,7 +63,6 @@ from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
 
-SEED_OWNER = "admin"  # seeded under the admin account, like Cornelius
 
 # Durable markers (system_settings KV — no migration).
 _SEEDED_FLAG = "default_system_seeded"
@@ -110,13 +110,44 @@ def _resolve_first_run_verdict() -> Optional[bool]:
     """Resolve the durable first-run verdict, computing + persisting it once.
 
     Returns True (fresh install), False (established install), or None
-    (undetermined — a DB error; nothing is persisted so a later pass retries
-    the computation). See the module docstring for why this is persisted.
+    (undetermined — a DB error, or the platform owner row does not exist yet;
+    nothing is persisted so a later pass retries the computation). See the
+    module docstring for why this is persisted.
+
+    #3262: before the owner was resolved through ``ADMIN_USERNAME``, an
+    ``ADMIN_USERNAME=root`` install stored ``true`` here at first boot and both
+    seeders then deferred forever at their owner lookup, so neither seed flag
+    was ever set. Two rules keep that stale verdict from seeding a mature,
+    hand-built fleet once the owner is found:
+
+    * no verdict is persisted while the owner row is absent — the only state in
+      which a seeder can defer *after* the verdict is stored;
+    * a stored ``true`` with neither seed flag set while non-system agents
+      already exist is reconciled to ``false``. A real first run that got as far
+      as creating agents sets at least one of the two flags (Cornelius on
+      success, the system seed on ``deployed``/``partial``), so this state is
+      only reachable through the deferral above.
     """
     try:
         stored = db.get_setting_value(_FRESH_VERDICT_KEY, None)
         if stored is not None:
+            if (
+                stored == "true"
+                and db.get_setting_value("cornelius_seeded", "false") != "true"
+                and db.get_setting_value(_SEEDED_FLAG, "false") != "true"
+                and db.count_non_system_agents() > 0
+            ):
+                logger.warning(
+                    "First-run verdict: stored 'fresh' but no seed ever ran and "
+                    "agents already exist — reconciling to an established install"
+                )
+                db.set_setting(_FRESH_VERDICT_KEY, "false")
+                return False
             return stored == "true"
+        if not db.get_user_by_username(admin_username()):
+            # Pre-setup (or a misnamed owner): a verdict stored now would
+            # outlive the deferral it causes. Decide once the owner exists.
+            return None
         if db.get_setting_value("cornelius_seeded", "false") == "true":
             # Established ent#107-era install (possibly with every agent since
             # deleted) — never read it as fresh.
@@ -313,7 +344,7 @@ class SystemSeedService:
         #    not created until first-time setup completes; skip WITHOUT setting
         #    the flag so the setup-completion trigger (or a later boot) retries.
         try:
-            admin_row = db.get_user_by_username(SEED_OWNER)
+            admin_row = db.get_user_by_username(admin_username())
         except Exception as e:  # e.g. SQLite BUSY during boot — retry next pass
             return self._skip(result, "skipped_error", f"admin lookup failed: {e}")
         if not admin_row:

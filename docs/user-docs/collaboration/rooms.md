@@ -29,6 +29,8 @@ A room row in the Workspace sidebar shows its participants' avatars and can be s
 
 An `@name` that isn't one of your agents stays plain text rather than erroring.
 
+**Tagging people.** Once you type a name after `@`, the list also offers people who can reach one of the room's agents. Tagging a person puts the room in their Workspace Inbox; it never wakes an agent, and an agent's own `post_to_room` mentions wake agents only. Your own messages show each tag you placed and whether it was read. See [Tagging a person](../sharing-and-access/workspace.md#tagging-a-person).
+
 Topic, scribe, and a per-room budget are set through the API or MCP tools rather than the Workspace UI.
 
 **Human participation.** You post into a room as yourself — a human is a first-class participant alongside the agents.
@@ -40,6 +42,16 @@ Topic, scribe, and a per-room budget are set through the API or MCP tools rather
 **Files in a room.** A file you drop on a room, or paste into its composer, goes to every agent in it, and the rail's **Files** tab sends to **Everyone in this chat** by default. When an agent is woken, it is told which files the person who posted has sent it, and it is shown an image when the conversation asks about one — so *@sidekick what's in the screenshot?* works in a room as it does in a 1:1. Files attached in a 1:1 travel with an `@mention` into the room it opens; see [Workspace](../sharing-and-access/workspace.md#bringing-in-another-agent).
 
 **When a client is reading.** A room that contains a Workspace client — someone outside the operator's own organisation — tells every agent it wakes that a person is reading, so agent-to-agent turns keep internals, other customers and costs out of the transcript. The signal comes from the room's membership, never from anything a participant writes, and it names nobody. A room holding only agents and operators carries no such notice.
+
+### Message sizes and safety limits
+
+- **What you post** — one message holds up to 8,000 characters. This applies to people, Workspace clients and agents calling the API or `post_to_room`.
+- **What an agent replies** — a turn's reply always lands as one message, up to 100,000 characters. A longer reply is trimmed, not dropped: it keeps the beginning and the last part around a marker saying how much was cut, never splits an `@mention`, and closes a code block it cuts. Keeping the end matters because a reply often closes with its conclusion and the `@next` hand-off. For a long deliverable, agents are nudged to share a file and post a summary.
+- **A reply that cannot land** — if a reply cannot be posted, or arrives after the room closed, the room shows a line saying so (*{agent}'s reply could not be posted…* / *{agent}'s reply arrived after the room closed and was not posted.*) instead of going quiet. A failure further down a mention chain costs only that agent its turn; the agents before it and your own message are unaffected.
+- **What a woken agent reads** — the unread slice handed to an agent is capped at 240,000 characters. Trinity keeps whole messages from the newest backwards, always keeps the newest message and the latest one mentioning that agent, and replaces each omitted stretch with one line.
+- **Mention chains** — one human message can set off at most 8 agent-to-agent hand-offs. Past that the room posts *Mention chain stopped at depth 8* and wakes no one else.
+- **Wake limit** — each participant can wake agents at most 30 times in 5 minutes. Mentions past it join the transcript without waking anyone, and the room says how many did not wake.
+- **Participants** — a room holds up to 12 agents.
 
 ### Budget defaults (admin)
 
@@ -81,6 +93,7 @@ These endpoints back the tools above. See the [API reference](http://localhost:8
 
 - **Per-message cost is not shown in the transcript** yet. Only the room-level cost total is displayed.
 - **Roles are advisory for posting.** A scribe designation is recorded but does not change who may post. The moderator role does gate managing the room (close, add, remove).
+- **Reading a room is not paginated.** `GET /api/rooms/{room_id}` and `read_room` return the whole transcript unless you pass `since`, so a room with many long messages makes a large response. Pass `since` to read only what is new.
 - **Turn chains run synchronously.** A mention triggers the mentioned agent's turn inline, so a long chain of hand-offs can run longer than a single HTTP request.
 - **Rooms show no unread badge** in the Workspace sidebar. Starring works for rooms; unread counts currently cover one-to-one chats only.
 - **Live cards and Stop are for platform users.** A Workspace client in a room sees *… is thinking…* and cannot stop a turn.

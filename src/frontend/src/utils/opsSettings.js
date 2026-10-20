@@ -58,3 +58,21 @@ export function readOpsBool(payload, key) {
 export function opsBoolValue(enabled) {
   return enabled ? 'true' : 'false'
 }
+
+/**
+ * #2915 — read one INTEGER ops setting from the same descriptor payload.
+ * Unreadable (absent, blank, NaN, negative) → `fallback`, never 0 by accident:
+ * for the aging bound, 0 means "disabled", which is a policy a failed read
+ * must not choose.
+ */
+export function readOpsInt(payload, key, fallback) {
+  const entry = payload?.settings?.[key]
+  const raw = entry !== null && typeof entry === 'object' ? entry.value : entry
+  const n = typeof raw === 'number' ? raw : parseInt(String(raw ?? '').trim(), 10)
+  return Number.isInteger(n) && n >= 0 ? n : fallback
+}
+
+/** The string `PUT /ops/config` expects for an integer setting. */
+export function opsIntValue(n) {
+  return String(Math.max(0, Math.trunc(Number(n) || 0)))
+}

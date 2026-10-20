@@ -8,22 +8,67 @@ import asyncio
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from ..models import ChatRequest, ModelRequest, ParallelTaskRequest
 from ..state import agent_state
 from ..services.claude_code import get_execution_lock
+from ..services.execution_env import AUTH_OVERRIDE_HEADER
 from ..services.runtime_adapter import get_runtime
 from ..services.process_registry import get_process_registry, PENDING_CHAT_TIMEOUT_SECONDS
 from ..services import result_callback
+from ..services import retained_results
+from ..utils.credential_sanitizer import add_credential_value
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _accept_auth_override(request, runtime):
+    """The request's per-spawn credential (#3470), or None when this runtime
+    cannot honour one. Stages the value for log redaction. Never logs it."""
+    override = getattr(request, "auth_override", None)
+    if override is None or override.kind() is None:
+        return None
+    if not getattr(runtime, "supports_auth_override", False):
+        logger.info("[#3470] auth_override ignored: runtime does not take a Claude credential")
+        return None
+    add_credential_value(override.secret())
+    return override
+
+
+def _stamp_auth_override(response: Response, override) -> None:
+    """Tell the backend the override WAS applied. A 429 body carries no
+    metadata, so the header is the only signal that works on the failure path
+    too; an older image never sets it, which is how the backend tells the two
+    apart (`subscription_auto_switch.AUTH_OVERRIDE_HEADER`)."""
+    # `response` is None only for a direct in-process call (tests); FastAPI
+    # injects it for every HTTP request regardless of the default.
+    if override is not None and response is not None:
+        response.headers[AUTH_OVERRIDE_HEADER] = override.kind()
+
+
+def _reraise_with_auth_override(exc: HTTPException, override) -> None:
+    if override is not None:
+        exc.headers = {**(exc.headers or {}), AUTH_OVERRIDE_HEADER: override.kind()}
+    raise exc
+
+
+def _retain_terminal(execution_id, envelope: dict) -> None:
+    """#2944: keep this turn's terminal where the backend watchdog can claim it
+    if the connection that was waiting for it is gone (a backend recreate
+    mid-turn). Same envelope shape as the #1083 result callback. Best-effort —
+    a retention failure never touches the response the caller is about to get.
+    A missing id (the `temp-…` fallback) has no backend row to claim; no-op."""
+    try:
+        retained_results.record(execution_id, envelope)
+    except Exception:  # noqa: BLE001
+        logger.debug("[#2944] retain failed for %r", execution_id, exc_info=True)
+
+
 @router.post("/api/chat")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, response: Response = None):
     """
     Send a message to Claude Code and get response with execution log.
 
@@ -59,6 +104,9 @@ async def chat(request: ChatRequest):
             runtime = get_runtime()
             # Use request.model if provided, otherwise use the model set via /api/model endpoint
             effective_model = request.model or agent_state.current_model
+            # #3470: a SUB-003 re-issue's per-spawn credential (Claude only).
+            auth_override = _accept_auth_override(request, runtime)
+            execute_kwargs = {"auth_override": auth_override} if auth_override is not None else {}
             # #1020: feed the richer /health signal — count this execution and
             # record success/failure (drives consecutive_failures).
             agent_state.record_task_start()
@@ -69,37 +117,62 @@ async def chat(request: ChatRequest):
                     continue_session=True,
                     stream=request.stream,
                     system_prompt=request.system_prompt,
-                    execution_id=request.execution_id
+                    execution_id=request.execution_id,
+                    isolated_session=request.isolated_session,
+                    **execute_kwargs,
                 )
+            except HTTPException as exc:
+                agent_state.record_task_finish(success=False)
+                # #2944: the failure terminal is retained too — a watchdog that
+                # finds it writes the REAL error instead of the orphan string.
+                _retain_terminal(
+                    request.execution_id,
+                    result_callback._envelope_from_http_exception(exc),
+                )
+                _reraise_with_auth_override(exc, auth_override)
             except BaseException:
                 agent_state.record_task_finish(success=False)
                 raise
             agent_state.record_task_finish(success=True)
+            # #2944: retained BEFORE the response is sent — the send is the part
+            # that can fail when the backend went away. `/api/chat` carries no
+            # top-level session_id; the persisted one rides `metadata`.
+            _retain_terminal(
+                request.execution_id,
+                result_callback._success_envelope(
+                    response_text, raw_messages, metadata,
+                    getattr(metadata, "session_id", None),
+                ),
+            )
 
             # Add assistant response to history
             agent_state.add_message("assistant", response_text)
 
-            # Update session-level stats
-            if metadata.cost_usd:
-                agent_state.session_total_cost += metadata.cost_usd
-            agent_state.session_total_output_tokens += metadata.output_tokens
-            # Context window usage: metadata.input_tokens should contain the complete total
-            # (from modelUsage.inputTokens which includes all turns and cached tokens)
-            # However, with --continue flag, Claude Code may sometimes report only new tokens
-            # Fix: Context should monotonically increase during a session, so keep the max
-            if metadata.input_tokens > agent_state.session_context_tokens:
-                agent_state.session_context_tokens = metadata.input_tokens
-                logger.debug(f"Context updated to {metadata.input_tokens} tokens")
-            elif metadata.input_tokens > 0 and metadata.input_tokens < agent_state.session_context_tokens:
-                # Claude reported fewer tokens than before - likely only new input, not cumulative
-                # Keep the previous (higher) value as context should only grow
-                logger.warning(
-                    f"Context tokens decreased from {agent_state.session_context_tokens} to {metadata.input_tokens}. "
-                    f"Keeping previous value (likely --continue reporting issue)"
-                )
-            agent_state.session_context_window = metadata.context_window
+            # Update session-level stats — of the shared chat session, which an
+            # isolated turn (trinity-enterprise#752) never ran in.
+            if not request.isolated_session:
+                if metadata.cost_usd:
+                    agent_state.session_total_cost += metadata.cost_usd
+                agent_state.session_total_output_tokens += metadata.output_tokens
+                # Context window usage: metadata.input_tokens should contain the complete total
+                # (from modelUsage.inputTokens which includes all turns and cached tokens)
+                # However, on a resumed session Claude Code may sometimes report only new tokens
+                # (a fresh session resets the counter first — claude_code.py, #2958)
+                # Fix: Context should monotonically increase during a session, so keep the max
+                if metadata.input_tokens > agent_state.session_context_tokens:
+                    agent_state.session_context_tokens = metadata.input_tokens
+                    logger.debug(f"Context updated to {metadata.input_tokens} tokens")
+                elif metadata.input_tokens > 0 and metadata.input_tokens < agent_state.session_context_tokens:
+                    # Claude reported fewer tokens than before - likely only new input, not cumulative
+                    # Keep the previous (higher) value as context should only grow
+                    logger.warning(
+                        f"Context tokens decreased from {agent_state.session_context_tokens} to {metadata.input_tokens}. "
+                        f"Keeping previous value (likely --continue reporting issue)"
+                    )
+                agent_state.session_context_window = metadata.context_window
 
             logger.info(f"[Chat] Execution lock releasing after completion")
+            _stamp_auth_override(response, auth_override)
 
             # Return enhanced response with execution log and session stats
             # Use raw_messages (full Claude Code JSON transcript) for execution log viewer compatibility
@@ -124,13 +197,14 @@ async def chat(request: ChatRequest):
 
 
 @router.post("/api/task")
-async def execute_task(request: ParallelTaskRequest):
+async def execute_task(request: ParallelTaskRequest, response: Response = None):
     """
     Execute a stateless task in parallel mode (no conversation context).
 
     Unlike /api/chat, this endpoint:
     - Does NOT acquire execution lock (parallel allowed)
-    - Does NOT use --continue flag (stateless) by default
+    - Does NOT resume the chat's own session (stateless) by default — and
+      the chat never resumes a task's session either (#2958)
     - Each call is independent and can run concurrently
 
     Use this for:
@@ -158,8 +232,12 @@ async def execute_task(request: ParallelTaskRequest):
             content={"execution_id": request.execution_id, "status": "accepted"},
         )
 
-    # Execute via runtime adapter in headless mode (no lock, no --continue)
+    # Execute via runtime adapter in headless mode (no lock, no chat session)
     runtime = get_runtime()
+    # #3470: a SUB-003 re-issue's per-spawn credential (Claude only). The 202
+    # path above never carries one — the walk is inline-only (#1083 boundary).
+    auth_override = _accept_auth_override(request, runtime)
+    execute_kwargs = {"auth_override": auth_override} if auth_override is not None else {}
     # #2433: register as ACCEPTED before anything can queue. The headless
     # executor's `Popen` + `registry.register()` run inside a pool thread, so a
     # request beyond the pool size was counted in /health `active_tasks` but
@@ -187,6 +265,7 @@ async def execute_task(request: ParallelTaskRequest):
             resume_session_id=request.resume_session_id,  # Resume previous session (EXEC-023)
             persist_session=bool(request.persist_session),  # Session tab: write JSONL for future --resume
             images=request.images,  # Vision images from channel adapters (#562)
+            **execute_kwargs,
         )
     except HTTPException as exc:
         # #679 (F3): a terminated turn that surfaces a non-auth/non-rate terminal
@@ -205,8 +284,16 @@ async def execute_task(request: ParallelTaskRequest):
         # #679 (F4): a cancel is neutral for the failure counter (never trips the
         # dispatch breaker); a genuine failure still increments it.
         agent_state.record_task_finish(success=None if is_cancel else False)
+        # #2944: retain the terminal the caller is about to receive — the
+        # failure as the callback would type it, or the cancel relabel.
+        failed_envelope = result_callback._envelope_from_http_exception(exc)
+        _retain_terminal(
+            request.execution_id,
+            result_callback._cancelled_override(failed_envelope) if is_cancel else failed_envelope,
+        )
         if is_cancel:
             logger.info(f"[Task] Task {request.execution_id} cancelled by user (status {exc.status_code})")
+            _stamp_auth_override(response, auth_override)
             return {
                 "response": exc.detail if isinstance(exc.detail, str) else "",
                 "execution_log": [],
@@ -215,7 +302,7 @@ async def execute_task(request: ParallelTaskRequest):
                 "status": "cancelled",
                 "timestamp": datetime.now().isoformat(),
             }
-        raise
+        _reraise_with_auth_override(exc, auth_override)
     except BaseException:
         agent_state.record_task_finish(success=False)
         raise
@@ -236,6 +323,17 @@ async def execute_task(request: ParallelTaskRequest):
     else:
         logger.info(f"[Task] Task {session_id} completed successfully")
 
+    # #2944: retained BEFORE the return — returning is the step that goes to a
+    # dead socket when the backend was recreated mid-turn (the reported $32 run).
+    success_envelope = result_callback._success_envelope(
+        response_text, raw_messages, metadata, session_id
+    )
+    _retain_terminal(
+        request.execution_id,
+        result_callback._cancelled_override(success_envelope) if cancelled else success_envelope,
+    )
+
+    _stamp_auth_override(response, auth_override)
     # raw_messages contains the full Claude Code JSON stream (init, assistant, user, result)
     # This is the complete execution transcript showing thinking, tool calls, and results
     return {
@@ -287,7 +385,7 @@ async def get_model():
             "model": agent_state.current_model,
             "runtime": runtime,
             "available_models": ["sonnet", "opus", "haiku", "fable"],
-            "note": "Claude model aliases (Anthropic API): each resolves to the current generation of its family — today sonnet (Sonnet 5), opus (Opus 5), haiku (Haiku 4.5), fable (Fable 5.1). Add [1m] suffix for the 1M extended-context beta (e.g. sonnet[1m])."
+            "note": "Claude model aliases (Anthropic API): each resolves to the current generation of its family — today sonnet (Sonnet 5), opus (Opus 5.5), haiku (Haiku 4.5), fable (Fable 5.1). Add [1m] suffix for the 1M extended-context beta (e.g. sonnet[1m])."
         }
 
 
@@ -335,7 +433,11 @@ async def set_model(request: ModelRequest):
 
 @router.delete("/api/chat/history")
 async def clear_chat_history():
-    """Clear conversation history and reset session"""
+    """Clear conversation history and reset session.
+
+    #2958: also forgets the chat's own session id and its keep-set marker. No
+    lock is taken (a turn may hold it for up to 30 min); a turn in flight across
+    the reset drops its capture via the generation counter instead."""
     agent_state.reset_session()
     return {
         "status": "cleared",
@@ -419,6 +521,35 @@ async def get_execution_status(execution_id: str):
     if not status:
         raise HTTPException(status_code=404, detail="Execution not found")
     return status
+
+
+@router.get("/api/executions/{execution_id}/result")
+async def get_execution_retained_result(execution_id: str):
+    """#2944: the terminal this agent retained for a finished turn.
+
+    Read by the backend cleanup watchdog BEFORE it fails a `running` row it can
+    no longer find a dispatcher for — a backend recreate mid-turn destroys the
+    coroutine that was awaiting `/api/task` / `/api/chat`, and this is where the
+    result went instead of the dead socket.
+
+    Returns:
+        - 200: the #1083-shaped envelope (`status`, `response`, `error`,
+          `error_code`, `terminal_reason`, `metadata`, `execution_log`,
+          `session_id`) plus `retained_at` (ISO) and `truncated_log`.
+        - 404 `{"detail": {"code": "no_retained_result"}}` when nothing is
+          retained — for a malformed id too. The CODED body is how the backend
+          tells "asked, nothing there" from an older image's bare FastAPI
+          `{"detail": "Not Found"}` (no route at all), which it must keep
+          treating as the pre-#2944 orphan path.
+    """
+    record = retained_results.get(execution_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail={"code": "no_retained_result"})
+    return {
+        **record["envelope"],
+        "retained_at": record.get("retained_at_iso"),
+        "truncated_log": bool(record.get("truncated_log")),
+    }
 
 
 @router.get("/api/executions/{execution_id}/last-error")

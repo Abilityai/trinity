@@ -11,9 +11,13 @@ behavior exactly (clone semantics; fork when a `fork_to_own` block is present).
 
 | Intent | Mechanism | `agent_git_config` row | Container env |
 |---|---|---|---|
-| fork | ent#93 fork-to-own, unchanged (requires the `fork_to_own` block) | yes (source-mode) | repo=user's fork, PAT, `GIT_UPSTREAM_REPO`, sync=true |
+| fork | ent#93 fork-to-own (requires the `fork_to_own` block; its token may be omitted when the user's personal GitHub token is saved, #3164) | yes (source-mode) | repo=user's fork, PAT, `GIT_UPSTREAM_REPO`, sync=true |
 | clone | legacy default path, unchanged | yes | repo, PAT if any, sync=true |
 | copy | **backend-materialized snapshot** (new) | **no** | **no GitHub env, no PAT** |
+
+## Fork token (#3164)
+
+**The token (#3164).** `github_pat` is optional on both fork-to-own (`ForkToOwnRequest`) and the repo binding (`BindAgentRepoRequest`); a supplied token wins. Omitted, the write identity is the user's **saved personal** GitHub token (Settings → GitHub token): at create the resolver's `per_user` tier (`crud._apply_fork_to_own`), at bind the caller's own row read by user id (`db.get_user_github_pat` — never the agent's current per-agent token). It is persisted as the agent's per-agent PAT with tier `fork` exactly as a typed one. The **platform/global token is never a fork or bind identity**: with no personal token the request is a named 400 `FORK_PAT_REQUIRED` pointing at Settings — the destination would otherwise belong to the platform account, and the per-agent row would bake in the global PAT (ent#162 Decision 2). A token refusal raised while using the saved token says so (`token_source: "saved"`, message naming Settings). The UI reads presence only (`GET /api/users/me/github-pat` → `configured`) and shows "Using your saved GitHub token" with an explicit "Use a different token" override (`SavedGithubTokenField.vue`).
 
 ## Copy flow (the new path)
 

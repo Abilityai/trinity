@@ -65,7 +65,7 @@
       <!-- Empty state -->
       <span
         v-if="tags.length === 0 && !editable"
-        class="text-xs text-gray-400 dark:text-gray-500 italic"
+        class="text-xs text-gray-500 dark:text-gray-400 italic"
       >
         No tags
       </span>

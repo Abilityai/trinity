@@ -2,6 +2,7 @@ import { ref } from 'vue'
 import axios from 'axios'
 import { readStoredToken } from './platformSession'
 import { useAgentsStore } from '../stores/agents'
+import { useNetworkStore } from '../stores/network'
 import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useExecutionsStore } from '../stores/executions'
@@ -13,6 +14,8 @@ import { useReportsStore, useFleetReportsStore } from '../stores/reports'
 import { useRoomsStore } from '../stores/rooms'
 import { useSkillsStore } from '../stores/skills'
 import { useClientPortalStore } from '../stores/clientPortal'
+import { useAuthStore } from '../stores/auth'
+import { isWorkspaceOnlyRole } from './workspaceOnly'
 
 const ws = ref(null)
 const isConnected = ref(false)
@@ -27,8 +30,19 @@ async function fetchWsTicket() {
   return data.ticket
 }
 
+/**
+ * Drop the open socket so it reconnects with a fresh ticket (trinity-enterprise#837).
+ * The server fixes a socket's scope (its agents, its kinds, its fields) when it
+ * connects, so after a role change only a reconnect picks up the new one. Any
+ * close code other than 4001 schedules that reconnect.
+ */
+export function reconnectWebSocket() {
+  if (ws.value) ws.value.close(4000, 'scope changed')
+}
+
 export function useWebSocket() {
   const agentsStore = useAgentsStore()
+  const networkStore = useNetworkStore()
   const notificationsStore = useNotificationsStore()
   const operatorQueueStore = useOperatorQueueStore()
   const executionsStore = useExecutionsStore()
@@ -41,6 +55,7 @@ export function useWebSocket() {
   const fleetReportsStore = useFleetReportsStore()
   const skillsStore = useSkillsStore()
   const clientPortalStore = useClientPortalStore()
+  const authStore = useAuthStore()
 
   const connect = async () => {
     if (ws.value) return
@@ -110,14 +125,23 @@ export function useWebSocket() {
   }
 
   const handleMessage = (data) => {
+    // trinity-enterprise#837: the server sends a Workspace-only member's socket
+    // only the kinds the Workspace reads (`WORKSPACE_WS_EVENT_TYPES`,
+    // services/ws_identity_service.py — a Workspace consumer added below for a
+    // new kind goes there too, or a `user` never receives it). This gate is the
+    // second layer: the OPERATOR stores never follow that stream — every
+    // refetch below would 403 `workspace_only`. The Workspace stores do.
+    const operatorStores = !isWorkspaceOnlyRole(authStore.user?.role)
     // #306 reconnect replay: server signals "your last-event-id was trimmed,
     // full-refetch to rehydrate." Clear the cursor so the next reconnect
     // starts live and refetch anything event-driven.
     if (data.type === 'resync_required') {
       console.warn('[WebSocket] resync_required:', data.reason)
       lastEventId = null
-      try { agentsStore.fetchAgents && agentsStore.fetchAgents() } catch (_) {}
-      try { notificationsStore.fetchPendingCount && notificationsStore.fetchPendingCount() } catch (_) {}
+      if (operatorStores) {
+        try { agentsStore.fetchAgents && agentsStore.fetchAgents() } catch (_) {}
+        try { notificationsStore.fetchPendingCount && notificationsStore.fetchPendingCount() } catch (_) {}
+      }
       return
     }
     switch (data.event) {
@@ -145,6 +169,7 @@ export function useWebSocket() {
         break
       }
       case 'agent_notification':
+        if (!operatorStores) break
         // Real-time notification from an agent
         // The WebSocket event contains: notification_id, agent_name, notification_type, title, priority, category, timestamp
         // We update the pending count and can add to list if we have full details
@@ -167,16 +192,23 @@ export function useWebSocket() {
         break
       default:
         // Handle events keyed by 'type' instead of 'event'
-        if (data.type === 'operator_queue_new' || data.type === 'operator_queue_responded' || data.type === 'operator_queue_acknowledged' || data.type === 'operator_queue_cleared') {
+        if (operatorStores && (data.type === 'operator_queue_new' || data.type === 'operator_queue_responded' || data.type === 'operator_queue_cancelled' || data.type === 'operator_queue_acknowledged' || data.type === 'operator_queue_cleared' || data.type === 'operator_queue_sync')) {
           operatorQueueStore.handleWebSocketEvent(data)
         }
         // #1017: bulk dismiss by an operator — refresh badge + loaded list
-        if (data.type === 'notifications_cleared') {
+        if (operatorStores && data.type === 'notifications_cleared') {
           notificationsStore.fetchPendingCount()
           notificationsStore.fetchNotifications()
         }
         if (data.type === 'agent_activity') {
-          executionsStore.handleWebSocketEvent(data)
+          if (operatorStores) executionsStore.handleWebSocketEvent(data)
+          // ent#955: the fleet store's WS-driven `workingState` (the agent
+          // header's capacity bars, the dashboard tile's "working" chip) used
+          // to update only through the store's OWN socket, which the Dashboard
+          // opens on mount and closes on unmount — so on the agent page a
+          // 10-second task never lit the bars. This app-wide socket carries
+          // the same `agent_activity` events; feed them through.
+          if (operatorStores) networkStore.handleActivityStatusChange(data)
           // ent#475: a TERMINAL activity on a Workspace participant means it
           // may have rewritten a canvas or shared a file — the rail's feed
           // store re-reads (debounced) through the access-controlled routes.
@@ -190,7 +222,7 @@ export function useWebSocket() {
         // #1106: loop progress events (broadcast fleet-wide, keyed by type).
         // The store filters by the agent currently shown in LoopsPanel.
         if (data.type === 'loop_run_completed' || data.type === 'loop_completed') {
-          loopsStore.handleWebSocketEvent(data)
+          if (operatorStores) loopsStore.handleWebSocketEvent(data)
           // ent#458: the Workspace panel is a second consumer of the same
           // fleet-wide broadcast, scoped to the chat's participants instead of
           // the agent on Agent Detail. Two stores, one event — the
@@ -210,7 +242,7 @@ export function useWebSocket() {
         // through `/briefings`. Each is a no-op when its surface is not
         // showing that agent.
         if (data.type === 'agent_skills_changed' && data.agent_name) {
-          skillsStore.noteSkillsChanged(data.agent_name)
+          if (operatorStores) skillsStore.noteSkillsChanged(data.agent_name)
           clientPortalStore.revalidateBriefing(data.agent_name)
         }
         // #918: agent report thin trigger (broadcast fleet-wide, keyed by type).

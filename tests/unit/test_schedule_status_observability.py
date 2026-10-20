@@ -28,6 +28,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from db.write_params import ExecutionResult
 
 # ---------------------------------------------------------------------------
 # Bootstrap: make src/backend importable. Copy of the bootstrap from
@@ -127,7 +128,9 @@ class TestResidualRaceObservabilityLog:
             updated = schedule_ops.update_execution_status(
                 execution_id="exec-378",
                 status=TaskExecutionStatus.SUCCESS,
-                response="agent returned result",
+                result=ExecutionResult(
+                    response="agent returned result",
+                ),
             )
 
         assert updated is True
@@ -160,7 +163,9 @@ class TestResidualRaceObservabilityLog:
             updated = schedule_ops.update_execution_status(
                 execution_id="exec-other",
                 status=TaskExecutionStatus.SUCCESS,
-                response="late agent response",
+                result=ExecutionResult(
+                    response="late agent response",
+                ),
             )
 
         assert updated is True
@@ -190,7 +195,9 @@ class TestResidualRaceObservabilityLog:
             updated = schedule_ops.update_execution_status(
                 execution_id="exec-happy",
                 status=TaskExecutionStatus.SUCCESS,
-                response="ok",
+                result=ExecutionResult(
+                    response="ok",
+                ),
             )
 
         assert updated is True
@@ -214,7 +221,9 @@ class TestResidualRaceObservabilityLog:
             schedule_ops.update_execution_status(
                 execution_id="exec-same",
                 status=TaskExecutionStatus.FAILED,
-                error="re-fail",
+                result=ExecutionResult(
+                    error="re-fail",
+                ),
             )
 
         matching = [r for r in caplog.records if RESIDUAL_LOG_MARKER in r.getMessage()]
@@ -295,6 +304,7 @@ _EXPECTED_UPDATE_SITES = {
     "scrub_terminal_backlog_metadata",     # #1449: nulls backlog_metadata (reads status in a WHERE filter only)
     "restamp_execution_dispatch",          # #2433: re-anchors started_at/queued_at at dispatch after a backend-queue park; CAS on status == RUNNING + NULL lease, `status` untouched
     "stamp_execution_channel_context",     # ent#498: attaches a delivery destination to a pre-created row; `status` untouched and not read — the CAS is on source_channel IS NULL, so it only ever ADDS a destination and can never repoint an inbound channel turn whose adapter is waiting on that reply
+    "set_execution_subscription",          # #3470: re-points SUB-004 `subscription_id` to the credential that SERVED a walked turn (NULL for the platform key); `status` untouched and not read — written by the dispatcher that owns the turn, before its terminal write
 }
 
 
@@ -518,7 +528,9 @@ class TestStatusWriteNoOpOnTerminalRow:
         ok = schedule_ops.update_execution_status(
             execution_id="cas-cancel",
             status=TaskExecutionStatus.SUCCESS,
-            response="late 'I am done'",
+            result=ExecutionResult(
+                response="late 'I am done'",
+            ),
         )
 
         assert ok is False
@@ -537,7 +549,9 @@ class TestStatusWriteNoOpOnTerminalRow:
         ok = schedule_ops.update_execution_status(
             execution_id=f"cas-{terminal}",
             status=TaskExecutionStatus.FAILED,
-            error="cleanup misfire",
+            result=ExecutionResult(
+                error="cleanup misfire",
+            ),
         )
 
         assert ok is False

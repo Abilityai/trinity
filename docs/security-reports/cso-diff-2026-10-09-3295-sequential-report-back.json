@@ -1,0 +1,57 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-09",
+  "mode": "daily",
+  "scope": "diff",
+  "base": "origin/dev",
+  "issue": "abilityai/trinity#3295",
+  "phases_run": [0, 1, 2, 3, 6, 7, 9, 10, 11, 12, 13, 14],
+  "phases_skipped": {"4": "no workflow changed", "5": "no Dockerfile, compose or network definition changed", "8": "no skill file changed"},
+  "stack_cve_quicklist": [],
+  "attack_surface": {
+    "new_endpoints": 1,
+    "changed_auth": 0,
+    "new_mcp_tools": 0,
+    "changed_inputs": [
+      "POST /api/agents/{name}/executions/{execution_id}/report-back: body {parent_execution_id} (1..128 chars, extra=forbid); path execution_id",
+      "MCP server: a backend 504 on /chat now runs the #914 execution lookup (message + trigger + key id, derived window) before returning a receipt"
+    ],
+    "changed_outputs": [
+      "schedule_executions.source_channel* on a /chat row, written only through ent#498's add-only stamp after the dispatcher + provenance gates",
+      "chat_with_agent result fields on the sequential route: requested / off:not_armed / off:answered_inline",
+      "backend log [#3295] (execution id, agent, principal name); MCP log [Report-Back #3295] (execution id, parent id, armed)"
+    ]
+  },
+  "findings": [],
+  "hypotheses": [
+    {
+      "title": "execution-id existence differential inside an agent the caller can already access",
+      "file": "src/backend/services/chat_execution_service.py",
+      "claim": "arm_chat_report_back answers 404 for a missing/foreign row and 403 for a row the caller did not dispatch, so an accessor could tell which execution ids of that agent exist",
+      "verdict": "not a finding: GET /api/agents/{name}/executions is accessor-scoped, so the ids are already readable by anyone who reaches this gate; the #186 self-uniform rule targets AGENT enumeration, which get_authorized_agent answers uniformly before this code runs. Hard exclusion 5 (hardening without a concrete vulnerability). Applied before merge: the dispatcher refusal is now the same uniform 404.",
+      "confidence": 4
+    }
+  ],
+  "coverage_gaps": [],
+  "checks": {
+    "secrets_in_diff": "none (prefix grep over added lines in the branch log and the working diff; the only matches are the test file's deliberately fake sk-ant-SECRET… and tok-secret fixtures)",
+    "enterprise_docs_guard": "no paid-module or enterprise_* token on added doc lines",
+    "dependencies": "no manifest, lockfile, Dockerfile or workflow changed; npm audit --omit=dev reports 6 pre-existing advisories on dev, none introduced here",
+    "auth_gate": "route takes get_authorized_agent (uniform 404 for a missing or inaccessible agent) + get_current_user; listed in tests/unit/_route_census.AGENT_CALLABLE with its reason; test_2996_human_only_routes green",
+    "dispatcher_of_row": "an agent principal must equal row.source_agent_name (from the key, never X-Source-Agent — the route declares no such header); a person must equal row.source_user_id; a connector key is 403; a missing, foreign or not-dispatched row answers one uniform 404. Pinned by test_only_the_dispatcher_may_arm, test_a_person_who_did_not_dispatch_is_refused, test_connector_keys_are_refused",
+    "provenance_guard": "_inherited_channel_context is called unchanged: an agent key must BE the parent's executing agent, a person must own the parent's agent (can_user_share_agent), the parent must be running (ent#457). Pinned by test_the_provenance_guard_still_decides_the_parent and test_a_finished_parent_yields_no_context",
+    "repointing": "stamp_execution_channel_context is UPDATE … WHERE source_channel IS NULL (add-only) and _CHAT_TRIGGERS excludes inbound channel turns, so an existing reply destination can never be redirected. Pinned by test_an_inbound_channel_turn_is_never_armed and the ent#498 source assertion",
+    "sibling_agent_key": "an agent key for agent X cannot arm a row X did not dispatch (dispatcher check) nor name a turn X is not serving (provenance guard); together they bound the outbound destination to conversations X is already answering in",
+    "idempotency_replay": "a 409 in-flight replay implies the same dispatcher (the key hashes sourceAgent||userId); arming a replayed row with a second turn's parent is add-only, so an already-armed row keeps its first destination (#3296 standing)",
+    "mcp_recovery_lookup": "the 504 branch reuses pickRecentMcpExecution: exact message match, trigger set, key-id filter when present, ambiguity returns nothing — the same bound as the #914/#2661 abort path",
+    "report_content": "delivery runs through report_completion unchanged: per-channel consent (Slack allow_proactive, Telegram group flag, portal session-client check), sanitize-then-truncate, effect_guard at-most-once",
+    "disclosure_in_logs": "execution ids, agent names, principal username/agent name and a parent id only; no message text, no token",
+    "input_bounds": "parent_execution_id 1..128 (the header's own cap), extra=forbid; execution_id is a path segment looked up by equality",
+    "failure_direction": "arm refusals are 200 armed:false (MCP → off/not_armed); an unanswered arm leaves requested, which the existing note already says is not a guarantee; nothing fails toward a second post"
+  },
+  "supply_chain_summary": {"scanner": "npm audit --omit=dev (pre-existing advisories only; no dependency change in diff)"},
+  "filter_stats": {"candidates": 1, "reported": 0},
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "trend": "first diff run for this issue; previous diff run (ent#731, same day) also 0 findings",
+  "counts_as_full_run": false
+}

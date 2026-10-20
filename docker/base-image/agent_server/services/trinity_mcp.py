@@ -12,6 +12,13 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# #2392: every Trinity MCP call carries the id of the execution that spawned the
+# CLI, so the backend can attribute tool calls. The value is expanded by the CLI
+# itself from its own process env (TRINITY_EXECUTION_ID is set per spawn by the
+# agent server), so one config file serves every concurrent execution.
+EXECUTION_ID_HEADER = "X-Trinity-Execution-Id"
+EXECUTION_ID_HEADER_VALUE = "${TRINITY_EXECUTION_ID:-manual}"
+
 
 def inject_trinity_mcp_if_configured() -> bool:
     """
@@ -51,7 +58,9 @@ def _inject_claude_mcp(trinity_mcp_url: str, trinity_mcp_api_key: str) -> bool:
             "type": "http",
             "url": trinity_mcp_url,
             "headers": {
-                "Authorization": f"Bearer {trinity_mcp_api_key}"
+                "Authorization": f"Bearer {trinity_mcp_api_key}",
+                # Claude Code expands ${VAR:-default} in http MCP headers.
+                EXECUTION_ID_HEADER: EXECUTION_ID_HEADER_VALUE,
             }
         }
     }
@@ -118,7 +127,10 @@ def _inject_gemini_mcp(trinity_mcp_url: str, trinity_mcp_api_key: str) -> bool:
         settings["mcpServers"]["trinity"] = {
             "url": trinity_mcp_url,
             "headers": {
-                "Authorization": f"Bearer {trinity_mcp_api_key}"
+                "Authorization": f"Bearer {trinity_mcp_api_key}",
+                # Gemini CLI expands $VAR / ${VAR} / ${VAR:-default} across
+                # settings.json at load (packages/cli/src/utils/envVarResolver.ts).
+                EXECUTION_ID_HEADER: EXECUTION_ID_HEADER_VALUE,
             }
         }
 
@@ -401,6 +413,11 @@ def _inject_codex_mcp(trinity_mcp_url: str, trinity_mcp_api_key: str) -> bool:
     server = {
         "url": trinity_mcp_url,
         "bearer_token_env_var": "TRINITY_MCP_API_KEY",
+        # #2392: Codex has no ${VAR} expansion; env_http_headers maps header ->
+        # env var name, read from the codex process env. When the var is unset
+        # or blank Codex OMITS the header (no `manual` default); the backend
+        # treats an absent id as absent.
+        "env_http_headers": {EXECUTION_ID_HEADER: "TRINITY_EXECUTION_ID"},
     }
     if _upsert_codex_mcp_servers({"trinity": server}):
         logger.info("Injected Trinity MCP server into codex config.toml")

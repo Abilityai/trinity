@@ -1,6 +1,6 @@
 # trinity Plugin
 
-Connect, deploy, operate, and sync agents on the Trinity platform. Seven skills covering the complete lifecycle — from a guided first journey through connection, deployment, remote loops, and instance provisioning.
+Connect, deploy, operate, and sync agents on Trinity — the operating system for the AI-native company: open source, self-hosted, that you own. Seven skills (trinity v2.11.5) covering the complete lifecycle — from a guided first journey through connection, deployment, remote loops, and instance provisioning.
 
 > 🧭 **New to Trinity? Start with `/trinity:start-here`** — a guided, resumable walkthrough that takes you from "what is Trinity?" to your first agent running on your own instance. [Jump to the section](#the-guided-journey-trinitystart-here).
 
@@ -38,7 +38,7 @@ One command that concierges a newcomer through the whole path — it sequences t
 |-------|--------------|
 | **Orient** | What Trinity is, in plain terms, plus the current release |
 | **Choose your door** | Just looking · build my first agent · I already have agents · set up my instance |
-| **Get an instance** | Hands off to `/trinity:deploy-new-instance` (cloud, your server, or local Docker) — or takes the URL you already have |
+| **Get an instance** | Hands off to `/trinity:deploy-new-instance` (the DigitalOcean installer, your own server, or local Docker) — or takes the URL you already have |
 | **Connect + verify** | Hands off to `/trinity:connect`, then runs a live smoke test: fleet visible, instance healthy, docs assistant online |
 | **First agent alive** | Deploys via `/trinity:onboard` (or picks an existing agent) and exchanges a real message with it |
 
@@ -65,7 +65,9 @@ This:
 3. Provisions an MCP API key
 4. Writes `.mcp.json` pointing at `<instance-url>/mcp` — the production frontend serves that path, so it works on installs that expose only ports 80/443; it falls back to the MCP server's own port 8080 when the route is not served
 
-An account that requires a second factor stops after step 2: complete the sign-in in the web UI, create the key under **Settings → API Keys**, then re-run `/trinity:connect --force`. See [Authentication](../api-reference/authentication.md).
+An account that requires a second factor stops after step 2: complete the sign-in in the web UI, create the key under **Settings → MCP Keys**, then re-run `/trinity:connect --force`.
+
+No instance yet? `/trinity:connect` hands you to `/trinity:deploy-new-instance`. Trinity is self-hosted; there is no hosted instance to sign up for. See [Authentication](../api-reference/authentication.md).
 
 After connecting, Trinity MCP tools become available:
 
@@ -76,7 +78,15 @@ After connecting, Trinity MCP tools become available:
 
 ### Step 2: Add your GitHub token (One-Time)
 
-Deployment is **repository-first**: Trinity clones the agent straight from its GitHub repo and tracks the branch. In the Trinity UI, go to **Settings → GitHub token** and add a fine-grained PAT with *Contents: Read* on the repos your agents live in. Public repos work without a token; private repos don't. See [GitHub PAT Setup](../integrations/github-pat-setup.md).
+Deployment is **repository-first**: Trinity clones the agent straight from its GitHub repo. What the agent can do with that repo depends on the token:
+
+| Token | Result |
+|-------|--------|
+| **Your own** token (**Settings → MCP Keys → Personal GitHub Token**), fine-grained PAT with *Contents: Read and write*, on a repo your GitHub account owns | The agent gets a **working branch** it alone writes, with auto-sync on, so its work lands back in git |
+| A read-only token, or the instance-wide token an admin set | The agent is **pull-only**: it tracks the branch and its own changes never reach git |
+| No token | Public repos clone pull-only; private repos fail |
+
+The create response's `git_mode` says which you got and why. See [GitHub Sync](../integrations/github-sync.md) and [GitHub PAT Setup](../integrations/github-pat-setup.md).
 
 ### Step 3: Onboard (Per Agent)
 
@@ -90,18 +100,22 @@ Run it in the agent's directory. It analyzes the current state, then:
 
 1. **Creates the Trinity files** it finds missing — `template.yaml` (with `plugins:`, `schedules:`, and credential declarations), `.env.example`, `.gitignore`, `.mcp.json.template`
 2. **Checks GitHub readiness** — the token tier and a pushed remote — before any deploy runs
-3. **Deploys** — from the repository by default (`create_agent` with `github:owner/repo@branch`); from a local archive as the fallback when the repo doesn't exist yet or the instance can't reach GitHub, with an offer to promote the agent onto the repo path afterwards
+3. **Deploys** — from the repository by default (`create_agent` with `github:owner/repo@branch`, as `kind: "agent"` unless you want a pull-only `deployment`); from a local archive as the fallback when the repo doesn't exist yet or the instance can't reach GitHub, with an offer to promote the agent onto the repo path afterwards
 4. **Injects** gitignored credentials (`.env`) after deploy, since they are never in the clone or the archive
 5. **Reconciles declared schedules** onto the instance, matching on schedule name
 6. **Verifies** with the platform's own compatibility report — the report, not the skill's checklist, is the definition of "compatible"
 
-Two things it will tell you and you cannot skip: declared schedules arm only on a literal `enabled: true`, and a newly created agent's **autonomy toggle is off** — until you turn it on in the UI, the scheduler skips every cron trigger for that agent.
+Two things it will tell you and you cannot skip: declared schedules arm only on a literal `enabled: true`, and a newly created agent's **autonomy toggle is off** — until you turn it on in the UI, the scheduler skips every cron trigger for that agent. Turning autonomy on is a person's act; an agent's own key cannot do it.
+
+The files it scaffolds follow current platform rules: `.gitignore` no longer ignores `.claude/settings.json` (project settings may be committed; Trinity keeps a copy out of a commit only when it carries platform hook paths or credential-bearing keys), a skill that needs a person raises an ask with `ask_operator` and reads the result with `get_my_ask` (one decision per ask; when the facts change while it is pending, the agent replaces its own ask rather than repeating it), and a call refused for exceeding the instance's chain-depth limit is never retried.
+
+**Run from inside a deployed agent, onboarding needs a permission.** An agent's own key can create or deploy another agent only when that agent holds **Manage other agents**, and `/trinity:sync schedules` can write another agent's schedules only with **Change other agents' schedules**. An instance admin grants both in the agent's Settings. Without them the call is refused, and the skill names the missing permission instead of working around it. Your own user key needs neither.
 
 There are three ways an agent gets onto Trinity:
 
 | Path | When | What happens |
 |------|------|--------------|
-| **From the GitHub repo** (default) | The agent is adapted and pushed | Trinity clones the repo, tracks the branch, materializes declared schedules and plugins at creation |
+| **From the GitHub repo** (default) | The agent is adapted and pushed | Trinity clones the repo — onto a working branch with auto-sync, or pull-only on the tracked branch, depending on the token (Step 2) — and materializes declared schedules and plugins at creation |
 | **From local files** (fallback) | No repo yet, air-gapped instance, or a throwaway | A snapshot of your directory is deployed; promote it onto the repo path with `initialize_github_sync` before it becomes long-lived |
 | **Deploy as-is, then onboard in place** | A repo you can't or shouldn't adapt locally — someone else's agent, a bare repo with no `template.yaml` | Create the agent from the bare repo first (Trinity tolerates a missing `template.yaml`), then run `/trinity:onboard` *inside* that agent — see [below](#onboarding-a-deployed-agent-in-place) |
 
@@ -127,7 +141,7 @@ When `/trinity:onboard` detects it is running *inside* a deployed Trinity agent 
 
 1. Writes the Trinity files — `template.yaml` (with `plugins:` declaring at least `trinity@abilityai`), `.env.example`, `.gitignore`, `.mcp.json.template` if the agent runs MCP servers of its own
 2. **Installs the declared plugins now**, with the same CLI calls the container's boot hook uses, so they are present from the next execution rather than the next restart
-3. **Commits and pushes the result back to the repo** — this step matters: a repo-deployed agent tracks its branch pull-only, so a file written in the container is lost on the next reset unless it reaches the repo. If the agent has no write credentials, the skill tries the platform's push path and, failing that, **stops and says so** — it prints the patch and states that the result is container-local, rather than pretending
+3. **Commits and pushes the result back to the repo** — this step matters: a pull-only agent tracks its branch read-only, so a file written in the container is lost on the next reset unless it reaches the repo. If the agent has no write credentials, the skill tries the platform's push path and, failing that, **stops and says so** — it prints the patch and states that the result is container-local, rather than pretending
 4. Reconciles declared schedules live
 5. Finishes with `get_agent_compatibility_report` — every HARD finding is yours to fix; SOFT and AI findings are advisory
 
@@ -172,6 +186,10 @@ Examples:
 
 After firing, the skill starts a lightweight local watch by default — it polls the loop and reports run-by-run progress, stalls, and the final result. Say "fire and forget" to skip the watch; the remote loop runs either way and also appears on the agent's **Loops** tab in the Trinity web UI. Inside a deployed Trinity agent there is no watch — the wake-up tools it relies on are denied there — so poll with `/trinity:loop status` or a `set_reminder` instead.
 
+**Raising the per-run timeout is the owner's act.** A loop's `timeout_per_run` cannot exceed the agent's execution timeout. The agent's owner raises that cap in the agent's settings. An agent key can raise it only when the agent holds the **Manage other agents** permission, which an instance admin grants; without it, a loop launched from inside a deployed agent raises an ask naming that permission instead of trying again.
+
+**A denial is a permission, not a typo.** The loop tools enforce the same agent-to-agent permissions as `chat_with_agent`. An agent-scoped key can loop itself and the agents it has been granted, nothing else; your own user key is unaffected. A refused status or stop call answers `Loop '<id>' not found or not accessible`, whether or not the loop exists. Do not retry under another name: ask the agent's owner to grant the permission.
+
 `local` runs the same Fixed or Until loop natively in your Claude Code session — no Trinity connection, no `loop_id`. Use it when the task lives on this machine or Trinity is unreachable; if the loop must outlive your session, it is remote.
 
 The loop mechanics — modes, template variables, stop signals, capacity, costs — are the platform's Sequential Agent Loops feature. See [Agent Loops](../automation/agent-loops.md) for the full guide.
@@ -193,6 +211,8 @@ The loop mechanics — modes, template variables, stop signals, capacity, costs 
 
 Analyzes the agent's purpose and data sources, proposes a set of metrics, and — after your approval — scaffolds an agent-specific `/update-dashboard` skill that keeps `dashboard.yaml` current. Declare that skill's cron in `template.yaml` `schedules:` to keep the agent's dashboard live.
 
+It also proposes which of those numbers to **declare** as business metrics, and writes or extends the `metrics:` block in `template.yaml` (name, type, label, a `cadence` that matches the schedule). The generated skill then records the same numbers as points with the `record_metrics` MCP tool after it writes the dashboard. That step is guarded: off Trinity it is skipped silently. A point for an undeclared metric comes back `metric_undeclared`. On an agent that is already deployed, an edit it makes to its own `template.yaml` is not seen by Trinity until you call `refresh_metric_definitions` or restart the agent, because auto-sync pushes and never pulls. Widgets can bind to a declared metric with `metric: <name>` and read the recorded series instead of a hand-typed value.
+
 The generated skill writes only widget types Trinity renders — `metric`, `status`, `progress`, `text`, `markdown`, `table`, `list`, `link`, `image`, `divider`, `spacer`; anything else is stripped by the agent. There is no chart type: trend lines and sparklines come from the platform, which records each `metric` and `progress` widget's value on every fetch, keyed by the widget's stable `id:` — so the skill gives those widgets an `id` (reordering unkeyed widgets orphans their history) and never emits YAML anchors, which Trinity's hardened loader rejects. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md).
 
 ## Instance Provisioning: `/trinity:deploy-new-instance`
@@ -201,7 +221,7 @@ The generated skill writes only widget types Trinity renders — `metric`, `stat
 /trinity:deploy-new-instance
 ```
 
-Deploys a complete Trinity instance — on a cloud host, any server you can reach over SSH, or local Docker; fresh installs and existing instances both — and scaffolds a dedicated ops agent with 13 skills to manage it (health checks, updates, rollbacks, provisioning). It builds from source or pulls prebuilt images (`start.sh --hosted` with a pinned `TRINITY_IMAGE_TAG`), seeds the admin account from `.env` so there is no first-run setup screen, and needs only the frontend port opened in the firewall — the MCP server is reachable through it at `/mcp`. See [Deploying Trinity](../guides/deploying-trinity.md) and the [Trinity Ops Agent](../guides/deploying/ops-agent.md).
+Deploys a complete Trinity instance — through the DigitalOcean guided installer (which you run in your own terminal, so your password never passes through the session), on any server you can reach over SSH, or on local Docker; fresh installs and existing instances both — and scaffolds a dedicated ops agent with 13 skills to manage it (health checks, updates, rollbacks, provisioning). It builds from source or pulls prebuilt images (`start.sh --hosted` with a pinned `TRINITY_IMAGE_TAG`), seeds the admin account from `.env` so there is no first-run setup screen, and needs only the frontend port opened in the firewall — the MCP server is reachable through it at `/mcp`. See [Deploying Trinity](../guides/deploying-trinity.md) and the [Trinity Ops Agent](../guides/deploying/ops-agent.md).
 
 ## Alternative: Trinity CLI
 

@@ -253,6 +253,7 @@ class SchedulerApp:
                 source_agent_name=origin.agent_name,
                 source_mcp_key_id=origin.mcp_key_id,
                 source_mcp_key_name=origin.mcp_key_name,
+                chain_depth=origin.chain_depth,
             )
         except Exception as exc:
             lock.release()

@@ -37,6 +37,10 @@ from utils.safe_yaml import (
 # traversal-shaped name reaching path math or an exec argument.
 SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
+# trinity-enterprise#753: the values `approval:` may take. `recommended` gates a
+# library skill by default where it is assigned.
+APPROVAL_VALUES = frozenset({"recommended"})
+
 # Dep names are interpolation-gated BEFORE any probe runs: a name failing these
 # is reported as frontmatter_invalid and never reaches the agent container.
 BINARY_NAME_RE = re.compile(r"^[A-Za-z0-9._+-]{1,64}$")
@@ -137,6 +141,37 @@ def _as_str_list(value: Any) -> List[str]:
     return []
 
 
+# The successor is the AUTHOR's text, surfaced verbatim in the UI — so it is
+# bounded here, once, rather than at each of the places that render it.
+SUPERSEDED_BY_MAX_CHARS = 200
+
+
+def _first_present(sources: List[Dict[str, Any]], keys: Tuple[str, ...]) -> Any:
+    """First non-None value of ``keys`` across ``sources``, source by source.
+
+    Read per source rather than through the merged scope: a ``trinity:`` block
+    must win whichever spelling it uses, and a key present but null must not
+    mask the other spelling.
+    """
+    for source in sources:
+        for key in keys:
+            value = source.get(key)
+            if value is not None:
+                return value
+    return None
+
+
+def _one_line(value: str, limit: int) -> Optional[str]:
+    """``value`` as one printable, bounded line — or None when nothing is left.
+
+    Control and format characters are dropped (a bidi override in a library
+    string would otherwise reorder the text around it on screen) and every run
+    of whitespace, newlines included, collapses to one space.
+    """
+    kept = "".join(ch for ch in value if ch.isprintable() or ch.isspace())
+    return " ".join(kept.split())[:limit].rstrip() or None
+
+
 def extract_contract(frontmatter: Optional[Dict[str, Any]]) -> Tuple[Dict[str, Any], List[str]]:
     """Extract the skill contract from parsed frontmatter.
 
@@ -148,7 +183,12 @@ def extract_contract(frontmatter: Optional[Dict[str, Any]]) -> Tuple[Dict[str, A
     Returns ``(contract, warnings)`` where contract is::
 
         {description, automation, user_invocable, allowed_tools,
-         requires: {packages, binaries, env}}
+         requires: {packages, binaries, env}, deprecated, superseded_by, approval}
+
+    ``deprecated`` / ``superseded-by`` (trinity-enterprise#672) are the two
+    lifecycle keys a library uses to retire a skill. ``superseded_by`` is the
+    author's text, not a resolved skill name, and is None unless the skill is
+    deprecated — see :func:`deprecation_warning` for the machine-usable form.
     """
     warnings: List[str] = []
     fm = frontmatter or {}
@@ -161,7 +201,10 @@ def extract_contract(frontmatter: Optional[Dict[str, Any]]) -> Tuple[Dict[str, A
     if automation is not None and not isinstance(automation, str):
         automation = None
 
-    user_invocable = scope.get("user_invocable")
+    # Both spellings (#3134): Claude Code and the libraries write the hyphen,
+    # which wins inside one source; a `trinity:` block wins either way.
+    sources = ([trinity_block] if isinstance(trinity_block, dict) else []) + [fm]
+    user_invocable = _first_present(sources, ("user-invocable", "user_invocable"))
     if not isinstance(user_invocable, bool):
         user_invocable = True
 
@@ -193,14 +236,61 @@ def extract_contract(frontmatter: Optional[Dict[str, Any]]) -> Tuple[Dict[str, A
     if not isinstance(description, str):
         description = None
 
+    # Lifecycle keys (#672). A malformed value is NAMED rather than ignored: a
+    # library whose validation runs this parser fails on `frontmatter_invalid*`,
+    # which is what keeps such a library and the platform agreeing.
+    deprecated = _first_present(sources, ("deprecated",))
+    if deprecated is not None and not isinstance(deprecated, bool):
+        warnings.append("frontmatter_invalid:deprecated")
+    deprecated = deprecated is True
+
+    superseded_raw = _first_present(sources, ("superseded-by", "superseded_by"))
+    superseded_by = None
+    if isinstance(superseded_raw, str):
+        if deprecated:
+            superseded_by = _one_line(superseded_raw, SUPERSEDED_BY_MAX_CHARS)
+    elif superseded_raw is not None:
+        warnings.append("frontmatter_invalid:superseded-by")
+
+    # trinity-enterprise#753: `approval: recommended` gates the skill by default
+    # on every agent it is assigned to (the owner can clear it). A closed set; a
+    # non-string (YAML hands `yes` as a bool, an unquoted date as a date) or an
+    # unknown word is named, read as no recommendation, and never raises.
+    approval_raw = _first_present(sources, ("approval",))
+    approval = None
+    if isinstance(approval_raw, str) and approval_raw.strip().lower() in APPROVAL_VALUES:
+        approval = approval_raw.strip().lower()
+    elif approval_raw is not None:
+        warnings.append("frontmatter_invalid:approval")
+
     contract = {
         "description": description,
         "automation": automation,
         "user_invocable": user_invocable,
         "allowed_tools": allowed_tools,
         "requires": requires,
+        "deprecated": deprecated,
+        "superseded_by": superseded_by,
+        "approval": approval,
     }
     return contract, warnings
+
+
+def deprecation_warning(info: Dict[str, Any]) -> Optional[str]:
+    """The per-skill warning code for a deprecated skill, or None (#672).
+
+    The ONE producer of the grammar, shared by the injection result and the
+    assign-time delivery report: ``deprecated:<successor>`` when the successor
+    is a valid skill name, bare ``deprecated`` otherwise. The author's text is
+    free prose, so it never enters a ``kind:detail`` code that other code
+    splits and pattern-matches.
+    """
+    if info.get("deprecated") is not True:
+        return None
+    successor = info.get("superseded_by")
+    if validate_skill_name(successor):
+        return f"deprecated:{successor}"
+    return "deprecated"
 
 
 # =========================================================================

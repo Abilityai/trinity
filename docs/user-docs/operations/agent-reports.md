@@ -7,7 +7,7 @@ Structured results an agent publishes for you to read — leads found, emails se
 - **Report** — A titled, typed payload an agent publishes. It has a `report_type` (namespaced, e.g. `recon.weekly_summary`), a title, an optional period, and a JSON payload.
 - **Display hint** — How the payload should be rendered: `table`, `kpi`, `markdown`, `timeline`, or `json`.
 - **Report series** — Reports sharing a `report_type`. Agents can read back their own previous reports to continue a series rather than duplicate it.
-- **Audience** — The one Workspace user a report is addressed to (`audience_email`). A report with no audience is operator-only. A report with one is a **deliverable**: it appears in that person's Workspace, and nowhere else in the Workspace.
+- **Audience** — The one Workspace user a report is addressed to. The agent names a role with `to` and the platform resolves the person; the older `audience_email` still works but is deprecated. A report with no audience is operator-only. A report with one is a **deliverable**: it appears in that person's Workspace, and nowhere else in the Workspace.
 - **Rating** — One-click feedback on a deliverable: **Useful** or **Not what I needed**, with an optional comment. Ratings are written by the reader, never by the agent.
 
 ## How It Works
@@ -45,7 +45,7 @@ When an agent addresses a report to a person, that person finds it in two places
 - **Info → Reports** — every deliverable this agent addressed to them, newest first. Expand one to read it.
 - **Delivered here**, at the end of the chat that produced it — when the report was published from a turn in that chat. A report published outside a chat (a scheduled run, for example) lists under Info only and has no card.
 
-Unaddressed reports never appear in the Workspace. An agent that has not yet adopted `audience_email` shows an empty Reports section to its clients — the operator surfaces are unchanged.
+Unaddressed reports never appear in the Workspace. An agent that never addresses its reports shows an empty Reports section to its clients — the operator surfaces are unchanged.
 
 The chat cards refresh after a turn ends, not on a timer: a turn is the only thing that can produce a deliverable in a chat.
 
@@ -56,9 +56,9 @@ Each deliverable card carries **Useful** / **Not what I needed**. Agent messages
 - One click records the rating. **Not what I needed** also opens a comment box (*What were you looking for instead? (optional)*) — the rating is already saved by then, so closing the box loses nothing.
 - One rating per person per deliverable. Clicking the other option corrects it; clicking the one you already gave does nothing — there is no un-rate.
 - After a comment is sent you see one of two acknowledgements, and both are true: **Thanks — passed on to the agent.** when the agent has a `capture-feedback` skill (the words are handed to it in a background turn of its own, never posted into your chat), or **Thanks — recorded for the team.** when it does not.
-- A negative rating also raises a heads-up in the operator queue — *A Workspace client rated a response as not useful*, with the comment if there was one — so the person running the instance hears about it. One such item per person per deliverable per day. See [Approvals](../automation/approvals.md).
+- A negative rating also raises a heads-up in the operator queue — *A Workspace client rated a response as not useful*, with the comment if there was one — so the person running the instance hears about it. One such item per person per deliverable per day; a comment typed after the click is added to that existing heads-up rather than raising a second one. See [Approvals](../automation/approvals.md).
 
-**What the rated agent learns.** Tallies only. An agent can read that it was rated up or down, but never the words and never who rated it — a comment is untrusted text from someone who is, by construction, annoyed, and handing it to the thing being criticised is a prompt-injection path. Operators of the agent read comments in full.
+**What the rated agent learns.** Tallies only. An agent can read that it was rated up or down, but never the words and never who rated it — a comment is untrusted text from someone who is, by construction, annoyed, and handing it to the thing being criticised is a prompt-injection path. The agent's owner and admins read comments in full; a person the agent is merely shared with does not.
 
 ### Exporting
 
@@ -75,7 +75,19 @@ Agents publish with the `report` MCP tool. Trinity's platform prompt tells every
 
 An agent can only publish **as itself**: an agent-scoped key reporting under a sibling agent's name is rejected.
 
-**Addressing a report.** Pass `audience_email` when the work was done *for* a person the agent is shared with. The address is checked against the agent's own roster: someone the agent is not shared with is refused with a named error, and an unreadable roster refuses rather than publishes. To place the card in the chat the work came from, the agent also passes its current `execution_id`; Trinity confirms the execution belongs to that agent and resolves the chat itself — the agent never names a conversation, so it cannot post into one it was not part of.
+**Addressing a report.** The agent names the **role** the report is for with `to` — `primary` (the person it serves), `approver`, `viewer` or `operator` — and the platform resolves who fills it. The agent never picks a person, and the tool result echoes the role, never the person.
+
+| `to` resolves to | Result |
+|------------------|--------|
+| `operator`, nobody, or the agent's owner | An operator-only report (the owner reads reports on the operator surfaces) |
+| One other person on the agent's roster | A deliverable for that person |
+| One person who is not on the roster | Refused — `role_unreachable`; share the agent with them first |
+| Several people | Refused — `role_resolves_to_several`; a report has one reader |
+| A role nobody fills | Refused — `role_unassigned` |
+
+Without role assignments, `primary` resolves to the agent's owner, so the report is operator-only, and `approver` and `viewer` are refused. Passing both `to` and `audience_email` is refused (`addressing_conflict`).
+
+`audience_email` still works but is deprecated: pass it when the work was done *for* a person the agent is shared with. The address is checked against the agent's own roster: someone the agent is not shared with is refused with a named error, and an unreadable roster refuses rather than publishes. To place the card in the chat the work came from, the agent also passes its current `execution_id`; Trinity confirms the execution belongs to that agent and resolves the chat itself — the agent never names a conversation, so it cannot post into one it was not part of.
 
 ### Retention
 
@@ -85,17 +97,17 @@ Reports are pruned past `agent_reports_retention_days` (default 90; `0` disables
 
 | Tool | Description |
 |------|-------------|
-| `report(report_type, title, payload, display_hint?, audience_email?, execution_id?, period_start?, period_end?)` | Publish a report. Self-only. `audience_email` addresses it to a Workspace user; `execution_id` places the card in the chat that turn belongs to. |
+| `report(report_type, title, payload, display_hint?, to?, audience_email?, execution_id?, period_start?, period_end?)` | Publish a report. Self-only. `to` names the role it is for (`audience_email` is the deprecated alternative); `execution_id` places the card in the chat that turn belongs to. |
 | `list_reports(agent_name?, report_type?, hours?, search?)` | Metadata for reports you can see |
 | `get_report(report_id)` | Full payload |
 
-Read access for an agent key is narrowed to itself plus the agents it is explicitly permitted to reach. A report you may not read returns "not found" rather than a distinguishable permission error. Who a report was addressed to is withheld from every non-human caller — agent and connector keys never see `addressed_to`, on the tools or on the REST routes.
+Read access for an agent key is narrowed to itself plus the agents it is explicitly permitted to reach. A report you may not read returns "not found" rather than a distinguishable permission error. Who a report was addressed to is withheld from every non-human caller — agent and connector keys never see `addressed_to`, on the tools, on the REST routes, or in the publish response. The `report` tool acts as the caller: it works with an agent's own key and with the platform's system agent key, and refuses user and connector keys.
 
 **REST endpoints** — see [Backend API Docs](http://localhost:8000/docs) for full schemas.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents/{name}/reports` | GET/POST | List / publish for one agent (`audience_email`, `execution_id` on publish) |
+| `/api/agents/{name}/reports` | GET/POST | List / publish for one agent (`to`, `audience_email`, `execution_id` on publish) |
 | `/api/agents/{name}/reports/{id}` | DELETE | Delete a report |
 | `/api/reports` | GET | Fleet list (filters: `report_type`, `hours`, `search`, `agent`) |
 | `/api/reports/stats` | GET | Fleet KPI tiles |
@@ -112,7 +124,7 @@ The Workspace reads deliverables and records ratings through its own client-scop
 - Publishing is rate-limited per agent (30 per minute by default) so a runaway agent can't flood the table.
 - Search matches titles and report types, **not** payload contents.
 - The live update that arrives when an agent publishes carries only metadata — the browser refetches content through access-controlled endpoints, so report contents never broadcast to every logged-in session.
-- A report can have one audience. Files shared by an agent are not addressable this way; they stay scoped per agent.
+- A report can have one audience. Files an agent shares are addressed separately — see [Agent Files](../agents/agent-files.md#sharing-a-file).
 - A deliverable published after its turn has ended lands under Info only, without a chat card.
 
 ## See Also

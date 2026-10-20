@@ -34,14 +34,24 @@ from ._runtime_config import (
     _load_guardrails,
     merged_disallowed_tools,
 )
-from .execution_env import build_execution_env
+from .execution_env import build_execution_env, auth_override_env_layers
 from .error_classifier import (
     _classify_signal_exit,
     _diagnose_exit_failure,
     _format_rate_limit_error,
     _is_rate_limit_message,
+    _model_rejection_detail,
+    _model_rejection_message,
+    _stream_error_reason,
 )
-from .headless_executor import _attempt_empty_result_recovery, execute_headless_task
+from . import chat_session_marker
+from . import jsonl_recovery as _jsonl_recovery
+from .headless_executor import (
+    _attempt_empty_result_recovery,
+    _recover_completed_turn_into,
+    _valid_session_id,
+    execute_headless_task,
+)
 from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
 from .stream_parser import process_stream_line
@@ -76,9 +86,13 @@ _execution_lock = asyncio.Lock()
 class ClaudeCodeRuntime(AgentRuntime):
     """Claude Code implementation of AgentRuntime interface."""
 
+    # #3470: a SUB-003 re-issue may carry the credential for THAT spawn.
+    supports_auth_override = True
+
     @classmethod
     def capabilities(cls) -> RuntimeCapabilities:
-        # Claude is the reference runtime: full continuity (--continue), the
+        # Claude is the reference runtime: full continuity (--resume of the
+        # chat's own session id, #2958), the
         # Session tab's cached-UUID --resume machinery, MCP, and native cost
         # reporting (Claude Code emits total_cost_usd directly). (#1187)
         return RuntimeCapabilities(
@@ -136,7 +150,9 @@ class ClaudeCodeRuntime(AgentRuntime):
         continue_session: bool = False,
         stream: bool = False,
         system_prompt: Optional[str] = None,
-        execution_id: Optional[str] = None
+        execution_id: Optional[str] = None,
+        isolated_session: bool = False,
+        auth_override=None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
         """Execute Claude Code with the given prompt.
 
@@ -144,9 +160,11 @@ class ClaudeCodeRuntime(AgentRuntime):
             - execution_log: Simplified ExecutionLogEntry objects for activity tracking
             - raw_messages: Full Claude Code JSON transcript for execution log viewer
         """
-        # Note: continue_session is handled internally by agent_state.session_started
-        # The execute_claude_code function checks agent_state and uses --continue automatically
-        return await execute_claude_code(prompt, stream, model, system_prompt=system_prompt, execution_id=execution_id)
+        # Note: continue_session is handled internally: execute_claude_code
+        # resumes the chat's own session id (agent_state.chat_session_id, #2958).
+        return await execute_claude_code(prompt, stream, model, system_prompt=system_prompt,
+                                         execution_id=execution_id, isolated_session=isolated_session,
+                                         auth_override=auth_override)
 
     async def execute_headless(
         self,
@@ -160,6 +178,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         resume_session_id: Optional[str] = None,
         persist_session: bool = False,
         images: Optional[List[Dict]] = None,
+        auth_override=None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
         """Execute Claude Code in headless mode for parallel tasks.
 
@@ -167,40 +186,51 @@ class ClaudeCodeRuntime(AgentRuntime):
             resume_session_id: Optional session ID to resume (EXEC-023)
             persist_session: If True, write the JSONL so the next --resume can find it (Session tab)
             images: Optional list of vision images: [{"media_type": str, "data": base64_str}] (#562)
+            auth_override: #3470 per-spawn credential (SUB-003 re-issue); Claude only
         """
         return await execute_headless_task(
             prompt, model, allowed_tools, system_prompt, timeout_seconds,
             max_turns, execution_id, resume_session_id,
             persist_session=persist_session, images=images,
+            auth_override=auth_override,
         )
 
 
-async def execute_claude_code(prompt: str, stream: bool = False, model: Optional[str] = None, system_prompt: Optional[str] = None, execution_id: Optional[str] = None) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
+async def _execute_claude_code_once(
+    prompt: str,
+    stream: bool,
+    model: Optional[str],
+    system_prompt: Optional[str],
+    execution_id: str,
+    resume_session_id: Optional[str],
+    attempt_state: Optional[Dict] = None,
+    cli_model: Optional[str] = None,
+    auth_override=None,
+) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
     """
-    Execute Claude Code in headless mode with the given prompt.
+    Run ONE chat subprocess. ``execute_claude_code`` owns the session choice.
 
     Uses streaming subprocess to update session activity in REAL-TIME as tools execute.
 
     Uses: claude --print --output-format stream-json
-    Uses --continue flag for subsequent messages to maintain conversation context
+    Uses --resume <resume_session_id> when the chat has its own session (#2958)
     Uses --model to select Claude model (sonnet, opus, haiku, or full model name)
 
     Args:
         prompt: User message
         stream: Whether to stream (unused currently)
-        model: Model override
+        model: Model override (already resolved into agent_state.current_model)
         system_prompt: Platform instructions appended via --append-system-prompt
+        resume_session_id: the chat's own session id, or None for a cold start
+        attempt_state: filled with this attempt's ``execution_log`` so the
+            caller can tell whether a failed attempt ran a tool
+        cli_model: the model for THIS turn when it must not come from the
+            shared ``agent_state.current_model`` (an isolated turn, #752)
 
     Returns: (response_text, execution_log, metadata, raw_messages)
         - execution_log: Simplified ExecutionLogEntry objects for activity tracking
         - raw_messages: Full Claude Code JSON transcript for execution log viewer
     """
-
-    if not agent_state.claude_code_available:
-        raise HTTPException(
-            status_code=503,
-            detail="Claude Code is not available in this container"
-        )
 
     try:
         # Note: Claude Code will use whatever authentication is available:
@@ -208,18 +238,7 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         # 2. ANTHROPIC_API_KEY environment variable (API billing)
         # We don't require ANTHROPIC_API_KEY since users may be logged in with their subscription.
 
-        # Safety-net fallback: backend always resolves model before calling the agent
-        # (#831), so this branch should only fire for direct agent-server calls.
-        if not model and not agent_state.current_model:
-            model = "claude-sonnet-4-6"
-            logger.debug("[Chat] No model specified, defaulting to 'claude-sonnet-4-6'")
-
-        # Update model if specified (persists for session)
-        if model:
-            agent_state.current_model = model
-            logger.info(f"Model set to: {model}")
-
-        # Build command - use --continue for subsequent messages
+        # Build command
         # Use stream-json for detailed execution log (requires --verbose)
         cmd = ["claude", "--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"]
 
@@ -246,17 +265,18 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
             cmd.extend(["--mcp-config", str(mcp_config_path)])
 
         # Add model selection if set
-        if agent_state.current_model:
-            cmd.extend(["--model", agent_state.current_model])
-            logger.info(f"Using model: {agent_state.current_model}")
+        turn_model = cli_model or agent_state.current_model
+        if turn_model:
+            cmd.extend(["--model", turn_model])
+            logger.info(f"Using model: {turn_model}")
 
-        if agent_state.session_started:
-            # Continue the existing conversation
-            cmd.append("--continue")
-            logger.info("Continuing existing conversation session")
+        # #2958: resume the chat's OWN session by id. Never `--continue`, which
+        # takes the newest JSONL in the shared project dir whoever wrote it —
+        # a scheduled run's near-full context, paid for by an auto-compaction.
+        if resume_session_id:
+            cmd.extend(["--resume", resume_session_id])
+            logger.info(f"Resuming the chat's own session {resume_session_id}")
         else:
-            # First message in session
-            agent_state.session_started = True
             logger.info("Starting new conversation session")
 
         # Add platform system prompt if provided
@@ -266,6 +286,8 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
 
         # Initialize tracking structures
         execution_log: List[ExecutionLogEntry] = []
+        if attempt_state is not None:
+            attempt_state["execution_log"] = execution_log
         raw_messages: List[Dict] = []  # Capture ALL raw JSON messages for execution log viewer
         # Issue #640: track stdout JSON parse failures so operators can see when
         # the wire was corrupted (interleaved/truncated lines that json.loads
@@ -280,11 +302,9 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         # (salvage / partial-metadata paths), this catalog value is the real
         # denominator — NOT the flat 200K Pydantic default (get_context_window
         # is never called for Claude, so this seed is the only fallback hook).
-        metadata.context_window = resolve_context_window(model or agent_state.current_model)
+        metadata.context_window = resolve_context_window(cli_model or model or agent_state.current_model)
         tool_start_times: Dict[str, datetime] = {}
         response_parts: List[str] = []
-        # Use provided execution_id if available (enables termination tracking from backend)
-        execution_id = execution_id or str(uuid.uuid4())
         # #678: capture turn-start timestamp so JSONL recovery can scope
         # records to this turn (the resumed JSONL accumulates across all
         # turns of the session). Mirror format from headless_executor.py:217.
@@ -302,6 +322,8 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         # descendant across fork/exec/setsid/double-fork. Cleanup uses it
         # to identify and kill orphans that escape both the pgid sweep
         # and the FD-based pipe-writer sweep.
+        # #3470: a SUB-003 re-issue's credential is a layer of THIS spawn only.
+        auth_extra, auth_drop = auth_override_env_layers(auth_override)
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -311,6 +333,7 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
             bufsize=1,  # Line buffered
             start_new_session=True,
             env=build_execution_env({
+                **auth_extra,
                 EXECUTION_TAG_NAME: execution_id,
                 # #2127: same ceiling as the headless path. The chat path has no
                 # early-finalize to gate (it plainly waits for the process), so
@@ -320,7 +343,7 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                 # ceiling to only the reported path is the recurring
                 # one-of-two-call-sites escape (#686, #1264).
                 "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": str(int(timeout_seconds * 1000)),
-            }),
+            }, drop=auth_drop),
         )
         # Issue #407: capture pgid now — after wait() reaps the parent,
         # the pid is gone and we lose the ability to signal the group.
@@ -442,13 +465,32 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         # Outer asyncio.wait_for is a safety net with a small grace period for
         # drain/cleanup after the inner process.wait() already bounded itself.
         loop = asyncio.get_event_loop()
+        waiter_abandoned = threading.Event()
+
+        def read_owned_subprocess_output():
+            try:
+                return read_subprocess_output()
+            finally:
+                if waiter_abandoned.is_set():
+                    loop.call_soon_threadsafe(lambda: registry.unregister(execution_id))
+
+        # Unlike headless execution, chat has already spawned its child before
+        # submitting the reader. Even a queued reader must run to reap it.
+        worker = loop.run_in_executor(_executor, read_owned_subprocess_output)
+        # A timeout/cancel can end the HTTP waiter before this worker. Consume
+        # its eventual exception without changing what an active await sees.
+        worker.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         try:
             try:
                 stderr_output, return_code = await asyncio.wait_for(
-                    loop.run_in_executor(_executor, read_subprocess_output),
+                    asyncio.shield(worker),
                     timeout=timeout_seconds + 60
                 )
+            except asyncio.CancelledError:
+                waiter_abandoned.set()
+                raise
             except asyncio.TimeoutError:
+                waiter_abandoned.set()
                 logger.error(
                     f"[Chat] Outer timeout on session {execution_id} "
                     f"— killing process group as last resort"
@@ -470,6 +512,31 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                     status_code=504,
                     detail=f"Chat execution timed out after {timeout_seconds} seconds"
                 )
+
+            # #2958: authoritative compact_events from the JSONL, read BEFORE the
+            # error checks so the #678 structured 502 body carries them too.
+            # Stdout's compact_boundary has no compactMetadata (the numbers are
+            # null placeholders). Off the event loop: a chat JSONL now grows
+            # for the life of the session (the read is capped at 10 MB).
+            compact_sid = _valid_session_id(metadata.session_id)
+            if compact_sid:
+                jsonl_compacts = await loop.run_in_executor(
+                    None,
+                    lambda: _jsonl_recovery._extract_compact_events_from_jsonl(
+                        compact_sid, since_iso=task_start_iso
+                    ),
+                )
+                if jsonl_compacts:
+                    metadata.compact_events = jsonl_compacts
+                    for ev in jsonl_compacts:
+                        logger.info(
+                            f"event=session_auto_compact "
+                            f"claude_session_id={compact_sid} "
+                            f"trigger={ev.trigger} "
+                            f"pre_tokens={ev.pre_tokens} "
+                            f"post_tokens={ev.post_tokens} "
+                            f"duration_ms={ev.duration_ms}"
+                        )
 
             # Check for rate limit detected during stream parsing (takes priority)
             if metadata.error_type == "rate_limit":
@@ -493,6 +560,16 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                     detail=f"Authentication failure: {auth_msg[:300]}. Check subscription token or API key configuration."
                 )
 
+            # #3012: Claude Code refused the model. Mirrors the check in
+            # headless_executor._finalize_headless_result — a 400 with
+            # error_code "model_unsupported", never the generic 500.
+            model_rejection = _model_rejection_message(
+                metadata, stderr_output if return_code != 0 else ""
+            )
+            if model_rejection is not None:
+                logger.error(f"[Chat] Model rejected by Claude Code: {model_rejection[:200]}")
+                raise HTTPException(status_code=400, detail=_model_rejection_detail(model_rejection))
+
             # Check for errors
             if return_code != 0:
                 # Issue #906: Signal terminations (SIGKILL/SIGTERM/SIGINT — OOM,
@@ -508,7 +585,9 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                     raise HTTPException(status_code=status_code, detail=detail)
 
                 error_detail = stderr_output[:500] if stderr_output else ""
-                if not error_detail:
+                # #3340: an error the stream named outranks stderr. Mirrors
+                # headless_executor._finalize_headless_result.
+                if _stream_error_reason(metadata) or not error_detail:
                     error_detail = _diagnose_exit_failure(return_code, metadata)
                 # Also check if stderr contains a rate limit message
                 if _is_rate_limit_message(error_detail) or _is_rate_limit_message(stderr_output):
@@ -521,6 +600,41 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                     status_code=500,
                     detail=f"Claude Code execution failed (exit code {return_code}): {error_detail[:300]}"
                 )
+
+            # #1673 / #2968: an `is_error` result with a clean exit (the
+            # stream parser marks it `execution_error`) is a failure, whatever
+            # text it carries — a failed `--resume` (#2958), an `API Error: …`
+            # in the result field, or a partial answer cut off mid-turn. Parity
+            # with headless_executor._finalize_headless_result: first the #1870
+            # completed-turn recovery, gated on on-disk `stop_reason=end_turn`
+            # evidence (never on the stdout text, which would re-open #1673),
+            # so a finished answer the CLI mislabelled is kept; otherwise 502
+            # (not 503 — clear of SUB-003's auth auto-switch) with the
+            # sanitized cause. The structured body matches the #678/#1853
+            # shape so the backend salvages cost/context onto the FAILED row.
+            # Off the event loop, like the compact read above: it parses the
+            # session JSONL. The reader threads are done, so nothing else
+            # touches `metadata` / `response_parts` while it mutates them.
+            if metadata.error_type == "execution_error":
+                recovered = await loop.run_in_executor(
+                    None,
+                    lambda: _recover_completed_turn_into(
+                        metadata=metadata,
+                        response_parts=response_parts,
+                        session_id=metadata.session_id or resume_session_id,
+                        since_iso=task_start_iso,
+                        label=execution_id,
+                    ),
+                )
+                if not recovered:
+                    err = sanitize_text(metadata.error_message or "Execution error")
+                    logger.error(f"[Chat] Claude Code execution error: {err[:300]}")
+                    meta = sanitize_dict(metadata.model_dump())
+                    meta["session_id"] = _valid_session_id(metadata.session_id)
+                    raise HTTPException(
+                        status_code=502,
+                        detail={"message": f"Execution error: {err[:300]}", "metadata": meta},
+                    )
 
             # #678: empty-result recovery before falling through to the
             # generic 500. Tries JSONL metadata back-fill then text
@@ -584,6 +698,166 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
     except Exception as e:
         logger.error(f"Claude Code execution error: {e}")
         raise HTTPException(status_code=500, detail=f"Execution error: {str(e)}")
+
+
+# #2958: statuses that are never a dead-session symptom — a rate limit, an auth
+# failure or a timeout is retried by nobody here, and a cold retry would only
+# double the cost of the same failure. #3012: 400 is a model the CLI refused —
+# a cold retry sends the same --model and is refused the same way.
+_NO_COLD_RETRY_STATUSES = frozenset({400, 429, 503, 504})
+
+
+def _reset_session_counters() -> None:
+    """A fresh session starts from zero context. Without this a cold start
+    reports the old session's ~170k tokens as `context_used` — the same false
+    "degraded" signal #2958 is about. The displayed history is kept."""
+    agent_state.session_context_tokens = 0
+    agent_state.session_total_cost = 0.0
+    agent_state.session_total_output_tokens = 0
+
+
+def _cold_retry_reason(
+    resume_session_id: Optional[str],
+    exc: HTTPException,
+    attempt_state: Dict,
+    execution_id: str,
+) -> Optional[str]:
+    """Return why a failed resume turn may be retried cold, or None.
+
+    Decided by the FILESYSTEM after the failure, never by the CLI's error text
+    (that sits behind an `[ede_diagnostic]` header since #1849 and has broken a
+    substring matcher before). Checking after the failure leaves no gap between
+    check and use: the file is gone at the moment we know the resume failed.
+    """
+    if not resume_session_id:
+        return None
+    if exc.status_code in _NO_COLD_RETRY_STATUSES:
+        return None
+    jsonl = Path(_jsonl_recovery._JSONL_PROJECTS_DIR) / f"{resume_session_id}.jsonl"
+    if jsonl.exists():
+        return None
+    # A turn that ran a tool may have had side effects; never repeat them.
+    if any(e.type == "tool_use" for e in attempt_state.get("execution_log") or []):
+        return None
+    if get_process_registry().was_terminated(execution_id):
+        return None
+    return "resume_jsonl_missing"
+
+
+async def execute_claude_code(prompt: str, stream: bool = False, model: Optional[str] = None, system_prompt: Optional[str] = None, execution_id: Optional[str] = None, isolated_session: bool = False, auth_override=None) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
+    """
+    Execute one chat turn, resuming only the chat's OWN session (#2958).
+
+    The chat records its session id after each successful turn and resumes it
+    with ``--resume <id>``. A different effective model starts a fresh session.
+    A resume whose JSONL is gone (reaped, deleted) gets ONE cold retry. A reset
+    (``DELETE /api/chat/history``) during the turn discards the capture.
+
+    ``isolated_session`` (trinity-enterprise#752): a self-approved turn of a
+    gated skill runs in a fresh session that is NOT kept as the chat's own —
+    the next caller resumes the shared session as it was, without the skill.
+
+    Returns: (response_text, execution_log, metadata, raw_messages)
+    """
+    if not agent_state.claude_code_available:
+        raise HTTPException(
+            status_code=503,
+            detail="Claude Code is not available in this container"
+        )
+
+    if isolated_session:
+        # No --resume, no capture, no shared-model or session-counter change,
+        # and no cold retry (there is no resume to fall back from). The turn's
+        # model is its own: the request's, else the chat's current one.
+        turn_model = model or agent_state.current_model or "claude-sonnet-4-6"
+        return await _execute_claude_code_once(
+            prompt, stream, model, system_prompt, execution_id or str(uuid.uuid4()), None, {},
+            cli_model=turn_model, auth_override=auth_override,
+        )
+
+    # Safety-net fallback: backend always resolves model before calling the agent
+    # (#831), so this branch should only fire for direct agent-server calls.
+    if not model and not agent_state.current_model:
+        model = "claude-sonnet-4-6"
+        logger.debug("[Chat] No model specified, defaulting to 'claude-sonnet-4-6'")
+
+    # Update model if specified (persists for session)
+    if model:
+        agent_state.current_model = model
+        logger.info(f"Model set to: {model}")
+    effective_model = agent_state.current_model
+
+    # Use provided execution_id if available (enables termination tracking from
+    # backend). Minted here so a cold retry keeps the same id.
+    execution_id = execution_id or str(uuid.uuid4())
+
+    generation = agent_state.chat_session_generation
+    resume = _valid_session_id(agent_state.chat_session_id)
+    if resume and agent_state.chat_session_model != effective_model:
+        # AC2: a model change never continues a session built under another
+        # model (it would throw away the prompt cache mid-session).
+        logger.info(
+            f"event=chat_session_model_change agent={agent_state.agent_name} "
+            f"old={agent_state.chat_session_model} new={effective_model}"
+        )
+        resume = None
+    if not resume:
+        _reset_session_counters()
+
+    attempt_state: Dict = {}
+    try:
+        result = await _execute_claude_code_once(
+            prompt, stream, model, system_prompt, execution_id, resume, attempt_state,
+            auth_override=auth_override,
+        )
+    except HTTPException as exc:
+        reason = _cold_retry_reason(resume, exc, attempt_state, execution_id)
+        if reason is None:
+            raise
+        # Re-register as pending BEFORE the cancel check: a cancel that lands
+        # in the gap is then recorded and `register()` kills at spawn.
+        registry = get_process_registry()
+        registry.register_pending(execution_id, metadata={"type": "chat"})
+        if registry.was_terminated(execution_id):
+            registry.discard_pending(execution_id)
+            raise
+        logger.warning(
+            f"event=chat_resume_fallback agent={agent_state.agent_name} "
+            f"session={resume} reason={reason}"
+        )
+        agent_state.chat_session_id = None
+        agent_state.chat_session_model = None
+        chat_session_marker.clear()
+        _reset_session_counters()
+        result = await _execute_claude_code_once(
+            prompt, stream, model, system_prompt, execution_id, None, {},
+            auth_override=auth_override,
+        )
+
+    _capture_chat_session(result[2], effective_model, generation)
+    return result
+
+
+def _capture_chat_session(
+    metadata: ExecutionMetadata, effective_model: Optional[str], generation: int
+) -> None:
+    """Record the session a SUCCESSFUL turn ran in. A failed turn never gets
+    here, so it never moves the id (#2958 F1)."""
+    if agent_state.chat_session_generation != generation:
+        logger.info(
+            f"event=chat_session_capture_discarded agent={agent_state.agent_name} "
+            f"reason=reset_during_turn"
+        )
+        return
+    sid = _valid_session_id(metadata.session_id)
+    if not sid:
+        return
+    agent_state.chat_session_id = sid
+    agent_state.chat_session_model = effective_model
+    agent_state.session_started = True
+    # A failed write keeps the in-memory id (T-C): a later reap of the
+    # unprotected JSONL is absorbed by the cold retry.
+    chat_session_marker.write(sid, effective_model)
 
 
 def get_execution_lock():

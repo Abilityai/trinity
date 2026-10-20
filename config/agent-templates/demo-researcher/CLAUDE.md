@@ -57,16 +57,18 @@ Report on recent research activity and findings count.
 
 ## Metrics Tracking
 
-After each research cycle, update your metrics in `metrics.json`:
+After each research cycle, record your metrics with the `record_metrics` MCP
+tool. It is the only write path — do **not** write a `metrics.json` file;
+nothing reads one any more.
 
-```json
-{
-  "research_cycles": 1,
-  "findings_discovered": 5,
-  "topics_researched": 3,
-  "research_status": "idle",
-  "last_cycle_duration": 120
-}
+```
+record_metrics(points=[
+  {"metric": "research_cycles", "value": 1},
+  {"metric": "findings_discovered", "value": 5},
+  {"metric": "topics_researched", "value": 3},
+  {"metric": "research_status", "value": "idle"},
+  {"metric": "last_cycle_duration", "value": 120},
+], execution_id="<from your Execution Context block>")
 ```
 
 - Increment `research_cycles` after each `/research` run
@@ -80,4 +82,4 @@ After each research cycle, update your metrics in `metrics.json`:
 - Be concise but thorough
 - Flag high-priority findings clearly
 - Maintain consistent formatting across reports
-- Update metrics.json after each research cycle
+- Call `record_metrics` after each research cycle

@@ -274,19 +274,34 @@ def test_the_wake_controls_are_actually_wired_into_the_post_path():
     import inspect
     from shared_sessions import service
 
-    src = inspect.getsource(service.post_message)
-    tree = ast.parse(src.lstrip())
-    called = {
-        node.func.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
+    def _calls(fn):
+        tree = ast.parse(inspect.getsource(fn).lstrip())
+        return {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+
+    # #3210 split `post_message` at the append: what a landed message sets in
+    # motion — these controls included — lives in `_after_landing`. Both links
+    # are pinned, so deleting either call site still fails here.
+    assert "_after_landing" in _calls(service.post_message), (
+        "post_message must hand a landed message to _after_landing"
+    )
+    called = _calls(service._after_landing)
     assert "_apply_wake_cap" in called, (
         "post_message must run the per-participant wake cap (ent#362 AC#4)"
     )
-    assert "agent_on_roster" in src, (
-        "post_message must re-check the roster before waking, so a revoked "
-        "share stops future wakes (ent#362 AC#6)"
+    # trinity-enterprise#860: the wake-time re-check now runs for EVERY
+    # principal through `_can_still_reach` -> `_assert_can_reach_agent`, which
+    # is where a Workspace principal's roster is read.
+    assert "_can_still_reach" in _calls(service._after_landing), (
+        "post_message must re-check access before waking, so a revoked "
+        "share stops future wakes (ent#362 AC#6, trinity-enterprise#860)"
+    )
+    assert "_assert_can_reach_agent" in _calls(service._can_still_reach)
+    assert "agent_on_roster" in inspect.getsource(service._assert_can_reach_agent), (
+        "the reach check must read a Workspace principal's roster (ent#362 AC#6)"
     )
 
 
@@ -434,7 +449,7 @@ def test_the_marker_is_set_and_cleared_around_the_turn():
     import inspect
     from shared_sessions import service
 
-    src = inspect.getsource(service._wake_agent)
+    src = inspect.getsource(service._wake_agent_locked)
     assert "_mark_agent_working(" in src
     assert "_clear_agent_working(" in src
     # The clear must be in the finally, or a raised turn leaves it stuck.

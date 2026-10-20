@@ -26,17 +26,33 @@
       <component :is="fileIcon" class="h-4 w-4 mr-2 flex-shrink-0" :class="iconColor" />
 
       <!-- Name -->
-      <span class="truncate text-gray-700 dark:text-gray-200" :title="item.name">
-        {{ item.name }}
+      <span class="truncate text-gray-700 dark:text-gray-200" :title="item.type === 'link' ? `${item.name} (link)` : item.name">
+        {{ item.name }}<template v-if="item.type === 'link'"> &rarr;</template>
       </span>
 
+      <!-- ent#820: a node this caller cannot change carries a lock; it inherits
+           the row's ink, so it adds no colour of its own -->
+      <svg
+        v-if="item.restricted?.includes('write')"
+        class="h-3 w-3 ml-1 flex-shrink-0 opacity-70"
+        fill="none"
+        viewBox="0 0 24 24"
+        stroke="currentColor"
+        role="img"
+        aria-label="Read-only for you"
+        data-testid="file-node-lock"
+      >
+        <title>Read-only for you</title>
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+      </svg>
+
       <!-- Size (files only) -->
-      <span v-if="item.type === 'file' && item.size" class="ml-auto text-xs text-gray-400 dark:text-gray-500 flex-shrink-0">
+      <span v-if="item.type === 'file' && item.size" class="ml-auto text-xs text-gray-500 dark:text-gray-400 flex-shrink-0">
         {{ formatSize(item.size) }}
       </span>
 
       <!-- File count (folders only) -->
-      <span v-if="item.type === 'directory' && item.file_count" class="ml-auto text-xs text-gray-400 dark:text-gray-500 flex-shrink-0">
+      <span v-if="item.type === 'directory' && item.file_count" class="ml-auto text-xs text-gray-500 dark:text-gray-400 flex-shrink-0">
         {{ item.file_count }}
       </span>
     </div>
@@ -51,7 +67,7 @@
         :search-query="searchQuery"
         @select="$emit('select', $event)"
       />
-      <div v-if="!item.children?.length" class="px-2 py-1 text-xs text-gray-400 dark:text-gray-500 italic">
+      <div v-if="!item.children?.length" class="px-2 py-1 text-xs text-gray-500 dark:text-gray-400 italic">
         Empty folder
       </div>
     </div>

@@ -45,6 +45,10 @@
         </template>
       </p>
 
+      <!-- trinity-enterprise#704: what the git binding came out as, and why.
+           After the provenance line so the heading keeps its subtitle. -->
+      <GitModeNotice v-if="gitMode" :git-mode="gitMode" class="mt-3" />
+
       <!-- One shared footprint for every state — nothing shifts on arrival. -->
       <div class="mt-4 min-h-28" aria-live="polite">
         <!-- (a) waiting -->
@@ -172,11 +176,14 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAgentsStore } from '../stores/agents'
 import api from '../api'
+import GitModeNotice from './GitModeNotice.vue'
 
 const props = defineProps({
   agentName: { type: String, required: true },
   // {source_repo, source_branch, head_sha, file_count} — copy intent only.
   importSnapshot: { type: Object, default: null },
+  // trinity-enterprise#704: the create response's git_mode ({kind, source_mode, pushes, reason}).
+  gitMode: { type: Object, default: null },
 })
 const emit = defineEmits(['close'])
 

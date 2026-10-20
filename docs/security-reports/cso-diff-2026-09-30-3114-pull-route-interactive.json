@@ -1,0 +1,60 @@
+{
+  "version": "1.1",
+  "date": "2026-09-30",
+  "mode": "daily",
+  "scope": "diff",
+  "confidence_gate": 8,
+  "branch": "feature/3114-pull-route-interactive",
+  "issue": [
+    "abilityai/trinity#3114"
+  ],
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    9,
+    10,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": [
+      "stream proxies hold while queued (chat, public, portal)"
+    ],
+    "changed_dispatch": "interactive producers enqueue on pull pilots"
+  },
+  "findings": [],
+  "fixed_during_audit": [],
+  "appendix": [
+    {
+      "title": "Anonymous public-link turns share max_backlog_depth with scheduled work on pilots",
+      "class": "DoS (excluded)",
+      "file": "src/backend/services/backlog_service.py"
+    },
+    {
+      "title": "Held stream polls the row once per second",
+      "class": "DoS (excluded)",
+      "file": "src/backend/services/sync_waiter.py"
+    }
+  ],
+  "supply_chain_summary": "no dependency changes",
+  "filter_stats": {
+    "candidates": 2,
+    "excluded_dos": 2,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "n/a (diff scope)"
+}

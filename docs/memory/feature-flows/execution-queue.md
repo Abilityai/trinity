@@ -441,9 +441,9 @@ async def _execute_schedule_with_lock(self, schedule_id: str):
     # Track activity via internal API
     await self._track_activity_start(schedule, execution)
 
-    # Execute using AgentClient.task()
-    client = get_agent_client(schedule.agent_name)
-    task_response = await client.task(schedule.message, execution_id=execution.id)
+    # Dispatch through the backend (the scheduler never calls the agent directly)
+    result = await self._call_backend_execute_task(
+        agent_name=schedule.agent_name, message=..., execution_id=execution.id, ...)
 
     # Update execution with parsed response metrics
     self.db.update_execution_status(...)
@@ -456,35 +456,15 @@ async def _execute_schedule_with_lock(self, schedule_id: str):
 - Runs in **dedicated scheduler container** (not backend)
 - Uses Redis distributed locks to prevent duplicate executions
 - Checks autonomy before execution
-- Activity tracking via internal API (`POST /api/internal/activities/track`)
-- Uses `AgentClient.task()` for stateless execution with raw log format
+- Dispatches via `_call_backend_execute_task` → `POST /api/internal/execute-task`; the backend's `TaskExecutionService` creates and closes the activity rows in-process and POSTs the agent's `/api/task` via `agent_post_with_retry` (stateless, raw log format)
 - Execution log stored in raw Claude Code `stream-json` format for log viewer compatibility
 
-#### AgentClient Service (Scheduler Version)
+#### Scheduler → Agent Path
 
-The dedicated scheduler has its own `AgentClient` (`src/scheduler/agent_client.py`) for agent communication:
-
-```python
-from scheduler.agent_client import get_agent_client, AgentNotReachableError
-
-# Create client for agent
-client = get_agent_client(schedule.agent_name)
-
-# Send task message - returns AgentTaskResponse with raw Claude Code log
-task_response = await client.task(schedule.message, execution_id=execution.id)
-
-# Access parsed metrics
-task_response.response_text          # The agent's response (truncated if > 10000 chars)
-task_response.metrics.context_used   # Tokens used
-task_response.metrics.context_max    # Context window size
-task_response.metrics.context_percent # Usage percentage
-task_response.metrics.cost_usd       # Cost in USD
-task_response.metrics.tool_calls_json     # JSON string of tool calls
-task_response.metrics.execution_log_json  # Raw Claude Code stream-json format
-task_response.raw_response           # Original response dict
-```
-
-**Note**: The `task()` method was added on 2025-01-02 to fix execution log viewer compatibility. It calls `/api/task` which returns raw Claude Code `stream-json` format, unlike `chat()` which calls `/api/chat` and returns a simplified format.
+The dedicated scheduler has no agent HTTP client. There is no `src/scheduler/agent_client.py`;
+it was removed in v0.7.0. `_call_backend_execute_task` hands every fire to the backend, which
+calls the agent's `/api/task` (raw Claude Code `stream-json`) via `agent_post_with_retry` in
+`src/backend/services/task_execution_service.py`.
 
 #### Response Data Classes (`src/backend/services/agent_client.py:528-544`)
 
@@ -684,7 +664,6 @@ The queue management endpoints use a **thin router + service layer** architectur
 | `src/backend/services/execution_queue.py` | 244 | Redis-backed queue implementation |
 | `src/backend/services/agent_client.py` | 1130 | Centralized agent HTTP client (Redis-backed circuit breaker, retry, connection pool, per-base_url drop-grace — RELIABILITY-001 / #631 / #474) |
 | `src/scheduler/service.py` | - | Dedicated scheduler (APScheduler, activity tracking) |
-| `src/scheduler/agent_client.py` | - | Scheduler's agent HTTP client |
 | `src/backend/routers/chat.py` | 1004 | Chat endpoint (uses raw httpx with retry) |
 | `src/backend/models.py:189-236` | 47 | ExecutionSource, ExecutionStatus, Execution, QueueStatus |
 | `docker/base-image/agent_server/services/claude_code.py` | - | Defense-in-depth lock |
@@ -776,6 +755,10 @@ Returned by `/api/agents/{name}/chat` when queue is full:
   "message": "Agent 'my-agent' is busy with 3 queued requests. Please try again later."
 }
 ```
+
+Since #2919 this 429 — like the async `/task` capacity-and-backlog-full 429 and the sync `/task` at-capacity 429 — also carries the additive header `X-Trinity-Error-Code: capacity` (body unchanged), so a client can tell admission refused from an exhausted subscription (`billing`) without parsing the prose.
+
+The MCP client does exactly that since #3244: only `capacity` is answered `agent_busy`. Any other 429 on `/chat` is a `rate_limited` result (`retryable: false`) — the usage-limit 429 raised after the turn ran carries `X-Trinity-Execution-Id` (the row already written `failed`) and the result tells the caller to read it with `get_execution_result`; a 429 with no code says the run may have started and points at `list_recent_executions`.
 
 ### MCP Response for Busy Agent
 Returned by `chat_with_agent` MCP tool:
@@ -970,12 +953,26 @@ curl -X POST http://localhost:8000/api/agents/my-agent/chat \
 
 This section documents the internal implementation details of the Chat API (`POST /api/agents/{name}/chat`) that uses the execution queue. For the deprecated Chat tab UI, users now interact via the Web Terminal - see [agent-terminal.md](agent-terminal.md).
 
-### Claude Code CLI Execution (`agent_server/services/claude_code.py:400-520`)
+### Claude Code CLI Execution (`agent_server/services/claude_code.py`)
 
-The agent server executes Claude Code as a subprocess with specific flags:
+The agent server executes Claude Code as a subprocess with specific flags. Since #2958
+`execute_claude_code` is a thin wrapper that owns the **session choice** — resume
+`agent_state.chat_session_id` unless the effective model changed (fresh session, counters
+reset); one cold retry when a resume fails and its JSONL is absent afterwards (no tool ran,
+not cancelled); capture the new id after a successful turn unless a reset bumped
+`chat_session_generation` mid-turn; publish it to `~/.trinity/chat-session.json` for the
+JSONL reaper's keep set. The subprocess body is `_execute_claude_code_once`, which also
+reads compact events from the JSONL (the backend writes them to `compact_metadata`). An
+exit-0 `is_error` result (`metadata.error_type == "execution_error"`) is a failure on
+every chat turn (#2968, parity with the headless #1673 check): the shared #1870 core
+`headless_executor._recover_completed_turn_into` runs first (off the event loop), and
+without on-disk `stop_reason=end_turn` evidence the turn raises 502 with a structured
+`{message, metadata}` body that `chat_execution_service._parse_agent_http_error` salvages
+onto the FAILED row — see [parallel-headless-execution.md](parallel-headless-execution.md)
+"How Error Type Drives HTTP Status Codes":
 
 ```python
-async def execute_claude_code(prompt: str, stream: bool = False, model: Optional[str] = None):
+async def _execute_claude_code_once(prompt, stream, model, system_prompt, execution_id, resume_session_id, attempt_state=None):
     # Build command
     cmd = ["claude", "--print", "--output-format", "stream-json",
            "--verbose", "--dangerously-skip-permissions"]
@@ -989,9 +986,10 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
     if agent_state.current_model:
         cmd.extend(["--model", agent_state.current_model])
 
-    # Use --continue flag for subsequent messages (maintains conversation context)
-    if agent_state.session_started:
-        cmd.append("--continue")
+    # #2958: resume the chat's OWN session by id — never --continue, which took
+    # the newest JSONL in the shared project dir (a scheduled run's)
+    if resume_session_id:  # chosen by execute_claude_code (the wrapper)
+        cmd.extend(["--resume", resume_session_id])
 
     # Use Popen for real-time streaming
     process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, ...)
@@ -1021,6 +1019,9 @@ class AgentState:
     def __init__(self):
         self.conversation_history: List[ChatMessage] = []
         self.session_started = False
+        self.chat_session_id: Optional[str] = None      # #2958: captured after a successful turn
+        self.chat_session_model: Optional[str] = None   # a different effective model starts fresh
+        self.chat_session_generation: int = 0           # bumped by reset_session()
         self.session_total_cost: float = 0.0
         self.session_context_tokens: int = 0
         self.session_context_window: int = 200000
@@ -1030,6 +1031,10 @@ class AgentState:
     def reset_session(self):
         self.conversation_history = []
         self.session_started = False
+        self.chat_session_id = None
+        self.chat_session_model = None
+        self.chat_session_generation += 1     # an in-flight turn drops its capture
+        chat_session_marker.clear()           # the reaper's keep-set marker
         self.session_total_cost = 0.0
         self.session_total_output_tokens = 0
         self.session_context_tokens = 0

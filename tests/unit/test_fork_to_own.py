@@ -749,13 +749,15 @@ async def test_non_fork_github_creation_unchanged(crud_env, monkeypatch):
     _patch_repo_validation(monkeypatch, crud)
 
     await crud.create_agent_internal(
-        AgentConfig(name="plain-gh", template="github:Abilityai/cornelius"),
+        # trinity-enterprise#705: a deployment — the agent default would now
+        # probe push access and take a working branch when it can push.
+        AgentConfig(name="plain-gh", template="github:Abilityai/cornelius", kind="deployment"),
         _user(), MagicMock())
 
     env = ctx["docker_utils"].containers_run.call_args.kwargs["environment"]
     assert env["GITHUB_PAT"] == "platform-pat"
     assert "GIT_UPSTREAM_REPO" not in env
-    # source_mode default True → no auto-sync for non-fork agents
+    # a pull-only deployment → no auto-sync for non-fork agents
     assert "GIT_SYNC_AUTO" not in env
     ctx["db"].set_agent_github_pat.assert_not_called()
     ctx["db"].set_git_auto_sync_enabled.assert_not_called()

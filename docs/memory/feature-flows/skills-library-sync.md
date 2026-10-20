@@ -1,5 +1,7 @@
 # Feature: Skills Library Sync
 
+> **2026-09-24 — ent#530 skill sets.** `SkillSourceClone._catalog()` memoises the guarded `catalog.yaml` read (reset after `sync()`), shared by `_declared_root()` and the new `declared_sets()` (`services/skill_sets.parse_catalog_sets` — total, codes only). `skill_set_service.library_sets()` resolves sets across sources with skill precedence, cached by `_library_fingerprint`, served by `GET /api/skills/library/sets`. The fleet re-inject resolves sets once per sweep and `_reinject_agent` reconciles set-derived rows first, then prunes after injection when members were dropped upstream.
+
 ## Overview
 Synchronizes a skills library from a GitHub repository to the local filesystem using git clone/pull operations. Enables platform administrators to maintain a centralized collection of reusable agent skills that can be assigned to agents.
 
@@ -17,12 +19,15 @@ As a platform administrator, I want to configure and sync a GitHub repository co
 | `src/frontend/src/views/Settings.vue:514-524` | `PUT /api/settings/{key}` | Save URL/branch settings |
 | Settings → Skills Library → Automation | `GET/PUT /api/settings/skills-library` | Auto-sync + fleet re-inject config, sync status, last fleet report (ent#236) |
 | — (background) | `services/skills_sync_service.py` | Scheduled sync loop (ent#236) |
+| MCP (admin principals: user-scoped key of an admin, system agent) | `list_skill_sources`, `register_skill_source`, `update_skill_source`, `delete_skill_source`, `sync_skill_source`, `sync_skill_library` → `/api/skills/sources[...]`, `POST /api/skills/sources/apply`, `POST /api/skills/library/sync` | Source management + sync over MCP (trinity-enterprise#692); agent and connector keys never see these tools and the routes refuse them |
 
 ---
 
 ## Scheduled Auto-Sync + Fleet Re-Inject (ent#236)
 
 Both default OFF; a zero-config install behaves exactly as before.
+
+`_reinject_agent` also reconciles each agent's skill-gate library defaults (trinity-enterprise#753): before the re-inject (a newly `approval: recommended` skill is gated on every holder) and, when the set reconcile dropped members, after the prune (`drop_after_prune`). See [skill-gate.md](skill-gate.md) §6.
 
 ```
 skills_sync_service loop (every worker, self-gating, config re-read per cycle)
@@ -536,7 +541,8 @@ Page loads or sync completes
 
 Since ent#183, `list_skills`/`get_skill` also parse the frontmatter **contract**
 (`automation`, `user_invocable`, `requires: {packages, binaries, env}`,
-`allowed-tools`) plus package metadata (`multi_file`, `file_count`,
+`allowed-tools`, and since ent#672 the lifecycle keys `deprecated` /
+`superseded_by`) plus package metadata (`multi_file`, `file_count`,
 `size_bytes`, `version` = git tree SHA); `get_skill` adds a `files` list. The
 list metadata is cached per library commit SHA and invalidated by
 `sync_library()`. `GET /api/skills/library/status` additionally reports
@@ -704,6 +710,10 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 | Date | Changes |
 |------|---------|
+| 2026-10-15 | **#3430**: bundled community-catalog pin bumped to `trinity-skills` **v0.5.0** (fresh-install seed only). v0.4.0 adds `project-status`; v0.5.0 adds `update-status` and brings `project-status` and `add-pipeline` onto the platform's current ask-id and 120-char escalation-title contracts (both failed on `dev` at v0.3.0). 40 skills, none dropped since v0.3.0. The guard floor rises to v0.5.0; existing instances keep their row (ent#529) and move with the user-doc steps. |
+| 2026-10-10 | **ent#692**: source management over MCP for admin principals (`src/mcp-server/src/tools/skill_sources.ts`) — fenced by principal, not transport. New idempotent `POST /api/skills/sources/apply` (keyed on the repo URL; `created`/`updated`/`unchanged`, 409 `ambiguous_source`); create accepts `priority`. `GET /api/skills/library/status` now carries `last_fleet_reinject` (counts only — the per-agent `failures` map stays on the admin routes), so whoever ran a sync can read its consequence. Sync tools report `ran` / `refused_busy` / `failed`. |
+| 2026-10-06 | **#3123**: bundled community-catalog pin bumped to `trinity-skills` **v0.3.0** (fresh-install seed only). The catalog gains `update-dashboard`, the playbook the metrics tiles already point users at, and drops the four retired `add-*` installers (now marketplace-only), giving 38 skills. The guard floor rises to v0.3.0, and `docs/user-docs/automation/skills-and-playbooks.md` joins `.env.example` in the parity check. Existing instances keep their row (ent#529); that user doc now carries the steps for moving one to a newer tag (`PUT /api/skills/sources/{id}`, then a full sync). |
+| 2026-09-30 | **ent#672**: the listing the sync produces now carries each skill's lifecycle keys — `deprecated` and `superseded_by` (the library's `superseded-by`) — parsed on every listing, never persisted, so a re-sync that drops the key clears the flag. Contract details: [skill-injection.md](skill-injection.md). |
 | 2026-09-06 | **#2545 + #2550**: bundled community-catalog pin bumped to `trinity-skills` **v0.2.0** (fresh-install seed only — adds the `project-management` category, 14 skills; `.env.example` documents the same value, `tests/unit/test_2545_skill_source_pin.py` keeps them in step). Update-path tag pin now compares the tag **peeled** (`refs/tags/<ref>^{commit}`): an annotated tag's bare rev-parse is the tag object, so the unmoved bundled source was refused as `moved_tag` on every sync after the first (`tests/unit/test_2550_annotated_tag_pin.py`, both tag kinds). |
 | 2026-07-29 | **ent#236 lifecycle automation**: scheduled leader-locked auto-sync, commit-gated fleet-wide re-inject with an honest per-agent report, durable sync status (`--workers 2` gap), and the dedicated range-validated `GET/PUT /api/settings/skills-library` route. Removal-on-unassign is documented in [skill-injection.md](skill-injection.md). |
 | 2026-07-19 | **ent#183 skill packages**: skills are full directory packages; list/get surface the frontmatter contract + package metadata (commit-SHA-cached); status adds `multi_file_count`; HEAD of the clone is the atomic injection source. |
@@ -712,5 +722,5 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 ---
 
-**Last Updated**: 2026-09-06
-**Status**: Verified - Updated for #2545 pin bump + #2550 annotated-tag pin fix
+**Last Updated**: 2026-10-15
+**Status**: Verified - Updated for #3430 bundled catalog pin v0.5.0

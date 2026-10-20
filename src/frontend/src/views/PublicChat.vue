@@ -282,7 +282,7 @@
           v-model="message"
           :disabled="chatLoading"
           :public-token="token"
-          placeholder="Type your message or / for playbooks..."
+          placeholder="Type your message or / for skills..."
           :cancellable="canCancelTurn"
           :cancelling="cancelling"
           @submit="sendMessage"
@@ -319,6 +319,8 @@ const verifyLoading = ref(false)
 const verifyError = ref(null)
 const sessionToken = ref(localStorage.getItem(`public_session_${token.value}`) || '')
 const isVerified = computed(() => !linkInfo.value?.require_email || !!sessionToken.value)
+const SESSION_EXPIRED_NOTICE = 'Session expired. Please verify your email again.'
+const TURN_FAILED_NOTICE = "The agent couldn't respond right now. Your message is back in the box below — send it again to retry."
 
 // Chat session persistence (for anonymous links)
 const chatSessionId = ref(localStorage.getItem(`public_chat_session_id_${token.value}`) || '')
@@ -471,6 +473,39 @@ const verifyCode = async () => {
   }
 }
 
+// #3406 — the link's own session is gone: it expired (24 h) or was never
+// valid. One reaction for every route that checks it, so the visitor lands on
+// the verify card with the reason. The send path used to put the reason in
+// `chatError`, which renders only inside the chat block this card replaces;
+// the load paths swallowed the 401 and kept the dead key, so every reload
+// repeated it.
+const endPublicSession = () => {
+  try {
+    // Only the session this tab held: a sibling tab that verified again since
+    // wrote a fresh one under the same key, and this tab's 401 says nothing
+    // about it (the #2791 `stale` rule, for the link's own session).
+    const key = `public_session_${token.value}`
+    if (localStorage.getItem(key) === sessionToken.value) localStorage.removeItem(key)
+  } catch {
+    /* storage unavailable — the in-memory reset below still ends it */
+  }
+  sessionToken.value = ''
+  // The server asks for a session only where the agent requires an email, so
+  // a 401 proves the requirement even if the policy changed after this page
+  // loaded — without it an open link would never show the card.
+  if (linkInfo.value) linkInfo.value = { ...linkInfo.value, require_email: true }
+  codeSent.value = false
+  code.value = ''
+  verifyError.value = SESSION_EXPIRED_NOTICE
+  // The transcript reloads from the server once the visitor verifies again
+  // (history is kept per email). Kept here, it would gain a second intro and
+  // show an unsent message beside its restored draft.
+  messages.value = []
+  chatError.value = null
+  viewingHistorySession.value = null
+  introFetched.value = false
+}
+
 const getVerifyErrorMessage = (error) => {
   switch (error) {
     case 'invalid_code':
@@ -515,6 +550,7 @@ const loadHistory = async () => {
     return false // No history
   } catch (err) {
     console.error('Failed to load history:', err)
+    if (err.response?.status === 401) endPublicSession()
     return false
   } finally {
     historyLoading.value = false
@@ -524,6 +560,9 @@ const loadHistory = async () => {
 // Fetch agent introduction
 const fetchIntro = async () => {
   if (introFetched.value || introLoading.value) return
+  // #3406 — a link that needs an email and holds no session can only 401
+  // here; the history request just before this one already said so.
+  if (linkInfo.value?.require_email && !sessionToken.value) return
 
   introLoading.value = true
   introError.value = null
@@ -548,6 +587,10 @@ const fetchIntro = async () => {
     introFetched.value = true
   } catch (err) {
     console.error('Failed to fetch intro:', err)
+    if (err.response?.status === 401) {
+      endPublicSession()
+      return
+    }
     // Don't block the user - just skip the intro on error
     introError.value = 'Could not load introduction.'
     introFetched.value = true
@@ -593,6 +636,10 @@ const confirmNewConversation = async () => {
     await fetchIntro()
   } catch (err) {
     console.error('Failed to clear session:', err)
+    if (err.response?.status === 401) {
+      endPublicSession()
+      return
+    }
     chatError.value = 'Failed to start new conversation. Please refresh the page.'
   }
 }
@@ -742,7 +789,9 @@ const pollExecution = async (executionId) => {
       )
 
       const execution = response.data
-      if (execution.status === 'success' || execution.status === 'failed' || execution.status === 'cancelled') {
+      // `skipped` (trinity#3274): the skill gate held the turn — it will not
+      // run now, so waiting longer only ends in "timed out".
+      if (['success', 'failed', 'cancelled', 'skipped'].includes(execution.status)) {
         return execution
       }
     } catch (err) {
@@ -820,9 +869,21 @@ const sendMessage = async (userMessage, files = []) => {
           content: execution.response
         })
       } else if (execution.status === 'failed') {
-        chatError.value = execution.error || 'Failed to process your request. Please try again.'
+        // #3461 — never the row's own `error`: it is the operator's diagnosis
+        // (exit code, where to fix the credential), and this page is read by
+        // anonymous visitors. One plain line, and their words back in the
+        // input so sending again is the retry.
+        chatError.value = TURN_FAILED_NOTICE
+        message.value = restoreDraft(userMessage, message.value)
       } else if (execution.status === 'cancelled') {
         chatError.value = 'Request was cancelled.'
+      } else if (execution.status === 'skipped' && execution.gate === 'held' && execution.error) {
+        // Waiting for an approval: the gate's notice (the server stores it as
+        // this turn's reply too).
+        messages.value.push({ role: 'system', content: execution.error })
+      } else if (execution.status === 'skipped') {
+        // Refused by the gate: an error, never a waiting notice.
+        chatError.value = execution.error || 'Failed to process your request. Please try again.'
       }
     } else {
       chatError.value = 'Request timed out. Please try again.'
@@ -831,10 +892,10 @@ const sendMessage = async (userMessage, files = []) => {
     console.error('Chat error:', err)
     closeSSE()
     if (err.response?.status === 401) {
-      // Session expired, clear and show verification again
-      sessionToken.value = ''
-      localStorage.removeItem(`public_session_${token.value}`)
-      chatError.value = 'Session expired. Please verify your email again.'
+      // Session expired: back to the verify card with the reason (#3406), and
+      // the words back in the input so verifying again does not lose them.
+      endPublicSession()
+      message.value = restoreDraft(userMessage, message.value)
     } else if (err.response?.status === 429) {
       chatError.value = 'Too many requests. Please wait a moment.'
     } else {
@@ -859,9 +920,14 @@ const cancelTurn = async () => {
   cancelling.value = true
   const restoreText = pendingUserMessage.value
   try {
-    const res = await axios.post(
-      `/api/public/executions/${token.value}/${executionId}/terminate`
-    )
+    // On an email link the route demands the visitor's own session (ent#155
+    // review) as a QUERY parameter — it has no body model. Without it every
+    // Stop there answered 401 (#3406).
+    let url = `/api/public/executions/${token.value}/${executionId}/terminate`
+    if (linkInfo.value?.require_email && sessionToken.value) {
+      url += `?session_token=${encodeURIComponent(sessionToken.value)}`
+    }
+    const res = await axios.post(url)
     const alreadyTerminal = isNoopCancel(res.data?.status)
     const outcome = cancelOutcome({ ok: true, alreadyTerminal })
     if (outcome.kind === 'cancelled') {
@@ -873,6 +939,15 @@ const cancelTurn = async () => {
       cancelling.value = false
       return
     }
+    // The session ended mid-turn (#3406). The turn finishes server-side and
+    // the transcript reloads once the visitor verifies again. Only on an email
+    // link: elsewhere this route checks no session, and a 401 is the agent's
+    // own status passed through, not a reason to ask for an email.
+    if (err?.response?.status === 401 && linkInfo.value?.require_email) {
+      endPublicSession()
+      cancelling.value = false
+      return
+    }
     chatError.value = cancelOutcome({ ok: false, alreadyTerminal: false }).message
     cancelling.value = false
   }
@@ -880,7 +955,9 @@ const cancelTurn = async () => {
 
 const onEscapeKeydown = (event) => {
   if (!shouldCancelOnEscape(event, {
-    inFlight: canCancelTurn.value,
+    // `isVerified` (#3406): once the session has ended the verify card is up,
+    // and a session-less terminate could only 401 and reset the form mid-entry.
+    inFlight: isVerified.value && canCancelTurn.value,
     cancelling: cancelling.value,
   })) return
   event.preventDefault()
@@ -907,9 +984,13 @@ onMounted(async () => {
       } else {
         introFetched.value = true // Mark intro as done since we have history
       }
-
-      loadPlaybooks()
     }
+
+    // The quick actions need no session — the route checks the link, not the
+    // visitor — so they load behind the verify card too, and are there after a
+    // first verification or an expired session, neither of which reloads the
+    // page (#3406).
+    loadPlaybooks()
   }
 })
 

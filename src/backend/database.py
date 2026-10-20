@@ -25,6 +25,7 @@ import os
 import secrets
 from datetime import datetime
 from pathlib import Path
+from typing import List, Optional
 
 # Re-export models for backward compatibility
 from db_models import (
@@ -111,6 +112,7 @@ from db.schema import init_schema
 # Import operation classes
 from db.users import UserOperations
 from db.agents import AgentOperations
+from db.write_params import ChatMessageFields, ExecutionResult, ExecutionSource, TaskExecutionFields
 from db.mcp_keys import McpKeyOperations
 from db.schedules import ScheduleOperations
 from db.chat import ChatOperations
@@ -119,6 +121,7 @@ from db.activities import ActivityOperations
 from db.reports import ReportOperations
 from db.canvas import CanvasOperations
 from db.canvas_shares import CanvasShareOperations
+from db.skill_gate_requests import SkillGateRequestOperations
 from db.user_preferences import UserPreferenceOperations
 from db.product_events import ProductEventOperations
 from db.evaluations import EvaluationOperations
@@ -131,6 +134,12 @@ from db.settings import SettingsOperations
 from db.public_links import PublicLinkOperations
 from db.email_auth import EmailAuthOperations
 from db.skills import SkillsOperations
+from db.skill_sets import SkillSetsOperations
+from db.role_readiness import RoleReadinessOperations
+from db.capability_grants import CapabilityGrantOperations
+from db.peer_skill_grants import PeerSkillGrantOperations
+from db.skill_gates import SkillGateOperations
+from db.seat_decisions import SeatDecisionOperations
 from db.skill_sources import SkillSourcesOperations
 from db.public_chat import PublicChatOperations
 from db.tags import TagOperations
@@ -143,6 +152,7 @@ from db.slack import SlackOperations
 from db.slack_channels import SlackChannelOperations
 from db.nevermined import NeverminedOperations
 from db.operator_queue import OperatorQueueOperations
+from db.queue_mentions import QueueMentionOperations
 from db.event_subscriptions import EventSubscriptionOperations
 from db.telegram_channels import TelegramChannelOperations
 from db.whatsapp_channels import WhatsAppChannelOperations
@@ -151,6 +161,8 @@ from db.access_requests import AccessRequestOperations
 from db.audit import PlatformAuditOperations
 from db.canary import CanaryOperations
 from db.compatibility import CompatibilityOperations
+from db.metric_definitions import MetricDefinitionOperations
+from db.metric_points import MetricPointOperations
 from db.sync_state import SyncStateOperations
 from db.idempotency import IdempotencyOperations
 from db.loops import LoopOperations
@@ -360,13 +372,23 @@ def _retention_window_seed_values():
     # — which this seed's fail-safe contract then SWALLOWS, leaving the feature
     # silently dead on every boot. Verified empirically before the move; the
     # same #1638 circular-import trap, one seed later.
-    from config import OPS_SETTINGS_DEFAULTS, RETENTION_OPS_KEYS
+    from config import (ENV_BACKED_OPS_KEYS, OPS_SETTINGS_DEFAULTS,
+                        RETENTION_OPS_KEYS, env_ops_value)
 
-    return [
-        (key, OPS_SETTINGS_DEFAULTS[key])
-        for key in RETENTION_OPS_KEYS
-        if key in OPS_SETTINGS_DEFAULTS
-    ]
+    pairs = []
+    for key in RETENTION_OPS_KEYS:
+        if key not in OPS_SETTINGS_DEFAULTS:
+            continue
+        # An env-backed window whose variable is SET is skipped on purpose
+        # (trinity-enterprise#478): seeding it would freeze the environment's
+        # value into a row and quietly end the environment's authority, so a
+        # later `METRICS_RETENTION_DAYS` change would be ignored with nothing
+        # to explain why. Env stays a live fallback; a `PUT /ops/config` row
+        # still wins over it, which is the only precedence anyone documented.
+        if key in ENV_BACKED_OPS_KEYS and env_ops_value(key) is not None:
+            continue
+        pairs.append((key, OPS_SETTINGS_DEFAULTS[key]))
+    return pairs
 
 
 def _seed_retention_windows(cursor, conn):
@@ -983,6 +1005,7 @@ class DatabaseManager:
         self._report_ops = ReportOperations()
         self._canvas_ops = CanvasOperations()
         self._canvas_share_ops = CanvasShareOperations()
+        self._skill_gate_request_ops = SkillGateRequestOperations()
         self._user_preference_ops = UserPreferenceOperations()
         self._product_event_ops = ProductEventOperations()
         self._evaluation_ops = EvaluationOperations()
@@ -995,6 +1018,12 @@ class DatabaseManager:
         self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
         self._skills_ops = SkillsOperations()
+        self._skill_sets_ops = SkillSetsOperations()
+        self._role_readiness_ops = RoleReadinessOperations()
+        self._capability_grant_ops = CapabilityGrantOperations()
+        self._peer_skill_grant_ops = PeerSkillGrantOperations()  # ent#662
+        self._skill_gate_ops = SkillGateOperations()
+        self._seat_decision_ops = SeatDecisionOperations()
         self._skill_sources_ops = SkillSourcesOperations()
         self._public_chat_ops = PublicChatOperations()
         self._tag_ops = TagOperations()
@@ -1007,6 +1036,7 @@ class DatabaseManager:
         self._slack_channel_ops = SlackChannelOperations()
         self._nevermined_ops = NeverminedOperations()
         self._operator_queue_ops = OperatorQueueOperations()
+        self._queue_mention_ops = QueueMentionOperations()  # trinity-enterprise#631
         self._event_subscription_ops = EventSubscriptionOperations()
         self._telegram_channel_ops = TelegramChannelOperations()
         self._whatsapp_channel_ops = WhatsAppChannelOperations()
@@ -1015,6 +1045,8 @@ class DatabaseManager:
         self._audit_ops = PlatformAuditOperations()
         self._canary_ops = CanaryOperations()
         self._compatibility_ops = CompatibilityOperations()  # #668 agent compatibility
+        self._metric_definition_ops = MetricDefinitionOperations()  # ent#477 metric registry
+        self._metric_point_ops = MetricPointOperations()  # ent#478 recorded points
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
         self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
@@ -1052,6 +1084,14 @@ class DatabaseManager:
 
     def list_users(self):
         return self._user_ops.list_users()
+
+    # trinity-enterprise#631 — who may be tagged in a conversation with these agents
+    def list_taggable_people(self, agent_names, query, *, exclude_email=None, limit=8):
+        return self._user_ops.list_taggable_people(agent_names, query,
+                                                   exclude_email=exclude_email, limit=limit)
+
+    def get_taggable_person(self, agent_names, email):
+        return self._user_ops.get_taggable_person(agent_names, email)
 
     def update_user_role(self, username: str, role: str):
         return self._user_ops.update_user_role(username, role)
@@ -1121,6 +1161,10 @@ class DatabaseManager:
     def reconcile_spawn_key_id(self, agent_name: str, current_key_id: str) -> int:
         """#1854: re-point a parent's spawned children at its current key id."""
         return self._agent_ops.reconcile_spawn_key_id(agent_name, current_key_id)
+
+    def list_agents_spawned_by_key(self, agent_name: str, key_id: str) -> List[str]:
+        """ent#629: live agents spawned by `agent_name` with key `key_id`."""
+        return self._agent_ops.list_agents_spawned_by_key(agent_name, key_id)
 
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
@@ -1303,6 +1347,10 @@ class DatabaseManager:
 
     def list_active_shared_files_for_agent(self, agent_name: str) -> list:
         return self._agent_shared_files_ops.list_active_for_agent(agent_name)
+
+    def list_active_shared_files_for_viewer(self, agent_name: str, viewer_email, *, include_owner_only: bool = False) -> list:
+        return self._agent_shared_files_ops.list_active_for_viewer(
+            agent_name, viewer_email, include_owner_only=include_owner_only)
 
     def mark_shared_file_downloaded(self, file_id: str) -> None:
         return self._agent_shared_files_ops.mark_downloaded(file_id)
@@ -1536,11 +1584,11 @@ class DatabaseManager:
     # Backlog Execution Queries (delegated to db/schedules.py) - BACKLOG-001
     # =========================================================================
 
-    def update_execution_to_queued(self, execution_id: str, backlog_metadata: str, queued_at: str) -> bool:
-        return self._schedule_ops.update_execution_to_queued(execution_id, backlog_metadata, queued_at)
+    def update_execution_to_queued(self, execution_id: str, backlog_metadata: str, queued_at: str, conversation_key: str = None) -> bool:
+        return self._schedule_ops.update_execution_to_queued(execution_id, backlog_metadata, queued_at, conversation_key)
 
-    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None):
-        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds)
+    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None, interactive_triggers=None, waiting_conversation_prefix: str = None):
+        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds, interactive_triggers, waiting_conversation_prefix)
 
     def release_claim_to_queued(self, execution_id: str) -> bool:
         return self._schedule_ops.release_claim_to_queued(execution_id)
@@ -1560,14 +1608,19 @@ class DatabaseManager:
     def count_active_leased_by_agent(self, agent_names):
         return self._schedule_ops.count_active_leased_by_agent(agent_names)
 
+    def execution_awaits_claim(self, execution_id: str) -> bool:
+        return self._schedule_ops.execution_awaits_claim(execution_id)
+
     def count_active_leased(self, agent_name: str) -> int:
         return self._schedule_ops.count_active_leased(agent_name)
 
     def get_queued_count(self, agent_name: str) -> int:
         return self._schedule_ops.get_queued_count(agent_name)
 
-    def cancel_queued_execution(self, execution_id: str, reason: str = "cancelled") -> bool:
-        return self._schedule_ops.cancel_queued_execution(execution_id, reason)
+    def cancel_queued_execution(
+        self, execution_id: str, reason: str = "cancelled", status: str = "cancelled"
+    ) -> bool:
+        return self._schedule_ops.cancel_queued_execution(execution_id, reason, status)
 
     def cancel_queued_for_agent(self, agent_name: str, reason: str = "agent_deleted") -> int:
         return self._schedule_ops.cancel_queued_for_agent(agent_name, reason)
@@ -1716,6 +1769,9 @@ class DatabaseManager:
     def get_agent_schedule_names(self, agent_name: str):
         return self._schedule_ops.get_agent_schedule_names(agent_name)
 
+    def get_workspace_delivery_schedules_for_agents(self, agent_names):
+        return self._schedule_ops.get_workspace_delivery_schedules_for_agents(agent_names)
+
     def find_active_schedules_exceeding_timeout(self, agent_name: str, ceiling_seconds: int):
         return self._schedule_ops.find_active_schedules_exceeding_timeout(
             agent_name, ceiling_seconds
@@ -1788,45 +1844,19 @@ class DatabaseManager:
         agent_name: str,
         message: str,
         triggered_by: str = "manual",
-        source_user_id: int = None,
-        source_user_email: str = None,
-        source_agent_name: str = None,
-        source_mcp_key_id: str = None,
-        source_mcp_key_name: str = None,
-        model_used: str = None,
-        fan_out_id: str = None,
-        fan_out_task_id: str = None,
-        loop_id: str = None,
-        subscription_id: str = None,
-        source_channel: str = None,
-        source_channel_chat_id: str = None,
-        source_channel_thread: str = None,
-        source_channel_agent: str = None,
-        source_channel_client: str = None,
-        open_canvas_id: str = None,
+        fields: Optional[TaskExecutionFields] = None,
+        *,
+        execution_id: Optional[str] = None,
     ):
-        """Create an execution record for a manual/API-triggered task (no schedule)."""
+        """Create an execution record for a manual/API-triggered task (no schedule).
+        Optional columns ride `fields` (#1482, `db/write_params.py`).
+        `execution_id`: a caller-chosen id (trinity-enterprise#751)."""
         return self._schedule_ops.create_task_execution(
-            agent_name, message, triggered_by,
-            source_user_id=source_user_id,
-            source_user_email=source_user_email,
-            source_agent_name=source_agent_name,
-            source_mcp_key_id=source_mcp_key_id,
-            source_mcp_key_name=source_mcp_key_name,
-            model_used=model_used,
-            fan_out_id=fan_out_id,
-            fan_out_task_id=fan_out_task_id,
-            loop_id=loop_id,
-            subscription_id=subscription_id,
-            source_channel=source_channel,
-            source_channel_chat_id=source_channel_chat_id,
-            source_channel_thread=source_channel_thread,
-            # ent#265: binding-agent for channel report-back (set only at the
-            # /task inheritance point; None for direct rows).
-            source_channel_agent=source_channel_agent,
-            source_channel_client=source_channel_client,
-            open_canvas_id=open_canvas_id,
-        )
+            agent_name, message, triggered_by, fields, execution_id=execution_id)
+
+    def get_max_running_chain_depth(self, agent_name: str) -> int:
+        """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
+        return self._schedule_ops.get_max_running_chain_depth(agent_name)
 
     def create_schedule_execution(
         self,
@@ -1834,31 +1864,17 @@ class DatabaseManager:
         agent_name: str,
         message: str,
         triggered_by: str = "schedule",
-        source_user_id: int = None,
-        source_user_email: str = None,
-        source_agent_name: str = None,
-        source_mcp_key_id: str = None,
-        source_mcp_key_name: str = None,
-        subscription_id: str = None,
+        source: Optional[ExecutionSource] = None,
     ):
         return self._schedule_ops.create_schedule_execution(
-            schedule_id, agent_name, message, triggered_by,
-            source_user_id=source_user_id,
-            source_user_email=source_user_email,
-            source_agent_name=source_agent_name,
-            source_mcp_key_id=source_mcp_key_id,
-            source_mcp_key_name=source_mcp_key_name,
-            subscription_id=subscription_id,
-        )
+            schedule_id, agent_name, message, triggered_by, source)
 
-    def update_execution_status(self, execution_id: str, status: str, response: str = None, error: str = None,
-                                context_used: int = None, context_max: int = None, cost: float = None, tool_calls: str = None, execution_log: str = None,
-                                claude_session_id: str = None, compact_metadata: str = None, retry_count: int = None,
-                                claim_token: str = None, turn_integrity: str = None):
-        return self._schedule_ops.update_execution_status(execution_id, status, response, error,
-                                                          context_used, context_max, cost, tool_calls, execution_log, claude_session_id,
-                                                          compact_metadata, retry_count, claim_token,
-                                                          turn_integrity=turn_integrity)
+    def update_execution_status(self, execution_id: str, status: str,
+                                result: Optional[ExecutionResult] = None, *, claim_token: str = None):
+        """Terminal write; returns the CAS bool unchanged (#1082/#1083). The
+        recorded values ride `result` (#1482, `db/write_params.py`)."""
+        return self._schedule_ops.update_execution_status(
+            execution_id, status, result, claim_token=claim_token)
 
     def mark_execution_dispatched(self, execution_id: str, async_dispatch: bool = False) -> bool:
         return self._schedule_ops.mark_execution_dispatched(execution_id, async_dispatch)
@@ -1869,6 +1885,10 @@ class DatabaseManager:
     def stamp_execution_channel_context(self, execution_id: str, **kwargs) -> bool:
         """ent#498 — attach a delivery destination to a pre-created row."""
         return self._schedule_ops.stamp_execution_channel_context(execution_id, **kwargs)
+
+    def set_execution_subscription(self, execution_id: str, subscription_id) -> bool:
+        """#3470 — re-point a row's SUB-004 attribution to the subscription that served."""
+        return self._schedule_ops.set_execution_subscription(execution_id, subscription_id)
 
     def resume_session_belongs_to_user(
         self, agent_name: str, claude_session_id: str, user_id: int
@@ -1887,7 +1907,8 @@ class DatabaseManager:
         return self._schedule_ops.get_agent_executions(agent_name, limit)
 
     def get_agent_executions_summary(self, agent_name: str, limit: int = 50, *,
-                                     exclude_triggers=None):
+                                     exclude_triggers=None, scope_to_viewer=False,
+                                     viewer_email=None):
         """Get execution summaries for list view - excludes large text fields.
 
         `exclude_triggers` filters before the LIMIT — see the operation's own
@@ -1896,10 +1917,18 @@ class DatabaseManager:
         PERF-001: Task List Performance Optimization
         """
         return self._schedule_ops.get_agent_executions_summary(
-            agent_name, limit, exclude_triggers=exclude_triggers)
+            agent_name, limit, exclude_triggers=exclude_triggers,
+            scope_to_viewer=scope_to_viewer, viewer_email=viewer_email)
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
+
+    def get_execution_gate_state(self, execution_id: str):
+        return self._schedule_ops.get_execution_gate_state(execution_id)
+
+    def get_execution_failure_stamp(self, execution_id: str):
+        """`(status, error, completed_at)` or None — the #3245 liveness read."""
+        return self._schedule_ops.get_execution_failure_stamp(execution_id)
 
     def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200):
         """Every execution row of one fan-out batch (#2670)."""
@@ -1928,6 +1957,10 @@ class DatabaseManager:
         `__getattr__` — the ent#277 trap, guarded by
         `tests/unit/test_ent525_portal_work.py::test_the_facade_exposes_every_ledger_read_the_service_makes`."""
         return self._schedule_ops.get_running_for_chat(chat_id)
+
+    def get_running_in_conversation(self, agent_name: str, source_channel: str, chat_id: str):
+        """ent#549 — this agent's RUNNING turns in one conversation."""
+        return self._schedule_ops.get_running_in_conversation(agent_name, source_channel, chat_id)
 
     def get_fleet_execution_stats(self, agent_names, hours: int = 24):
         """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
@@ -2004,6 +2037,12 @@ class DatabaseManager:
     def get_git_auto_sync_enabled(self, agent_name: str):
         return self._schedule_ops.get_git_auto_sync_enabled(agent_name)
 
+    def set_git_pull_sync_enabled(self, agent_name: str, enabled: bool):
+        return self._schedule_ops.set_git_pull_sync_enabled(agent_name, enabled)
+
+    def get_git_pull_sync_enabled(self, agent_name: str):
+        return self._schedule_ops.get_git_pull_sync_enabled(agent_name)
+
     def get_all_git_auto_sync_enabled(self, agent_names=None):
         return self._schedule_ops.get_all_git_auto_sync_enabled(agent_names)
 
@@ -2060,6 +2099,9 @@ class DatabaseManager:
     def list_sync_states(self):
         return self._sync_state_ops.list_all()
 
+    def list_sync_health_rows(self, agent_names=None):
+        return self._sync_state_ops.list_health_rows(agent_names)
+
     def upsert_sync_state(self, agent_name: str, **fields):
         return self._sync_state_ops.upsert(agent_name, **fields)
 
@@ -2074,16 +2116,15 @@ class DatabaseManager:
         return self._chat_ops.get_or_create_chat_session(agent_name, user_id, user_email, subscription_id=subscription_id)
 
     def add_chat_message(self, session_id: str, agent_name: str, user_id: int, user_email: str,
-                         role: str, content: str, cost: float = None, context_used: int = None,
-                         context_max: int = None, tool_calls: str = None, execution_time_ms: int = None,
-                         source: str = "text", subscription_id: str = None, output_tokens: int = None):
-        return self._chat_ops.add_chat_message(session_id, agent_name, user_id, user_email,
-                                               role, content, cost, context_used, context_max,
-                                               tool_calls, execution_time_ms, source=source,
-                                               subscription_id=subscription_id, output_tokens=output_tokens)
+                         role: str, content: str, fields: Optional[ChatMessageFields] = None):
+        return self._chat_ops.add_chat_message(
+            session_id, agent_name, user_id, user_email, role, content, fields)
 
     def get_chat_session(self, session_id: str):
         return self._chat_ops.get_chat_session(session_id)
+
+    def find_chat_session_by_message_source(self, agent_name: str, user_id: int, source: str):
+        return self._chat_ops.find_chat_session_by_message_source(agent_name, user_id, source)
 
     def get_chat_messages(self, session_id: str, limit: int = 100):
         return self._chat_ops.get_chat_messages(session_id, limit)
@@ -2099,6 +2140,16 @@ class DatabaseManager:
 
     def create_new_chat_session(self, agent_name: str, user_id: int, user_email: str, subscription_id: str = None):
         return self._chat_ops.create_new_chat_session(agent_name, user_id, user_email, subscription_id=subscription_id)
+
+    # #3127: per-session Claude id for pulled /chat turns.
+    def get_chat_session_claude_id(self, session_id: str):
+        return self._chat_ops.get_chat_session_claude_id(session_id)
+
+    def set_chat_session_claude_id(self, session_id: str, claude_session_id):
+        return self._chat_ops.set_chat_session_claude_id(session_id, claude_session_id)
+
+    def clear_chat_session_claude_ids(self, agent_name: str):
+        return self._chat_ops.clear_chat_session_claude_ids(agent_name)
 
     def delete_chat_session(self, session_id: str):
         return self._chat_ops.delete_chat_session(session_id)
@@ -2153,9 +2204,12 @@ class DatabaseManager:
     def create_activity(self, activity):
         return self._activity_ops.create_activity(activity)
 
-    def complete_activity(self, activity_id: str, status: str = "completed", details: dict = None, error: str = None):
-        """#1804: returns an ``ActivityCloseOutcome`` (tri-state), not a bool."""
-        return self._activity_ops.complete_activity(activity_id, status, details, error)
+    def complete_activity(self, activity_id: str, status: str = "completed", details: dict = None, error: str = None,
+                          *, completed_at=None):
+        """#1804: returns an ``ActivityCloseOutcome`` (tri-state), not a bool.
+        ``completed_at`` (#3589): the producer's terminal instant, else now."""
+        return self._activity_ops.complete_activity(activity_id, status, details, error,
+                                                    completed_at=completed_at)
 
     def close_open_activities_for_executions(self, execution_ids, status: str = "failed", error: str = None):
         """#1804: batched bulk-sweep close (one transaction, no per-row WS)."""
@@ -2166,6 +2220,14 @@ class DatabaseManager:
 
     def get_open_activity_id_for_execution(self, execution_id: str, include_failed: bool = False):
         return self._activity_ops.get_open_activity_id_for_execution(execution_id, include_failed)
+
+    def get_open_companion_activity_ids_for_execution(
+        self, execution_id: str, *, extra_ids=(), include_failed: bool = False
+    ):
+        """#3588: open collaboration / self-task companion ids for an execution."""
+        return self._activity_ops.get_open_companion_activity_ids_for_execution(
+            execution_id, extra_ids=extra_ids, include_failed=include_failed
+        )
 
     def get_agent_activities(self, agent_name: str, activity_type: str = None, activity_state: str = None, limit: int = 100):
         return self._activity_ops.get_agent_activities(agent_name, activity_type, activity_state, limit)
@@ -2262,6 +2324,68 @@ class DatabaseManager:
 
     def record_canvas_share_view(self, share_id: str) -> None:
         return self._canvas_share_ops.record_view(share_id)
+
+    # --- gated-skill requests (trinity-enterprise#751) ------------------------
+    # Signatures mirror db/skill_gate_requests.py exactly; a parity test in
+    # tests/unit/test_ent751_skill_gate_requests_db.py fails when they drift.
+
+    def create_gate_request(self, **fields):
+        return self._skill_gate_request_ops.create_gate_request(**fields)
+
+    def record_self_approved_run(self, *, request_id: str, agent_name: str, skills,
+                                 request_text: str, requester_email: str, triggered_by,
+                                 dispatched_execution_id: str) -> bool:
+        return self._skill_gate_request_ops.record_self_approved_run(
+            request_id=request_id, agent_name=agent_name, skills=skills,
+            request_text=request_text, requester_email=requester_email,
+            triggered_by=triggered_by, dispatched_execution_id=dispatched_execution_id)
+
+    def get_gate_request(self, request_id: str):
+        return self._skill_gate_request_ops.get_gate_request(request_id)
+
+    def get_gate_request_by_dispatched_execution(self, execution_id: str):
+        return self._skill_gate_request_ops.get_gate_request_by_dispatched_execution(execution_id)
+
+    def get_self_approved_runs(self, agent_name: str, execution_ids):
+        return self._skill_gate_request_ops.get_self_approved_runs(agent_name, execution_ids)
+
+    def get_gate_requests_by_origin_executions(self, execution_ids):
+        return self._skill_gate_request_ops.get_gate_requests_by_origin_executions(execution_ids)
+
+    def attach_gate_ask(self, request_id: str, ask_item_id: str) -> bool:
+        return self._skill_gate_request_ops.attach_gate_ask(request_id, ask_item_id)
+
+    def count_pending_gate_requests(self, agent_name: str, requester_key=None) -> int:
+        return self._skill_gate_request_ops.count_pending_gate_requests(
+            agent_name, requester_key=requester_key)
+
+    def claim_gate_request_for_dispatch(self, request_id: str, execution_id: str) -> bool:
+        return self._skill_gate_request_ops.claim_gate_request_for_dispatch(request_id, execution_id)
+
+    def transition_gate_request(self, request_id: str, to_state: str, *, detail=None) -> bool:
+        return self._skill_gate_request_ops.transition_gate_request(
+            request_id, to_state, detail=detail)
+
+    def mark_gate_request_notified(self, request_id: str) -> bool:
+        return self._skill_gate_request_ops.mark_gate_request_notified(request_id)
+
+    def list_pending_gate_requests(self, agent_name: str):
+        return self._skill_gate_request_ops.list_pending_gate_requests(agent_name)
+
+    def list_gate_requests_with_ended_asks(self, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_with_ended_asks(limit)
+
+    def list_gate_requests_ended_unreported(self, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_ended_unreported(limit)
+
+    def list_gate_requests_lost_in_dispatch(self, claimed_before: str, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_lost_in_dispatch(claimed_before, limit)
+
+    def list_gate_requests_dispatched_unrecorded(self, claimed_before: str, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_dispatched_unrecorded(claimed_before, limit)
+
+    def list_gate_requests_without_live_ask(self, created_before: str, limit: int = 200):
+        return self._skill_gate_request_ops.list_gate_requests_without_live_ask(created_before, limit)
 
     def last_completed_execution_at(self, agent_name: str):
         return self._canvas_ops.last_completed_execution_at(agent_name)
@@ -2648,20 +2772,29 @@ class DatabaseManager:
     def get_whitelist_default_role(self, email: str):
         return self._email_auth_ops.get_whitelist_default_role(email)
 
+    def cap_whitelist_default_role(self, email: str, role: str):
+        return self._email_auth_ops.cap_whitelist_default_role(email, role)
+
     def remove_from_whitelist(self, email: str):
         return self._email_auth_ops.remove_from_whitelist(email)
 
     def list_whitelist(self, limit: int = 100):
         return self._email_auth_ops.list_whitelist(limit)
 
-    def create_login_code(self, email: str, expiry_minutes: int = 10):
-        return self._email_auth_ops.create_login_code(email, expiry_minutes)
+    def create_login_code(self, email: str, expiry_minutes: int = 10, purpose=None):
+        return self._email_auth_ops.create_login_code(email, expiry_minutes, purpose=purpose)
 
-    def verify_login_code(self, email: str, code: str):
-        return self._email_auth_ops.verify_login_code(email, code)
+    def is_email_account_suspended(self, email: str) -> bool:
+        return self._user_ops.is_email_account_suspended(email)
+
+    def verify_login_code(self, email: str, code: str, purpose=None):
+        return self._email_auth_ops.verify_login_code(email, code, purpose=purpose)
 
     def count_recent_code_requests(self, email: str, minutes: int = 10):
         return self._email_auth_ops.count_recent_code_requests(email, minutes)
+
+    def count_recent_codes_for_purpose(self, purpose: str, minutes: int = 10):
+        return self._email_auth_ops.count_recent_codes_for_purpose(purpose, minutes)
 
     def cleanup_old_codes(self, days: int = 1):
         return self._email_auth_ops.cleanup_old_codes(days)
@@ -2680,22 +2813,151 @@ class DatabaseManager:
         return self._skills_ops.get_agent_skill_names(agent_name)
 
     def assign_skill(self, agent_name: str, skill_name: str, assigned_by: str,
-                     source_id: str = None):
+                     source_id: str = None, assigned_by_agent: str = None):
         return self._skills_ops.assign_skill(
-            agent_name, skill_name, assigned_by, source_id
+            agent_name, skill_name, assigned_by, source_id, assigned_by_agent
         )
 
     def unassign_skill(self, agent_name: str, skill_name: str):
         return self._skills_ops.unassign_skill(agent_name, skill_name)
 
     def set_agent_skills(self, agent_name: str, skill_names: list, assigned_by: str,
-                         source_ids: dict = None):
+                         source_ids: dict = None, assigned_by_agent: str = None,
+                         set_resolver=None, result: dict = None):
         return self._skills_ops.set_agent_skills(
-            agent_name, skill_names, assigned_by, source_ids
+            agent_name, skill_names, assigned_by, source_ids, assigned_by_agent,
+            set_resolver, result,
         )
+
+    # ent#530 — skill sets (delegated to db/skill_sets.py)
+    def list_agent_skill_sets(self, agent_name: str):
+        return self._skill_sets_ops.list_agent_sets(agent_name)
+
+    def agent_skill_set_names(self, agent_name: str):
+        return self._skill_sets_ops.agent_set_names(agent_name)
+
+    def assign_skill_set(self, agent_name, set_name, source_id, assigned_by, assigned_by_agent, resolved):
+        return self._skill_sets_ops.assign_set(agent_name, set_name, source_id, assigned_by,
+                                               assigned_by_agent, resolved)
+
+    def unassign_skill_set(self, agent_name, set_name, resolved, assigned_by):
+        return self._skill_sets_ops.unassign_set(agent_name, set_name, resolved, assigned_by)
+
+    def reconcile_skill_sets(self, agent_name, resolved):
+        return self._skill_sets_ops.reconcile(agent_name, resolved)
+
+    def replace_skill_sets(self, agent_name, set_names, source_ids, assigned_by, assigned_by_agent, resolved):
+        return self._skill_sets_ops.replace_sets(agent_name, set_names, source_ids, assigned_by,
+                                                 assigned_by_agent, resolved)
+
+    def set_skill_individual(self, agent_name, skill_name, individual):
+        return self._skill_sets_ops.set_individual(agent_name, skill_name, individual)
 
     def delete_agent_skills(self, agent_name: str):
         return self._skills_ops.delete_agent_skills(agent_name)
+
+    def set_skill_delivery_status(self, agent_name: str, conflicted: list, resolved: list):
+        # #2914: the inject path's per-row verdict (`conflict` / cleared).
+        return self._skills_ops.set_skill_delivery_status(agent_name, conflicted, resolved)
+    # =========================================================================
+    # Per-skill grants over an edge (delegated to db/peer_skill_grants.py) — ent#662
+    def granted_peer_skills(self, caller_agent: str, target_agent: str):
+        return self._peer_skill_grant_ops.granted_peer_skills(caller_agent, target_agent)
+
+    def list_peer_skill_grants(self, caller_agent: str):
+        return self._peer_skill_grant_ops.list_peer_skill_grants(caller_agent)
+
+    def grant_peer_skill(self, caller_agent: str, target_agent: str, skill_name: str, granted_by: str):
+        return self._peer_skill_grant_ops.grant_peer_skill(caller_agent, target_agent, skill_name, granted_by)
+
+    def revoke_peer_skill(self, caller_agent: str, target_agent: str, skill_name: str):
+        return self._peer_skill_grant_ops.revoke_peer_skill(caller_agent, target_agent, skill_name)
+
+    def recent_peer_messages(self, caller_agent: str, target_agent: str, since: str, limit: int = 500):
+        return self._peer_skill_grant_ops.recent_peer_messages(caller_agent, target_agent, since, limit)
+
+    def delete_agent_peer_skill_grants(self, agent_name: str):
+        return self._peer_skill_grant_ops.delete_agent_peer_skill_grants(agent_name)
+
+    # Agent capability grants (delegated to db/capability_grants.py) — ent#596
+    def agent_has_capability(self, agent_name: str, capability: str) -> bool:
+        return self._capability_grant_ops.agent_has_capability(agent_name, capability)
+
+    def list_capability_holders(self, capability: str):
+        return self._capability_grant_ops.list_capability_holders(capability)
+
+    def grant_agent_capability(self, agent_name: str, capability: str, granted_by: str) -> bool:
+        return self._capability_grant_ops.grant_agent_capability(agent_name, capability, granted_by)
+
+    def list_agent_capabilities(self, agent_name: str):
+        # ent#164: one agent's grants, for its Settings (ent#756)
+        return self._capability_grant_ops.list_agent_capabilities(agent_name)
+
+    def revoke_agent_capability(self, agent_name: str, capability: str) -> bool:
+        return self._capability_grant_ops.revoke_agent_capability(agent_name, capability)
+
+    def delete_agent_capability_grants(self, agent_name: str) -> int:
+        return self._capability_grant_ops.delete_agent_capability_grants(agent_name)
+
+    # =========================================================================
+    # Skill gate map (delegated to db/skill_gates.py) — trinity-enterprise#753
+    def list_agent_skill_gates(self, agent_name: str):
+        return self._skill_gate_ops.list_agent_skill_gates(agent_name)
+
+    def write_skill_gate(self, agent_name: str, skill_name: str, *, changes, origin: str,
+                         set_by: str, set_by_agent):
+        return self._skill_gate_ops.write_skill_gate(
+            agent_name, skill_name, changes=changes, origin=origin, set_by=set_by,
+            set_by_agent=set_by_agent)
+
+    def clear_skill_gate(self, agent_name: str, skill_name: str, *, set_by: str, set_by_agent,
+                         recommended):
+        return self._skill_gate_ops.clear_skill_gate(
+            agent_name, skill_name, set_by=set_by, set_by_agent=set_by_agent,
+            recommended=recommended)
+
+    def reconcile_library_skill_gates(self, agent_name: str, recommended, *, set_by: str, may_drop):
+        return self._skill_gate_ops.reconcile_library_skill_gates(
+            agent_name, recommended, set_by=set_by, may_drop=may_drop)
+
+    def drop_unassigned_skill_gates(self, agent_name: str, names, *, keep=()):
+        return self._skill_gate_ops.drop_unassigned_skill_gates(agent_name, names, keep=keep)
+
+    # Role readiness (delegated to db/role_readiness.py) — ent#527 / #663
+    # =========================================================================
+
+    def get_agent_role_readiness(self, agent_name: str):
+        return self._role_readiness_ops.get_role_readiness(agent_name)
+
+    def set_agent_role_readiness(self, agent_name: str, status: str, changed_by: str):
+        return self._role_readiness_ops.set_role_readiness(agent_name, status, changed_by)
+
+    def get_role_readiness_for_agents(self, agent_names):
+        return self._role_readiness_ops.get_role_readiness_for_agents(agent_names)
+
+    # Seat decisions (delegated to db/seat_decisions.py) — ent#638 / R25.
+    # Explicit signatures on purpose (learnings 2026-09-01: a kwarg the mixin
+    # gains must land here too); parity pinned by test_ent638_seat_decisions.
+    def insert_seat_decision(self, values: dict) -> dict:
+        return self._seat_decision_ops.insert_seat_decision(values)
+
+    def get_seat_decision(self, agent_name: str, decision_id: str) -> Optional[dict]:
+        return self._seat_decision_ops.get_seat_decision(agent_name, decision_id)
+
+    def list_seat_decisions(self, agent_name: str, seat_email: Optional[str] = None, *, limit: int = 500) -> List[dict]:
+        return self._seat_decision_ops.list_seat_decisions(agent_name, seat_email, limit=limit)
+
+    def list_seat_decision_seats(self, agent_name: str, *, limit: int = 50) -> List[str]:
+        return self._seat_decision_ops.list_seat_decision_seats(agent_name, limit=limit)
+
+    def supersede_seat_decision(self, agent_name: str, old_id: str, values: dict) -> Optional[dict]:
+        return self._seat_decision_ops.supersede_seat_decision(agent_name, old_id, values)
+
+    def set_seat_decision_status(self, agent_name: str, decision_id: str, status: str, *, reason: Optional[str], by: str) -> bool:
+        return self._seat_decision_ops.set_seat_decision_status(agent_name, decision_id, status, reason=reason, by=by)
+
+    def reconfirm_seat_decision(self, agent_name: str, decision_id: str, review_by: str) -> bool:
+        return self._seat_decision_ops.reconfirm_seat_decision(agent_name, decision_id, review_by)
 
     def is_skill_assigned(self, agent_name: str, skill_name: str):
         return self._skills_ops.is_skill_assigned(agent_name, skill_name)
@@ -2767,11 +3029,27 @@ class DatabaseManager:
     def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
         return self._public_chat_ops.get_session_messages(session_id, limit, sender_email=sender_email)
 
-    def get_recent_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
-        return self._public_chat_ops.get_recent_messages(session_id, limit, sender_email=sender_email)
+    def get_recent_public_chat_messages(
+        self, session_id: str, limit: int = 20, sender_email: str = None, since: str = None,
+    ):
+        return self._public_chat_ops.get_recent_messages(
+            session_id, limit, sender_email=sender_email, since=since,
+        )
+
+    def prune_public_chat_session(self, session_id: str, keep: int) -> int:
+        # ent#600: bound a Telegram group session that records every visible message.
+        return self._public_chat_ops.prune_session(session_id, keep)
 
     def clear_public_chat_session(self, session_id: str):
         return self._public_chat_ops.clear_session(session_id)
+
+    def clear_public_chat_sessions_by_identifier(
+        self, agent_name: str, channel: str, session_identifier: str,
+    ) -> int:
+        # ent#600: a Telegram group's sessions (the chat + its forum topics).
+        return self._public_chat_ops.clear_sessions_by_identifier(
+            agent_name, channel, session_identifier,
+        )
 
     def build_public_chat_context(self, session_id: str, new_message: str, max_turns: int = 10):
         return self._public_chat_ops.build_context_prompt(session_id, new_message, max_turns)
@@ -2835,6 +3113,26 @@ class DatabaseManager:
     ) -> bool:
         return self._public_link_ops.update_user_memory_conversation_summary(
             agent_name, user_email, conversation_summary
+        )
+
+    # ent#637: the write boundary records history; the person reads + undoes it.
+    def write_public_user_memory_agent_notes(
+        self, agent_name: str, user_email: str, agent_notes: str, *,
+        execution_id: str = None, triggered_by: str = "", schedule_id: str = None,
+    ) -> dict:
+        return self._public_link_ops.write_user_memory_agent_notes(
+            agent_name, user_email, agent_notes,
+            execution_id=execution_id, triggered_by=triggered_by, schedule_id=schedule_id,
+        )
+
+    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
+        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)
+
+    def undo_public_user_memory_write(
+        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str
+    ) -> str:
+        return self._public_link_ops.undo_user_memory_write(
+            agent_name, user_email, write_id, undone_by=undone_by
         )
 
     # =========================================================================
@@ -2965,8 +3263,8 @@ class DatabaseManager:
     def delete_subscription(self, subscription_id: str):
         return self._subscription_ops.delete_subscription(subscription_id)
 
-    def assign_subscription_to_agent(self, agent_name: str, subscription_id: str):
-        return self._subscription_ops.assign_subscription_to_agent(agent_name, subscription_id)
+    def assign_subscription_to_agent(self, agent_name: str, subscription_id: str, **kwargs):
+        return self._subscription_ops.assign_subscription_to_agent(agent_name, subscription_id, **kwargs)
 
     def clear_agent_subscription(self, agent_name: str):
         return self._subscription_ops.clear_agent_subscription(agent_name)
@@ -3180,8 +3478,11 @@ class DatabaseManager:
             schedule_id, hours, agent_name,
         )
 
-    def get_agent_analytics(self, agent_name: str, hours: int):
-        return self._schedule_ops.get_agent_analytics(agent_name, hours)
+    def get_agent_analytics(self, agent_name: str, hours: int, *,
+                            scope_to_viewer=False, viewer_email=None):
+        # #3139: `scope_to_viewer` narrows to what a Workspace client can account for.
+        return self._schedule_ops.get_agent_analytics(
+            agent_name, hours, scope_to_viewer=scope_to_viewer, viewer_email=viewer_email)
 
     def get_agent_schedules_summary(self, agent_name: str, hours: int):
         return self._schedule_ops.get_agent_schedules_summary(agent_name, hours)
@@ -3336,6 +3637,14 @@ class DatabaseManager:
         # ent#264: per-binding in-progress indicator toggle (default ON).
         return self._telegram_channel_ops.set_progress_indicator_enabled(agent_name, enabled)
 
+    def set_telegram_can_read_all_group_messages(self, agent_name, value):
+        # ent#600: Telegram's getMe.can_read_all_group_messages (None = not reported).
+        return self._telegram_channel_ops.set_can_read_all_group_messages(agent_name, value)
+
+    def touch_telegram_group_untagged_seen(self, binding_id, chat_id):
+        # ent#600: an un-tagged message reached the bot in this group.
+        return self._telegram_channel_ops.touch_group_untagged_seen(binding_id, chat_id)
+
     def get_all_telegram_bindings(self):
         return self._telegram_channel_ops.get_all_bindings()
 
@@ -3385,7 +3694,7 @@ class DatabaseManager:
 
     def update_telegram_group_config(
         self, group_config_id, trigger_mode=None, welcome_enabled=None,
-        welcome_text=None, allow_proactive=None,
+        welcome_text=None, allow_proactive=None, context_enabled=None,
     ):
         # Keyword passthrough (ent#265 / eng M3): a positional append here risks a
         # silent allow_proactive→welcome_text swap if the ops signature ever moves.
@@ -3395,6 +3704,7 @@ class DatabaseManager:
             welcome_enabled=welcome_enabled,
             welcome_text=welcome_text,
             allow_proactive=allow_proactive,
+            context_enabled=context_enabled,   # ent#600: group-context opt-out
         )
 
     def deactivate_telegram_group_config(self, binding_id, chat_id):
@@ -3547,6 +3857,11 @@ class DatabaseManager:
     def get_nevermined_payment_log(self, agent_name, limit=50):
         return self._nevermined_ops.get_payment_log(agent_name, limit)
 
+    def nevermined_payer_owns_execution(self, agent_name, execution_id, subscriber_address):
+        return self._nevermined_ops.payer_owns_execution(
+            agent_name, execution_id, subscriber_address
+        )
+
     def get_nevermined_settlement_failures(self, limit=50):
         return self._nevermined_ops.get_settlement_failures(limit)
 
@@ -3554,11 +3869,57 @@ class DatabaseManager:
         return self._nevermined_ops.get_payment_log_entry(log_id)
 
     # =========================================================================
+    # Person tags on the queue-item ledger (db/queue_mentions.py) - ent#631
+    # =========================================================================
+
+    def create_person_mention(self, **kwargs):
+        return self._queue_mention_ops.create(**kwargs)
+
+    def list_person_mentions_for(self, email, limit=200):
+        return self._queue_mention_ops.list_for_addressee(email, limit)
+
+    def get_person_mention(self, item_id):
+        return self._queue_mention_ops.get(item_id)
+
+    def mark_person_mention_read(self, item_id, email, now):
+        return self._queue_mention_ops.mark_read(item_id, email, now)
+
+    def list_person_mentions_by_prefix(self, prefix, limit=2000, agent_names=None):
+        return self._queue_mention_ops.list_by_request_prefix(prefix, limit, agent_names)
+
+    # =========================================================================
     # Operator Queue (delegated to db/operator_queue.py) - OPS-001
     # =========================================================================
 
-    def create_operator_queue_item(self, agent_name, item):
-        return self._operator_queue_ops.create_item(agent_name, item)
+    def create_operator_queue_item(self, agent_name, item, *, channel=None, raised_by=None):
+        # trinity-enterprise#611: provenance is keyword-only — never from `item`.
+        return self._operator_queue_ops.create_item(
+            agent_name, item, channel=channel, raised_by=raised_by,
+        )
+
+    def create_operator_queue_item_with_outcome(self, agent_name, item, *, channel=None, raised_by=None):
+        # trinity-enterprise#611: the file poller's create — `(id, inserted)`, so a
+        # repeat is never counted as an admission.
+        return self._operator_queue_ops.create_item_with_outcome(
+            agent_name, item, channel=channel, raised_by=raised_by,
+        )
+
+    def create_native_operator_queue_item(self, agent_name, item, *, max_pending, channel,
+                                          raised_by, to_role, resolved_to, proposal,
+                                          supersedes_expired, exclude_request_id_prefixes=None,
+                                          replaces=None, guard_pending_proposal=False):
+        # trinity-enterprise#611: an agent-raised ask — replay, depth cap and insert
+        # in one per-agent serialized step. #3130: the prefixes leave platform
+        # rows out of the depth cap. #3247: `replaces` ends one of the agent's
+        # own pending asks in the same transaction.
+        return self._operator_queue_ops.create_native_item(
+            agent_name, item, max_pending=max_pending, channel=channel,
+            raised_by=raised_by, to_role=to_role, resolved_to=resolved_to,
+            proposal=proposal, supersedes_expired=supersedes_expired,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
+            replaces=replaces,
+            guard_pending_proposal=guard_pending_proposal,
+        )
 
     def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
         # #1142: retention sweep for terminal operator-queue rows.
@@ -3569,20 +3930,86 @@ class DatabaseManager:
     def get_operator_queue_item(self, item_id):
         return self._operator_queue_ops.get_item(item_id)
 
+    def update_pending_problem_report(self, agent_name, request_id, *, question, context, now=None):
+        # trinity#3521: a comment sent after the thumbs-down reaches the alert.
+        return self._operator_queue_ops.update_pending_problem_report(
+            agent_name, request_id, question=question, context=context, now=now,
+        )
+
+    def get_operator_queue_item_for_agent_by_request_id(self, agent_name, request_id):
+        # trinity-enterprise#611: the agent's own readback — ignores Clear All.
+        return self._operator_queue_ops.get_item_for_agent_by_request_id(agent_name, request_id)
+
+    def list_expired_operator_queue_proposals(self, agent_name, limit, raised_by=None):
+        # trinity-enterprise#611: the native create's re-ask guard (C6).
+        return self._operator_queue_ops.list_expired_proposals_for_agent(agent_name, limit, raised_by)
+
+    def list_pending_operator_queue_proposals(self, agent_name, limit, raised_by=None):
+        # #3247 T8: the native create's pending-proposal guard (`already_pending`).
+        return self._operator_queue_ops.list_pending_proposals_for_agent(agent_name, limit, raised_by)
+
+    def list_pending_operator_queue_asks(self, agent_name, limit, exclude_request_id_prefixes=None):
+        # #3247: the agent's own pending asks for the Execution Context line.
+        return self._operator_queue_ops.list_pending_asks_for_agent(
+            agent_name, limit, exclude_request_id_prefixes)
+
+    def list_recent_operator_queue_endings(self, agent_name, since, limit,
+                                           exclude_request_id_prefixes=None):
+        # trinity-enterprise#611: ids + endings for the Execution Context line.
+        return self._operator_queue_ops.list_recent_endings_for_agent(
+            agent_name, since, limit,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
+        )
+
     def list_operator_queue_items(self, **kwargs):
         return self._operator_queue_ops.list_items(**kwargs)
 
+    def count_operator_queue_items(self, **kwargs):
+        return self._operator_queue_ops.count_items(**kwargs)
+
+    def list_operator_queue_agent_names(self, **kwargs):
+        return self._operator_queue_ops.list_item_agent_names(**kwargs)
+
+    def list_operator_queue_items_walk(self, **kwargs):
+        # trinity-enterprise#815: one page of a cursor walk, `(item, key)` pairs.
+        return self._operator_queue_ops.list_items_walk(**kwargs)
+
+    def operator_queue_walk_alert_priorities(self, **kwargs):
+        return self._operator_queue_ops.walk_alert_priorities(**kwargs)
+
     def respond_to_operator_queue_item(self, item_id, response, response_text,
-                                        responded_by_id, responded_by_email):
+                                        responded_by_id, responded_by_email,
+                                        divergence_acknowledged=False, terminal=False):
         return self._operator_queue_ops.respond_to_item(
-            item_id, response, response_text, responded_by_id, responded_by_email
+            item_id, response, response_text, responded_by_id, responded_by_email,
+            divergence_acknowledged=divergence_acknowledged, terminal=terminal,
         )
 
-    def cancel_operator_queue_item(self, item_id):
-        return self._operator_queue_ops.cancel_item(item_id)
+    def withdraw_operator_queue_item(self, agent_name, item_id, *, reason):
+        # trinity-enterprise#901: the agent ends its own pending ask, no successor.
+        return self._operator_queue_ops.withdraw_item(agent_name, item_id, reason=reason)
 
-    def bulk_cancel_operator_queue_items(self, ids, accessible_agent_names=None):
-        return self._operator_queue_ops.bulk_cancel_items(ids, accessible_agent_names)
+    def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None,
+                                   disposition="cancelled"):
+        # trinity-enterprise#611: CAS + endings ledger; a lost race carries
+        # `_status_conflict` (the mirror of respond). ent#748: `dismissed`.
+        return self._operator_queue_ops.cancel_item(
+            item_id, disposed_by_email=disposed_by_email, reason=reason,
+            disposition=disposition,
+        )
+
+    def set_operator_queue_discussion_link(self, item_id, key, chat_id):
+        # trinity-enterprise#747: link a pending ask to its discussion chat, once.
+        return self._operator_queue_ops.set_discussion_link(item_id, key, chat_id)
+
+    def bulk_cancel_operator_queue_items(self, ids, accessible_agent_names=None, *,
+                                         disposed_by_email, reason=None):
+        # trinity-enterprise#611: returns {"batch_id", "rows"} — the rows THIS
+        # sweep ended, never the ids it was asked to end.
+        return self._operator_queue_ops.bulk_cancel_items(
+            ids, accessible_agent_names,
+            disposed_by_email=disposed_by_email, reason=reason,
+        )
 
     def clear_resolved_operator_queue_items(self, agent_name=None,
                                             accessible_agent_names=None):
@@ -3590,16 +4017,65 @@ class DatabaseManager:
             agent_name, accessible_agent_names
         )
 
-    def get_operator_queue_terminal_for_agent(self, agent_name, since_hours=168):
+    def get_operator_queue_terminal_for_agent(self, agent_name, limit=200):
         return self._operator_queue_ops.get_terminal_items_for_agent(
-            agent_name, since_hours
+            agent_name, limit
         )
+
+    # #2915 — sync honesty (leader-locked poller writers + the header counts)
+    def get_operator_queue_sync_index_for_agent(self, agent_name):
+        return self._operator_queue_ops.get_sync_index_for_agent(agent_name)
+
+    def set_operator_queue_sync_state(self, item_id, state, detail, now):
+        return self._operator_queue_ops.set_sync_state(item_id, state, detail, now)
+
+    def refresh_operator_queue_last_confirmed(self, agent_name, now, older_than):
+        return self._operator_queue_ops.refresh_last_confirmed(agent_name, now, older_than)
+
+    def set_operator_queue_delivery_state(self, item_id, state, detail, now):
+        return self._operator_queue_ops.set_delivery_state(item_id, state, detail, now)
+
+    def mark_operator_queue_unconfirmed(self, detail, now, agent_name=None, exclude_agents=None,
+                                        exclude_request_id_prefixes=None):
+        return self._operator_queue_ops.mark_unconfirmed(
+            detail, now, agent_name=agent_name, exclude_agents=exclude_agents,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
+        )
+
+    def mark_operator_queue_undelivered_for_stopped_agents(self, now, *, running_agents,
+                                                           exclude_request_id_prefixes=None):
+        return self._operator_queue_ops.mark_undelivered_for_stopped_agents(
+            now, running_agents=running_agents,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
+        )
+
+    def count_operator_queue_flags(self, accessible_agent_names=None):
+        return self._operator_queue_ops.count_flags(accessible_agent_names)
 
     def mark_operator_queue_acknowledged(self, agent_name, item_id):
         # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
         return self._operator_queue_ops.mark_acknowledged(agent_name, item_id)
 
+    # #3246 — platform alerts: one pending row per (agent, subject)
+    def find_pending_operator_queue_by_subject(self, agent_name, subject):
+        return self._operator_queue_ops.find_pending_by_subject(agent_name, subject)
+
+    def find_person_ended_operator_queue_by_subject(self, agent_name, subject, since):
+        return self._operator_queue_ops.find_person_ended_by_subject(agent_name, subject, since)
+
+    def create_platform_operator_queue_item(self, agent_name, item, *, subject,
+                                            max_pending_for_type=None):
+        # Returns {"outcome": created|updated|refused_at_budget, "row", "changed"}.
+        return self._operator_queue_ops.create_platform_item(
+            agent_name, item, subject=subject, max_pending_for_type=max_pending_for_type,
+        )
+
+    def end_operator_queue_items_by_platform(self, ids, *, reason, batch_id=None):
+        # Returns {"batch_id", "rows"} — the rows THIS call ended (CAS-won).
+        return self._operator_queue_ops.end_items_by_platform(ids, reason=reason, batch_id=batch_id)
+
     def mark_operator_queue_expired(self):
+        # trinity-enterprise#611: returns the rows this sweep ended (was a count).
         return self._operator_queue_ops.mark_expired()
 
     def get_operator_queue_stats(self, **kwargs):
@@ -3612,14 +4088,17 @@ class DatabaseManager:
         # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
         return self._operator_queue_ops.item_exists(agent_name, item_id)
 
-    def count_operator_queue_pending_for_agent(self, agent_name, item_type=None):
+    def count_operator_queue_pending_for_agent(self, agent_name, item_type=None,
+                                               exclude_request_id_prefixes=None):
         # #1632: DB-measured per-agent pending depth — the primary ingestion cap.
         # #1677: optional item_type = the per-(agent, type) platform-alert
         # budget read. The pass-through is load-bearing — a missed delegation
         # plus the helper's swallow voids the budget while monkeypatched tests
-        # stay green (pinned by test_1677's real-facade test).
+        # stay green (pinned by test_1677's real-facade test). #3130: the
+        # prefixes leave platform rows out of the agent's own cap.
         return self._operator_queue_ops.count_pending_for_agent(
-            agent_name, item_type=item_type
+            agent_name, item_type=item_type,
+            exclude_request_id_prefixes=exclude_request_id_prefixes,
         )
 
     # =========================================================================
@@ -3650,8 +4129,10 @@ class DatabaseManager:
     def create_agent_event(self, source_agent, event_type, payload=None, subscriptions_triggered=0):
         return self._event_subscription_ops.create_event(source_agent, event_type, payload, subscriptions_triggered)
 
-    def list_agent_events(self, source_agent=None, event_type=None, limit=50):
-        return self._event_subscription_ops.list_events(source_agent, event_type, limit)
+    def list_agent_events(self, source_agent=None, event_type=None, limit=50, agent_names=None):
+        return self._event_subscription_ops.list_events(
+            source_agent, event_type, limit, agent_names=agent_names
+        )
 
     # =========================================================================
     # Access Requests (Issue #311)
@@ -3813,12 +4294,103 @@ class DatabaseManager:
         return self._compatibility_ops.count_agents_with_hard_findings()
 
     # =========================================================================
+    # Declared metric registry (ent#477 — delegated to db/metric_definitions.py)
+    # =========================================================================
+    #
+    # `DatabaseManager` delegates BY NAME — there is no `__getattr__` passthrough
+    # — so a method reachable only through `db.<name>(...)` must be listed here
+    # or it `AttributeError`s at runtime while every mocked test stays green
+    # (learning 2026-07-06). `test_ent477_metric_registry.py` derives the
+    # required set by scanning `services/metric_registry.py` for `db.<name>(`.
+
+    def list_metric_definitions(self, agent_name: str, include_retired: bool = False):
+        """Declared metric definitions for an agent. See MetricDefinitionOperations."""
+        return self._metric_definition_ops.list_for_agent(
+            agent_name, include_retired=include_retired
+        )
+
+    def metric_declarations_elsewhere(self, agent_name, names):
+        """Metric names the owner's other agents actively declare, with their
+        agreed label (ent#843). See MetricDefinitionOperations."""
+        return self._metric_definition_ops.declarations_elsewhere(agent_name, list(names))
+
+    def reconcile_metric_definitions(self, agent_name: str, declared, source: str):
+        """Set-diff the declared metrics into the registry; returns a summary dict."""
+        return self._metric_definition_ops.reconcile(agent_name, declared, source)
+
+    # -------------------------------------------------------------------------
+    # Recorded metric points (trinity-enterprise#478 — db/metric_points.py)
+    # -------------------------------------------------------------------------
+
+    def insert_metric_points(self, agent_name: str, rows):
+        """Insert or restate validated points; returns `PointWriteCounts`
+        (`recorded`, `deduplicated`, `corrected` — ent#729)."""
+        return self._metric_point_ops.insert_points(agent_name, rows)
+
+    def count_metric_points_today(
+        self, agent_name: str, day_start_iso: str, limit: int
+    ) -> int:
+        """Points this agent wrote since `day_start_iso`, counted to `limit`."""
+        return self._metric_point_ops.count_points_today(
+            agent_name, day_start_iso, limit
+        )
+
+    def latest_metric_points(
+        self, agent_name: str, metric_names, per_metric_limit: int = 200
+    ):
+        """Newest-N points per named metric (ent#479 read). See MetricPointOperations."""
+        return self._metric_point_ops.latest_points_for(
+            agent_name, list(metric_names), per_metric_limit
+        )
+
+    def metric_series_points(
+        self,
+        agent_name: str,
+        metric: str,
+        since_iso: str,
+        until_iso=None,
+        limit: int = 2000,
+    ):
+        """One metric's points inside a window, newest first, `limit + 1` deep."""
+        return self._metric_point_ops.series_points(
+            agent_name, metric, since_iso, until_iso, limit
+        )
+
+    def metric_series_points_for_dims(
+        self,
+        agent_name: str,
+        metric: str,
+        dims,
+        absent_keys,
+        since_iso: str,
+        limit: int,
+    ):
+        """One dimension series' newest points since `since_iso` (#3293)."""
+        return self._metric_point_ops.series_points_for_dims(
+            agent_name, metric, dict(dims), list(absent_keys), since_iso, limit
+        )
+
+    def count_metric_points_candidates(self, retention_days: int, limit: int) -> int:
+        """Bounded count of points older than the window (#1644 guard)."""
+        return self._metric_point_ops.count_metric_points_candidates(
+            retention_days, limit
+        )
+
+    def prune_metric_points(
+        self, retention_days: int = 365, chunk_size: int = 5000
+    ) -> int:
+        """Delete points older than the window, bounded per call."""
+        return self._metric_point_ops.prune_metric_points(
+            retention_days, chunk_size
+        )
+
+    # =========================================================================
     # Idempotency keys (RELIABILITY-006, #525 — delegated to db/idempotency.py)
     # =========================================================================
 
-    def idempotency_claim(self, scope: str, key: str, ttl_hours: int = 24) -> dict:
+    def idempotency_claim(self, scope: str, key: str, ttl_hours: int = 24, **intent) -> dict:
         """Atomically claim (scope, key). See IdempotencyOperations.claim."""
-        return self._idempotency_ops.claim(scope, key, ttl_hours=ttl_hours)
+        return self._idempotency_ops.claim(scope, key, ttl_hours=ttl_hours, **intent)
 
     def idempotency_attach_execution(self, scope: str, key: str, execution_id: str) -> None:
         """Record the execution_id for an in-flight idempotency claim."""
@@ -3835,6 +4407,10 @@ class DatabaseManager:
     def idempotency_discard_completed(self, scope: str, key: str) -> None:
         """Delete a completed replay row whose recorded resource is gone (#2040 F3)."""
         return self._idempotency_ops.discard_completed(scope, key)
+
+    def idempotency_discard_completed_if_execution(self, scope: str, key: str, execution_id: str) -> bool:
+        """Compare-and-delete a completed row still naming execution_id (#3245)."""
+        return self._idempotency_ops.discard_completed_if_execution(scope, key, execution_id)
 
     def idempotency_purge_expired(self, ttl_hours: int = 24) -> int:
         """Purge idempotency rows older than ttl_hours. Returns rows removed."""
@@ -3880,7 +4456,7 @@ class DatabaseManager:
     def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
         return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
 
-    def finalize_loop_run(self, run_id: str, **kwargs):
+    def finalize_loop_run(self, run_id: str, **kwargs) -> bool:
         return self._loop_ops.finalize_loop_run(run_id, **kwargs)
 
     def list_loop_runs(self, loop_id: str):

@@ -24,7 +24,9 @@ import httpx
 
 from database import db
 from adapters.base import ChannelAdapter, FileAttachment, NormalizedMessage, ChannelResponse
+from services import login_policy_gate
 from services.email_service import EmailService
+from services.telegram_group_context import fetch_can_read_all_group_messages
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,21 @@ def _clear_pending_login(binding_id: int, user_id: str) -> None:
         logger.warning(f"Redis unavailable for pending login clear: {e}")
 
 
+# ent#849: strong refs so a detached code send is not garbage-collected mid-flight.
+_login_code_tasks: set = set()
+
+
+async def _send_login_code_if_allowed(email: str) -> None:
+    """Mint and send a /login code off the reply path (policy-refused mode)."""
+    try:
+        if not login_policy_gate.email_code_allowed_for(email):
+            return
+        code = db.create_login_code(email, expiry_minutes=10)["code"]
+        await EmailService().send_verification_code(email, code)
+    except Exception:
+        logger.exception("Failed to issue /login code")
+
+
 class TelegramAdapter(ChannelAdapter):
     """Telegram implementation of ChannelAdapter with per-agent bot routing."""
 
@@ -124,6 +141,21 @@ class TelegramAdapter(ChannelAdapter):
     def get_session_identifier(self, message: NormalizedMessage) -> str:
         bot_id = message.metadata.get("bot_id", "unknown")
         chat_id = message.channel_id
+        if message.metadata.get("is_group"):
+            # ent#600: a group's session is keyed per CHAT, not per sender — it
+            # is the shared, attributed context every tagged turn reads and
+            # every observed message writes. DM history can never land here
+            # (a DM key carries the sender and its chat_id is the user id), so
+            # the reason TGRAM-GROUP ran groups with fresh context still holds.
+            # Forum supergroups: each topic is its own conversation.
+            # #1649 pinned the previous per-sender shape as a known limitation
+            # and asked for exactly this re-decision; proactive broadcasts now
+            # land in the session a reply reads.
+            key = f"{bot_id}:group:{chat_id}"
+            topic_id = message.metadata.get("topic_id")
+            if topic_id:
+                key = f"{key}:topic:{topic_id}"
+            return key
         return f"{bot_id}:{message.sender_id}:{chat_id}"
 
     def get_source_identifier(self, message: NormalizedMessage) -> str:
@@ -182,23 +214,34 @@ class TelegramAdapter(ChannelAdapter):
         # everything there). Observe mode stays excluded so the indicator
         # never reveals a silently-observing bot.
         progress_ack_eligible = True
+        # ent#600: `untagged` — a group message that did not address the bot;
+        # `observe_only` — an untagged message in mention mode, which the
+        # router RECORDS as group context and never executes (no reply, no
+        # typing, no reaction, no rate-limit charge).
+        untagged = False
+        observe_only = False
         if is_group:
             is_mentioned = self._is_bot_mentioned(message, bot_username)
             is_reply = self._is_reply_to_bot(message, bot_id)
-            progress_ack_eligible = is_mentioned or is_reply
+            is_addressed_command = self._is_command_addressed_to_bot(message, bot_username)
+            is_tagged = is_mentioned or is_reply or is_addressed_command
+            progress_ack_eligible = is_tagged
+            untagged = not is_tagged
 
-            if not is_mentioned and not is_reply:
-                # Check trigger mode — if "all" or "observe", process anyway
-                # Issue #349: "observe" mode passes all messages but agent can return [NO_REPLY]
+            if untagged:
+                # Check trigger mode — "all" / "observe" execute every message
+                # (Issue #349: "observe" lets the agent return [NO_REPLY]);
+                # "mention" observes it instead of dropping it (ent#600).
                 binding = db.get_telegram_binding(agent_name)
-                if binding:
-                    group_config = db.get_telegram_group_config(binding["id"], chat_id)
-                    trigger_mode = group_config.get("trigger_mode") if group_config else None
-                    if trigger_mode not in ("all", "observe"):
-                        return None
+                if not binding:
+                    return None
+                group_config = db.get_telegram_group_config(binding["id"], chat_id)
+                trigger_mode = group_config.get("trigger_mode") if group_config else None
+                if trigger_mode in ("all", "observe"):
                     progress_ack_eligible = trigger_mode == "all"
                 else:
-                    return None
+                    observe_only = True
+                    progress_ack_eligible = False
 
         # Extract text content
         text = message.get("text", "").strip()
@@ -223,6 +266,38 @@ class TelegramAdapter(ChannelAdapter):
         if not text and files:
             text = "(file upload)"
 
+        metadata = {
+            "bot_id": bot_id,
+            "bot_username": bot_username,
+            "agent_name": agent_name,
+            "username": username,
+            "is_group": is_group,
+            "chat_type": chat_type,
+            "chat_title": chat.get("title"),
+            "has_photo": "photo" in message,
+            "has_document": "document" in message,
+            "raw_message": message,
+            # ent#264: True for DMs, mention/reply-triggered group turns,
+            # and `all`-trigger-mode groups; False for observe-mode
+            # un-mentioned turns (typing only — no visible indicator).
+            "progress_ack_eligible": progress_ack_eligible,
+            # ent#600: see the group-filtering block above.
+            "untagged": untagged,
+            "observe_only": observe_only,
+        }
+        if is_group:
+            # ent#600: speaker labels for attributed history replay (#903's
+            # `_sender_label` reads these). Groups only — DM transcripts (and
+            # the MEM-001 summaries built from them) keep today's shape.
+            first_name = (from_user.get("first_name") or "").strip()
+            if first_name:
+                metadata["sender_display_name"] = first_name
+            if username:
+                metadata["sender_username"] = username
+            # Forum supergroups: a topic is its own conversation.
+            if message.get("is_topic_message") and message.get("message_thread_id"):
+                metadata["topic_id"] = str(message["message_thread_id"])
+
         return NormalizedMessage(
             sender_id=user_id,
             text=text,
@@ -230,22 +305,7 @@ class TelegramAdapter(ChannelAdapter):
             thread_id=str(message.get("message_id", "")),
             timestamp=str(message.get("date", "")),
             files=files,
-            metadata={
-                "bot_id": bot_id,
-                "bot_username": bot_username,
-                "agent_name": agent_name,
-                "username": username,
-                "is_group": is_group,
-                "chat_type": chat_type,
-                "chat_title": chat.get("title"),
-                "has_photo": "photo" in message,
-                "has_document": "document" in message,
-                "raw_message": message,
-                # ent#264: True for DMs, mention/reply-triggered group turns,
-                # and `all`-trigger-mode groups; False for observe-mode
-                # un-mentioned turns (typing only — no visible indicator).
-                "progress_ack_eligible": progress_ack_eligible,
-            }
+            metadata=metadata,
         )
 
     async def send_response(
@@ -277,13 +337,18 @@ class TelegramAdapter(ChannelAdapter):
         reply_to = thread_id if response.metadata.get("is_group") else None
 
         for chunk in chunks:
-            await self._send_message(
+            sent = await self._send_message(
                 bot_token=bot_token,
                 chat_id=channel_id,
                 text=chunk,
                 reply_to_message_id=reply_to,
                 parse_mode="HTML",
             )
+            if sent is None:
+                # Never deliver the suffix after a missing chunk, or replay
+                # already accepted chunks while retrying a later one.
+                logger.error("Telegram reply stopped after a failed chunk")
+                return
 
     # =========================================================================
     # Unified access control (Issue #311)
@@ -625,6 +690,19 @@ class TelegramAdapter(ChannelAdapter):
         return False
 
     @staticmethod
+    def _is_command_addressed_to_bot(message: dict, bot_username: str) -> bool:
+        """``/reset@mybot`` addresses the bot even though Telegram files it as a
+        ``bot_command`` entity, not a ``mention`` (ent#600). A bare ``/reset``
+        in a group is addressed to nobody in particular and stays untagged."""
+        if not bot_username:
+            return False
+        text = (message.get("text") or "").strip()
+        if not text.startswith("/"):
+            return False
+        first = text.split()[0]
+        return first.lower().endswith(f"@{bot_username.lower()}")
+
+    @staticmethod
     def _is_reply_to_bot(message: dict, bot_id: str) -> bool:
         """Check if this message is a reply to one of the bot's own messages."""
         reply_to = message.get("reply_to_message")
@@ -681,10 +759,54 @@ class TelegramAdapter(ChannelAdapter):
                 chat_title=chat_title,
                 chat_type=chat_type,
             )
+            # ent#600: re-adding the bot is the documented way to apply a
+            # Privacy Mode change, so this is the moment to re-read getMe.
+            # Best-effort — the config above is already written; a Telegram
+            # hiccup leaves the stored flag as it was.
+            await self._refresh_can_read_all_group_messages(binding["agent_name"])
         elif new_status in ("left", "kicked") and old_status in ("member", "administrator"):
             # Bot was removed from group — deactivate config
             logger.info(f"Bot removed from group '{chat_title}' (chat_id={chat_id}) for agent={binding['agent_name']}")
             db.deactivate_telegram_group_config(binding["id"], chat_id)
+
+    async def _refresh_can_read_all_group_messages(self, agent_name: str) -> None:
+        """ent#600: store ``getMe.can_read_all_group_messages`` for the binding.
+        Never raises — an event handler must not die on a Telegram hiccup."""
+        try:
+            bot_token = db.get_telegram_bot_token(agent_name)
+            if not bot_token:
+                return
+            value = await fetch_can_read_all_group_messages(bot_token)
+            db.set_telegram_can_read_all_group_messages(agent_name, value)
+        except Exception as e:  # noqa: BLE001 — best-effort refresh
+            # Type only: an httpx error's message can carry the request URL,
+            # and the getMe URL embeds the bot token.
+            logger.debug(
+                f"[TELEGRAM] getMe refresh failed for {agent_name} (non-fatal): {type(e).__name__}"
+            )
+
+    # =========================================================================
+    # Group conversation context hooks (ent#600)
+    # =========================================================================
+
+    async def group_context_enabled(self, message: NormalizedMessage, agent_name: str) -> bool:
+        """Per-group opt-out (default ON; a missing row reads as ON)."""
+        binding = db.get_telegram_binding(agent_name)
+        if not binding:
+            return True
+        cfg = db.get_telegram_group_config(binding["id"], message.channel_id)
+        if not cfg:
+            return True
+        value = cfg.get("context_enabled")
+        return True if value is None else bool(value)
+
+    async def note_untagged_seen(self, message: NormalizedMessage, agent_name: str) -> None:
+        """An un-tagged message reached the bot in this group — the per-group
+        proof that Privacy Mode is effectively off (drives the panel status)."""
+        binding = db.get_telegram_binding(agent_name)
+        if not binding:
+            return
+        db.touch_telegram_group_untagged_seen(binding["id"], message.channel_id)
 
     async def _handle_user_member_change(self, event: dict, binding: dict) -> None:
         """Handle a user joining or leaving a group (welcome messages)."""
@@ -823,9 +945,18 @@ class TelegramAdapter(ChannelAdapter):
                     "I don't have a pending login for you. Send "
                     "<code>/login your@email.com</code> first."
                 )
+            # ent#849: refused before redeeming, worded like a wrong code.
+            if not login_policy_gate.email_code_allowed_for(pending_email):
+                return "❌ Invalid or expired code. Try again or request a new one."
             result = db.verify_login_code(pending_email, arg)
             if not result:
                 return "❌ Invalid or expired code. Try again or request a new one."
+            # ent#720: a suspended account is refused here as on the web — the
+            # verified email is NOT recorded, so the open-access shortcut below
+            # and the per-message gate never see it.
+            if db.is_email_account_suspended(pending_email):
+                _clear_pending_login(binding["id"], message.sender_id)
+                return "❌ This account is suspended. Contact the agent's owner."
             db.set_telegram_verified_email(binding["id"], message.sender_id, pending_email)
             _clear_pending_login(binding["id"], message.sender_id)
 
@@ -856,6 +987,19 @@ class TelegramAdapter(ChannelAdapter):
         email = arg.lower()
         if "@" not in email or " " in email or len(email) > 254:
             return "That doesn't look like an email address. Try <code>/login you@example.com</code>."
+
+        # ent#849: while the login policy refuses email codes, every address
+        # takes the same background path: members get no code, and neither the
+        # reply nor its timing tells a member from an outsider.
+        if not login_policy_gate.email_code_allowed():
+            _set_pending_login(binding["id"], message.sender_id, email)
+            task = asyncio.create_task(_send_login_code_if_allowed(email))
+            _login_code_tasks.add(task)
+            task.add_done_callback(_login_code_tasks.discard)
+            return (
+                f"📧 Sent a 6-digit code to <code>{email}</code>.\n"
+                "Reply with <code>/login 123456</code> to finish verification."
+            )
 
         try:
             code_data = db.create_login_code(email, expiry_minutes=10)
@@ -920,32 +1064,39 @@ class TelegramAdapter(ChannelAdapter):
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(url, json=payload)
-
-                if resp.status_code == 429:
-                    # Rate limited — respect retry_after
-                    retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
-                    logger.warning(f"Telegram rate limited, retry_after={retry_after}s")
-                    import asyncio
-                    await asyncio.sleep(min(retry_after, 30))
+                rate_limit_retried = False
+                while True:
                     resp = await client.post(url, json=payload)
-
-                if resp.status_code != 200:
-                    error_body = resp.text
-                    logger.error(f"Telegram sendMessage failed ({resp.status_code}): {error_body}")
-
-                    # If HTML parsing failed, retry with plain text
-                    if "can't parse entities" in error_body.lower():
+                    body = resp.json()
+                    if resp.status_code == 429 and not rate_limit_retried:
+                        rate_limit_retried = True
+                        retry_after = body.get("parameters", {}).get("retry_after", 5)
+                        if (not isinstance(retry_after, int) or isinstance(retry_after, bool)
+                                or not 0 <= retry_after <= 30):
+                            logger.warning("Telegram flood wait exceeds bounded retry policy")
+                            return None
+                        await asyncio.sleep(retry_after)
+                        continue
+                    if (resp.status_code == 400 and payload["parse_mode"]
+                            and "can't parse entities" in str(body.get("description", "")).lower()):
                         payload["parse_mode"] = ""
                         payload["text"] = self._strip_html(text)
-                        resp = await client.post(url, json=payload)
-                        if resp.status_code != 200:
-                            logger.error(f"Telegram plain text fallback also failed: {resp.text}")
-                            return None
-
-                return resp.json().get("result")
-        except Exception as e:
-            logger.error(f"Telegram sendMessage error: {e}", exc_info=True)
+                        continue
+                    result = body.get("result")
+                    if (resp.status_code == 200 and body.get("ok") is True
+                            and isinstance(result, dict) and result.get("message_id")):
+                        return result
+                    # Keep the useful API reason, never its URLs or our token.
+                    description = str(body.get("description", "No error description"))
+                    description = description.replace(bot_token, "[REDACTED]")
+                    description = re.sub(r"https?://\S+", "[URL]", description)
+                    description = " ".join(description.splitlines())[:300]
+                    logger.error("Telegram sendMessage failed (status %s): %s", resp.status_code, description)
+                    return None
+        except Exception:
+            # A timeout has an unknown delivery outcome: don't replay it, and
+            # don't log exception URLs containing the bot token.
+            logger.error("Telegram sendMessage failed without confirmation")
             return None
 
     # _send_voice is retained (now driven by services/voice_reply_service.py, ent#117);
@@ -1271,22 +1422,27 @@ class TelegramAdapter(ChannelAdapter):
         a cut are closed there and reopened in the next chunk — otherwise the
         continuation fails HTML parse and falls back to unformatted text.
         """
-        if len(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
+        def units(value):
+            return len(value.encode("utf-16-le")) // 2
+
+        if units(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
             return [text]
 
         # Reserve room for the closing tags a cut can append.
         limit = TELEGRAM_MAX_MESSAGE_LENGTH - 100
         chunks = []
         while text:
-            if len(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
+            if units(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
                 chunks.append(text)
                 break
 
             # Find a good split point — paragraph, then sentence, then hard cut
-            split_at = limit
+            # Count astral characters conservatively as two UTF-16 units.
+            # Decoding with ignore drops only a trailing half-surrogate.
+            split_at = len(text.encode("utf-16-le")[:limit * 2].decode("utf-16-le", errors="ignore"))
             for sep in ["\n\n", "\n", ". ", " "]:
-                idx = text.rfind(sep, 0, limit)
-                if idx > limit // 2:
+                idx = text.rfind(sep, 0, split_at)
+                if idx > split_at // 2:
                     split_at = idx + len(sep)
                     break
 
@@ -1298,6 +1454,12 @@ class TelegramAdapter(ChannelAdapter):
                     split_at = limit
                 head = text[:split_at]
 
+            # An HTML entity is indivisible too: '&am' + 'p;' changes the
+            # visible reply even when Telegram accepts both chunks.
+            if head.rfind("&") > head.rfind(";"):
+                split_at = head.rfind("&")
+                head = text[:split_at]
+
             open_tags = []
             for m in TelegramAdapter._HTML_TAG_RE.finditer(head):
                 if m.group(1):
@@ -1306,11 +1468,17 @@ class TelegramAdapter(ChannelAdapter):
                 else:
                     open_tags.append((m.group(2).lower(), m.group(3) or ""))
 
-            chunks.append(
-                head + "".join(f"</{name}>" for name, _ in reversed(open_tags))
-            )
+            chunk = head + "".join(f"</{name}>" for name, _ in reversed(open_tags))
+            prefix = "".join(f"<{name}{attrs}>" for name, attrs in open_tags)
+            if split_at <= len(prefix) or units(chunk) > TELEGRAM_MAX_MESSAGE_LENGTH:
+                # Pathologically nested/large markup cannot be reopened with
+                # room for content. Preserve the remaining text unformatted.
+                plain = html.escape(TelegramAdapter._strip_html(text), quote=False)
+                chunks.extend(TelegramAdapter._split_message(plain))
+                break
+            chunks.append(chunk)
             text = (
-                "".join(f"<{name}{attrs}>" for name, attrs in open_tags)
+                prefix
                 + text[split_at:]
             )
 

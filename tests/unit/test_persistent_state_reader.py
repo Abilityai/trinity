@@ -94,39 +94,33 @@ def test_protected_paths_lists_unchanged():
     (refresh the snapshot, reference your issue here) or upstream drifted
     (refresh and document why).
     """
+    # trinity-enterprise#820: the lists moved into the vendored path policy
+    # (agent_server/file_path_policy.py) and files.py reads them from there;
+    # the snapshot is of the policy's data.
+    import importlib.util
+    policy_py = _FILES_PY.parents[1] / "file_path_policy.py"
+    spec = importlib.util.spec_from_file_location("_test_persistent_policy", str(policy_py))
+    policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy)
     source = _FILES_PY.read_text()
+    assert "PROTECTED_PATHS = list(_policy.AGENT_SERVER_DELETE_PROTECTED_NAMES)" in source
+    assert "EDIT_PROTECTED_PATHS = list(_policy.AGENT_SERVER_EDIT_PROTECTED_NAMES)" in source
 
-    # PROTECTED_PATHS (delete protection) — unchanged since S4
-    expected_protected = (
-        "PROTECTED_PATHS = [\n"
-        '    "CLAUDE.md",\n'
-        '    ".trinity",\n'
-        '    ".git",\n'
-        '    ".gitignore",\n'
-        '    ".env",\n'
-        '    ".mcp.json",\n'
-        '    ".mcp.json.template",\n'
-        "]"
-    )
+    # PROTECTED_PATHS (delete protection) — refreshed by trinity-enterprise#823:
+    # added .claude.json and .credentials.json (Claude Code's login files);
+    # trinity-enterprise#820 added .credentials.enc (the edit list had it, the
+    # delete list did not).
+    assert policy.AGENT_SERVER_DELETE_PROTECTED_NAMES == (
+        "CLAUDE.md", ".trinity", ".git", ".gitignore", ".env", ".mcp.json",
+        ".mcp.json.template", ".credentials.enc", ".claude.json", ".credentials.json",
+    ), "PROTECTED_PATHS drifted — refresh the snapshot if the change is intentional."
     # EDIT_PROTECTED_PATHS (edit protection) — refreshed by #590:
-    # added .mcp.json and .credentials.enc.
-    expected_edit_protected = (
-        "EDIT_PROTECTED_PATHS = [\n"
-        '    ".trinity",\n'
-        '    ".git",\n'
-        '    ".gitignore",\n'
-        '    ".env",\n'
-        '    ".mcp.json",\n'
-        '    ".mcp.json.template",\n'
-        '    ".credentials.enc",\n'
-        "]"
-    )
-    assert expected_protected in source, (
-        "PROTECTED_PATHS drifted — refresh the snapshot if the change is intentional."
-    )
-    assert expected_edit_protected in source, (
-        "EDIT_PROTECTED_PATHS drifted — refresh the snapshot if the change is intentional."
-    )
+    # added .mcp.json and .credentials.enc; trinity-enterprise#823 added
+    # .claude.json and .credentials.json.
+    assert policy.AGENT_SERVER_EDIT_PROTECTED_NAMES == (
+        ".trinity", ".git", ".gitignore", ".env", ".mcp.json", ".mcp.json.template",
+        ".credentials.enc", ".claude.json", ".credentials.json",
+    ), "EDIT_PROTECTED_PATHS drifted — refresh the snapshot if the change is intentional."
 
 
 # ---------------------------------------------------------------------------

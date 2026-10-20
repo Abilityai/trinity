@@ -67,6 +67,62 @@ _TRINITY_AUTHORED_PATHS: Tuple[str, ...] = (
     ".trinity/plugins.yaml",
 )
 
+# ent#708: the shell twin of the agent server's `_guard_container_only_settings`
+# (the agent server ships as its own image and cannot import this module), for
+# the backend-driven commit in `provisioning.initialize_git_in_container`. Runs
+# after staging: when the INDEX copy of `.claude/settings.json` registers a hook
+# under container-only `/opt/trinity/` paths or carries a credential-bearing key
+# (HOME is the repo root, so it is also Claude Code's user settings file), or is
+# not UTF-8 JSON object text, keep the HEAD copy when HEAD registers no
+# `/opt/trinity/` hook (a no-op when the index already equals HEAD: nothing new
+# leaks, and untracking would commit a DELETION of a template's settings —
+# review of #3019), else untrack it (no HEAD copy, or a pre-#2036 hook-path leak
+# to heal). The working-tree file is never touched.
+#
+# ONE rule, two homes. A key check cannot be expressed robustly in grep (a key
+# name can appear inside a hook command or a nested object), so the checker is
+# the SAME predicate as `agent_server/routers/git.py::_settings_refusal_reason`,
+# run by the container's own python3: exit 0 = may commit, anything else
+# (refused, undecodable, unparseable, python3 missing) = keep it out — fail
+# closed. The heal check fails the OTHER way: exit 0 only on a positively
+# detected `/opt/trinity/` hook, so an error keeps the HEAD copy rather than
+# committing a deletion. The marker and the key list are passed as argv so the
+# programs need no string literals: the whole constant is spliced into
+# `bash -c "cd <dir> && <cmd>"` and docker-py `shlex.split`s it, so it must
+# carry no double quotes, `$`, backslash or backtick. `_CREDENTIAL_SETTINGS_KEYS`
+# below must equal the agent server's tuple of the same name (parity-tested in
+# test_ent708_settings_json_guard.py).
+_CREDENTIAL_SETTINGS_KEYS: Tuple[str, ...] = (
+    "env",
+    "apiKeyHelper",
+    "awsAuthRefresh",
+    "awsCredentialExport",
+    "gcpAuthRefresh",
+    "otelHeadersHelper",
+)
+_SETTINGS_PARSE = (
+    "import sys,json;a=sys.argv;d=json.loads(sys.stdin.buffer.read().decode());"
+    "h=isinstance(d,dict) and a[1] in json.dumps(d.get(a[2]));"
+)
+_SETTINGS_CHECK = (
+    "python3 -c '" + _SETTINGS_PARSE
+    + "sys.exit(int(not isinstance(d,dict) or h or any(d.get(k) for k in a[3:])))' "
+    "/opt/trinity/ hooks " + " ".join(_CREDENTIAL_SETTINGS_KEYS) + " 2>/dev/null"
+)
+_SETTINGS_HEAL_CHECK = (
+    "python3 -c '" + _SETTINGS_PARSE + "sys.exit(int(not h))' "
+    "/opt/trinity/ hooks 2>/dev/null"
+)
+CONTAINER_ONLY_SETTINGS_GUARD = (
+    "if git cat-file -e :.claude/settings.json 2>/dev/null "
+    "&& ! git show :.claude/settings.json | " + _SETTINGS_CHECK + "; then "
+    "if git cat-file -e HEAD:.claude/settings.json 2>/dev/null "
+    "&& ! git show HEAD:.claude/settings.json | " + _SETTINGS_HEAL_CHECK + "; "
+    "then git reset -q -- .claude/settings.json; "
+    "else git rm -q --cached -- .claude/settings.json; fi; fi"
+)
+
+
 _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # Shell init / history (instance-specific)
     ".bash_logout",
@@ -142,21 +198,20 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     #
     # ent#345 UPDATE: the platform no longer bakes this file — the guardrail
     # registration moved to root-owned `/etc/claude-code/managed-settings.json`,
-    # out of the agent's write reach and out of the synced tree. The rule STAYS
-    # load-bearing, for the two copies that can still exist: a legacy one on a
-    # volume that predates ent#345 (removed by `startup.sh` only on an exact
-    # content match, so an agent that never restarts still has it) and an
-    # agent-authored one. Either still registers absolute `/opt/trinity` paths, so
-    # committing either still bricks a foreign clone — the damage above, unchanged.
+    # out of the agent's write reach and out of the synced tree.
     #
-    # Trade-off, stated: `.claude/settings.json` doubles as Claude Code's
-    # PROJECT-level settings file, so a template can no longer commit one. The
-    # original justification ("the baked file always exists and would collide") no
-    # longer holds — nothing bakes it — but the rule survives on the leak argument
-    # alone, and an agent that genuinely needs it keeps the #1596 escape hatch:
-    # negate in its own `.gitignore` (`!.claude/settings.json`).
-    # `settings.local.json` is already covered by the `*.local.json` rule below.
-    ".claude/settings.json",
+    # ent#708: `.claude/settings.json` is therefore NOT ignored any more. It is
+    # Claude Code's PROJECT settings file — a template ships hooks there, and the
+    # file-level rule silently dropped them (the marketplace `add-git-sync` hooks
+    # vanished from every deployed agent until the skill learned to negate it).
+    # The damage #2036 fixed was never the file, it was one CONTENT: absolute
+    # `/opt/trinity/` hook paths. Container paths or credential-bearing keys
+    # (HOME is the repo root, so this is also the USER settings file) are now
+    # kept out of every platform commit by a guard instead — `agent_server/routers/git.py::
+    # _guard_container_only_settings` (heartbeat, Push, reset) and
+    # `CONTAINER_ONLY_SETTINGS_GUARD` below (initialize) — which also covers the
+    # legacy copies `startup.sh`'s exact-match removal leaves on long-lived
+    # volumes. `settings.local.json` is covered by the `*.local.json` rule below.
     ".claude/remote-settings.json",
     ".claude/policy-limits.json",
     ".claude/backups/",
@@ -187,6 +242,25 @@ _GITIGNORE_SUPERSEDED_LINES: Tuple[str, ...] = (
     ".trinity/",
     ".trinity",
 )
+
+# ent#708: lines retired from the canonical list whose removal is only SAFE once
+# the container can enforce what replaced them. `.claude/settings.json` left the
+# list for a content guard, and the merge strips only managed lines — so without
+# this every existing agent kept the old line, migrated into its user region,
+# and its template hooks stayed dropped (review of #3019). But the merge also
+# runs by `docker exec` on containers still on a pre-guard base image, whose
+# heartbeat and Push would then commit a legacy `/opt/trinity/` copy or a
+# credential. So these are stripped only when the container's agent server
+# carries the guard, probed at merge time by grepping its source for the guard's
+# name; a pre-guard container keeps the line until it is recreated on a new
+# image. Deliberately NOT in `_GITIGNORE_MANAGED_LINES`: on a pre-guard image the
+# line is legitimately still there, and the sweep's "shadowed by us" oracle must
+# not claim it. The probe fails SAFE — a missing or renamed file keeps the line.
+_GITIGNORE_GUARD_GATED_SUPERSEDED_LINES: Tuple[str, ...] = (
+    ".claude/settings.json",
+)
+_SETTINGS_GUARD_PROBE_PATH = "/app/agent_server/routers/git.py"
+_SETTINGS_GUARD_PROBE_TOKEN = "_guard_container_only_settings"
 
 AGENT_HOME_DIR = "/home/developer"
 
@@ -343,7 +417,7 @@ if not _GITIGNORE_PROTECTED <= set(_GITIGNORE_PATTERNS):
         "that is not there would be written to the floor and never stripped."
     )
 
-for _managed_line in _GITIGNORE_MANAGED_LINES:
+for _managed_line in (*_GITIGNORE_MANAGED_LINES, *_GITIGNORE_GUARD_GATED_SUPERSEDED_LINES):
     # `grep -vxF -f` is the strip mechanism. An EMPTY entry in that pattern file
     # matches every blank line with `-x` (silently deleting the user's spacing)
     # and every line without it (wiping the file); a newline-bearing entry
@@ -427,6 +501,14 @@ def _build_gitignore_merge_command(git_dir: str) -> str:
         q(line) for line in (_GITIGNORE_FLOOR_BEGIN, *floor, _GITIGNORE_FLOOR_END)
     )
     strip_args = " ".join(q(line) for line in _GITIGNORE_MANAGED_LINES)
+    gated_args = " ".join(q(line) for line in _GITIGNORE_GUARD_GATED_SUPERSEDED_LINES)
+    # ent#708: see `_GITIGNORE_GUARD_GATED_SUPERSEDED_LINES` — stripped only
+    # inside a container whose agent server carries the settings content guard.
+    gated_strip = (
+        f"if grep -qsF -- {q(_SETTINGS_GUARD_PROBE_TOKEN)} "
+        f"{q(_SETTINGS_GUARD_PROBE_PATH)}; then "
+        f"printf '%s\\n' {gated_args}; printf '%s\\r\\n' {gated_args}; fi"
+    )
 
     script = (
         f"cd {q(git_dir)} && "
@@ -436,7 +518,8 @@ def _build_gitignore_merge_command(git_dir: str) -> str:
         "{ [ -e .gitignore ] || : > .gitignore; } && "
         f"printf '%s\\n' {top_args} > .gitignore.tmp && "
         "{ LC_ALL=C grep -a -vxF -f "
-        f"<(printf '%s\\n' {strip_args}; printf '%s\\r\\n' {strip_args}) "
+        f"<(printf '%s\\n' {strip_args}; printf '%s\\r\\n' {strip_args}; "
+        f"{gated_strip}) "
         ".gitignore >> .gitignore.tmp || [ $? -eq 1 ]; } && "
         f"printf '%s\\n' {floor_args} >> .gitignore.tmp && "
         "if cmp -s .gitignore.tmp .gitignore; then rm -f .gitignore.tmp; "
@@ -592,41 +675,32 @@ async def _git_toplevel(container_name: str) -> Optional[str]:
     return None
 
 
-async def _detect_git_dir_fallback(container_name: str) -> str:
-    """Where to *create* a repo when the container has none yet.
-
-    Verbatim the pre-#2075 content heuristic: any non-empty ``workspace/``
-    means the repo goes there. ``initialize_git_in_container`` uses this to
-    place a brand-new repo, so fresh-agent placement stays byte-compatible.
-    """
-    check_workspace = await execute_command_in_container(
-        container_name=container_name,
-        command=(
-            'bash -c "[ -d /home/developer/workspace ] && '
-            'find /home/developer/workspace -mindepth 1 -maxdepth 1 | '
-            'head -1 | wc -l"'
-        ),
-        timeout=5,
-    )
-    workspace_has_content = (
-        check_workspace.get("exit_code") == 0
-        and "1" in check_workspace.get("output", "")
-    )
-    return "/home/developer/workspace" if workspace_has_content else "/home/developer"
+#: Where a NEW repository is created, and the only root the agent server ever
+#: reads (`agent_server/routers/git.py::_STATUS_HOME_DIR`, `auto_sync._HOME_DIR`).
+#: #2938: the pre-#2075 content heuristic used to root a fresh repo at
+#: `workspace/` whenever that directory held anything — and every git route in
+#: the agent server, plus in-container auto-sync, hardcodes the home
+#: directory, so such an init returned 200 and the very next status poll said
+#: "not enabled" forever. A populated `workspace/` is not a reason to root the
+#: repo there; it is content under home that the initial commit should include.
+NEW_REPO_ROOT = "/home/developer"
 
 
 async def _detect_git_dir(container_name: str) -> str:
     """Pick the directory git operations should run in for an agent container.
 
-    Git's own answer wins (``_git_toplevel``). Only when the container has no
-    repository at all does the legacy content heuristic decide — that path is
-    reached by ``initialize_git_in_container``, which needs a placement for a
-    repo that does not exist yet.
+    Git's own answer wins (``_git_toplevel``): a genuinely workspace-rooted
+    legacy repo still answers ``/home/developer/workspace`` so Push, the
+    gitignore migration and the token scrub keep working on it. A container
+    with no repository at all answers ``NEW_REPO_ROOT`` — the one root the
+    agent server reads — which is the placement ``initialize_git_in_container``
+    needs for a repo that does not exist yet (#2938; the content heuristic that
+    used to decide this is gone, see ``NEW_REPO_ROOT``).
     """
     top = await _git_toplevel(container_name)
     if top:
         return top
-    return await _detect_git_dir_fallback(container_name)
+    return NEW_REPO_ROOT
 
 
 async def _migrate_workspace_gitignore(agent_name: str) -> gitignore_sweep.GitignoreSweep:

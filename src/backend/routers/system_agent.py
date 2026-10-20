@@ -32,8 +32,8 @@ from services.docker_utils import (
     container_exec_run, api_exec_create, api_exec_start
 )
 from services.agent_service.helpers import check_base_image_state
-from services.agent_service.lifecycle import start_agent_internal
-from services.system_agent_service import BASE_IMAGE_STATE_LABELS
+from services.agent_service.lifecycle import public_skills_result, start_agent_internal
+from services.system_agent_service import BASE_IMAGE_STATE_LABELS, system_agent_service
 from db.agents import SYSTEM_AGENT_NAME
 
 router = APIRouter(prefix="/api/system-agent", tags=["system-agent"])
@@ -274,6 +274,9 @@ async def restart_system_agent(
         if refreshed is not None:
             await container_reload(refreshed)
             status = refreshed.status
+            # #3814: a restart is the remedy the pull-drift alert names; re-read
+            # the new container so the alert ends here, not at the next boot.
+            system_agent_service._report_pull_mode(refreshed)
         else:
             status = "unknown"
 
@@ -289,6 +292,9 @@ async def restart_system_agent(
             # `image_drift` is the adoption that answers the staleness alarm.
             "recreated": bool(start_result.get("recreated")),
             "recreate_reason": start_result.get("recreate_reason"),
+            # #2991: the same skill-delivery pair the agent start endpoint returns.
+            "skills_injection": start_result.get("skills_injection", "unknown"),
+            "skills_result": public_skills_result(start_result.get("skills_result")),
         }
 
     except Exception as e:

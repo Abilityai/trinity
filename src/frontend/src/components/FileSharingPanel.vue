@@ -1,13 +1,15 @@
 <template>
   <div>
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">File Sharing</h3>
-    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      Let the agent publish files from its
-      <code class="font-mono text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">/home/developer/public/</code>
-      directory via time-limited download URLs. Agents call the
-      <code class="font-mono text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">share_file</code>
-      MCP tool once this toggle is on.
-    </p>
+    <template v-if="!embedded">
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">File Sharing</h3>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+        Let the agent publish files from its
+        <code class="font-mono text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">/home/developer/public/</code>
+        directory via time-limited download URLs. Agents call the
+        <code class="font-mono text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">share_file</code>
+        MCP tool once this toggle is on.
+      </p>
+    </template>
 
     <!-- Toggle -->
     <div class="flex items-start gap-3 mb-4">
@@ -31,14 +33,9 @@
       </div>
     </div>
 
-    <!-- Restart-required banner -->
-    <div
-      v-if="status.restart_required"
-      class="mb-4 rounded-md bg-state-autonomous-50 dark:bg-state-autonomous-900/30 border border-state-autonomous-200 dark:border-state-autonomous-800 px-4 py-3 text-sm text-state-autonomous-800 dark:text-state-autonomous-200"
-    >
-      Configuration changed — restart the agent to mount or detach
-      <code class="font-mono text-xs">/home/developer/public/</code>.
-    </div>
+    <!-- trinity-enterprise#888: no card-level restart banner. A toggle whose
+         volume is not mounted yet reports to the page's one banner (Settings),
+         which names it and carries the Restart button. -->
 
     <!-- Quota + file count -->
     <div v-if="status.enabled" class="mb-4 text-sm text-gray-600 dark:text-gray-400">
@@ -50,6 +47,11 @@
     </div>
 
     <!-- Files table -->
+    <!-- #1925 triage — NOT a tab strip: a bounded wide table. Horizontal scroll
+         INSIDE the container is the correct treatment for unbounded column width
+         (design-system principle 7); collapsing columns into a "More" menu would
+         hide data, not navigation. Left as-is deliberately so a later audit does
+         not re-flag it. -->
     <div
       v-if="status.enabled && files.length > 0"
       class="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700"
@@ -57,23 +59,34 @@
       <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
         <thead class="bg-gray-50 dark:bg-gray-800">
           <tr>
-            <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Filename</th>
-            <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Size</th>
-            <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Expires</th>
-            <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Downloads</th>
-            <th class="px-4 py-2 text-right text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Actions</th>
+            <th
+              v-for="col in COLUMNS"
+              :key="col.label"
+              :class="[HEAD_CELL, col.right ? 'text-right' : 'text-left']"
+            >{{ col.label }}</th>
           </tr>
         </thead>
         <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-800">
-          <tr v-for="file in files" :key="file.file_id">
+          <tr v-for="{ file, audience } in rows" :key="file.file_id">
             <td class="px-4 py-2 text-sm text-gray-900 dark:text-gray-100 truncate max-w-[20ch]" :title="file.filename">
               {{ file.filename }}
             </td>
-            <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400">{{ formatBytes(file.size_bytes) }}</td>
-            <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400" :title="file.expires_at">
+            <!-- Who the file is for (ent#549). "Owner only" because the turn had
+                 no person and "Owner only" because the platform could not tell
+                 are different claims — the second line says which. -->
+            <td :class="MUTED_CELL" class="max-w-[30ch]">
+              <div class="truncate" :title="audience.label">{{ audience.label }}</div>
+              <div
+                v-if="audience.detail"
+                class="truncate text-xs"
+                :title="audience.detail"
+              >{{ audience.detail }}</div>
+            </td>
+            <td :class="MUTED_CELL">{{ formatBytes(file.size_bytes) }}</td>
+            <td :class="MUTED_CELL" :title="file.expires_at">
               {{ relativeTime(file.expires_at) }}
             </td>
-            <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-400">{{ file.download_count }}</td>
+            <td :class="MUTED_CELL">{{ file.download_count }}</td>
             <td class="px-4 py-2 text-right whitespace-nowrap">
               <button
                 @click="copyUrl(file)"
@@ -107,19 +120,41 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import { useNotification } from '../composables'
+import { useAgentRestartStore } from '../stores/agentRestart'
+import { describeSharedFileAudience } from '../utils/sharedFileAudience'
 
 const props = defineProps({
   agentName: { type: String, required: true },
+  // trinity-enterprise#888: inside Settings › Storage the section supplies
+  // the title, and the restart it needs goes to the page's one banner.
+  embedded: { type: Boolean, default: false },
 })
 
 const agentsStore = useAgentsStore()
 const { showNotification } = useNotification()
 
+// One class string per cell KIND, bound rather than repeated per cell: adding the
+// "For" column (ent#549) would otherwise have grown this file's raw-gray count,
+// which the design-system ratchet only lets shrink.
+const HEAD_CELL = 'px-4 py-2 text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400'
+const MUTED_CELL = 'px-4 py-2 text-sm text-gray-600 dark:text-gray-400'
+const COLUMNS = [
+  { label: 'Filename' },
+  { label: 'For' },
+  { label: 'Size' },
+  { label: 'Expires' },
+  { label: 'Downloads' },
+  { label: 'Actions', right: true },
+]
+
 const status = ref({ enabled: false, restart_required: false, volume_attached: false })
 const files = ref([])
+// One derivation per row (#2955): the five "For" bindings read a precomputed
+// `{ label, detail }`. `utils/sharedFileAudience.js` stays the single rule.
+const rows = computed(() => files.value.map((file) => ({ file, audience: describeSharedFileAudience(file) })))
 const totalBytes = ref(0)
 const quotaBytes = ref(500 * 1024 * 1024)
 
@@ -227,4 +262,22 @@ function relativeTime(iso) {
 }
 
 onMounted(loadStatus)
+// The page is kept alive across agents: an in-place switch must drop the
+// previous agent's status BEFORE the report below runs for the new name, or
+// the first agent's "restart required" is announced for the second.
+watch(() => props.agentName, () => {
+  status.value = { enabled: false, restart_required: false, volume_attached: false }
+  files.value = []
+  loadStatus()
+})
+
+const restartStore = useAgentRestartStore()
+
+// The backend says when the toggle and the mounted volume disagree; that is a
+// change waiting for a restart, and the one banner is where it is announced.
+watch(() => [props.agentName, status.value.restart_required], ([name, pending]) => {
+  restartStore.report(name, 'file-sharing', 'File sharing', !!pending)
+})
+// After the banner's restart, re-read: only the backend knows if it applied.
+watch(() => restartStore.epochFor(props.agentName), () => loadStatus())
 </script>

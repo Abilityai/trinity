@@ -75,6 +75,17 @@
         {{ expanded ? 'Show fewer' : `Show all ${hintPlan.total}` }}
       </button>
     </div>
+
+    <!-- ent#465: the shell's per-viewer suggestions (top 3). BELOW the hints:
+         the hints are static (they arrive with the briefing, under the skeleton
+         that already holds their footprint), while suggestions are dynamic —
+         their own fetch, 0–3 rows, dismissible — so above the hints every
+         arrival or dismissal shoved the "Things you can ask" grid up and down.
+         Down here a late row grows into the empty pane (the composer is pinned
+         to the bottom of the column), and nothing the reader is looking at
+         moves. A slot, so this component stays the briefing and the
+         suggestions keep their own store, verbs and door. -->
+    <slot name="after-hints" />
     </template>
     </div>
   </div>

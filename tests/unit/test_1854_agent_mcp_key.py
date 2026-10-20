@@ -456,7 +456,7 @@ def test_07_env_overrides_carry_both_key_and_url(keys_db, monkeypatch):
     from services import agent_mcp_key_service as svc
 
     _mk_agent("scout")
-    overrides = svc.build_mcp_key_env_overrides("scout", description="test")
+    overrides, _key = svc._mint_and_build_env("scout", "test")
 
     assert set(overrides) >= {"TRINITY_MCP_API_KEY", "TRINITY_MCP_URL"}
     assert overrides["TRINITY_MCP_API_KEY"].startswith("trinity_mcp_")
@@ -1097,7 +1097,7 @@ def test_05b_mcp_scope_is_populated_for_every_mcp_key_principal(monkeypatch):
     monkeypatch.setattr(deps.db, "get_user_by_email", lambda e: {
         "id": 1, "username": "owner", "email": e, "role": "admin"})
 
-    request = SimpleNamespace(method="GET", url=SimpleNamespace(path="/api/agents/x/mcp-key"))
+    request = SimpleNamespace(method="GET", scope={"path": "/api/agents/x/mcp-key"})
     user = asyncio.run(deps.get_current_user(request=request, token="trinity_mcp_x"))
     assert user.mcp_scope == "system"
     assert user.agent_name is None and user.connector_agent is None, (
@@ -1168,7 +1168,7 @@ def test_20_regenerate_is_rate_limited(keys_db, monkeypatch):
     )
     request = SimpleNamespace(
         client=SimpleNamespace(host="127.0.0.1"),
-        url=SimpleNamespace(path="/api/agents/scout/mcp-key/regenerate"),
+        scope={"path": "/api/agents/scout/mcp-key/regenerate"},
         state=SimpleNamespace(request_id="r1"),
     )
     with pytest.raises(HTTPException) as exc:

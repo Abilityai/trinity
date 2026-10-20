@@ -41,6 +41,7 @@ import pytest
 
 from services.chat_execution_service import run_chat_turn as FN  # moved from routers.chat (#1483)
 from models import ChatMessageRequest, ActivityState, TaskExecutionStatus
+from unit._write_params import flat_kwargs
 
 _MOD = sys.modules[FN.__module__]
 
@@ -150,7 +151,7 @@ def test_success_persists_and_completes():
     su = [c for c in m["db"].update_execution_status.call_args_list
           if c.kwargs.get("status") == TaskExecutionStatus.SUCCESS]
     assert len(su) == 1
-    assert su[0].kwargs["claude_session_id"] == "11111111-1111-1111-1111-111111111111"
+    assert flat_kwargs(su[0])["claude_session_id"] == "11111111-1111-1111-1111-111111111111"
     # both activities completed COMPLETED
     states = [c.kwargs.get("status") for c in m["activity"].complete_activity.call_args_list]
     assert states.count(ActivityState.COMPLETED) == 2  # chat + collaboration
@@ -168,7 +169,7 @@ def test_success_discards_malformed_session_id():
         _run(cap)
     su = [c for c in m["db"].update_execution_status.call_args_list
           if c.kwargs.get("status") == TaskExecutionStatus.SUCCESS]
-    assert su[0].kwargs["claude_session_id"] is None
+    assert flat_kwargs(su[0])["claude_session_id"] is None
 
 
 # --- Budget exhausted -----------------------------------------------------
@@ -315,5 +316,5 @@ def test_http_error_salvages_partial_metadata_onto_failed_row():
     fw = [c for c in m["db"].update_execution_status.call_args_list
           if c.kwargs.get("status") == TaskExecutionStatus.FAILED]
     assert len(fw) == 1
-    assert fw[0].kwargs.get("cost") == 0.03  # salvaged from partial_metadata
-    assert fw[0].kwargs.get("context_max") == 200000
+    assert flat_kwargs(fw[0]).get("cost") == 0.03  # salvaged from partial_metadata
+    assert flat_kwargs(fw[0]).get("context_max") == 200000

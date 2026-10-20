@@ -230,3 +230,85 @@ async def test_existing_remote_nothing_to_commit_still_pushes():
     assert result.success
     assert any(c == "git push -u origin main" for c in fake.calls), \
         "push should run even when there was nothing new to commit"
+
+
+class _FetchTimesOutExec(_FakeExec):
+    """#2969: `git fetch origin` hits the primitive's (now enforced) timeout.
+
+    The remote is NOT empty — the fetch was simply too slow — so
+    `origin/main` never materialises locally and `rev-parse` fails.
+    """
+
+    def __init__(self):
+        super().__init__(remote_has_main=False)
+        self.timeouts: dict[str, int] = {}
+
+    async def __call__(self, container_name, command, timeout=60, *,
+                       environment=None, user="developer"):
+        inner = command.split(" && ", 1)[1].rstrip('"') if " && " in command else command
+        self.timeouts[inner] = timeout
+        if inner == "git fetch origin":
+            self.calls.append(inner)
+            return {"exit_code": 124, "output": "", "timed_out": True}
+        return await super().__call__(
+            container_name, command, timeout, environment=environment, user=user
+        )
+
+
+@pytest.mark.asyncio
+async def test_timed_out_fetch_never_force_pushes_over_remote():
+    """#2969: before the primitive enforced `timeout`, `git fetch` was
+    unbounded. Now a slow fetch of a LARGE existing remote is killed; that
+    must abort init, not fall through to the empty-remote branch and
+    `git push --force` the workspace over the remote's history."""
+    gs = _load_git_service()
+    fake = _FetchTimesOutExec()
+
+    with patch.object(gs, "execute_command_in_container", fake), \
+            patch.object(gs.gitignore, "execute_command_in_container", fake), \
+            patch.object(gs.remotes, "execute_command_in_container", fake), \
+            patch.object(gs.token_scrub, "execute_command_in_container", fake):
+        result = await gs.initialize_git_in_container(
+            agent_name="test-agent",
+            github_repo="owner/repo",
+            github_pat="ghp_fake",
+            create_working_branch=False,
+        )
+
+    assert not result.success
+    assert "timed out" in (result.error or "")
+    assert not any(c.startswith("git push") for c in fake.calls), fake.calls
+    assert not any(c.startswith("git add") for c in fake.calls), fake.calls
+
+
+@pytest.mark.asyncio
+async def test_bulk_git_steps_get_a_realistic_timeout():
+    """#2969: fetch / add / push move a whole workspace. 60s was decorative
+    while the primitive ignored `timeout`; enforced, it would kill a real
+    first push of a large workspace mid-transfer."""
+    gs = _load_git_service()
+    fake = _FetchTimesOutExec()
+    fake.timeouts.clear()
+
+    async def _ok_fetch(container_name, command, timeout=60, *, environment=None,
+                        user="developer"):
+        inner = command.split(" && ", 1)[1].rstrip('"') if " && " in command else command
+        fake.timeouts[inner] = timeout
+        return await _FakeExec.__call__(
+            fake, container_name, command, timeout, environment=environment, user=user
+        )
+
+    with patch.object(gs, "execute_command_in_container", _ok_fetch), \
+            patch.object(gs.gitignore, "execute_command_in_container", _ok_fetch), \
+            patch.object(gs.remotes, "execute_command_in_container", _ok_fetch), \
+            patch.object(gs.token_scrub, "execute_command_in_container", _ok_fetch):
+        result = await gs.initialize_git_in_container(
+            agent_name="test-agent",
+            github_repo="owner/repo",
+            github_pat="ghp_fake",
+            create_working_branch=False,
+        )
+
+    assert result.success, result.error
+    for step in ("git fetch origin", "git add .", "git push -u origin main --force"):
+        assert fake.timeouts[step] >= 300, (step, fake.timeouts[step])

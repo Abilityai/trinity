@@ -157,8 +157,13 @@ export function attachmentState(entry) {
  *   where it goes. Rejections are per-file and never abort the batch.
  * @param {object} [options]
  * @param {() => boolean} [options.disabled]  drop is ignored while true.
+ * @param {(entry: object) => Promise<any>} [options.discard]  delete the
+ *   uploaded copy of a removed chip (#3738). The caller knows where `upload`
+ *   put it — `entry.receipt` is whatever `upload` resolved with — so the
+ *   composable stays destination-agnostic. Best effort: a rejection is logged,
+ *   never shown on a chip.
  */
-export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
+export function usePortalFileDrop(upload, { disabled = () => false, discard = null } = {}) {
   const dragging = ref(false)
   // One entry per file in the gesture, each with its OWN progress and outcome —
   // the batch has no shared verdict, because "one failure does not fail the
@@ -225,12 +230,19 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
     if (!files.length) return []
 
     batchNotice.value = ''
+    // #3265: the bound is per MESSAGE, not per gesture. Chips pile up across
+    // drops and pastes, and the message carries every one of them, so a second
+    // drop of eleven onto eleven would build a message the server caps. The
+    // difference is stated here, where the person can still see it.
+    const room = Math.max(0, MAX_BATCH_FILES - entries.value.length)
     let batch = files
-    if (files.length > MAX_BATCH_FILES) {
-      batch = files.slice(0, MAX_BATCH_FILES)
-      batchNotice.value =
-        `Only the first ${MAX_BATCH_FILES} of ${files.length} files were added.`
+    if (files.length > room) {
+      batch = files.slice(0, room)
+      batchNotice.value = room
+        ? `Only the first ${room} of ${files.length} files were added — a message carries up to ${MAX_BATCH_FILES}.`
+        : `A message carries up to ${MAX_BATCH_FILES} files. None of these ${files.length} were added.`
     }
+    if (!batch.length) return []
 
     const mine = batch.map((file) => {
       const rejection = rejectionFor(file)
@@ -267,15 +279,29 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
     // resolve while the earlier batch was still going.
     const run = Promise.resolve(inFlight).then(async () => {
       for (const { file, entry, rejection } of mine) {
-        if (rejection) continue
+        // #3738: a chip removed while it waited in the queue never uploads —
+        // the loop walks its own list, so leaving `entries` does not stop it.
+        if (rejection || entry.removed) {
+          entry.uploading = false
+          continue
+        }
         try {
-          await upload(file)
+          const res = await upload(file)
+          // #3265: the name the server stored the file under (it sanitises),
+          // which is what a sent message names it by.
+          entry.serverName = (res && typeof res.filename === 'string' && res.filename) || file.name
+          entry.receipt = res
           entry.done = true
         } catch (err) {
           entry.error = uploadFailureReason(err)
+          // A room upload that reached some participants before one refused
+          // says which, so a removal can still take those copies back.
+          if (err?.receipt) entry.receipt = err.receipt
         } finally {
           entry.uploading = false
         }
+        // Removed while in flight: it landed after the person took it back.
+        if (entry.removed && (entry.done || entry.receipt)) discardQuietly(entry)
       }
     })
     inFlight = run
@@ -318,8 +344,45 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
     dragging.value = false
   }
 
-  function removeAt(i) {
+  /**
+   * Take one chip back (#3738). The chip goes at once; what happens to its
+   * bytes depends on how far the upload got:
+   *   - refused / never started: nothing to delete;
+   *   - queued: the batch loop sees `removed` and skips it;
+   *   - in flight: deleted once it lands (the loop checks `removed` after);
+   *   - landed: deleted now;
+   *   - failed after part of a room landed: those copies are deleted now.
+   * By identity, so a double click is one removal.
+   */
+  function remove(entry) {
+    const i = entries.value.indexOf(entry)
+    if (i === -1) return
     entries.value.splice(i, 1)
+    entry.removed = true
+    if (entry.done || entry.receipt) discardQuietly(entry)
+  }
+
+  function removeAt(i) {
+    const entry = entries.value[i]
+    if (entry) remove(entry)
+  }
+
+  // Never awaited by `remove`, never writes `entry.error`, never throws: the AC
+  // is that a failed delete does not block or show on a chip. Logged so a
+  // removed file still in the inbox can be explained.
+  function discardQuietly(entry) {
+    if (!discard) return
+    // The inbox overwrites by name, so a live chip with the same stored name
+    // is the SAME file — deleting it here would take that chip's file too.
+    // Live means uploading (or queued to) or sent: a chip that failed or was
+    // refused before uploading holds no copy, so it must not keep this one.
+    const name = entry.serverName || entry.name
+    if (entries.value.some((e) => !e.removed && (e.uploading || e.done) && (e.serverName || e.name) === name)) return
+    Promise.resolve()
+      .then(() => discard(entry))
+      .catch((err) => {
+        console.warn('[portal] could not delete removed upload', name, err?.response?.status ?? err)
+      })
   }
 
   return {
@@ -329,6 +392,7 @@ export function usePortalFileDrop(upload, { disabled = () => false } = {}) {
     addFiles,
     settled,
     clear,
+    remove,
     removeAt,
     handlers: { onDragEnter, onDragOver, onDragLeave, onDrop, onPaste },
   }

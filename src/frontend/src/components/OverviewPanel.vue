@@ -16,6 +16,7 @@ import { ref, computed, watch, onMounted } from 'vue'
 import axios from 'axios'
 import { parseUTC } from '@/utils/timestamps'
 import { BUCKET_COLORS } from '@/utils/executionBuckets'
+import { formatSyncSummary, syncChip, syncPillClass, syncTextClass } from '@/utils/syncSummary'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
 import { useAgentsStore } from '../stores/agents'
@@ -64,7 +65,11 @@ const info = ref(null)
 const live = ref(null) // { running_count, queued_count }
 const notifCount = ref(0)
 const opQueuePending = ref(0)
-const syncFailures = ref(0)
+// trinity-enterprise#707: the whole `/git/sync-state` payload (the backend's
+// numbers + verdict), not just the failure count.
+const syncState = ref(null)
+// D13: the attention count keeps counting failed syncs, not red divergence.
+const syncFailures = computed(() => syncState.value?.consecutive_failures || 0)
 const health = ref(null) // AgentHealthDetail
 const healthTrend = ref(null) // { dates, uptime, latency }
 const schedulesCount = ref(null)
@@ -76,6 +81,16 @@ const recent = ref([])
 const attentionCount = computed(
   () => (notifCount.value || 0) + (opQueuePending.value || 0) + (syncFailures.value || 0)
 )
+
+// --- sync line (trinity-enterprise#707) ---
+// `—` until the backend has an observation (and after a failed read, which
+// keeps whatever was on screen): never `ok` for an agent nobody has measured.
+const syncText = computed(() => formatSyncSummary(syncState.value, Date.now()) ?? '—')
+const syncTitle = computed(
+  () => syncChip(syncState.value, Date.now())?.title ?? 'Sync status unknown'
+)
+const syncClass = computed(() => syncTextClass(syncState.value))
+const syncPill = computed(() => syncPillClass(syncState.value))
 
 // --- formatters ---
 function fmtDuration(ms) {
@@ -180,9 +195,9 @@ function fmtSuccessRate(rate) {
   return rate == null ? '—' : `${Math.round(rate * 100)}%`
 }
 function successRateClass(rate) {
-  if (rate == null) return 'text-gray-400 dark:text-gray-500'
-  if (rate >= 0.9) return 'text-status-success-600 dark:text-status-success-400'
-  if (rate >= 0.5) return 'text-status-warning-600 dark:text-status-warning-400'
+  if (rate == null) return 'text-gray-500 dark:text-gray-400'
+  if (rate >= 0.9) return 'text-status-success-700 dark:text-status-success-400'
+  if (rate >= 0.5) return 'text-status-warning-700 dark:text-status-warning-400'
   return 'text-status-danger-600 dark:text-status-danger-400'
 }
 // Reuses the existing `fmtDuration` defined for the Duration chart below.
@@ -222,7 +237,7 @@ async function loadSidecars() {
   if (stats.status === 'fulfilled') live.value = stats.value.data
   if (notif.status === 'fulfilled') notifCount.value = notif.value.data?.pending_count || 0
   if (opq.status === 'fulfilled') opQueuePending.value = opq.value.data?.count || 0
-  if (sync.status === 'fulfilled') syncFailures.value = sync.value.data?.consecutive_failures || 0
+  if (sync.status === 'fulfilled') syncState.value = sync.value.data || null
   if (hDetail.status === 'fulfilled') health.value = hDetail.value.data
   if (hHist.status === 'fulfilled') healthTrend.value = bucketHealth(hHist.value.data?.checks || [])
   if (scheds.status === 'fulfilled') schedulesCount.value = (scheds.value.data || []).length
@@ -278,7 +293,10 @@ onMounted(() => {
             {{ info.description }}
           </p>
         </div>
+        <!-- trinity-enterprise#887: the Info tab is Settings › General now,
+             which is owner-only — so is this link. -->
         <button
+          v-if="agent.can_share"
           class="shrink-0 text-xs font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline"
           @click="emit('navigate-tab', 'info')"
         >Full details →</button>
@@ -312,12 +330,15 @@ onMounted(() => {
 
     <!-- 3. Trend charts -->
     <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
-      <div class="flex items-center justify-between px-5 pt-4">
+      <!-- #2197 class: title + live counts + window toggle are ~360px of
+           rigid min-content, so this row widened the page at 375px (found by
+           e2e/agent-header.spec.js, ent#950). It wraps instead. -->
+      <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-2 px-5 pt-4">
         <h3 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider">Activity trends</h3>
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2">
           <span v-if="live" class="text-xs text-gray-500 dark:text-gray-400">
             <span class="font-mono text-action-primary-600 dark:text-action-primary-400">{{ live.running_count }}</span> running ·
-            <span class="font-mono text-status-warning-600 dark:text-status-warning-400">{{ live.queued_count }}</span> queued
+            <span class="font-mono text-status-warning-700 dark:text-status-warning-400">{{ live.queued_count }}</span> queued
           </span>
           <div class="inline-flex rounded-md border border-gray-200 dark:border-gray-700 overflow-hidden">
             <button
@@ -357,7 +378,7 @@ onMounted(() => {
         <div>
           <div class="flex items-baseline justify-between mb-2">
             <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300" title="Runs that finished without erroring — completion, not answer quality (ent#206)">Execution completion rate</h4>
-            <span class="text-sm font-semibold text-status-success-600 dark:text-status-success-400">{{ Math.round(analytics.success_rate * 100) }}%</span>
+            <span class="text-sm font-semibold text-status-success-700 dark:text-status-success-400">{{ Math.round(analytics.success_rate * 100) }}%</span>
           </div>
           <TrendLineChart :dates="dates" :series="successSeries" :y-min="0" :y-max="100" :value-format="(v) => (v == null ? '—' : v + '%')" :axis-format="(v) => v + '%'" />
         </div>
@@ -482,7 +503,7 @@ onMounted(() => {
         >
           Enable it in Operations → Health →
         </router-link>
-        <p v-else class="mt-2 text-xs text-gray-400 dark:text-gray-500">
+        <p v-else class="mt-2 text-xs text-gray-500 dark:text-gray-400">
           An admin can enable it in Operations → Health.
         </p>
       </div>
@@ -520,8 +541,8 @@ onMounted(() => {
         <button v-if="agent.can_share" class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600" @click="emit('navigate-tab', 'sharing')">
           {{ (agent.shares && agent.shares.length) || 0 }} shares
         </button>
-        <span class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">
-          Sync: <span :class="syncFailures > 0 ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-600 dark:text-status-success-400'">{{ syncFailures > 0 ? `${syncFailures} failing` : 'ok' }}</span>
+        <span data-testid="overview-sync" :title="syncTitle" class="px-2.5 py-1 rounded-md text-gray-600 dark:text-gray-300 tabular-nums" :class="syncPill || 'bg-gray-100 dark:bg-gray-700'">
+          Sync: <span data-testid="overview-sync-value" :class="syncClass">{{ syncText }}</span>
         </span>
       </div>
     </div>

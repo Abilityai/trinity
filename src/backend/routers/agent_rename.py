@@ -144,8 +144,9 @@ async def rename_agent_endpoint(
         new_container_name = f"agent-{sanitized_name}"
         await container_rename(container, new_container_name)
 
-        # Update container labels (need to recreate for label changes)
-        # For now, we'll update just the database and handle labels on next start
+        # Container env and labels change only on recreate. The next start's
+        # recreate re-bakes AGENT_NAME and the trinity.agent-name label from the
+        # new name (#3813, check_agent_name_env_matches).
         #
         # #1159: the running container still carries TRINITY_AGENT_AUTH_TOKEN=
         # derive(old_name); under the new name that token is stale and would 401
@@ -179,6 +180,17 @@ async def rename_agent_endpoint(
                 status_code=500,
                 detail="Failed to update database. Agent name may already be taken."
             )
+
+        # trinity-enterprise#751: a gated request approved for the old name must
+        # not run under the new one. The rename re-keyed the records; cancel the
+        # pending ones and tell their requesters. Best effort.
+        try:
+            from services import skill_gate_service
+            await skill_gate_service.cancel_pending_for_agent(
+                sanitized_name, actor_email=current_user.email, actor_user=current_user,
+                reason="agent_renamed")
+        except Exception as e:
+            logger.warning(f"Failed to cancel gated requests after renaming {agent_name}: {e}")
 
         # #1560 / RELIABILITY-004 (#307): every per-agent Redis keyspace is keyed
         # by name, so a rename orphans all of them under the old name — the
@@ -241,7 +253,7 @@ async def rename_agent_endpoint(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=sanitized_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"old_name": agent_name, "new_name": sanitized_name},
         )

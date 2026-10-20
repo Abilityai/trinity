@@ -14,6 +14,7 @@ the fix safe rather than merely present:
 from __future__ import annotations
 
 import ast
+import re
 import asyncio
 import sqlite3
 import sys
@@ -275,7 +276,12 @@ async def test_dispatch_goes_through_execute_task_not_a_bespoke_path(service, mo
     recorder, _ = _install(monkeypatch, enabled=True)
     await service.maybe_dispatch_resume(ITEM, response="approve")
     assert set(recorder.calls[0]) <= {
-        "agent_name", "message", "triggered_by", "source_user_email",
+        # trinity-enterprise#886: no `source_user_email` — the responder never
+        # reaches the agent's prompt (ent#715); a closed set, so re-adding fails.
+        "agent_name", "message", "triggered_by",
+        # trinity-enterprise#751: the person's own answer, for the skill gate —
+        # not a second surface, the same `execute_task` reads it.
+        "request_text",
     }
 
 
@@ -399,8 +405,28 @@ def test_trigger_counts_as_autonomous():
     assert '"operator_response"' in block
 
 
-def _dispatch_call_sites() -> list[pathlib.Path]:
-    """Every module that calls ``spawn_resume_dispatch``, DISCOVERED.
+# trinity-enterprise#611: ONE sink. Every ending — an answer from the operator
+# route or the Workspace, a cancel, a bulk sweep, an expiry — goes through
+# `services/ask_service.py`, and its default ending observer is the ONLY place
+# either spawner is called. So the rule "a wake hangs off the compare-and-set
+# WIN, never the attempt" is checked at the sink: every function that hands rows
+# to the observers must have won a CAS for them first.
+_SPAWNERS = ("spawn_resume_dispatch(", "spawn_ending_dispatch(")
+_SINK = "services/ask_service.py"
+# The set-based CAS writers: their RETURN is the set of rows this call ended
+# (bulk: the sweep's own batch_id re-select; expiry: per-id CAS winners).
+_SET_CAS_ACCESSORS = (
+    "bulk_cancel_operator_queue_items(",
+    "mark_operator_queue_expired(",
+    "end_operator_queue_items_by_platform(",  # #3246 — the platform ending
+    # #3247: the native create ends a replace's predecessor by compare-and-set
+    # inside its own transaction; `predecessor` is the row AS THE CAS LEFT IT
+    "create_native_operator_queue_item(",
+)
+
+
+def _dispatch_call_sites(spawner: str = "spawn_resume_dispatch(") -> list[pathlib.Path]:
+    """Every module that calls `spawner`, DISCOVERED.
 
     Deliberately a walk and not a list (ent#430 review). The guard below started
     as one hardcoded path — `routers/operator_queue.py`, the only caller ent#329
@@ -424,13 +450,13 @@ def _dispatch_call_sites() -> list[pathlib.Path]:
             text = path.read_text()
         except (OSError, UnicodeDecodeError):
             continue
-        if "spawn_resume_dispatch(" in text:
+        if spawner in text:
             hits.append(path)
     return hits
 
 
-def _dispatching_functions(path: pathlib.Path):
-    """Every function in `path` that calls ``spawn_resume_dispatch``, as CODE.
+def _functions_calling(path: pathlib.Path, needle: str):
+    """Every function in `path` whose CODE calls `needle`.
 
     `ast.unparse` is the point, not decoration. The first version of this guard
     tested `"_status_conflict" in source` against the raw file, and a mutation
@@ -445,65 +471,154 @@ def _dispatching_functions(path: pathlib.Path):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         body = ast.unparse(node)
-        if "spawn_resume_dispatch(" in body:
+        if needle in body:
             out.append((node.name, body))
     return out
 
 
+def test_the_ask_sink_is_the_only_place_a_wake_is_spawned():
+    """Re-pinned (trinity-enterprise#611): both spawners are called from the sink
+    and from nowhere else. A route or a service that spawns a wake itself has
+    stepped around the CAS rule below — it must go through the sink instead.
+    Separate floors: each spawner must still be FOUND, or the rule below has gone
+    blind to it (a rename, an alias)."""
+    for spawner in _SPAWNERS:
+        found = {p.relative_to(_BACKEND).as_posix() for p in _dispatch_call_sites(spawner)}
+        assert found == {_SINK}, (
+            f"{spawner} is called from {sorted(found)}; the only call site is "
+            f"{_SINK} — end the ask through services/ask_service.py instead"
+        )
+
+
 def test_every_dispatch_call_site_hangs_off_the_cas_win_only():
-    """A lost respond race must not dispatch — at EVERY call site.
+    """A lost race must not wake anyone — at EVERY way an ask ends.
 
-    ``respond_to_operator_queue_item`` returns a ``_status_conflict`` marker when
-    the item left `pending` between the check and the UPDATE; the caller must
-    refuse there. The dispatch must sit *after* that refusal, or a caller whose
-    answer was never recorded still spends the agent's money — the #1083 rule
-    that side effects hang off the CAS result, not off the attempt.
+    The wake is spawned by the sink's ending observer, which only ever sees the
+    rows `_ended(...)` hands it. So the rule is checked where rows ENTER
+    `_ended(`: each function that calls it must, in code and before the call,
+    either consult `_status_conflict` (a single-row CAS that lost returns the row
+    with that marker, having written nothing) or take its rows from a set-based
+    CAS writer whose return IS the set of winners (`bulk_cancel_…` re-selects by
+    the sweep's own batch_id; `mark_…_expired` collects per-id CAS winners), or
+    refuse every db `outcome` but the writer's winning token (`withdraw`,
+    trinity-enterprise#901 — see `_OUTCOME_CAS_WINNERS`).
 
-    It is worse than one wasted execution: the idempotency key digests the
-    ANSWER TEXT, so the winner and the loser hash differently and one queue item
-    produces TWO paid executions.
-
-    Discovered rather than listed, and asserted against parsed CODE rather than
-    file text, so a third call site inherits the rule instead of re-losing it.
-    `architecture.md`'s "Two callers, one rule" bullet claims exactly this
-    protection; before ent#430's review it claimed it while the guard read a
-    single hardcoded file.
+    It is worse than one wasted execution: the resume key digests the ANSWER
+    TEXT, so a winner and a loser hash differently and one queue item produces
+    TWO paid executions. Discovered, not listed; asserted against parsed CODE.
     """
-    sites = _dispatch_call_sites()
-    assert len(sites) >= 2, (
-        f"expected at least the two known dispatch call sites, found {sites} — "
-        f"if the helper was renamed, this guard has gone blind"
+    sink = _BACKEND / _SINK
+    fns = {n.name: n for n in ast.walk(ast.parse(sink.read_text()))
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    # Real calls to the sink only — an `ast.Call` whose func is the bare name
+    # `_ended`. A text match also caught helpers whose NAMES end in `_ended(`
+    # (`_refuse_ended(`, `_refuse_ended_predecessor(`), which end nothing
+    # (trinity-enterprise#901 sweep C1).
+    feeders = [(name, ast.unparse(fn)) for name, fn in fns.items()
+               if name != "_ended" and _calls_ended(fn)]
+    assert {n for n, _ in feeders} >= {"answer", "cancel", "bulk_cancel", "expire", "withdraw"}, (
+        f"the five ways an ask ends no longer all reach _ended(): {[n for n, _ in feeders]}"
     )
-    checked = 0
-    for path in sites:
-        rel = path.relative_to(_BACKEND).as_posix()
-        fns = _dispatching_functions(path)
-        assert fns, f"{rel} matched the text scan but no function calls it — alias?"
-        for name, body in fns:
-            assert "_status_conflict" in body, (
-                f"{rel}::{name} dispatches a resume without ever consulting "
-                f"`_status_conflict` IN CODE, so a lost respond race reaches the "
-                f"spawn: the answer is not in the database and the agent is paid "
-                f"to act on it"
-            )
-            assert body.index("_status_conflict") < body.index("spawn_resume_dispatch("), (
-                f"{rel}::{name} dispatches BEFORE checking `_status_conflict` — "
-                f"the race loser spends"
-            )
-            checked += 1
-    assert checked >= 2, checked
+    for name, body in feeders:
+        at = _ENDED_CALL.search(body).start()
+        guarded = (
+            _refuses_on_status_conflict_before_ended(fns[name])
+            or any(a in body[:at] for a in _SET_CAS_ACCESSORS)
+            or _refuses_unless_outcome_won_before_ended(fns[name])
+        )
+        assert guarded, (
+            f"{_SINK}::{name} hands rows to the ending observers without having won "
+            f"a compare-and-set for them — a lost race would be woken and paid for"
+        )
 
 
-def test_the_discovery_walk_finds_both_known_callers():
-    """The guard above is only as good as what it finds, so pin the floor.
+# A call to the sink itself, never an identifier that merely ends in `_ended(`.
+_ENDED_CALL = re.compile(r"(?<![A-Za-z0-9_])_ended\(")
 
-    A rename of the helper, or a caller that reaches it through an alias, would
-    otherwise leave the loop iterating an empty list and passing in silence —
-    the failure mode a discovery guard trades for the one it fixes.
-    """
-    found = {p.relative_to(_BACKEND).as_posix() for p in _dispatch_call_sites()}
-    assert "routers/operator_queue.py" in found, found
-    assert "client_portal/asks/service.py" in found, found
+# The outcome form (trinity-enterprise#901): a single-row CAS writer that reports
+# `{"outcome": ..., "row": ...}` instead of a `_status_conflict` marker. The
+# ending function must refuse every outcome but the WINNING token, by name,
+# before `_ended` — a deny-list of the known losing outcomes is not accepted,
+# because an outcome the db layer adds later would fall through to the sink.
+# writer accessor -> the one outcome that means this call won the row
+_OUTCOME_CAS_WINNERS = {
+    "withdraw_operator_queue_item(": "withdrawn",
+}
+
+
+def _calls_ended(fn) -> bool:
+    return any(isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_ended"
+               for n in ast.walk(fn))
+
+
+def _refuses_unless_outcome_won_before_ended(fn) -> bool:
+    """The function calls an outcome-form CAS writer, and above the first
+    `_ended(` call an `if` tests `<...outcome...> != "<winning token>"` with a
+    body that raises or returns. Asserted on parsed code, like the
+    `_status_conflict` form, so a comment naming the token proves nothing."""
+    ended_line = min(
+        (n.lineno for n in ast.walk(fn)
+         if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_ended"),
+        default=None,
+    )
+    if ended_line is None:
+        return False
+    body = ast.unparse(fn)
+    for accessor, winner in _OUTCOME_CAS_WINNERS.items():
+        if accessor not in body:
+            continue
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.If) and node.lineno < ended_line
+                    and any(isinstance(b, (ast.Raise, ast.Return)) for b in node.body)):
+                continue
+            t = node.test
+            if (isinstance(t, ast.Compare) and len(t.ops) == 1
+                    and isinstance(t.ops[0], ast.NotEq)
+                    and "outcome" in ast.unparse(t.left)
+                    and isinstance(t.comparators[0], ast.Constant)
+                    and t.comparators[0].value == winner):
+                return True
+    return False
+
+
+def _refuses_on_status_conflict_before_ended(fn) -> bool:
+    """An `if` whose TEST reads `_status_conflict` and whose body raises or
+    returns, above the first `_ended(` call. Presence of the string is not
+    enough: `updated.pop("_status_conflict", False)` on its own line still
+    names it while letting the loser through (trinity-enterprise#611 review
+    mutation M1)."""
+    ended_line = min(
+        (n.lineno for n in ast.walk(fn)
+         if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_ended"),
+        default=None,
+    )
+    if ended_line is None:
+        return False
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.If)
+            and node.lineno < ended_line
+            and "_status_conflict" in ast.unparse(node.test)
+            and any(isinstance(b, (ast.Raise, ast.Return)) for b in node.body)
+        ):
+            return True
+    return False
+
+
+def test_the_observers_are_only_ever_told_by_the_sink():
+    """Rows reach an observer through `_ended` alone — the one place that runs
+    after a CAS win. Iterating `_observers` anywhere else is a side door."""
+    tree = ast.parse((_BACKEND / _SINK).read_text())
+    iterating = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            if isinstance(node, ast.For) and "_observers" in ast.unparse(node.iter):
+                iterating.add(fn.name)
+    assert iterating == {"_ended"}, iterating
+    spawning = {n for s in _SPAWNERS for n, _ in _functions_calling(_BACKEND / _SINK, s)}
+    assert spawning == {"_wake_filer"}, spawning
 
 
 def test_the_knob_is_owner_only():
@@ -576,3 +691,28 @@ def test_the_names_this_service_imports_actually_exist_on_the_real_modules():
                 f"swallowed as a fire-and-forget task exception."
             )
     assert checked, "no services.* imports found — did the module move?"
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#751 — what the skill gate reads on a resume
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response, response_text, expected", [
+    ("/pay-invoice 42", None, "/pay-invoice 42"),               # the chosen option
+    ("approve", "then /pay-invoice 42", "approve\nthen /pay-invoice 42"),
+])
+async def test_the_skill_gate_reads_the_persons_whole_answer_not_the_frame(
+    service, monkeypatch, response, response_text, expected
+):
+    """A question with no options accepts any text as its answer, so the
+    chosen answer is the person's words as much as the free text is (review
+    C3). The frame around it quotes the agent's OWN question and is not a
+    request anyone made of the agent."""
+    recorder, _ = _install(monkeypatch, enabled=True)
+    await service.maybe_dispatch_resume(ITEM, response=response, response_text=response_text)
+    call = recorder.calls[0]
+    assert call["request_text"] == expected
+    assert ITEM["question"] in call["message"]
+    assert ITEM["question"] not in call["request_text"]

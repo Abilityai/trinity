@@ -254,6 +254,13 @@ def test_gemini_key_is_encrypted_at_rest_and_resolved_settings_then_env(monkeypa
     assert settings_service.get_gemini_api_key() == "AIza-from-env"
 
 
+def test_gemini_key_accepts_the_newer_aq_prefix():
+    """Google AI Studio now also issues AQ.-prefixed keys, not just AIza (ent#582 follow-up)."""
+    r = _client().put("/api/settings/api-keys/gemini", json={"api_key": "AQ.Ab12345"})
+    assert r.status_code == 200
+    assert settings_service.get_gemini_api_key() == "AQ.Ab12345"
+
+
 def test_a_saved_gemini_key_lights_the_voice_flags_without_a_restart(monkeypatch):
     monkeypatch.setattr(_live("config"), "VOICE_ENABLED", True)
     client = _client()

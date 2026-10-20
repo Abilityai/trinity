@@ -48,6 +48,17 @@ class AgentState:
         # Backward compatibility alias
         self.claude_code_available = self.runtime_available if self.agent_runtime == "claude-code" else self._check_claude_code()
         self.session_started = False  # Track if we've started a conversation
+        # #2958: the Claude chat path resumes ONLY its own session. The id is
+        # captured after a successful chat turn (never before the subprocess
+        # succeeds) and passed as `--resume <id>`; `--continue` took the newest
+        # JSONL in the shared project dir, whoever wrote it (a schedule, a
+        # Workspace turn). `chat_session_model` is the effective model that
+        # session last ran under — a different model starts a fresh session.
+        # `chat_session_generation` is bumped by reset_session() so a turn that
+        # was in flight across a `DELETE /api/chat/history` drops its capture.
+        self.chat_session_id: Optional[str] = None
+        self.chat_session_model: Optional[str] = None
+        self.chat_session_generation: int = 0
         # Session-level token tracking
         self.session_total_cost: float = 0.0
         self.session_total_output_tokens: int = 0
@@ -184,6 +195,13 @@ class AgentState:
         """Reset conversation state and token tracking"""
         self.conversation_history = []
         self.session_started = False
+        # #2958: forget the chat's own session (in memory and the reaper's
+        # keep-set marker) and invalidate any capture still in flight.
+        self.chat_session_id = None
+        self.chat_session_model = None
+        self.chat_session_generation += 1
+        from .services import chat_session_marker  # lazy: avoids an import cycle
+        chat_session_marker.clear()
         self.session_total_cost = 0.0
         self.session_total_output_tokens = 0
         self.session_context_tokens = 0

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 
@@ -39,6 +40,10 @@ class TaskExecutionErrorCode(str, Enum):
     LEASE_EXPIRED = "lease_expired" # Fire-and-forget lease expired — no callback before slot TTL (#1083)
     SKILL_NOT_FOUND = "skill_not_found"  # Slash-command message didn't resolve to an installed skill (#1410)
     EPHEMERAL_EXHAUSTED = "ephemeral_exhausted"  # Ghost agent budget spent — expired TTL or exec count (trinity-enterprise#69)
+    MODEL_UNSUPPORTED = "model_unsupported"  # Claude Code refused the model — CLI too old or unknown id; never a subscription fault (#3012)
+    # Agent-to-agent hop past inter_agent_max_chain_depth (#2806). Refused before
+    # a row exists, so it only ever appears on the X-Trinity-Error-Code header.
+    INTER_AGENT_DEPTH_EXCEEDED = "inter_agent_depth_exceeded"
 
 
 @dataclass
@@ -101,6 +106,11 @@ class TerminalEnvelope:
         previous_attempt_cost: #678 R2 — failed-first-attempt cost rolled into
             the terminal cost write.
         execution_time_ms: wall-clock used for the activity-completion detail.
+        completed_at: #3589 — the instant the PRODUCER says the turn ended
+            (aware UTC), threaded to both terminal writers so ``duration_ms``
+            measures the turn, not the turn plus however late the terminal
+            reached the backend. ``None`` (the sync path, every current agent
+            image) → the writers stamp now.
         raw_response: full response dict threaded back via ``TaskExecutionResult``
             (Session router consumes ``compact_events``); empty for callbacks.
     """
@@ -115,4 +125,85 @@ class TerminalEnvelope:
     retry_count: Optional[int] = None
     previous_attempt_cost: float = 0.0
     execution_time_ms: Optional[int] = None
+    completed_at: Optional[datetime] = None
     raw_response: dict = field(default_factory=dict)
+
+
+def _aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Pydantic parses an ISO string without an offset to a NAIVE datetime;
+    the writers subtract an aware ``started_at`` from it, so normalize here
+    (naive = UTC, the ``parse_iso_timestamp`` convention)."""
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def terminal_from_callback_payload(payload: Any, execution_id: str) -> TerminalEnvelope:
+    """Normalize an agent-reported terminal (the #1083 ``ExecutionResultEnvelope``
+    shape) into the ``TerminalEnvelope`` ``apply_result`` consumes.
+
+    ONE classification for both readers of that shape: the result-callback
+    endpoint (``routers/agents.py``) and, since #2944, the cleanup watchdog
+    claiming a terminal the agent retained after the backend lost the held-open
+    connection. Two copies of this mapping would be two places for the
+    auth-is-never-cancellation rule below to drift.
+
+    #679: 3-way map — ``success``→SUCCESS, ``cancelled``→CANCELLED, everything
+    else (incl. unknown forward-compat values) →FAILED.
+
+    Finding 2 (CSO 2026-06-22): an auth/rate terminal must NOT be reclassified
+    as a clean cancellation even when the agent labels it "cancelled". The agent
+    side already guards this (``result_callback._is_auth_or_rate``), but the
+    backend is the trust boundary — a buggy or mixed-version agent that reports
+    ``status:"cancelled"`` carrying ``error_code:"auth"`` (or an auth/rate
+    ``terminal_reason``) would otherwise silently dodge the AUTH dispatch
+    breaker / SUB-003 auto-switch.
+
+    ``payload`` is duck-typed (the Pydantic model or any object with the same
+    attributes) so this leaf keeps importing nothing at module level; the
+    status enum is resolved lazily for the same reason.
+    """
+    from models import TaskExecutionStatus  # noqa: WPS433 — leaf stays import-free at module level
+
+    is_auth_or_rate = (
+        getattr(payload, "error_code", None) == TaskExecutionErrorCode.AUTH.value
+        or getattr(payload, "terminal_reason", None) in ("auth", "rate_limit")
+    )
+    raw_status = getattr(payload, "status", None)
+    if raw_status == "success":
+        status = TaskExecutionStatus.SUCCESS
+    elif raw_status == "cancelled" and not is_auth_or_rate:
+        status = TaskExecutionStatus.CANCELLED
+    else:
+        status = TaskExecutionStatus.FAILED
+
+    error_code: Optional[TaskExecutionErrorCode] = None
+    raw_code = getattr(payload, "error_code", None)
+    if raw_code:
+        try:
+            error_code = TaskExecutionErrorCode(raw_code)
+        except ValueError:
+            # Unknown codes are non-fatal — apply_result only special-cases AUTH.
+            error_code = None
+
+    # #3012: an agent image older than #3012 reports a model the CLI refused as
+    # 503 → error_code "auth", which would trip the AUTH dispatch breaker. The
+    # error text says what it really was.
+    if error_code is not None and error_code.value == TaskExecutionErrorCode.AUTH.value:
+        from services.failure_classifier import is_model_rejection  # noqa: WPS433 — leaf, lazy like above
+
+        if is_model_rejection(getattr(payload, "error", None) or ""):
+            error_code = TaskExecutionErrorCode.MODEL_UNSUPPORTED
+
+    return TerminalEnvelope(
+        execution_id=execution_id,
+        status=status,
+        response=getattr(payload, "response", None),
+        error=getattr(payload, "error", None),
+        error_code=error_code,
+        metadata=getattr(payload, "metadata", None) or {},
+        execution_log=getattr(payload, "execution_log", None),
+        session_id=getattr(payload, "session_id", None),
+        execution_time_ms=getattr(payload, "execution_time_ms", None),
+        completed_at=_aware_utc(getattr(payload, "completed_at", None)),  # #3589
+    )

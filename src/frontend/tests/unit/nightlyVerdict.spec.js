@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const require_ = createRequire(import.meta.url)
-const { verdictFor, groupByPr } = require_(
+const { verdictFor, groupByPr, legsFromMatrix } = require_(
   resolve(HERE, '../../../../scripts/ci/nightly-verdict.js'),
 )
 
@@ -105,5 +105,88 @@ describe('grouping', () => {
 
   it('tolerates an empty sweep without inventing a PR', () => {
     expect([...groupByPr([]).keys()]).toEqual([])
+  })
+})
+
+// #3103: the test job runs PR code, which can forge status JSON, file names
+// and whole artifacts. Leg identity comes from the discover matrix only.
+describe('legs are built from the trusted matrix', () => {
+  const SHA = 'a'.repeat(40)
+  const entry = (over = {}) => ({ pr_number: 7, seed: '12345', head_sha: SHA, ...over })
+  const status = (over = {}) =>
+    JSON.stringify({
+      pr_number: 7, seed: '12345', head_sha: SHA,
+      merge_conflict: false, regression: false, ...over,
+    })
+  const run = (entries, read) => legsFromMatrix({ include: entries }, read)
+
+  it('accepts a status matching its matrix entry (number pr, string seed)', () => {
+    const { legs, rejected } = run([entry()], () => status())
+    expect(rejected).toEqual([])
+    expect(legs).toEqual([
+      { pr_number: 7, seed: '12345', head_sha: SHA, merge_conflict: false, regression: false },
+    ])
+  })
+
+  it('reads each leg by the matrix identity, never by enumeration', () => {
+    const asked = []
+    run([entry(), entry({ seed: '67890' })], (pr, seed) => { asked.push([pr, seed]); return null })
+    expect(asked).toEqual([[7, '12345'], [7, '67890']])
+  })
+
+  it('an absent status is missing, not rejected', () => {
+    expect(run([entry()], () => null)).toEqual({ legs: [], rejected: [] })
+  })
+
+  it.each([
+    ['another PR', { pr_number: 8 }],
+    ['another seed', { seed: '67890' }],
+    ['another head sha', { head_sha: 'b'.repeat(40) }],
+    ['a string verdict', { regression: 'false' }],
+    ['a missing verdict', { merge_conflict: undefined }],
+  ])('rejects a status claiming %s', (_, over) => {
+    const { legs, rejected } = run([entry()], () => status(over))
+    expect(legs).toEqual([])
+    expect(rejected).toHaveLength(1)
+  })
+
+  it('rejects unparseable and non-object JSON', () => {
+    expect(run([entry()], () => '{nope').rejected).toHaveLength(1)
+    expect(run([entry()], () => 'null').rejected).toHaveLength(1)
+  })
+
+  it.each([
+    ['uppercase', 'A'.repeat(40)],
+    ['short', 'a'.repeat(39)],
+    ['injected', `${'a'.repeat(40)}\`<img>`],
+  ])('rejects a %s matrix head_sha before reading anything', (_, sha) => {
+    let read = false
+    const { legs, rejected } = run([entry({ head_sha: sha })], () => { read = true; return status({ head_sha: sha }) })
+    expect(legs).toEqual([])
+    expect(rejected).toHaveLength(1)
+    expect(read).toBe(false)
+  })
+
+  it('a forged status for a PR outside the matrix is never read', () => {
+    const { legs } = run([entry()], (pr) => (pr === 7 ? status() : status({ pr_number: 99 })))
+    expect(legs.map((l) => l.pr_number)).toEqual([7])
+  })
+
+  it('a seedless matrix (integration-nightly) skips the seed check', () => {
+    const asked = []
+    const { legs, rejected } = run(
+      [{ pr_number: 7, head_sha: SHA }],
+      (pr, seed) => { asked.push([pr, seed]); return status({ seed: undefined }) },
+    )
+    expect(rejected).toEqual([])
+    expect(asked).toEqual([[7, undefined]])
+    expect(legs).toEqual([
+      { pr_number: 7, head_sha: SHA, merge_conflict: false, regression: false },
+    ])
+  })
+
+  it('an empty or missing matrix yields nothing', () => {
+    expect(legsFromMatrix(undefined, () => status())).toEqual({ legs: [], rejected: [] })
+    expect(legsFromMatrix({ include: [] }, () => status())).toEqual({ legs: [], rejected: [] })
   })
 })

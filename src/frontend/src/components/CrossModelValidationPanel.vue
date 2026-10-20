@@ -2,7 +2,9 @@
   <!-- ent#277. Gated on the entitlement: in an OSS-only build (or an unentitled
        enterprise build) `enterprise_features` omits the id and this renders
        nothing at all — no dead toggle promising a feature the backend 404s. -->
-  <div v-if="entitled" class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-5">
+  <!-- `embedded` (trinity-enterprise#890): a row of Settings › Guardrails ›
+       Checks, inside that section's card — so no card of its own. -->
+  <div v-if="entitled" :class="embedded ? 'px-4 py-3' : 'bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-5'">
     <div class="flex items-start justify-between gap-4">
       <div>
         <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Cross-model validation</h3>
@@ -51,8 +53,8 @@
         API key
         <!-- Never render the stored key: the endpoint only reports whether one
              resolves. This line is the whole read surface for the credential. -->
-        <span v-if="config?.key_configured" class="ml-1 text-status-success-600 dark:text-status-success-400">— configured</span>
-        <span v-else class="ml-1 text-status-warning-600 dark:text-status-warning-400">— not set (falls back to the platform key for this provider)</span>
+        <span v-if="config?.key_configured" class="ml-1 text-status-success-700 dark:text-status-success-400">— configured</span>
+        <span v-else class="ml-1 text-status-warning-700 dark:text-status-warning-400">— not set (falls back to the platform key for this provider)</span>
       </label>
       <input v-model="form.api_key" type="password" placeholder="leave blank to keep the current key"
              class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder:text-gray-400 dark:placeholder:text-gray-500 text-sm px-3 py-2 focus:outline-none" />
@@ -64,7 +66,7 @@
         {{ saving ? 'Saving…' : 'Save' }}
       </button>
       <span v-if="error" class="text-xs text-status-danger-600 dark:text-status-danger-400">{{ error }}</span>
-      <span v-else-if="saved" class="text-xs text-status-success-600 dark:text-status-success-400">Saved</span>
+      <span v-else-if="saved" class="text-xs text-status-success-700 dark:text-status-success-400">Saved</span>
     </div>
   </div>
 </template>
@@ -74,7 +76,10 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import api from '../api'
 import { useEnterpriseStore } from '../stores/enterprise'
 
-const props = defineProps({ agentName: { type: String, required: true } })
+const props = defineProps({
+  agentName: { type: String, required: true },
+  embedded: { type: Boolean, default: false },
+})
 
 const enterprise = useEnterpriseStore()
 const entitled = computed(() => enterprise.isEntitled('cross_model_validation'))

@@ -30,7 +30,7 @@
 
     <div
       v-else-if="!data || data.total_executions === 0"
-      class="text-center py-6 text-xs text-gray-400 dark:text-gray-500"
+      class="text-center py-6 text-xs text-gray-500 dark:text-gray-400"
     >No executions in selected window</div>
 
     <div v-else class="space-y-3">
@@ -244,8 +244,8 @@ const successRatePercent = computed(() => {
 const successRateColor = computed(() => {
   if (!data.value) return 'text-gray-900 dark:text-white'
   const rate = data.value.success_rate
-  if (rate >= 0.95) return 'text-status-success-600 dark:text-status-success-400'
-  if (rate >= 0.80) return 'text-status-warning-600 dark:text-status-warning-400'
+  if (rate >= 0.95) return 'text-status-success-700 dark:text-status-success-400'
+  if (rate >= 0.80) return 'text-status-warning-700 dark:text-status-warning-400'
   return 'text-status-danger-600 dark:text-status-danger-400'
 })
 

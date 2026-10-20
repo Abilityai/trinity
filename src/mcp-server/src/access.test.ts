@@ -28,7 +28,7 @@ import {
   policyFor,
   withAgentAccess,
 } from "./access.js";
-import { TrinityClient } from "./client.js";
+import { ApiError, TrinityClient } from "./client.js";
 import type { McpAuthContext } from "./types.js";
 
 function fakeClient(opts: { permitted?: boolean } = {}) {
@@ -68,6 +68,30 @@ describe("ent#628 TOOL_ACCESS_POLICY is total over the registered tools", () => 
     assert.deepEqual(TOOL_ACCESS_POLICY.run_agent_loop, { kind: "enforce", param: "agent_name" });
     assert.equal(TOOL_ACCESS_POLICY.get_loop_status.kind, "in-tool");
     assert.equal(TOOL_ACCESS_POLICY.stop_loop.kind, "in-tool");
+  });
+
+  it("ent#596: the three skill-changing tools name the backend skill-manager fence, not ENT629", () => {
+    // They were `baselined: ENT629` — "ungated at MCP, backend owner-equivalent".
+    // The fence now exists (routers/skills.py get_skill_managed_agent_by_name),
+    // so a row pointing back at ENT629 would claim the gap is still open.
+    for (const tool of ["assign_skill_to_agent", "set_agent_skills", "sync_agent_skills", "unassign_skill_set"]) {
+      const policy = TOOL_ACCESS_POLICY[tool];
+      assert.equal(policy.kind, "baselined", tool);
+      assert.match((policy as { owner: string }).owner, /get_skill_managed_agent_by_name.*#596/, tool);
+    }
+    // The READ is a use, not a change: since ent#629 it is edge-gated like any read.
+    assert.deepEqual(TOOL_ACCESS_POLICY.get_agent_skills, { kind: "enforce", param: "agent_name" });
+  });
+
+  it("ent#629: no row is left pointing at an open question — the backend narrows agent reach", () => {
+    // Every former `baselined: ENT629` row is `enforce` on its agent parameter.
+    // A row that names #629 again would say the gap is still open.
+    for (const [name, policy] of Object.entries(TOOL_ACCESS_POLICY)) {
+      if (policy.kind === "baselined") assert.doesNotMatch(policy.owner, /#629/, name);
+    }
+    for (const tool of ["get_chat_history", "get_agent_logs", "set_agent_github_pat", "delete_agent", "get_agent"]) {
+      assert.equal(TOOL_ACCESS_POLICY[tool].kind, "enforce", tool);
+    }
   });
 
   it("every baselined row names an owner — an issue or a backend gate, never free text", () => {
@@ -199,5 +223,36 @@ describe("ent#628 the permission read fails CLOSED", () => {
     assert.equal(await real.isAgentPermitted("a", "b"), false);
     const out = await checkAgentEdge(real, session("agent", "a").session, "b");
     assert.equal(out.allowed, false);
+  });
+});
+
+describe("trinity-enterprise#837 a workspace_only refusal is not read as 'none'", () => {
+  // The operator floor refuses a Workspace-only account on these reads. Turned
+  // into "no permitted agents" / "no such agent", the caller would report a
+  // missing permission or a missing agent instead of the account's situation.
+  const refusal = () =>
+    new ApiError(403, JSON.stringify({
+      detail: { code: "workspace_only", message: "This account works in the Workspace. Open /workspace." },
+    }));
+  const clientThrowing = (err: Error) => {
+    const real = new TrinityClient("http://127.0.0.1:1");
+    (real as unknown as { request: () => Promise<never> }).request = async () => {
+      throw err;
+    };
+    return real;
+  };
+
+  it("getPermittedAgents rethrows it", async () => {
+    await assert.rejects(clientThrowing(refusal()).getPermittedAgents("a"), /workspace_only/);
+  });
+
+  it("getAgentAccessInfo rethrows it", async () => {
+    await assert.rejects(clientThrowing(refusal()).getAgentAccessInfo("a"), /workspace_only/);
+  });
+
+  it("any other failure still reads as none (fail closed)", async () => {
+    const other = clientThrowing(new ApiError(403, JSON.stringify({ detail: "Forbidden" })));
+    assert.deepEqual(await other.getPermittedAgents("a"), []);
+    assert.equal(await other.getAgentAccessInfo("a"), null);
   });
 });

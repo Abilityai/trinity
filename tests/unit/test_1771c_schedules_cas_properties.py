@@ -54,6 +54,7 @@ from hypothesis.stateful import (
     rule,
     run_state_machine_as_test,
 )
+from db.write_params import ExecutionResult
 
 # ---------------------------------------------------------------------------
 # Bootstrap (see the sibling edges file for the tests/utils shadowing rationale)
@@ -229,7 +230,7 @@ class CasWriterMachine(RuleBasedStateMachine):
 
     @rule(status=st.sampled_from(sorted(TERMINAL | {"running"})))
     def finalize(self, status):
-        self.ops.update_execution_status(self.eid, status, response="r")
+        self.ops.update_execution_status(self.eid, status, result=ExecutionResult(response="r"))
 
     @rule()
     def bulk_fail_queued(self):

@@ -29,7 +29,7 @@ print_banner() {
     echo "║      ██║   ██║  ██║██║██║ ╚████║██║   ██║      ██║        ║"
     echo "║      ╚═╝   ╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝╚═╝   ╚═╝      ╚═╝        ║"
     echo "║                                                            ║"
-    echo "║          Deep Agent Orchestration Platform                 ║"
+    echo "║       The operating system for the AI-native company       ║"
     echo "║                                                            ║"
     echo "╚════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"

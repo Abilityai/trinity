@@ -26,14 +26,6 @@ class ExecutionStatus(str, Enum):
     PENDING_RETRY = "pending_retry"  # Added for RETRY-001 - retry scheduled but not yet fired
 
 
-class TriggerSource(str, Enum):
-    """What triggered the execution."""
-    SCHEDULE = "schedule"
-    MANUAL = "manual"
-    API = "api"
-    RETRY = "retry"  # Added for RETRY-001 - automatic retry of failed execution
-
-
 @dataclass
 class Schedule:
     """A scheduled task definition."""
@@ -96,12 +88,13 @@ class ScheduleExecution:
     source_agent_name: Optional[str] = None
     source_mcp_key_id: Optional[str] = None
     source_mcp_key_name: Optional[str] = None
+    chain_depth: Optional[int] = None  # #2806/#2973 — agent-to-agent hops from a root
     # Retry tracking (RETRY-001)
     attempt_number: int = 1  # Which attempt this is (1 = first try)
     retry_of_execution_id: Optional[str] = None  # Links retry to original execution
     retry_scheduled_at: Optional[datetime] = None  # When retry is scheduled (for restart recovery)
     # Validation tracking (VALIDATE-001)
-    business_status: Optional[str] = None  # pending_validation, validated, failed_validation, skipped
+    business_status: Optional[str] = None  # pending_validation, validated, failed_validation, validation_unavailable, skipped
     validated_at: Optional[datetime] = None  # When validation completed
     validation_execution_id: Optional[str] = None  # FK to validation execution
     validates_execution_id: Optional[str] = None  # FK to execution being validated
@@ -114,6 +107,16 @@ class ScheduleExecution:
 # clamping here is safe on both backends.
 _SQLITE_INT_MIN = -(2 ** 63)
 _SQLITE_INT_MAX = 2 ** 63 - 1
+
+
+def _chain_depth(value: object) -> Optional[int]:
+    """#2973: a positive int the backend sent, else None (a root).
+
+    Same drop-don't-coerce rule as the other origin fields; the upper cap keeps
+    a junk value out of the INTEGER column (the guard's own max is 32)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 1 <= value <= 1000 else None
 
 
 @dataclass
@@ -133,6 +136,10 @@ class ExecutionOrigin:
     agent_name: Optional[str] = None
     mcp_key_id: Optional[str] = None
     mcp_key_name: Optional[str] = None
+    # #2973: the inter-agent chain depth (#2806) the backend computed for an
+    # agent-triggered run. Not attribution: the guard reads it back to refuse
+    # the next hop, so it is excluded from `is_empty`.
+    chain_depth: Optional[int] = None
 
     def is_empty(self) -> bool:
         # Compared against None, NOT truthiness. `user_id=0` is a populated
@@ -190,6 +197,7 @@ class ExecutionOrigin:
             agent_name=_str("source_agent_name"),
             mcp_key_id=_str("source_mcp_key_id"),
             mcp_key_name=_str("source_mcp_key_name"),
+            chain_depth=_chain_depth(body.get("chain_depth")),
         )
 
 
@@ -225,26 +233,6 @@ class Reminder:
 
 
 @dataclass
-class AgentTaskMetrics:
-    """Metrics extracted from agent task response."""
-    context_used: int = 0
-    context_max: int = 200000
-    context_percent: float = 0.0
-    cost_usd: Optional[float] = None
-    tool_calls_json: Optional[str] = None
-    execution_log_json: Optional[str] = None
-    session_id: Optional[str] = None  # Claude Code session ID for --resume (EXEC-023)
-
-
-@dataclass
-class AgentTaskResponse:
-    """Parsed response from agent task endpoint."""
-    response_text: str
-    metrics: AgentTaskMetrics
-    raw_response: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
 class SchedulerStatus:
     """Current status of the scheduler service."""
     running: bool
@@ -252,46 +240,3 @@ class SchedulerStatus:
     last_check: datetime
     uptime_seconds: float
     jobs: List[Dict[str, Any]] = field(default_factory=list)
-
-
-# =============================================================================
-# Process Scheduling Models
-# =============================================================================
-
-
-@dataclass
-class ProcessSchedule:
-    """
-    A scheduled process trigger definition.
-
-    Represents a schedule trigger defined in a process definition.
-    When the cron fires, the scheduler executes the process.
-    """
-    id: str  # Unique schedule ID
-    process_id: str  # Process definition ID
-    process_name: str  # Process name (denormalized for display)
-    trigger_id: str  # Trigger ID from process definition
-    cron_expression: str
-    enabled: bool
-    timezone: str
-    description: Optional[str]
-    created_at: datetime
-    updated_at: datetime
-    last_run_at: Optional[datetime] = None
-    next_run_at: Optional[datetime] = None
-
-
-@dataclass
-class ProcessScheduleExecution:
-    """A record of a process schedule execution."""
-    id: str
-    schedule_id: str
-    process_id: str
-    process_name: str
-    execution_id: Optional[str]  # Process execution ID returned by backend
-    status: str
-    started_at: datetime
-    triggered_by: str
-    completed_at: Optional[datetime] = None
-    duration_ms: Optional[int] = None
-    error: Optional[str] = None

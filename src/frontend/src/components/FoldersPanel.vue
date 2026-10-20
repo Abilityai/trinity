@@ -8,7 +8,7 @@
     <!-- Not Owner State -->
     <div v-else-if="!canShare" class="text-center py-8">
       <div class="mx-auto w-16 h-16 bg-gray-100 dark:bg-gray-800 rounded-full flex items-center justify-center mb-4">
-        <svg class="w-8 h-8 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg class="w-8 h-8 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
         </svg>
       </div>
@@ -20,20 +20,8 @@
 
     <!-- Main Content -->
     <div v-else class="space-y-6">
-      <!-- Restart Required Banner -->
-      <div v-if="foldersData?.restart_required" class="mb-4 p-4 bg-state-autonomous-50 dark:bg-state-autonomous-900/20 border border-state-autonomous-200 dark:border-state-autonomous-700 rounded-lg">
-        <div class="flex items-start">
-          <svg class="w-5 h-5 text-state-autonomous-500 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-          </svg>
-          <div class="ml-3">
-            <h3 class="text-sm font-medium text-state-autonomous-800 dark:text-state-autonomous-200">Restart Required</h3>
-            <p class="mt-1 text-sm text-state-autonomous-700 dark:text-state-autonomous-300">
-              Configuration has changed. Restart the agent to apply shared folder mounts.
-            </p>
-          </div>
-        </div>
-      </div>
+      <!-- trinity-enterprise#888: no card-level restart banner. A mount that
+           waits for a restart reports to the page's one banner in Settings. -->
 
       <!-- Configuration Section -->
       <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
@@ -219,6 +207,7 @@
 <script setup>
 import { ref, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
+import { useAgentRestartStore } from '../stores/agentRestart'
 import { agentNameTooltip } from '../utils/agentName'
 
 const props = defineProps({
@@ -244,7 +233,10 @@ const consumers = ref([])
 const availableFolders = ref([])
 
 async function loadFoldersConfig() {
-  loading.value = true
+  // Skeleton only while there is no config yet (#1927): a reload after a
+  // toggle swaps values in place instead of collapsing the panel under the
+  // pointer that flipped it.
+  if (!foldersData.value) loading.value = true
   try {
     foldersData.value = await agentsStore.getAgentFolders(props.agentName)
 
@@ -299,8 +291,19 @@ onMounted(() => {
 })
 
 watch(() => props.agentName, () => {
+  foldersData.value = null
   if (props.canShare) {
     loadFoldersConfig()
   }
+})
+
+// trinity-enterprise#888: the restart a mount change needs is announced by
+// the page's one banner; this reports it and re-reads after the restart.
+const restartStore = useAgentRestartStore()
+watch(() => [props.agentName, foldersData.value?.restart_required], ([name, pending]) => {
+  restartStore.report(name, 'folders', 'Shared folders', !!pending)
+})
+watch(() => restartStore.epochFor(props.agentName), () => {
+  if (props.canShare) loadFoldersConfig()
 })
 </script>

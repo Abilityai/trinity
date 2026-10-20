@@ -63,6 +63,12 @@ _FIXED_FILES = [
     # ent#411: the last plugin reconcile, written by the boot hook. Agent-writable
     # like everything else here, so I-006 reads it defensively.
     (".trinity/plugins-state.json", True),
+    # ent#479: the SUPERSEDED metric value file. Read with content (it is a
+    # small flat JSON of numbers by contract, under the same size cap as
+    # dashboard.yaml) so D-010 can name WHICH keys have no registry entry —
+    # "you still write this file" is advice; "these four numbers are not
+    # declared anywhere" is a fix.
+    ("metrics.json", True),
 ]
 
 # The in-container script body. ROOT and the config are prepended at runtime.

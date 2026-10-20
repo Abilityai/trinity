@@ -134,7 +134,7 @@
           Run
         </button>
       </div>
-      <p v-if="agentStatus !== 'running'" class="text-xs text-status-warning-600 dark:text-status-warning-400 mt-2">
+      <p v-if="agentStatus !== 'running'" class="text-xs text-status-warning-700 dark:text-status-warning-400 mt-2">
         Agent must be running to execute tasks
       </p>
     </div>
@@ -164,7 +164,7 @@
 
       <!-- Empty State — fetch succeeded and returned zero -->
       <div v-else-if="allTasks.length === 0" class="text-center py-12 flex-1 flex flex-col justify-center">
-        <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
         </svg>
         <p class="mt-2 text-gray-500 dark:text-gray-400">No tasks yet</p>
@@ -239,6 +239,12 @@
                 >
                   compacted{{ taskCompactCount(task) > 1 ? ` ×${taskCompactCount(task)}` : '' }}
                 </span>
+                <!-- trinity-enterprise#754: went through without approval because
+                     its requester is the approver (server-decided booleans). -->
+                <ExecutionGateMarker
+                  :self-approved="!!task.gate_self_approved"
+                  :by-viewer="!!task.gate_self_approved_by_viewer"
+                />
                 <!-- Time -->
                 <span class="text-xs text-gray-500 dark:text-gray-400">
                   {{ formatRelativeTime(task.started_at) }}
@@ -303,7 +309,7 @@
                 :class="[
                   'p-1.5 rounded transition-colors flex items-center space-x-1',
                   task.status === 'running'
-                    ? 'text-status-success-600 dark:text-status-success-400 hover:text-status-success-700 dark:hover:text-status-success-300 bg-status-success-50 dark:bg-status-success-900/20'
+                    ? 'text-status-success-700 dark:text-status-success-400 hover:text-status-success-700 dark:hover:text-status-success-300 bg-status-success-50 dark:bg-status-success-900/20'
                     : 'text-gray-400 hover:text-action-primary-600 dark:hover:text-action-primary-400'
                 ]"
                 :title="task.status === 'running' ? 'View live execution' : 'Open execution details'"
@@ -478,7 +484,7 @@
                   <!-- Tool Call -->
                   <div v-else-if="entry.type === 'tool-call'" class="flex space-x-3">
                     <div class="flex-shrink-0 w-8 h-8 bg-state-autonomous-100 dark:bg-state-autonomous-900/50 rounded-full flex items-center justify-center">
-                      <svg class="w-4 h-4 text-state-autonomous-600 dark:text-state-autonomous-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg class="w-4 h-4 text-state-autonomous-700 dark:text-state-autonomous-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                       </svg>
@@ -494,7 +500,7 @@
                   <!-- Tool Result -->
                   <div v-else-if="entry.type === 'tool-result'" class="flex space-x-3">
                     <div class="flex-shrink-0 w-8 h-8 bg-status-success-100 dark:bg-status-success-900/50 rounded-full flex items-center justify-center">
-                      <svg class="w-4 h-4 text-status-success-600 dark:text-status-success-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg class="w-4 h-4 text-status-success-700 dark:text-status-success-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                       </svg>
                     </div>
@@ -508,7 +514,7 @@
                   <div v-else-if="entry.type === 'result'" class="bg-gray-100 dark:bg-gray-900 rounded-lg p-3 text-xs border-t-2 border-gray-300 dark:border-gray-600">
                     <div class="flex items-center justify-between text-gray-500 dark:text-gray-400">
                       <div class="flex items-center space-x-3">
-                        <span class="font-semibold text-status-success-600 dark:text-status-success-400">Completed</span>
+                        <span class="font-semibold text-status-success-700 dark:text-status-success-400">Completed</span>
                         <span>{{ entry.numTurns }} turns</span>
                       </div>
                       <div class="flex items-center space-x-3 font-mono">
@@ -549,14 +555,16 @@
 
 <script setup>
 import SkeletonLoader from './SkeletonLoader.vue'
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch, nextTick } from 'vue'
 import axios from 'axios'
 import { parseUTC } from '@/utils/timestamps'
 import { useAuthStore } from '../stores/auth'
 import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import ModelSelector from './ModelSelector.vue'
 import LoadFailed from './LoadFailed.vue'
+import ExecutionGateMarker from './skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
 import { apiErrorMessage } from '../utils/apiError'
+import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
 
 // Template ref for highlighted task element
 const highlightedTaskRef = ref(null)
@@ -626,6 +634,15 @@ const runningExecutions = ref([])
 
 // Polling interval
 let pollInterval = null
+
+// trinity-enterprise#754: a Run from the Skills tab is accepted asynchronously
+// and opens here while it is still going, so the poll re-reads the list until
+// no loaded row is in flight (models.TaskExecutionStatus: queued → running, and
+// pending_retry back to running, before a terminal status).
+const IN_FLIGHT_STATUSES = ['queued', 'running', 'pending_retry']
+let executionsSeq = 0           // only the latest read of the list is applied
+let executionsReading = false   // the poll never stacks a read on one still out
+let highlightShownFor = null    // the highlighted id already opened and scrolled to
 
 // Check if a task should be highlighted
 function isHighlightedTask(taskId) {
@@ -700,21 +717,56 @@ async function loadAllData() {
 
 // Load executions from server
 async function loadExecutions() {
+  const seq = ++executionsSeq
+  executionsReading = true
   loadError.value = ''
   try {
     const response = await axios.get(`/api/agents/${props.agentName}/executions?limit=100`, {
       headers: authStore.authHeader
     })
+    // A later read — or one for the agent the page moved to — supersedes this one.
+    if (seq !== executionsSeq) return
+    settleDetails(response.data)
     executions.value = response.data
 
-    // If highlightExecutionId is provided, expand and scroll to that task
-    if (props.highlightExecutionId) {
+    // If highlightExecutionId is provided, expand and scroll to that task —
+    // once, on the first read that answers: a re-read never re-opens a row the
+    // user closed, or scrolls the list back to it.
+    if (props.highlightExecutionId && props.highlightExecutionId !== highlightShownFor) {
+      highlightShownFor = props.highlightExecutionId
       scrollToHighlightedTask()
     }
   } catch (error) {
+    if (seq !== executionsSeq) return
     console.error('Failed to load executions:', error)
     loadError.value = apiErrorMessage(error, 'Request failed')
+  } finally {
+    if (seq === executionsSeq) executionsReading = false
   }
+}
+
+// trinity-enterprise#754: details are read once, on expand (PERF-001), and a
+// read taken while the run was in flight holds no response yet. So a row whose
+// status changes drops them, and the row that is open re-reads them: its
+// result shows where the user is looking.
+function settleDetails(rows) {
+  const before = new Map(executions.value.map(e => [e.id, e.status]))
+  for (const row of rows) {
+    const was = before.get(row.id)
+    if (was === undefined || was === row.status) continue
+    delete taskDetailsCache.value[row.id]
+    if (expandedTaskId.value === row.id) loadTaskDetails(row.id)
+  }
+}
+
+// Re-read the list on the poll while a loaded row is in flight. Not while a
+// read is already out, and not while a task typed here is still awaited: its
+// local row stands for it until the call returns and re-reads the list itself,
+// so a read meanwhile would list the same task twice.
+function shouldRereadExecutions() {
+  if (executionsReading) return false
+  if (pendingTasks.value.some(t => t.status === 'running')) return false
+  return executions.value.some(e => IN_FLIGHT_STATUSES.includes(e.status))
 }
 
 // Scroll to highlighted task and expand it
@@ -825,10 +877,18 @@ async function runNewTask() {
     })
 
     const durationMs = Date.now() - startMs
+    // trinity#3274: a gated skill — nothing ran and no execution exists, so the
+    // local row stays as the only record: the server's status and its notice.
+    const held = pendingApprovalMessage(response)
 
     // Update the local task with success
     const idx = pendingTasks.value.findIndex(t => t.id === taskId)
-    if (idx !== -1) {
+    if (idx !== -1 && held) {
+      pendingTasks.value[idx] = {
+        ...pendingTasks.value[idx], status: response.data.status, response: held, gateHeld: true
+      }
+      expandedTaskId.value = taskId
+    } else if (idx !== -1) {
       pendingTasks.value[idx] = {
         ...pendingTasks.value[idx],
         status: 'success',
@@ -841,6 +901,8 @@ async function runNewTask() {
     }
   } catch (error) {
     const durationMs = Date.now() - startMs
+    // A gate refusal creates no execution either: keep the row and its reason.
+    const refused = isGateRefusal(error)
 
     // Update the local task with failure
     const idx = pendingTasks.value.findIndex(t => t.id === taskId)
@@ -849,17 +911,20 @@ async function runNewTask() {
         ...pendingTasks.value[idx],
         status: 'failed',
         duration_ms: durationMs,
-        error: error.response?.data?.detail || error.message || 'Task failed'
+        error: refused ? apiErrorMessage(error) : (error.response?.data?.detail || error.message || 'Task failed'),
+        gateHeld: refused
       }
+      if (refused) expandedTaskId.value = taskId
     }
   } finally {
     taskLoading.value = false
     // Refresh server data - this will load the persisted execution
     await loadExecutions()
     loadQueueStatus()
-    // Remove the local pending task since it's now in server data
+    // Remove the local pending task since it's now in server data — unless the
+    // skill gate held it, which leaves no server row to replace it.
     const idx = pendingTasks.value.findIndex(t => t.id === taskId)
-    if (idx !== -1) {
+    if (idx !== -1 && !pendingTasks.value[idx].gateHeld) {
       pendingTasks.value.splice(idx, 1)
     }
   }
@@ -908,7 +973,11 @@ async function toggleTaskExpand(taskId) {
     return
   }
 
-  // Fetch details from the server
+  await loadTaskDetails(taskId)
+}
+
+// Fetch a task's details from the server, then cache them (PERF-001)
+async function loadTaskDetails(taskId) {
   expandLoadingTaskId.value = taskId
   try {
     const response = await axios.get(`/api/agents/${props.agentName}/executions/${taskId}`, {
@@ -924,7 +993,8 @@ async function toggleTaskExpand(taskId) {
     // Cache empty to avoid re-fetching on error
     taskDetailsCache.value[taskId] = { response: null, error: null }
   } finally {
-    expandLoadingTaskId.value = null
+    // Two reads can overlap (an expand, and a row settling while open).
+    if (expandLoadingTaskId.value === taskId) expandLoadingTaskId.value = null
   }
 }
 
@@ -1196,6 +1266,7 @@ function startPolling() {
   if (props.agentStatus === 'running') {
     pollInterval = setInterval(() => {
       loadQueueStatus()
+      if (shouldRereadExecutions()) loadExecutions()
     }, 5000)
   }
 }
@@ -1244,4 +1315,11 @@ onMounted(() => {
 onUnmounted(() => {
   stopPolling()
 })
+
+// trinity-enterprise#754 (PR review): AgentDetail is KeepAlive'd, so leaving
+// the page deactivates this panel without unmounting it. The poll (the queue
+// chip, and the list while a run is in flight) stops with the page and starts
+// again when the page is shown.
+onDeactivated(() => stopPolling())
+onActivated(() => startPolling())
 </script>

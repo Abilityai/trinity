@@ -444,8 +444,8 @@ Both the agents store (for Agents page) and network store (for Dashboard) fetch 
 
 ### PUT /api/agents/{name}/capacity
 
-**Authentication**: Required (JWT)
-**Authorization**: Agent owner only
+**Authentication**: Required (JWT, or the owner's own `user`-scoped key)
+**Authorization**: Agent owner only. **Person-only (#2996)**: the route takes `Depends(require_person)` — a JWT session or the owner's own `user`-scoped key. Agent- and system-scoped keys (and every other key scope) get 403 `person_required` before the owner check, whatever agent they address. See requirements `auth.md` §2.8.
 
 **Request**:
 ```json

@@ -142,9 +142,9 @@ screenshots:
   - file: agent-skills.png
     title: Agent Detail — Skills tab
     route: /agents/{name}?tab=skills
-    shows: Assigned skills with the library browse/assign surface.
+    shows: Own and shared skills as cards, with Run and (for the owner) Requires approval.
     sources:
-      - src/frontend/src/components/SkillsPanel.vue
+      - src/frontend/src/components/skills/SkillsTab.vue
       - src/frontend/src/components/skills
     captured_at: 2026-08-09
     captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
@@ -360,7 +360,6 @@ screenshots:
     shows: Platform settings including agent defaults and feature toggles.
     sources:
       - src/frontend/src/views/Settings.vue
-      - src/frontend/src/components/settings/SettingsPanel.vue
     captured_at: 2026-08-09
     captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
 
@@ -466,7 +465,9 @@ screenshots:
     shows: "The Inbox Action view with one Needs-approval card open in the reading pane: the question, the proposed actions, answer buttons, Discuss and Dismiss, and where the ask came from."
     sources:
       - src/frontend/src/views/Portal.vue
-      - src/frontend/src/components/portal
+      - src/frontend/src/components/portal/PortalInbox.vue
+      - src/frontend/src/components/portal/PortalInboxPane.vue
+      - src/frontend/src/components/portal/PortalInboxList.vue
     captured_at: 2026-10-14
     captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
 
@@ -488,7 +489,7 @@ screenshots:
     shows: "The Projects list: status, visibility and health chips per project, steward, open tasks, filters for membership and company projects."
     sources:
       - src/frontend/src/views/Portal.vue
-      - src/frontend/src/components/portal
+      - src/frontend/src/components/portal/projects
     captured_at: 2026-10-14
     captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
 
@@ -497,7 +498,7 @@ screenshots:
     route: /workspace/projects/{id}
     shows: "A project page: goal, Overview / Tasks / Log / Files & reports tabs, the Continue card, the Steward card and the Health card."
     sources:
-      - src/frontend/src/components/portal
+      - src/frontend/src/components/portal/projects
     captured_at: 2026-10-14
     captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
 

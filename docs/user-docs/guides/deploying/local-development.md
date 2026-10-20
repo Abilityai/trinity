@@ -47,7 +47,7 @@ The only edit a local install needs is **`ADMIN_PASSWORD`**. Everything else bel
 
 | Variable | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Lets agents use Claude. Can be left blank and configured in Settings after login; `start.sh` warns in its summary when no model key (`ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`) is set. |
+| `ANTHROPIC_API_KEY` | Lets agents use Claude. Can be left blank; the setup steps that open the first time you log in ask for it, and agents cannot run until one is set. `start.sh` warns in its summary when no model key (`ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`) is set. |
 | `EMAIL_PROVIDER` | How verification codes are sent. `.env.example` sets `console` (codes print to the backend log); the compose default when the line is absent is `resend`. |
 | `RESEND_API_KEY` | Required if `EMAIL_PROVIDER=resend`. |
 | `GITHUB_PAT` | Forwarded to the backend; needed to clone private template repos. |
@@ -56,10 +56,11 @@ The only edit a local install needs is **`ADMIN_PASSWORD`**. Everything else bel
 | `PUBLIC_CHAT_URL` | Public-facing URL for chat links and webhooks. Leave empty for local dev. |
 | `FRONTEND_URL` | Used for OAuth redirect callbacks. Leave empty for local dev. |
 | `TRINITY_DEFAULT_SYSTEM_MANIFEST` | Set to `disabled` to skip the starter fleet a fresh install seeds (see [First-Time Setup](../../getting-started/setup.md#your-starter-fleet)). |
+| `AAUTH_ENABLED` / `AAUTH_ISSUER` / `AAUTH_PROTOTYPE_ENABLED` / `AAUTH_PERSON_SERVER` / `AAUTH_RESOURCE_ALLOWLIST` | Forwarded by the dev compose, all off or empty by default. Only needed to test signed calls between two Trinity instances (AAuth); the issuer must be a public `https://` host, so a plain `localhost` stack cannot be a peer. An admin can set the same values at runtime in **Settings › Integrations**, and a saved value wins over `.env`. See [A2A Protocol → AAuth](../../integrations/a2a-protocol.md#aauth-agent-identity--trinity-to-trinity-without-a-shared-key). |
 
 ### Keys the dev compose does not forward
 
-Every key in `.env.example` is forwarded by `docker-compose.yml` **except** these, which only the production and hosted compose files read: `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `NOTION_CLIENT_ID`, `NOTION_CLIENT_SECRET`, `TUNNEL_TOKEN`, `TRINITY_DATA_PATH`, `HOST_TEMPLATES_PATH`. `TRINITY_IMAGE_TAG` and `ADMIN_PASSWORD_SOURCE` are read only by the hosted compose, and the `VITE_*` keys are build arguments of the production frontend image (for the dev Vite server, set them in `src/frontend/.env` instead). Setting any of these in a dev `.env` does nothing. The complete key-by-key reference lives in [Single-Server Deployment → `.env` reference](single-server.md#env-reference).
+Every key in `.env.example` is forwarded by `docker-compose.yml` **except** these, which only the production and hosted compose files read: `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `NOTION_CLIENT_ID`, `NOTION_CLIENT_SECRET`, `TUNNEL_TOKEN`, `TRINITY_DATA_PATH`, `HOST_TEMPLATES_PATH`. `TRINITY_IMAGE_TAG` and `ADMIN_PASSWORD_SOURCE` are read only by the hosted compose, `PRIVATE_NETWORK_CIDRS` only by `start.sh --provision` on a cloud instance, and the `VITE_*` keys are build arguments of the production frontend image (for the dev Vite server, set them in `src/frontend/.env` instead). Setting any of these in a dev `.env` does nothing. The complete key-by-key reference lives in [Single-Server Deployment → `.env` reference](single-server.md#env-reference).
 
 ### Port conflict
 
@@ -71,7 +72,7 @@ The frontend binds port `80` by default. If another process already holds `:80`,
 ./scripts/deploy/build-base-image.sh
 ```
 
-This builds `trinity-agent-base:latest` — the Docker image every agent container inherits. It includes Python 3.13, Node.js 20, Go 1.23, and Claude Code. **The platform can start without this, but you cannot create any agents until the image exists.**
+This builds `trinity-agent-base:latest` — the Docker image every agent container inherits. It includes Python 3.13, Node.js 20, Go 1.23, and the three agent runtimes: Claude Code, Gemini CLI and OpenAI Codex. **The platform can start without this, but you cannot create any agents until the image exists.**
 
 The image is tagged both `trinity-agent-base:latest` and `trinity-agent-base:<VERSION>` (read from the `VERSION` file). First build takes 5–10 minutes.
 
@@ -192,7 +193,7 @@ The volume name prefix `trinity_` comes from the Compose project name (the direc
 
 ### Optional: PostgreSQL Backend
 
-SQLite is the zero-config default for local development, but the dev compose ships a bundled PostgreSQL container behind a profile (note: **SQLite support ends September 1, 2026** — production instances should run PostgreSQL; see [single-server.md](single-server.md#database-backend)):
+SQLite is the zero-config default for local development, and the dev compose ships a bundled PostgreSQL container behind a profile. SQLite reached **end-of-support on September 1, 2026** — it no longer receives schema migrations or fixes, and server installs run PostgreSQL (see [Single-Server Deployment → Database backend](single-server.md#database-backend)). To run your local stack on PostgreSQL:
 
 ```bash
 # In .env:
@@ -201,7 +202,7 @@ SQLite is the zero-config default for local development, but the dev compose shi
 docker compose --profile postgres up -d
 ```
 
-The host in the URL is the compose service name `postgres` (Docker DNS). `POSTGRES_DB`, `POSTGRES_USER` and `POSTGRES_PASSWORD` are read by the dev compose only (the bundled container does not exist in the prod or hosted files). The switch is non-destructive — comment `DATABASE_URL` out and the next restart is back on SQLite (each backend keeps its own data).
+The host in the URL is the compose service name `postgres` (Docker DNS). `POSTGRES_DB`, `POSTGRES_USER` and `POSTGRES_PASSWORD` configure the bundled container. The hosted compose bundles one too (always on, database and user fixed at `trinity`); the prod compose has none. The switch is non-destructive — comment `DATABASE_URL` out and the next restart is back on SQLite (each backend keeps its own data).
 
 ## Troubleshooting
 

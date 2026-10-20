@@ -3,7 +3,7 @@ Internal endpoints with shared-secret authentication (C-003).
 
 These endpoints are called by:
 - Agent containers on the Docker network to communicate back to the backend
-- Dedicated scheduler service (trinity-scheduler) for task execution and activity tracking
+- Dedicated scheduler service (trinity-scheduler) for task execution
 
 Security: Requires X-Internal-Secret header matching INTERNAL_API_SECRET env var.
 Falls back to SECRET_KEY if INTERNAL_API_SECRET is not set.
@@ -17,22 +17,21 @@ import logging
 
 from database import db
 from models import (
-    ActivityCompleteRequest,
-    ActivityTrackRequest,
-    ActivityType,
     InternalAuditRequest,
     InternalTaskExecutionRequest,
     PullTaskResultRequest,
-    ShareFileRequest,
-    ShareFileResponse,
     TaskExecutionStatus,
     ValidateExecutionRequest,
 )
 from services.activity_service import activity_service
 from services.task_execution_service import get_task_execution_service
+from services.skill_gate_errors import SkillGateError
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services import heartbeat_service, idempotency_service, schedule_workspace_delivery
+from services import (
+    heartbeat_service, idempotency_service, schedule_seat_memory, schedule_workspace_delivery,
+)
 from services.runtime_secret_scrub import get_staged_values, scrub_text
+from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +84,7 @@ router = APIRouter(
 pull_router = APIRouter(prefix="/api/internal", tags=["internal"])
 
 _PULL_AUTH_DENIED = (
-    "Pull seam requires a valid X-Internal-Secret or the agent's own agent-scoped MCP key"
+    "Pull seam requires a valid X-Internal-Secret or the agent's own MCP key"
 )
 
 
@@ -103,8 +102,9 @@ def _pull_authorized(request: Request, agent_name: str) -> bool:
     """Dual-auth predicate for a pull seam bound to ``agent_name``: the trusted
     backend (valid internal secret) OR the agent's OWN agent-scoped MCP key,
     reusing ``heartbeat_service.authorize_heartbeat`` (the same "an agent may act
-    only on itself" rule that gates the heartbeat + #1083 callback). A
-    user/system/mismatched key ⇒ False (caller raises 403)."""
+    only on itself" rule that gates the heartbeat + #1083 callback). The
+    system agent's own system-scoped key qualifies for its own name (#3814).
+    A user or mismatched key ⇒ False (caller raises 403)."""
     if _internal_secret_valid(request):
         return True
     # #1081 B1: the agent-key (worker) path is additionally gated on the pilot
@@ -118,12 +118,6 @@ def _pull_authorized(request: Request, agent_name: str) -> bool:
     if not is_pull_pilot_agent(agent_name):
         return False
     return heartbeat_service.authorize_heartbeat(_validated_agent_key(request), agent_name)
-
-
-@router.get("/health")
-async def internal_health():
-    """Internal health check for agent containers."""
-    return {"status": "ok"}
 
 
 # =============================================================================
@@ -145,7 +139,7 @@ async def internal_next_task(request: Request, agent_name: str, worker_id: str):
 
     Auth (dual): a valid ``X-Internal-Secret`` (trusted backend) OR the agent's
     own agent-scoped MCP key bound to ``agent_name`` — an agent may only claim
-    its OWN queue. A user/system/mismatched scoped key → 403.
+    its OWN queue. A user or mismatched key → 403 (the system agent's key qualifies for its own name only, #3814).
 
     Query params: ``agent_name`` + ``worker_id``. On success returns the §3.1
     claim response (envelope frame + lease metadata). When the queue is empty it
@@ -179,7 +173,7 @@ async def internal_task_result(
     ``agent_name`` must equal the execution's) — an agent may only report results
     for its OWN executions. This ownership gate is IN ADDITION to the
     ``claim_token`` CAS below (which independently blocks a stale/wrong-token
-    write). A user/system/non-agent key → 403; an unknown OR not-owned execution
+    write). A user or unbound key → 403; an unknown OR not-owned execution
     → a **uniform 404** (self-uniform enumeration-safety, Invariant #186 — a
     404/403 split would leak the existence of another agent's execution id).
 
@@ -199,7 +193,9 @@ async def internal_task_result(
     # check; the agent path requires the scoped key to OWN this execution.
     if not _internal_secret_valid(request):
         key = _validated_agent_key(request)
-        if not (key and key.get("scope") == "agent"):
+        # A key that cannot act for its OWN bound name (user, connector, an
+        # unbound system key) is refused before any lookup (#3814).
+        if not (key and heartbeat_service.authorize_heartbeat(key, key.get("agent_name"))):
             raise HTTPException(status_code=403, detail=_PULL_AUTH_DENIED)
         execution = db.get_execution(execution_id)
         if execution is None or not heartbeat_service.authorize_heartbeat(
@@ -260,122 +256,22 @@ async def internal_agent_pre_check(agent_name: str):
         raise HTTPException(status_code=404, detail="Agent not found")
 
 
-@router.get("/agents/{agent_name}/sync-health-status")
-async def internal_agent_sync_health(agent_name: str):
-    """#389: lightweight read used by the dedicated scheduler before dispatching.
+@router.get("/agents/{agent_name}/brief-readiness")
+async def internal_agent_brief_readiness(agent_name: str):
+    """Whether a companion's cron seat brief may fire (trinity-enterprise#689).
 
-    Returns both the per-agent `freeze_schedules_if_sync_failing` flag and
-    whether the current sync state would trip it. The scheduler multiplies
-    the two to decide whether to skip the fire.
+    Asked by the scheduler's readiness gate, beside the #454 pre-check, only for
+    a `triggered_by="schedule"` run that delivers to a Workspace seat. Thin
+    passthrough — the rule lives in `services/role_readiness_gate.py`. The
+    scheduler fails open on anything but a 200 with `fire: false`.
     """
-    from database import db as _db
-    freeze_flag = _db.get_freeze_schedules_if_sync_failing(agent_name)
-    state = _db.get_sync_state(agent_name) or {}
-    failing = (
-        state.get("last_sync_status") == "failed"
-        and (state.get("consecutive_failures") or 0) >= 3
-    )
-    return {
-        "agent_name": agent_name,
-        "freeze_schedules_if_sync_failing": bool(freeze_flag),
-        "sync_failing": bool(failing),
-        "should_freeze": bool(freeze_flag and failing),
-        "consecutive_failures": state.get("consecutive_failures") or 0,
-    }
+    from services.role_readiness_gate import AgentNotFound, brief_readiness
 
-
-# =============================================================================
-# Activity Tracking Endpoints (for dedicated scheduler)
-# =============================================================================
-
-
-@router.post("/activities/track")
-async def track_activity(request: ActivityTrackRequest):
-    """
-    Track the start of a new activity.
-
-    Called by the dedicated scheduler when a cron-triggered execution starts.
-    Creates an activity record and broadcasts via WebSocket.
-
-    Returns:
-        activity_id: UUID of the created activity
-    """
     try:
-        # Map string to ActivityType enum
-        activity_type_map = {
-            "schedule_start": ActivityType.SCHEDULE_START,
-            "schedule_end": ActivityType.SCHEDULE_END,
-            "chat_start": ActivityType.CHAT_START,
-            "chat_end": ActivityType.CHAT_END,
-            "agent_collaboration": ActivityType.AGENT_COLLABORATION,
-        }
-
-        activity_type = activity_type_map.get(request.activity_type)
-        if not activity_type:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid activity_type: {request.activity_type}"
-            )
-
-        activity_id = await activity_service.track_activity(
-            agent_name=request.agent_name,
-            activity_type=activity_type,
-            user_id=request.user_id,
-            triggered_by=request.triggered_by,
-            related_execution_id=request.related_execution_id,
-            details=request.details
-        )
-
-        logger.info(f"Activity tracked: {activity_id} for agent {request.agent_name} ({request.activity_type})")
-
-        return {
-            "activity_id": activity_id,
-            "agent_name": request.agent_name,
-            "activity_type": request.activity_type
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to track activity: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/activities/{activity_id}/complete")
-async def complete_activity(activity_id: str, request: ActivityCompleteRequest):
-    """
-    Mark an activity as completed or failed.
-
-    Called by the dedicated scheduler when an execution completes.
-    Updates the activity record and broadcasts via WebSocket.
-    """
-    try:
-        success = await activity_service.complete_activity(
-            activity_id=activity_id,
-            status=request.status,
-            details=request.details,
-            error=request.error
-        )
-
-        if not success:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Activity not found: {activity_id}"
-            )
-
-        logger.info(f"Activity completed: {activity_id} ({request.status})")
-
-        return {
-            "activity_id": activity_id,
-            "status": request.status,
-            "completed": True
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to complete activity: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        verdict = await brief_readiness(agent_name)
+    except AgentNotFound:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return {"agent_name": agent_name, "fire": verdict.fire, "reason": verdict.reason, "basis": verdict.basis}
 
 
 # =============================================================================
@@ -485,6 +381,12 @@ async def execute_task_internal(
     # whether the caller asked for async — and the async branch returns an
     # `accepted` ack the scheduler then polls, so refusing after it would leave a
     # row nobody ever fails.
+    # ent#637: a run addressed to one person runs AS that seat — its memory is
+    # read into the caller prompt (so the whole-blob write has something to
+    # read first) and `write_user_memory` accepts the run. Composed only after
+    # the ent#498 stamp landed, because the stamp is what the write boundary
+    # resolves the seat from; a refused address gets neither.
+    seat_system_prompt: Optional[str] = None
     if request.deliver_to_workspace_email:
         try:
             # Off the event loop: `resolve_and_stamp` makes 4–6 synchronous
@@ -514,11 +416,15 @@ async def execute_task_internal(
                 "message": refusal.detail,
                 "execution_id": request.execution_id,
             })
+        seat_system_prompt = await asyncio.to_thread(
+            schedule_seat_memory.build_seat_caller_prompt,
+            request.agent_name, request.deliver_to_workspace_email,
+        )
 
     if request.async_mode:
         # Fire-and-forget: spawn background task, return immediately
         asyncio.create_task(_execute_task_internal_background(
-            task_service, request
+            task_service, request, system_prompt=seat_system_prompt,
         ))
         accepted = {
             "status": "accepted",
@@ -530,9 +436,13 @@ async def execute_task_internal(
         idempotency_service.complete(idem, request.execution_id, accepted)
         return accepted
 
-    # Synchronous mode (default, backward compatible)
+    # Synchronous mode (default, backward compatible). #3114: on a pull pilot
+    # the turn is queued and awaited here.
+    from services.task_execution_service import dispatch_and_await_terminal
+
     try:
-        result = await task_service.execute_task(
+        result = await dispatch_and_await_terminal(
+            service=task_service,
             agent_name=request.agent_name,
             message=request.message,
             triggered_by=request.triggered_by,
@@ -542,6 +452,7 @@ async def execute_task_internal(
             execution_id=request.execution_id,
             schedule_context=_schedule_context_from(request),
             attempt=request.attempt,
+            system_prompt=seat_system_prompt,
         )
 
         result_payload = {
@@ -600,13 +511,17 @@ def _fail_execution_row(execution_id: Optional[str], error: str) -> None:
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=error,
+                result=ExecutionResult(
+                    error=error,
+                ),
             )
     except Exception as db_err:  # noqa: BLE001
         logger.error("Failed to mark execution %s failed: %s", execution_id, db_err)
 
 
-async def _execute_task_internal_background(task_service, request: InternalTaskExecutionRequest):
+async def _execute_task_internal_background(
+    task_service, request: InternalTaskExecutionRequest, *, system_prompt: Optional[str] = None,
+):
     """
     Background coroutine for async task execution (SCHED-ASYNC-001).
 
@@ -625,6 +540,7 @@ async def _execute_task_internal_background(task_service, request: InternalTaskE
             execution_id=request.execution_id,
             schedule_context=_schedule_context_from(request),
             attempt=request.attempt,
+            system_prompt=system_prompt,   # ent#637: the seat's memory, or None
         )
         logger.info(
             f"Async task completed for {request.agent_name}: "
@@ -645,7 +561,9 @@ async def _execute_task_internal_background(task_service, request: InternalTaskE
                     won = db.update_execution_status(
                         execution_id=request.execution_id,
                         status=TaskExecutionStatus.FAILED,
-                        error="Execution cancelled (backend shutdown)",
+                        result=ExecutionResult(
+                            error="Execution cancelled (backend shutdown)",
+                        ),
                     )
                     logger.info(f"Updated execution {request.execution_id} to FAILED on cancel")
                     # #1804: the second backend-shutdown terminal writer (the
@@ -665,6 +583,12 @@ async def _execute_task_internal_background(task_service, request: InternalTaskE
                 logger.error(f"Failed to update execution status on cancel: {db_err}")
         raise
 
+    except SkillGateError as e:
+        # trinity-enterprise#751: the run names a gated skill. Not a failure —
+        # the backstop already closed the row SKIPPED (the scheduler does not
+        # retry SKIPPED) and raised the approval or refused by name.
+        logger.info(f"Scheduled task on {request.agent_name} not run by the skill gate: {e.code}")
+
     except Exception as e:
         # If an exception escapes TaskExecutionService, ensure execution is marked failed
         # to prevent stuck 'running' status (fixes issue #90)
@@ -683,7 +607,9 @@ async def _execute_task_internal_background(task_service, request: InternalTaskE
                     db.update_execution_status(
                         execution_id=request.execution_id,
                         status=TaskExecutionStatus.FAILED,
-                        error=error_msg,
+                        result=ExecutionResult(
+                            error=error_msg,
+                        ),
                     )
                     logger.info(f"Updated execution {request.execution_id} to FAILED")
             except Exception as db_err:
@@ -812,32 +738,6 @@ async def log_audit_entry(request: InternalAuditRequest):
     except Exception as e:
         logger.error(f"Failed to log audit entry: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# =============================================================================
-# Agent Shared Files (outbound — FILES-001 Step 3)
-# =============================================================================
-
-@router.post("/agent-files/share", response_model=ShareFileResponse)
-async def agent_files_share(payload: ShareFileRequest):
-    """
-    Mint a public download URL for a file the agent wrote to its publish dir.
-
-    Authentication: X-Internal-Secret (already enforced by router dependency).
-    Agent identity: carried by `payload.agent_name`. The agent server is
-    responsible for passing its own name here — same trust model as
-    /internal/execute-task (forging requires the internal secret).
-    """
-    from services.agent_shared_files_service import create_share
-
-    result = await create_share(
-        agent_name=payload.agent_name,
-        filename=payload.filename,
-        display_name=payload.display_name,
-        expires_in=payload.expires_in,
-        created_by=payload.agent_name,
-    )
-    return ShareFileResponse(**result)
 
 
 # ---------------------------------------------------------------------------

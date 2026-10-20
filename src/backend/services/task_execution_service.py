@@ -24,7 +24,8 @@ from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
+from types import SimpleNamespace
 
 import httpx
 
@@ -51,10 +52,16 @@ from services.dispatch_breaker import DispatchBreaker
 from services.execution_integrity import derive_turn_integrity
 from services import event_dispatch_service
 from services import channel_completion_report
+from services import peer_skill_policy, skill_gate_service
+from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.platform_audit_service import AuditEventType, platform_audit_service
 # #2048: stdlib-only leaf by construction, so this cannot cycle back through the
 # capacity stack at import time (its own reference to this module is lazy).
-from services.pull_pilot import note_unreachable_pull_trigger, pull_owns_dispatch
+from services.pull_pilot import (
+    INTERACTIVE_TRIGGERS,
+    note_unreachable_pull_trigger,
+    pull_owns_dispatch,
+)
 from services.settings_service import settings_service
 from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sanitize_response, sanitize_text
 from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
@@ -77,6 +84,73 @@ from services.platform_prompt_service import (
     get_platform_system_prompt,
     is_execution_context_enabled,
 )
+from db.write_params import ExecutionResult, TaskExecutionFields
+from db.skill_gate_requests import APPROVED_RUN_STATES
+
+
+#: The resume turn a person answered (trinity-enterprise#329). Mirrors
+#: `operator_resume_service.TRIGGERED_BY`; not imported, to keep this module free
+#: of that service's import graph.
+_RESUME_TRIGGER = "operator_response"
+
+
+def served_person_for_row(row: Any) -> Optional[str]:
+    """The person a run serves, read off its execution row, or None — picks the
+    seat the prompt names (trinity-enterprise#814). Never rendered.
+
+    Two kinds of run serve one person: a scheduled seat run (ent#637, via
+    `schedule_seat_memory.seat_for_execution`) and the resume turn of an ask
+    the addressee discussed in the Workspace (ent#886). The resume row carries
+    no person column — who answered stays in the operator-queue row and the
+    audit row, never in the agent's prompt (ent#715) — so its served person is
+    the Workspace stamp `_workspace_destination` wrote, which exists only when
+    the responder IS the addressee. Read off the row so the push and the pull
+    composer agree: a pull claim rebuilds the turn from the row alone.
+
+    Accepts the ORM-ish row `db.get_execution` returns and the dict a pull claim
+    returns. Pure; fail-soft (any doubt is None, i.e. the primary's seat).
+    """
+    from services import schedule_seat_memory
+
+    if row is None:
+        return None
+
+    def field(name: str) -> Any:
+        if isinstance(row, dict):
+            return row.get(name)
+        return getattr(row, name, None)
+
+    trigger = (field("triggered_by") or "").lower()
+    if trigger in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS:
+        return schedule_seat_memory.seat_for_execution(SimpleNamespace(
+            triggered_by=field("triggered_by"),
+            schedule_id=field("schedule_id"),
+            source_channel=field("source_channel"),
+            source_channel_client=field("source_channel_client"),
+        ))
+    if trigger == _RESUME_TRIGGER:
+        if (field("source_channel") or "").lower() != schedule_seat_memory.PORTAL_SOURCE_CHANNEL:
+            return None
+        client = (field("source_channel_client") or "").strip().lower()
+        return client or None
+    return None
+
+
+def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str]) -> Optional[str]:
+    """`served_person_for_row` for the push composer: one row read, and only
+    for a trigger that can serve a person; fail-soft."""
+    from services import schedule_seat_memory
+
+    trigger = (triggered_by or "").lower()
+    if not execution_id or (
+        trigger not in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS and trigger != _RESUME_TRIGGER
+    ):
+        return None
+    try:
+        return served_person_for_row(db.get_execution(execution_id))
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_served_person_for({execution_id}) failed: {e}")
+        return None
 
 
 def _resolve_agent_runtime(agent_name: str) -> str:
@@ -188,8 +262,19 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # ent#329: `operator_response` belongs here. The operator answered and moved
     # on; the resume turn runs with nobody reading its reply, so an unresolved
     # command in it is invisible without the alert.
+    #
+    # trinity-enterprise#611: `operator_ending` too — the wake for an ask that
+    # was cancelled or expired runs with nobody reading its reply, exactly like
+    # the answer's.
+    #
+    # #2845: `retry` belongs here. RETRY-001 fires it from a timer
+    # `retry_delay_seconds` after the failure, so nobody is reading its reply —
+    # even when the run it retries was started by hand. Without it, a skill that
+    # was missing all along stays silent whenever the first attempt failed
+    # before reaching the agent (capacity, timeout) and only the retry got far
+    # enough to show it.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
-     "a2a", "operator_response"}
+     "a2a", "operator_response", "operator_ending", "retry"}
 )
 
 
@@ -319,6 +404,13 @@ async def _alert_skill_not_found(
 # trust restart_result's string status (it proves the call returned, not that
 # the new token authenticates). A still-failing retry just writes FAILED.
 _SWITCH_RETRY_DELAY_S = 3.0
+
+# #3470: the least a SUB-003 re-issue needs to be worth dispatching — the settle
+# above, the HTTP slack, and 30s for the agent to do anything at all. A FLOOR,
+# not a second ceiling (#2789): the remaining turn budget stays the only bound
+# on how long a re-issue may run; this only refuses a re-issue whose agent-side
+# budget would be `max(1, …)` seconds — a guaranteed, billed, mis-blamed TIMEOUT.
+_SWITCH_RETRY_MIN_REMAINING_S = _SWITCH_RETRY_DELAY_S + _AGENT_HTTP_SLACK_S + 30.0
 
 
 
@@ -592,6 +684,12 @@ def build_pull_queue_payload(
     source_user_email: Optional[str],
     source_agent_name: Optional[str],
     slot_already_held: bool,
+    conversation_key: Optional[str] = None,
+    persist_session: bool = False,
+    schedule_context: Optional[dict] = None,
+    attempt: Optional[int] = None,
+    images: Optional[list] = None,
+    collaboration_activity_id: Optional[str] = None,
 ) -> Optional[PersistentTaskPayload]:
     """The #2391 producer gate: the overflow payload that lets THIS producer put
     a row on the durable queue, or ``None`` to keep today's ``"reject"`` policy.
@@ -678,8 +776,42 @@ def build_pull_queue_payload(
         subscription_id=subscription_id,
         x_source_agent=source_agent_name,
         triggered_by=triggered_by,
-        collaboration_activity_id=None,
+        # #3127: an agent-to-agent /chat turn's activity, closed by the sink.
+        collaboration_activity_id=collaboration_activity_id,
+        # #3114: what the push payload sends beside the request. The worker
+        # needs persist_session and images to run the same turn; the claim
+        # composes the prompt from schedule_context and attempt; the claim
+        # guard serialises turns sharing conversation_key.
+        conversation_key=conversation_key,
+        persist_session=persist_session,
+        schedule_context=schedule_context,
+        attempt=attempt,
+        images=images or None,
     )
+
+
+# #3114: triggers whose caller holds a person (or a validation verdict) on the
+# answer. On a pull pilot such a turn first waits for a worker to CLAIM it,
+# bounded by one agent timeout, and is cancelled if none does in time.
+_CLAIM_WAITING_TRIGGERS = INTERACTIVE_TRIGGERS | {"validation"}
+# Row-read cadence while a sync turn waits for its claim. Module-level so tests
+# can shorten it.
+QUEUE_CLAIM_POLL_INTERVAL = 1.0
+
+
+async def _wait_until_claimed(execution_id: str, budget: float) -> bool:
+    """Poll the row while it is ``queued``. True once it left ``queued``
+    (claimed, terminal, or gone); False when it is still queued at ``budget``."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
+    while True:
+        row = db.get_execution(execution_id)
+        if row is None or row.status != TaskExecutionStatus.QUEUED:
+            return True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(QUEUE_CLAIM_POLL_INTERVAL, remaining))
 
 
 async def dispatch_and_await_terminal(
@@ -688,6 +820,9 @@ async def dispatch_and_await_terminal(
     message: str,
     triggered_by: str,
     wait_timeout: Optional[float] = None,
+    claim_budget: Optional[float] = None,
+    service: Optional["TaskExecutionService"] = None,
+    caller_waiting: bool = False,
     **execute_kwargs,
 ) -> TaskExecutionResult:
     """``execute_task`` for a caller that genuinely needs the answer in-line.
@@ -705,17 +840,30 @@ async def dispatch_and_await_terminal(
     block correctly while the work happens somewhere else, which is a different
     thing and one the adapter already does.
 
-    ⚠️ Under pull, nothing signals the waiter directly (the pull sink writes the
-    terminal through the CAS, it does not know about this registry), so the wake
-    comes from ``sync_waiter``'s DB-poll fallback and latency is bounded by
-    ``SYNC_WAITER_POLL_INTERVAL``. For a turn measured in seconds-to-minutes that
-    is noise, and it is deliberately not worth a second signalling path.
+    The pull sink signals the waiter when its CAS write wins (#3114), so a
+    caller in the same process wakes at once; a caller on another uvicorn
+    worker wakes on ``sync_waiter``'s DB poll within
+    ``SYNC_WAITER_POLL_INTERVAL``.
+
+    **Interactive and validation triggers wait in two phases (#3114).** Phase 1
+    holds while the row is ``queued``, for at most ``claim_budget`` seconds
+    (default one agent execution timeout; a room passes a shorter one). If no
+    worker claimed it by then the row is stored FAILED and the caller gets
+    FAILED/``CAPACITY``, which is what push answers for an agent with no free
+    slot. A cancel that loses the race means a worker just claimed the row, so
+    the wait carries on. Phase 2 is the terminal wait, timed from the claim.
+    Other triggers keep the single terminal wait, unless the caller passes
+    ``caller_waiting=True``: a blocked caller whose trigger is autonomous (an
+    agent-to-agent ``/chat``, #3127) opts into the two phases explicitly.
 
     A wait that times out returns a FAILED result with ``TIMEOUT`` rather than
     raising — the execution keeps running and its real terminal still lands on
     the row, exactly as for a fan-out deadline (#2524).
+
+    ``service`` is for a caller that holds its own ``TaskExecutionService``
+    (``ValidationService`` takes one by injection); default is the singleton.
     """
-    result = await get_task_execution_service().execute_task(
+    result = await (service or get_task_execution_service()).execute_task(
         agent_name=agent_name,
         message=message,
         triggered_by=triggered_by,
@@ -726,16 +874,59 @@ async def dispatch_and_await_terminal(
 
     from services.sync_waiter import wait_for_sync_terminal
 
+    try:
+        agent_timeout = float(db.get_execution_timeout(agent_name))
+    except Exception:  # noqa: BLE001 — a config read must not break dispatch
+        agent_timeout = 7200.0
     if wait_timeout is None:
-        try:
-            wait_timeout = float(db.get_execution_timeout(agent_name)) + 120.0
-        except Exception:  # noqa: BLE001 — a config read must not break dispatch
-            wait_timeout = 7320.0
+        wait_timeout = agent_timeout + 120.0
+    if claim_budget is None:
+        claim_budget = agent_timeout
 
     logger.info(
         "[TaskExecService] %s dispatch for %s queued as %s; awaiting its terminal",
         triggered_by, agent_name, result.execution_id,
     )
+    if caller_waiting or triggered_by in _CLAIM_WAITING_TRIGGERS:
+        try:
+            claimed = await _wait_until_claimed(result.execution_id, claim_budget)
+        except asyncio.CancelledError:
+            # The caller went away: a turn still queued must not run later for
+            # nobody (a paid turn would run unsettled).
+            if db.cancel_queued_execution(result.execution_id, reason="caller went away"):
+                _close_unclaimed_turn(agent_name, result.execution_id,
+                                      TaskExecutionStatus.CANCELLED, "caller went away")
+            raise
+        if not claimed:
+            error = (
+                f"Agent at capacity (queued turn not claimed in {int(claim_budget)}s)"
+            )
+            # #3114: stored FAILED, so it reads as a capacity failure; only a
+            # caller going away (above) leaves a CANCELLED row.
+            if db.cancel_queued_execution(
+                result.execution_id, reason=error, status=TaskExecutionStatus.FAILED
+            ):
+                logger.info(
+                    "[TaskExecService] %s: queued %s turn %s not claimed in %ss; failed",
+                    agent_name, triggered_by, result.execution_id, int(claim_budget),
+                )
+                _close_unclaimed_turn(agent_name, result.execution_id,
+                                      TaskExecutionStatus.FAILED, error)
+                return TaskExecutionResult(
+                    execution_id=result.execution_id,
+                    status=TaskExecutionStatus.FAILED,
+                    response="",
+                    error=error,
+                    error_code=TaskExecutionErrorCode.CAPACITY,
+                )
+            # Lost the cancel: a worker claimed it just now. Phase 2.
+        # A short turn can finish inside one claim poll, before the waiter
+        # registers, and the sink's wake-up is then lost. Read the row first.
+        from services.sync_waiter import TERMINAL_TASK_STATUSES
+
+        done = result_from_execution_row(result.execution_id)
+        if done is not None and done.status in TERMINAL_TASK_STATUSES:
+            return done
     try:
         await wait_for_sync_terminal(result.execution_id, wait_timeout)
     except asyncio.TimeoutError:
@@ -743,10 +934,42 @@ async def dispatch_and_await_terminal(
             execution_id=result.execution_id,
             status=TaskExecutionStatus.FAILED,
             response="",
-            error=f"Timed out after {int(wait_timeout)}s waiting for the queued execution",
+            error=(
+                f"Execution timed out after {int(wait_timeout)}s waiting for "
+                f"the queued execution"
+            ),
             error_code=TaskExecutionErrorCode.TIMEOUT,
         )
     return result_from_execution_row(result.execution_id) or result
+
+
+def _close_unclaimed_turn(agent_name: str, execution_id: str, status, error: str) -> None:
+    """#3114: a claim-wait CAS winner (unclaimed FAILED, caller-away CANCELLED)
+    closes its dispatch activity and emits the terminal event, as every other
+    terminal writer does. Fire-and-forget; a running loop is guaranteed here."""
+    activity_service.spawn_close_execution_activity(execution_id, status, error=error)
+    event_dispatch_service.spawn_task_terminal_event(
+        agent_name, execution_id, terminal_status=status, summary_or_error=error,
+    )
+
+
+# Values `mark_execution_dispatched` writes into `claude_session_id` before a
+# real session id exists. Never a resumable session.
+_DISPATCH_SESSION_SENTINELS = frozenset({"dispatched", "dispatched_async"})
+_ERROR_CODE_VALUES = {code.value: code for code in TaskExecutionErrorCode}
+
+
+def _split_error_code(
+    error: Optional[str],
+) -> Tuple[Optional[TaskExecutionErrorCode], Optional[str]]:
+    """``(code, text)`` from an error the pull sink stored as ``[code] text``
+    (``apply_task_result``). The prefix is removed only when it names a
+    ``TaskExecutionErrorCode``; channel adapters post ``text`` to people."""
+    if not error or not error.startswith("["):
+        return None, error
+    head, sep, rest = error[1:].partition("]")
+    code = _ERROR_CODE_VALUES.get(head.strip().lower()) if sep else None
+    return (code, rest.strip()) if code else (None, error)
 
 
 def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult]:
@@ -755,21 +978,46 @@ def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult
     The row is the authority once a turn has run somewhere other than inside the
     caller's await — under pull that is every turn. Returns None when the row is
     gone, so the caller can fall back to whatever it already had.
+
+    #3114: shaped like the push result its interactive callers already read.
+    ``response`` is set on success and cancel (#679 returns a cancelled turn's
+    partial reply), ``error_code`` comes back out of the ``[code]`` prefix the
+    pull sink writes and the prefix is removed from ``error``,
+    compact events ride ``raw_response["metadata"]``, and the dispatch
+    sentinels never pass for a session id.
     """
     execution = db.get_execution(execution_id)
     if execution is None:
         return None
     status = getattr(execution, "status", None)
     status = status.value if hasattr(status, "value") else str(status)
+    error = getattr(execution, "error", None)
+    session_id = getattr(execution, "claude_session_id", None)
+    if session_id in _DISPATCH_SESSION_SENTINELS:
+        session_id = None
+    raw_response: dict = {}
+    compact = getattr(execution, "compact_metadata", None)
+    if compact:
+        try:
+            raw_response = {"metadata": {"compact_events": json.loads(compact)}}
+        except (TypeError, ValueError):
+            raw_response = {}
+    keeps_response = status in (
+        TaskExecutionStatus.SUCCESS.value, TaskExecutionStatus.CANCELLED.value
+    )
+    error_code, error = _split_error_code(error)
     return TaskExecutionResult(
         execution_id=execution_id,
         status=status,
-        response=getattr(execution, "response", None) or "",
+        response=(getattr(execution, "response", None) or "") if keeps_response else "",
         cost=getattr(execution, "cost", None),
         context_used=getattr(execution, "context_used", None),
         context_max=getattr(execution, "context_max", None),
-        session_id=getattr(execution, "claude_session_id", None),
-        error=getattr(execution, "error", None),
+        session_id=session_id,
+        execution_log=getattr(execution, "execution_log", None),
+        raw_response=raw_response,
+        error=error,
+        error_code=error_code,
     )
 
 
@@ -953,11 +1201,13 @@ async def _write_terminal_and_gate(
         won = db.update_execution_status(
             execution_id=execution_id,
             status=status,
-            error=error,
-            cost=cost,
-            context_used=context_used,
-            context_max=context_max,
-            retry_count=retry_count,
+            result=ExecutionResult(
+                error=error,
+                cost=cost,
+                context_used=context_used,
+                context_max=context_max,
+                retry_count=retry_count,
+            ),
         )
     if won:
         # #1804: the CAS winner owns the close. ``activity_status`` was dropped
@@ -1080,6 +1330,10 @@ class _AttemptState:
     previous_attempt_cost: float = 0.0
     subscription_switch_attempted: bool = False
     execution_time_ms: int = 0
+    # #3470: the turn's SUB-003 walk (`subscription_auto_switch.SubscriptionWalk`)
+    # — which credentials this turn has run on, the override the current
+    # attempt carries, and the committed switch. None until the first dispatch.
+    subscription_walk: Optional[object] = None
     # #2638: the switch that actually happened during this turn — pre-dispatch
     # or post-failure — carried onto `TaskExecutionResult` so a caller can say
     # "moved to <sub>, try again" instead of "not retryable". None = none.
@@ -1214,6 +1468,31 @@ def _log_retry_budget(
         logger.info(line)
 
 
+# trinity-enterprise#751: the attribution a producer may leave off its call but
+# wrote on the row it pre-created. `/api/internal/execute-task` sends neither the
+# schedule id nor the person who pressed Run now — both live on the row.
+_ROW_ATTRIBUTION = ("source_user_id", "source_user_email", "source_agent_name",
+                    "source_mcp_key_id", "source_mcp_key_name", "schedule_id")
+
+
+def _with_row_attribution(fields: dict, execution_id: Optional[str]) -> dict:
+    """`fields` with each missing attribution filled from the pre-created row
+    (platform-written). Read only when a gate applies; an unreadable row leaves
+    `fields` as the caller passed them."""
+    merged = dict(fields, schedule_id=None)
+    if not execution_id:
+        return merged
+    try:
+        row = db.get_execution(execution_id)
+    except Exception:  # noqa: BLE001 — attribution only; the gate still runs
+        logger.warning("[SkillGate] could not read row %s for attribution", execution_id)
+        return merged
+    for key in _ROW_ATTRIBUTION:
+        if merged.get(key) is None:
+            merged[key] = getattr(row, key, None) if row is not None else None
+    return merged
+
+
 class TaskExecutionService:
     """
     Stateless service encapsulating the full task-execution lifecycle.
@@ -1258,8 +1537,37 @@ class TaskExecutionService:
         # splats straight into this signature — an unaccepted keyword here is a
         # TypeError on every Workspace turn, not a silently-dropped column.
         source_channel_client: Optional[str] = None,
+        # trinity#3653: the agent whose channel binding owns the context, for a
+        # row that is not that agent's direct turn (a gated request's wake-up).
+        source_channel_agent: Optional[str] = None,
         # ent#555 — which canvas the user had open when they sent this turn.
         open_canvas_id: Optional[str] = None,
+        # #3114: the conversation this turn continues, e.g. "session:<key>".
+        # Only a pull pilot's queue reads it: the claim never runs two queued
+        # turns with the same key at once. Ignored on the push path.
+        conversation_key: Optional[str] = None,
+        # #2973: inter-agent chain depth (#2806) the caller already admitted;
+        # stamped on the row created here. Ignored when `execution_id` is given.
+        chain_depth: Optional[int] = None,
+        # trinity-enterprise#751: the requester's OWN words, when `message` is a
+        # composed prompt (history, sender context, a template). The skill gate
+        # scans this, never the composition. None ⇒ `message` is the requester's.
+        request_text: Optional[str] = None,
+        # trinity-enterprise#751: True only when an admission seam already ran the
+        # skill gate for this request (`/chat`, `/task` and what they reach).
+        gate_checked: bool = False,
+        # trinity#3274: what an approved run sends when the producer scans more
+        # than the message (fan-out: the subtask's message and the batch's
+        # system prompt, apart) — `skill_gate_service.frozen_replay`.
+        gate_replay: Optional[dict] = None,
+        # trinity-enterprise#751: the person the producer's entry AUTHENTICATED
+        # (the Workspace's `PortalPrincipal`). The only way the backstop lets an
+        # approver run their own gated request; None ⇒ the requester is derived
+        # from the row's fields and never self-approves.
+        gate_requester: Optional["skill_gate_service.Requester"] = None,
+        # #3127: the agent-to-agent /chat collaboration activity. Only a pull
+        # pilot's queue reads it (the pull sink closes it); ignored on push.
+        collaboration_activity_id: Optional[str] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1331,23 +1639,27 @@ class TaskExecutionService:
                 agent_name=agent_name,
                 message=message,
                 triggered_by=triggered_by,
-                source_user_id=source_user_id,
-                source_user_email=source_user_email,
-                source_agent_name=source_agent_name,
-                source_mcp_key_id=source_mcp_key_id,
-                source_mcp_key_name=source_mcp_key_name,
-                model_used=model,
-                fan_out_id=fan_out_id,
-                loop_id=loop_id,
-                subscription_id=_exec_sub_id,
-                open_canvas_id=open_canvas_id,
-                source_channel=source_channel,
-                source_channel_chat_id=source_channel_chat_id,
-                source_channel_thread=source_channel_thread,
-                # ent#457 review: the paired write. Accepting the kwarg without
-                # persisting it would leave `_resolve_portal` failing closed on
-                # every row this branch creates — the sync Workspace turn.
-                source_channel_client=source_channel_client,
+                fields=TaskExecutionFields(
+                    source_user_id=source_user_id,
+                    source_user_email=source_user_email,
+                    source_agent_name=source_agent_name,
+                    source_mcp_key_id=source_mcp_key_id,
+                    source_mcp_key_name=source_mcp_key_name,
+                    model_used=model,
+                    fan_out_id=fan_out_id,
+                    loop_id=loop_id,
+                    subscription_id=_exec_sub_id,
+                    open_canvas_id=open_canvas_id,
+                    source_channel=source_channel,
+                    source_channel_chat_id=source_channel_chat_id,
+                    source_channel_thread=source_channel_thread,
+                    # ent#457 review: the paired write. Accepting the kwarg without
+                    # persisting it would leave `_resolve_portal` failing closed on
+                    # every row this branch creates — the sync Workspace turn.
+                    source_channel_client=source_channel_client,
+                    source_channel_agent=source_channel_agent,
+                    chain_depth=chain_depth,
+                ),
             )
             execution_id = execution.id if execution else None
 
@@ -1379,12 +1691,53 @@ class TaskExecutionService:
             source_user_email=source_user_email,
             source_agent_name=source_agent_name,
             slot_already_held=slot_already_held,
+            conversation_key=conversation_key,
+            persist_session=persist_session,
+            schedule_context=schedule_context,
+            attempt=attempt,
+            images=images,
+            collaboration_activity_id=collaboration_activity_id,
         )
 
         # Wrap entire execution flow to ensure execution status is updated on any failure.
         # This fixes issue #90 where exceptions during slot acquisition left executions
         # stuck in 'running' status with NULL session_id and duration_ms.
         try:
+            # ---- 1b. Skill gate backstop (trinity-enterprise#751) -----------
+            # Every producer that reaches the agent through here and was not
+            # checked at an admission seam. Before admission, so a gated request
+            # holds no slot, opens no activity and is never enqueued; the row is
+            # closed SKIPPED and the gate's exception propagates (the `finally`
+            # releases a slot the caller pre-acquired).
+            if not gate_checked:
+                await self._skill_gate_backstop(
+                    agent_name=agent_name,
+                    message=message,
+                    request_text=request_text,
+                    triggered_by=triggered_by,
+                    execution_id=execution_id,
+                    gate_requester=gate_requester,
+                    schedule_context=schedule_context,
+                    loop_id=loop_id,
+                    gate_replay=gate_replay,
+                    fields=dict(
+                        source_user_id=source_user_id,
+                        source_user_email=source_user_email,
+                        source_agent_name=source_agent_name,
+                        source_mcp_key_id=source_mcp_key_id,
+                        source_mcp_key_name=source_mcp_key_name,
+                        model=model,
+                        timeout_seconds=timeout_seconds,
+                        allowed_tools=allowed_tools,
+                        subscription_id=subscription_id,
+                        chain_depth=chain_depth,
+                        source_channel=source_channel,
+                        source_channel_chat_id=source_channel_chat_id,
+                        source_channel_thread=source_channel_thread,
+                        source_channel_client=source_channel_client,
+                    ),
+                )
+
             # ---- 2. Acquire capacity slot ------------------------------------
             slot_acquired, admission_denied = await self._admission_gate(
                 agent_name=agent_name,
@@ -1480,6 +1833,7 @@ class TaskExecutionService:
                 timeout_seconds=timeout_seconds,
                 circuit=circuit,
                 state=state,
+                triggered_by=triggered_by,
             )
 
             # ---- #1083: fire-and-forget ACK --------------------------------
@@ -1548,6 +1902,12 @@ class TaskExecutionService:
                 state=state,
             ), state)
 
+        except SkillGateError:
+            # trinity-enterprise#751: not an execution failure — the backstop
+            # already closed the row SKIPPED. Propagate so the caller (or the
+            # app handler) answers pending / refused instead of FAILED.
+            raise
+
         except Exception as e:
             error_msg = str(e)
             logger.error(f"[TaskExecService] Unexpected error executing task on {agent_name}: {error_msg}")
@@ -1584,7 +1944,9 @@ class TaskExecutionService:
                         won = db.update_execution_status(
                             execution_id=execution_id,
                             status=TaskExecutionStatus.FAILED,
-                            error="Execution cancelled (backend shutdown)",
+                            result=ExecutionResult(
+                                error="Execution cancelled (backend shutdown)",
+                            ),
                         )
                         # #1804: #767 closed the execution record here so the
                         # cleanup sweep wouldn't inflate ITS duration — but left
@@ -1614,6 +1976,92 @@ class TaskExecutionService:
                     agent_name,
                     execution_id or f"temp-{datetime.utcnow().timestamp()}",
                 )
+
+    # -----------------------------------------------------------------------
+    # Skill gate backstop (trinity-enterprise#751)
+    # -----------------------------------------------------------------------
+
+    async def _skill_gate_backstop(self, *, agent_name, message, request_text, triggered_by,
+                                   execution_id, fields, gate_requester=None,
+                                   schedule_context=None, loop_id=None,
+                                   gate_replay=None) -> None:
+        """Run the skill gate for a producer that calls `execute_task` directly.
+
+        Skipped for the approved run itself — a row the gate's own record names
+        as its dispatched execution, on this agent. Otherwise a gated request
+        closes its row SKIPPED (no activity exists yet: this runs before
+        admission, the #1804 allowlisted admission-path shape) and re-raises,
+        so the caller answers pending / refused instead of dispatching.
+        """
+        try:
+            # The gate map first: while nothing is gated and the agent holds no
+            # library skill (the common case) these are the only reads.
+            # abilityai/trinity-enterprise#662: an agent with library skills
+            # but no gates still goes through `enforce`, whose peer check is
+            # the rule for what an edge exposes.
+            gates = skill_gate_service.read_gates(agent_name)
+            if not gates and not peer_skill_policy.has_library_skills(agent_name):
+                return
+            if gates and execution_id:
+                approved = db.get_gate_request_by_dispatched_execution(execution_id)
+                if (approved and approved.get("agent_name") == agent_name
+                        and approved.get("state") in APPROVED_RUN_STATES):
+                    return
+            fields = _with_row_attribution(fields, execution_id)
+            requester = gate_requester or skill_gate_service.requester_for_dispatch(
+                triggered_by=triggered_by,
+                source_user_email=fields["source_user_email"],
+                source_agent_name=fields["source_agent_name"],
+                source_mcp_key_id=fields["source_mcp_key_id"],
+                source_channel=fields["source_channel"],
+                source_channel_chat_id=fields["source_channel_chat_id"],
+                schedule_id=(schedule_context or {}).get("schedule_id") or fields.get("schedule_id"),
+                schedule_name=(schedule_context or {}).get("name"),
+                loop_id=loop_id,
+            )
+            frozen = skill_gate_service.frozen_dispatch(
+                triggered_by=triggered_by,
+                **{k: v for k, v in fields.items() if k != "schedule_id"})
+            decision = await skill_gate_service.enforce(
+                agent_name,
+                request_text=message if request_text is None else request_text,
+                # trinity#3274: the schedule's name, the key's name and the email
+                # reach the executor's system prompt beside the request.
+                context_text=skill_gate_service.requester_context_text(
+                    schedule_name=(schedule_context or {}).get("name"),
+                    mcp_key_name=fields["source_mcp_key_name"],
+                    source_email=fields["source_user_email"]),
+                requester=requester,
+                triggered_by=triggered_by,
+                occurrence_key=execution_id,
+                origin_execution_id=execution_id,
+                dispatch={**frozen, **(gate_replay or {})},
+                gates=gates,
+            )
+            # Only reachable with a producer-supplied, proven `gate_requester`.
+            # trinity-enterprise#752: the row this call created or was given is
+            # the run the agent receives — cleared here for the in-container
+            # hook, before admission (so a Workspace cold retry reuses it).
+            await skill_gate_service.record_self_approval(
+                agent_name, decision, current_user=None,
+                endpoint=f"execute_task:{triggered_by}", execution_id=execution_id,
+                request_text=message if request_text is None else request_text,
+                triggered_by=triggered_by,
+                # #3404: no principal reaches here, so the producer's own
+                # account of the credential is what the audit row carries.
+                credential=requester.credential)
+        except SkillGateError as exc:
+            if execution_id:
+                if isinstance(exc, SkillApprovalRequired):
+                    # The notice itself — it names the request id, and it is the
+                    # text a public-link visitor reads off this row (#3274).
+                    error = exc.message
+                else:
+                    error = f"Refused by the skill gate ({exc.code}): {exc}"
+                await _write_terminal_and_gate(
+                    execution_id, None, status=TaskExecutionStatus.SKIPPED,
+                    error=error, agent_name=agent_name)
+            raise
 
     # -----------------------------------------------------------------------
     # Terminal applier (#1083) — the single point that finalizes an execution
@@ -1722,13 +2170,18 @@ class TaskExecutionService:
                     db.update_execution_status(
                         execution_id=execution_id,
                         status=TaskExecutionStatus.FAILED,
-                        error=error_msg,
+                        result=ExecutionResult(
+                            error=error_msg,
+                        ),
                     )
                 return False, TaskExecutionResult(
                     execution_id=execution_id or "",
                     status=TaskExecutionStatus.FAILED,
                     response="",
                     error=error_msg,
+                    # #3127: a full backlog answers a sync caller 429/capacity,
+                    # as a full slot pool does.
+                    error_code=TaskExecutionErrorCode.CAPACITY,
                 )
             except CircuitOpen as e:
                 # #526: dispatch breaker open — fast-fail before any agent
@@ -1745,7 +2198,9 @@ class TaskExecutionService:
                     db.update_execution_status(
                         execution_id=execution_id,
                         status=TaskExecutionStatus.FAILED,
-                        error=error_msg,
+                        result=ExecutionResult(
+                            error=error_msg,
+                        ),
                     )
                 return False, TaskExecutionResult(
                     execution_id=execution_id or "",
@@ -1768,7 +2223,9 @@ class TaskExecutionService:
                     db.update_execution_status(
                         execution_id=execution_id,
                         status=TaskExecutionStatus.FAILED,
-                        error=error_msg,
+                        result=ExecutionResult(
+                            error=error_msg,
+                        ),
                     )
                 return False, TaskExecutionResult(
                     execution_id=execution_id or "",
@@ -1917,6 +2374,7 @@ class TaskExecutionService:
                 schedule_cron=(schedule_context or {}).get("cron"),
                 schedule_next_run=(schedule_context or {}).get("next_run"),
                 execution_id=execution_id,
+                served_person_email=_served_person_for(execution_id, triggered_by),
             )
             effective_system_prompt = compose_system_prompt(
                 execution_context=exec_ctx,
@@ -1948,45 +2406,65 @@ class TaskExecutionService:
         timeout_seconds: Optional[int],
         circuit: CircuitState,
         state: "_AttemptState",
+        triggered_by: Optional[str] = None,
     ) -> httpx.Response:
-        """Step 4 of execute_task: POST /api/task, with the two bounded
-        in-line retries — #678 reader-race (502 signature) and #792 SUB-003
-        switch+retry (429/auth intercepted pre-raise). Mutates *state*
-        (retry counts, rolled-up failed-attempt cost, the one-shot switch
-        flag, start_time/execution_time_ms) — the exception handlers in
+        """Step 4 of execute_task: POST /api/task, with the bounded in-line
+        retries — #678 reader-race (502 signature) and the #3470 SUB-003 walk
+        (429/auth intercepted pre-raise; supersedes the #792 one-shot).
+        Mutates *state* (retry counts, rolled-up failed-attempt cost, the
+        walk, start_time/execution_time_ms) — the exception handlers in
         execute_task read those fields, which is why they live on a shared
         object rather than in locals. Transport/HTTP errors propagate to
         those handlers exactly as they did inline.
         """
+        # Function-local so a test's attribute patch on the module is honoured
+        # at call time (the #2114 lazy-import lesson, applied deliberately).
+        from services.subscription_auto_switch import (
+            advance_subscription_walk,
+            apply_pre_dispatch_result,
+            apply_rung_legacy,
+            commit_subscription_walk,
+            earliest_known_reset,
+            ensure_serviceable_subscription,
+            note_override_honoured,
+            notify_pool_exhausted,
+            start_subscription_walk,
+            walk_reset_candidates,
+        )
+
         effective_timeout = float(timeout_seconds or 600) + _AGENT_HTTP_SLACK_S
 
+        # #3470: one walk per turn — which credentials it has run on and the
+        # override the current attempt carries. Built before the pre-dispatch
+        # check so that check can fold into it.
+        try:
+            state.subscription_walk = start_subscription_walk(agent_name, triggered_by)
+        except Exception as walk_err:  # noqa: BLE001 — never fail a turn from here
+            logger.error(f"[#3470] could not start the subscription walk for '{agent_name}': {walk_err}")
+            state.subscription_walk = None
+
         # #2638 AC#3: SUB-003 has always been reactive — dispatch, get refused,
-        # switch, re-issue once (#792). Everything needed to skip that first
-        # doomed attempt is already known here: the sampler's cached provider
-        # reading and the platform's own 2h 429 events both say whether the
-        # assigned subscription can serve. On the Workspace the wasted attempt
-        # is not an internal retry, it is a person watching their message fail.
+        # switch, re-issue (#792). Everything needed to skip that first doomed
+        # attempt is already known here: the sampler's cached provider reading
+        # and the platform's own 2h 429 events both say whether the assigned
+        # subscription can serve. On the Workspace the wasted attempt is not an
+        # internal retry, it is a person watching their message fail.
         #
         # Best-effort by construction: `ensure_serviceable_subscription` never
         # raises and returns None for every "cannot tell" case, so a turn that
-        # would have run still runs and #792 remains the backstop.
+        # would have run still runs and the walk remains the backstop. #3470:
+        # with no alternative but a viable platform key, it answers a key ROUTE
+        # — the first attempt then runs on the key by per-spawn override.
         try:
-            from services.subscription_auto_switch import (
-                ensure_serviceable_subscription,
-            )
             pre_switch = await ensure_serviceable_subscription(agent_name)
             if pre_switch:
-                state.subscription_switch = pre_switch
-                # A turn gets at most ONE remediation, and this was it. Without
-                # this line the pre-dispatch path spends none of the budget the
-                # #792 flag exists to hold, so a turn that was moved here and
-                # then refused again would switch a SECOND time, re-issue, and
-                # burn a further rate-limit event — churning to a third
-                # never-used subscription, which is precisely the cascade the
-                # flag was introduced to stop. The except handler reads the same
-                # flag, so it also stops recording a second failure event; that
-                # is the existing rule stated at its other read site, not a new
-                # one.
+                if state.subscription_walk is not None:
+                    apply_pre_dispatch_result(state.subscription_walk, pre_switch)
+                    state.subscription_switch = state.subscription_walk.summary()
+                else:
+                    state.subscription_switch = pre_switch
+                # The walk has begun: the except handler must not run its own
+                # pre-#3470 switch on top of it.
                 state.subscription_switch_attempted = True
                 # The DESTINATION is deliberately not interpolated here.
                 # `_perform_auto_switch` already logs "Auto-switching agent 'X'
@@ -1997,7 +2475,8 @@ class TaskExecutionService:
                 # credential). Not worth a standing false positive on the hot
                 # path for a line that duplicates the one above it.
                 logger.warning(
-                    f"[TaskExecService] #2638 pre-dispatch switch for "
+                    f"[TaskExecService] #2638 pre-dispatch "
+                    f"{'route' if pre_switch.get('route') else 'switch'} for "
                     f"'{agent_name}' before the first attempt"
                 )
         except Exception as pre_err:  # noqa: BLE001 — never fail a turn from here
@@ -2005,6 +2484,21 @@ class TaskExecutionService:
                 f"[TaskExecService] #2638 pre-dispatch check raised for "
                 f"'{agent_name}': {pre_err}"
             )
+
+        # #3470: a pre-dispatch key route rides the first attempt as a per-spawn
+        # credential. The payload is never logged or persisted with it. Not on
+        # an async (#1083) dispatch: the agent's 202 branch runs before it reads
+        # the override, so the route would be silently dropped and the trail
+        # would claim a re-issue that never happened — the walk is inline-only.
+        if state.subscription_walk is not None and state.subscription_walk.active is not None:
+            if payload.get("async_result"):
+                state.subscription_walk.active = None
+                state.subscription_walk.attempts.clear()
+                state.subscription_switch = None
+            else:
+                override_body = state.subscription_walk.active.payload()
+                if override_body:
+                    payload["auth_override"] = override_body
 
         logger.info(f"[TaskExecService] Calling agent {agent_name} /api/task (timeout={effective_timeout}s, tools={payload['allowed_tools']}, msg_len={len(payload['message'])})")
 
@@ -2123,164 +2617,205 @@ class TaskExecutionService:
                         f"agent_timeout={retry_agent_timeout}s)"
                     )
 
-        # #792 SUB-003 switch+retry: a returned 429/auth response is
-        # interceptable HERE, before raise_for_status (below) raises it into
-        # the except handler — mirroring the #678 502 path above. If the agent
-        # rate-limited / auth-failed and SUB-003 successfully switched the
-        # subscription, re-issue the turn ONCE with the SAME execution_id so a
-        # one-shot trigger (manual / webhook / mcp) recovers instead of landing
-        # FAILED. The retry IS the readiness probe (see _SWITCH_RETRY_DELAY_S).
-        # Guarded by its own one-shot flag (NOT state.retry_count, which #678 owns) so
-        # the two retry reasons never suppress each other; the except handler
-        # reads the flag to skip a cascade double-switch.
-        if not state.subscription_switch_attempted:
+        # #3470 (supersedes the #792 one-shot): a returned 429/auth response is
+        # interceptable HERE, before raise_for_status (below) raises it into the
+        # except handler — mirroring the #678 502 path above. Instead of ONE
+        # switch and ONE re-issue, the turn WALKS the pool: each refused
+        # attempt asks `advance_subscription_walk` for the next credential
+        # (another subscription, then the platform API key), and the SAME
+        # execution_id is re-issued with that credential as a per-spawn
+        # `auth_override` — a trial. Nothing moves in the DB or the container
+        # until a trial serves; `commit_subscription_walk` then makes that
+        # subscription the assignment once. Bounded by the turn's remaining
+        # wall-clock budget (#2789 — the only ceiling) and by the walk's own
+        # rung cap. The except handler reads `subscription_switch_attempted`
+        # to skip its own (pre-#3470) switch once the walk has run.
+        walk = state.subscription_walk
+        last_switch_kind: Optional[str] = None
+        pending_rung = None
+        while True:
             switch_failure_kind = classify_switch_failure(response)
-            if switch_failure_kind is not None:
-                state.subscription_switch_attempted = True
-                switch_error_msg, switch_partial_meta, _ = _extract_agent_error(
-                    response, f"HTTP {response.status_code} from agent"
+            if switch_failure_kind is None:
+                break
+            if walk is None:
+                break
+            state.subscription_switch_attempted = True
+            last_switch_kind = switch_failure_kind
+            switch_error_msg, switch_partial_meta, _ = _extract_agent_error(
+                response, f"HTTP {response.status_code} from agent"
+            )
+            # #678 R2 rollup: a refused attempt that already spent something
+            # (a mid-run 429) must not be absorbed by the next attempt's write.
+            state.previous_attempt_cost += _salvage_attempt_cost(switch_partial_meta)
+
+            # A re-issue with an override the agent IGNORED (old image) ran on
+            # the baseline, so the refusal is the baseline's — already recorded
+            # by the attempt that picked this rung. Apply the rung the #792 way
+            # (assign + hot-reload) and re-issue once more; no second record.
+            honoured = note_override_honoured(walk, response.headers)
+            if not honoured and pending_rung is not None:
+                # The legacy re-issue obeys the same floor as a walked one.
+                elapsed_s = _turn_elapsed_seconds(state)
+                remaining_http = effective_timeout - elapsed_s - _SWITCH_RETRY_DELAY_S
+                if remaining_http <= _SWITCH_RETRY_MIN_REMAINING_S:
+                    walk.stop_reason = "budget"
+                    pending_rung = None
+                    break
+                applied = await apply_rung_legacy(
+                    walk, pending_rung, failure_kind=switch_failure_kind
                 )
-                switch_result = None
+                pending_rung = None
+                if not applied:
+                    walk.stop_reason = walk.stop_reason or "exhausted"
+                    break
+                rung = None
+            else:
+                pending_rung = None
+                # Budget BEFORE picking: a rung with no room to run is a
+                # guaranteed, billed, mis-blamed TIMEOUT (#2789 keeps the
+                # remaining budget as the only ceiling; this is a floor).
+                elapsed_s = _turn_elapsed_seconds(state)
+                remaining_http = effective_timeout - elapsed_s - _SWITCH_RETRY_DELAY_S
+                budget_ok = remaining_http > _SWITCH_RETRY_MIN_REMAINING_S
+                rung = await advance_subscription_walk(
+                    walk,
+                    failure_kind=switch_failure_kind,
+                    error_message=switch_error_msg,
+                    budget_ok=budget_ok,
+                )
+                if rung is None:
+                    if walk.stop_reason == "budget":
+                        logger.warning(
+                            f"[TaskExecService] #3470 '{agent_name}': {walk.stop_reason} — "
+                            f"no room left in the turn's budget to re-issue "
+                            f"({remaining_http:.0f}s remaining)"
+                        )
+                    else:
+                        logger.warning(
+                            f"[TaskExecService] #3470 '{agent_name}': pool exhausted after "
+                            f"{len(walk.attempts)} attempt(s) ({walk.stop_reason})"
+                        )
+                        try:
+                            notify_pool_exhausted(
+                                walk, earliest_known_reset(walk_reset_candidates(walk))
+                            )
+                        except Exception as notify_err:  # noqa: BLE001
+                            logger.debug(f"[#3470] exhausted notice failed: {notify_err}")
+                    break
+                if rung.kind != "concurrent_switch" and walk.override_supported is False:
+                    # Legacy mode: the agent cannot take a per-spawn credential,
+                    # so the rung becomes the assignment first (one restart max).
+                    applied = await apply_rung_legacy(
+                        walk, rung, failure_kind=switch_failure_kind
+                    )
+                    if not applied:
+                        walk.stop_reason = walk.stop_reason or "exhausted"
+                        break
+                    rung = None
+                elif rung.kind != "concurrent_switch":
+                    pending_rung = rung
+
+            state.retry_count += 1
+            # #2638: the destination name is deliberately NOT interpolated —
+            # reading it off a dict built from `subscription_credentials` makes
+            # this a CodeQL sink for a value it taints as a credential. The
+            # walk's own log lines name the rung.
+            logger.warning(
+                f"[TaskExecService] SUB-003 walk on '{agent_name}' "
+                f"({switch_failure_kind}) — re-issue {len(walk.attempts)} "
+                f"(prev_cost=${state.previous_attempt_cost:.4f})"
+            )
+            # Best-effort audit. phase=initiated documents the re-issue was queued.
+            try:
+                await platform_audit_service.log(
+                    event_type=AuditEventType.EXECUTION,
+                    event_action="auto_retry",
+                    source="task_execution_service",
+                    actor_agent_name=agent_name,
+                    target_type="execution",
+                    target_id=execution_id,
+                    details={
+                        "reason": "subscription_auto_switch",
+                        "attempt": state.retry_count + 1,
+                        "phase": "initiated",
+                        "failure_kind": switch_failure_kind,
+                        "rung": (rung.kind if rung is not None else "legacy_switch"),
+                        "attempts": [dict(a) for a in walk.attempts],
+                    },
+                )
+            except Exception as audit_err:
+                logger.debug(f"[TaskExecService] audit log failed (non-fatal): {audit_err}")
+
+            # Small settle so a hot-reloaded token (legacy mode) is live for the
+            # next subprocess; the re-issue itself probes readiness.
+            await asyncio.sleep(_SWITCH_RETRY_DELAY_S)
+            # Cap the re-issue to the REMAINING original budget — and to NOTHING
+            # ELSE (#2789): it is a full re-run of the user's turn on another
+            # credential and earns the budget the turn was given. Computed from
+            # the TURN clock (`turn_started_at`, never reset) AFTER the settle.
+            elapsed_s = _turn_elapsed_seconds(state)
+            retry_http_timeout = max(1.0, effective_timeout - elapsed_s)
+            retry_agent_timeout = max(1, int(min(
+                float(timeout_seconds or 600),
+                retry_http_timeout - _AGENT_HTTP_SLACK_S,
+            )))
+            # #2789: attribute a terminal timeout against the budget that was
+            # actually in force for THIS attempt.
+            state.applied_timeout_seconds = retry_agent_timeout
+            _log_retry_budget(
+                agent_name, "subscription-switch", retry_agent_timeout, timeout_seconds,
+                elapsed_s=elapsed_s,
+            )
+            retry_payload = {**payload, "timeout_seconds": retry_agent_timeout}
+            retry_payload.pop("auth_override", None)
+            override_body = walk.active.payload() if walk.active is not None else None
+            if override_body:
+                retry_payload["auth_override"] = override_body
+            state.start_time = datetime.utcnow()
+            response = await agent_post_with_retry(
+                agent_name,
+                "/api/task",
+                retry_payload,
+                max_retries=3,
+                retry_delay=1.0,
+                timeout=retry_http_timeout,
+                execution_id=execution_id,  # #2433: in-flight proof-of-life
+            )
+            state.execution_time_ms = int((datetime.utcnow() - state.start_time).total_seconds() * 1000)
+            logger.info(
+                f"[TaskExecService] Agent {agent_name} post-switch re-issue "
+                f"responded: HTTP {response.status_code} ({state.execution_time_ms}ms, "
+                f"http_timeout={retry_http_timeout:.0f}s, "
+                f"agent_timeout={retry_agent_timeout}s)"
+            )
+
+        # The attempt that came back is final for this loop. If it SERVED on a
+        # trial credential, make that durable (one commit, one notification) and
+        # re-point the row's SUB-004 attribution; a key-served turn is not a
+        # subscription spend.
+        # Every success goes through the commit — not only a walked one — because
+        # a turn served on the baseline after earlier turns ran on the key is the
+        # "returned to its subscription" transition (one Redis GET).
+        if walk is not None:
+            if response.status_code < 400:
+                note_override_honoured(walk, response.headers)
                 try:
-                    from services.subscription_auto_switch import (
-                        handle_subscription_failure,
+                    await commit_subscription_walk(
+                        walk, failure_kind=last_switch_kind or "rate_limit"
                     )
-                    switch_result = await handle_subscription_failure(
-                        agent_name=agent_name,
-                        error_message=switch_error_msg,
-                        failure_kind=switch_failure_kind,
-                    )
-                except Exception as switch_err:
-                    logger.error(
-                        f"[SUB-003] Auto-switch failed for '{agent_name}': {switch_err}"
-                    )
-
-                # #2638 AC#4: the switcher declined — every subscription is
-                # exhausted, refused, or skip-listed. Before giving the user a
-                # dead end, fall back to the platform API key if one is
-                # configured and the operator has left the setting on. Same
-                # one-shot budget: this rides the `subscription_switch_attempted`
-                # flag already set above, so a turn gets at most one remediation.
-                if not (switch_result and switch_result.get("switched")):
-                    try:
-                        from services.subscription_auto_switch import fallback_to_api_key
-                        switch_result = await fallback_to_api_key(agent_name)
-                    except Exception as fb_err:  # noqa: BLE001
-                        logger.error(
-                            f"[#2638] API-key fallback raised for '{agent_name}': {fb_err}"
-                        )
-
-                if switch_result and switch_result.get("switched"):
-                    # #2638 AC#5: remember it. If the one retry below also
-                    # fails, the caller has to be able to say "we moved you to
-                    # <sub>, try again" — the portal was reporting these as
-                    # not-retryable while the agent sat on a fresh subscription.
-                    state.subscription_switch = switch_result
-                    state.retry_count += 1
-                    # #678 R2 rollup: accumulate the failed attempt's cost so it
-                    # isn't absorbed by the retry's success replacement.
-                    state.previous_attempt_cost += _salvage_attempt_cost(switch_partial_meta)
-                    # Cap the retry to the REMAINING original budget so a 429
-                    # after a long run can't balloon wall-clock / slot time —
-                    # and to NOTHING ELSE (#2789).
-                    #
-                    # This retry is a full re-run of the user's turn on a fresh
-                    # subscription, so it earns the budget the turn was given.
-                    # It used to be clamped to `_AUTO_RETRY_MAX_TIMEOUT_S` as
-                    # well, which is the #678 reader-race ceiling for a turn
-                    # that never started: a 3600s agent got 300s, the agent
-                    # server killed its own process group at 300s mid tool-use,
-                    # and the turn was discarded after being billed. `remaining_s`
-                    # is already a hard wall-clock bound — `effective_timeout` is
-                    # the operator's own `execution_timeout_seconds` plus the HTTP
-                    # slack — so first attempt + retry can never exceed what
-                    # TIMEOUT-001 already promises. A second ceiling here bought
-                    # nothing and cost every turn longer than five minutes.
-                    #
-                    # The agent-side budget keeps the slack the first dispatch
-                    # has, so the agent's structured 504 still beats our own
-                    # ReadTimeout; without it the two land on the same instant
-                    # and the terminal loses the agent's error detail.
-                    # The budget is computed AFTER the settle delay below, from
-                    # the TURN clock (`turn_started_at`, never reset — see
-                    # `_AttemptState`): `start_time` may already have been
-                    # re-stamped by a reader-race retry, and the 3s settle is
-                    # wall-clock the turn spends too. Both were counted against
-                    # nothing before, and on the #678→#792 interplay the first
-                    # made this retry re-grant nearly the whole budget.
-                    # #2638: the destination name is deliberately NOT
-                    # interpolated. `_perform_auto_switch` logs "Auto-switching
-                    # agent 'X' from 'A' to 'B'" one frame down, so this line
-                    # only ever repeated it — and reading a name off the switch
-                    # result makes this a sink for a value CodeQL taints from
-                    # `subscription_credentials` (that row carries an encrypted
-                    # token, so the whole record reads as a credential). The
-                    # finding is a false positive about the VALUE and a true
-                    # observation about the SHAPE; dropping a redundant
-                    # interpolation is cheaper than a standing dismissal on the
-                    # execution hot path.
-                    logger.warning(
-                        f"[TaskExecService] SUB-003 switched '{agent_name}' "
-                        f"({switch_failure_kind}) — auto-retry 1/1 "
-                        f"(prev_cost=${state.previous_attempt_cost:.4f})"
-                    )
-                    # Best-effort audit. phase=initiated documents the retry was queued.
-                    try:
-                        await platform_audit_service.log(
-                            event_type=AuditEventType.EXECUTION,
-                            event_action="auto_retry",
-                            source="task_execution_service",
-                            actor_agent_name=agent_name,
-                            target_type="execution",
-                            target_id=execution_id,
-                            details={
-                                "reason": "subscription_auto_switch",
-                                # state.retry_count was just incremented above; +1 makes
-                                # this the human attempt number. In the #678→#792
-                                # interplay this is correctly 3 (not a second "2").
-                                "attempt": state.retry_count + 1,
-                                "phase": "initiated",
-                                "failure_kind": switch_failure_kind,
-                                "new_subscription": switch_result.get("new_subscription"),
-                            },
-                        )
-                    except Exception as audit_err:
-                        logger.debug(f"[TaskExecService] audit log failed (non-fatal): {audit_err}")
-
-                    # Small settle so a hot-reloaded token is live for the next
-                    # subprocess; the retry call itself probes readiness.
-                    await asyncio.sleep(_SWITCH_RETRY_DELAY_S)
-                    elapsed_s = _turn_elapsed_seconds(state)
-                    retry_http_timeout = max(1.0, effective_timeout - elapsed_s)
-                    retry_agent_timeout = max(1, int(min(
-                        float(timeout_seconds or 600),
-                        retry_http_timeout - _AGENT_HTTP_SLACK_S,
-                    )))
-                    # #2789: attribute a terminal timeout against the budget
-                    # that was actually in force for THIS attempt.
-                    state.applied_timeout_seconds = retry_agent_timeout
-                    _log_retry_budget(
-                        agent_name, "subscription-switch", retry_agent_timeout, timeout_seconds,
-                        elapsed_s=elapsed_s,
-                    )
-                    retry_payload = {**payload, "timeout_seconds": retry_agent_timeout}
-                    state.start_time = datetime.utcnow()
-                    response = await agent_post_with_retry(
-                        agent_name,
-                        "/api/task",
-                        retry_payload,
-                        max_retries=3,
-                        retry_delay=1.0,
-                        timeout=retry_http_timeout,
-                        execution_id=execution_id,  # #2433: in-flight proof-of-life
-                    )
-                    state.execution_time_ms = int((datetime.utcnow() - state.start_time).total_seconds() * 1000)
-                    logger.info(
-                        f"[TaskExecService] Agent {agent_name} post-switch retry "
-                        f"responded: HTTP {response.status_code} ({state.execution_time_ms}ms, "
-                        f"http_timeout={retry_http_timeout:.0f}s, "
-                        f"agent_timeout={retry_agent_timeout}s)"
-                    )
+                except Exception as commit_err:  # noqa: BLE001
+                    logger.error(f"[#3470] commit failed for '{agent_name}': {commit_err}")
+                try:
+                    served_on = walk.ran_on()
+                    if execution_id and (
+                        served_on[0] == "api_key"
+                        or (served_on[1] and walk.committed and walk.committed.get("switched"))
+                    ):
+                        db.set_execution_subscription(execution_id, served_on[1])
+                except Exception as attr_err:  # noqa: BLE001
+                    logger.warning(f"[#3470] usage attribution update failed: {attr_err}")
+            if walk.started:
+                state.subscription_switch = walk.summary()
 
         return response
 
@@ -2539,7 +3074,20 @@ class TaskExecutionService:
         error_msg, partial_metadata, agent_execution_log = _extract_agent_error(
             getattr(e, "response", None), f"HTTP error: {type(e).__name__}"
         )
-        logger.error(f"[TaskExecService] Failed to execute task on {agent_name}: {error_msg}")
+        # #3470: the walk's trail for the FAILED row — which credentials this
+        # turn ran on and why it stopped — visible in the Executions view with
+        # no schema change (the structured list rides the result + audit rows).
+        # Appended at the envelope, AFTER the substring classifiers below have
+        # read the agent's own text: the trail names failure kinds, and a
+        # classifier must never match our wording.
+        walk_trail = ""
+        walk = state.subscription_walk
+        if walk is not None and getattr(walk, "attempts", None):
+            try:
+                walk_trail = walk.trail_text()
+            except Exception:  # noqa: BLE001 — wording must never break a terminal
+                walk_trail = ""
+        logger.error(f"[TaskExecService] Failed to execute task on {agent_name}: {error_msg}{walk_trail}")
 
         # SUB-003 (#441): Auto-switch on rate-limit (429) OR auth-class
         # failures (503 from agent server, or auth indicators in the error
@@ -2550,7 +3098,12 @@ class TaskExecutionService:
         # again — a second switch would burn another rate-limit event and churn
         # to a third never-used subscription.
         agent_status_code = getattr(getattr(e, "response", None), "status_code", None)
-        if not state.subscription_switch_attempted:
+        # #3012: Claude Code refused the model. An agent image older than #3012
+        # answers that 503, which read as auth below and rotated the agent
+        # through every subscription. No subscription can fix it — never switch.
+        from services.failure_classifier import is_model_rejection
+        model_rejected = is_model_rejection(error_msg)
+        if not state.subscription_switch_attempted and not model_rejected:
             try:
                 from services.subscription_auto_switch import (
                     handle_subscription_failure,
@@ -2574,7 +3127,10 @@ class TaskExecutionService:
         # Issue #285: Detect auth failures (HTTP 503 from agent server)
         # Return structured error code so callers can handle appropriately
         error_code = None
-        if agent_status_code == 503:
+        if model_rejected:
+            logger.warning(f"[TaskExecService] Model rejected on {agent_name}: {error_msg[:200]}")
+            error_code = TaskExecutionErrorCode.MODEL_UNSUPPORTED
+        elif agent_status_code == 503:
             logger.warning(f"[TaskExecService] Auth failure detected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.AUTH
         elif agent_status_code == 429:
@@ -2610,8 +3166,8 @@ class TaskExecutionService:
         failure_envelope = TerminalEnvelope(
             execution_id=execution_id,
             status=TaskExecutionStatus.FAILED,
-            error=error_msg,
-            error_code=error_code,  # AUTH (503) / BILLING (429, #2638) / None
+            error=f"{error_msg}{walk_trail}",
+            error_code=error_code,  # MODEL_UNSUPPORTED (#3012) / AUTH (503) / BILLING (429, #2638) / None
             metadata=partial_metadata,
             # #1853: thread the agent's salvaged transcript + session id onto
             # the FAILED envelope so apply_result persists them (mirrors
@@ -2770,16 +3326,21 @@ class TaskExecutionService:
                 won = db.update_execution_status(
                     execution_id=eid,
                     status=TaskExecutionStatus.SUCCESS,
-                    response=sanitized_resp,
-                    context_used=context_used if context_used > 0 else None,
-                    context_max=metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW,
-                    cost=total_cost,
-                    tool_calls=tool_calls_json,
-                    execution_log=execution_log_json,
-                    claude_session_id=claude_session_id,
-                    compact_metadata=compact_metadata_json,
-                    retry_count=envelope.retry_count or None,
-                    turn_integrity=turn_integrity_json,
+                    result=ExecutionResult(
+                        response=sanitized_resp,
+                        context_used=context_used if context_used > 0 else None,
+                        context_max=metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW,
+                        cost=total_cost,
+                        tool_calls=tool_calls_json,
+                        execution_log=execution_log_json,
+                        claude_session_id=claude_session_id,
+                        compact_metadata=compact_metadata_json,
+                        retry_count=envelope.retry_count or None,
+                        turn_integrity=turn_integrity_json,
+                        # #3589: the producer's terminal instant (the watchdog
+                        # claim's `retained_at`); None = the writer stamps now.
+                        completed_at=envelope.completed_at,
+                    ),
                 )
                 if not won:
                     # #671/H4: SUCCESS lost the CAS — only to a CANCELLED row.
@@ -2815,6 +3376,7 @@ class TaskExecutionService:
                 await activity_service.complete_activity(
                     activity_id=activity_id,
                     status=ActivityState.COMPLETED,
+                    completed_at=envelope.completed_at,  # #3589, same instant as the row
                     details={
                         "session_id": envelope.session_id,
                         "cost_usd": total_cost,
@@ -2928,17 +3490,20 @@ class TaskExecutionService:
                 # finalizes CANCELLED (and any future non-success terminal). A
                 # no-op for every current caller — all still pass FAILED.
                 status=envelope.status,
-                error=envelope.error,
-                cost=salvage_cost,
-                context_used=salvage_context,
-                context_max=salvage_context_max,
-                # #1853: mirror SUCCESS — persist the sanitized transcript, the
-                # tool_calls summary, and the session id so the failing row is
-                # diagnosable via the same API as a successful one.
-                execution_log=salvage_execution_log_json,
-                tool_calls=salvage_tool_calls_json,
-                claude_session_id=salvage_session_id,
-                retry_count=envelope.retry_count or None,
+                result=ExecutionResult(
+                    error=envelope.error,
+                    cost=salvage_cost,
+                    context_used=salvage_context,
+                    context_max=salvage_context_max,
+                    # #1853: mirror SUCCESS — persist the sanitized transcript, the
+                    # tool_calls summary, and the session id so the failing row is
+                    # diagnosable via the same API as a successful one.
+                    execution_log=salvage_execution_log_json,
+                    tool_calls=salvage_tool_calls_json,
+                    claude_session_id=salvage_session_id,
+                    retry_count=envelope.retry_count or None,
+                    completed_at=envelope.completed_at,  # #3589
+                ),
             )
         # #671/H4: complete the activity, record the AUTH breaker outcome, and
         # release the slot ONLY if this writer won the CAS.
@@ -2950,6 +3515,7 @@ class TaskExecutionService:
                 activity_id=activity_id,
                 status=activity_state_for_terminal(envelope.status),
                 error=envelope.error,
+                completed_at=envelope.completed_at,  # #3589, same instant as the row
             )
         # Compare by ``.value``, NOT by enum-member equality — ``@dataclass`` on
         # the fieldless ``TaskExecutionErrorCode`` str-Enum gives every member a

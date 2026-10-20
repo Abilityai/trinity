@@ -18,7 +18,10 @@ from typing import Optional, List
 
 from models import SubscriptionHeadroomHistory, SubscriptionRegistration, SubscriptionTokenTest, User
 from database import db
-from dependencies import get_current_user, assert_admin, assert_agent_access, assert_agent_owner
+from dependencies import (
+    get_current_user, assert_admin, assert_agent_access, assert_agent_owner,
+    is_fleet_admin, principal_reach,
+)
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from db_models import (
     SubscriptionCredentialCreate,
@@ -139,7 +142,7 @@ async def register_subscription(
             await adopt_for_credentialless_agents(
                 actor_user=current_user,
                 actor_ip=http_request.client.host if http_request.client else None,
-                endpoint=str(http_request.url.path),
+                endpoint=http_request.scope["path"],
                 request_id=getattr(http_request.state, "request_id", None),
             )
         except Exception as e:
@@ -229,10 +232,17 @@ async def list_subscriptions(
     of the accessor's contract, so scoping costs nothing and restores exactly
     the read the workflow needs: an agent key resolves to its owner and sees
     that owner's subscriptions, which are the only ones it can assign anyway.
+    Each row's `agents` is cut to the agent key's reach (trinity-enterprise#872),
+    so the owner's other agents are not named.
     """
-    if current_user.role == "admin" and not getattr(current_user, "agent_name", None):
+    if is_fleet_admin(current_user):
         return db.list_subscriptions_with_agents()
-    return db.list_subscriptions_with_agents(owner_id=current_user.id)
+    subs = db.list_subscriptions_with_agents(owner_id=current_user.id)
+    reach = principal_reach(current_user) if subs else None
+    if reach is not None:
+        subs = [s.model_copy(update={"agents": cut, "agent_count": len(cut)})
+                for s in subs for cut in ([a for a in s.agents if a in reach],)]
+    return subs
 
 
 @router.get("/{subscription_id}/usage", response_model=SubscriptionUsage)
@@ -505,7 +515,7 @@ async def _log_subscription_assignment(
         actor_ip=request.client.host if request is not None and request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path) if request is not None else None,
+        endpoint=request.scope["path"] if request is not None else None,
         request_id=getattr(request.state, "request_id", None) if request is not None else None,
         details=details,
     )

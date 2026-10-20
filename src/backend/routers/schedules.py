@@ -27,6 +27,8 @@ from models import (
     WebhookStatusResponse,
 )
 from dependencies import (
+    agent_may_reach,
+    capability_fence,
     get_current_user,
     get_authorized_agent,
     AuthorizedAgent,
@@ -37,7 +39,9 @@ from dependencies import (
     resolve_source_agent,
 )
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
+from services import dispatch_admission_service, skill_gate_map_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from utils.public_url import public_base_url
 from services.schedule_validation import (
     ScheduleValidationError,
     validate_cron_expression,
@@ -119,7 +123,8 @@ def _enforce_timeout_below_agent_cap(agent_name: str, requested_seconds: int) ->
                 "message": (
                     f"Schedule timeout {requested_seconds}s exceeds agent "
                     f"execution_timeout_seconds {cap}s. Raise the agent cap "
-                    f"first via PUT /api/agents/{agent_name}/timeout."
+                    f"first: the agent's owner sets it via PUT /api/agents/{agent_name}/timeout "
+                    "(an agent key cannot)."
                 ),
                 "agent_cap_seconds": cap,
                 "requested_seconds": requested_seconds,
@@ -168,7 +173,7 @@ def _enforce_delivery_target_authority(current_user, name: str, email) -> None:
         # False — which would have refused the OWNER too, turning this gate from
         # a narrowing into a functional break. Every other call site in the
         # codebase passes `current_user.username`.
-        can_own = db.can_user_share_agent(current_user.username, name)
+        can_own = (db.can_user_share_agent(current_user.username, name) and agent_may_reach(current_user, name, manage=True))
     except Exception:  # noqa: BLE001 — an unreadable ownership check refuses
         can_own = False
     if not can_own:
@@ -182,7 +187,7 @@ def _enforce_delivery_target_authority(current_user, name: str, email) -> None:
         )
 
 
-@router.post("/{name}/schedules", response_model=ScheduleResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/{name}/schedules", response_model=ScheduleResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def create_schedule(
     name: str,
     schedule_data: ScheduleCreate,
@@ -345,7 +350,7 @@ async def get_schedule(
     return ScheduleResponse(**schedule.model_dump())
 
 
-@router.put("/{name}/schedules/{schedule_id}", response_model=ScheduleResponse)
+@router.put("/{name}/schedules/{schedule_id}", response_model=ScheduleResponse, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def update_schedule(
     name: str,
     schedule_id: str,
@@ -434,7 +439,7 @@ async def update_schedule(
     return ScheduleResponse(**updated_schedule.model_dump())
 
 
-@router.delete("/{name}/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{name}/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def delete_schedule(
     name: str,
     schedule_id: str,
@@ -460,7 +465,7 @@ async def delete_schedule(
 
 # Schedule Control Endpoints
 
-@router.post("/{name}/schedules/{schedule_id}/enable")
+@router.post("/{name}/schedules/{schedule_id}/enable", dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def enable_schedule(
     # CSO M1 (#2081) intent kept — owner-tier, matching update/delete. The
     # variant must match the PATH PARAM: these routes declare `{name}`, and
@@ -483,7 +488,7 @@ async def enable_schedule(
     return {"status": "enabled", "schedule_id": schedule_id}
 
 
-@router.post("/{name}/schedules/{schedule_id}/disable")
+@router.post("/{name}/schedules/{schedule_id}/disable", dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def disable_schedule(
     # CSO M1 (#2081) intent kept — owner-tier, matching update/delete. The
     # variant must match the PATH PARAM: these routes declare `{name}`, and
@@ -560,7 +565,17 @@ async def trigger_schedule(
     )
     _source_agent = current_user.agent_name or _resolved_source
 
+    # #2973: inherit the caller's chain depth; refuse past the max (named 403,
+    # main.py) before the try below could turn it into a 500.
+    chain_depth = await dispatch_admission_service.enforce_inter_agent_depth(
+        current_user=current_user,
+        target=name,
+        endpoint=f"/api/agents/{name}/schedules/{schedule_id}/trigger",
+        x_via_mcp=None,
+    )
+
     source_payload = {
+        "chain_depth": chain_depth,
         "source_user_id": current_user.id,
         "source_user_email": current_user.email,
         "source_agent_name": _source_agent,
@@ -657,13 +672,18 @@ async def trigger_schedule(
 # Webhook Management Endpoints (WEBHOOK-001, #291)
 
 
-def _build_webhook_url(request_base_url: str, token: str) -> str:
-    """Construct the full webhook URL from base URL and token."""
-    base = str(request_base_url).rstrip("/")
-    return f"{base}/api/webhooks/{token}"
+def _build_webhook_url(request: Request, token: str) -> Optional[str]:
+    """Construct the full webhook URL for a token, or None with no usable host.
+
+    The origin comes from `public_base_url` so an HTTPS proxy's
+    `X-Forwarded-Proto` upgrades it to https (#3601); `request.base_url` is
+    http behind every proxy on the prod/hosted compose command.
+    """
+    base = public_base_url(request)
+    return f"{base}/api/webhooks/{token}" if base else None
 
 
-@router.post("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse)
+@router.post("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def generate_webhook(
     name: AuthorizedAgent,
     schedule_id: str,
@@ -699,7 +719,7 @@ async def generate_webhook(
             detail="Failed to generate webhook token"
         )
 
-    webhook_url = _build_webhook_url(request.base_url, token)
+    webhook_url = _build_webhook_url(request, token)
     logger.info(f"Webhook token generated for schedule {schedule_id} by {current_user.username}")
 
     # ent#77: rotating the token clears any prior signing secret (revoke path in
@@ -735,7 +755,7 @@ async def get_webhook_status(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
 
     token = status_data["webhook_token"]
-    webhook_url = _build_webhook_url(request.base_url, token) if token else None
+    webhook_url = _build_webhook_url(request, token) if token else None
 
     return WebhookStatusResponse(
         schedule_id=schedule_id,
@@ -751,6 +771,7 @@ async def get_webhook_status(
 @router.post(
     "/{name}/schedules/{schedule_id}/webhook/secret",
     response_model=WebhookStatusResponse,
+    dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))],
 )
 async def generate_webhook_secret(
     name: AuthorizedAgent,
@@ -786,7 +807,7 @@ async def generate_webhook_secret(
             detail="Failed to generate webhook signing secret",
         )
 
-    webhook_url = _build_webhook_url(request.base_url, schedule.webhook_token)
+    webhook_url = _build_webhook_url(request, schedule.webhook_token)
     logger.info(
         f"Webhook signing secret generated for schedule {schedule_id} by {current_user.username}"
     )
@@ -805,6 +826,7 @@ async def generate_webhook_secret(
 @router.delete(
     "/{name}/schedules/{schedule_id}/webhook/secret",
     response_model=WebhookStatusResponse,
+    dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))],
 )
 async def disable_webhook_secret(
     name: AuthorizedAgent,
@@ -827,14 +849,14 @@ async def disable_webhook_secret(
         schedule_id=schedule_id,
         has_token=token is not None,
         webhook_enabled=schedule.webhook_enabled,
-        webhook_url=_build_webhook_url(request.base_url, token) if token else None,
+        webhook_url=_build_webhook_url(request, token) if token else None,
         auth_enabled=False,
         has_secret=False,
         signature_header=WEBHOOK_SIGNATURE_HEADER,
     )
 
 
-@router.delete("/{name}/schedules/{schedule_id}/webhook", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{name}/schedules/{schedule_id}/webhook", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
 async def revoke_webhook(
     name: AuthorizedAgent,
     schedule_id: str,
@@ -876,7 +898,8 @@ async def get_schedule_executions(
 @router.get("/{name}/executions", response_model=List[ExecutionSummary])
 async def get_agent_executions(
     name: AuthorizedAgent,
-    limit: int = 50
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
 ):
     """Get execution summaries for an agent - optimized for list views.
 
@@ -893,13 +916,19 @@ async def get_agent_executions(
     and user access. This returns 404 if agent not found, 403 if no access, or execution list.
     """
     executions = db.get_agent_executions_summary(name, limit=limit)
+    # trinity-enterprise#754: "ran without approval" — one batch read for the page.
+    flags = skill_gate_map_service.self_approved_flags(
+        name, [e.get("id") for e in executions], current_user)
+    for e in executions:
+        e["gate_self_approved"], e["gate_self_approved_by_viewer"] = flags.get(e.get("id"), (False, False))
     return executions
 
 
 @router.get("/{name}/executions/{execution_id}", response_model=ExecutionResponse)
 async def get_execution(
     name: AuthorizedAgent,
-    execution_id: str
+    execution_id: str,
+    current_user: User = Depends(get_current_user),
 ):
     """Get details of a specific execution."""
     execution = db.get_execution(execution_id)
@@ -909,7 +938,11 @@ async def get_execution(
             detail="Execution not found"
         )
 
-    return ExecutionResponse(**execution.model_dump())
+    # trinity-enterprise#754: "ran without approval", as on the list.
+    self_approved, by_viewer = skill_gate_map_service.self_approved_flags(
+        name, [execution_id], current_user).get(execution_id, (False, False))
+    return ExecutionResponse(**execution.model_dump(), gate_self_approved=self_approved,
+                             gate_self_approved_by_viewer=by_viewer)
 
 
 @router.get("/{name}/executions/{execution_id}/log")

@@ -386,6 +386,8 @@ console.log(`Registered ${totalTools} tools`);
 | `fan_out` | 390-590 | `{agent_name, tasks[], timeout_seconds?, max_concurrency?, model?, system_prompt?, allowed_tools?}` | `POST /api/agents/{name}/fan-out` |
 | `get_fan_out_result` | `tools/executions.ts` | `{agent_name, fan_out_id}` | `GET /api/agents/{name}/fan-out/{fan_out_id}` (#2670) |
 
+> **Chain-depth refusal (#2806)**: when the backend refuses an agent-to-agent hop with 403 `inter_agent_depth_exceeded`, `client.chat` / `task` / `fanOut` return a typed `DepthRefusal` (`parseDepthRefusal`) instead of throwing, and `chat_with_agent` (sequential, parallel, pull-routed) and `fan_out` return `{status: "inter_agent_depth_exceeded", agent, depth, max_depth, retryable: false, message}`. Any other 403 still throws `API error (403)`. Since #2973 `run_agent_loop`, `trigger_agent_schedule` and `emit_event` render the same refusal through `client.ts::depthRefusalFromError`. Tests: `src/mcp-server/src/chat-depth.test.ts`, `src/mcp-server/src/tools/depth-refusal.test.ts`.
+
 > **Per-agent timeout fallback (#418, 2026-04-20)**: For `chat_with_agent` (when `parallel=true`) and `fan_out`, `timeout_seconds` is fully optional with **no default**. When omitted, the backend falls back to the target agent's configured `execution_timeout_seconds` (TIMEOUT-001; default 900s, max 7200s). Previously, the Zod schema defaulted to `600`, which silently capped inter-agent invocations below the per-agent setting.
 
 ### System Tools (`src/mcp-server/src/tools/systems.ts`)
@@ -396,6 +398,7 @@ console.log(`Registered ${totalTools} tools`);
 | `list_systems` | 105-133 | `{}` | List deployed systems grouped by prefix |
 | `restart_system` | 138-167 | `{system_name}` | Restart all agents in system |
 | `get_system_manifest` | 172-202 | `{system_name}` | Export system as YAML manifest |
+| `teardown_system` | ent#454 | `{system_name, dry_run?, agents?, strict?}` | Remove a deployed system — deploy's inverse. A **license-blind proxy** over an entitlement-gated route: it degrades rather than throws, keeping 404 (module absent on this build) / 403 (unentitled, or an agent key on a human-only verb) / 503 (membership unverified, retryable) distinct, and returns a `failed` report that arrives as a 500 AS a result. `dry_run` defaults to **`true`** — the opposite of `deploy_system`, because an unwanted preview costs a round trip and an unwanted execute costs a fleet |
 
 ### Documentation Tools (`src/mcp-server/src/tools/docs.ts`)
 
@@ -462,7 +465,9 @@ chat_with_agent({
 **When `parallel: false` (default)** *(updated 2025-12-30)*:
 - Calls `POST /api/agents/{name}/chat`
 - Uses execution queue (one at a time per agent)
-- Maintains conversation context with `--continue` flag
+- Maintains conversation context by resuming the agent's own chat session by id (`--resume`, #2958; shared by every `/chat` caller of the agent, never a headless run's). A different effective model or a `DELETE /api/chat/history` starts a fresh session
+- On a pull pilot (#3127) the turn is queued and claimed by the agent's worker. Context is per `chat_sessions` row (one per agent and user; an agent key resolves to its owner, so all of one owner's agents share it), resumed from `chat_sessions.cached_claude_session_id`. A second turn of the same session waits on the resume lock for up to one turn's lock TTL, then 429 `capacity`. A full backlog answers 429 `capacity`. `DELETE /api/chat/history` clears the cached ids; the Chat tab writes the same rows, so its "New chat" also starts a fresh MCP conversation
+- A turn that crosses the context limit can pay a one-off auto-compaction: recorded as `compact_metadata` on the row, summarised in the response's `execution.compaction`, and returned by `get_execution_result` (#2958)
 - Agent-to-agent calls (with `X-Source-Agent` header) now create `schedule_executions` record (visible in Tasks tab)
 
 See [Parallel Headless Execution](parallel-headless-execution.md) for full details.
@@ -485,16 +490,26 @@ chat_with_agent({
 //   "status": "accepted",
 //   "execution_id": "abc123xyz",
 //   "agent_name": "worker-1",
-//   "message": "Task accepted. Poll GET /api/agents/{name}/executions/{execution_id} for results.",
+//   "message": "Accepted by 'worker-1' as abc123xyz — it may still be running or already done. Do not re-send: read the outcome with get_execution_result(agent_name=\"worker-1\", execution_id=\"abc123xyz\").",
 //   "async_mode": true
 // }
+// The backend's own receipt says "Poll GET /api/agents/{name}/executions/{execution_id}" —
+// right for a REST caller, impossible for an MCP one — so `runAgentChat` rewrites the
+// `message` of an `accepted`/`queued` receipt (ent#568); every other field is untouched.
+// The lead claims nothing about liveness: the backend stores this receipt as the
+// idempotency snapshot at dispatch and replays it within 24 h while the run is live,
+// succeeded or may still report back (a `lease_expired` failure inside its hold
+// window). Since #3245 a run that ended failed/cancelled is NOT replayed — an identical
+// re-send starts a new run — and a replayed answer carries `"idempotent_replay": true`
+// (the client copies the backend's `X-Idempotent-Replay` header into the body; absence
+// is not proof of a fresh dispatch).
 ```
 
 **When `async: true` (with `parallel: true`)**:
 - Backend spawns task in background thread via `asyncio.create_task()`
 - Returns immediately with `execution_id` for polling
 - Execution status set to "running" in database
-- Poll `GET /api/agents/{name}/executions/{execution_id}` for status and results
+- Read the outcome with `get_execution_result(agent_name, execution_id)` (REST: `GET /api/agents/{name}/executions/{execution_id}`)
 - Background task updates execution record when complete (success/failed)
 - Activities tracked and completed asynchronously
 
@@ -519,6 +534,12 @@ list_recent_executions({ agent_name: "worker-1", limit: 5 })
 
 // And: get_agent_activity_summary for monitoring
 get_agent_activity_summary({ agent_name: "worker-1", hours: 24 })
+
+// And, for the system agent / user-scoped keys only (abilityai/trinity-enterprise#653):
+// a substring grep over past executions' prompt/response/error with bounded
+// excerpts. Proxies an entitlement-gated enterprise route — answers
+// available:false where the module is absent; agent-scoped keys never see it.
+search_executions({ query: "timeout contacting", agents: ["worker-1"], hours: 168 })
 ```
 
 **Polling for results via REST API**:
@@ -602,7 +623,7 @@ default 25000, under the gateway ceiling) and answers with a receipt:
 ```jsonc
 { "status": "queued_timeout", "agent": "bdr-agent",
   "execution_id": "fZv-iXtUXSolY1wzPO7T6w",
-  "message": "… Poll get_execution_result(execution_id) instead of retrying …" }
+  "message": "… Do not re-send: read the outcome with get_execution_result(agent_name=\"bdr-agent\", execution_id=\"fZv-…\"). A timeout is not a failure (#914)." }
 ```
 
 **#914 covered `/chat` only.** `parallel=true, async=false` dispatches through
@@ -632,10 +653,55 @@ silent wrong data, strictly worse than the loud error it replaced.
 | `/task` recovers on `AbortError` **only** | A `TypeError` may mean the request never landed, and on this route a concurrent peer row is the normal state |
 
 **Retry guidance the tool description now states:** an *identical* re-send is
-deduplicated server-side and answers with the original `execution_id`; a
+deduplicated server-side and answers with the original `execution_id` (since
+#3245, not once that run ended `failed` or `cancelled`); a
 **reworded** one derives a different idempotency key and dispatches a second
 execution. That asymmetry is why the opaque error was dangerous — it invited the
 rewrite.
+
+#### The delegation contract — one text on every surface (ent#568)
+
+The receipts above only help a caller who knows what they mean. The rule is now
+**one text** (`src/delegation_contract.ts`), byte-identical to
+`DELEGATION_CONTRACT` in the platform prompt's §Agent Collaboration
+(`tests/unit/test_ent568_delegation_contract.py` parses the TS array):
+
+- **Where it is read.** The platform prompt (every agent, every turn), the
+  `chat_with_agent` description and every dynamic `chat_with_<agent>` tool
+  (verbatim — the only copy an external MCP client sees), and `fan_out` /
+  `send_message`, which repeat its rule sentence (`DELEGATION_RULE`) and point at it.
+- **What it says.** A receipt means the work arrived; never re-send because a
+  call timed out or could not be confirmed; read with `get_execution_result` /
+  `get_fan_out_result` or `set_reminder` and end the turn; an error without an
+  `execution_id` is checked in `list_recent_executions` before a word-for-word
+  re-send; `agent_busy` means nothing ran and is re-sent after `retry_after_seconds` (#3244: only the `capacity` 429 is `agent_busy`; any other `/chat` 429 is a `rate_limited` result naming the failed run); `pending_approval` is not
+  retried, and its `message` says whether the outcome will reach the caller (#3233); `parallel=true, async=true` for long work, whose end fires
+  `agent.task.*` for a subscriber (a sequential `/chat` turn fires none).
+  #3245 added: after a confirmed `failed` or `cancelled`, re-send word for word
+  to retry; if the same `execution_id` comes back (a `lease_expired` failure is
+  held until its window ends), `set_reminder` and end the turn.
+- **The 2,048-char cap.** Claude Code cuts every MCP tool description at
+  `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` (default 2,048). #2958 (2026-09-24)
+  took the `chat_with_agent` description from 2,035 to 2,424 chars, so from then
+  on Claude Code cut its last paragraph — the `list_recent_executions` advice and
+  "prefer `parallel=true, async=true`" — before the model read it (other
+  runtimes' MCP clients were not measured). It is now a
+  lead, one line of modes and the contract (2,030 chars published since #3245, which
+  added the confirmed-failure bullet, raised the contract's own pin 1,650 → 1,730
+  and dropped "(the primary way to use sub-agents)" from the lead); per-mode detail moved into the `parallel` / `async` /
+  `timeout_seconds` parameter descriptions, which are not cut.
+  `src/delegation-contract.test.ts` reads every carrying description back through
+  a real `tools/list` and pins it under the cap.
+- **The receipt itself.** Every `execution_id` receipt a `chat_with_*` caller
+  gets carries `readNotResend(agent, execution_id)` — "Do not re-send: read the
+  outcome with `get_execution_result(agent_name=…, execution_id=…)`": the
+  `queued_timeout` `chat()` / `task()` write, the 409 replay, and the backend's
+  own async `accepted` / `queued` and sync-`/task` `queued_timeout` snapshots,
+  whose REST "poll GET …" line `runAgentChat` rewrites with a liveness-neutral
+  lead. `fan_out_timeout` keeps its `get_fan_out_result` line. `chat()` now
+  reuses `queuedTimeoutReceipt` (it had its own copy of the string), and the
+  "concurrent-duplicate guard will kill mid-execution" claim is gone: no such
+  guard exists.
 
 **Backend counterpart (#2661):** a failed/cancelled/timed-out sync `/task` now
 releases its idempotency claim (`_map_task_failure`). It previously left the
@@ -745,9 +811,9 @@ async function checkAgentAccess(
 Since ent#628 the agent-scope rule has ONE implementation, `src/mcp-server/src/access.ts::checkAgentEdge`, and
 every registered tool declares in `TOOL_ACCESS_POLICY` whether it is gated at registration (`enforce`),
 gates itself after resolving its target (`in-tool`), is ungated at the MCP layer with a named owner
-(`baselined` → trinity-enterprise#629), or has no agent target (`none`); `server.ts` refuses to register a
-tool without a row. It is a tool-surface gate — the REST routes behind the tools resolve an agent key to
-its owner (Invariant #8).
+(`baselined`, naming the backend fence), or has no agent target (`none`); `server.ts` refuses to register a
+tool without a row. The backend holds the same line one hop down (trinity-enterprise#629,
+`dependencies.agent_may_reach`).
 
 ---
 
@@ -1189,8 +1255,9 @@ npx @modelcontextprotocol/inspector http://localhost:8080/mcp
 # - get_agent_ssh_access, deploy_local_agent, initialize_github_sync
 # Chat tools (3):
 # - chat_with_agent, get_chat_history, get_agent_logs
-# System tools (4):
+# System tools (5):
 # - deploy_system, list_systems, restart_system, get_system_manifest
+# - teardown_system (ent#454 — proxies an entitlement-gated route, license-blind)
 # Docs tools (1):
 # - get_agent_requirements
 # Skills tools (7):

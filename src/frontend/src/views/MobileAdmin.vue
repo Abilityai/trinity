@@ -75,7 +75,7 @@
         <!-- AGENTS TAB -->
         <div v-if="activeTab === 'agents'" class="tab-panel">
           <!-- Search -->
-          <div class="search-bar">
+          <div v-if="!fleetAdminOnly" class="search-bar">
             <input
               v-model="agentSearch"
               type="text"
@@ -89,7 +89,7 @@
                fetch is the failed state (never "No agents found"), and a failed
                refresh with data on screen is the SIBLING stale banner. -->
           <InlineError
-            v-if="agentsView.stale"
+            v-if="!fleetAdminOnly && agentsView.stale"
             class="mb-3"
             :message="staleBannerMessage('agents', lastLoadedAt.agents)"
             :detail="fetchError.agents"
@@ -97,7 +97,15 @@
             @retry="fetchAgents"
             @dismiss="fetchError.agents = ''"
           />
-          <div v-if="agentsView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading agents...</span></div>
+          <!-- #3041: the fleet list is admin-gated. A 403 is a permission
+               boundary, not a failed load — say so, point at what this session
+               can do, and offer no retry that can never succeed. -->
+          <div v-if="fleetAdminOnly" class="empty-state" data-testid="agents-admin-only">
+            <p>The fleet list is admin-only on mobile.</p>
+            <p class="mt-1">Your own agents are on the desktop dashboard. Ask an admin for access, or answer what your agents need from you in the Queue.</p>
+            <button type="button" class="chat-open-btn admin-only-action" data-testid="agents-admin-only-open-queue" @click="openQueue">Open the Queue</button>
+          </div>
+          <div v-else-if="agentsView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading agents...</span></div>
           <LoadFailed
             v-else-if="agentsView.state === 'failed'"
             dense
@@ -238,11 +246,27 @@
                 <div class="ops-card-header">
                   <span class="ops-agent-name" :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))">{{ item.agent_name }}</span>
                   <span class="ops-priority" :class="'priority-' + item.priority">{{ item.priority }}</span>
+                  <!-- #2915: the same badge rule as the desktop card; styled with
+                       currentColor only so this view's colour count cannot move. -->
+                  <span
+                    v-if="queueSyncBadge(item)"
+                    class="ops-sync"
+                    :title="queueSyncBadge(item).title"
+                    data-testid="queue-sync-badge"
+                  >{{ queueSyncBadge(item).label }}</span>
                 </div>
                 <!-- The API field is `type`; a read of a misnamed field here rendered a blank line for months (issue 2370). -->
                 <div class="ops-card-type" data-testid="queue-type">{{ queueTypeLabel(item.type) }}</div>
-                <p v-if="item.title && item.title !== item.question" class="ops-card-title" data-testid="queue-title">{{ item.title }}</p>
-                <p class="ops-card-message">{{ item.message || item.question || item.description }}</p>
+                <p v-if="item.title && item.title !== item.question" class="ops-card-title" data-testid="queue-title"><AskMarkdown :text="item.title" inline /></p>
+                <!-- #3246: one row per condition — how often the platform saw it. -->
+                <p v-if="queueSeenLine(item)" class="ops-card-type" data-testid="queue-seen-line">{{ queueSeenLine(item) }}</p>
+                <!-- #3115: agent-written markdown, rendered — never shown raw. -->
+                <AskMarkdown v-if="!item.gate" class="ops-card-message" :text="item.message || item.question || item.description" :prose="false" data-testid="queue-message" />
+                <!-- trinity-enterprise#611: the exact action this approval would run,
+                     on the same card that offers the decision (desktop parity). -->
+                <!-- trinity-enterprise#755: a gated-skill approval has its own card. -->
+                <GatedSkillRequest v-if="item.gate" :item="item" class="mt-2" />
+                <QueueProposal v-else-if="item.proposal" :proposal="item.proposal" class="mt-2" />
                 <!-- Controls switch on the item TYPE (desktop parity), and an
                      approval is never answered on one tap: select → restated
                      consequence → optional note → explicit Send. The decision
@@ -253,10 +277,14 @@
                      This inline step is deliberately p19-shaped — named verb,
                      restated consequence, the safe action first and focused —
                      and is NOT a confirm overlay (see the note on #1924). -->
-                <template v-if="queueResponseKind(item) === 'approval'">
+                <!-- trinity-enterprise#755: a gated-skill approval offers its
+                     controls only to a person it is addressed to; anyone else
+                     reads who it is waiting on, in the card above. -->
+                <template v-if="gateReadOnly(item)" />
+                <template v-else-if="queueResponseKind(item) === 'approval'">
                   <div class="ops-options" role="group" aria-label="Options">
                     <button
-                      v-for="(opt, idx) in optionsOf(item)"
+                      v-for="(opt, idx) in offeredChips(item)"
                       :key="idx + ':' + opt"
                       type="button"
                       class="ops-option-btn"
@@ -264,17 +292,31 @@
                       :aria-pressed="selectedOptions[item.id] === opt ? 'true' : 'false'"
                       :disabled="respondingItems[item.id]"
                       @click="selectOption(item.id, opt)"
-                    >{{ opt }}</button>
+                    ><AskMarkdown :text="opt" inline /></button>
+                    <!-- #3242: the platform's off-menu answer; hidden where the sink refuses it. -->
+                    <button
+                      v-if="!decidedByOptions(item)"
+                      type="button"
+                      class="ops-option-btn"
+                      data-testid="queue-something-else"
+                      :aria-pressed="selectedOptions[item.id] === SOMETHING_ELSE ? 'true' : 'false'"
+                      :disabled="respondingItems[item.id]"
+                      @click="selectOption(item.id, SOMETHING_ELSE)"
+                    >{{ SOMETHING_ELSE_LABEL }}</button>
                   </div>
                   <div v-if="selectedOptions[item.id]" class="ops-approval-form" data-testid="queue-approval-form">
-                    <p class="ops-card-body" role="status" data-testid="queue-consequence">
-                      Sending <strong>{{ selectedOptions[item.id] }}</strong> to {{ item.agent_name }} — it reads this as your decision on its next run.
+                    <p v-if="selectedOptions[item.id] === SOMETHING_ELSE" class="ops-card-body" role="status" data-testid="queue-consequence">
+                      Sending your instruction to {{ item.agent_name }} — it will carry out none of the options and re-plan from your text.
+                    </p>
+                    <p v-else class="ops-card-body" role="status" data-testid="queue-consequence">
+                      Sending <strong><AskMarkdown :text="selectedOptions[item.id]" inline /></strong> to {{ item.agent_name }} — it reads this as your decision on its next run.
                     </p>
                     <input
                       v-model="responseTexts[item.id]"
                       type="text"
                       enterkeyhint="done"
-                      placeholder="Add a note (optional)..."
+                      maxlength="4000"
+                      :placeholder="selectedOptions[item.id] === SOMETHING_ELSE ? 'What should it do instead?' : (gateRejecting(item, selectedOptions[item.id]) ? 'Reason (optional) — the requester is told' : 'Add a note (optional)...')"
                       class="ops-response-input"
                       data-testid="queue-note"
                       :disabled="respondingItems[item.id]"
@@ -292,9 +334,9 @@
                         type="button"
                         class="ops-respond-btn ops-send-btn"
                         data-testid="queue-send"
-                        :disabled="respondingItems[item.id]"
+                        :disabled="respondingItems[item.id] || !approvalBody(item)"
                         @click="submitApproval(item)"
-                      >Send: {{ selectedOptions[item.id] }}</button>
+                      >{{ selectedOptions[item.id] === SOMETHING_ELSE ? 'Send instruction' : `Send: ${selectedOptions[item.id]}` }}</button>
                     </div>
                   </div>
                 </template>
@@ -330,6 +372,32 @@
                     :detail="respondErrors[item.id].detail"
                     @dismiss="dismissRespondError(item.id)"
                   />
+                </div>
+              </div>
+            </div>
+
+            <!-- trinity-enterprise#611: how the latest asks ENDED — who and when,
+                 from the endings ledger (utils/operatorQueue.js::queueEnding).
+                 Shown whatever the pending list's state, including empty. -->
+            <div v-if="recentlyEndedItems.length" class="ops-ended" data-testid="queue-recently-ended">
+              <h2 class="section-title">Recently ended</h2>
+              <div class="ops-list">
+                <div
+                  v-for="item in recentlyEndedItems"
+                  :key="item.id"
+                  class="ops-card"
+                  data-testid="queue-ended-card"
+                  :data-item-id="item.id"
+                >
+                  <div class="ops-card-header">
+                    <span class="ops-agent-name" :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))">{{ item.agent_name }}</span>
+                    <span
+                      class="ops-sync"
+                      :title="queueEnding(item).when ? formatLocalDateTime(queueEnding(item).when) : undefined"
+                    >{{ queueEnding(item).label }}</span>
+                  </div>
+                  <div class="ops-card-type">{{ queueEndingText(queueEnding(item)) }}</div>
+                  <p class="ops-card-message"><AskMarkdown :text="item.title" inline /></p>
                 </div>
               </div>
             </div>
@@ -386,7 +454,7 @@
           <div class="system-section">
             <h2 class="section-title">Fleet Health</h2>
             <InlineError
-              v-if="fleetView.stale"
+              v-if="!fleetAdminOnly && fleetView.stale"
               class="mb-3"
               :message="staleBannerMessage('fleet health', lastLoadedAt.fleet)"
               :detail="fetchError.fleet"
@@ -394,7 +462,11 @@
               @retry="fetchFleetHealth"
               @dismiss="fetchError.fleet = ''"
             />
-            <div v-if="fleetView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading...</span></div>
+            <!-- #3041: same admin-gated endpoint as the Agents tab. -->
+            <div v-if="fleetAdminOnly" class="empty-state" data-testid="fleet-admin-only">
+              Fleet health and fleet actions are admin-only. Ask an admin for access.
+            </div>
+            <div v-else-if="fleetView.state === 'loading'" class="skeleton-rows" aria-busy="true"><div v-for="n in 3" :key="n" class="skeleton-row"></div><span class="sr-only">Loading...</span></div>
             <LoadFailed
               v-else-if="fleetView.state === 'failed'"
               dense
@@ -424,8 +496,9 @@
             </div>
           </div>
 
-          <!-- Quick Actions -->
-          <div class="system-section">
+          <!-- Quick Actions — every one is admin-gated server-side (#3041):
+               hidden rather than offered as a confirm-then-403 dead end. -->
+          <div v-if="!fleetAdminOnly" class="system-section" data-testid="fleet-actions">
             <h2 class="section-title">Actions</h2>
             <div class="actions-grid">
               <button @click="confirmAction('emergency-stop')" class="action-btn action-danger" :disabled="actionLoading">
@@ -508,7 +581,9 @@
             v-for="(msg, i) in chatMessages"
             :key="i"
             class="chat-bubble"
-            :class="msg.role === 'user' ? 'bubble-user' : 'bubble-assistant'"
+            :class="msg.role === 'user' ? 'bubble-user' : msg.role === 'system' ? 'bubble-system' : 'bubble-assistant'"
+            :data-testid="msg.role === 'system' ? 'chat-system-line' : undefined"
+            :role="msg.role === 'system' ? 'status' : undefined"
           >
             <div class="bubble-content">{{ msg.content }}</div>
             <div class="bubble-time">{{ formatTime(msg.timestamp) }}</div>
@@ -597,14 +672,24 @@ import { http } from '../utils/boundedHttp'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
+import AskMarkdown from '../components/operator/AskMarkdown.vue'
 import { apiErrorMessage } from '../utils/apiError'
+import { isGateRefusal, pendingApprovalMessage, storedChatMessage } from '../utils/skillGate'
 import { viewState, staleBannerMessage, listFrom } from '../utils/loadingState'
 import {
-  optionsOf, queueResponseKind, buildQueueResponse, queueTypeLabel,
-  QUEUE_RESPONSE_NOT_RECORDED, respondRefusedAsNotPending,
-} from '../utils/operatorQueue'
+  queueResponseKind, buildQueueResponse, queueTypeLabel,
+  SOMETHING_ELSE, SOMETHING_ELSE_LABEL, offeredChips, decidedByOptions,
+  QUEUE_RESPONSE_NOT_RECORDED, respondRefusedAsNotPending, queueSyncBadge,
+  QUEUE_RESPONSE_DIVERGED, respondRefusedAsDiverged,
+  QUEUE_RESPONSE_NOT_ADDRESSEE, respondRefusedAsNotAddressee } from '../utils/operatorQueue'
+// trinity-enterprise#611: a second line so the #2370 import pin above stays byte-exact.
+import { queueEnding, queueEndingText, queueSeenLine, recentlyEnded } from '../utils/operatorQueue'
+import { formatLocalDateTime } from '../utils/timestamps'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
+import QueueProposal from '../components/operator/QueueProposal.vue'
+import GatedSkillRequest from '../components/operator/GatedSkillRequest.vue'
+import { gateReadOnly, gateRejecting } from '../utils/skillGateCard'
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -646,6 +731,11 @@ const chatInputEl = ref(null)
 
 // Ops
 const queueItems = ref([])
+// trinity-enterprise#611: the asks that ended most recently. The same fetch
+// already returned them; the view used to drop them, so an ask cancelled or
+// expired elsewhere just vanished from the phone.
+const RECENTLY_ENDED_MAX = 5
+const recentlyEndedItems = ref([])
 const notifications = ref([])
 const responseTexts = reactive({})
 const respondingItems = reactive({})
@@ -681,6 +771,11 @@ const loading = reactive({
 const hasLoaded = reactive({ agents: false, queue: false, notifications: false, fleet: false })
 const fetchError = reactive({ agents: '', queue: '', notifications: '', fleet: '' })
 const lastLoadedAt = reactive({ agents: null, queue: null, notifications: null, fleet: null })
+// #3041: `GET /api/ops/fleet/status` is admin-gated. A 403 from it is a
+// permission boundary — the Agents tab and the fleet summary say "admin-only"
+// instead of a load failure, and the poll stops asking.
+const fleetAdminOnly = ref(false)
+const isForbidden = (e) => e?.response?.status === 403
 
 // Polling
 let pollInterval = null
@@ -764,7 +859,15 @@ async function fetchAgents() {
       http.get('/api/agents/autonomy-status'),
       http.get('/api/agents/execution-stats', { params: { include_7d: true } })
     ])
-    if (fleetRes.status !== 'fulfilled') throw fleetRes.reason
+    if (fleetRes.status !== 'fulfilled') {
+      if (isForbidden(fleetRes.reason)) {
+        fleetAdminOnly.value = true
+        fetchError.agents = ''
+        return
+      }
+      throw fleetRes.reason
+    }
+    fleetAdminOnly.value = false
     if (autonomyRes.status !== 'fulfilled') throw autonomyRes.reason
     const autonomyMap = autonomyRes.value.data || {}
     const agentList = (fleetRes.value.data.agents || []).map(a => ({
@@ -818,7 +921,9 @@ async function fetchQueue() {
     if (seq !== queueFetchSeq) return // a newer fetch owns the list now
     // The endpoint returns {items, count}; `(res.data || []).filter` on that
     // object threw on every poll, so this tab always read "No pending items".
-    queueItems.value = listFrom(res.data, 'items').filter(i => i.status === 'pending')
+    const all = listFrom(res.data, 'items')
+    queueItems.value = all.filter(i => i.status === 'pending')
+    recentlyEndedItems.value = recentlyEnded(all, RECENTLY_ENDED_MAX)
     pruneQueueItemState(queueItems.value)
     hasLoaded.queue = true
     lastLoadedAt.queue = Date.now()
@@ -854,11 +959,17 @@ async function fetchFleetHealth() {
   loading.fleet = true
   try {
     const res = await http.get('/api/ops/fleet/status')
+    fleetAdminOnly.value = false
     fleetSummary.value = res.data.summary || { total: 0, running: 0, stopped: 0, high_context: 0 }
     hasLoaded.fleet = true
     lastLoadedAt.fleet = Date.now()
     fetchError.fleet = ''
   } catch (e) {
+    if (isForbidden(e)) {
+      fleetAdminOnly.value = true
+      fetchError.fleet = ''
+      return
+    }
     console.error('Failed to fetch fleet health:', e)
     fetchError.fleet = apiErrorMessage(e, 'Request failed')
   } finally {
@@ -879,6 +990,12 @@ function loadAllData() {
   fetchAgents()
   fetchQueue()
   fetchNotifications()
+}
+
+// #3041: the Queue is a sub-tab of Ops — land on it, whatever sub-tab was last viewed.
+function openQueue() {
+  activeTab.value = 'ops'
+  activeOpsTab.value = 'queue'
 }
 
 async function refreshCurrentTab() {
@@ -989,7 +1106,7 @@ async function selectSession(session) {
   showSessions.value = false
   try {
     const res = await http.get(`/api/agents/${chatAgent.value}/chat/sessions/${session.id}`)
-    chatMessages.value = res.data.messages || []
+    chatMessages.value = (res.data.messages || []).map(storedChatMessage)
     scrollChatToBottom()
   } catch (e) {
     console.error('Failed to load session:', e)
@@ -997,8 +1114,10 @@ async function selectSession(session) {
 }
 
 function buildContextPrompt(userMessage) {
-  // Include last 10 exchanges for context
-  const recent = chatMessages.value.slice(-20)
+  // Include last 10 exchanges for context. A held (gated-skill) request and
+  // its notice stay on screen but out of it (trinity#3274), or every later
+  // turn would ask for the approval again.
+  const recent = chatMessages.value.filter(m => !m.held).slice(-20)
   if (recent.length === 0) return userMessage
   let context = 'Previous conversation:\n'
   recent.forEach(m => {
@@ -1017,18 +1136,23 @@ async function sendChatMessage() {
     chatInputEl.value.style.height = 'auto'
   }
 
+  // trinity#3163: the context is built from the conversation as it stands, so
+  // the message being sent reaches the agent once, and a first message carries
+  // no history.
+  const contextPrompt = buildContextPrompt(message)
+
   // Add user message immediately
   chatMessages.value.push({
     role: 'user',
     content: message,
     timestamp: new Date().toISOString()
   })
+  const userEntry = chatMessages.value[chatMessages.value.length - 1]
   scrollChatToBottom()
 
   chatExecutionStatus.value = 'running'
 
   try {
-    const contextPrompt = buildContextPrompt(message)
     const payload = {
       message: contextPrompt,
       save_to_session: true,
@@ -1039,6 +1163,15 @@ async function sendChatMessage() {
     }
 
     const submitRes = await http.post(`/api/agents/${chatAgent.value}/task`, payload)
+    // trinity#3274: a gated skill — nothing ran, nothing to poll.
+    const held = pendingApprovalMessage(submitRes)
+    if (held) {
+      userEntry.held = true
+      chatMessages.value.push({ role: 'system', content: held, held: true, timestamp: new Date().toISOString() })
+      // trinity#3526: the request was saved to a conversation — stay in it.
+      if (submitRes.data.chat_session_id) chatSessionId.value = submitRes.data.chat_session_id
+      return
+    }
     const executionId = submitRes.data.execution_id
 
     // Poll for completion
@@ -1064,9 +1197,14 @@ async function sendChatMessage() {
       chatSessionId.value = chatSessions.value[0].id
     }
   } catch (e) {
+    // A refused gated request stays out of the next message's history too:
+    // resent, it would be refused again on every later turn (#3274).
+    const refused = isGateRefusal(e)
+    if (refused) userEntry.held = true
     chatMessages.value.push({
       role: 'assistant',
-      content: `Error: ${e.response?.data?.detail || e.message || 'Failed to send message'}`,
+      content: `Error: ${refused ? apiErrorMessage(e) : (e.response?.data?.detail || e.message || 'Failed to send message')}`,
+      held: refused,
       timestamp: new Date().toISOString()
     })
   } finally {
@@ -1172,8 +1310,10 @@ function pruneQueueItemState(items) {
 // with no way to clear it. It therefore clears the maps directly instead of
 // delegating to the prune above, which would inherit that exemption: this is a
 // wipe, not a reconcile against a served list.
+const divergedQueueItems = reactive({})   // #2915: id → the operator saw the divergence notice
+
 function resetQueueItemState() {
-  for (const map of [selectedOptions, responseTexts, respondErrors, respondingItems]) {
+  for (const map of [selectedOptions, responseTexts, respondErrors, respondingItems, divergedQueueItems]) {
     for (const id of Object.keys(map)) delete map[id]
   }
 }
@@ -1183,11 +1323,30 @@ async function sendQueueResponse(item, body) {
   if (!body || respondingItems[id]) return false
   respondingItems[id] = true
   delete respondErrors[id]
+  // #2915: a second send after the divergence notice answers anyway.
+  const payload = divergedQueueItems[id] ? { ...body, acknowledge_divergence: true } : body
   try {
-    await http.post(`/api/operator-queue/${id}/respond`, body)
+    await http.post(`/api/operator-queue/${id}/respond`, payload)
+    delete divergedQueueItems[id]
   } catch (e) {
     console.error('Failed to send queue response:', e?.response?.status ?? e?.message ?? e)
     respondingItems[id] = false
+    if (respondRefusedAsDiverged(e)) {
+      // #2915: the agent changed or closed this item after the card was read.
+      // Keep the card and the selection, say so beside the control (p18), refetch
+      // so the badge renders, and let the next tap carry the acknowledgement.
+      divergedQueueItems[id] = true
+      respondErrors[id] = { message: QUEUE_RESPONSE_DIVERGED }
+      await fetchQueue()
+      return false
+    }
+    if (respondRefusedAsNotAddressee(e)) {
+      // trinity-enterprise#751: a gated-skill approval addressed to someone else.
+      // Refused, nothing recorded, and a retry can never succeed — say why,
+      // beside the control (p18), and keep the card.
+      respondErrors[id] = { message: QUEUE_RESPONSE_NOT_ADDRESSEE }
+      return false
+    }
     if (respondRefusedAsNotPending(e)) {
       // 409 (somebody else resolved it first, #1017), 400 (already terminal)
       // or 404 (row gone): the answer was NOT recorded and the item is not
@@ -1220,10 +1379,15 @@ async function sendQueueResponse(item, body) {
   return true
 }
 
-function submitApproval(item) {
-  return sendQueueResponse(item, buildQueueResponse({
+// #3242: null until sendable — "Something else" needs the instruction typed.
+function approvalBody(item) {
+  return buildQueueResponse({
     kind: 'approval', option: selectedOptions[item.id], note: responseTexts[item.id],
-  }))
+  })
+}
+
+function submitApproval(item) {
+  return sendQueueResponse(item, approvalBody(item))
 }
 
 function submitAnswer(item) {
@@ -1411,9 +1575,11 @@ function cleanupPWA() {
 function startPolling() {
   stopPolling()
   pollInterval = setInterval(() => {
-    if (activeTab.value === 'agents') fetchAgents()
+    // #3041: a 403 does not change on its own — the poll stops asking; a
+    // manual refresh still re-checks (a role granted meanwhile shows up).
+    if (activeTab.value === 'agents') { if (!fleetAdminOnly.value) fetchAgents() }
     else if (activeTab.value === 'ops') { fetchQueue(); fetchNotifications() }
-    else if (activeTab.value === 'system') fetchFleetHealth()
+    else if (activeTab.value === 'system') { if (!fleetAdminOnly.value) fetchFleetHealth() }
   }, 15000)
 }
 
@@ -1880,6 +2046,19 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
   color: white;
 }
 
+/* trinity-enterprise#611: layout only — the strip's cards reuse .ops-card. */
+.ops-ended {
+  margin-top: 20px;
+}
+
+.ops-sync {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  opacity: 0.85;
+  white-space: nowrap;
+}
 .ops-priority {
   font-size: 11px;
   padding: 2px 8px;
@@ -2439,6 +2618,10 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
 .text-yellow { color: #facc15; }
 .text-red { color: #f87171; }
 
+.admin-only-action {
+  margin-top: 12px;
+}
+
 .chat-open-btn {
   padding: 6px 14px;
   background: #312e81;
@@ -2607,6 +2790,18 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
   font-size: 10px;
   color: rgba(255, 255, 255, 0.4);
   margin-top: 4px;
+}
+
+/* trinity#3274: a platform line (a held request's notice), not a bubble —
+   centred and muted, gray-400 on this view's dark ground (gray-500 is below
+   AA there). A theme() token, not a literal. */
+.bubble-system {
+  align-self: center;
+  max-width: 100%;
+  padding: 4px 16px;
+  font-size: 12.5px;
+  text-align: center;
+  color: theme('colors.gray.400');
 }
 
 .bubble-assistant .bubble-time {

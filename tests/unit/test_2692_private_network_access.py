@@ -163,6 +163,9 @@ def test_the_marketplace_header_is_keyed_on_provenance_not_the_cloud() -> None:
     """Pre-existing behaviour that moved into the extracted renderer."""
     assert 'header X-DO-MARKETPLACE "trinity"' in _render("", provenance="do-marketplace")
     assert "X-DO-MARKETPLACE" not in _render("", provenance="do-script")
+    # #3004: the AWS listing is a marketplace install on another vendor's catalog.
+    assert "X-DO-MARKETPLACE" not in _render("", provenance="aws-marketplace")
+    assert "X-DO-MARKETPLACE" not in _render("", provenance="aws-script")
 
 
 # ---------------------------------------------------------------------------

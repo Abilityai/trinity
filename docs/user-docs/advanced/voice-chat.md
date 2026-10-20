@@ -10,14 +10,10 @@ Real-time voice conversations with agents, inside a Workspace chat. Audio stream
 - **Animated Orb** — Canvas-rendered visualization that reflects session state via color and particle movement. During a call it takes the conversation column.
 - **Tool Calling (`run_task`)** — During a call, Gemini can hand real work to the agent. In a Workspace call the task runs *as the agent*, in that chat — with its skills, files, memory and mid-work state — in the background: the conversation goes on, and the answer lands in the chat as a turn and is voiced when it arrives. The orb shows a pill naming each task while it runs.
 - **Voice System Prompt** — Controls Gemini's persona for the session. Looked up in order: DB setting → `voice-agent-system-prompt.md` in the container → auto-generated from template info → generic fallback.
-- **Talk** — The button in an agent's Agent Detail header that opens the Workspace with the call already starting. See [Voice mode in the Workspace](#voice-mode-in-the-workspace).
 
 ## How It Works
 
-**The Workspace is the only place a voice call runs.** There are two ways in, and they end up in the same call:
-
-- **From Agent Detail** — click **Talk** in the header, beside **Workspace**. Trinity opens the Workspace on that agent and starts the call. Talk is always there; if the instance cannot run a call, the Workspace tells you why.
-- **From the Workspace** — click the call button, the leftmost control in the composer (**Start a voice call**), in whichever chat you want the call to belong to.
+**The Workspace is the only place a voice call runs.** Open the Workspace from the navigation bar, pick the agent, and click the call button — the leftmost control in the composer (**Start a voice call**) — in whichever chat you want the call to belong to. Agent Detail has no voice control.
 
 Once the call is up:
 
@@ -50,7 +46,7 @@ Click **Mute** on the orb, or press **M**, to silence your microphone mid-sessio
 ## Requirements
 
 - A Gemini key in **Settings → Integrations** ([Platform Keys](../credentials/platform-keys.md#gemini)), or `GEMINI_API_KEY` in `.env`.
-- `VOICE_ENABLED` must be on (default: on when API key is present).
+- `VOICE_ENABLED` must be on (default `true`; it does nothing without a Gemini key).
 - Browser microphone permission granted, on a secure (https) page.
 - A signed-in platform user. External clients signed in with an email code do not get a call button.
 
@@ -101,7 +97,7 @@ All `run_task` invocations are written to the platform audit log.
 
 ## Voice mode in the Workspace
 
-The call starts in the chat you are in — modal, the way ChatGPT's voice mode is: you are either in the chat or in the call. Pressing **Talk** on Agent Detail brings you here with the call already starting.
+The call starts in the chat you are in — modal, the way ChatGPT's voice mode is: you are either in the chat or in the call.
 
 ### What happens
 
@@ -116,14 +112,14 @@ The call knows the recent turns of the chat it started in, and its transcript be
 
 The call button is shown to signed-in platform users. When the instance cannot run a call, the button is disabled and its tooltip says why: voice is turned off, or no voice provider key is configured. External clients signed in with an email code do not see it.
 
-**Talk**, on Agent Detail, is never hidden — that is deliberate. Hiding it would mean a working feature disappears whenever the flag has not loaded yet or the request to fetch it failed, and you would have no way to tell that from "this instance has no voice". So Talk always takes you to the Workspace, and the Workspace tells you in words if a call cannot start. A pasted or bookmarked link with `voice=1` in it opens the chat and starts nothing — only the button starts a call.
+A pasted or bookmarked link with `voice=1` in it opens the chat and starts nothing — only the call button starts a call.
 
 ### Limits, and what you hear
 
 - A Workspace call lasts at most **30 minutes** by default (`WORKSPACE_VOICE_MAX_DURATION`). Thirty seconds before the limit the agent is told to wrap up out loud; at the limit the call ends and the chat records *ended at the 30-minute limit*.
 - A call cannot start while a reply to a typed message is still being written (*A reply is still being written — wait for it, then start the call.*), and a typed message is refused while a call is live in that chat, so a reply never lands in the middle of a call.
 - Microphone denied, an insecure (non-https) page, a provider error, a dropped connection — each ends or refuses the call with a sentence in the status line. The chat is never blocked by a failed call. The connection to the provider is renewed silently during a long call; the orb shows *Connecting…* for the swap.
-- Switching chats, New chat, ⌘J or opening a room mid-call asks first (**End the call?** — *End call and leave* or *Stay on the call*); only **End call** itself never asks. Leaving the page or pressing the browser's back button ends the call; the transcript is kept.
+- Switching chats, New chat, ⌘J or opening a room mid-call asks first (**End the call?** — *End call and leave* or *Stay on the call*); only **End call** itself never asks. The Workspace's other keyboard shortcuts (switching agents and chats, the rail keys) are off while a call is live. Leaving the page or pressing the browser's back button ends the call; the transcript is kept.
 - **Esc** ends the call — unless something is open on top of it. A file preview or a confirm dialog opened mid-call takes the first Esc for itself; the call ends on the next.
 
 ### Canvas tools

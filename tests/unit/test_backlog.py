@@ -383,6 +383,7 @@ class _FakeDb:
         self.queued_count_value = 0
         self.release_claim_called = False
         self.fail_status_calls = []
+        self.conversation_keys = {}
 
     def get_queued_count(self, agent_name):
         return self.queued_count_value
@@ -396,8 +397,9 @@ class _FakeDb:
     def get_execution_timeout(self, agent_name):
         return self.execution_timeout
 
-    def update_execution_to_queued(self, execution_id, metadata, queued_at):
+    def update_execution_to_queued(self, execution_id, metadata, queued_at, conversation_key=None):
         self.queued[execution_id] = metadata
+        self.conversation_keys[execution_id] = conversation_key
         self.queued_count_value += 1
         return True
 
@@ -409,6 +411,8 @@ class _FakeDb:
         return True
 
     def update_execution_status(self, **kwargs):
+        if kwargs.get("result") is not None:  # #1482: inline the parameter object
+            kwargs.update(vars(kwargs.pop("result")))
         self.fail_status_calls.append(kwargs)
         return True
 
@@ -480,6 +484,25 @@ def _make_request():
 
 @pytest.mark.asyncio
 class TestBacklogEnqueue:
+    @pytest.mark.parametrize("pilots, expected", [("alpha", "chat-1"), ("", None)])
+    async def test_enqueue_stamps_conversation_key_on_pilots_only(
+        self, fake_db, fake_slots, monkeypatch, pilots, expected
+    ):
+        """#2843: only a pilot's worker enforces one turn per conversation, so
+        only a pilot's rows carry the key. The session id wins over the resume id."""
+        from services.backlog_service import BacklogService
+
+        monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", pilots)
+        request = _make_request()
+        request.chat_session_id = "chat-1"
+        request.resume_session_id = "claude-uuid"
+        assert await BacklogService().enqueue(
+            agent_name="alpha", execution_id="exec-k", request=request,
+            effective_timeout=300, user_id=7, user_email=None, subscription_id=None,
+            x_source_agent=None, triggered_by="session", collaboration_activity_id=None,
+        )
+        assert fake_db.conversation_keys["exec-k"] == expected
+
     async def test_enqueue_under_cap_succeeds(self, fake_db, fake_slots):
         from services.backlog_service import BacklogService
 

@@ -16,6 +16,7 @@ from .helpers import (
 )
 from .lifecycle import (
     inject_assigned_credentials,
+    public_skills_result,
     start_agent_internal,
     recreate_container_with_updated_config,
 )
@@ -31,6 +32,7 @@ from .terminal import (
     TerminalSessionManager,
 )
 from .permissions import (
+    agent_reach_logic,
     get_agent_permissions_logic,
     set_agent_permissions_logic,
     add_agent_permission_logic,
@@ -54,9 +56,6 @@ from .queue import (
     get_agent_queue_status_logic,
     clear_agent_queue_logic,
     force_release_agent_logic,
-)
-from .metrics import (
-    get_agent_metrics_logic,
 )
 from .dashboard import (
     get_agent_dashboard_logic,
@@ -101,6 +100,7 @@ __all__ = [
     # Lifecycle
     "inject_assigned_credentials",
     "start_agent_internal",
+    "public_skills_result",
     "recreate_container_with_updated_config",
     # CRUD
     "create_agent_internal",
@@ -111,6 +111,7 @@ __all__ = [
     # Terminal
     "TerminalSessionManager",
     # Permissions
+    "agent_reach_logic",
     "get_agent_permissions_logic",
     "set_agent_permissions_logic",
     "add_agent_permission_logic",
@@ -132,7 +133,6 @@ __all__ = [
     "clear_agent_queue_logic",
     "force_release_agent_logic",
     # Metrics
-    "get_agent_metrics_logic",
     # Dashboard
     "get_agent_dashboard_logic",
     # Stats

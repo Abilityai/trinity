@@ -25,6 +25,10 @@ Pick by *when* and *how often* the work should run:
 
 Reminders are the agent-initiated, one-shot, durable counterpart to cron [schedules](scheduling.md) — use a reminder for a single deferred follow-up, a schedule for a recurring cadence.
 
+### Checking back on delegated work
+
+The delegation contract every agent is taught names reminders as the way to finish later. When an agent hands work to another agent and gets back a receipt (an `execution_id`) instead of a result, it sets a reminder whose message names that `execution_id`, then ends its turn. When the reminder fires, it reads the outcome with `get_execution_result` instead of re-sending the work. See [Agent Network](../collaboration/agent-network.md#concepts).
+
 ## How It Works
 
 An agent sets a reminder one of two ways — pick exactly one:
@@ -103,6 +107,7 @@ Both create boundaries accept an optional `Idempotency-Key` header, so a naive r
 - **Delay bounds** — The fire time must be at least **60 seconds** and at most **30 days** out.
 - **Per-agent caps** — At most **25 pending** reminders and **100 created per day** per agent. Beyond either, `set_reminder` returns `429`.
 - **Timeout cap** — A per-reminder `timeout_seconds` cannot exceed the agent's execution timeout cap.
+- **New call chain** — A fired reminder starts a new agent-to-agent call chain; it does not inherit the depth of the turn that set it.
 - **No web UI** — Reminders are set and managed by the agent; there is no dashboard form. The *result* of a fired reminder is visible in Executions.
 
 ## See Also

@@ -37,8 +37,20 @@ export const USER_KEY = 'auth0_user'
 /** Routes that are already the way out — bouncing from them is a loop. */
 const AUTH_ROUTES = ['/login', '/setup', '/m']
 
+/** The mobile admin: its own sign-in AND its app — the PWA opens here. */
+const MOBILE_ADMIN_ROUTE = '/m'
+
 /** Surfaces whose session may be a CLIENT's rather than the operator's. */
 const WORKSPACE_PREFIXES = ['/workspace', '/portal']
+
+/**
+ * Public token pages (#3406). A stranger opens these with no account; each
+ * carries its own access rule and its own sign-in, so a 401 there is never a
+ * reason to leave the page. `tests/unit/publicSurfaceRoutes.spec.js` fails any
+ * route reachable without `requiresAuth` that none of these predicates covers.
+ */
+const PUBLIC_CHAT_PREFIX = '/chat/'
+const SHARED_CANVAS_PREFIX = '/canvas/s/'
 
 export function isAuthRoute(path) {
   return AUTH_ROUTES.includes(path || '')
@@ -47,6 +59,16 @@ export function isAuthRoute(path) {
 export function isWorkspacePath(path) {
   const p = path || ''
   return WORKSPACE_PREFIXES.some((prefix) => p.startsWith(prefix))
+}
+
+// Lower-cased: the router matches paths case-insensitively, so `/Chat/x`
+// opens the public chat too and must not be judged an operator page.
+export function isPublicChatPath(path) {
+  return (path || '').toLowerCase().startsWith(PUBLIC_CHAT_PREFIX)
+}
+
+export function isSharedCanvasPath(path) {
+  return (path || '').toLowerCase().startsWith(SHARED_CANVAS_PREFIX)
 }
 
 /**
@@ -106,15 +128,41 @@ export function tokenOfRequest(config) {
 }
 
 /**
+ * Did the server reject the PLATFORM credential? (#3406)
+ *
+ * Every rejection `get_current_user` makes carries `WWW-Authenticate: Bearer`
+ * (its `credentials_exception`, and `OAuth2PasswordBearer`'s missing-token
+ * 401); a public link's own session check answers a bare 401. On `/chat/:token`
+ * the operator's JWT rides every request, so this header is the only thing
+ * that tells "the link's 24 h session expired" from "the operator's token is
+ * dead". The backend half is pinned by
+ * `tests/unit/test_3406_bearer_challenge_contract.py`.
+ *
+ * Fails toward `false`: a header it cannot read (absent, a proxy that strips
+ * it, an unexpected shape) leaves the session alone. The worst case is a dead
+ * token lingering on a public page — never an operator signed out.
+ */
+export function isBearerChallenge(error) {
+  const headers = error?.response?.headers
+  if (!headers) return false
+  const raw = typeof headers.get === 'function'
+    ? headers.get('www-authenticate')
+    : (headers['www-authenticate'] ?? headers['WWW-Authenticate'])
+  return typeof raw === 'string' && /^\s*bearer\b/i.test(raw)
+}
+
+/**
  * What to do about a 401. The ONE predicate, replacing three copies.
  *
- * @returns {'ignore'|'stale'|'logout'}
+ * @returns {'ignore'|'stale'|'logout'|'logout-in-place'}
  *
  *   * `ignore` — this 401 is not the platform session's to act on;
  *   * `stale`  — the credential that failed has since been REPLACED, so the
  *                session it belonged to is already gone and the current one is
  *                innocent. Re-adopt what is stored; never destroy it;
- *   * `logout` — the stored platform credential is the one that failed.
+ *   * `logout` — the stored platform credential is the one that failed;
+ *   * `logout-in-place` — the same, on a public token page (#3406): end the
+ *                dead session but stay, because the page shows its own sign-in.
  *
  * The `stale` arm is finding 1 of the issue, and it is the whole reason this
  * function takes `failedToken`. A Workspace tab left open across a logout and a
@@ -135,18 +183,52 @@ export function tokenOfRequest(config) {
  * the surface itself is an operator one, so an expired operator JWT bounces
  * there even if a portal token is lying around — that is today's behaviour and
  * this change does not widen it.
+ *
+ * The public token pages (#3406) never navigate. Before them, a returning
+ * visitor's expired link session 401'd on `/chat/:token`, fell through to
+ * `logout`, and landed on the operator /login — and an operator previewing
+ * their own link was signed out of the platform, because their JWT rode the
+ * request that failed.
  */
 export function sessionLostVerdict({
   failedToken = null,
   storedToken = null,
   portalTokenPresent = false,
   path = '',
+  bearerChallenged = false,
 } = {}) {
-  if (isAuthRoute(path)) return 'ignore'
+  // The token that failed IS the stored one — the evidence every in-place
+  // arm below requires. A request that carried nothing, answered after a
+  // sibling tab wrote a fresh token, says nothing about that token.
+  const ownTokenFailed = !!storedToken && failedToken === storedToken
+
+  if (isAuthRoute(path)) {
+    // `/m` shows its own sign-in whenever no session is held, and the PWA
+    // opens there. A dead token left in storage would keep its panels failing
+    // behind a signed-in-looking page and the ws-ticket retry 401ing every 5 s,
+    // so a 401 the platform itself issued (a Bearer challenge) ends it here.
+    // Not `/login`: a wrong password there carries the challenge too, and a
+    // sibling tab's fresh token rides that request (#3406).
+    if (path === MOBILE_ADMIN_ROUTE && ownTokenFailed && bearerChallenged) return 'logout-in-place'
+    return 'ignore'
+  }
 
   // Superseded: someone replaced the credential between the request and its
   // answer. Whatever went wrong belonged to a session that is already over.
   if (failedToken && storedToken && failedToken !== storedToken) return 'stale'
+
+  const onSharedCanvas = isSharedCanvasPath(path)
+  if (onSharedCanvas || isPublicChatPath(path)) {
+    // End the platform session only on this page's own evidence: the token
+    // that failed IS the stored one, and it was the platform credential that
+    // failed. On the canvas every 401 is (a bad token reads as anonymous, and
+    // the share then asks for a sign-in); on a chat link only a Bearer
+    // challenge says so — a bare 401 is the visitor's own link session. Left
+    // in storage, a dead token keeps the ws-ticket retry 401ing every 5 s and
+    // bounces the canvas card's Sign in off the `/login -> /` guard.
+    const platformRejected = onSharedCanvas || bearerChallenged
+    return ownTokenFailed && platformRejected ? 'logout-in-place' : 'ignore'
+  }
 
   const onWorkspace = isWorkspacePath(path)
 
@@ -231,6 +313,27 @@ export function applyRequestCredential(config, readToken = readStoredToken) {
 }
 
 /**
+ * The path a 401 is judged against (#3406).
+ *
+ * `router.currentRoute` is START_LOCATION — path `/` — until the FIRST
+ * navigation completes, and the guard holds that navigation open across
+ * `checkSetupStatus()`'s fetch. A dead token's `/api/users/me` or ws-ticket
+ * 401 lands inside that window, so it was judged as if the person were on the
+ * dashboard: a `/chat/` visitor was pushed to /login over the page they were
+ * loading, and a Workspace client lost #2791's veto the same way. Until the
+ * router has settled, the address bar is the truth.
+ *
+ * @param {object} router          the app router (its `currentRoute` ref is read)
+ * @param {object} startLocation   vue-router's `START_LOCATION`
+ * @param {string} locationPath    `window.location.pathname`
+ */
+export function pathForVerdict(router, startLocation, locationPath = '') {
+  const current = router?.currentRoute?.value
+  if (!current || current === startLocation || !current.path) return locationPath || ''
+  return current.path
+}
+
+/**
  * Act on a 401. The ONE reaction, behind the ONE verdict.
  *
  * @param {object} error         the axios error (only `config` is read)
@@ -241,7 +344,7 @@ export function applyRequestCredential(config, readToken = readStoredToken) {
  * @param {() => void} deps.adoptStoredSession   authStore.adoptStoredSession
  * @param {() => unknown} deps.logout             authStore.logout — NOT awaited
  * @param {() => Promise|unknown} deps.goToLogin  router.push('/login')
- * @returns {{ verdict: 'ignore'|'stale'|'logout', navigation: unknown }}
+ * @returns {{ verdict: 'ignore'|'stale'|'logout'|'logout-in-place', navigation: unknown }}
  *   `navigation` is whatever `goToLogin` returned, so the caller can absorb a
  *   rejected (redundant) navigation — see `notifyPlatformUnauthorized`.
  */
@@ -258,6 +361,7 @@ export function reactToPlatformUnauthorized(error, {
     storedToken: readToken(),
     portalTokenPresent,
     path,
+    bearerChallenged: isBearerChallenge(error),
   })
 
   if (verdict === 'ignore') return { verdict, navigation: undefined }
@@ -277,6 +381,9 @@ export function reactToPlatformUnauthorized(error, {
   // runs. Awaiting would hold the user on a dead page for the length of the
   // server revoke, and a hung revoke would hold them there indefinitely.
   logout()
+  // #3406 — a public token page shows its own sign-in; leaving it would take
+  // the visitor away from the link they opened.
+  if (verdict === 'logout-in-place') return { verdict, navigation: undefined }
   return { verdict, navigation: goToLogin() }
 }
 

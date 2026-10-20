@@ -3,7 +3,17 @@
 # Identical to docker-compose.prod.yml in every respect except one: it carries
 # NO `build:` blocks. (Plus the ent#580 marketplace admin claim: this file
 # renders an explicitly blank ADMIN_PASSWORD and forwards ADMIN_PASSWORD_SOURCE;
-# prod refuses a blank one. The parity test allowlists exactly those lines.)
+# prod refuses a blank one. Plus the bundled PostgreSQL of #3159: a `postgres`
+# service, its volume, and a DATABASE_URL that defaults to it. The parity test
+# allowlists exactly those lines.)
+#
+# DATABASE: hosted installs run on the bundled PostgreSQL. POSTGRES_PASSWORD is
+# REQUIRED; the file does not render without it. `start.sh --hosted` generates
+# it. A compose-only install (a template or a managed host that runs this file
+# directly) sets it in its environment, e.g. `openssl rand -hex 24`, and leaves
+# DATABASE_URL unset. An install that already has /data/trinity.db sets
+# `DATABASE_URL=` (empty) to stay on SQLite; moving it to PostgreSQL is
+# docs/migrations/SQLITE_TO_POSTGRES.md.
 # Every service resolves a prebuilt image from GHCR, so a
 # fresh VM is serving in ~2 minutes instead of spending 5-10 of them compiling
 # the agent base image on first boot. That build time is what fails the
@@ -139,6 +149,8 @@ services:
       # Mirrors docker-compose.yml — without this line the .env knob is inert in
       # prod (the #1039 packaging-gap class).
       - SLACK_SOCKET_CONNECTION_COUNT=${SLACK_SOCKET_CONNECTION_COUNT:-2}
+      - TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES=${TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES:-}  # ent#600
+      - TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS=${TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS:-}  # ent#600
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
       - CREDENTIAL_ENCRYPTION_KEY_SECONDARY=${CREDENTIAL_ENCRYPTION_KEY_SECONDARY:-}  # #267 rotation fallback
       # Agent auth master (#1159) - backend derives each agent's in-container
@@ -188,6 +200,22 @@ services:
       # gap here cannot make the feature unreachable — but the env leg still has to
       # be forwarded or an operator setting it in .env silently does nothing.
       - A2A_OUTBOUND_ENABLED=${A2A_OUTBOUND_ENABLED:-false}
+      # AAuth prototype (trinity-enterprise#623 / #878 / #879). Default OFF and
+      # fail-closed: system_settings wins, but the env leg must be forwarded or
+      # the .env levers silently do nothing (#1056 class).
+      # ent#862: the graduated agent identity (Flows 1-4). Empty default, so an
+      # unset variable reads as unset and the Settings switch stays authoritative.
+      - AAUTH_ENABLED=${AAUTH_ENABLED:-}
+      - AAUTH_PROTOTYPE_ENABLED=${AAUTH_PROTOTYPE_ENABLED:-false}
+      - AAUTH_ISSUER=${AAUTH_ISSUER:-}
+      - AAUTH_PERSON_SERVER=${AAUTH_PERSON_SERVER:-}
+      - AAUTH_RESOURCE_ALLOWLIST=${AAUTH_RESOURCE_ALLOWLIST:-}
+      # Nevermined x402 facilitator concurrency (ent#679). The bound is enforced at
+      # these defaults whether or not they are wired, so the gap is an inert
+      # tuning lever rather than a dead feature — but this compose launches
+      # standalone (no base merge / env_file), so wire them here too (#1056 class).
+      - NEVERMINED_MAX_INFLIGHT=${NEVERMINED_MAX_INFLIGHT:-8}  # concurrent verify/settle calls, fleet-wide
+      - NEVERMINED_FACILITATOR_WAIT_SECONDS=${NEVERMINED_FACILITATOR_WAIT_SECONDS:-5.0}  # wait for a slot before "busy, retry"
       # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
       # gates the feature (empty ⇒ adapters deliver text). Prod compose launches
       # standalone (no base merge / env_file), so wire it here too (#1056 class).
@@ -210,6 +238,20 @@ services:
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Prod compose launches standalone (no base merge / env_file), so wire it here too.
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # trinity-enterprise#478 — metric write path. The two policy values are a
+      # bootstrap fallback; a Settings row wins over them.
+      # The three ENV-BACKED ops keys below (METRICS_RETENTION_DAYS,
+      # METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH) are forwarded with
+      # an EMPTY default (ent#671): an unset variable must reach the container
+      # unset, or GET /api/settings/retention reports `source: env` for a value
+      # nobody chose and the Settings rows lock read-only. The code default is
+      # the fallback. Pinned by tests/unit/test_ent671_env_backed_ops_forwarding.py.
+      - METRICS_RATE_LIMIT=${METRICS_RATE_LIMIT:-60}             # record_metrics calls per agent per 60s
+      - METRICS_RETENTION_DAYS=${METRICS_RETENTION_DAYS:-}    # recorded point retention (0 = forever)
+      - METRICS_DAILY_POINT_CAP=${METRICS_DAILY_POINT_CAP:-}  # points per agent per UTC day (0 = unlimited)
+      - INTER_AGENT_MAX_CHAIN_DEPTH=${INTER_AGENT_MAX_CHAIN_DEPTH:-}  # max agent-to-agent hops per call chain (#2806)
+      - METRICS_READ_RATE_LIMIT=${METRICS_READ_RATE_LIMIT:-240}   # GET /metrics reads per agent per 60s (tiles, dashboard binds, get_metrics)
+      - OBJECTIVES_READ_RATE_LIMIT=${OBJECTIVES_READ_RATE_LIMIT:-60}  # GET /objectives reads per agent per 60s (fans out into the agent container)
       # Agent canvases (ent#438/ent#553) — per-agent ceiling on the canvas pile.
       # This compose launches standalone (no base merge / env_file), so wire it here too.
       - CANVAS_MAX_PER_AGENT=${CANVAS_MAX_PER_AGENT:-100}        # canvases per agent
@@ -242,11 +284,17 @@ services:
       - OPERATOR_QUEUE_QUESTION_MAX=${OPERATOR_QUEUE_QUESTION_MAX:-4000}                       # question char cap (truncate)
       - OPERATOR_QUEUE_CONTEXT_MAX_BYTES=${OPERATOR_QUEUE_CONTEXT_MAX_BYTES:-8192}             # context byte cap (marker over)
       - OPERATOR_QUEUE_OPTIONS_MAX_BYTES=${OPERATOR_QUEUE_OPTIONS_MAX_BYTES:-4096}             # options byte cap (dropped over)
+      - OPERATOR_QUEUE_MAX_OPTIONS=${OPERATOR_QUEUE_MAX_OPTIONS:-5}             # #3243 options per agent ask
+      - OPERATOR_QUEUE_OPTION_MAX_CHARS=${OPERATOR_QUEUE_OPTION_MAX_CHARS:-60}   # #3243 chars per option
+      - OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS=${OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS:-120}  # #3243 agent ask title
+      - OPERATOR_QUEUE_PROPOSAL_MAX_BYTES=${OPERATOR_QUEUE_PROPOSAL_MAX_BYTES:-8192}           # proposal byte cap (native asks; 422 over)
       - OPERATOR_QUEUE_ID_MAX=${OPERATOR_QUEUE_ID_MAX:-256}                                    # max agent-supplied id length
       - OPERATOR_QUEUE_EXECUTION_ID_MAX=${OPERATOR_QUEUE_EXECUTION_ID_MAX:-128}                # max execution_id kept in a marker
       - OPERATOR_QUEUE_EMAIL_MAX=${OPERATOR_QUEUE_EMAIL_MAX:-320}                               # ent#364: addressee email length clamp (RFC 5321)
       - OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS=${OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:-300}  # one flood alert / agent / window
       - OPERATOR_ALERT_MAX_PENDING_PER_TYPE=${OPERATOR_ALERT_MAX_PENDING_PER_TYPE:-5}     # per-(agent,type) platform-alert budget (#1677)
+      - OPERATOR_PLATFORM_ALERT_LIFETIME_DAYS=${OPERATOR_PLATFORM_ALERT_LIFETIME_DAYS:-14}   # #3246: platform alert expires N days after its last reading
+      - OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS=${OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS:-7}        # #3246: a person's ending holds N days unless priority rises
       - GITHUB_PAT=${GITHUB_PAT}
       # Log Retention & Archival Configuration (#1039)
       # These were MISSING from prod — prod launches standalone (no base-compose
@@ -401,12 +449,14 @@ services:
       - TEMPLATE_REGISTRY_URL=${TEMPLATE_REGISTRY_URL:-https://raw.githubusercontent.com/Abilityai/trinity-templates/main/registry.yaml}
       # Internal API shared secret (C-003) - for scheduler/agent communication
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
-      # Configurable database backend (#300, experimental) — mirrors
-      # docker-compose.yml; without these lines the .env lever is inert in prod
-      # (the #1039/#1056 packaging-gap class). Unset → SQLite at /data/trinity.db.
-      # Prod compose ships no postgres service: a postgresql:// URL must point at
-      # an operator-managed PostgreSQL instance (see docs/POSTGRESQL_SETUP.md).
-      - DATABASE_URL=${DATABASE_URL:-}
+      # Database backend (#3159, HOST-022). Hosted installs default to the
+      # bundled `postgres` service below. `-` with no colon is load-bearing:
+      # UNSET resolves to the bundled PostgreSQL; set-but-EMPTY (`DATABASE_URL=`,
+      # which start.sh --hosted writes for an install that already has
+      # /data/trinity.db) keeps SQLite, so an update never boots an empty
+      # PostgreSQL beside a populated SQLite file. Any other postgresql:// URL
+      # points at an operator-managed server (docs/POSTGRESQL_SETUP.md).
+      - DATABASE_URL=${DATABASE_URL-postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity}
       - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
       # Fire-and-forget dispatch (#1083). When true, eligible autonomous turns
@@ -505,6 +555,8 @@ services:
       # + deletes archived originals.
       - trinity-logs:/data/logs
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       vector:
@@ -671,6 +723,39 @@ services:
       retries: 5
       start_period: 5s
 
+  # PostgreSQL (#3159, HOST-022) — the hosted database. SQLite reached
+  # end-of-support on 2026-09-01 (#1278), so every one-click channel starts on
+  # this service. It is hosted-only: docker-compose.prod.yml leaves the database
+  # to the operator, and the parity test allowlists exactly this service, its
+  # volume and the two depends_on edges. An install that keeps SQLite (an
+  # existing /data/trinity.db) still starts it, idle, so one file renders for
+  # both. Platform network only: agents NEVER reach it (Issue #589).
+  postgres:
+    image: postgres:16-alpine
+    container_name: trinity-postgres
+    logging: *default-logging
+    restart: unless-stopped
+    expose:
+      - "5432"
+    environment:
+      - POSTGRES_DB=trinity
+      - POSTGRES_USER=trinity
+      - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (generate openssl rand -hex 24; start.sh --hosted does this)}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - trinity-platform   # Issue #589: PostgreSQL is NOT on agent network
+    security_opt:
+      - no-new-privileges:true
+    # TCP probe: the image's first-boot init runs a socket-only temporary
+    # server, so a socket probe can report ready before the real server listens.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U trinity -d trinity"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   # Scheduler - dedicated service for cron-based agent task execution
   # Prevents duplicate executions that occurred with multiple backend workers
   scheduler:
@@ -680,9 +765,9 @@ services:
     restart: unless-stopped
     environment:
       - DATABASE_PATH=/data/trinity.db
-      # #300: when set to a postgresql:// URL the scheduler reads/writes Postgres
-      # (the same DB the backend uses); unset → shared SQLite at DATABASE_PATH.
-      - DATABASE_URL=${DATABASE_URL:-}
+      # #300/#3159: the same database the backend uses — see the backend's
+      # DATABASE_URL comment for why the default uses `-` with no colon.
+      - DATABASE_URL=${DATABASE_URL-postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity}
       # Scheduler uses the same `backend` ACL user (identical access patterns).
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - HEALTH_PORT=8001
@@ -692,12 +777,15 @@ services:
       # #1022: scheduler→backend dispatch + pre-check deadlines (operator-tunable).
       - DISPATCH_TIMEOUT=${DISPATCH_TIMEOUT:-30}
       - PRE_CHECK_TIMEOUT=${PRE_CHECK_TIMEOUT:-70}
+      - READINESS_CHECK_TIMEOUT=${READINESS_CHECK_TIMEOUT:-5}
       - MISFIRE_GRACE_TIME=3600
       - PUBLISH_EVENTS=true
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
     volumes:
       - ${TRINITY_DATA_PATH:-./trinity-data}:/data
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       backend:
@@ -793,6 +881,8 @@ services:
       # #946 pull-pilot routing gate — see docker-compose.yml. Without this the
       # flag cannot be enabled in prod (the #1056/#1039 packaging-gap class).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #3232 report-back kill switch — see docker-compose.yml.
+      - MCP_REPORT_BACK_ENABLED=${MCP_REPORT_BACK_ENABLED:-true}
       # #848 inline email auth — THIS is the session-tier gate: with it OFF a
       # keyless MCP connection is refused outright and no login tools register.
       # Same packaging-gap class as the line above; the backend reads the same key
@@ -903,6 +993,7 @@ services:
 volumes:
   agent-configs:
   redis-data:
+  postgres-data:  # PostgreSQL data (#3159)
   trinity-logs:  # Vector log storage
   # trinity-data: using bind mount via TRINITY_DATA_PATH env var
 

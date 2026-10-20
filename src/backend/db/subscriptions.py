@@ -18,6 +18,10 @@ from typing import Optional, List, Dict, Any, Sequence, Set, Tuple
 
 from sqlalchemy import select, insert, update, delete, func, and_
 
+# #3470: "no expectation" for `assign_subscription_to_agent`'s CAS — distinct
+# from None, which is a real expected value (an unassigned agent).
+_UNSET = object()
+
 from .engine import get_engine
 from .tables import (
     subscription_credentials,
@@ -488,7 +492,9 @@ class SubscriptionOperations:
     def assign_subscription_to_agent(
         self,
         agent_name: str,
-        subscription_id: str
+        subscription_id: str,
+        *,
+        expected_subscription_id=_UNSET,
     ) -> bool:
         """
         Assign a subscription to an agent.
@@ -496,9 +502,17 @@ class SubscriptionOperations:
         Args:
             agent_name: Name of the agent
             subscription_id: ID of the subscription to assign
+            expected_subscription_id: #3470 — when given, the write is a
+                compare-and-set: it lands only while the agent's current
+                assignment still equals this value (None = unassigned) and
+                returns False otherwise, raising nothing. The SUB-003 walk
+                commits a served trial this way so two workers whose
+                process-local #799 locks cannot see each other never both
+                commit — the first write wins, the second reads False and
+                skips its hot-reload and notification.
 
         Returns:
-            True if successful
+            True if the assignment was written
         """
         with get_engine().begin() as conn:
             # Verify subscription exists
@@ -510,14 +524,23 @@ class SubscriptionOperations:
             if not existing:
                 raise ValueError(f"Subscription {subscription_id} not found")
 
+            where = agent_ownership.c.agent_name == agent_name
+            if expected_subscription_id is not _UNSET:
+                where = and_(
+                    where,
+                    agent_ownership.c.subscription_id.is_(None)
+                    if expected_subscription_id is None
+                    else agent_ownership.c.subscription_id == expected_subscription_id,
+                )
+
             # Update agent ownership
             result = conn.execute(
-                update(agent_ownership)
-                .where(agent_ownership.c.agent_name == agent_name)
-                .values(subscription_id=subscription_id)
+                update(agent_ownership).where(where).values(subscription_id=subscription_id)
             )
 
             if result.rowcount == 0:
+                if expected_subscription_id is not _UNSET:
+                    return False
                 raise ValueError(f"Agent {agent_name} not found in ownership table")
 
             return True

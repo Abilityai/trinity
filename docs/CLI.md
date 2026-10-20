@@ -1,6 +1,6 @@
 # Trinity CLI
 
-Command-line interface for the Trinity Autonomous Agent Orchestration Platform.
+Command-line interface for Trinity, the operating system for the AI-native company.
 
 ## Installation
 

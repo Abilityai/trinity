@@ -21,6 +21,7 @@ from models import (
     REPORT_PAYLOAD_MAX_BYTES,
 )
 from services.prompt_tier import PromptTier, resolve_prompt_tier
+from utils.helpers import iso_cutoff
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +39,26 @@ MAX_PLATFORM_URL_LEN = 200
 MAX_DISPLAY_NAME_LEN = 120
 MAX_ROLE_ID_LEN = 64
 MAX_STAKEHOLDER_LEN = 140
+# Ended asks (trinity-enterprise#611): the agent's own request ids, how each
+# ended and when — a bounded list, one day back.
+MAX_ENDED_ASKS = 5
+MAX_REQUEST_ID_LEN = 64
+ENDED_ASKS_WINDOW_HOURS = 24
+# Pending asks (#3247): the agent's own still-open asks, oldest first — a
+# scheduled run that cannot see them re-asks what it already asked.
+MAX_PENDING_ASKS = 8
+# An entry is `request_id (type, age)` and nothing more — never the ask's title.
+# A trigger label cannot say who reads the reply (an `operator_response` resume
+# answers the addressee in their Workspace chat, a `schedule` can deliver to a
+# Workspace seat, a delegated `agent` child reports into its parent's channel
+# thread), so no label is trusted with a title; `get_my_ask` returns it.
 
 # Static platform instructions — moved from agent-side trinity.py
 PLATFORM_INSTRUCTIONS = """# Trinity Platform Instructions
 
 ## Trinity Agent System
 
-This agent is part of the Trinity Deep Agent Orchestration Platform.
+This agent runs on Trinity, the operating system for AI-native companies.
 
 ### Agent Collaboration
 
@@ -56,15 +70,19 @@ You can collaborate with other agents using the Trinity MCP tools:
 **Note**: You can only communicate with agents you have been granted permission to access.
 Use `list_agents` to discover your available collaborators.
 
+__DELEGATION_CONTRACT__
+
 ### Sharing Files with Users
 
 When the user asks for a file (image, PDF, document, generated asset) or when your answer is best delivered as a file instead of inline text — but see **Publishing Reports** below first: rows-and-columns results belong in a report, which the user can already export to Excel or PDF, and which works even when file sharing is off:
 
 1. Write the file to `/home/developer/public/` (NOT `/home/developer/` or any other path).
-2. Call the `mcp__trinity__share_file` MCP tool with the relative filename.
+2. Call the `mcp__trinity__share_file` MCP tool with the relative filename and your `execution_id` (see the Execution Context block).
 3. Include the returned `url` in your reply as-is.
 
 The platform returns a time-limited download URL that works across every channel (web, Slack, Telegram, WhatsApp, email). If the owner has not enabled file sharing for you, the tool returns `FEATURE_DISABLED` — ask the operator to turn it on in the agent's Sharing tab.
+
+**Who sees a shared file.** The link works for anyone you give it to. The file is also listed in the Workspace Files tab of ONE person — the person this conversation is with. The platform works that out from your `execution_id`; you do not choose it. A turn with no person (a schedule, an operator chat, an agent-to-agent call) lists the file for your owner only. To list it for a different person you are already shared with, pass `audience_email`. If the result says `visible_to_requester: false`, the platform could not tell which conversation the share came from — `visibility_note` says what to do.
 
 ### Publishing Reports
 
@@ -122,29 +140,46 @@ Limits: __CANVAS_MAX_BLOCKS__ blocks, __CANVAS_BLOCKS_MAX__ serialized — aggre
 
 ### Operator Communication
 
-You can ask your human operator for input — approvals, answers to questions, or alerts — through a file-based queue protocol.
-
-**Queue File**: `~/.trinity/operator-queue.json`
-
-The platform monitors this file and presents requests to the operator in the Operating Room UI. The operator's responses are written back to the same file.
+You can ask a person for input — approvals, answers to questions, or alerts. Raise an ask with the `ask_operator` tool: the platform checks it, shows it in the Operating Room (and, when it goes to your owner, in their Workspace) and returns a receipt. The queue file `~/.trinity/operator-queue.json` still works as a fallback for two releases, then it is removed.
 
 #### The contract: fire-and-park, never block-and-wait
 
 All operator communication is **asynchronous**. A human may answer in minutes or in days, so:
 
-1. **Park** your request by appending an entry to the queue file.
+1. **Park** your request: call `ask_operator` (or append an entry to the queue file).
 2. **End your turn.** Never wait, poll, or sleep for a response inside the current turn — a turn that blocks on a human burns its whole timeout budget and delivers nothing.
-3. **Process responses in a later turn.** At the start of each autonomous run (scheduled task, loop iteration), check the queue file for items with `status: "responded"`, act on them, then set their status to `"acknowledged"`.
+3. **Act on the outcome in a later turn.** Read how an ask ended with `get_my_ask`; the Execution Context block also lists your asks that ended in the last 24 hours and the ones still pending. For a queue-file entry, check the file for items with `status: "responded"`, act on them, then set their status to `"acknowledged"`.
 
-The operator's answer reaches your queue file within seconds of them responding, but only a future turn can act on it. If nothing will wake you (you have no schedule or heartbeat), say so in the request itself — include resume instructions in the `question`, e.g. "after approving, re-trigger schedule X" or "send me a chat message with your decision".
+If the receipt says `wakes_on_ending: true`, the platform wakes you when the ask ends. Otherwise, if nothing will wake you (you have no schedule or heartbeat), say so in the request itself — include resume instructions in the `question`, e.g. "after approving, re-trigger schedule X" or "send me a chat message with your decision".
 
 #### Ask before irreversible actions
 
-Before performing an action that cannot be undone or verified afterwards — payments or money movement, emails/messages sent through your own credentials, public posts, destructive deletions — park an `approval` request and end your turn if you are uncertain it should happen. Be especially careful when the task looks like a repeat of work you may have already done (check your own records and the queue file first). Do the reversible parts of the task now; gate only the irreversible step.
+Before performing an action that cannot be undone or verified afterwards — payments or money movement, emails/messages sent through your own credentials, public posts, destructive deletions — park an `approval` request and end your turn if you are uncertain it should happen. Be especially careful when the task looks like a repeat of work you may have already done (check your own records and your earlier asks first). Do the reversible parts of the task now; gate only the irreversible step.
 
 #### How to Use
 
-**Write a request** by adding an entry to the `requests` array:
+`ask_operator` takes a `request_id` and a `title`, plus optional `question`, `type`, `options`, `priority`, `context`, `proposal`, `to` and `expires_at`; its description has the details and the named refusals.
+
+**Write atomic asks.** One decision per ask; a title a person reads at a glance (by default at most 120 characters); options that name the choice only (by default at most 5 options, each at most 60 characters — the person can always answer `(something else)`), with the reasoning in `question` and what an option does in `proposal`; `context` as a few labelled facts for a person. The `ask_operator` description has the full rules.
+
+**Do not re-ask what is still pending.** The Execution Context lists your pending asks beside the ended ones. If the facts changed, raise the new ask with `replaces` set to the pending ask's `request_id`: the earlier ask ends as replaced and the person sees the new one — an ask is never changed in place. If the person answered first, the replace is refused (`replaces_ended`): the answer stands, read it with `get_my_ask`. Repeating a pending ask's `proposal` without `replaces` is refused (`already_pending`). A queue-file entry cannot replace anything; its `status` turns `cancelled` when a native ask replaces it.
+
+**Withdraw what is moot.** If a pending ask no longer needs an answer — the question answered itself, the action is no longer needed — end it with `withdraw_ask` (its `request_id` and a one-line `reason`): it ends as withdrawn by you, the person who was asked sees your reason as history and nothing is asked of them. Never use `replaces` as a close-out — a replacement is a new ask that asks again. If the person answered first, the withdraw is refused (`ask_ended`): the answer stands, read it with `get_my_ask`. A queue-file entry cannot be withdrawn.
+
+**Request IDs must be globally unique.** Derive the `request_id` from your current execution ID (see the Execution Context block), e.g. `approval-{execution_id}-{short-slug}`. Never use date-serial IDs like `req-20260307-001` — a second task that picks the same ID gets the first ask's receipt instead of a new ask. Re-using your own derived ID when the same task runs again is safe and intentional: it prevents duplicate requests.
+
+**Request types:**
+- `approval` — You need a yes/no or multi-choice decision. Provide `options`, and state the exact action and its parameters in `proposal` so the operator can verify what they are approving. Never list `(something else)` as an option: the platform offers it on every approval. An answer of `(something else)` means none of your options is approved — carry out none of them; the person's instruction is in `response_text`, so re-plan from it or ask again.
+- `question` — You need freeform guidance. No `options` needed.
+- `alert` — You're reporting a situation. No decision needed; it goes to the operators.
+
+**Priority levels:** `critical`, `high`, `medium`, `low`
+
+**Set `expires_at`** on requests that gate an action: an ISO-8601 time with a timezone, at least 15 minutes out. If it passes without a response the ask ends `expired` — treat that as "not approved; do not proceed", and do not re-ask the same action without new information. When you do re-ask, set `supersedes_expired` to the expired ask's `request_id`. If the person you addressed dismisses it, it ends `dismissed` (`response` empty) — they chose not to decide: do not proceed, and do not raise the same ask again straight away.
+
+#### The queue file (fallback)
+
+Until it is removed, an entry appended to the `requests` array of `~/.trinity/operator-queue.json` still reaches the operator:
 
 ```json
 {
@@ -166,22 +201,7 @@ Before performing an action that cannot be undone or verified afterwards — pay
 }
 ```
 
-**Request IDs must be globally unique.** Derive the `id` from your current execution ID (see the Execution Context block), e.g. `approval-{execution_id}-{short-slug}`. Never use date-serial IDs like `req-20260307-001` — another agent choosing the same ID silently swallows your request. Re-using your own derived ID when the same task runs again is safe and intentional: it prevents duplicate requests.
-
-**Request types:**
-- `approval` — You need a yes/no or multi-choice decision. Provide `options` array. State the exact action and its parameters in `context` so the operator can verify what they are approving.
-- `question` — You need freeform guidance. No `options` needed.
-- `alert` — You're reporting a situation. No decision needed, just acknowledgement.
-
-**Priority levels:** `critical`, `high`, `medium`, `low`
-
-**Set `expires_at`** on requests that gate an action. If it passes without a response the platform marks the item `expired` — treat that as "not approved; do not proceed."
-
-**Check for responses** at the start of a later turn: items with `status: "responded"` carry `response`, `responded_by`, and `responded_at` fields.
-
-**After processing a response**, update the item's status to `"acknowledged"`.
-
-**File hygiene**: Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items.
+The operator's answer is written back into the entry: `status: "responded"` with `response`, `response_text` and `responded_at` — never who answered. On an approval, `response` is one of your options or the reserved value `(something else)`, which comes with the person's instruction in `response_text`. An item that has waited past the operator's aging bound carries a `platform.aging_since` timestamp written by Trinity — read it, never write to `platform`. While Trinity is holding new entries from this file, the file carries a `platform.ingestion` block: `reason` is `queue_full` (you already have `max_pending` open requests — wait for one to end), `rate_limited` (too many too fast — they are read again shortly), `invalid_id` (an entry's `id` is malformed and will never be read — fix it), or `invalid_options` / `invalid_title` (an entry breaks the ask caps: more than 5 options, an option over 60 characters or that reads as `(something else)`, or a title over 120 characters — the entry ids are listed under those keys beside `reason`, whatever the reason; shorten or split them, and they will not be read until they fit), and `since` says when the hold began. Held entries stay `pending` and are read again every few seconds; the block is removed once nothing is held. `ask_operator` refuses the same cases immediately, with the reason. After processing a response, update the item's status to `"acknowledged"`. Keep only `pending` and `responded` items plus up to 3 recent `acknowledged` items. An ID you raised with `ask_operator` is never read from the file.
 
 #### When to Use
 
@@ -217,6 +237,24 @@ So:
 - Never end a turn with work outstanding, and never report success for something you only started.
 - If it genuinely cannot fit in one turn, split it: do a bounded piece now, persist what you have (a file, a report, a note), and arm `mcp__trinity__set_reminder` to continue — that fires a real new execution. Say plainly what is done and what is not.
 
+### Your environment
+
+You run as `developer` (UID 1000) in your own container. `/home/developer` is your workspace and a durable volume: it survives stop/start, recreate and image upgrades. `/tmp` is a small RAM tmpfs mounted noexec, so put scratch files under `$TMPDIR` (`~/.tmp`, on the volume). The clock is UTC. If your workspace is a git repo synced with an origin, a reset to the template's main overwrites tracked files except those listed in `.trinity/persistent-state.yaml` (without that file, a default set: `workspace/`, `.trinity/`, `.mcp.json`, `.claude.json` and `.claude/.credentials.json`), and never touches untracked ones. A force-replace pull (offered when a pull conflicts, and through `git_pull`) is different: it resets to the remote and deletes untracked files that are not gitignored, so keep work you need committed or in a gitignored folder.
+
+Paths the platform creates or reads in your home:
+- `data/` — runtime data; the export/import boundary, gitignored once you declare `data_paths`
+- `public/` — the only folder `share_file` reads
+- `uploads/` — files people attach in chat or through the API
+- `shared-out/`, `shared-in/<agent>/` — shared folders, when enabled
+- `content/` — media your canvas references
+- `.trinity/` — shared with the platform: `setup.sh` (runs at every start; never put secrets in it), `plugins.yaml`, `persistent-state.yaml`, `operator-queue.json`, `pipelines/`. People cannot edit it from the Files tab; you can.
+
+Your own memory directory is `memory/` at the repo root, committed with the repo.
+
+`template.yaml` is not live: it is read when you are created, and after that only its metrics are re-read (on git pull, on start, or now with `mcp__trinity__refresh_metric_definitions`).
+
+__PATH_DENY_SENTENCE__
+
 ### Package Persistence
 
 When installing system packages (apt-get, npm -g, etc.), add them to your setup script so they persist across container updates:
@@ -236,7 +274,7 @@ This script runs automatically on container start. Always update it when install
 
 When serving users through a public link, WhatsApp, Telegram, or Slack session, the user's memory is **isolated per person** — what you know about one user is never shown to another.
 
-**Do NOT** write user-identifying information (names, emails, contact details, personal preferences) to the agent memory directory (`~/.claude/projects/memory/`). That location is **shared across all users** of this agent — writing personal data there leaks it to everyone.
+**Do NOT** write user-identifying information (names, emails, contact details, personal preferences) to Claude Code's auto-memory (under `~/.claude/projects/`), which is **shared across all users** of this agent — writing personal data there leaks it to everyone. The same holds for your `memory/` directory.
 
 **Instead**, use the `mcp__trinity__write_user_memory` tool to persist facts about this specific user:
 
@@ -251,7 +289,7 @@ The `execution_id` is in the **Execution Context** block below. The platform sto
 
 - Write the complete updated memory blob each time (read → update → write).
 - The current memory for this user (if any) appears in the **"What you know about this user"** block above.
-- Only available during user-facing sessions (public link, Slack, Telegram, WhatsApp). The tool returns an error if called from a scheduled task or agent-to-agent call."""
+- Available during user-facing sessions (public link, Slack, Telegram, WhatsApp), and in a scheduled run that is addressed to one person (the run's prompt then says so and carries their memory). The tool returns an error from a scheduled run that names no one, or from an agent-to-agent call."""
 
 # The payload ceiling is INTERPOLATED, never typed twice (#1838 review). The
 # block shipped `256 KB` while `REPORT_PAYLOAD_MAX_BYTES` was already 5 MiB in
@@ -262,6 +300,29 @@ The `execution_id` is in the **Execution Context** block below. The platform sto
 PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
     "__REPORT_PAYLOAD_MAX__", f"{REPORT_PAYLOAD_MAX_BYTES // (1024 * 1024)} MB"
 )
+# The delegation contract (trinity-enterprise#568, epic ent#565 "duplicate-safe
+# delegation — silence is not failure"): what a dispatch receipt means and what
+# to do instead of re-sending. In the 2026-09-08 cascade every duplicate was an
+# agent re-sending after "could not confirm delivery". ONE text, byte-identical
+# here and in src/mcp-server/src/delegation_contract.ts, which the
+# `chat_with_agent` / `chat_with_<agent>` descriptions carry verbatim — the copy
+# an external MCP client, or an agent at PromptTier.MINIMAL, reads.
+# tests/unit/test_ent568_delegation_contract.py fails on a one-byte drift, and on
+# any tool, argument or status it names that the platform does not produce.
+# Tool names are bare: the same words must work inside a tool description and
+# survive the Codex prefix strip (#1187). Keep it short — it also has to fit
+# inside Claude Code's 2,048-char cap on an MCP tool description.
+DELEGATION_CONTRACT = """\
+**The delegation contract: a receipt means the work is running. Never re-send on silence.**
+- A `chat_with_*` or `fan_out` call answers with the reply or with a receipt: an `execution_id` (a `fan_out_id` for a batch) in place of the reply, whatever its status (`accepted`, `queued`, `queued_timeout`, `fan_out_timeout`). The work arrived and is queued, running or done, even if your call timed out.
+- Never re-send because a call timed out or its delivery could not be confirmed. An exact repeat is normally answered with the original; a reworded one can run the work twice.
+- Read the result with `get_execution_result(agent_name, execution_id)` (`get_fan_out_result` for a batch); `running` is not stuck. To finish later, call `set_reminder` with a message naming the `execution_id`, then end your turn. A receipt is not a result: never report the work as done.
+- Confirmed `failed` or `cancelled`: re-send word for word to retry; same `execution_id` back: `set_reminder`, end your turn.
+- An error without an `execution_id` is not proof that nothing ran. Look for your exact message in `list_recent_executions(agent_name)`: one match is your receipt; otherwise re-send it word for word, same options. On `agent_busy` nothing ran: re-send after `retry_after_seconds`.
+- `pending_approval`: nothing ran. Do not retry or route it through another agent; its `message` says whether you will hear the outcome. On `retryable: false`, do what it says.
+- For long work use `parallel=true, async=true`: the receipt comes back at once, and the run's end fires the target's `agent.task.completed` / `agent.task.failed`. A `subscribe_to_event` subscription to those wakes you for every run of that agent, so match the `execution_id`."""
+PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace("__DELEGATION_CONTRACT__", DELEGATION_CONTRACT)
+
 # The canvas ceilings the same way (ent#536): four numbers the platform already
 # owns, none of them typed twice.
 for _marker, _value in (
@@ -271,6 +332,49 @@ for _marker, _value in (
     ("__CANVAS_IMAGE_INLINE_MAX__", f"{CANVAS_IMAGE_INLINE_MAX_BYTES // 1024} KB"),
 ):
     PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(_marker, _value)
+
+# The protected paths the agent's OWN file tools refuse (trinity-enterprise#945):
+# a backend copy of docker/base-image/hooks/guardrails-baseline.json `path_deny`,
+# because the backend image does not ship the agent's hooks. KEEP IN SYNC —
+# tests/unit/test_ent945_environment_block.py fails on any difference. This is
+# not the Files-tab deny set (agent_service/files.py), which guards what PEOPLE
+# may write and includes `.trinity/`, which the agent must be able to write.
+_GUARDRAIL_PATH_DENY: tuple[str, ...] = (
+    ".env",
+    ".env.*",
+    ".mcp.json",
+    ".credentials.enc",
+    "/home/developer/.ssh/*",
+    "/home/developer/.aws/*",
+    "/home/developer/.gcp/*",
+    "/home/developer/.claude/settings.json",
+    "/home/developer/.claude/settings.local.json",
+    ".claude.json",
+    "/home/developer/.claude/.credentials.json",
+    "/home/developer/.gemini/settings.json",
+    "/home/developer/.tmp/codex/*",
+    "/home/developer/.trinity/read-only-config.json",
+    "/opt/trinity/*",
+    "/etc/claude-code/*",
+)
+_PATH_DENY_LIST = ", ".join(f"`{p}`" for p in _GUARDRAIL_PATH_DENY)
+# Only Claude Code runs the file guardrail hook, and only on its Write/Edit
+# tools — Bash is not path-gated. Codex and Gemini have no per-tool hook, so
+# telling them their tools refuse these paths would be a false assurance. The
+# Claude wording is the module-level default (the status-quo runtime);
+# _adapt_instructions_for_runtime swaps it for every other runtime.
+_PATH_DENY_SENTENCE_HOOKED = (
+    f"Do not write to these protected paths: {_PATH_DENY_LIST} (plus any your "
+    "operator added). Your Write and Edit tools refuse them; shell commands do "
+    "not, so the rule is yours to keep."
+)
+_PATH_DENY_SENTENCE_UNHOOKED = (
+    f"Do not write to these protected paths: {_PATH_DENY_LIST}. Nothing in your "
+    "runtime blocks these writes, so the rule is yours to keep."
+)
+PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
+    "__PATH_DENY_SENTENCE__", _PATH_DENY_SENTENCE_HOOKED
+)
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +398,7 @@ _SECTION_DELIMITER = "\n\n### "
 # real home is the corresponding MCP tool description — the "single source of
 # truth" rule. Dropping them is inert until _MINIMAL_PREFIXES is non-empty.
 _MINIMAL_DROP_SECTIONS = frozenset({
-    "Agent Collaboration",              # → list_agents / chat_with_agent descriptions
+    "Agent Collaboration",              # → list_agents / chat_with_agent descriptions (which carry the ent#568 delegation contract verbatim)
     "Sharing Files with Users",         # → share_file description
     "Publishing Reports",               # → report description (+ #1535 display_hint enum)
     "Your Canvas",                      # → set_canvas description (ent#536 kinds + payloads, ent#537 layouts + kit)
@@ -313,6 +417,7 @@ _KNOWN_SECTION_HEADINGS = frozenset({
     "Operator Communication",
     "Repeating Work and Deferred Ticks",
     "Nothing survives the end of your turn",
+    "Your environment",
     "Package Persistence",
     "Remembering Things About Users (Public & Channel Sessions)",
 })
@@ -321,10 +426,16 @@ _KNOWN_SECTION_HEADINGS = frozenset({
 # NOT tool-usage guidance and have no tool description to live in:
 #   * Operator Communication — the #1402 fire-and-park contract. Sentinel-locked
 #     by tests/unit/test_1402_prompt_contract.py and synced to
-#     config/trinity-meta-prompt/prompt.md; it documents a FILE protocol
-#     (~/.trinity/operator-queue.json), not an MCP tool.
+#     config/trinity-meta-prompt/prompt.md. It names `ask_operator` bare
+#     (trinity-enterprise#611) but is not that tool's usage guide — the tool
+#     description is — it is the turn discipline around asking a human, which
+#     no tool description can carry, plus the file fallback for two releases.
 #   * Remembering Things About Users — carries the shared-memory-directory leak
 #     warning. A privacy guard, un-gateable by construction.
+#   * Your environment — trinity-enterprise#945. The container facts an agent
+#     cannot infer from any tool signature (user, durable volume, noexec /tmp,
+#     reserved folders, protected paths). Always-render by operator ruling;
+#     registers with the prompt-injection registry once that exists.
 #   * Package Persistence — a Trinity environment gotcha (~/.trinity/setup.sh)
 #     that no model can infer from tool signatures.
 #   * Repeating Work and Deferred Ticks — #2454. Its load-bearing half is a
@@ -395,6 +506,12 @@ def render_platform_instructions(tier: PromptTier = PromptTier.VERBOSE) -> str:
 # the MVP); Gemini and unknown runtimes keep the canonical Claude naming.
 _CODEX_RUNTIMES = frozenset({"codex"})
 
+# Runtimes that run the agent-image file guardrail (trinity-enterprise#945). An
+# empty label is the default runtime, Claude Code; `claude` is its alias in the
+# agent server (runtime_adapter, execution_env). Every other value — Codex,
+# Gemini, anything new — is told nothing blocks the protected paths.
+_GUARDRAIL_HOOK_RUNTIMES = frozenset({"claude-code", "claude", ""})
+
 # Prepended to the Codex variant. Intentionally avoids the literal
 # ``mcp__trinity__`` token so the stripped prompt contains it nowhere.
 _CODEX_MCP_ORIENTATION = (
@@ -403,7 +520,9 @@ _CODEX_MCP_ORIENTATION = (
     "by the bare names documented below — `list_agents`, `chat_with_agent`, "
     "`share_file`, `report`, `list_reports`, `get_report`, `set_canvas`, "
     "`patch_canvas`, `get_canvas`, `write_user_memory`, "
-    "`set_reminder`, `run_agent_loop` — "
+    "`set_reminder`, `run_agent_loop`, `fan_out`, `get_execution_result`, "
+    "`get_fan_out_result`, `list_recent_executions`, `subscribe_to_event`, "
+    "`refresh_metric_definitions` — "
     "exactly as your client "
     "auto-discovers them. Do not add any vendor-specific tool-name prefix."
     "\n\n---\n\n"
@@ -414,10 +533,17 @@ def _adapt_instructions_for_runtime(instructions: str, runtime: str) -> str:
     """Rewrite the MCP-tool references in ``instructions`` for ``runtime``.
 
     Codex → strip the Claude-only ``mcp__trinity__`` prefix and prepend a short
-    orientation note. Claude/Gemini/unknown → return the text unchanged (the
-    plan's ``default claude-code`` behavior). Pure — never mutates the input.
+    orientation note. Claude/Gemini/unknown keep the canonical naming (the
+    plan's ``default claude-code`` behavior). Any runtime without the file
+    guardrail hook gets the honest protected-paths sentence (trinity-enterprise#945).
+    Pure — never mutates the input.
     """
-    if (runtime or "").lower() in _CODEX_RUNTIMES:
+    runtime_key = (runtime or "").lower()
+    if runtime_key not in _GUARDRAIL_HOOK_RUNTIMES:
+        instructions = instructions.replace(
+            _PATH_DENY_SENTENCE_HOOKED, _PATH_DENY_SENTENCE_UNHOOKED
+        )
+    if runtime_key in _CODEX_RUNTIMES:
         return _CODEX_MCP_ORIENTATION + instructions.replace("mcp__trinity__", "")
     return instructions
 
@@ -439,7 +565,13 @@ def format_user_memory_block(memory_record: dict) -> Optional[str]:
         return None
     agent_notes = (memory_record.get("agent_notes") or "").strip()
     summary = (memory_record.get("conversation_summary") or "").strip()
-    if not agent_notes and not summary:
+    # ent#638: the seat's standing decisions ride the same block on every
+    # caller (public link, channel adapters, seat runs, the Workspace) — the
+    # read-into-context path that makes a criterion reusable and `cites`
+    # non-zero. Read here, keyed off the record's own seat, so no caller can
+    # forget it; fail-open, bounded, no person emails.
+    decisions = _seat_decisions_block(memory_record)
+    if not agent_notes and not summary and not decisions:
         return None
 
     lines = ["## What you know about this user", ""]
@@ -447,8 +579,24 @@ def format_user_memory_block(memory_record: dict) -> Optional[str]:
         lines.extend(["### Agent notes", "", agent_notes, ""])
     if summary:
         lines.extend(["### Conversation summary", "", summary, ""])
+    if decisions:
+        lines.extend([decisions])
     lines.append("---")
     return "\n".join(lines)
+
+
+def _seat_decisions_block(memory_record: dict) -> Optional[str]:
+    agent_name = memory_record.get("agent_name")
+    seat_email = memory_record.get("user_email")
+    if not agent_name or not seat_email:
+        return None
+    try:
+        from database import db
+        from services import seat_decision_service
+        return seat_decision_service.prompt_block(db, agent_name, seat_email)
+    except Exception:  # noqa: BLE001 — a prompt never breaks on the decision record
+        logger.debug("[ent#638] decisions block skipped", exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +779,13 @@ def _sanitize_field(value: Optional[str], max_len: int = MAX_FIELD_LEN) -> Optio
     return cleaned
 
 
+def render_context_field(value: Optional[str]) -> Optional[str]:
+    """A requester-set field (a schedule's name, an MCP key's name, an email)
+    exactly as the execution-context block renders it — what the skill gate
+    scans beside the raw value (trinity#3274, `skill_gate_service.requester_context_text`)."""
+    return _sanitize_field(value)
+
+
 @dataclass
 class ExecutionContext:
     """Per-invocation execution metadata injected into the agent system prompt.
@@ -665,6 +820,29 @@ class ExecutionContext:
     role_id: Optional[str] = None
     stakeholders: Optional[List[str]] = None
     proactive_consent: Optional[bool] = None
+    # trinity-enterprise#611: asks this agent raised that ended in the last day —
+    # `{request_id, disposition, disposed_at}` each, no human text. Auto-filled
+    # from the DB; stateless, so a wake that was lost (a crash, a stopped agent)
+    # still reaches the agent on its next turn.
+    ended_asks: Optional[List[dict]] = None
+    # #3247: this agent's own PENDING asks, oldest first — `{request_id, type,
+    # title, created_at}` each, at most MAX_PENDING_ASKS — and how many there
+    # are in all (the rest are named as a count). Auto-filled from the DB.
+    pending_asks: Optional[List[dict]] = None
+    pending_asks_total: Optional[int] = None
+    # trinity-enterprise#814: the person a scheduled seat run is addressed to
+    # (ent#637 — the Workspace delivery address on the execution row), or the
+    # addressee of a discussed-ask resume (ent#886 — the run carries no
+    # `source_user_email`). Read off the row by
+    # `task_execution_service.served_person_for_row`. NEVER rendered: it only
+    # picks which seat `role_id` names. A chat turn uses `source_user_email`
+    # for the same purpose.
+    served_person_email: Optional[str] = None
+    # trinity-enterprise#814: the seat THIS run serves when it is not the
+    # primary's (a shared companion working for someone else, or an agent that
+    # holds a seat itself). Rendered as its own line; the `Primary human` line
+    # and its role stay the primary's.
+    served_role_id: Optional[str] = None
 
     @staticmethod
     def derive_mode(triggered_by: Optional[str]) -> str:
@@ -739,6 +917,87 @@ def _render_collaborators(ctx: ExecutionContext) -> Optional[str]:
     return ", ".join(cleaned)
 
 
+def _render_ended_asks(ctx: ExecutionContext) -> Optional[str]:
+    """The `Ended asks` line body (trinity-enterprise#611): ids, the ending, the
+    time — no title, answer or reason, which a person wrote and this block
+    reaches every composed turn. Bounded; the rest is one tool call away."""
+    if not ctx.ended_asks:
+        return None
+    from services.ask_service import agent_ending_kind
+
+    entries: List[str] = []
+    for ask in ctx.ended_asks[:MAX_ENDED_ASKS]:
+        rid = _sanitize_field(ask.get("request_id"), max_len=MAX_REQUEST_ID_LEN)
+        how = _sanitize_field(ask.get("disposition"), max_len=16)
+        # #3247 / trinity-enterprise#901: the agent ended it itself — by
+        # replacing it or withdrawing it. The kind, never the agent's reason.
+        how = agent_ending_kind(ask) or how
+        when = _sanitize_field(ask.get("disposed_at"), max_len=MAX_TIMESTAMP_LEN)
+        if rid and how:
+            entries.append(" ".join(x for x in (rid, how, when) if x))
+    if not entries:
+        return None
+    more = ", and more" if len(ctx.ended_asks) > MAX_ENDED_ASKS else ""
+    return "; ".join(entries) + f"{more} — read one with get_my_ask"
+
+
+def _coarse_age(created_at: Optional[str], now: Optional[datetime] = None) -> Optional[str]:
+    """`<1h`, `3h`, `2d` — how long an ask has waited. The raw timestamp when it
+    does not parse; None when there is none."""
+    if not created_at:
+        return None
+    try:
+        at = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        hours = int(((now or datetime.now(timezone.utc)) - at).total_seconds() // 3600)
+    except (TypeError, ValueError):
+        return _sanitize_field(created_at, max_len=MAX_TIMESTAMP_LEN)
+    if hours < 1:
+        return "<1h"
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def _render_pending_asks(ctx: ExecutionContext) -> Optional[str]:
+    """The `Pending asks` line body (#3247): `request_id (type, age)`, oldest
+    first, bounded, the rest as a count. Never a title, a question or anything
+    a person wrote — the turn's trigger label does not say who reads the reply,
+    and `get_my_ask` returns the title when the agent needs it. A row the agent
+    did not raise itself (a pre-#611 NULL raiser) spends the same budget, so it
+    stays on the line, marked `not replaceable`: a replace of it is refused, and
+    so is a withdraw (trinity-enterprise#901) — the advice offers both only when
+    the line carries an ask the agent raised."""
+    if not ctx.pending_asks:
+        return None
+    entries: List[str] = []
+    replaceable = False
+    for ask in ctx.pending_asks[:MAX_PENDING_ASKS]:
+        rid = _sanitize_field(ask.get("request_id"), max_len=MAX_REQUEST_ID_LEN)
+        if not rid:
+            continue
+        own = ask.get("raised_by") == "agent"
+        replaceable = replaceable or own
+        meta = ", ".join(x for x in (
+            _sanitize_field(ask.get("type"), max_len=16),
+            _coarse_age(ask.get("created_at")),
+            None if own else "not replaceable",
+        ) if x)
+        entries.append(f"{rid} ({meta})" if meta else rid)
+    if not entries:
+        return None
+    total = max(ctx.pending_asks_total or 0, len(ctx.pending_asks))
+    shown = min(len(ctx.pending_asks), MAX_PENDING_ASKS)
+    more = (f", and {total - shown} more — list them with list_operator_queue"
+            if total > shown else "")
+    advice = " — do not re-ask one of these"
+    if replaceable:
+        advice += ("; if the facts changed, replace it (ask_operator, replaces)"
+                   "; if it is moot, withdraw it (withdraw_ask)")
+    return "; ".join(entries) + more + advice
+
+
 def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
     """Render the `Primary human` line body (trinity-enterprise#500).
 
@@ -749,6 +1008,11 @@ def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
     presence of a name (the assignment is a RECORD of who fills the role, not a
     grant of contact permission, which lives on the separate sharing consent
     bit).
+
+    Consent FAILS CLOSED: only an explicit ``True`` renders as permitted. An
+    unresolved bit (``None`` — a provider may validly answer a name and a role
+    and nothing else) renders the restrictive clause, exactly like ``False``,
+    because a permission statement that nobody made is not a permission.
     """
     display = _sanitize_field(ctx.primary_user_display, max_len=MAX_DISPLAY_NAME_LEN)
     if not display:
@@ -757,14 +1021,12 @@ def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
     role = _sanitize_field(ctx.role_id, max_len=MAX_ROLE_ID_LEN)
     if role:
         line = f"{line} (role: {role})"
-    if ctx.proactive_consent is not None:
-        line = (
-            f"{line} — proactive contact permitted"
-            if ctx.proactive_consent
-            else f"{line} — proactive contact NOT yet permitted; do not message "
-                 "them unprompted"
-        )
-    return line
+    if ctx.proactive_consent is True:
+        return f"{line} — proactive contact permitted"
+    return (
+        f"{line} — proactive contact NOT yet permitted; do not message "
+        "them unprompted"
+    )
 
 
 def _render_stakeholders(ctx: ExecutionContext) -> Optional[str]:
@@ -844,6 +1106,9 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         if assignment:
             lines.append(f"- **Primary human**: {assignment}")
 
+        served = _sanitize_field(ctx.served_role_id, max_len=MAX_ROLE_ID_LEN)
+        if served and served != _sanitize_field(ctx.role_id, max_len=MAX_ROLE_ID_LEN):
+            lines.append(f"- **Seat this run serves**: {served}")
         stakeholders = _render_stakeholders(ctx)
         if stakeholders:
             lines.append(f"- **Stakeholders**: {stakeholders}")
@@ -851,6 +1116,14 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         collaborators = _render_collaborators(ctx)
         if collaborators:
             lines.append(f"- **Collaborators**: {collaborators}")
+
+        pending_asks = _render_pending_asks(ctx)
+        if pending_asks:
+            lines.append(f"- **Pending asks**: {pending_asks}")
+
+        ended_asks = _render_ended_asks(ctx)
+        if ended_asks:
+            lines.append(f"- **Ended asks (last {ENDED_ASKS_WINDOW_HOURS} h)**: {ended_asks}")
 
         timestamp = _sanitize_field(
             ctx.timestamp, max_len=MAX_TIMESTAMP_LEN
@@ -895,6 +1168,73 @@ def _resolve_assignment(
     from services.assignment_provider import resolve_assignment
 
     return resolve_assignment(agent_name, triggered_by) or {}
+
+
+def _served_role(ctx: ExecutionContext) -> Optional[str]:
+    """The seat THIS run serves, when it is not the primary's (trinity-enterprise#814).
+
+    A shared companion serves several people; the provider's answer carries the
+    primary's seat. When the run is addressed to a person — the chat user, or
+    the Workspace a brief is delivered to — their own seat is the one served,
+    and the agent's own seat when it holds one. Asked only when the provider
+    already answered, so an audience it suppressed still renders nothing.
+    """
+    person = ctx.served_person_email or ctx.source_user_email
+    if not person:
+        return None
+    try:
+        from services.assignment_provider import resolve_served_seat
+
+        served = resolve_served_seat(ctx.agent_name, person)
+    except Exception as e:  # noqa: BLE001 — the line degrades, never the turn
+        logger.debug(f"_served_role({ctx.agent_name}) failed: {e}")
+        return None
+    if served.get("source") in ("holds", "person"):
+        return served.get("role_id")
+    return None
+
+
+def _resolve_ended_asks(agent_name: Optional[str]) -> List[dict]:
+    """This agent's asks that ended in the last day, newest first. Empty on any
+    failure — the line is omitted, never the turn (trinity-enterprise#611)."""
+    if not agent_name:
+        return []
+    try:
+        from services.operator_queue_service import _RESERVED_ID_PREFIXES
+
+        return db.list_recent_operator_queue_endings(
+            agent_name,
+            iso_cutoff(hours=ENDED_ASKS_WINDOW_HOURS),
+            MAX_ENDED_ASKS + 1,
+            exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+        ) or []
+    except Exception as e:
+        logger.debug(f"_resolve_ended_asks({agent_name}) failed: {e}")
+        return []
+
+
+def _resolve_pending_asks(agent_name: Optional[str]) -> tuple:
+    """This agent's own pending asks, oldest first, and how many there are —
+    `(rows ≤ MAX_PENDING_ASKS, total)`. Drawn from the predicate that spends the
+    open-ask budget. `([], 0)` on any failure: the line is omitted, never the
+    turn (#3247)."""
+    if not agent_name:
+        return [], 0
+    try:
+        from services.operator_queue_service import _RESERVED_ID_PREFIXES
+
+        rows = db.list_pending_operator_queue_asks(
+            agent_name, MAX_PENDING_ASKS,
+            exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+        ) or []
+        total = len(rows)
+        if total >= MAX_PENDING_ASKS:
+            total = db.count_operator_queue_pending_for_agent(
+                agent_name, exclude_request_id_prefixes=_RESERVED_ID_PREFIXES)
+        return rows, max(total, len(rows))
+    except Exception as e:
+        logger.debug(f"_resolve_pending_asks({agent_name}) failed: {e}")
+        return [], 0
 
 
 def _resolve_platform_url() -> Optional[str]:
@@ -955,11 +1295,21 @@ def compose_system_prompt(
         # caller that pre-fills BOTH collaborators and platform_url would
         # otherwise skip the whole replace block, and the assignment fields
         # would silently never render.
-        if ctx.collaborators is None or ctx.platform_url is None or needs_assignment:
+        if (ctx.collaborators is None or ctx.platform_url is None or needs_assignment
+                or ctx.ended_asks is None or ctx.pending_asks is None):
             assignment = (
                 _resolve_assignment(ctx.agent_name, ctx.triggered_by)
                 if needs_assignment
                 else {}
+            )
+            # The rows and their total are one answer, resolved once (#3247).
+            pending, pending_total = (
+                (ctx.pending_asks, ctx.pending_asks_total)
+                if ctx.pending_asks is not None
+                else _resolve_pending_asks(ctx.agent_name)
+            )
+            served_role = (
+                _served_role(ctx) if assignment and ctx.served_role_id is None else None
             )
             ctx = replace(
                 ctx,
@@ -992,6 +1342,16 @@ def compose_system_prompt(
                     ctx.proactive_consent
                     if ctx.proactive_consent is not None
                     else assignment.get("proactive_consent")
+                ),
+                ended_asks=(
+                    ctx.ended_asks
+                    if ctx.ended_asks is not None
+                    else _resolve_ended_asks(ctx.agent_name)
+                ),
+                pending_asks=pending,
+                pending_asks_total=pending_total,
+                served_role_id=(
+                    ctx.served_role_id if ctx.served_role_id is not None else served_role
                 ),
             )
         block = build_execution_context(ctx)

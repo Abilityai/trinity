@@ -22,7 +22,7 @@ As an operator provisioning a server (by hand, from a marketplace image, or from
 | `workflow_dispatch` (optional `ref:`) | same workflow | **Smoke build only** — publishes `sha-<short>` and nothing else (see *Tag gating* below) |
 | `./scripts/deploy/start.sh --hosted` | `scripts/deploy/start.sh` | Or `TRINITY_HOSTED=1`. Same script as the source install; only the image source differs |
 | `./scripts/deploy/stop.sh` | `scripts/deploy/stop.sh` | Reads the running stack's own compose label to pick the right `-f`, then `stop` (never `down`) |
-| `start.sh --provision --cloud digitalocean` | `scripts/deploy/start.sh:392-414` | Brings a **bare** cloud VM to the state `--hosted` assumes (#2380). Called by the Packer bakery, the 1-Click first boot, and the installer below — see *Provision Layer* |
+| `start.sh --provision --cloud <digitalocean\|vultr>` | `scripts/deploy/start.sh:392-414` | Brings a **bare** cloud VM to the state `--hosted` assumes (#2380). Called by the Packer bakery, the 1-Click first boot, Vultr's vendor data, and the installer below — see *Provision Layer* |
 | `bash trinity-do-create.sh` (on the operator's machine) | `scripts/deploy/trinity-do-create.sh` | Prompting installer: creates a DigitalOcean droplet whose user-data runs `start.sh --provision … --hosted --unattended` |
 
 ## Publish Layer — `.github/workflows/publish-images.yml`
@@ -108,7 +108,7 @@ The project name is derived by **compose's own rule** (`compose_project_name()`:
 `--hosted` assumes a machine that already has Docker. `--provision` gets a **bare** cloud VM there, and it is the only implementation of that: the Packer bakery, the 1-Click first boot and a hand-written doc script used to carry three copies, which had already drifted (the image's DROP list was missing 8081, so the login page answered plain HTTP past the certificate — #2281 review C1). The `packer/` copies are deleted; every caller enters here. Requirements: PROV-012…015.
 
 ```
-start.sh --provision --cloud digitalocean [--machine-only | --site-only] [--provenance X]
+start.sh --provision --cloud <digitalocean|vultr> [--machine-only | --site-only] [--provenance X]
   ├─ guard: Linux + root + the cloud's metadata service answers         (start.sh:392-404)
   ├─ machine phase — provision_machine (:188)       IP-independent, safe to bake
   │    Docker · Caddy 2.11.4 (floor 2.11.3 asserted) · ufw 22/80/443
@@ -123,6 +123,7 @@ start.sh --provision --cloud digitalocean [--machine-only | --site-only] [--prov
 | Caller | Invocation |
 |---|---|
 | Packer bakery (`packer/digitalocean/scripts/01-provision.sh:67`) | `--machine-only` — packages and the firewall unit go into the snapshot; Trinity is not installed |
+| Vultr vendor data (`scripts/deploy/vultr-vendor-data.sh`) | `--cloud vultr --provenance vultr-marketplace --hosted --unattended`, both phases — imageless, so first boot pays the apt + image pull the DigitalOcean snapshot baked (PROV-017) |
 | 1-Click first boot (`packer/digitalocean/files/opt/trinity-firstboot/firstboot.sh:114`) | `--site-only --provenance do-marketplace --hosted --unattended` — the machine phase is already baked, so no `apt-get update` per droplet |
 | Installer user-data (`scripts/deploy/trinity-do-create.sh:189`) | `--hosted --unattended`, both phases, default provenance `do-script` |
 
@@ -147,7 +148,7 @@ Docker's published-port rules are evaluated ahead of ufw's chain, so `ufw deny 8
 
 Users reach Caddy on 80/443 — host ports, which never traverse this chain (Caddy proxies `127.0.0.1:8081`). Naming what is inside rather than the public interface also closes a private VPC interface. The chain is rebuilt only when its final DROP is missing and the jump is inserted only once the chain is populated, so no run leaves an empty chain live; the systemd unit reapplies it on every boot (it replaces `iptables-persistent`, which ufw `Breaks:`). IPv4 only: Docker maintains an IPv6 `DOCKER-USER` only with daemon IPv6 enabled, which no Trinity compose file sets.
 
-**The metadata block.** DigitalOcean serves a droplet's user-data verbatim from `169.254.169.254` for the life of the machine, and the installer's user-data carries the admin password and the Claude subscription token. An agent container is precisely the untrusted-code case, so the whole RFC 3927 range is dropped, and the rule must sit **ahead of** the bridge RETURNs or container traffic leaves the chain before reaching it. `tests/unit/test_2380_provision_single_source.py` pins the ordering.
+**The metadata block.** DigitalOcean serves a droplet's user-data verbatim from `169.254.169.254` for the life of the machine, and the installer's user-data carries the admin password. An agent container is precisely the untrusted-code case, so the whole RFC 3927 range is dropped, and the rule must sit **ahead of** the bridge RETURNs or container traffic leaves the chain before reaching it. `tests/unit/test_2380_provision_single_source.py` pins the ordering.
 
 ### The installer — `scripts/deploy/trinity-do-create.sh`
 
@@ -155,20 +156,19 @@ Runs on the **operator's** machine, fetched from a release tag, and ends with an
 
 ```
 checks (before any prompt): doctl installed + signed in; a snap doctl needs $HOME
-prompts: admin password (×2, ≥12 chars, guessable prefixes refused) · Claude token (sk-ant-oat01-…)
-         · region · name · confirm the monthly cost
+prompts: admin password (×2, ≥12 chars, guessable prefixes refused) · region · name
+         · confirm the monthly cost  (no Claude credential: the onboarding overlay's Connect Claude step, ent#582)
 user-data (umask 077 temp file, removed on exit):
     clone the pinned tag → /opt/trinity
     start.sh --provision --cloud digitalocean --hosted --unattended
-    register the Claude subscription, assign it to every agent the install created
 doctl compute droplet create (ubuntu-24-04-x64, s-4vcpu-8gb, the account's SSH keys) --wait
 poll https://<ip>/ with verification for 15 min → print the address, or the console fallback
 ```
 
 | Concern | Resolution |
 |---|---|
-| **Prompts, not a file to edit** | A guide that says "change four lines" fails its audience and leaves two secrets on disk. `read -rs` keeps them off the terminal, out of shell history, and out of every file but the droplet's user-data |
-| **Portability (#2683)** | A full `mktemp` template (GNU rejects `-t NAME`). A snap `doctl` has a private `/tmp`, so the file goes under `$HOME` (non-hidden: snap's `home` interface denies dotfiles), and an unset `$HOME` is refused before the first prompt. Every value in the user-data — both secrets and the tag — is `'\''`-quoted, because a `'` in a valid password broke first boot after the droplet was already billing. An empty SSH-key array under `set -u` on macOS's bash 3.2 |
+| **Prompts, not a file to edit** | A guide that says "change four lines" fails its audience and leaves the admin password on disk. `read -rs` keeps it off the terminal, out of shell history, and out of every file but the droplet's user-data |
+| **Portability (#2683)** | A full `mktemp` template (GNU rejects `-t NAME`). A snap `doctl` has a private `/tmp`, so the file goes under `$HOME` (non-hidden: snap's `home` interface denies dotfiles), and an unset `$HOME` is refused before the first prompt. Every value in the user-data — the password and the tag — is `'\''`-quoted, because a `'` in a valid password broke first boot after the droplet was already billing. An empty SSH-key array under `set -u` on macOS's bash 3.2 |
 | **A shell to support it** | Every SSH key already on the account is attached; without one, DigitalOcean emails a root password and the browser console is the only way in |
 | **Release pin** | The default tag is tied to `VERSION` by `tests/unit/test_2380_installer_release_pin.py`, so a release cut cannot ship an installer that installs the previous RC |
 | **Provenance** | `do-script` — guide-eligible, not a marketplace install ([install-provenance.md](install-provenance.md)) |

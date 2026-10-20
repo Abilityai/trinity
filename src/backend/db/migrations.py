@@ -2992,6 +2992,33 @@ def _migrate_agent_ownership_a2a_exposed(cursor, conn):
     conn.commit()
 
 
+
+def _migrate_a2a_internal_scope(cursor, conn):
+    """trinity-enterprise#838 — A2A exposure scope and the keyless trusted caller.
+
+    ``agent_ownership.a2a_scope`` (``public`` | ``internal``, default
+    ``public`` — today's behaviour) and ``a2a_keyless_internal`` (default 1:
+    an internal-scope agent answers a trusted-network caller with no key), plus
+    ``schedule_executions.source_host``, the address a keyless trusted caller's
+    run is attributed to. Edition-agnostic OSS primitives the A2A server reads;
+    the scope WRITE is the entitled enterprise setter, like ``a2a_exposed``.
+    Mirrored by the Alembic revision 0096_a2a_internal_scope.
+    """
+    _safe_add_column(
+        cursor, "agent_ownership", "a2a_scope",
+        "ALTER TABLE agent_ownership ADD COLUMN a2a_scope TEXT DEFAULT 'public'",
+    )
+    _safe_add_column(
+        cursor, "agent_ownership", "a2a_keyless_internal",
+        "ALTER TABLE agent_ownership ADD COLUMN a2a_keyless_internal INTEGER DEFAULT 1",
+    )
+    _safe_add_column(
+        cursor, "schedule_executions", "source_host",
+        "ALTER TABLE schedule_executions ADD COLUMN source_host TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_operator_resume(cursor, conn):
     """ent#329 — owner opt-in: an operator answer re-triggers the agent.
 
@@ -3458,6 +3485,43 @@ def _migrate_telegram_progress_indicator(cursor, conn):
     )
 
 
+def _migrate_telegram_group_context(cursor, conn):
+    """ent#600 — Telegram group conversation context.
+
+    Three additive, nullable/defaulted columns:
+
+    * ``telegram_bindings.can_read_all_group_messages INTEGER`` — Telegram's
+      ``getMe`` fact (Privacy Mode off ⇒ 1). NULL = never checked; refreshed at
+      connect, Verify, and when the bot is added to a group.
+    * ``telegram_group_configs.last_untagged_seen_at TEXT`` — when an un-tagged
+      message last reached the bot in that group: the per-group proof that it
+      sees the conversation (an admin bot does regardless of Privacy Mode).
+    * ``telegram_group_configs.context_enabled INTEGER DEFAULT 1`` — per-group
+      opt-out. ``ADD COLUMN ... DEFAULT 1`` populates existing rows, so every
+      current group gets context ON without a backfill UPDATE (ent#264's shape).
+
+    Mirrored by Alembic 0079_telegram_group_context.
+    """
+    _safe_add_column(
+        cursor,
+        "telegram_bindings",
+        "can_read_all_group_messages",
+        "ALTER TABLE telegram_bindings ADD COLUMN can_read_all_group_messages INTEGER",
+    )
+    _safe_add_column(
+        cursor,
+        "telegram_group_configs",
+        "last_untagged_seen_at",
+        "ALTER TABLE telegram_group_configs ADD COLUMN last_untagged_seen_at TEXT",
+    )
+    _safe_add_column(
+        cursor,
+        "telegram_group_configs",
+        "context_enabled",
+        "ALTER TABLE telegram_group_configs ADD COLUMN context_enabled INTEGER DEFAULT 1",
+    )
+
+
 def _migrate_channel_report_back_columns(cursor, conn):
     """ent#265 — channel completion report-back: Telegram leg + binding identity.
 
@@ -3618,6 +3682,96 @@ def _migrate_operator_queue_addressed_to(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_queue_sync_state(cursor, conn):
+    """#2915 — the operator-queue file sync tells the truth.
+
+    Eight nullable columns record what the poller last established about the
+    agent's file entry (`sync_state` / `sync_detail` / `sync_updated_at` /
+    `last_confirmed_at`), whether the human's answer ever reached the agent
+    (`delivery_state` / `delivery_detail` / `delivery_updated_at`) and whether the
+    human answered a diverged item knowingly (`divergence_acknowledged_at`, which
+    lets the write-back deliver into the entry as it is now). No default and
+    no backfill on purpose: a NULL renders as "not yet checked" — the honest
+    state for every row the loop has not looked at since this landed — never as
+    confirmed. The row's own title/question/options/expires_at are the ingest
+    snapshot the fingerprint compares against, so nothing else is stored.
+    """
+    for column in (
+        "sync_state", "sync_detail", "sync_updated_at", "last_confirmed_at",
+        "delivery_state", "delivery_detail", "delivery_updated_at",
+        "divergence_acknowledged_at",
+    ):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for sync honesty (#2915)",
+        )
+    conn.commit()
+
+
+def _migrate_operator_queue_ask_object(cursor, conn):
+    """trinity-enterprise#611 — the ask object: how an ask ended, and who raised it.
+
+    Twelve nullable TEXT columns, one migration for everything #611 writes (two
+    stacked revisions would double the re-parent risk, #2068).
+
+    The endings ledger: `disposition` (answered | cancelled | expired),
+    `disposed_at`, `disposed_by` (person | timeout), `disposed_by_email`,
+    `disposition_reason` (the operator's optional cancel reason) and `batch_id`
+    (one uuid per bulk-cancel sweep) — each written in the same compare-and-set
+    UPDATE that flips `status`.
+
+    The agent-raised ask: `raised_by` (agent | gate), `channel` (file | mcp),
+    `to_role`, `resolved_to` (JSON list of person refs), `proposal` (JSON) and
+    `supersedes_expired` (the predecessor row's uuid). Written only from
+    keyword-only arguments, never from an agent's file entry.
+
+    No default and no backfill: a row that ended before the ledger keeps a NULL
+    disposition and reads from `status`, never from an invented ending time.
+    """
+    for column in (
+        "disposition", "disposed_at", "disposed_by", "disposed_by_email",
+        "disposition_reason", "batch_id",
+        "raised_by", "channel", "to_role", "resolved_to", "proposal",
+        "supersedes_expired",
+    ):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for the ask object (trinity-enterprise#611)",
+        )
+    conn.commit()
+
+
+def _migrate_operator_queue_replace(cursor, conn):
+    """#3247 — an agent replaces one of its OWN pending asks.
+
+    Two nullable TEXT link columns on `operator_queue`: `replaces` on the
+    successor (the predecessor row's uuid) and `replaced_by` on the predecessor
+    (the successor row's uuid). Both are stamped inside the one per-agent
+    locked transaction that ends the predecessor (`cancelled` /
+    `disposed_by='agent'` / `disposition_reason='replaced'`) and inserts the
+    successor, so each row is self-describing: a surface that holds only one
+    of the pair still knows the other.
+
+    No default and no backfill; nothing indexes them (nothing queries by them).
+    PostgreSQL twin: Alembic `0097_operator_queue_replace`.
+    """
+    for column in ("replaces", "replaced_by"):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for the replace link (#3247)",
+        )
+    conn.commit()
+
+
 def _migrate_channel_report_client(cursor, conn):
     """ent#457 review — WHICH client a portal channel context belongs to.
 
@@ -3756,6 +3910,24 @@ def _migrate_portal_chat_state(cursor, conn):
             PRIMARY KEY (client_email, chat_kind, chat_id)
         )
         """
+    )
+    conn.commit()
+
+
+def _migrate_executions_started_at_index(cursor, conn):
+    """ent#653 — standalone `started_at` index on `schedule_executions`.
+
+    The admin path of every fleet read (`GET /api/executions`, the enterprise
+    execution search) carries no `agent_name` filter, so the composite
+    `idx_executions_agent_started` never applies and `ORDER BY started_at DESC
+    LIMIT n` was a full scan + sort. Portable DDL; the PostgreSQL track adds the
+    same index in Alembic `0064_executions_search_indexes` alongside the
+    trigram (pg_trgm) indexes the search itself rides, which SQLite cannot
+    express and therefore does not get.
+    """
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_started_at "
+        "ON schedule_executions(started_at DESC)"
     )
     conn.commit()
 
@@ -4091,6 +4263,45 @@ def _migrate_execution_open_canvas(cursor, conn):
     conn.commit()
 
 
+def _migrate_execution_chain_depth(cursor, conn):
+    """#2806 — how many agent-to-agent hops deep this execution is.
+
+    Stamped at dispatch on the child row of an agent-principal call as
+    `1 + MAX(chain_depth)` over the calling agent's running rows; NULL (read
+    as 0) on every root. The chain-depth guard reads it to refuse a hop past
+    `inter_agent_max_chain_depth`. Nullable with no default, so existing rows
+    are roots and no backfill is needed.
+
+    Mirrored by the Alembic revision 0077_execution_chain_depth.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "chain_depth",
+        "ALTER TABLE schedule_executions ADD COLUMN chain_depth INTEGER",
+    )
+    conn.commit()
+
+
+def _migrate_loop_chain_depth(cursor, conn):
+    """#2973 — the inter-agent chain depth a loop inherits from its starter.
+
+    Captured when an agent principal starts the loop and stamped on every
+    iteration's execution row, because later iterations run after the
+    starter's own turn has ended and its running rows can no longer be read.
+    NULL on a loop started by a human (a root). Nullable, no backfill.
+
+    Mirrored by the Alembic revision 0084_agent_loops_chain_depth.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "chain_depth",
+        "ALTER TABLE agent_loops ADD COLUMN chain_depth INTEGER",
+    )
+    conn.commit()
+
+
 def _migrate_agent_canvas_shares_table(cursor, conn):
     """ent#554 — share links for a canvas.
 
@@ -4210,6 +4421,45 @@ def _migrate_portal_messages_voice_source(cursor, conn):
     conn.commit()
 
 
+def _migrate_portal_messages_attachments(cursor, conn):
+    """#3265 — a sent Workspace message shows what was attached to it.
+
+    One nullable column on `enterprise_portal_messages`: `attachments`, a JSON
+    list on a user turn — `{filename, size_bytes, mime_type}` for an upload the
+    server found in the sender's inbox, `{filename, failed, error}` for one that
+    did not land. Without it the chips cleared at send and nothing on the row
+    said a file went with the message, so a reload could not show it either.
+
+    Additive, no backfill: no existing row recorded what it carried.
+    Mirrored by the Alembic revision 0092_portal_messages_attachments.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "attachments",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN attachments TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_portal_messages_execution_id(cursor, conn):
+    """#3166 — each Workspace message names the turn that wrote it.
+
+    One nullable column on `enterprise_portal_messages`. Two turns on one thread
+    (the chat open in two tabs) wrote replies the client could not tell apart,
+    so a tab could show the other turn's answer as its own. Additive, no
+    backfill: old rows stay NULL and the client keeps its old matching for them.
+    Mirrored by the Alembic revision 0095_portal_messages_execution_id.
+    """
+    _safe_add_column(
+        cursor,
+        "enterprise_portal_messages",
+        "execution_id",
+        "ALTER TABLE enterprise_portal_messages ADD COLUMN execution_id TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_portal_session_main_chat(cursor, conn):
     """ent#523 — the pinned Main chat, and the tombstone Reset leaves behind.
 
@@ -4273,6 +4523,1072 @@ def _migrate_schedule_workspace_delivery(cursor, conn):
                  "Workspace brief delivery (ent#498)..."),
     )
     conn.commit()
+
+
+def _migrate_agent_skills_delivery_status(cursor, conn):
+    """#2914 — the durable per-assignment injection verdict.
+
+    Assigning a library skill whose name matched an agent-authored
+    `.claude/skills/<name>/` used to overwrite the agent's copy and bury an
+    `unmanaged_dir_overwritten` warning in the assignment response. The inject
+    path now refuses to write into a directory the platform did not create and
+    records `conflict` on the assignment row instead; NULL means no standing
+    conflict. Recorded on the row (not derived at read time) because the
+    Skills tab must show the conflict to an operator who never saw the
+    injection response, and clearing it is the inject path's job on the next
+    sync once the name lands.
+
+    Mirrored by the Alembic revision 0065_agent_skills_delivery_status.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_skills",
+        "delivery_status",
+        "ALTER TABLE agent_skills ADD COLUMN delivery_status TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_public_user_memory_writes_table(cursor, conn):
+    """Write history for the per-user memory's agent_notes section (ent#637).
+
+    A schedule that names a user (ent#498's address) may now write that user's
+    MEM-001 memory from the run it triggers. The person must be able to see that
+    a scheduled run touched their memory — what, when, which run — and undo it,
+    so every agent-notes write through the one boundary
+    (`POST /api/agents/{name}/user-memory`) records the notes before and after,
+    the execution, its trigger and the schedule. This is also ent#419's third
+    layer (write history with rollback), built here because this AC needed it.
+
+    Mirrored by the Alembic revision 0066_public_user_memory_writes.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS public_user_memory_writes (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_email TEXT NOT NULL,
+            execution_id TEXT,
+            triggered_by TEXT NOT NULL,
+            schedule_id TEXT,
+            previous_notes TEXT NOT NULL DEFAULT '',
+            new_notes TEXT NOT NULL DEFAULT '',
+            written_at TEXT NOT NULL,
+            undone_at TEXT,
+            undone_by TEXT
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_public_user_memory_writes_lookup "
+        "ON public_user_memory_writes(agent_name, user_email, written_at)"
+    )
+def _migrate_agent_role_readiness_table(cursor, conn):
+    """The agent owner's readiness stamp for a role companion (ent#527 / #663).
+
+    `template.yaml`'s `x-role.status` is agent-writable, and the 2026-09-20
+    ruling is that only the agent OWNER flips a companion `calibrating → ready`
+    and the agent never can — so the stamp lives here, platform-side: one row
+    per agent with the state, when it changed and who flipped it. A template
+    that says `ready` with no row here is shown as calibrating.
+
+    Mirrored by the Alembic revision 0067_agent_role_readiness.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_role_readiness (
+            agent_name TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            changed_at TEXT NOT NULL,
+            changed_by TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
+def _migrate_agent_shared_files_audience(cursor, conn):
+    """A shared file is for the person the turn was for (trinity-enterprise#549).
+
+    `agent_shared_files` was scoped by agent alone, so the Workspace Files tab
+    listed every active share of an agent to everyone on its roster — a file
+    made in one person's chat appeared, download link included, in another
+    person's tab. Third occurrence of one class (asks ent#428, reports ent#365):
+    a table scoped by an owning entity gains a per-person dimension.
+
+    `addressed_to_email` decides whose Files tab lists the row.
+    `addressed_to_channel` is the channel identity (`whatsapp:+…`) and is DISPLAY
+    ONLY — the owner's panel shows it and no reader filters on it.
+    `audience_source` records how the addressee was decided (turn | override |
+    channel | none | ambiguous), so "nobody" and "could not tell" stay
+    distinguishable for the person reading the owner's panel.
+
+    All three are nullable with NO default and there is no backfill, on purpose:
+    NULL email + NULL channel means "the owner only", which is exactly what an
+    existing row has to become — its recipient is unknowable, and every share
+    expires within seven days. The same call ent#365 made for reports.
+    """
+    for column in ("addressed_to_email", "addressed_to_channel", "audience_source"):
+        _safe_add_column(
+            cursor,
+            "agent_shared_files",
+            column,
+            f"ALTER TABLE agent_shared_files ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to agent_shared_files — a shared file has an addressee (ent#549)",
+        )
+    conn.commit()
+
+def _migrate_metric_definitions_table(cursor, conn):
+    """trinity-enterprise#477 — the declared metric registry.
+
+    One row per metric an agent's `template.yaml metrics:` block declares.
+    `UNIQUE(agent_name, name)` is the conflict target `MetricDefinitionOperations
+    .reconcile` upserts against — without it two workers reconciling the same
+    agent concurrently would each insert, and ent#478 would then find two
+    definitions for one point name.
+
+    No CHECK constraints on the enum columns: `test_1819_rename_cascade_parity`
+    seeds a placeholder row per AGENT_REFS table from NOT NULL introspection,
+    and a CHECK would break that seed. The enums are enforced by the one
+    reader (`services/template_metrics.py`).
+
+    Mirrored by the Alembic revision 0069_metric_definitions.
+    """
+    cursor.execute("PRAGMA table_info(metric_definitions)")
+    if cursor.fetchall():
+        return
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS metric_definitions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL,
+            label TEXT,
+            description TEXT,
+            unit TEXT,
+            warning_threshold REAL,
+            critical_threshold REAL,
+            status_values_json TEXT,
+            cadence TEXT,
+            cadence_seconds INTEGER,
+            direction TEXT NOT NULL DEFAULT 'neutral',
+            aggregation TEXT NOT NULL DEFAULT 'last',
+            dimensions_json TEXT,
+            extensions_json TEXT,
+            definition_hash TEXT,
+            type_conflict TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            source TEXT,
+            first_declared_at TEXT,
+            last_synced_at TEXT,
+            retired_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(agent_name, name)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_metric_definitions_agent_status "
+        "ON metric_definitions(agent_name, status)"
+    )
+    conn.commit()
+
+
+def _migrate_metric_points_table(cursor, conn):
+    """trinity-enterprise#478 — the recorded metric point store.
+
+    Append-only: `record_metrics` INSERTs, the retention sweep DELETEs by ts
+    range, nothing UPDATEs. The primary key IS the point identity
+    `(agent_name, ts, idempotency_key)` where `idempotency_key` is
+    `sha256(metric \0 ts \0 canonical_dims)` — so a re-POSTed observation
+    conflicts with itself and `on_conflict_do_nothing` drops it, with no
+    surrogate id and no second unique index to keep in order.
+
+    `dims` is TEXT here and JSONB on PostgreSQL: the shared DDL in
+    `db/schema.py` carries the `/* pg:JSONB */` marker that
+    `to_postgres_table_ddl` rewrites, and the Alembic twin writes JSONB
+    directly.
+
+    No CHECK constraints — `test_1819_rename_cascade_parity` seeds a
+    placeholder row per AGENT_REFS table from NOT NULL introspection and a
+    CHECK would break that seed. The value/type rules belong to the one writer
+    (`services/metric_points_service.py`).
+
+    Mirrored by the Alembic revision 0070_metric_points.
+    """
+    cursor.execute("PRAGMA table_info(metric_points)")
+    if cursor.fetchall():
+        return
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS metric_points (
+            agent_name TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            value_numeric DOUBLE PRECISION,
+            value_text TEXT,
+            dims TEXT,
+            execution_id TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, ts, idempotency_key)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_metric_points_agent_metric_ts "
+        "ON metric_points(agent_name, metric, ts DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_metric_points_ts ON metric_points(ts)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_metric_points_agent_created "
+        "ON metric_points(agent_name, created_at)"
+    )
+    conn.commit()
+
+
+def _migrate_seat_decisions_table(cursor, conn):
+    """The seat-level decision record (trinity-enterprise#638, ruling R25).
+
+    Why a thing was approved, deferred or killed — the alternatives that were
+    live, the criterion that discriminated, who decided (role and person),
+    `review_by`, and what would reverse it — owned by the seat
+    (`agent_name` × `seat_email`, the ent#637 memory scope). Correction
+    supersedes rather than edits; expiry is computed from `review_by` on read.
+
+    Mirrored by the Alembic revision 0071_seat_decisions.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS seat_decisions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            seat_email TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            decided TEXT NOT NULL,
+            alternatives TEXT NOT NULL,
+            criterion TEXT NOT NULL,
+            reversal TEXT NOT NULL,
+            decided_by_role TEXT,
+            decided_by_person TEXT NOT NULL,
+            decided_at TEXT NOT NULL,
+            review_by TEXT NOT NULL,
+            notes TEXT,
+            ask_class TEXT,
+            scope TEXT NOT NULL DEFAULT 'seat',
+            status TEXT NOT NULL DEFAULT 'active',
+            supersedes_id TEXT,
+            cites TEXT NOT NULL DEFAULT '[]',
+            request_id TEXT,
+            close_reason TEXT,
+            closed_at TEXT,
+            closed_by TEXT,
+            reconfirmed_at TEXT,
+            source_execution_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_seat_decisions_seat ON seat_decisions(agent_name, seat_email, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_seat_decisions_review ON seat_decisions(agent_name, review_by)")
+    conn.commit()
+
+
+def _migrate_agent_capability_grants(cursor, conn):
+    """trinity-enterprise#596 — only designated agents may change an agent's skills.
+
+    Two changes, one concern:
+
+    * ``agent_capability_grants`` — a capability an instance admin grants to a
+      named agent. ``skills.manage`` is the first: a holder may change skills on
+      any agent its owner holds, itself included; every other agent key is
+      refused on both. A row, not a column on ``agent_ownership``, so who granted
+      it and when is answerable, and later capabilities share the seam.
+    * ``agent_skills.assigned_by_agent`` — the agent that made an assignment,
+      NULL for a human. ``assigned_by`` has only ever recorded the owner's
+      username, which made "the agent did it" indistinguishable from "the person
+      did it" (Tandem R29).
+
+    Additive only: no existing row changes meaning. Nobody holds the grant on
+    upgrade — that is the ruling (default-deny), and the refusal names the
+    Settings surface where an admin grants it.
+
+    Mirrored by the Alembic revision 0072_agent_capability_grants.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_capability_grants (
+            agent_name TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, capability)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_capability_grants_cap "
+        "ON agent_capability_grants(capability)"
+    )
+    _safe_add_column(
+        cursor,
+        "agent_skills",
+        "assigned_by_agent",
+        "ALTER TABLE agent_skills ADD COLUMN assigned_by_agent TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_workspace_suggestion_feedback_table(cursor, conn):
+    """Accept/dismiss of a Workspace suggestion (trinity-enterprise#465).
+
+    Per viewer + agent + suggestion key. A dismissal holds while the suggestion's
+    state fingerprint is unchanged (`dismissed_fingerprint`); an accept is
+    counted for usefulness and never hides anything. Named generically, with a
+    `surface` column, so the post-action next-step tier shares this one
+    dismissal model rather than growing a second table. Additive only.
+
+    Mirrored by the Alembic revision 0078_workspace_suggestion_feedback.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS workspace_suggestion_feedback (
+            client_email TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            suggestion_key TEXT NOT NULL,
+            surface TEXT NOT NULL DEFAULT 'agent',
+            source TEXT,
+            dismissed_at TEXT,
+            dismissed_fingerprint TEXT,
+            accepted_at TEXT,
+            accept_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (client_email, agent_name, suggestion_key)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_workspace_suggestion_feedback_agent "
+        "ON workspace_suggestion_feedback(agent_name)"
+    )
+    conn.commit()
+
+
+def _migrate_portal_messages_unread_index(cursor, conn):
+    """#3064 — cover the Workspace unread count's message arm.
+
+    `count_unread_by_session` runs on every 20s Workspace poll and filtered
+    `enterprise_portal_messages` by viewer + `role = 'assistant'` + thread +
+    `created_at` with no index leading on the viewer, so SQLite scanned the
+    whole table. Index-only: no column, no data, no behaviour change.
+    PostgreSQL half: Alembic `0081_portal_messages_unread_idx`.
+    """
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_portal_messages_unread "
+        "ON enterprise_portal_messages(client_email, role, session_id, created_at)"
+    )
+
+
+def _migrate_execution_conversation_key(cursor, conn):
+    """#2843 — one turn per conversation at a time on the pull queue.
+
+    `schedule_executions.conversation_key` names the conversation a queued turn
+    continues; the partial unique index allows at most one `running` row per
+    (agent, key). Nullable, no backfill: existing rows carry no guard.
+    PostgreSQL half: Alembic `0083_execution_conversation_key`.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "conversation_key",
+        "ALTER TABLE schedule_executions ADD COLUMN conversation_key TEXT",
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_one_running_turn "
+        "ON schedule_executions(agent_name, conversation_key) "
+        "WHERE status = 'running' AND conversation_key IS NOT NULL"
+    )
+    conn.commit()
+
+
+def _migrate_metric_points_restatement(cursor, conn):
+    """trinity-enterprise#729 — a corrected value restates its row (R45).
+
+    `revision` counts accepted corrections (0 at insert); `recorded_at` is the
+    write time of the value the row holds. Both are written by the store, never
+    by a caller.
+
+    * `revision BIGINT NOT NULL DEFAULT 0` — existing rows read 0, and a writer
+      from before this change (a rollback, or a checkout switched back) still
+      inserts. BIGINT because it is a monotonic counter (SQLite: one 64-bit
+      affinity either way).
+    * `recorded_at TEXT` — nullable, NO backfill: NULL means "written before
+      ent#729", whose write time is `created_at`. A backfill would buy nothing
+      a reader can rely on (the rollback writer inserts NULL anyway) and would
+      rewrite the whole table at boot.
+
+    Mirrored by the Alembic revision 0086_metric_points_restatement.
+    """
+    _safe_add_column(
+        cursor,
+        "metric_points",
+        "revision",
+        "ALTER TABLE metric_points ADD COLUMN revision BIGINT NOT NULL DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor,
+        "metric_points",
+        "recorded_at",
+        "ALTER TABLE metric_points ADD COLUMN recorded_at TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_ent720_email_identity(cursor, conn):
+    """trinity-enterprise#720 — a sign-in email is unique, and a code has a purpose.
+
+    1. `email_login_codes.purpose` (NULL = sign-in; `email_bind:<user id>` for
+       the mailbox proof a bind now requires).
+    2. Resolve pre-existing duplicate `users.email` values, then add
+       `idx_users_email_unique ON users(lower(email)) WHERE email IS NOT NULL`.
+       Blank addresses become NULL first (they would collide under the index).
+       Per lower-cased address the EARLIEST-created account keeps it; the others
+       are set to NULL and named by USERNAME only in the log — the address itself
+       never is. Duplicates only exist because nothing stopped them; the oldest
+       row is the original owner.
+
+    Idempotent; a fresh install whose tables do not exist yet on the first pass
+    gets both from `db/schema.py`. PostgreSQL half: Alembic
+    `0085_ent720_email_identity` (same decision function, `resolve_duplicate_emails`).
+    """
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='email_login_codes'")
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(email_login_codes)")
+        if "purpose" not in {r[1] for r in cursor.fetchall()}:
+            cursor.execute("ALTER TABLE email_login_codes ADD COLUMN purpose TEXT")
+
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    if not cursor.fetchone():
+        return
+    cursor.execute("UPDATE users SET email = NULL WHERE email IS NOT NULL AND TRIM(email) = ''")
+    # Every real `users` table carries username + created_at; a reduced legacy
+    # shape (the #1160 boot fixture) lacks them, so read them only when present.
+    cursor.execute("PRAGMA table_info(users)")
+    cols = {r[1] for r in cursor.fetchall()}
+    name_col = "username" if "username" in cols else "CAST(id AS TEXT)"
+    created_col = "created_at" if "created_at" in cols else "''"
+    cursor.execute(
+        f"SELECT id, {name_col}, email, {created_col} FROM users WHERE email IS NOT NULL")
+    losers = resolve_duplicate_emails(cursor.fetchall())
+    for user_id, username in losers:
+        cursor.execute("UPDATE users SET email = NULL WHERE id = ?", (user_id,))
+        print(f"[ent#720] duplicate sign-in email: cleared on account '{username}' "
+              "(an earlier account holds it)")
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique "
+        "ON users(lower(email)) WHERE email IS NOT NULL"
+    )
+
+
+def resolve_duplicate_emails(rows):
+    """[(id, username, email, created_at)] → [(id, username)] that must LOSE
+    their email: per lower-cased address, all but the earliest-created account
+    (ties broken by the lower id). Shared by both migration tracks (ent#720)."""
+    groups = {}
+    for user_id, username, email, created_at in rows:
+        groups.setdefault((email or "").strip().lower(), []).append(
+            (created_at or "", user_id, username))
+    losers = []
+    for key, members in groups.items():
+        if not key or len(members) < 2:
+            continue
+        members.sort()
+        losers += [(uid, uname) for _, uid, uname in members[1:]]
+    return losers
+def _migrate_chat_session_claude_id(cursor, conn):
+    """#3127 — per-user `/chat` memory on pull pilots.
+
+    `chat_sessions.cached_claude_session_id` holds the Claude session id the
+    session's next pulled `/chat` turn resumes. Nullable, no backfill: a session
+    without one starts a fresh conversation.
+    PostgreSQL half: Alembic `0091_chat_session_claude_id`.
+    """
+    _safe_add_column(
+        cursor,
+        "chat_sessions",
+        "cached_claude_session_id",
+        "ALTER TABLE chat_sessions ADD COLUMN cached_claude_session_id TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_agent_skill_sets(cursor, conn):
+    """trinity-enterprise#530 — skill sets.
+
+    * ``agent_skill_sets`` — a named set of library skills assigned to an agent.
+    * ``agent_skills.individual`` — 1 (the default, so every existing row keeps
+      its meaning) when the skill was assigned on its own; 0 when it is present
+      only because an assigned set names it. Unassigning a set removes only its
+      individual = 0 rows that no other assigned set names.
+
+    Additive only. Mirrored by the Alembic revision 0080_agent_skill_sets.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_skill_sets (
+            agent_name TEXT NOT NULL,
+            set_name TEXT NOT NULL,
+            source_id TEXT,
+            assigned_by TEXT NOT NULL,
+            assigned_by_agent TEXT,
+            assigned_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, set_name)
+        )
+        """
+    )
+    _safe_add_column(
+        cursor,
+        "agent_skills",
+        "individual",
+        "ALTER TABLE agent_skills ADD COLUMN individual INTEGER NOT NULL DEFAULT 1",
+    )
+    conn.commit()
+
+
+def _migrate_role_readiness_rollout_seed(cursor, conn):
+    """The readiness gate's rollout (trinity-enterprise#689), data only.
+
+    From this release a companion's cron seat brief runs only when its owner
+    stamp says `ready`. Every agent whose proactive brief fires TODAY — an
+    enabled, live, seat-delivery schedule on a live agent with autonomy on (a
+    schedule on an autonomy-off agent does not fire) — is stamped `ready`
+    here, at the value in force (#2085), so no install changes behaviour.
+    INSERT OR IGNORE: an existing stamp (an owner's `calibrating`) is never
+    overwritten. `changed_by` is the rollout sentinel the role card renders as
+    "carried over", not as a person. Runs once (tracked in schema_migrations).
+
+    Mirrored by the Alembic revision 0074_role_readiness_rollout_seed.
+    """
+    from utils.helpers import utc_now_iso
+
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO agent_role_readiness (agent_name, status, changed_at, changed_by)
+        SELECT DISTINCT s.agent_name, 'ready', ?, 'rollout:ent#689'
+        FROM agent_schedules s
+        JOIN agent_ownership o ON o.agent_name = s.agent_name
+        WHERE s.enabled = 1
+          AND s.deleted_at IS NULL
+          AND s.deliver_to_workspace_email IS NOT NULL
+          AND s.deliver_to_workspace_email != ''
+          AND o.deleted_at IS NULL
+          AND o.autonomy_enabled = 1
+        """,
+        (utc_now_iso(),),
+    )
+    conn.commit()
+
+
+def _migrate_auto_sync_enabled_backfill(cursor, conn):
+    """The auto-sync toggle becomes authoritative (#3010), data only.
+
+    From this release the agent's auto-sync loop obeys `agent_git_config.
+    auto_sync_enabled` alone; the baked `GIT_SYNC_AUTO` env no longer ORs it on.
+    The slice that auto-pushed on env with the DB flag at 0 — and that the DB
+    can identify — is live ghost agents: creation baked the env for them but
+    skipped the DB write (`and not config.ephemeral`). Set their flag so no
+    ghost that auto-pushes today silently stops. Non-source-mode only: a
+    tokenless ghost is always source-mode (ent#123), so `source_mode = 0`
+    implies the PAT the creation predicate required. Runs once (tracked in
+    schema_migrations); an owner's later OFF is then the only writer.
+
+    Mirrored by the Alembic revision 0075_auto_sync_enabled_backfill.
+    """
+    cursor.execute(
+        """
+        UPDATE agent_git_config SET auto_sync_enabled = 1
+        WHERE COALESCE(auto_sync_enabled, 0) = 0
+          AND COALESCE(source_mode, 0) = 0
+          AND agent_name IN (
+              SELECT agent_name FROM agent_ownership
+              WHERE is_ephemeral = 1 AND deleted_at IS NULL
+          )
+        """
+    )
+    conn.commit()
+
+
+def _migrate_agent_sync_state_divergence(cursor, conn):
+    """Add the divergence / dirt episode columns to agent_sync_state (trinity-enterprise#706).
+
+    `diverged_since` / `dirty_since` are ISO-Z episode clocks the
+    SyncHealthService sets once and clears on a return to 0; `dirty_files` is
+    the porcelain change count the agent's status call already computed and
+    threw away; `last_successful_push_at` is the last push that landed. All
+    nullable with NO backfill: the clocks cannot be known retroactively, and
+    starting them at the first post-upgrade poll is the 24 h soak before any
+    divergence freeze can fire.
+    """
+    for column, sql_type in (
+        ("diverged_since", "TEXT"),
+        ("dirty_files", "INTEGER"),
+        ("dirty_since", "TEXT"),
+        ("last_successful_push_at", "TEXT"),
+    ):
+        _safe_add_column(
+            cursor,
+            "agent_sync_state",
+            column,
+            f"ALTER TABLE agent_sync_state ADD COLUMN {column} {sql_type}",
+        )
+
+
+def _migrate_pull_sync(cursor, conn):
+    """The container's pull cycle (trinity-enterprise#703).
+
+    * `agent_git_config.pull_sync_enabled` — the per-agent switch the agent's
+      pull loop reads live each cycle (the #3010 one-writer discipline).
+    * `agent_sync_state.last_pull_at / last_pull_status / behind_after_pull /
+      last_pull_error / last_successful_pull_at / consecutive_pull_failures /
+      consecutive_pull_skips` — the pull cycle's own outcome and health,
+      persisted by the sync-health poller.
+
+    Backfill (operator ruling 2026-09-25): on only where auto-sync is already
+    on, so no agent that is not already writing to git starts rebasing its
+    working tree on upgrade; everyone else is off until toggled. New `github:`
+    agents get it at creation. Runs once (schema_migrations).
+
+    Mirrored by the Alembic revision 0087_pull_sync.
+    """
+    _safe_add_column(
+        cursor, "agent_git_config", "pull_sync_enabled",
+        "ALTER TABLE agent_git_config ADD COLUMN pull_sync_enabled INTEGER DEFAULT 0",
+    )
+    for column, ddl in (
+        ("last_pull_at", "TEXT"),
+        ("last_pull_status", "TEXT"),
+        ("behind_after_pull", "INTEGER"),
+        ("last_pull_error", "TEXT"),
+        ("last_successful_pull_at", "TEXT"),
+        ("consecutive_pull_failures", "INTEGER DEFAULT 0"),
+        ("consecutive_pull_skips", "INTEGER DEFAULT 0"),
+    ):
+        _safe_add_column(
+            cursor, "agent_sync_state", column,
+            f"ALTER TABLE agent_sync_state ADD COLUMN {column} {ddl}",
+        )
+    cursor.execute(
+        "UPDATE agent_git_config SET pull_sync_enabled = 1 "
+        "WHERE COALESCE(auto_sync_enabled, 0) = 1"
+    )
+    conn.commit()
+
+
+def _migrate_skill_gate_requests_table(cursor, conn):
+    """trinity-enterprise#751 — a gated-skill request frozen while its approval
+    ask is open; the ask records the decision, this row the effect (exactly
+    once: a status compare-and-set plus a UNIQUE `dispatched_execution_id`).
+    See the DDL comment in db/schema.py.
+
+    Idempotent. PostgreSQL half: Alembic `0088_skill_gate_requests`.
+    """
+    cursor.execute("PRAGMA table_info(skill_gate_requests)")
+    if not cursor.fetchall():
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS skill_gate_requests (
+                request_id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                ask_item_id TEXT,
+                skills TEXT NOT NULL,
+                request_text TEXT NOT NULL,
+                fingerprints TEXT,
+                requester_kind TEXT NOT NULL,
+                requester_key TEXT NOT NULL,
+                source_agent TEXT,
+                requester_email TEXT,
+                requester_execution_id TEXT,
+                requester_mcp_key_id TEXT,
+                origin_execution_id TEXT,
+                triggered_by TEXT,
+                dispatch TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                state_detail TEXT,
+                dispatched_execution_id TEXT UNIQUE,
+                created_at TEXT NOT NULL,
+                decided_at TEXT,
+                dispatched_at TEXT,
+                notified_at TEXT
+            )
+        """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_agent_state "
+        "ON skill_gate_requests(agent_name, state)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_requester "
+        "ON skill_gate_requests(agent_name, requester_key, state)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_gate_requests_state "
+        "ON skill_gate_requests(state, decided_at)"
+    )
+    conn.commit()
+
+
+# #3130: the shared statement — both tracks run the same SQL (the Alembic
+# revision imports it), so the survivor rule cannot drift between them.
+SUPERSEDE_QUEUE_FLOOD_BACKLOG_SQL = """
+UPDATE operator_queue
+SET status = 'cancelled',
+    disposition = 'cancelled',
+    disposed_at = :now,
+    disposed_by = 'platform',
+    disposed_by_email = NULL,
+    disposition_reason = 'superseded',
+    batch_id = :batch_id
+WHERE status = 'pending'
+  AND request_id LIKE 'queue-flood-%'
+  AND EXISTS (
+    SELECT 1 FROM operator_queue AS newer
+    WHERE newer.agent_name = operator_queue.agent_name
+      AND newer.status = 'pending'
+      AND newer.request_id LIKE 'queue-flood-%'
+      AND (newer.created_at > operator_queue.created_at
+           OR (newer.created_at = operator_queue.created_at AND newer.id > operator_queue.id))
+  )
+"""
+
+
+def _migrate_proactive_consent_not_asked(cursor, conn):
+    """trinity-enterprise#817 — proactive consent says "not asked" apart from "no".
+
+    `agent_sharing.allow_proactive` was 0 by DEFAULT for every share, so "nobody
+    asked this person" and "this person declined" were one value. From now on
+    NULL = not asked, 0 = declined, 1 = consented, and a new share is written
+    NULL. The existing 0s are moved to NULL: the default wrote 0 for everyone,
+    so almost none of them was ever an answer (operator ruling 2026-10-06).
+
+    Data only — the column and its DDL are unchanged, so no table rebuild. Who
+    may be messaged is unchanged too: only 1 allows it, before and after.
+    Idempotent. Mirrored by Alembic 0098_proactive_consent_not_asked.
+    """
+    cursor.execute("UPDATE agent_sharing SET allow_proactive = NULL WHERE allow_proactive = 0")
+    conn.commit()
+
+def _migrate_admin_email_not_username(cursor, conn):
+    """#3554 — the provisioned admin has no sign-in email.
+
+    The PostgreSQL admin seed wrote ``email = username`` ("admin"), which is
+    truthy, so the first-run "Sign-in email" step never appeared. Clears the
+    value where it still equals the username and is not an address (no ``@``);
+    a real email, even one equal to its username, is kept. Data only.
+
+    Idempotent. Mirrored by Alembic 0100_admin_email_not_username.
+    """
+    cursor.execute("PRAGMA table_info(users)")
+    cols = {row[1] for row in cursor.fetchall()}
+    if not {"username", "email"} <= cols:   # a pre-username schema has nothing to clear
+        return
+    cursor.execute(
+        "UPDATE users SET email = NULL WHERE email = username AND email NOT LIKE '%@%'"
+    )
+    conn.commit()
+
+
+def _migrate_agent_peer_skill_grants(cursor, conn):
+    """abilityai/trinity-enterprise#662 — a peer may run what an agent declares;
+    what an admin assigned needs a grant.
+
+    ``agent_peer_skill_grants`` holds the per-skill grant over an edge: caller X
+    may run library-assigned skill Y on target Z. Additive only. Nobody holds a
+    grant on upgrade — the safe default — and the Permissions panel shows each
+    edge's library skills as "not granted" until an admin opens them.
+
+    Idempotent. Mirrored by Alembic 0099_agent_peer_skill_grants.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_peer_skill_grants (
+            caller_agent TEXT NOT NULL,
+            target_agent TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            PRIMARY KEY (caller_agent, target_agent, skill_name)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_peer_skill_grants_target "
+        "ON agent_peer_skill_grants(target_agent)"
+    )
+    conn.commit()
+
+
+def _migrate_supersede_queue_flood_backlog(cursor, conn):
+    """#3130: collapse the flood-alert backlog to one pending alert per agent.
+
+    Before #3130 the file seam's flood alert counted toward the depth it
+    reported, and a sustained over-cap condition minted a new one every
+    cooldown window — 386 of one agent's 435 queue rows. The fix stops new
+    ones; this clears the ones already there, once. For each agent it keeps
+    the NEWEST pending `queue-flood-` row (by `created_at`, then `id`, so the
+    survivor is deterministic) and ends the rest as `cancelled`, disposed by
+    the platform with reason `superseded`. Never touches an agent's own rows,
+    a non-pending row, or an agent with a single flood row.
+
+    No wake and no file write follow: these are platform-minted rows
+    (`is_platform_minted`), which take no part in either. Idempotent.
+
+    Mirrored by the Alembic revision 0089_supersede_queue_flood_backlog.
+    """
+    import uuid as _uuid
+    from utils.helpers import utc_now_iso
+    sql = SUPERSEDE_QUEUE_FLOOD_BACKLOG_SQL.replace(":now", "?").replace(":batch_id", "?")
+    cursor.execute(sql, (utc_now_iso(), _uuid.uuid4().hex))
+    conn.commit()
+
+
+# #3246: the shared sweep — both tracks run this function over their own
+# connection (the Alembic revision imports it), so the survivor rule cannot
+# drift between them. `run(sql, params, fetch=False)` is the one driver seam:
+# sqlite3 and SQLAlchemy `text()` both bind `:name` parameters.
+# `raised_by IS NULL` is the platform-row discriminator: the agent file seam
+# writes 'agent' and gates write 'gate', and an agent can mint an id under a
+# reserved prefix on its own name (the git-token-scrub prefix was unreserved
+# before #3246), so the id shape alone must never pick a survivor.
+_PLATFORM_ALERT_SWEEP_SELECT = """
+SELECT id, agent_name, request_id, status, created_at, expires_at, context,
+       subject, disposed_by, disposed_at, raised_by
+FROM operator_queue
+WHERE raised_by IS NULL
+  AND (status = 'pending'
+       OR (disposed_by = 'person' AND subject IS NULL AND disposed_at >= :since))
+"""
+
+_PLATFORM_ALERT_SWEEP_END = """
+UPDATE operator_queue
+SET status = 'cancelled',
+    disposition = 'cancelled',
+    disposed_at = :now,
+    disposed_by = 'platform',
+    disposed_by_email = NULL,
+    disposition_reason = 'superseded',
+    batch_id = :batch_id
+WHERE status = 'pending' AND raised_by IS NULL AND id IN ({ids})
+"""
+
+_SWEEP_CHUNK = 400  # well under every driver's bound-parameter limit
+
+
+def run_platform_alert_sweep(run, *, now=None, batch_id=None) -> dict:
+    """#3246: collapse the platform-alert backlog to one pending row per subject.
+
+    Reads every pending row plus the person-ended rows inside the snooze
+    window, hands them to the leaf's pure ``plan_sweep`` (the ONE source of
+    per-kind id parsing — imported function-locally so neither migration
+    track pulls the service graph into ``init_database()``), then writes:
+
+    * survivors: ``subject``, ``last_seen_at``, ``context.seen_count = 1`` and
+      ``expires_at`` only where it was NULL;
+    * every other pending row of the subject: ended as ONE batch —
+      ``cancelled`` / ``platform`` / ``superseded`` / NULL email / ``batch_id``
+      — the ent#611 vocabulary, compare-and-set on ``status = 'pending'`` so a
+      row a person ends first is never overwritten;
+    * known kinds with no derivable subject: ``expires_at`` only (the row
+      leaves on its own; nothing is merged on a guess);
+    * person-ended rows inside the snooze window: ``subject`` only.
+
+    Agent-raised rows and gate rows (``raised_by IS NOT NULL``) are excluded
+    by the SELECT and skipped again by the planner; external prefixes never
+    derive. None of them is ever stamped or ended. Idempotent: a second run finds the survivors stamped
+    and plans nothing. Returns the write counts for the boot log.
+    """
+    import json as _json
+    import uuid as _uuid
+    from datetime import datetime as _dt, timezone as _tz
+
+    from services.platform_alerts import plan_sweep, snooze_window
+
+    now = now or _dt.now(_tz.utc)
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    since_iso = (now - snooze_window()).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    cols = ("id", "agent_name", "request_id", "status", "created_at", "expires_at",
+            "context", "subject", "disposed_by", "disposed_at", "raised_by")
+    rows = [dict(zip(cols, r)) for r in run(_PLATFORM_ALERT_SWEEP_SELECT, {"since": since_iso}, fetch=True)]
+    plan = plan_sweep(rows, now=now)
+    counts = {"survivors": 0, "ended": 0, "lifetime_only": 0, "snoozed": 0}
+    if plan.is_empty():
+        return counts
+
+    for stamp in plan.survivor_stamps:
+        # `expires_at` is only in the statement when the planner set one: an
+        # untyped NULL bound into COALESCE is driver-dependent on PostgreSQL,
+        # and a stamp that carries none has nothing to write there.
+        params = {"id": stamp.id, "subject": stamp.subject, "last_seen_at": stamp.last_seen_at,
+                  "context": _json.dumps(stamp.context) if stamp.context is not None else None}
+        expiry_sql = ""
+        if stamp.expires_at is not None:
+            expiry_sql = ", expires_at = COALESCE(expires_at, :expires_at)"
+            params["expires_at"] = stamp.expires_at
+        run(
+            "UPDATE operator_queue SET subject = :subject, last_seen_at = :last_seen_at, "
+            f"context = :context{expiry_sql} "
+            "WHERE id = :id AND status = 'pending' AND raised_by IS NULL",
+            params,
+        )
+        counts["survivors"] += 1
+
+    batch = batch_id or _uuid.uuid4().hex
+    ended = list(plan.ended_ids)
+    for start in range(0, len(ended), _SWEEP_CHUNK):
+        chunk = ended[start:start + _SWEEP_CHUNK]
+        params = {f"e{i}": id_ for i, id_ in enumerate(chunk)}
+        placeholders = ", ".join(f":{k}" for k in params)
+        params.update({"now": now_iso, "batch_id": batch})
+        run(_PLATFORM_ALERT_SWEEP_END.format(ids=placeholders), params)
+        counts["ended"] += len(chunk)
+
+    for stamp in plan.lifetime_stamps:
+        run("UPDATE operator_queue SET expires_at = :expires_at "
+            "WHERE id = :id AND status = 'pending' AND expires_at IS NULL AND raised_by IS NULL",
+            {"id": stamp.id, "expires_at": stamp.expires_at})
+        counts["lifetime_only"] += 1
+
+    for stamp in plan.snooze_stamps:
+        run("UPDATE operator_queue SET subject = :subject "
+            "WHERE id = :id AND subject IS NULL AND raised_by IS NULL",
+            {"id": stamp.id, "subject": stamp.subject})
+        counts["snoozed"] += 1
+    return counts
+
+
+# Both tracks create the same two indexes, by name (schema.py declares them too).
+PLATFORM_ALERT_INDEX_DDL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_operator_queue_pending_subject "
+    "ON operator_queue(agent_name, subject) WHERE status = 'pending' AND subject IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_operator_queue_agent_subject ON operator_queue(agent_name, subject)",
+)
+
+
+def _migrate_platform_alert_subjects(cursor, conn):
+    """#3246 — platform alerts: one pending row per subject.
+
+    Ordered columns → sweep → index, in ONE migration: the partial unique index
+    can only be created once the sweep has collapsed the duplicates an
+    installed backlog holds, so the three steps cannot be split across
+    migrations without breaking the upgrade of exactly the installs this is
+    for. Adds `subject TEXT` and `last_seen_at TEXT` (nullable, PRAGMA-guarded),
+    runs `run_platform_alert_sweep` (the leaf's `plan_sweep` decides; see its
+    docstring for the rules), then creates `uq_operator_queue_pending_subject`
+    (partial, pending + subject only) and `idx_operator_queue_agent_subject`.
+
+    No wake and no file write follow: these are platform-minted rows
+    (`is_platform_minted`), which take no part in either. Idempotent.
+
+    Mirrored by the Alembic revision 0090_platform_alert_subjects.
+    """
+    for column in ("subject", "last_seen_at"):
+        _safe_add_column(
+            cursor,
+            "operator_queue",
+            column,
+            f"ALTER TABLE operator_queue ADD COLUMN {column} TEXT",
+            log_msg=f"Adding {column} to operator_queue for platform alerts (#3246)",
+        )
+    conn.commit()
+
+    def _run(sql, params, fetch=False):
+        cursor.execute(sql, params)
+        return cursor.fetchall() if fetch else None
+
+    counts = run_platform_alert_sweep(_run)
+    conn.commit()
+    if any(counts.values()):
+        logger.info("Platform-alert backlog sweep (#3246): %s", counts)
+
+    for ddl in PLATFORM_ALERT_INDEX_DDL:
+        cursor.execute(ddl)
+    conn.commit()
+
+
+# #2372: the platform-minted prefixes on the day the heal shipped. Frozen on
+# purpose — a one-time fix of rows that already exist must not widen when a
+# prefix is reserved later (`operator_queue_service._RESERVED_ID_PREFIXES` stays
+# the live definition; a unit test pins the two equal at ship time).
+PLATFORM_ALERT_HEAL_PREFIXES = (
+    "queue-flood-", "poison-", "cb-dormant-", "sync-failing-", "git-bloat-",
+    "sync-diverged-", "skill-not-found-", "val_", "system-seed-",
+    "base-image-stale-", "alert-budget-", "effect-unguarded-", "db-backup-",
+    "log-archive-", "sub-headroom-", "skills-legacy-adoption-",
+    "workspace-problem-", "portal-inbox-collision-", "gitignore-untracked-",
+    "skills-reconcile-", "skills-fleet-reinject-", "retention-guard-",
+    "ent615-git-token-scrub-", "role-drift-", "gate-",
+)
+PLATFORM_ALERT_HEAL_SELECT_SQL = "SELECT id, request_id FROM operator_queue WHERE status = 'responded'"
+PLATFORM_ALERT_HEAL_UPDATE_SQL = (
+    "UPDATE operator_queue SET status = 'acknowledged', acknowledged_at = :now "
+    "WHERE id = :id AND status = 'responded'"
+)
+
+
+def platform_alert_heal_ids(rows):
+    """Ids of `responded` rows that are platform-minted — matched the way
+    `is_platform_minted` matches (strip + lowercase + prefix), in Python,
+    because SQL `LIKE` reads the `_` in `val_` as a wildcard."""
+    return [
+        row_id for row_id, request_id in rows
+        if str(request_id or "").strip().lower().startswith(PLATFORM_ALERT_HEAL_PREFIXES)
+    ]
+
+
+def _migrate_platform_alert_responded_heal(cursor, conn):
+    """#2372: platform alerts an operator acknowledged before the fix sat in
+    `responded` — no agent ever acknowledges them, so they stayed for the 90-day
+    floor and out of Clear All. Moves each to `acknowledged` (`acknowledged_at`
+    = now), the state an operator's answer now lands in. Agents' own asks and
+    non-`responded` rows are untouched. Idempotent.
+
+    Mirrored by the Alembic revision 0093_platform_alert_responded_heal.
+    """
+    from utils.helpers import utc_now_iso
+    cursor.execute(PLATFORM_ALERT_HEAL_SELECT_SQL)
+    now = utc_now_iso()
+    sql = PLATFORM_ALERT_HEAL_UPDATE_SQL.replace(":now", "?").replace(":id", "?")
+    for row_id in platform_alert_heal_ids(cursor.fetchall()):
+        cursor.execute(sql, (now, row_id))
+    conn.commit()
+
+
+def _migrate_agent_skill_gates(cursor, conn):
+    """trinity-enterprise#753 — the per-agent skill gate map.
+
+    One row per (agent, skill) that needs approval before it runs: the approver
+    kind and an optional deadline. The table the dispatch check (#751) and the
+    in-container hook (#752) read through ``skill_gate_service.list_skill_gates``.
+    See the DDL comment in db/schema.py. Additive: no row = ungated, so every
+    existing agent is unchanged on upgrade.
+
+    Mirrored by the Alembic revision 0094_agent_skill_gates.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_skill_gates (
+            agent_name TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            approver TEXT NOT NULL,
+            deadline_hours INTEGER,
+            origin TEXT NOT NULL,
+            set_by TEXT NOT NULL,
+            set_by_agent TEXT,
+            set_at TEXT NOT NULL,
+            PRIMARY KEY (agent_name, skill_name)
+        )
+        """
+    )
+    conn.commit()
+
 
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
@@ -4407,4 +5723,41 @@ MIGRATIONS = [
     ("schedule_workspace_delivery", _migrate_schedule_workspace_delivery),
     ("portal_messages_voice_source", _migrate_portal_messages_voice_source),
     ("portal_file_dismissals_table", _migrate_portal_file_dismissals_table),
+    ("executions_started_at_index", _migrate_executions_started_at_index),
+    ("agent_skills_delivery_status", _migrate_agent_skills_delivery_status),
+    ("public_user_memory_writes_table", _migrate_public_user_memory_writes_table),
+    ("agent_role_readiness_table", _migrate_agent_role_readiness_table),
+    ("agent_shared_files_audience", _migrate_agent_shared_files_audience),
+    ("metric_definitions_table", _migrate_metric_definitions_table),
+    ("metric_points_table", _migrate_metric_points_table),
+    ("seat_decisions_table", _migrate_seat_decisions_table),
+    ("agent_capability_grants", _migrate_agent_capability_grants),
+    ("operator_queue_sync_state", _migrate_operator_queue_sync_state),
+    ("role_readiness_rollout_seed", _migrate_role_readiness_rollout_seed),
+    ("auto_sync_enabled_backfill", _migrate_auto_sync_enabled_backfill),
+    ("operator_queue_ask_object", _migrate_operator_queue_ask_object),
+    ("execution_chain_depth", _migrate_execution_chain_depth),
+    ("workspace_suggestion_feedback_table", _migrate_workspace_suggestion_feedback_table),
+    ("telegram_group_context", _migrate_telegram_group_context),
+    ("agent_skill_sets", _migrate_agent_skill_sets),
+    ("portal_messages_unread_index", _migrate_portal_messages_unread_index),
+    ("agent_sync_state_divergence", _migrate_agent_sync_state_divergence),
+    ("execution_conversation_key", _migrate_execution_conversation_key),
+    ("loop_chain_depth", _migrate_loop_chain_depth),
+    ("ent720_email_identity", _migrate_ent720_email_identity),
+    ("metric_points_restatement", _migrate_metric_points_restatement),
+    ("pull_sync", _migrate_pull_sync),
+    ("skill_gate_requests_table", _migrate_skill_gate_requests_table),
+    ("supersede_queue_flood_backlog", _migrate_supersede_queue_flood_backlog),
+    ("platform_alert_subjects", _migrate_platform_alert_subjects),
+    ("chat_session_claude_id", _migrate_chat_session_claude_id),
+    ("portal_messages_attachments", _migrate_portal_messages_attachments),
+    ("platform_alert_responded_heal", _migrate_platform_alert_responded_heal),
+    ("agent_skill_gates", _migrate_agent_skill_gates),
+    ("portal_messages_execution_id", _migrate_portal_messages_execution_id),
+    ("a2a_internal_scope", _migrate_a2a_internal_scope),
+    ("operator_queue_replace", _migrate_operator_queue_replace),
+    ("proactive_consent_not_asked", _migrate_proactive_consent_not_asked),
+    ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
+    ("admin_email_not_username", _migrate_admin_email_not_username),
 ]

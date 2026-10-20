@@ -11,9 +11,9 @@
  *     lost sight of — and its lesser control is **Ask about it** (a prefill,
  *     never a send), because a step-level restart is a platform capability
  *     Trinity does not have (#919 territory; ruling 1, 2026-09-02);
- *   * an agent that publishes no steps SAYS so — "this agent doesn't report
- *     steps" — and an agent whose steps could not be read says THAT, which is
- *     a different sentence (ruling 2, as reviewed: three states, not two);
+ *   * an agent that publishes no steps gets no steps sentence (#3001, which
+ *     removed "this agent doesn't report steps"), and an agent whose steps
+ *     could not be read says so — "could not be read" is a real failure;
  *   * the Work signal is derived on every render from ONE merged set — the
  *     feed's running rows plus the conversation's in-flight turn, joined by
  *     execution id — never the sum of two signals (review A1);
@@ -94,6 +94,24 @@ export function soleStoppableItem(items, stoppingIds = []) {
 }
 
 /**
+ * #3114: the status of a just-sent turn before the Work feed has read its row.
+ * On a pull agent (`pullsTurns`), until the agent streams anything the turn may
+ * still be waiting for a worker, so it reads "Waiting for a slot". Every other
+ * agent runs the turn on send.
+ */
+export function pendingTurnOutcome(streamActivity, pullsTurns) {
+  return pullsTurns && !streamActivity ? 'queued' : 'running'
+}
+
+/**
+ * #3114: the card's clock restarts when a worker picks the turn up, so
+ * "Working" counts working time only.
+ */
+export function clockRestartsAt(before, now) {
+  return before === 'queued' && now === 'running'
+}
+
+/**
  * The status word a person reads. Honest about WHY it ended (the
  * `loopStatusLabel` rule, applied to executions): a timeout, a cancel and a
  * failure are three situations with three next actions.
@@ -160,30 +178,71 @@ export function liveElapsedSeconds(item, { fetchedAtMs = null, nowMs = Date.now(
   return null
 }
 
+// ---------------------------------------------------------------- title
+
+/** Mirrors the server's `TITLE_MAX` (`client_portal/work/service.py`). */
+export const TITLE_MAX = 120
+
+// Python's `\s` on a str, exactly: JS `\s` plus U+001C–U+001F and U+0085,
+// minus U+FEFF. `trim()` is not used for the same reason.
+const TITLE_WS = /[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/g
+
+/**
+ * The title the feed will give this message, before the feed has read the
+ * turn — so the chat's card keeps its title when the feed's row replaces the
+ * synthetic one (#2964). Mirrors `service.clean_title`: collapse whitespace
+ * runs, trim, cut at TITLE_MAX code points (not UTF-16 units) with "…".
+ * Pinned row-for-row by `tests/fixtures/portal-work-titles.json`.
+ * Secret masking is NOT mirrored: the server stays the only place that masks,
+ * so a masked message still changes its title when the feed's row lands. That
+ * is not only a pasted token — `sanitize_text` also masks plain words
+ * ("Basic question" → "***REDACTED***: …", `author=me`); the fixture pins one.
+ */
+export function previewTitle(message) {
+  const text = String(message ?? '').replace(TITLE_WS, ' ').replace(/^ | $/g, '')
+  if (!text) return '(no message)'
+  const chars = Array.from(text)
+  if (chars.length <= TITLE_MAX) return text
+  return chars.slice(0, TITLE_MAX - 1).join('').replace(/ $/, '') + '…'
+}
+
 // ---------------------------------------------------------------- steps
 
 /**
  * The steps sentence for a card — three states, three sentences (ruling 2,
  * reviewed). Returns `{ kind, text }`: `stages` renders the list, the other
  * two render the sentence in tertiary ink.
+ *
+ * #3001: an agent that publishes no stages gets NO sentence (kind `none`, empty
+ * text). "<agent> doesn't report steps." read as a fault beside the live
+ * activity line (#620) and as noise before it, so it was removed outright;
+ * the card shows the activity line, or the stages, or nothing. `unknown` keeps
+ * its sentence — "could not be read" reports a real failure.
  */
-export function stepsLine(steps, agentName = null) {
-  const who = agentName || 'This agent'
+export function stepsLine(steps, options) {
+  const liveSignal = !!(options && typeof options === 'object' && options.liveSignal)
   // `undefined` = not read yet (the chat's card before the feed has the row):
   // say nothing rather than "could not be read", which is a different claim.
   if (steps === undefined) return { kind: 'pending', text: '' }
+  // #3357: a card that is showing a live activity line has its evidence of
+  // progress on screen. "Could not be read" beside it reads as a fault the
+  // agent is visibly not having, so a run that reports what it is doing is
+  // never described as unreadable — whatever the feed says. Stages, when the
+  // read has them, still render.
+  if (liveSignal && !(steps && steps.state === 'reported'
+      && Array.isArray(steps.stages) && steps.stages.length)) {
+    return { kind: 'none', text: '' }
+  }
   if (!steps || typeof steps !== 'object' || steps.state === 'unknown') {
     return { kind: 'unknown', text: 'Steps could not be read right now.' }
   }
-  if (steps.state === 'none') {
-    return { kind: 'none', text: `${who} doesn't report steps.` }
+  if (steps.state === 'reported' && Array.isArray(steps.stages) && steps.stages.length) {
+    return { kind: 'stages', text: '' }
   }
-  if (steps.state === 'reported') {
-    if (Array.isArray(steps.stages) && steps.stages.length) return { kind: 'stages', text: '' }
-    return { kind: 'none', text: `${who} doesn't report steps.` }
-  }
+  if (steps.state === 'none' || steps.state === 'reported') return { kind: 'none', text: '' }
   return { kind: 'unknown', text: 'Steps could not be read right now.' }
 }
+
 
 /** The stages, each with the name a person reads and who holds it (masked names read "another agent"). */
 export function stageRows(steps) {
@@ -215,9 +274,14 @@ export function holderLine(holder, { agentName = null, masked = false } = {}) {
  * 1:1 — a delegated child lives on the delegate, and the server found it by
  * the chat, not by the participant (review A2).
  */
+//
+// #3166: another person-sent turn on the same thread (the chat open in a
+// second tab) carries the same chat id but is not a child of this turn — it is
+// a sibling, and "held by <agent>" over its title read as this turn's work.
 export function childrenForChat(items, chatId, excludeId = null) {
   if (!chatId) return []
-  return liveItems(items).filter((it) => it.chat_id === chatId && it.id !== excludeId)
+  return liveItems(items).filter((it) => it.chat_id === chatId && it.id !== excludeId
+    && it.kind !== 'turn')
 }
 
 /**

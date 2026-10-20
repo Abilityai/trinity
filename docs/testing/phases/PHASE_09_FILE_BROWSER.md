@@ -1,409 +1,243 @@
-# Phase 9: File Browser & Persistence (test-files)
+# Phase 09: File Browser (Files tab)
 
-> **Purpose**: Validate file operations, tree structure, and persistent storage
-> **Duration**: ~10 minutes
-> **Assumes**: Phase 8 PASSED (queue working, test-files running)
-> **Output**: File browser and persistence verified
+> **Purpose**: Verify the agent Files tab — tree, search, hidden-file toggle, preview pane, download, protected-file guard and folder create/delete — and the three read endpoints behind it.
+> **Duration**: ~12 minutes
+> **Assumes**: the fixture trio is running and you are logged in as admin
+> **Output**: The Files tab lists and previews a running agent's workspace honestly in every state, and leaves the workspace exactly as it found it
+> **Last verified**: 2026-10-09 against source (not yet browser-run)
 
 ---
 
 ## Background
 
-**Persistent Memory (Pillar III)**:
-- Agents have virtual filesystems in containers
-- Shared directory accessible via UI file browser
-- Files survive agent restarts
-- Tree structure navigation and download
+Every agent has a **Files** tab (`components/FilesPanel.vue`) — it is unconditional, including for the system agent. It is a two-pane browser over `/home/developer`: a tree on the left, a preview pane on the right. Paths shown in the UI and passed to the API are relative to `/home/developer`.
 
----
+Controls that exist: `Refresh`, new-folder, a `Hidden` checkbox, a `Search files...` box, and in the preview pane `Edit` (text files), `Download` and `Delete`. There is **no upload control and no right-click menu**.
 
-## Test: File Browser Navigation
+This phase uses `test-counter`, whose `counter.txt` is a known small text file. Replaces the January flow that used a `test-files` agent (it does not exist) and created files through chat.
 
-### Step 1: Navigate to test-files
+## Prerequisites
+
+- [ ] Logged in as `admin` with `ADMIN_PASSWORD` from `.env`
+- [ ] `test-counter` shows `Running`
+- [ ] `$TOKEN` holds an admin Bearer token
+
+This phase sends **at most 1 task** (only if the state file is missing) and creates one empty folder, `sweep-tmp-09`, which it deletes in Cleanup. It never edits or deletes a file it did not create.
+
+## Setup
+
+### Step 1: Make sure the state file exists
 **Action**:
-- Go to http://localhost/agents
-- Click test-files
-- Wait for detail page to load
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/agents/test-counter/files?path=/home/developer&show_hidden=false" \
+  | python3 -c "import sys,json; t=json.load(sys.stdin)['tree']; print([i['name'] for i in t])"
+```
+- If `counter.txt` is in the list, send nothing.
+- If it is not, open `http://localhost/agents/test-counter?tab=tasks`, type `reset` in the task textarea, click `Run`, and wait up to 60 s for the row to read `success`.
 
 **Expected**:
-- [ ] Agent detail page loads
-- [ ] Chat tab active
-- [ ] Status: "Running" (green)
-- [ ] Context: 0% (fresh agent)
+- [ ] HTTP 200 and a `tree` array
+- [ ] `counter.txt` exists at the top level before Step 2 starts
+- [ ] Record whether the task was needed, and the top-level names returned
 
 ---
 
-### Step 2: Click Files Tab
+## Test: Tree and controls
+
+### Step 2: Open the Files tab
 **Action**:
-- Click "Files" tab in agent detail page
-- Wait 3 seconds for file tree to load
+- Navigate to `http://localhost/agents/test-counter?tab=files`
 
 **Expected**:
-- [ ] Files tab active
-- [ ] File tree structure visible
-- [ ] Root directory shows
-- [ ] Folder icons for directories
-- [ ] File icons for documents
+- [ ] Left pane, top row: a button titled `Refresh`, a button titled `New folder in workspace root`, and a checkbox labelled `Hidden`
+- [ ] Below it an input with placeholder `Search files...`
+- [ ] The tree lists the same top-level names as Step 1, folders before files
+- [ ] A footer line reading `N files`, optionally followed by `•` and a total size
+- [ ] Right pane shows `No File Selected` and `Select a file from the tree to preview`
+- [ ] Record the current state of the `Hidden` checkbox as `HIDDEN_ORIGINAL` (it is remembered per browser)
 
-**Verify**:
-- [ ] Tree structure renders
-- [ ] Expandable folders shown with chevrons
-- [ ] No loading errors
-
----
-
-### Step 3: Explore Directory Structure
+### Step 3: Search
 **Action**:
-- Click to expand `/home/developer/` folder
-- Wait 1 second
-- Click to expand `workspace/` folder
-- Look at available files/folders
+- Type `counter` in `Search files...`
+- Replace it with `zzz-no-such-file`
+- Clear the box
 
 **Expected**:
-```
-📁 home/
-  📁 developer/
-    📁 workspace/
-      📄 README.md
-      📄 data.json
-      📁 uploads/
-      📁 cache/
-```
+- [ ] `counter`: the tree narrows to entries whose name contains `counter`; `counter.txt` is listed and highlighted
+- [ ] `zzz-no-such-file`: the tree area reads `No matching files found`
+- [ ] Cleared: the full tree returns
 
-**Verify**:
-- [ ] Folders expand/collapse correctly
-- [ ] Subfolder visible
-- [ ] Files listed with names
-- [ ] Folder icons distinguished from file icons
-
----
-
-## Test: File Creation and Content
-
-### Step 4: Create File via Chat
+### Step 4: Hidden files
 **Action**:
-- Type in chat: "create file config.yaml with content: database: postgres, host: localhost, port: 5432"
-- Press Enter
-- Wait 10 seconds
-
-**Expected Response**:
-```
-File created successfully
-Path: /home/developer/workspace/config.yaml
-Size: 52 bytes
-Timestamp: [current time]
-```
-
-**Verify**:
-- [ ] File created successfully
-- [ ] Correct path shown
-- [ ] File size shown
-- [ ] Timestamp recorded
-
----
-
-### Step 5: Verify File in Browser
-**Action**:
-- Look at Files tab (may need refresh: F5)
-- Wait 2 seconds
-- Expand workspace folder
-- Look for config.yaml
+- Tick `Hidden` (or, if `HIDDEN_ORIGINAL` was ticked, untick it), observe, then return it to `HIDDEN_ORIGINAL`
 
 **Expected**:
-- [ ] config.yaml appears in file tree
-- [ ] Listed with other files
-- [ ] File icon shown
-- [ ] Size displayed (52 bytes)
-
-**Verify**:
-- [ ] New file visible in browser
-- [ ] File tree updates automatically
-- [ ] Metadata correct
+- [ ] The tree reloads on each change
+- [ ] With `Hidden` ticked, entries whose names start with `.` appear; unticked, none do
+- [ ] The `N files` footer changes accordingly — record both counts
 
 ---
 
-### Step 6: Download File
+## Test: Preview pane
+
+### Step 5: Preview a text file
 **Action**:
-- Right-click on config.yaml in file tree
-- Select "Download" (if UI provides)
-- Or: Type in chat "download config.yaml"
-- Press Enter
-- Wait 5 seconds
+- Click `counter.txt`
 
 **Expected**:
-```
-File ready for download
-URL: http://localhost/api/agents/test-files/files/workspace/config.yaml
-Size: 52 bytes
-```
+- [ ] The row is highlighted and the preview shows the file body as monospace text (a single number)
+- [ ] Under the preview: the name `counter.txt`, then a line with its path, a size and a relative time (`just now`, `5m ago`, …)
+- [ ] Buttons `Edit`, `Download`, `Delete` are shown; `Delete` is enabled for this file (do not click it)
 
-**Verify**:
-- [ ] Download link generated
-- [ ] File accessible via HTTP
-- [ ] Correct file size
-
----
-
-## Test: File Modification
-
-### Step 7: Append to File
+### Step 6: Edit mode opens and cancels without writing
 **Action**:
-- Type: "append to config.yaml: database_pool: 10"
-- Press Enter
-- Wait 5 seconds
-
-**Expected Response**:
-```
-File updated successfully
-Path: /home/developer/workspace/config.yaml
-New size: 67 bytes (was 52)
-Timestamp: [updated time]
-```
-
-**Verify**:
-- [ ] File updated
-- [ ] Size increased (52 → 67 bytes)
-- [ ] Timestamp changed
-- [ ] No errors
-
----
-
-### Step 8: Verify Update in Browser
-**Action**:
-- Look at Files tab
-- Check config.yaml size
-- If possible, click on file to view content
+- Click `Edit`, change nothing, click `Cancel`
 
 **Expected**:
-- [ ] File size updated to 67 bytes
-- [ ] Timestamp shows recent modification
-- [ ] Content accessible if UI supports preview
+- [ ] In edit mode the body becomes a textarea and the buttons become `Save` (disabled — nothing changed) and `Cancel`
+- [ ] `Cancel` returns to the read-only preview with no dialog and the same content
 
-**Verify**:
-- [ ] File browser reflects changes
-- [ ] Size accurate
-- [ ] Modification time current
-
----
-
-## Test: Directory Operations
-
-### Step 9: Create Subdirectory
+### Step 7: Download
 **Action**:
-- Type: "create directory reports under workspace"
-- Press Enter
-- Wait 5 seconds
-
-**Expected Response**:
-```
-Directory created successfully
-Path: /home/developer/workspace/reports
-Timestamp: [current time]
-```
-
-**Verify**:
-- [ ] Directory created
-- [ ] Path correct
-- [ ] No errors
-
----
-
-### Step 10: Create Files in Subdirectory
-**Action**:
-- Type: "create file reports/summary.txt with content: Daily Report"
-- Press Enter
-- Wait 5 seconds
-
-**Expected Response**:
-```
-File created successfully
-Path: /home/developer/workspace/reports/summary.txt
-Size: 14 bytes
-```
-
-**Verify**:
-- [ ] File created in subdirectory
-- [ ] Path includes parent folder
-- [ ] Size correct
-
----
-
-### Step 11: Verify Tree Structure
-**Action**:
-- Click to expand workspace folder in Files tab
-- Look for reports subfolder
-- Click to expand reports folder
+- Click `Download`
 
 **Expected**:
+- [ ] The browser starts a download named `counter.txt`
+- [ ] A toast reads `Downloaded counter.txt`
+- [ ] No context menu is involved; right-clicking a tree row shows only the browser's own menu
+
+### Step 8: Protected file
+**Action**:
+- If `CLAUDE.md` is in the tree, click it. If it is not, record `SKIPPED (CLAUDE.md not in tree)`.
+
+**Expected**:
+- [ ] The markdown is previewed as text
+- [ ] `Delete` is disabled and its title is `Protected file cannot be deleted`
+- [ ] The line `This is a protected system file and cannot be deleted.` is shown under the buttons
+- [ ] `Edit` is still offered (do not click it)
+
+### Step 9: A file type with no preview
+**Action**:
+- Tick `Hidden` and look for a file whose extension is not text, image, audio, video or PDF (for example a `.db`, `.bin`, `.gz` or `.lock` file). Click it. Return `Hidden` to `HIDDEN_ORIGINAL`.
+- If no such file exists, record `SKIPPED (no binary file present)`.
+
+**Expected**:
+- [ ] The preview reads `Preview not available for this file type` followed by the MIME type (or `Unknown type`)
+- [ ] `Edit` is not offered; `Download` is
+
+---
+
+## Test: Folders
+
+### Step 10: Create an empty folder
+**Action**:
+- Click an empty area or a top-level file so that no folder is selected, then click the new-folder button (title `New folder in workspace root`)
+- In the dialog type `sweep-tmp-09` and click `Create`
+
+**Expected**:
+- [ ] Dialog heading `New Folder`, the line `Create in /home/developer`, an input with placeholder `folder-name`, the hint `Use / to create nested folders.`, and `Create` disabled until a name is typed
+- [ ] Toast `Created sweep-tmp-09`; the dialog closes and `sweep-tmp-09` appears in the tree
+
+### Step 11: Empty-folder states
+**Action**:
+- Click `sweep-tmp-09` in the tree
+
+**Expected**:
+- [ ] The folder expands and shows the italic line `Empty folder` beneath it
+- [ ] The preview pane shows the folder name and `0 items`
+- [ ] The new-folder button's title is now `New folder in sweep-tmp-09`
+- [ ] `Edit` is not offered for a folder
+
+---
+
+## Test: Read endpoints
+
+### Step 12: List, preview, download
+**Action**:
+```bash
+B=http://localhost:8000/api/agents/test-counter
+# list (path and show_hidden are query params; path defaults to /home/developer)
+curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $TOKEN" "$B/files"
+# preview and download take the file path as the ?path= query param
+curl -s -H "Authorization: Bearer $TOKEN" --get --data-urlencode "path=counter.txt" "$B/files/preview"
+curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $TOKEN" --get --data-urlencode "path=counter.txt" "$B/files/download"
 ```
-📁 workspace/
-  📄 config.yaml
-  📄 data.json
-  📁 reports/
-    📄 summary.txt
+
+**Expected**:
+- [ ] List: `200`
+- [ ] Preview: the body is the same number shown in Step 5
+- [ ] Download: `200`
+
+### Step 13: Honest failures
+**Action**:
+```bash
+B=http://localhost:8000/api/agents/test-counter
+curl -s -w "\n%{http_code}\n" -H "Authorization: Bearer $TOKEN" --get --data-urlencode "path=zzz-no-such-file.txt" "$B/files/preview"
+curl -s -w "\n%{http_code}\n" -H "Authorization: Bearer $TOKEN" --get --data-urlencode "path=/etc/passwd" "$B/files/preview"
+curl -s -o /dev/null -w "%{http_code}\n" "$B/files"
 ```
 
-**Verify**:
-- [ ] Nested folder structure visible
-- [ ] All files and folders shown
-- [ ] Hierarchy correctly represented
+**Expected**:
+- [ ] Missing file: `404`
+- [ ] Path outside the workspace: `403` with a detail beginning `Access denied`; no file content is returned
+- [ ] No token: `401`
 
----
-
-## Test: Activity Panel Tracking
-
-### Step 12: Check Activity Panel
+### Step 14: 390 px and dark theme
 **Action**:
-- Scroll to Activity section
-- Look for file-related tool calls
+- With `counter.txt` selected, resize to 390 × 844; then restore 1280 × 800
+- Note the title of the theme button in the top bar (`Light mode (click to switch)`, `Dark mode (click to switch)` or `System theme (click to switch)`), click it until dark is active, look at the tree and preview, then keep clicking until the original title is back
 
 **Expected**:
-- [ ] `create_file` tool call
-- [ ] `update_file` tool call
-- [ ] `create_directory` tool call
-- [ ] `get_file_tree` tool call
-- [ ] `download_file` tool call
-
-**Verify**:
-- [ ] Tool calls recorded
-- [ ] Parameters show file paths
-- [ ] Timestamps match operations
-- [ ] No errors logged
+- [ ] At 390 px record what happens to the two panes (the tree has a 280 px minimum width) and whether the page scrolls horizontally
+- [ ] In dark theme the selected tree row, the preview text and the three action buttons are all legible
+- [ ] The theme button's title equals the one noted at the start
 
 ---
 
-## Test: File Persistence
+## Cleanup / Restore
 
-### Step 13: Stop and Restart Agent
-**Action**:
-- Type in chat: "stop agent"
-- Press Enter
-- Wait 10 seconds for agent to stop
-- In agent list, restart test-files agent
-- Wait 15 seconds for startup
-- Click test-files again
-- Click Files tab
+Original state: no `sweep-tmp-09` folder; `Hidden` checkbox as `HIDDEN_ORIGINAL`; theme as noted in Step 14.
 
-**Expected**:
-- [ ] Agent stops and restarts
-- [ ] Files tab loads
-- [ ] All files still present:
-  - config.yaml
-  - data.json
-  - reports/summary.txt
+- In the tree click `sweep-tmp-09`, click `Delete`. The dialog is titled `Delete Folder` and says `This will delete all 0 files inside.` and `This action cannot be undone.` Click the dialog's `Delete`. Expect the toast `Deleted sweep-tmp-09` and the folder gone from the tree.
+- If the UI delete failed, remove it by API (this is the only write call in the phase):
 
-**Verify**:
-- [ ] Files persisted through restart
-- [ ] File contents unchanged
-- [ ] Timestamps preserved
-- [ ] Directory structure intact
+```bash
+curl -s -X DELETE -H "Authorization: Bearer $TOKEN" --get \
+  --data-urlencode "path=sweep-tmp-09" \
+  http://localhost:8000/api/agents/test-counter/files
+```
 
----
+- Confirm `sweep-tmp-09` is absent and `counter.txt` is still present by re-running the Step 1 command.
+- Set `Hidden` back to `HIDDEN_ORIGINAL`.
 
-## Test: Context Growth with File Operations
+## Manual-only (not run unattended)
 
-### Step 14: Check Context After File Operations
-**Action**:
-- Look at context % in agent detail page header
-- Compare to Phase 8 context level
-
-**Expected**:
-- [ ] Context % increased from Phase 8
-- [ ] Noticeable increase from file operations
-- [ ] Progress bar filled accordingly
-- [ ] No agent exceeds 200K limit
-
-**Verify**:
-- [ ] Context grows with file operations
-- [ ] Multiple operations add significant context
-- [ ] Color progression visible
-
----
+- **Stopped agent**: the tab shows `Agent must be running to browse files` and the list endpoint returns 400 with the same sentence. Seeing it requires stopping a fixture; Phase 04 covers it during its single restart.
+- **Edit and save** a file (`Save` → toast `Saved <name>`) and the unsaved-changes prompts — these modify a fixture's file.
+- **Large files**: preview and download refuse files over 100 MB with a 413; needs a large file on disk.
+- **Image / audio / video / PDF previews**: need media files in the workspace.
 
 ## Critical Validations
 
-### File Permissions
-**Validation**: Only agent can access its files
-
-```bash
-# Check file ownership in container
-docker exec agent-test-files ls -la /home/developer/workspace/config.yaml
-# Should show: developer as owner
-```
-
-### File Size Tracking
-**Validation**: Reported sizes match actual sizes
-
-```bash
-# Check actual file sizes
-docker exec agent-test-files stat /home/developer/workspace/config.yaml
-# du -sh /home/developer/workspace/
-```
-
-### Directory Tree Completeness
-**Validation**: All files and folders visible in browser
-
-- [ ] Created files appear in tree
-- [ ] Created directories appear in tree
-- [ ] Nested structures shown correctly
-- [ ] No files hidden or missing
-
----
+1. The tree matches what `GET /api/agents/test-counter/files` returns, and `Hidden` controls whether dot-entries appear.
+2. Selecting a text file previews its real content; the preview endpoint returns the same bytes.
+3. A protected file cannot be deleted from the UI (button disabled with the stated title).
+4. A path outside `/home/developer` is refused with 403.
+5. The workspace after Cleanup equals the workspace before Step 10.
 
 ## Success Criteria
 
-Phase 9 is **PASSED** when:
-- ✅ Files tab loads with directory tree
-- ✅ Folder structure expandable/collapsible
-- ✅ File created via chat command
-- ✅ New file visible in file browser
-- ✅ File download link works
-- ✅ File modification updates size/timestamp
-- ✅ Subdirectory created successfully
-- ✅ Files created in subdirectories
-- ✅ Nested folder structure visible
-- ✅ Tool calls logged in activity panel
-- ✅ Files persist after agent restart
-- ✅ Context % increased with file operations
-
----
+- [ ] Search, hidden toggle and both empty messages (`No matching files found`, `Empty folder`) behave as stated
+- [ ] Text preview, edit-cancel and download work on `counter.txt` without changing it
+- [ ] Protected-file guard observed (or explicitly skipped because `CLAUDE.md` is absent)
+- [ ] Folder created and deleted; nothing else changed
+- [ ] All three read endpoints return 200; the three failure cases return 404 / 403 / 401
 
 ## Troubleshooting
 
-**Files tab doesn't load**:
-- Refresh page (F5)
-- Wait 3-5 seconds for data fetch
-- Check backend logs: `docker logs backend`
-
-**File creation fails**:
-- Check disk space: `docker exec agent-test-files df -h /home/developer/`
-- Verify permissions: `docker exec agent-test-files whoami` (should be developer)
-- Check logs: `docker logs agent-test-files`
-
-**Files not visible after creation**:
-- Refresh Files tab (F5)
-- Wait 2 seconds for tree update
-- Check actual file exists: `docker exec agent-test-files ls -la /home/developer/workspace/`
-
-**Download link broken**:
-- Verify file exists
-- Check URL is correct
-- Backend may not be serving files
-- Check backend logs
-
-**Files lost after restart**:
-- Docker volume may not be mounted
-- Check volume binding: `docker inspect agent-test-files | grep -i volume`
-- Verify mount path: `/home/developer/` should persist
-
----
-
-## Next Phase
-
-Once Phase 9 is **PASSED**, proceed to:
-- **Phase 10**: Error Handling (test-error)
-
----
-
-**Status**: 🟢 File browser & persistence validated (Pillar III)
-**Last Updated**: 2025-12-09
+- **Tree area shows red text and a `Failed to load files: …` toast**: the list call failed. `Agent server not ready. The agent may still be starting up.` means the container was just started — wait 10 s and click `Refresh`.
+- **`This folder is empty` at the top level**: the workspace has no non-hidden entries; tick `Hidden` to confirm the listing works at all.
+- **Preview pane shows red text**: it is the preview endpoint's error detail, shown verbatim — record it.
+- **`sweep-tmp-09` already exists at Step 10**: an earlier run did not clean up. Use it as-is for Step 11 and delete it in Cleanup.
+- **`Invalid folder name` toast**: the name contained a `.` or `..` path segment.

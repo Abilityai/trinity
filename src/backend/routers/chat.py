@@ -5,22 +5,27 @@ Includes execution queue integration to prevent parallel execution on the same a
 """
 from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import StreamingResponse, JSONResponse
+import asyncio
 import httpx
 import json
 import logging
 from datetime import datetime
 from typing import NoReturn, Optional
 
-from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, TaskExecutionStatus
+from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ReportBackRequest, TaskExecutionStatus
 from dependencies import (
+    capability_fence,
     get_current_user,
     get_authorized_agent,
     get_owned_agent,
     assert_owns_or_admin,
+    is_fleet_admin,
     resolve_source_agent,
 )
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
+from services import sync_waiter
+from services.pull_pilot import is_pull_pilot_agent, pull_queue_allowance
 from services.model_catalog import InvalidModelError, validate_dispatch_model
 from services.capacity_manager import (
     CapacityFull,
@@ -29,9 +34,17 @@ from services.capacity_manager import (
 )
 from services import dispatch_admission_service
 from services import chat_execution_service
-from services.chat_signals import ChatAdmissionReplay, ChatDispatchError
+from services import chat_persistence_service
+from services.chat_signals import (
+    ChatAdmissionReplay,
+    ChatDispatchError,
+    InterAgentDepthExceeded,
+)
+from services.chat_execution_service import ERROR_CODE_HEADER
+from services.execution_envelope import TaskExecutionErrorCode
 from database import db
 from utils.helpers import utc_now_iso
+from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +99,9 @@ def _raise_ephemeral_exhausted_410(agent_name: str, execution_id, exc) -> NoRetu
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=f"ephemeral_exhausted: ghost agent budget spent ({exc.reason})",
+                result=ExecutionResult(
+                    error=f"ephemeral_exhausted: ghost agent budget spent ({exc.reason})",
+                ),
             )
         except Exception as e:
             logger.warning(
@@ -114,7 +129,9 @@ def _raise_circuit_open_503(agent_name: str, execution_id, exc: CircuitOpen) -> 
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error="circuit_open: agent unhealthy (dispatch breaker open)",
+                result=ExecutionResult(
+                    error="circuit_open: agent unhealthy (dispatch breaker open)",
+                ),
             )
         except Exception as e:
             logger.warning(
@@ -128,6 +145,22 @@ def _raise_circuit_open_503(agent_name: str, execution_id, exc: CircuitOpen) -> 
     )
 
 
+def _raise_depth_exceeded_403(exc: InterAgentDepthExceeded) -> NoReturn:
+    """Map a chain-depth refusal to its named 403 (#2806).
+
+    403, not 429 (the MCP client reads that as "busy, retry") and not 422
+    (invalid input on these routes). Safe as a 403 only because the
+    `get_authorized_agent` dependency has already answered the uniform 404, so
+    this can never disclose whether a target exists (Invariant #8). The named
+    body and header are what tell it apart from an access denial.
+    """
+    raise HTTPException(
+        status_code=403,
+        detail=exc.detail(),
+        headers={ERROR_CODE_HEADER: exc.detail()["error"]},
+    )
+
+
 @router.post("/{name}/chat")
 async def chat_with_agent(
     request: ChatMessageRequest,
@@ -136,6 +169,9 @@ async def chat_with_agent(
     x_source_agent: Optional[str] = Header(None),
     x_via_mcp: Optional[str] = Header(None),
     idempotency_key: Optional[str] = Header(None),
+    # trinity-enterprise#751: the calling agent's own turn (#2392), forwarded by
+    # the MCP server; the skill gate keeps it only if it is that agent's own.
+    x_trinity_execution_id: Optional[str] = Header(None, max_length=128),
 ):
     """
     Proxy chat messages to agent's internal web server and persist to database.
@@ -194,7 +230,10 @@ async def chat_with_agent(
             x_source_agent=x_source_agent,
             x_via_mcp=x_via_mcp,
             idempotency_key=idempotency_key,
+            x_trinity_execution_id=x_trinity_execution_id,
         )
+    except InterAgentDepthExceeded as e:
+        _raise_depth_exceeded_403(e)
     except CircuitOpen as e:
         _raise_circuit_open_503(name, None, e)
     except EphemeralBudgetExhausted as e:
@@ -208,7 +247,12 @@ async def chat_with_agent(
                 "queue_length": e.depth or 0,
                 "retry_after": 30,
                 "message": f"Agent '{name}' is busy. Please try again later."
-            }
+            },
+            # #2919: an admission refusal is self-describing (the same 1:1
+            # header shape the ChatDispatchError branch below maps).
+            headers=chat_execution_service._error_code_headers(
+                TaskExecutionErrorCode.CAPACITY
+            ),
         )
     if isinstance(admission, ChatAdmissionReplay):
         if admission.in_flight:
@@ -247,6 +291,9 @@ async def chat_with_agent(
         chat_execution_id=chat_execution_id,
         capacity_result=capacity_result,
         queue_result=queue_result,
+        chain_depth=admission.chain_depth,
+        # trinity-enterprise#752: a self-approval is recorded on the row.
+        gate=admission.gate,
     )
     execution = ctx.execution
     task_execution_id = ctx.task_execution_id
@@ -281,6 +328,8 @@ async def chat_with_agent(
             chat_timeout=chat_timeout,
             idem=idem,
             capacity=capacity,
+            chain_depth=admission.chain_depth,
+            isolated_session=ctx.isolated_session,
         )
     except ChatDispatchError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
@@ -307,6 +356,7 @@ async def execute_parallel_task(
     idempotency_key: Optional[str] = Header(None),
     x_event_trigger: Optional[str] = Header(None),
     x_internal_secret: Optional[str] = Header(None),
+    x_trinity_execution_id: Optional[str] = Header(None, max_length=128),  # trinity-enterprise#751
 ):
     """
     Execute a stateless task in parallel mode (no conversation context).
@@ -375,7 +425,9 @@ async def execute_parallel_task(
                 status_code=400,
                 detail="This execution was never assigned a resumable session.",
             )
-        if current_user.role != "admin" and not db.resume_session_belongs_to_user(
+        # trinity-enterprise#872: the admin bypass is for an admin PERSON; an
+        # agent key carrying its owner's role is checked for ownership too.
+        if not _sees_every_user(current_user) and not db.resume_session_belongs_to_user(
             name, rid, current_user.id
         ):
             raise HTTPException(status_code=404, detail="Session not found.")
@@ -416,7 +468,10 @@ async def execute_parallel_task(
             idempotency_key=idempotency_key,
             x_event_trigger=x_event_trigger,
             x_internal_secret=x_internal_secret,
+            x_trinity_execution_id=x_trinity_execution_id,
         )
+    except InterAgentDepthExceeded as e:
+        _raise_depth_exceeded_403(e)
     except ChatDispatchError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
     if isinstance(result, ChatAdmissionReplay):
@@ -442,10 +497,26 @@ async def get_agent_chat_history(
     name: str = Depends(get_authorized_agent),
     current_user: User = Depends(get_current_user)
 ):
-    """Get agent's conversation history."""
+    """Get agent's conversation history.
+
+    On a pull pilot (#3127) /chat memory is per user, so this returns the
+    caller's active chat session from the database, in the agent's
+    ``[{role, content, timestamp}]`` shape.
+    """
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
+
+    if is_pull_pilot_agent(name):
+        sessions = db.get_agent_chat_sessions(name, user_id=current_user.id, status="active")
+        if not sessions:
+            return []
+        return [
+            {"role": m.role, "content": m.content, "timestamp": m.timestamp.isoformat()}
+            for m in db.get_chat_messages(sessions[0].id)
+            # trinity#3526: a held gated request and its notice are not turns.
+            if not chat_persistence_service.is_gate_message(m)
+        ]
 
     if container.status != "running":
         raise HTTPException(
@@ -475,7 +546,11 @@ async def reset_agent_chat_history(
     name: str = Depends(get_owned_agent),
     current_user: User = Depends(get_current_user)
 ):
-    """Reset/clear agent's conversation history (start a new session)."""
+    """Reset/clear agent's conversation history (start a new session).
+
+    #3127: also forgets the Claude ids of the agent's chat sessions, so each
+    user's next pulled /chat turn on a pull pilot starts a fresh conversation.
+    """
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -485,6 +560,8 @@ async def reset_agent_chat_history(
             status_code=503,
             detail="Agent is not running"
         )
+
+    db.clear_chat_session_claude_ids(name)
 
     try:
         async with agent_httpx_client(name) as client:
@@ -685,15 +762,10 @@ async def get_agent_model(
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as e:
-        import logging
-        logging.getLogger("trinity.errors").error(f"Failed to get model info for {name}: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail="Failed to get model info"
-        )
+        _raise_model_route_error(name, e, "Failed to get model info", "get model info")
 
 
-@router.put("/{name}/model")
+@router.put("/{name}/model", dependencies=[Depends(capability_fence("agents.manage"))])
 async def set_agent_model(
     request: ModelChangeRequest,
     name: str = Depends(get_authorized_agent),
@@ -721,12 +793,34 @@ async def set_agent_model(
 
             return response.json()
     except httpx.HTTPError as e:
-        import logging
-        logging.getLogger("trinity.errors").error(f"Failed to set model for {name}: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail="Failed to set model"
+        _raise_model_route_error(name, e, "Failed to set model", "set model")
+
+
+def _raise_model_route_error(name: str, e: httpx.HTTPError, unavailable: str, action: str):
+    """#3677: an agent's own 4xx is the caller's answer (an invalid model names
+    the valid ones), with its status and detail and no ERROR line; anything
+    else (unreachable, timed out, an agent 5xx) is still 503.
+
+    Not a 401: the agent's auth middleware answers 401 when the BACKEND's
+    per-agent token does not match (#1159; a rotated AGENT_AUTH_SECRET, an old
+    container). That is the platform's credential failing, not the caller's,
+    and a 401 reaching the browser signs the person out (platformSession's
+    `logout` verdict) on every load of the agent page. It stays a 503."""
+    import logging
+    response = getattr(e, "response", None) if isinstance(e, httpx.HTTPStatusError) else None
+    if response is not None and 400 <= response.status_code < 500 and response.status_code != 401:
+        try:
+            detail = response.json().get("detail")
+        except (ValueError, AttributeError):
+            detail = None
+        if detail in (None, ""):
+            detail = (response.text or "").strip()[:500] or f"The agent refused to {action}"
+        logging.getLogger("trinity.errors").info(
+            f"Agent {name} refused to {action}: {response.status_code}"
         )
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    logging.getLogger("trinity.errors").error(f"Failed to {action} for {name}: {e}")
+    raise HTTPException(status_code=503, detail=unavailable)
 
 
 # Persistent Chat History Routes
@@ -755,7 +849,7 @@ async def get_persistent_chat_history(
     # Determine if user should see all messages or just their own
     # Agent owners can see all messages, others only see their own
     user_id_filter = None
-    if user_filter or current_user.role != "admin":
+    if user_filter or not _sees_every_user(current_user):
         # For non-admins, always filter to their own messages unless they're the owner
         # (Owner check would require checking agent_ownership table)
         user_id_filter = current_user.id
@@ -771,6 +865,15 @@ async def get_persistent_chat_history(
         "message_count": len(messages),
         "messages": [msg.model_dump() for msg in messages]
     }
+
+
+def _sees_every_user(current_user: User) -> bool:
+    """Whether a history read spans every user's conversations with the agent:
+    an admin PERSON, never an agent key. An agent key carries its owner's role,
+    so with an `agent_permissions` edge to B it read every user's chats with B
+    — "may call" is not "may read everyone's conversations with it"
+    (trinity-enterprise#629, #3346 review)."""
+    return is_fleet_admin(current_user)
 
 
 @router.get("/{name}/chat/sessions")
@@ -793,7 +896,7 @@ async def get_agent_chat_sessions(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     # Non-admins only see their own sessions
-    user_id_filter = None if current_user.role == "admin" else current_user.id
+    user_id_filter = None if _sees_every_user(current_user) else current_user.id
 
     sessions = db.get_agent_chat_sessions(
         agent_name=name,
@@ -841,7 +944,7 @@ async def get_chat_session_detail(
     return {
         "session": session.model_dump(),
         "message_count": len(messages),
-        "messages": [msg.model_dump() for msg in messages]
+        "messages": chat_persistence_service.session_messages_view(name, messages),
     }
 
 
@@ -916,6 +1019,36 @@ async def terminate_agent_execution(
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
 
 
+@router.post("/{name}/executions/{execution_id}/report-back")
+async def arm_execution_report_back(
+    execution_id: str,
+    request: ReportBackRequest,
+    name: str = Depends(get_authorized_agent),
+    current_user: User = Depends(get_current_user),
+):
+    """#3295: ask that a sequential ``/chat`` execution report its terminal into
+    the caller's conversation (Slack / Telegram / Workspace).
+
+    Called by the MCP server at the moment it hands the caller a receipt instead
+    of the reply — so a call that answered inline is never armed and cannot
+    post twice. The body names the CALLER's own turn; the execution inherits
+    that turn's channel context through the same provenance guard a ``/task``
+    child uses. Agent-callable by design: the arming agent is the one that
+    dispatched the row (the service checks that), and the capability it uses
+    — reporting into a conversation it is already serving — is the ent#224
+    consent-gated completion report, never a new send path.
+    """
+    try:
+        return await chat_execution_service.arm_chat_report_back(
+            name=name,
+            execution_id=execution_id,
+            request=request,
+            current_user=current_user,
+        )
+    except ChatDispatchError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
+
+
 @router.get("/{name}/executions/running")
 async def get_agent_running_executions(
     name: str = Depends(get_authorized_agent),
@@ -976,26 +1109,39 @@ async def stream_execution_log(
     async def proxy_stream():
         """Proxy SSE stream from agent container with connect timeout and keepalive."""
         agent_url = f"http://agent-{name}:8000/api/executions/{execution_id}/stream"
+        # #3114: on a pull pilot the turn can wait on the durable queue, and the
+        # agent knows nothing of it until a worker claims it. Hold the stream
+        # while the row is queued, then retry a 404 briefly while the row is
+        # running (claimed, not yet registered on the agent by the worker).
+        allowance = pull_queue_allowance(name)
+        attach_retries = sync_waiter.STREAM_ATTACH_RETRIES if allowance else 0
         try:
+            async for tick in sync_waiter.wait_while_queued(execution_id, allowance):
+                yield tick
             # Connect timeout prevents hanging if agent is unresponsive,
             # but read timeout is None since SSE streams are long-lived
             timeout = httpx.Timeout(connect=10.0, read=None, write=None, pool=None)
             async with agent_httpx_client(name, timeout=timeout) as client:
-                async with client.stream("GET", agent_url) as response:
-                    if response.status_code == 404:
-                        # Execution not found on agent (race condition: task not started yet)
-                        yield f"data: {json.dumps({'type': 'error', 'message': 'Execution not yet available on agent', 'retryable': True})}\n\n"
-                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                        return
-
-                    if response.status_code != 200:
-                        yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
-                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                        return
-
-                    # Stream through data from agent, adding proxy-level keepalive
-                    async for chunk in response.aiter_text():
-                        yield chunk
+                while True:
+                    async with client.stream("GET", agent_url) as response:
+                        if response.status_code == 404:
+                            if attach_retries > 0 and sync_waiter.execution_is_running(execution_id):
+                                attach_retries -= 1
+                            else:
+                                # Execution not found on agent (race condition: task not started yet)
+                                yield f"data: {json.dumps({'type': 'error', 'message': 'Execution not yet available on agent', 'retryable': True})}\n\n"
+                                yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                                return
+                        elif response.status_code != 200:
+                            yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
+                            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                            return
+                        else:
+                            # Stream through data from agent, adding proxy-level keepalive
+                            async for chunk in response.aiter_text():
+                                yield chunk
+                            return
+                    await asyncio.sleep(sync_waiter.STREAM_ATTACH_RETRY_INTERVAL)
         except httpx.ConnectError:
             yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to connect to agent', 'retryable': True})}\n\n"
             yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"

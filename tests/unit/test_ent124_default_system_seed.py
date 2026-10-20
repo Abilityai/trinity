@@ -574,8 +574,11 @@ def test_orchestrator_hands_both_results_to_the_credential_connect(orch):
 
 def test_orchestrator_reuses_stored_verdict(orch):
     """A later pass must consume the persisted verdict, never recount — the
-    fleet/Cornelius agents now exist and would poison the count."""
+    fleet/Cornelius agents now exist and would poison the count. (Once a seed
+    flag is set the stored verdict is final; with neither set, #3262's stale-
+    verdict reconcile may count — pinned in test_3262_admin_username_owner.)"""
     orch.env.settings.set("first_run_fresh", "true")
+    orch.env.settings.set("cornelius_seeded", "true")
     orch.env.monkeypatch.setattr(
         sss.db, "count_non_system_agents",
         lambda: (_ for _ in ()).throw(AssertionError("must not recount")),

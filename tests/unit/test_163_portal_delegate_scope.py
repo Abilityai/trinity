@@ -119,7 +119,7 @@ def test_db_layer_refuses_scopes_bound_to_an_agent():
 def _request(method: str, path: str):
     return SimpleNamespace(
         method=method,
-        url=SimpleNamespace(path=path),
+        scope={"path": path},
         client=SimpleNamespace(host="127.0.0.1"),
         state=SimpleNamespace(request_id="r1"),
         headers={},
@@ -190,7 +190,7 @@ async def test_an_ordinary_user_key_is_untouched_by_the_fence(monkeypatch):
     monkeypatch.setattr(
         d.db, "get_user_by_email",
         lambda email: {"id": 2, "username": "bob", "email": email,
-                       "role": "user", "suspended_at": None})
+                       "role": "operator", "suspended_at": None})
 
     user = await d.get_current_user(_request("GET", "/api/agents"), "trinity_mcp_y")
     assert user.username == "bob"

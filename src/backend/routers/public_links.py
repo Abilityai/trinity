@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import List
 
 from models import User
+from db.public_links import parse_link_expiry
 from database import db, PublicLinkCreate, PublicLinkUpdate, PublicLinkWithUrl
 from dependencies import get_current_user, OwnedAgentByName, CurrentUser
 from services.docker_service import get_agent_container
@@ -55,7 +56,7 @@ def _link_to_response(link: dict, include_usage: bool = True) -> PublicLinkWithU
         token=link["token"],
         created_by=link["created_by"],
         created_at=datetime.fromisoformat(link["created_at"]) if isinstance(link["created_at"], str) else link["created_at"],
-        expires_at=datetime.fromisoformat(link["expires_at"]) if link.get("expires_at") else None,
+        expires_at=parse_link_expiry(link.get("expires_at")),
         enabled=link["enabled"],
         name=link.get("name"),
         link_type=link_type,

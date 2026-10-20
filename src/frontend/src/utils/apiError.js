@@ -41,6 +41,10 @@ export function apiErrorMessage(err, fallback = 'Something went wrong') {
   }
 
   if (typeof detail === 'string' && detail.trim()) return detail
+  // Named refusals: `{code, message, ...}` (e.g. ent#720's bind refusals).
+  if (detail && typeof detail === 'object' && typeof detail.message === 'string' && detail.message.trim()) {
+    return detail.message
+  }
   // Some endpoints return {message: …} rather than {detail: …}
   const message = err?.response?.data?.message
   if (typeof message === 'string' && message.trim()) return message

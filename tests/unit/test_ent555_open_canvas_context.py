@@ -27,6 +27,7 @@ wrote to when nobody named one (AC #7).
 from __future__ import annotations
 
 import pytest
+from db.write_params import TaskExecutionFields
 
 
 @pytest.fixture()
@@ -65,9 +66,14 @@ def _canvas(agent="mira", canvas_id="open-items", audience="roster"):
 
 def _turn(agent="mira", open_canvas_id=None):
     from database import db
-    return db.create_task_execution(agent_name=agent, message="add a column to this",
-                                    triggered_by="public",
-                                    open_canvas_id=open_canvas_id)
+    return db.create_task_execution(
+        agent_name=agent,
+        message="add a column to this",
+        triggered_by="public",
+        fields=TaskExecutionFields(
+            open_canvas_id=open_canvas_id,
+        ),
+    )
 
 
 # --- what may be stamped (the write side) -----------------------------------
@@ -197,9 +203,12 @@ def test_the_prompt_context_survives_a_resumed_turn():
     src = inspect.getsource(service.portal_chat)
     # #2694 put the voice delta at the head of a resumed turn; the canvas rides
     # behind it and AHEAD of the manifest on both arms, so a resumed turn and a
-    # cold one name the same canvas in the same place.
-    assert "(delta_prefix + canvas_prefix + manifest_prefix + message) if resuming" in src
-    assert "cold_message = history_prefix + canvas_prefix + manifest_prefix + message" in src
+    # cold one name the same canvas in the same place. (ent#661 put the
+    # turn-context lines between the delta and the canvas, on both arms;
+    # ent#610 adds the reply-to quote between the manifest and the message on
+    # both arms; the canvas-before-manifest order this pins is unchanged.)
+    assert "(delta_prefix + turn_prefix + canvas_prefix + manifest_prefix + reply_prefix + message) if resuming" in src
+    assert "cold_message = history_prefix + turn_prefix + canvas_prefix + manifest_prefix + reply_prefix + message" in src
 
 
 # --- wiring -----------------------------------------------------------------

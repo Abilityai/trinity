@@ -3,41 +3,37 @@
        element's. `w-full` inside the cell, with `w-72` kept as the mobile
        drawer's width, where there is no grid and no handle. -->
   <aside class="flex flex-col h-full w-72 sm:w-full min-w-0 bg-gray-50 dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800">
-    <!-- Brand. ent#359: the aggregate "waiting on you" count lives here, because
-         the agents block now occupies the top of the scroll region and would
-         otherwise scroll a fleet-wide signal out of view. -->
+    <!-- Brand. ent#556: Trinity's mark and the product's name. trinity-enterprise
+         #610 (D9/D13): it links to the Inbox — the Workspace's landing — and
+         the two aggregate counts that used to sit beside it MOVED to the pinned
+         Inbox row below: one home per fact, and that row is in the same
+         non-scrolling top block, so ent#359's "must not scroll out of view"
+         still holds. -->
     <div class="shrink-0 flex items-center gap-2 px-4 h-14 border-b border-gray-200 dark:border-gray-800">
-      <!-- ent#556: Trinity's mark and the product's name, replacing a
-           hand-drawn outline icon and the bare word "Workspace". Linked to the
-           Workspace root — true for both principals, and the only destination a
-           client session can actually open. -->
-      <PortalBrand :to="WORKSPACE_ROOT" />
-      <!-- ent#364: an ASK is a distinct fact from an unread reply — one is waiting
-           on you to decide, the other on you to read — so it gets its own badge
-           rather than being summed into that one. Before the unread count,
-           because a blocked agent outranks unread chatter.
-
-           #2424: `status-urgent` (not amber) — the token the operator NavBar's
-           pending-operator-queue badge already uses for "waiting on you", so the
-           two surfaces agree. Amber maps to `state-autonomous`, an operating
-           mode, which is a different claim. The wording comes from
-           `askBadgeTitle` because the inline literal said "agents" while
-           `askCount` counted asks. -->
-      <span
-        v-if="askCount"
-        class="ml-auto shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-500 text-white text-[11px] font-semibold flex items-center justify-center"
-        data-testid="sidebar-ask-count"
-        :title="askBadgeTitle(askCount)"
-      >{{ askCount > 99 ? '99+' : askCount }}</span>
-      <span
-        v-if="totalWaiting"
-        class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-600 text-white text-[11px] font-semibold flex items-center justify-center"
-        :class="askCount ? 'ml-1.5' : 'ml-auto'"
-        :title="`${totalWaiting} ${totalWaiting === 1 ? 'reply' : 'replies'} you haven't read`"
-      >{{ totalWaiting > 99 ? '99+' : totalWaiting }}</span>
+      <PortalBrand :to="WORKSPACE_INBOX" />
     </div>
 
     <div class="p-3 space-y-2">
+      <!-- trinity-enterprise#610: the pinned Inbox row (see the component). -->
+      <!-- Round 3 (§3g F4): said out loud, because on the drawer's landing
+           URL (/workspace/inbox) the row changes no route, and the shell's
+           route watcher is what closes the drawer everywhere else. -->
+      <PortalInboxRow :needs="inbox.needs" :came="inbox.came" @click="$emit('open-inbox')" />
+
+      <!-- ent#661: the person's Projects list — shown only when the roster
+           says this principal has the capability (internal-only).
+           #3695 (operator ruling 2026-10-13): it sits directly under Inbox —
+           the two navigation DESTINATIONS together at the top, then the two
+           ACTIONS on the chat list (New chat, Search). Between New chat and
+           Search it read as a chat-list control rather than a place to go.
+           #3672 (operator ruling): NO placeholder holds its slot while the
+           roster is out. Most installs (every OSS one) are not entitled to
+           Projects, so a held slot appeared and then vanished there — a layout
+           shift on every load to spare a late pop-in on the few entitled
+           installs. The link renders once the roster says `projectsAvailable`;
+           without it Inbox is followed by New chat with nothing between. -->
+      <PortalSidebarProjectsLink v-if="projectsAvailable" :active="projectsActive" @open="$emit('open-projects')" />
+
       <!-- New chat -->
       <!-- ent#357: disabled with an empty roster. `newChat()` only resets
            conversation state, so with no agent to chat with every branch of it
@@ -56,13 +52,31 @@
       <!-- Search -->
       <div class="relative">
         <svg class="w-4 h-4 text-gray-400 absolute left-3 top-2.5 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" /></svg>
+        <!-- ent#621 (follow-up): `⌘/` lands here (`focusSearch`, exposed for
+             the shell). The chord is shown three ways — `title`,
+             `aria-keyshortcuts`, and the key cap below — all read from the map. -->
         <input
+          ref="searchInput"
           :value="search"
           type="search"
+          :title="`${SEARCH_PLACEHOLDER} (${SEARCH_KEY_HINT})`"
+          :aria-keyshortcuts="SEARCH_KEY_SHORTCUTS"
           :placeholder="SEARCH_PLACEHOLDER"
           class="w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm pl-9 pr-3 py-2 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none"
           @input="$emit('update:search', $event.target.value)"
+          @focus="searchFocused = true"
+          @blur="searchFocused = false"
         />
+        <!-- Only while the field is empty and unfocused: it sits where the
+             field's own clear control appears, and a hint over what you are
+             typing is worse than none. Hidden below `sm`, where this sidebar is
+             the phone drawer and there is no keyboard to press it on. -->
+        <PortalKeyCap
+          v-if="!search && !searchFocused"
+          class="hidden sm:block absolute right-2.5 top-2 pointer-events-none"
+          data-testid="portal-sidebar-search-key"
+          aria-hidden="true"
+        >{{ SEARCH_KEY_HINT }}</PortalKeyCap>
       </div>
     </div>
 
@@ -82,29 +96,32 @@
         <!-- ent#402: while searching the label states the MATCH count. The
              toggle beside the rows states the overflow, so this must not
              repeat it — one fact, one place. -->
-        <div class="px-1.5 pt-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">{{ isSearching ? agentResultsLabel(agentResults.total) : 'Agents' }}</div>
+        <div class="px-1.5 pt-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wide" :class="META_INK">{{ isSearching ? agentResultsLabel(agentResults.total) : 'Agents' }}</div>
 
         <!-- #2159: the roster load is the first thing that happens after
              sign-in and it is not instant on a large fleet. Without this the
-             block renders empty and the page reads as hung, not loading. Three
-             skeleton rows: enough to say "rows are coming", not so many that a
-             small roster jumps when they are replaced. -->
-        <div v-if="loadingRoster && !roster.length" class="px-2 py-1.5" aria-busy="true">
-          <div v-for="i in 3" :key="i" class="flex items-center gap-2.5 py-2 animate-pulse">
-            <div class="w-[26px] h-[26px] rounded-full bg-gray-200 dark:bg-gray-800 shrink-0"></div>
-            <div class="min-w-0 flex-1 space-y-1.5">
-              <div class="h-3 w-1/2 rounded bg-gray-200 dark:bg-gray-800"></div>
-              <div class="h-2.5 w-1/3 rounded bg-gray-100 dark:bg-gray-800/60"></div>
-            </div>
-          </div>
-          <span class="sr-only">Loading your agents…</span>
-        </div>
+             block renders empty and the page reads as hung, not loading.
+             #3672: held until the WHOLE list has a verdict (`settled`), not
+             just the roster — the rows re-order and grow a subtitle when the
+             chats land, and an asked agent joins past the collapse limit when
+             the asks land, so rendering on the roster alone made them jump.
+             The retry arm keeps #2159's "no roster on screen" case. -->
+        <PortalSkeleton v-if="!settled || (loadingRoster && !roster.length)" variant="sidebar-agents" />
 
+        <!-- #3672: everything the section shows once settled, in ONE wrapper
+             with the one fade — so the rows arrive together, never one by one. -->
+        <div v-else class="ws-fade-in" data-testid="sidebar-agents-content">
+        <!-- ent#621: the row says it is the one you are in — by click as well as
+             by key. `aria-current` rather than `aria-selected`: these are
+             navigation destinations, not options in a listbox. -->
         <button
           v-for="a in shownAgents"
           :key="a.name"
-          class="w-full flex items-center gap-2.5 rounded-lg px-2 py-2 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
-          :title="agentRowTitle(a)"
+          class="w-full flex items-center gap-2.5 rounded-lg px-2 py-2 transition hover:bg-gray-50 dark:hover:bg-gray-800"
+          :class="a.name === activeAgentName ? ROW_ACTIVE : ''"
+          :aria-current="a.name === activeAgentName ? 'true' : undefined"
+          :title="`${agentRowTitle(a)} · ${AGENT_KEY_HINT} switch agent`"
+          :aria-keyshortcuts="AGENT_KEY_SHORTCUTS"
           @click="onAgentClick(a.name)"
         >
           <PortalAvatar :name="a.name" :avatar-url="a.avatar_url" :size="26" />
@@ -129,8 +146,18 @@
                  exists to remove. The slug stays the subtitle when the agent
                  renders under a label; the preview takes the line below it,
                  and never both lines at once. -->
-            <span v-if="rowMeta[a.name]?.preview" class="block text-xs text-gray-400 truncate">{{ rowMeta[a.name].preview }}</span>
-            <span v-else-if="agentLabel(a) !== a.name" class="block text-xs text-gray-400 truncate font-mono">{{ a.name }}</span>
+            <!-- ent#610 sign-off: the #2196 availability chip sits HERE, on the
+                 subtitle line, not in a strip reserved on every row (#2641) —
+                 that strip left a ~250px sidebar 0px for the names the moment
+                 "Show all" revealed a stopped agent. The text beside it truncates. -->
+            <span
+              v-if="chipFor(a) || rowMeta[a.name]?.preview || agentLabel(a) !== a.name"
+              class="flex items-center gap-1.5 min-w-0 text-xs"
+            >
+              <BaseBadge v-if="chipFor(a)" class="shrink-0" :variant="chipFor(a).variant">{{ chipFor(a).label }}</BaseBadge>
+              <span v-if="rowMeta[a.name]?.preview" class="min-w-0 truncate" :class="META_INK">{{ rowMeta[a.name].preview }}</span>
+              <span v-else-if="agentLabel(a) !== a.name" class="min-w-0 truncate font-mono" :class="META_INK">{{ a.name }}</span>
+            </span>
           </span>
           <!-- ent#523 / board A3: when you last heard from this agent. Tight
                enough to sit beside the name without competing with it. -->
@@ -148,51 +175,58 @@
                identical on every row — the same reason the availability slot
                below reserves its own footprint. `tabular-nums` was already
                right and is what makes a fixed column line up digit-for-digit. -->
-          <span class="shrink-0 w-14 text-right text-[11px] text-gray-400 tabular-nums">
+          <span class="shrink-0 w-14 text-right text-[11px] tabular-nums" :class="META_INK">
             <template v-if="rowMeta[a.name]?.time">{{ rowMeta[a.name].time }}</template>
           </span>
-          <!-- #2196: the agent can't currently run. LABEL, never disable —
-               disabling would relocate the dead state rather than remove it,
-               since a client whose agents are all stopped (a routine
-               resource-saving posture) would get an entirely inert Workspace.
-               The chip sets the expectation; the server's 502 is the honest
-               refusal. Nothing is rendered for `ready` or `unknown`.
-
-               The slot's footprint is RESERVED so a row does not reflow when an
-               agent starts or stops between refreshes — the same reason the
-               roster is not re-sorted by this.
-
-               #2641: the reservation is a property of the LIST, not of a row.
-               `availabilityChip` answers null for everything except `stopped`
-               and `unavailable`, so on a fleet where everything is running the
-               strip was empty on EVERY row — which is why the dates stopped
-               72px short of the right edge and the name was charged 72px for
-               nothing. Reserved on every row iff any VISIBLE row can show a
-               chip: uniform down the list, so #2580's identical truncation
-               point survives, and absent entirely when there is nothing to hold
-               space for, which puts the date flush against the row's edge.
-
-               The whole element goes, not just its width — a zero-width flex
-               child still sits between the date and the edge, and `gap-2.5` on
-               the row would keep paying 10px for it. -->
-          <span v-if="reserveAvailability" class="shrink-0 min-w-[4.5rem] flex justify-end">
-            <BaseBadge v-if="chipFor(a)" :variant="chipFor(a).variant">{{ chipFor(a).label }}</BaseBadge>
-          </span>
+          <!-- #2196's availability chip (LABEL, never disable) moved to the
+               subtitle line under the name (ent#610 sign-off): #2641's strip,
+               reserved on every row once any visible row could show a chip,
+               left the names 0px in a ~250px sidebar. Nothing after the date
+               reserves width now, so the date stays flush right (#2641). -->
           <!-- #2424: the ask badge ent#364's comment above already promised.
                It got an aggregate in the brand header and nothing per row, so
                the header advertised a count with no way to reach the agent it
                meant. Same token as that header badge; deliberately a DIFFERENT
                colour from the unread pill beside it, because they are
-               different obligations. -->
+               different obligations. ent#610 §3g A3b: both counters are the
+               700 tier — white on urgent-500 measured 2.80:1 — and the same two
+               colours the pinned Inbox row and the Inbox tabs use. -->
+          <!-- trinity-enterprise#657: unsent text in one of this agent's chats
+               (or in an unsaved new chat with it). Quiet and gray beside the two
+               pills — a state of the person's own work, not an obligation. -->
+          <span v-if="hasDraftFor(a.name)" class="shrink-0 flex items-center" data-testid="agent-draft"><DraftMark /></span>
+          <!-- trinity-enterprise#610 (the 09-30 ruling, item 3 — "D" in the
+               round-2 brief): this is the
+               agent row's "needs you" mark — the same feed (`openAsks`) and
+               the same hover words as the pinned Inbox row's, so the two read
+               as one fact. -->
+          <!-- trinity-enterprise#836: an UNFILLED orange circle — a ring, the
+               count in urgent ink at the AA tier (700 light / 400 dark) — not
+               the filled pill (operator ask, 2026-10-07: "more alarming than it
+               needs to be"). Still a different SHAPE from the filled unread
+               pill beside it (principle 24), still counted, still named. The
+               pinned Inbox row and the Inbox's Action counter keep their filled
+               700 pills; the rail's Asks tab wears this same recipe
+               (`OverflowTabs` `urgent-outline`). -->
           <span
             v-if="askCountFor(a.name)"
-            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-status-urgent-500 text-white text-[11px] font-semibold flex items-center justify-center"
+            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full ring-1 ring-inset ring-status-urgent-600 dark:ring-status-urgent-400 text-status-urgent-700 dark:text-status-urgent-400 text-[11px] font-semibold tabular-nums flex items-center justify-center"
+            :title="askBadgeTitle(askCountFor(a.name))"
+            aria-hidden="true"
             data-testid="agent-ask-count"
-          >{{ askCountFor(a.name) > 99 ? '99+' : askCountFor(a.name) }}</span>
+          >{{ capCount(askCountFor(a.name)) }}</span>
+          <!-- Round 2 (design F3): the two pills differ by colour alone, and a
+               title on a span inside a button is never read — each says what it
+               counts to a screen reader. -->
+          <span v-if="askCountFor(a.name)" class="sr-only">{{ askBadgeTitle(askCountFor(a.name)) }}</span>
           <span
             v-if="waitingFor(a.name)"
-            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-600 text-white text-[11px] font-semibold flex items-center justify-center"
-          >{{ waitingFor(a.name) > 99 ? '99+' : waitingFor(a.name) }}</span>
+            class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-700 text-white text-[11px] font-semibold flex items-center justify-center"
+            :title="`${waitingFor(a.name)} unread`"
+            aria-hidden="true"
+            data-testid="agent-unread-count"
+          >{{ capCount(waitingFor(a.name)) }}</span>
+          <span v-if="waitingFor(a.name)" class="sr-only">{{ waitingFor(a.name) }} unread</span>
         </button>
 
         <!-- #2159: ONE persistent button, never two v-if-alternated ones —
@@ -219,20 +253,22 @@
              both would state the same absence twice in two different words. -->
         <div
           v-if="isSearching && emptyLines.agents && roster.length"
-          class="px-2 py-3 text-xs text-gray-400"
+          class="px-2 py-3 text-xs"
+          :class="META_INK"
         >{{ emptyLines.agents }}</div>
 
         <!-- ent#357/#359 AC: an empty roster keeps a next action. Which one
              depends on who is looking — a platform user can go make an agent,
              an external client can only ask whoever invited them. -->
         <div v-if="!roster.length && !loadingRoster" class="px-2 py-3 text-xs text-gray-500 dark:text-gray-400">
-          <template v-if="isPlatformSession">
+          <template v-if="isPlatformSession && !workspaceOnly">
             No agents yet.
             <a href="/" class="text-action-primary-600 hover:underline">Create one →</a>
           </template>
           <template v-else>
             No agents shared with you yet — ask whoever invited you to share one.
           </template>
+        </div>
         </div>
       </section>
 
@@ -245,7 +281,7 @@
         <!-- Header and section status are ONE group and share one ink
              declaration; the result rows below are siblings, so they keep the
              body colour a chat title needs. -->
-        <div class="text-gray-400">
+        <div :class="META_INK">
           <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide">Chats</div>
           <div v-if="emptyLines.chats" class="px-2 py-3 text-xs">
             {{ emptyLines.chats }}
@@ -265,17 +301,38 @@
             <PortalAvatar :name="r.agent_name" :avatar-url="avatarFor(r.agent_name)" :size="22" />
             <span class="min-w-0 flex-1">
               <span class="block text-sm truncate">{{ r.title || 'Chat' }}</span>
-              <span v-if="r.snippet" class="block text-xs text-gray-400 truncate">{{ r.snippet }}</span>
+              <span v-if="r.snippet" class="block text-xs truncate" :class="META_INK">{{ r.snippet }}</span>
             </span>
+            <!-- trinity-enterprise#657: a search hit is a third row site with no
+                 ChatRow, so the mark is read from the store here. -->
+            <DraftMark v-if="searchRowHasDraft(r)" />
           </div>
         </button>
       </div>
 
-      <template v-else>
+      <!-- #3672: skeleton chat rows until the list's one verdict, then the
+           whole list in one pass with the same fade as the agents above. -->
+      <PortalSkeleton v-else-if="!settled" variant="sidebar-chats" />
+
+      <div v-else class="ws-fade-in" data-testid="sidebar-chats-content">
+        <!-- A failed chat-list read is said, never shown as "No chats yet"
+             (principle 15, #1926): the store keeps the last good list, which
+             on a failed FIRST read is an empty one. With rows on screen it is
+             the stale banner; with none, the same banner says nothing loaded. -->
+        <InlineError
+          v-if="threadsFailed && !failedDismissed"
+          class="mt-3"
+          :message="threadsFailedText"
+          retryable
+          data-testid="sidebar-chats-failed"
+          @retry="$emit('retry-threads')"
+          @dismiss="failedDismissed = true"
+        />
+
         <!-- Starred first, and LIFTED OUT of the date groups below (a starred
              chat appears exactly once — see partitionStarred). -->
         <div v-if="starred.length" class="mt-3">
-          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Starred</div>
+          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide" :class="META_INK">Starred</div>
           <ChatRow
             v-for="t in starred"
             :key="rowKey(t)"
@@ -289,7 +346,7 @@
         </div>
 
         <div v-for="g in grouped" :key="g.label" class="mt-3">
-          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">{{ g.label }}</div>
+          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide" :class="META_INK">{{ g.label }}</div>
           <ChatRow
             v-for="t in g.threads"
             :key="rowKey(t)"
@@ -301,7 +358,49 @@
             @toggle-star="$emit('toggle-star', t)"
           />
         </div>
-      </template>
+
+        <!-- ent#841: closed (archived) chats — nothing is deleted, and this is
+             where they are found again. Collapsed by default: they are out of
+             the way on purpose. Opening one reopens it as an active chat. -->
+        <div v-if="archived.length" class="mt-3" data-testid="sidebar-archived">
+          <button
+            type="button"
+            class="w-full flex items-center gap-1 px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide"
+            :class="META_INK"
+            :aria-expanded="archivedOpen"
+            data-testid="sidebar-archived-toggle"
+            @click="archivedOpen = !archivedOpen"
+          >
+            <svg class="w-3 h-3 transition-transform" :class="archivedOpen ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7" /></svg>
+            Archived · {{ archived.length }}
+          </button>
+          <template v-if="archivedOpen">
+            <ChatRow
+              v-for="t in archived"
+              :key="rowKey(t)"
+              :thread="t"
+              :active="isActive(t)"
+              :avatar-for="avatarFor"
+              :rename="rename"
+              @open="$emit('open-thread', t)"
+              @toggle-star="$emit('toggle-star', t)"
+            />
+          </template>
+        </div>
+
+        <!-- #3672: a list that turns out empty keeps a stable empty state
+             rather than collapsing to nothing (principle 16: it names the next
+             step). Not with an empty roster: the agents block above already
+             says the truer sentence, and saying it twice is noise (ent#402).
+             Only when the list is TRUSTED: an empty list from a failed read is
+             not "no chats" (the banner above says what happened). -->
+        <div
+          v-if="!threadsFailed && !activeThreads.length && !archived.length && roster.length"
+          class="mt-3 px-2 py-3 text-xs"
+          :class="META_INK"
+          data-testid="sidebar-chats-empty"
+        >No chats yet — open an agent above, or start a new chat.</div>
+      </div>
     </div>
 
     <!-- Footer: signed-in email + sign out -->
@@ -313,12 +412,26 @@
          lesson); only the accessible name changes. -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 p-3 flex items-center gap-2">
       <div class="min-w-0 flex-1">
-        <div class="text-xs text-gray-400">{{ isPlatformSession ? 'Signed in to Trinity' : 'Signed in' }}</div>
+        <div class="text-xs" :class="META_INK">{{ isPlatformSession ? 'Signed in to Trinity' : 'Signed in' }}</div>
         <div class="text-sm truncate" :title="clientEmail">{{ clientEmail }}</div>
       </div>
+      <!-- ent#621: the keys are only discoverable if something shows them, and
+           a key chord cannot show itself. Mouse and touch reach the same list
+           the `⌥/` chord opens (the ent#261 `<kbd>` precedent). -->
       <button
         type="button"
-        class="shrink-0 p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-white dark:hover:bg-gray-900 transition"
+        :class="FOOTER_BTN"
+        :title="`Keyboard shortcuts (${KEY_LIST_HINT})`"
+        :aria-label="`Keyboard shortcuts (${KEY_LIST_HINT})`"
+        :aria-keyshortcuts="KEY_LIST_SHORTCUTS"
+        data-testid="portal-sidebar-keys"
+        @click="$emit('open-keys')"
+      >
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8zm4 1v.01M11 9v.01M15 9v.01M7 13h10" /></svg>
+      </button>
+      <button
+        type="button"
+        :class="FOOTER_BTN"
         :title="signOutLabel"
         :aria-label="signOutLabel"
         @click="$emit('sign-out')"
@@ -330,23 +443,50 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import PortalSidebarProjectsLink from './projects/PortalSidebarProjectsLink.vue'
+import { computed, ref, watch } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalKeyCap from './PortalKeyCap.vue'
 import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
+import PortalInboxRow from './PortalInboxRow.vue'
+import PortalSkeleton from './PortalSkeleton.vue'
+import InlineError from '@/components/InlineError.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
+import DraftMark from '@/components/base/DraftMark.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { agentsWithDrafts, threadKey } from './portalDrafts'
 import {
-  groupThreadsByDate, partitionStarred, unreadByAgent, totalUnread, availabilityChip,
-  reservesAvailabilitySlot,
-  orderRosterAgents, agentRowMeta,
-  asksByAgent, askBadgeTitle, agentRowTitle as buildAgentRowTitle,
+  groupThreadsByDate, partitionStarred, unreadByAgent, availabilityChip,
+  agentRowMeta,
+  asksByAgent, agentRowTitle as buildAgentRowTitle,
   visibleAgentRows, AGENT_COLLAPSE_LIMIT,
   signOutLabelFor,
   searchAgents, sidebarSearchState, searchEmptyLines,
   agentResultsLabel, agentToggleLabel, showAgentToggle, SEARCH_PLACEHOLDER,
-  WORKSPACE_ROOT,
+  WORKSPACE_INBOX, askBadgeTitle,
 } from './portalUtils'
+import { inboxCounts } from './portalInbox'
+// ent#621: every key hint on this sidebar is DERIVED from the one map. A typed
+// glyph here would be a second declaration of the same chord, free to go stale
+// the day the map changes.
+import { keyHint, keyShortcutsFor, hostPlatform } from './portalKeymap'
+import { capCount } from '@/utils/tabTitle'
+import { staleBannerMessage } from '@/utils/loadingState'
+
+// ent#610 §3g B7a: the sidebar's meta ink, ONE string for every meta text
+// site. Bare gray-400 ink is 2.54:1 on white ("gray-400 is not text") and
+// had no dark half; gray-500 light is 4.83:1, gray-400 dark 6.99:1 on gray-900.
+const META_INK = 'text-gray-500 dark:text-gray-400'
+
+// ent#621: the agent row you are IN. The tinted ground is the semantic
+// `action-primary` token, not a raw neutral — the chat rows' white-on-ring
+// treatment reads as "a card lifted out of the list", which is the wrong
+// metaphor for a destination you are currently at, and spending three more raw
+// grays on it would push the file's ratchet the wrong way. Dark uses the
+// documented tinted-ground recipe (`token-500` at 16%, design-system §5).
+const ROW_ACTIVE = 'bg-action-primary-50 dark:bg-action-primary-500/16'
 
 const props = defineProps({
   roster: { type: Array, default: () => [] },
@@ -354,9 +494,28 @@ const props = defineProps({
   clientEmail: { type: String, default: '' },
   currentSessionId: { type: String, default: null },
   currentRoomId: { type: String, default: null },
+  // ent#621 — which agent is on stage. The sidebar had no notion of one: the
+  // only "current" it knew was a chat id, so an agent row never showed that it
+  // was the one you were in, by click or by key. It drives `aria-current`, the
+  // active row class, the auto-expand below, and `visibleAgentRows`' `keep`.
+  activeAgentName: { type: String, default: null },
   isPlatformSession: { type: Boolean, default: false },
+  // trinity-enterprise#837: a `user` cannot make an agent, so the empty roster
+  // asks for a share instead of pointing at the operator UI.
+  workspaceOnly: { type: Boolean, default: false },
+  // ent#661 — the roster's capability, and whether a Projects page is on screen.
+  projectsAvailable: { type: Boolean, default: false },
+  projectsActive: { type: Boolean, default: false },
   // #2159: distinguishes "still loading" from "loaded, and you have none".
   loadingRoster: { type: Boolean, default: false },
+  // #3672: the list's ONE first-load verdict (`sidebarSettled`, latched by the
+  // shell). False → both sections hold skeleton rows. Defaults to true so a
+  // caller that never loads (a test, a static mount) renders as before.
+  settled: { type: Boolean, default: true },
+  // The last chat-list read failed (`store.sessionsFailed`). `threads` is then
+  // the last good list — empty on a failed first read — so the empty copy is
+  // withheld and a banner says the read failed instead.
+  threadsFailed: { type: Boolean, default: false },
   search: { type: String, default: '' },
   searching: { type: Boolean, default: false },
   searchResults: { type: Array, default: () => [] },
@@ -365,31 +524,90 @@ const props = defineProps({
   rename: { type: Function, default: null },
 })
 const emit = defineEmits([
-  'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star',
-  'update:search', 'sign-out',
+  'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star', 'open-inbox',
+  'update:search', 'sign-out', 'open-projects', 'open-keys', 'retry-threads',
 ])
 
 const isSearching = computed(() => (props.search || '').trim().length >= 2)
 
+// The footer's icon buttons, ONE class string for both (the `ICON_BTN` shape
+// `PortalRail` uses): two identical inline copies is two places for a hover
+// state to drift, and the raw-colour ratchet counts every copy.
+const FOOTER_BTN = 'shrink-0 p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-white dark:hover:bg-gray-900 transition'
+
+const KEY_PLATFORM = hostPlatform()
+const AGENT_KEY_HINT = keyHint(['agent-prev', 'agent-next'], KEY_PLATFORM)
+const AGENT_KEY_SHORTCUTS = keyShortcutsFor(['agent-prev', 'agent-next'], KEY_PLATFORM)
+const KEY_LIST_HINT = keyHint('key-list', KEY_PLATFORM)
+const KEY_LIST_SHORTCUTS = keyShortcutsFor('key-list', KEY_PLATFORM)
+const SEARCH_KEY_HINT = keyHint('search-focus', KEY_PLATFORM)
+const SEARCH_KEY_SHORTCUTS = keyShortcutsFor('search-focus', KEY_PLATFORM)
+
+// ent#621 (follow-up) — the search key's two questions, answered by the
+// instance that owns the field (the shell has two sidebars and asks the one on
+// screen). `select()` so a second search replaces the first without a
+// backspace; `searchHasFocus` is what lets a repeat press hand the caret back.
+const searchInput = ref(null)
+const searchFocused = ref(false)
+function focusSearch() {
+  const el = searchInput.value
+  if (!el) return false
+  el.focus()
+  el.select?.()
+  return true
+}
+function searchHasFocus() {
+  return !!searchInput.value && typeof document !== 'undefined' && document.activeElement === searchInput.value
+}
+defineExpose({ focusSearch, searchHasFocus })
+
 // #2258: the accessible name of the footer button, per principal kind.
 const signOutLabel = computed(() => signOutLabelFor(props.isPlatformSession))
 
-const split = computed(() => partitionStarred(props.threads))
+// ent#841: an archived chat is out of the active list — Starred included (a
+// closed starred chat keeps its star, and gets its pinned place back when it is
+// reopened) — and is listed once, under Archived, newest closed first.
+const activeThreads = computed(() => props.threads.filter((t) => !t.archived_at))
+const archived = computed(() => props.threads
+  .filter((t) => t.archived_at)
+  .sort((a, b) => String(b.archived_at).localeCompare(String(a.archived_at))))
+const archivedOpen = ref(false)
+
+// The failed-read banner: dismissible, and back on the NEXT failure (a
+// recovered read clears it on its own, since `threadsFailed` drops).
+const failedDismissed = ref(false)
+watch(() => props.threadsFailed, (failed) => { if (failed) failedDismissed.value = false })
+const threadsFailedText = computed(() => (props.threads.length
+  ? staleBannerMessage('your chats', null)
+  : "Couldn't load your chats. They'll appear here once the list loads."))
+const split = computed(() => partitionStarred(activeThreads.value))
 const starred = computed(() => split.value.starred)
 const grouped = computed(() => groupThreadsByDate(split.value.rest))
 
 const waiting = computed(() => unreadByAgent(props.threads))
 const waitingFor = (name) => waiting.value[name] || 0
-const totalWaiting = computed(() => totalUnread(props.threads))
 // ent#364: read from the store rather than taken as a prop, because the count and
 // the two ask renderings must come from ONE list — a prop threaded from the view
 // would be a second path to the same fact, free to disagree with it.
 const asksStore = useClientPortalStore()
-const askCount = computed(() => asksStore.askCount)
+// trinity-enterprise#610 (D13): the pinned Inbox row's two counts — `needs` is
+// `askCount` (pending asks), `came` is `totalUnread` over these threads.
+// trinity-enterprise#631: plus the tags not yet opened.
+const inbox = computed(() => inboxCounts(props.threads, asksStore.openAsks, asksStore.mentions))
 // #2424: the ask twin of `waiting`. Kept a separate map on purpose — see the
-// brand-badge comment in the template.
+// Inbox-row comment in the template.
 const asksPerAgent = computed(() => asksByAgent(asksStore.openAsks))
 const askCountFor = (name) => asksPerAgent.value[name] || 0
+
+// trinity-enterprise#657: the agents whose row carries the Draft mark. A
+// listed thread's `hasDraft` rides the thread object (the shell's `decorate`,
+// like `unread`); an UNSAVED chat has no thread row, so its agents come from
+// the store — read here for the reason the asks are: one list, never a prop
+// free to disagree with it. Rooms are not propagated (the room row is listed).
+const draftsStore = usePortalDraftsStore()
+const draftAgents = computed(() => agentsWithDrafts(props.threads, draftsStore.newChatDraftAgents))
+const hasDraftFor = (name) => draftAgents.value.has(name)
+const searchRowHasDraft = (r) => draftsStore.keys.has(threadKey(r?.session_id))
 
 // A row key has to include the kind: thread ids and room ids are independent
 // spaces, so two chats of different kinds could collide on a bare id.
@@ -433,6 +651,7 @@ function agentRowTitle(a) {
     unread: waitingFor(a.name),
     askCount: askCountFor(a.name),
     chipTitle: chip ? chip.title : '',
+    hasDraft: hasDraftFor(a.name),
   })
 }
 
@@ -454,7 +673,11 @@ const agentsExpanded = ref(false)
 // never collapsed out of its own result). Both live inside `searchAgents`.
 const agentResults = computed(() => searchAgents(props.roster, props.search, {
   askCounts: asksPerAgent.value,
+  draftAgents: draftAgents.value,
   expanded: agentsExpanded.value,
+  // ent#621: the agent you are IN stays in its own result list, the way #2424
+  // keeps an asked agent in it.
+  keep: props.activeAgentName,
 }))
 
 // The section header, both empty lines and the hint read from ONE state value,
@@ -476,23 +699,35 @@ const emptyLines = computed(() => searchEmptyLines(searchState.value, props.sear
 // ONE loop in the template feeds from this, so the row markup, its badges, its
 // availability chip and its open path are inherited by search rather than
 // copied into it — the only way the two modes cannot drift.
-// ent#523 AC 6 — the agents you worked with most recently first, then by name.
 //
-// ent#491 now fills the recency half: rooms count (crediting every agent in
-// them), and the fourth argument is the session-stable snapshot that keeps an
-// incoming reply from re-sorting the list under the cursor. `primaryName` stays
-// null — ent#500 does not exist, so there is nothing to name a primary with, and
-// guessing one would be worse than the seam. Applied BEFORE the
-// collapse so the rows that survive `visibleAgentRows`' limit are the ones the
-// person actually uses — ordering after it would sort a slice chosen by the old
-// order, which is the same bug one step later. Search results are ordered by
-// relevance and are deliberately left alone.
-const orderedRoster = computed(() => orderRosterAgents(
-  props.roster, props.threads, null, asksStore.agentRecency))
-
+// ent#523 AC 6 (most recent first, then by name) and ent#491's session-stable
+// recency are still the order; ent#621 T6 moved the SORT up to `Portal.vue`, so
+// `props.roster` arrives already ordered. Two reasons it had to move: this
+// component is mounted twice (the desktop column and the mobile drawer), and the
+// switch-agent keys have to walk exactly the order the eye reads — which they
+// cannot ask a child for. Ordering still happens BEFORE the collapse, which is
+// the point of #2424; search results are ordered by relevance and are
+// deliberately left alone.
 const shownAgents = computed(() => (isSearching.value
   ? agentResults.value.visible
-  : visibleAgentRows(orderedRoster.value, { expanded: agentsExpanded.value, askCounts: asksPerAgent.value })))
+  : visibleAgentRows(props.roster, {
+      expanded: agentsExpanded.value, askCounts: asksPerAgent.value, draftAgents: draftAgents.value,
+      // ent#621: and never the agent you are looking at.
+      keep: props.activeAgentName,
+    })))
+
+// ent#621 Decision 27/37 — a key walk that lands on an agent behind "N more"
+// must SHOW it. `keep` alone would append one row to an otherwise unchanged
+// list, so the walk would rename a single row at the bottom while the rest of
+// the order stayed hidden: not "the order the sidebar shows". Expanding is the
+// honest answer, and it happens once here for both instances. Collapsing again
+// is left to the person — a list that re-collapsed itself on the next move
+// would fight the walk.
+watch(() => props.activeAgentName, (name) => {
+  if (!name || agentsExpanded.value) return
+  const i = (props.roster || []).findIndex((a) => a && a.name === name)
+  if (i >= AGENT_COLLAPSE_LIMIT) agentsExpanded.value = true
+})
 
 // #2641: computed over `shownAgents` — the rows actually RENDERED — not over
 // the whole roster. A stopped agent hidden by search or by the collapse limit
@@ -500,8 +735,6 @@ const shownAgents = computed(() => (isSearching.value
 // reported bug with extra steps. Declared after `shownAgents` rather than
 // beside `chipFor` so the dependency reads in source order; one pass per
 // render, beside `rowMeta`'s.
-const reserveAvailability = computed(() => reservesAvailabilitySlot(
-  shownAgents.value, { detailed: props.isPlatformSession }))
 
 // The one-line preview under the name (AC 6): the newest chat you have with
 // this agent. Null when there is nothing to show, so a row with no history

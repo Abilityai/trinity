@@ -72,4 +72,67 @@ function groupByPr(statuses) {
   return byPr;
 }
 
-module.exports = { verdictFor, groupByPr }
+const SHA_RE = /^[0-9a-f]{40}$/;
+
+/**
+ * Build per-leg statuses from the TRUSTED `discover` matrix (#3103).
+ *
+ * The test job runs PR code, and that code can forge anything the job writes:
+ * the status JSON, the artifact's file name, even the artifact itself (it can
+ * read the runner's upload token). So the identity of a leg — which PR, which
+ * seed, which head SHA — comes only from the matrix `discover` built before
+ * any PR code ran. The artifact contributes two booleans and nothing else, and
+ * a status whose identity fields disagree with the matrix is rejected rather
+ * than trusted. A rejected or absent leg is simply missing, which
+ * `verdictFor` already reports as unverified.
+ *
+ * `seed` is optional: integration-nightly runs one leg per PR and its matrix
+ * carries none. A seedless entry skips the seed check and yields a leg with
+ * no `seed` field.
+ *
+ * @param {{include: Array<{pr_number: number, seed?: string, head_sha: string}>}} matrix
+ * @param {(pr: number, seed: string|undefined) => string|null} readStatus raw JSON text, or null when absent
+ * @returns {{legs: object[], rejected: Array<{pr: number, seed: string, reason: string}>}}
+ */
+function legsFromMatrix(matrix, readStatus) {
+  const legs = [];
+  const rejected = [];
+  for (const entry of (matrix && matrix.include) || []) {
+    const pr = Number(entry.pr_number);
+    const seed = entry.seed === undefined ? undefined : String(entry.seed);
+    const reject = (reason) => rejected.push({ pr, seed, reason });
+
+    if (!Number.isInteger(pr) || pr <= 0) { reject('matrix pr_number is not a positive integer'); continue; }
+    if (!SHA_RE.test(String(entry.head_sha))) { reject('matrix head_sha is not a 40-char hex SHA'); continue; }
+
+    const raw = readStatus(pr, seed);
+    if (raw === null || raw === undefined) continue;
+
+    let s;
+    try {
+      s = JSON.parse(raw);
+    } catch (err) {
+      reject(`status JSON does not parse: ${err.message}`);
+      continue;
+    }
+    if (!s || typeof s !== 'object') { reject('status JSON is not an object'); continue; }
+    if (Number(s.pr_number) !== pr) { reject(`status pr_number ${JSON.stringify(s.pr_number)} disagrees with the matrix`); continue; }
+    if (seed !== undefined && String(s.seed) !== seed) { reject(`status seed ${JSON.stringify(s.seed)} disagrees with the matrix`); continue; }
+    if (s.head_sha !== entry.head_sha) { reject('status head_sha disagrees with the matrix'); continue; }
+    if (typeof s.merge_conflict !== 'boolean' || typeof s.regression !== 'boolean') {
+      reject('merge_conflict/regression are not booleans');
+      continue;
+    }
+
+    legs.push({
+      pr_number: pr,
+      ...(seed === undefined ? {} : { seed }),
+      head_sha: entry.head_sha,
+      merge_conflict: s.merge_conflict,
+      regression: s.regression,
+    });
+  }
+  return { legs, rejected };
+}
+
+module.exports = { verdictFor, groupByPr, legsFromMatrix }

@@ -62,10 +62,151 @@ spy over every existing resolver).
 | `apply_result` success branch | `services/task_execution_service.py` (~1965) | CAS-won only |
 | `apply_result` failure branch | `services/task_execution_service.py` (~2072) | **ent#265 D3** — previously emitted the #1578 event but never the report; the path agent-reported failure envelopes take (HTTP-error terminals, async #1083 callbacks). CANCELLED envelopes (#679) report too |
 | `_write_terminal_and_gate` | `services/task_execution_service.py` (~890) | timeout / budget / crash / inline circuit-open class |
+| `apply_task_result` (pull sink) | `services/pull_coordination_service.py` | CAS-won only (#3114) |
+| MCP `chat_with_agent` / `chat_with_<agent>` (#3232) | `src/mcp-server/src/tools/chat.ts::resolveReportBack` | not a terminal — where a delegated child's `parent_execution_id` comes from; async dispatches send the caller's turn by default. See [below](#how-an-mcp-delegation-carries-the-parent-3232) |
 
-All three call `spawn_completion_report(...)` — fire-and-forget with a
+Every terminal above calls `spawn_completion_report(...)` (the MCP row is not a
+terminal) — fire-and-forget with a
 strong-ref task set (the #1083 GC footgun), never-raise, CAS-won-gated by the
 caller.
+
+## How an MCP delegation carries the parent (#3232)
+
+The terminals above report only for a child row that inherited a channel
+context, and a row inherits only when its `/task` request names a
+`parent_execution_id`. For agent-to-agent delegation that request is built by
+the MCP server's `chat_with_agent` and every dedicated `chat_with_<agent>` tool
+(`src/mcp-server/src/tools/chat.ts::runAgentChat`). Before #3232 neither sent
+the field: `chat_with_agent` dropped the argument and the dedicated tools never
+declared it, so a delegation from a Slack, Telegram or Workspace turn never
+reported back.
+
+`resolveReportBack` decides once per call. "Default" below means: no
+`execution_id` passed, and the platform's `X-Trinity-Execution-Id` header
+(#2392) names a real turn (not `manual`, not absent).
+
+| Route | Default (nothing typed) | Typed id | Typed `manual` |
+|---|---|---|---|
+| `parallel=true, async=true` (another agent, or a self-task **without** `inject_result`) | **parent = header turn**; result `report_back: requested` + an informational note | parent = header turn if present, else the typed id (if well-formed); `report_back` fields | **opt-out**: no parent, no fields |
+| `parallel=true, async=true`, self-task **with** `inject_result=true` | no parent, no fields (the agent already named a destination) | as above | no parent, no fields |
+| #946 pull-routed sequential (flag ON, agent scope, non-self; always an async receipt) | **parent = header turn**; `requested` + note | as above | opt-out |
+| `parallel=true`, sync | no parent, no fields (sync stays opt-in) | as above | no parent, no fields |
+| sequential `/chat` (#3295) — the parent never travels in the `/chat` body; it goes out through `POST …/executions/{id}/report-back` **only when the call ends in a `queued_timeout` receipt** (the MCP server's 25 s abort, a 409 in-flight replay, or the backend's own 504) | receipt: **arm with the header turn**; `requested` + the default note (or `off`/`not_armed` if the backend refused). Inline reply or `agent_busy`: nothing armed, no fields | receipt: arm with the header turn if present, else the typed id; `requested`. Inline reply: `off`/`answered_inline` + note. `agent_busy`: `off`/`not_armed`, no note | **opt-out**: nothing armed, no fields |
+| any `/task` route, no header (agent image older than #2392) or header `manual` | no parent, no fields | typed id forwarded if well-formed (no header), or nothing with `off`/`manual_session` (header `manual`) | no parent, no fields |
+| any route, `MCP_REPORT_BACK_ENABLED=false` | no parent, **no fields** (receipts byte-identical to pre-#3232) | no parent; `off`/`disabled` | no parent, no fields |
+
+- **Header first.** When both a header turn and a typed id exist, the header
+  goes: a resumed session can copy a stale id out of its history, and the
+  header names the turn actually being served (`resolveExecutionId`, the house
+  rule). The header is not a trust boundary; `_inherited_channel_context`'s
+  provenance guard still decides every inheritance.
+- **`callerTurn` is separate.** The `X-Trinity-Execution-Id` the MCP server
+  forwards to the backend (read by the skill gate and pull-mode refusals) is
+  computed as before; a typed `manual` opt-out never clears it.
+- **Not in the idempotency key.** The parent does not change the
+  `Idempotency-Key` (Invariant #18), so the same text from a later turn within
+  24 h replays the first run, which reports to the first turn's thread (#3296).
+- **Sequential `/chat` is armed after the fact (#3295).** `ChatMessageRequest`
+  still has no parent field and the `/chat` row is still created without
+  `source_channel*`. The MCP server asks for the report only at the moment it
+  knows the caller is NOT getting the reply — when it hands back a
+  `queued_timeout` receipt — by calling
+  `POST /api/agents/{name}/executions/{execution_id}/report-back` with the
+  caller's turn. See [below](#how-a-sequential-chat-call-is-armed-3295). A call
+  that answers inline is never armed, so it can never post a second "done".
+
+Copy-paste example, from an agent serving a Slack thread — no argument needed:
+
+```
+chat_with_agent(agent_name="research-bot", message="Compile the Q3 report", parallel=true, async=true)
+→ {"status": "accepted", "execution_id": "…", "message": "Accepted by 'research-bot' as … ",
+   "report_back": "requested", "report_back_note": "Report-back is on by default: …"}
+```
+
+When `research-bot` finishes (or fails), its note lands in the thread. To keep
+a call quiet, pass `execution_id="manual"`.
+
+**Chains post once per async hop.** A (Slack turn) → B async: B's row
+inherits. B → C async: the header is B's turn, B's row carries the inherited
+context, and the guard's agent arm passes, so C inherits too. The thread gets
+B's note (often "handed to C") and later C's note. B can pass
+`execution_id="manual"` to stay quiet.
+
+**Inherited context is for this report only.** `POST /api/agents/{name}/voice-reply`
+(`routers/agents.py::send_voice_reply_endpoint`) has no proactive-consent check,
+so it refuses a delegated child — a row whose `source_channel_agent` is set —
+with `reason="delegated_turn"` before any channel branch (#3232). A direct
+channel turn still delivers.
+
+## How a sequential `/chat` call is armed (#3295)
+
+A sequential `chat_with_agent` (`parallel=false`) is served by `POST /chat`,
+whose caller normally gets the reply inline and relays it. Stamping the
+destination at row creation, as `/task` does, would therefore double-post on
+every call that answers in time — and on a pull pilot the sink reports at the
+terminal *before* the waiting handler returns the reply, so no "is the caller
+still waiting" check on the backend can tell the two apart (and
+`request.is_disconnected()` reads `False` behind the app's two
+`@app.middleware("http")` wrappers, so an aborted caller is invisible there).
+
+The one party that knows whether the caller got the reply is the MCP server,
+at the moment it builds a receipt. So:
+
+1. `resolveReportBack` treats the `chat` route like the async routes — default
+   on from the platform turn header, typed id held to the header's format,
+   `manual` opts out, `MCP_REPORT_BACK_ENABLED=false` sends nothing — but the
+   parent stays out of the `/chat` body.
+2. `runAgentChat`'s sequential branch, on a `queued_timeout` receipt (its own
+   abort at `MCP_CHAT_TIMEOUT_MS`, a 409 in-flight replay, or — new in #3295 —
+   the backend's own 504 after a pull pilot's wait, recovered through the same
+   execution lookup), calls `client.armChatReportBack(agent, execution_id,
+   parent)` → `POST /api/agents/{name}/executions/{execution_id}/report-back`
+   `{parent_execution_id}`. Own deadline (`MCP_REPORT_BACK_ARM_TIMEOUT_MS`,
+   default 2 s), never throws. Only an explicit refusal (4xx, or 200
+   `armed: false`) turns the result to `off`/`not_armed`; a timeout or network
+   error keeps `requested`, because the backend may well have processed the arm
+   and the note already says requested is not a guarantee.
+3. `chat_execution_service.arm_chat_report_back` admits only the row's own
+   **dispatcher** (an agent key must be `source_agent_name`; a person must be
+   `source_user_id`; connector keys 403; any other row is one uniform 404), only a `/chat` row (`triggered_by` ∈
+   `agent`/`mcp`/`chat` — an inbound channel turn is answered by the adapter),
+   and inherits the destination through the unchanged
+   `_inherited_channel_context` (ent#265 provenance + ent#457 parent-running).
+   The stamp is ent#498's `stamp_execution_channel_context` (`WHERE
+   source_channel IS NULL` — add-only, so a retried arm is idempotent). It then
+   re-reads the row and, if it already reached a terminal, spawns the report
+   itself.
+4. The push `/chat` terminals (`_finalize_chat_success`, `_finalize_http_failure`,
+   `_finalize_budget_exhausted`, and the pull path's `ResumeLockBusy` write)
+   now call `spawn_completion_report` on a CAS-won write — a no-op for an
+   unstamped row. The pull sink already did.
+
+**Exactly once without a RETURNING write.** `report_completion` reads the row
+fresh and `effect_guard` keys on the destination, so every interleaving of
+stamp and terminal delivers once: terminal first → its spawn finds no
+destination, the arm's re-read sees the terminal and spawns; stamp first → the
+arm spawns nothing on a running row, the terminal's spawn finds the stamp;
+both spawn → the second is a replay. Pinned by
+`tests/unit/test_3295_chat_report_back.py` with the real reporter and guard.
+
+Known limits: an arm that never reaches the backend (lost request) leaves the
+receipt saying `requested` with nothing posted — the same best-effort standing
+as every other delivery here; a backend restart mid-turn (F7). The MCP log line
+is `[Report-Back #3295] <caller> -> <target> execution_id=… parent=… armed=…`.
+
+### Debugging: no note arrived
+
+1. **MCP server log** — find the `[Report-Back #3232] <caller> -> <target> …`
+   line for the call. `arm=none` / `arm=opt_out` / `parent=none` means no parent
+   was sent (check `route=`, `caller_turn=`, and `report_back=off:<reason>`).
+2. **Child row** — `schedule_executions.source_channel*` on the child. Empty
+   with a parent sent means the backend refused inheritance.
+3. **Backend log** — the `[ent#265]` / `[ent#457]` provenance and liveness
+   refusal lines (wrong owner, parent not `running`), then the `[ent#224]`
+   report or suppression lines at the child's terminal.
+4. **Consent and binding** — Slack `allow_proactive`, the Telegram group's
+   "Completion reports" toggle, a missing binding or bot token. Kill switch:
+   the MCP server's startup line `Delegation report-back (#3232): OFF`.
 
 ## The D0 fix — inherited context is persisted at row creation
 
@@ -299,13 +440,18 @@ surface).
 | `_write_terminal_and_gate` (timeout/budget/crash) | ✅ | shipped with ent#224 |
 | Lease-reaper `LEASE_EXPIRED` | ❌ v1 | |
 | Bulk watchdog sweeps | ❌ v1 | |
-| Pull sink (`apply_task_result`) | ❌ v1 | dark until a pull pilot |
+| Pull sink (`apply_task_result`) | ✅ | #3114 — `pull_coordination_service` spawns the report |
+| Push `/chat` finalizers (`_finalize_chat_success` / `_finalize_http_failure` / `_finalize_budget_exhausted`) + the pull path's `ResumeLockBusy` write | ✅ | #3295 — CAS-won only; a no-op unless the row was armed through `POST …/executions/{id}/report-back` |
+| Backend-shutdown terminal / cleanup stale-execution and stale-slot sweeps | ❌ | write `failed` with no report, so a hung or orphaned child fails silently (follow-up) |
 | Operator-terminate cancel (Path B) | ❌ v1 | writes CANCELLED before `apply_result` |
+| `fan_out` children (MCP `fan_out`, `POST /api/agents/{name}/fan-out`) | ❌ | `FanOutRequest` has no parent field and `fan_out_service` creates its rows without `source_channel*`, so nothing is inherited (#3232, follow-up) |
+| Approved run of a delegated `/task` that needed a skill-gate approval | ❌ | the gate (`skill_gate_service.enforce` in `dispatch_parallel_task`) fires before `create_task_execution_and_activities`, so nothing is inherited, and `skill_gate_service._dispatch_approved` re-creates the run from the frozen dispatch, which carries no `source_channel*` (follow-up) |
 
 Other recorded limits: a restart mid-inline-turn loses the inline reply and
 reports nothing (F7); a late token-gated FAILED→SUCCESS resurrection replays
 the guard — the corrective ✅ is never sent (correct at-most-once, D4/L5);
-fan-out = ONE report per child execution (per-execution identity; no persisted
+fan-out children carry no inherited conversation today (row above); were they
+to, fan-out = ONE report per child execution (per-execution identity; no persisted
 parent key to dedup on — G3, pinned by test); pre-migration rows suppress on
 Telegram (NULL context, G7); forum topics not threaded (inbound never captures
 `message_thread_id`); no channel-history persistence of the report (the group
@@ -400,3 +546,11 @@ vanished session writing nothing. Each was verified to fail against a mutant
   no resolver for the value, so rooms and their children stay out of this leg
   by construction (not via `INLINE_CHANNEL_TRIGGERS`, which would cover the
   parent only)
+- 2026-10-06 (#3232): MCP delegation carries the parent —
+  `resolveReportBack`, the async default and its `manual` opt-out, the
+  `report_back` result fields, the `MCP_REPORT_BACK_ENABLED` kill switch, the
+  debugging runbook; pull-sink row corrected (#3114)
+- 2026-10-09 (#3295): a sequential `/chat` call that ends in a receipt is
+  armed after the fact — `POST …/executions/{id}/report-back`,
+  `arm_chat_report_back`, `chatRouteFields`, the push `/chat` terminals spawn;
+  `sequential_chat` reason retired for `answered_inline` / `not_armed`

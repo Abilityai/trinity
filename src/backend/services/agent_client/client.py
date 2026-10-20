@@ -36,6 +36,24 @@ from services.model_context import DEFAULT_CONTEXT_WINDOW
 logger = logging.getLogger(__name__)
 
 
+def _warn_if_link_refusal(agent_name: str, path: str, response) -> None:
+    """trinity-enterprise#819: the agent server does not open a file that is a
+    link. A platform read that meets one still fails soft; this names the file
+    so the template can ship it as a real file instead."""
+    if response.status_code != 403:
+        return
+    try:
+        detail = response.json().get("detail")
+    except Exception:  # noqa: BLE001 - a non-JSON body is not the refusal
+        return
+    if isinstance(detail, dict) and detail.get("code") == "resolved_path_mismatch":
+        logger.warning(
+            "Agent %s: platform read of %s refused because the file is a link; "
+            "file reads do not follow links, so ship it as a real file",
+            agent_name, path,
+        )
+
+
 # ============================================================================
 # Circuit Breaker (per-agent, Redis-backed for cross-worker coordination, #631)
 # ============================================================================
@@ -598,6 +616,7 @@ class AgentClient:
             elif response.status_code == 404:
                 return {"success": True, "content": None, "not_found": True}
             else:
+                _warn_if_link_refusal(self.agent_name, path, response)
                 return {
                     "success": False,
                     "error": response.text,
@@ -612,7 +631,8 @@ class AgentClient:
         path: str,
         content: str,
         timeout: float = 30.0,
-        platform: bool = False
+        platform: bool = False,
+        if_match: Optional[str] = None,
     ) -> dict:
         """
         Write content to a file in the agent's workspace.
@@ -623,6 +643,10 @@ class AgentClient:
             content: File content to write
             timeout: Request timeout
             platform: If True, allows writes to .trinity directory (platform-initiated)
+            if_match: #2915 — sha256 hex of the content this caller last READ.
+                The agent server refuses the write with 412 when the file no
+                longer matches (a compare-and-swap), so a concurrent agent write
+                is never clobbered. An older agent server ignores the parameter.
 
         Returns:
             dict with success status and file info
@@ -636,6 +660,8 @@ class AgentClient:
             query = f"path={encoded_path}"
             if platform:
                 query += "&platform=true"
+            if if_match:
+                query += f"&if_match={urllib.parse.quote(if_match, safe='')}"
 
             response = await self.put(
                 f"/api/files?{query}",

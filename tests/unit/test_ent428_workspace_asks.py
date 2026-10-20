@@ -132,16 +132,16 @@ def test_a_busy_fleet_does_not_crowd_out_one_client_ask(asks_db, client_email):
     the queue with nobody else permitted to answer it.
 
     The noise is operator asks (`addressed=None`), the majority case on any real
-    instance, and it is raised AFTER the client's ask: within one priority the
-    ordering is newest-first, so every noise row sorts ahead of it and the whole
-    `limit` is spent before the client's row is reached.
+    instance, and it is raised BEFORE the client's ask: within one priority
+    pending asks sort oldest first (#3679), so every noise row sorts ahead of it
+    and the whole `limit` is spent before the client's row is reached.
     """
     from database import db
     from client_portal.asks import service
 
-    mine = _raise_ask(addressed=client_email, req_id="req-quiet")
     for n in range(220):
         _raise_ask(req_id=f"req-noise-{n}", kind="approval")
+    mine = _raise_ask(addressed=client_email, req_id="req-quiet")
 
     # The fixture has to actually reproduce the crowd-out, or this test passes
     # for the wrong reason — filtering the result of a window the ask is still
@@ -174,8 +174,11 @@ def test_a_revoked_share_stops_showing_an_already_raised_ask(asks_db, client_ema
     assert service.list_asks(client_email, is_platform=False) == []
 
 
-def test_an_unreadable_roster_hides_rather_than_shows(asks_db, client_email, monkeypatch):
-    """Fail closed: showing an ask we cannot justify is worse than hiding one."""
+def test_an_unreadable_roster_shows_nothing_and_says_so(asks_db, client_email, monkeypatch):
+    """Still fail closed — no ask we cannot justify is shown — but no longer
+    SILENTLY: trinity-enterprise#610 (PR A0) reversed the old `== []` pin. An
+    empty list is the claim "nothing needs you", and making it during a roster
+    outage is the #2915 class; the list raises and the route answers 503."""
     import client_portal.service as portal_service
     from client_portal.asks import service
     _raise_ask(addressed=client_email)
@@ -184,7 +187,8 @@ def test_an_unreadable_roster_hides_rather_than_shows(asks_db, client_email, mon
         raise RuntimeError("roster down")
 
     monkeypatch.setattr(portal_service, "agent_on_roster", boom)
-    assert service.list_asks(client_email, is_platform=False) == []
+    with pytest.raises(service.AsksUnavailable):
+        service.list_asks(client_email, is_platform=False)
 
 
 def test_a_client_read_never_unlocks_the_owned_agents_branch(asks_db, client_email, roster):

@@ -55,6 +55,7 @@ def is_valid_public_channel_model(model: str) -> bool:
 # ImportError was swallowed by that seed's fail-safe contract — so the feature
 # no-opped on every boot with a fully green unit suite. Anything
 # `init_database()` reads belongs in config.py and is re-exported below.
+import config  # noqa: E402
 from config import (  # noqa: E402
     COMMUNITY_FRESH_INSTALL_SEED,  # noqa: F401  (re-export)
     COMMUNITY_RETENTION_FLOOR_DAYS,  # noqa: F401  (re-export)
@@ -79,11 +80,16 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "agent_soft_delete_retention_days": "Days to retain soft-deleted agents before hard-purge (default: 180, 0 = disabled, #834)",
     "schedule_soft_delete_retention_days": "Days to retain soft-deleted schedules before hard-purge (default: 30, 0 = disabled, #834)",
     "agent_reports_retention_days": "Days to retain agent_reports rows (default: 90, 0 = disabled, #918)",
+    "operator_queue_aging_hours": "Hours a pending operator-queue item may wait before it is marked as aging on the card and the filing agent receives a receipt (0 = disabled; default: 24, #2915)",
     "operator_queue_retention_days": "Days to retain terminal operator_queue rows (acknowledged/cancelled/expired; default: 90, 0 = disabled, #1142)",
     "agent_reminders_retention_days": "Days to retain terminal agent_reminders rows (fired/cancelled/failed; default: 90, 0 = disabled, #1296)",
     "subscription_headroom_retention_days": "Days to retain subscription headroom probe history used for utilization trends (default: 30, 0 = disabled, ent#433)",
     "subscription_failure_event_retention_days": "Days to retain subscription rate-limit/auth failure events (default: 30, 0 = disabled; was a hardcoded 24h sweep before ent#433)",
     "backup_retention_days": "Days to retain database-backup artifacts in /data/backups (default: 14, bounds 1-3650 — 0 is invalid; the newest 3 artifacts are always kept; disable backups via DB_BACKUP_ENABLED=false, #2216)",
+    "metrics_retention_days": "Days to retain recorded metric points (default: 365, bounds 0-3650; 0 disables the sweep and keeps them forever). Bootstrap via METRICS_RETENTION_DAYS until a value is saved here (trinity-enterprise#478)",
+    "metrics_daily_point_cap": "Maximum metric points one agent may record per UTC day (default: 100000, bounds 0-10000000; 0 is unlimited). Bootstrap via METRICS_DAILY_POINT_CAP until a value is saved here (trinity-enterprise#478)",
+    "inter_agent_max_chain_depth": "Maximum agent-to-agent hops in one call chain (default: 8, bounds 1-32). A hop past it is refused with 403 inter_agent_depth_exceeded before any model work. Bootstrap via INTER_AGENT_MAX_CHAIN_DEPTH until a value is saved here (#2806)",
+    "event_dispatch_max_fires_per_hour": "Maximum event-subscription dispatches from one source agent to one subscriber agent per hour, across all subscriptions between them (default: 120, bounds 1-10000). Dispatches past it are skipped and the subscriber gets one alert per window (#2973)",
 }
 
 
@@ -898,9 +904,6 @@ class SettingsService:
         """
         db.set_setting(TEMPLATE_REGISTRY_LKG_KEY, json.dumps(payload))
 
-    def clear_template_registry_lkg(self) -> None:
-        db.delete_setting(TEMPLATE_REGISTRY_LKG_KEY)
-
     def get_platform_default_model(self) -> str:
         """
         Return the platform-wide default Claude model (#831).
@@ -917,14 +920,38 @@ class SettingsService:
         _platform_model_cache_ts = now
         return _platform_model_cache
 
+    def resolve_ops_setting(self, key: str):
+        """`(value, source)` for one ops setting — the whole chain, once.
+
+        `system_settings` row -> environment variable (for the keys listed in
+        `config.ENV_BACKED_OPS_KEYS` only) -> code default. Every surface that
+        reports WHERE a value came from (`GET /api/settings/retention`, the
+        boot log, the definitions `policy` block) resolves through this rather
+        than re-deriving the chain, because a reader that skips a tier reports
+        a precedence the platform does not actually have (trinity-enterprise#478).
+
+        `source` is one of `db-row`, `env`, `default`.
+        """
+        row = self.get_setting(key, None)
+        if row is not None and row != "":
+            return (row, "db-row")
+        env_value = config.env_ops_value(key)
+        if env_value is not None:
+            return (env_value, "env")
+        return (OPS_SETTINGS_DEFAULTS.get(key, ""), "default")
+
     def get_ops_setting(self, key: str, as_type: type = str):
         """
         Get an ops setting with type conversion.
 
-        Uses defaults from OPS_SETTINGS_DEFAULTS if not set.
+        Resolves row -> env (env-backed keys only) -> OPS_SETTINGS_DEFAULTS
+        through `resolve_ops_setting`, so the env tier minted for ent#478's
+        knobs is honoured by every existing caller without each one growing its
+        own chain.
         """
-        default = OPS_SETTINGS_DEFAULTS.get(key, "")
-        value = self.get_setting(key, default)
+        value, _source = self.resolve_ops_setting(key)
+        if value == "":
+            value = OPS_SETTINGS_DEFAULTS.get(key, "")
 
         if as_type == int:
             return int(value)
@@ -1002,6 +1029,36 @@ def resolve_github_pat(agent_name: Optional[str] = None,
     if global_pat:
         return global_pat, "global"
     return "", "none"
+
+
+def resolve_github_pat_candidates(agent_name: Optional[str] = None,
+                                  owner_id: Optional[int] = None) -> list:
+    """Every configured GitHub PAT tier, in ``resolve_github_pat``'s order (#3725).
+
+    Returns ``[(pat, tier), ...]`` — only tiers that hold a token, and each
+    token VALUE once (a per-user token equal to the global one is the same
+    credential and would get the same answer from GitHub, so the later tier is
+    dropped). The credential-free path is not an entry: an empty list means
+    "no token anywhere", and the caller owns what it does next.
+
+    This is the ladder the create path walks when the preferred tier cannot
+    read a template — a stale saved token must not mask a platform token that
+    can. ``resolve_github_pat`` stays the single-answer resolver; its first
+    answer is always this list's first entry.
+    """
+    candidates = []
+    if agent_name:
+        candidates.append((db.get_agent_github_pat(agent_name), "per_agent"))
+    if owner_id is not None:
+        candidates.append((db.get_user_github_pat(owner_id), "per_user"))
+    candidates.append((get_github_pat(), "global"))
+    seen = set()
+    ladder = []
+    for pat, tier in candidates:
+        if pat and pat not in seen:
+            seen.add(pat)
+            ladder.append((pat, tier))
+    return ladder
 
 
 def get_google_api_key() -> str:

@@ -6,13 +6,16 @@ import logging
 from datetime import timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 import redis
+from pydantic import ValidationError
 
 from models import Token
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services import login_policy_gate
 from config import (
     SECRET_KEY,
     ALGORITHM,
@@ -26,6 +29,7 @@ from dependencies import (
     authenticate_user,
     create_access_token,
     get_current_user,
+    workspace_route,
     is_token_revoked,
     oauth2_scheme,
     revoke_token_jti,
@@ -287,6 +291,27 @@ def record_otp_attempt(email: str, success: bool):
         logger.warning(f"Failed to record OTP attempt: {e}")
 
 
+async def _parse_body(request: Request, model):
+    """Build ``model`` from a JSON-object body; a malformed body is a 422 (#3676).
+
+    A ``ValidationError`` becomes ``RequestValidationError`` so the app-level
+    handler shapes it and drops the rejected value, as for a typed body param.
+    """
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Request body must be a JSON object",
+        )
+    try:
+        return model(**body)
+    except ValidationError as e:
+        raise RequestValidationError(e.errors())
+
+
 def is_setup_completed() -> bool:
     """Check if initial setup is completed."""
     return db.get_setting_value('setup_completed', 'false') == 'true'
@@ -304,14 +329,24 @@ async def get_auth_mode():
 
     Returns:
         - email_auth_enabled: Whether email-based login is enabled
+        - email_code_login_enabled: Whether the email-code form may be used (ent#849)
+        - email_delivery_available: Whether this install can deliver email (#3655).
+          Install-level, like the flag above: with no provider configured the
+          code goes to the backend log, and the Login page says so instead of
+          "we sent a code". Never on the per-request response (#186).
         - setup_completed: Whether first-time setup is complete
     """
+    from services.email_service import email_service
+
     # Check if email auth is enabled (can be overridden via settings)
     email_auth_setting = db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
     email_auth_enabled = email_auth_setting.lower() == "true"
 
     return {
         "email_auth_enabled": email_auth_enabled,
+        # ent#849: false when the login policy turned email-code sign-in off.
+        "email_code_login_enabled": email_auth_enabled and login_policy_gate.email_code_allowed(),
+        "email_delivery_available": email_service.can_deliver(),
         "setup_completed": is_setup_completed()
     }
 
@@ -352,7 +387,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
             event_action="login_failed",
             source="api",
             actor_ip=client_ip,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"method": "admin", "username": form_data.username},
         )
@@ -382,7 +417,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
             actor_ip=client_ip,
             target_type="user",
             target_id=user["username"],
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"method": "admin"},
         )
@@ -427,7 +462,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
         actor_ip=client_ip,
         target_type="user",
         target_id=user["username"],
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"method": "admin"},
     )
@@ -492,6 +527,7 @@ async def validate_token(request: Request):
 
 
 @router.post("/api/auth/logout")
+@workspace_route("signing out of the Workspace ends the platform session too (#2258)")
 async def logout(
     current_user: User = Depends(get_current_user),
     token: str = Depends(oauth2_scheme),
@@ -545,9 +581,17 @@ async def request_email_login_code(request: Request):
             detail="Email authentication is disabled"
         )
 
+    # ent#849: a registered login policy can turn email-code sign-in off.
+    # Checked before the body is read, so the refusal is identical for every
+    # address and spends no rate-limit budget. `/token` never asks this gate.
+    if not login_policy_gate.email_code_allowed():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="email_code_disabled"
+        )
+
     # Parse request
-    body = await request.json()
-    login_request = EmailLoginRequest(**body)
+    login_request = await _parse_body(request, EmailLoginRequest)
     email = login_request.email.lower()
 
     # #186: every branch below returns a byte-identical body + status, and the
@@ -619,12 +663,26 @@ async def verify_email_login_code(request: Request):
             detail="Email authentication is disabled"
         )
 
+    # ent#849: a registered login policy can turn email-code sign-in off.
+    # Checked before the body is read, so the refusal is identical for every
+    # address and spends no rate-limit budget. `/token` never asks this gate.
+    if not login_policy_gate.email_code_allowed():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="email_code_disabled"
+        )
+
     # Get client IP for rate limiting
     client_ip = request.client.host if request.client else "unknown"
 
     # Parse request first so we can scope rate-limit checks per-account (#591)
-    body = await request.json()
-    verify_request = EmailLoginVerify(**body)
+    try:
+        verify_request = await _parse_body(request, EmailLoginVerify)
+    except (HTTPException, RequestValidationError):
+        # A malformed body still spends per-IP budget, so the parse-error
+        # path is not a free probe.
+        record_login_attempt(client_ip, success=False)
+        raise
     email = verify_request.email.lower()
     code = verify_request.code
 
@@ -651,8 +709,9 @@ async def verify_email_login_code(request: Request):
     # This narrows nothing legitimate: codes obtained through the web flow above
     # already passed this exact check at mint time, channel users redeem in
     # their own channel, and every account that can legitimately email-login is
-    # allow-listed by construction (sharing, access-request approval, and the
-    # admin allow-list UI are the only ways such an account comes to exist).
+    # allow-listed by construction (an admin adds it in the allow-list UI; rows
+    # that sharing and access-request approval wrote before trinity-enterprise#837
+    # remain, and neither writes one any more).
     #
     # Fails into the SAME branch as a bad code — identical status, message,
     # audit row and rate-limit accounting — so this is not an oracle for
@@ -677,7 +736,7 @@ async def verify_email_login_code(request: Request):
             event_action="login_failed",
             source="api",
             actor_ip=client_ip,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"method": "email", "email": email},
         )
@@ -714,7 +773,7 @@ async def verify_email_login_code(request: Request):
             actor_ip=client_ip,
             target_type="user",
             target_id=user["username"],
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"method": "email", "email": email},
         )
@@ -736,7 +795,7 @@ async def verify_email_login_code(request: Request):
         actor_ip=client_ip,
         target_type="user",
         target_id=user["username"],
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"method": "email", "email": email},
     )
@@ -809,8 +868,9 @@ async def request_access(request: Request):
     check_login_rate_limit(client_ip)
 
     # Parse request
-    body = await request.json()
-    email = (body.get("email") or "").lower().strip()
+    body = await _parse_body(request, dict)
+    email = body.get("email")
+    email = email.lower().strip() if isinstance(email, str) else ""
     if not email or "@" not in email:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -25,14 +25,10 @@ Two things this file pins that a single equality would not:
   without editing this file — which is the half #2726 would have needed to catch
   itself.
 
-**The JS twin is deliberately NOT changed.** ``stores/observability.js``'s
-``formatModelName`` returns a bare family name ("Claude Opus") with no version
-and keeps no ``model_id`` alongside it in ``costBreakdown()``. A one-line
-``includes('fable')`` branch there would render ``claude-fable-5`` and
-``claude-fable-5-1`` as the same "Claude Fable" label on a per-model breakdown —
-two indistinguishable rows where today both show their distinct raw ids. Making
-the two prettifiers actually agree needs version-aware structure on the JS side,
-which is out of scope for this fix (#2086 FR-7 still owns it).
+**There is no JS twin any more.** ``stores/observability.js``'s
+``formatModelName`` — the frontend prettifier this used to be compared against —
+was removed with the store in #3434 (it had no importer), so this Python
+prettifier is the only one.
 """
 import re
 
@@ -63,6 +59,10 @@ def catalog_ids():
         # A dated snapshot of the same point release: the 8-digit strip runs
         # first, then the exact entry matches.
         ("claude-fable-5-1-20260101", "Claude Fable 5.1"),
+        # #2987: the same shape one tier over. Stated explicitly as well as
+        # covered by the derived test below, so the expected STRING is pinned
+        # and not merely "does not contain a split version".
+        ("claude-opus-5-5", "Claude Opus 5.5"),
         # Unchanged neighbours — proof the new entry swallowed nothing.
         ("claude-fable-5", "Claude Fable 5"),
         ("claude-opus-5", "Claude Opus 5"),

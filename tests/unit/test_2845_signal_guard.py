@@ -157,3 +157,50 @@ def test_the_failure_names_the_cause():
         os.kill(1, signal.SIGTERM)
     assert "wrong module copy" in str(e.value) and "trinity-enterprise#620" in str(e.value)
     sg.consume_violations()
+
+
+def test_a_member_that_exited_mid_walk_is_gone_not_foreign(monkeypatch):
+    """The CI flake behind `test_subprocess_pgroup` (regression-diff reds on
+    #2920, #2924, #2927, the 09-18 train): the harness parent exits — that IS
+    the scenario under test — while `guarded_killpg` is still reading the
+    group's cgroups. `_cgroup_of` answers None for the vanished pid, and the
+    group read as "contains a process outside the session cgroup", refusing a
+    kill of a group that was entirely ours a millisecond earlier.
+
+    Simulate the race: the walk returns a live child plus a pid that no
+    longer exists. The kill must go through — the dead pid is not a member —
+    and nothing is recorded as a violation."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+    )
+    ghost = subprocess.Popen([sys.executable, "-c", "pass"])
+    ghost.wait(timeout=10)                       # reaped: /proc/<pid> is gone
+    pgid = os.getpgid(child.pid)
+    real_walk = sg._pgid_members
+    monkeypatch.setattr(sg, "_pgid_members", lambda g: real_walk(g) + [ghost.pid] if g == pgid else real_walk(g))
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+        child.wait(timeout=10)
+    finally:
+        if child.poll() is None:
+            child.kill()
+    assert sg.consume_violations() == []
+
+
+def test_a_live_pid_with_an_unreadable_cgroup_is_still_foreign(monkeypatch):
+    """The fix above must not widen the hole: a pid that EXISTS but whose
+    cgroup cannot be read stays foreign (fail closed), exactly as before."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+    )
+    pgid = os.getpgid(child.pid)
+    real_cg = sg._cgroup_of
+    monkeypatch.setattr(sg, "_cgroup_of", lambda pid: None if pid == child.pid else real_cg(pid))
+    try:
+        with pytest.raises(sg.ForeignProcessSignal):
+            os.killpg(pgid, signal.SIGKILL)
+    finally:
+        monkeypatch.undo()                       # the cleanup kill must not be refused too
+        child.kill(); child.wait(timeout=10)
+    refused = sg.consume_violations()
+    assert len(refused) == 1 and "outside the session cgroup" in refused[0]

@@ -1,0 +1,33 @@
+{
+  "version": "1.1",
+  "date": "2026-09-30",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/727-cross-agent-metrics-read",
+  "issue": "abilityai/trinity-enterprise#727",
+  "phases_run": [0, 1, 2, 6, 7, 9, 10, 12, 13, 14],
+  "phases_not_applicable": {"3": "no dependency or lockfile change", "4": "no workflow change", "5": "no Dockerfile/compose change", "8": "no skill file change", "11": "no new data class — declared metric values already CONFIDENTIAL/per-agent"},
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": ["GET /api/agents/{agent_name}/metrics", "GET /api/agents/{agent_name}/metrics/definitions", "GET /api/agents/{agent_name}/objectives"],
+    "changed_mcp_tools": ["get_metrics (optional agent parameter; policy row enforce on agent)"],
+    "new_services": ["services/metric_access_service.py"]
+  },
+  "checks": [
+    {"check": "grant gate order (Invariant #8)", "result": "clean", "evidence": "AuthorizedAgentByName resolves first; _metric_read_gate runs before limiter and store (test_the_gate_runs_before_the_limiter_and_the_store)"},
+    {"check": "refusal oracle over metric existence", "result": "clean", "evidence": "403 body identical for existing/absent metric (test_a_refusal_does_not_vary_by_whether_the_metric_exists)"},
+    {"check": "agent self-grant", "result": "clean", "evidence": "grant writers reject agent principals (set/add/remove permission routes); spawn auto-grant is parent->new child only; system deploy grants only among agents it created"},
+    {"check": "ephemeral agent keys", "result": "clean", "evidence": "_EPHEMERAL_ALLOWED_ROUTES excludes /metrics, /metrics/definitions, /objectives"},
+    {"check": "cross-viewer disclosure via objectives", "result": "clean", "evidence": "resolve_served_metrics requires can_view; router passes db.can_user_access_agent; ambiguity finding names only viewable candidates"},
+    {"check": "MCP description metadata (#846 class)", "result": "clean", "evidence": "get_metrics description is static text, no per-agent metadata"},
+    {"check": "audit completeness", "result": "clean", "evidence": "cross reads on all three routes audited; source passed; marker set only after row written"},
+    {"check": "secrets / PII / enterprise tokens in diff", "result": "clean"}
+  ],
+  "findings": [],
+  "accepted_risks": [
+    {"title": "agent key 403 vs 404 differential on sibling names", "note": "pre-existing since ent#479 (test_ent479 no-grant 403); definitions route previously returned 200 (more disclosure); ent#629 territory"},
+    {"title": "N granted readers x 240/min against one target", "note": "store-only indexed read; documented in requirements §51.3"}
+  ],
+  "filter_stats": {"candidates": 3, "dropped_by_gate": 3, "reported": 0},
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0}
+}

@@ -17,8 +17,8 @@ QA'ing it on Linux, neither visible on the author's macOS:
 And one this QA pass found, which is not a portability bug at all but was in the
 same lines:
 
-3. **A single quote in either secret breaks the droplet's first boot.** Both are
-   interpolated into single-quoted shell assignments in the user-data. The
+3. **A single quote in the password breaks the droplet's first boot.** It is
+   interpolated into a single-quoted shell assignment in the user-data. The
    password rules demand a special character and `'` is one, so
    `Tr0ub4dor's!Horse` passes this script's check AND the backend's, then writes
    `export ADMIN_PASSWORD='Tr0ub4dor's!Horse'` — a syntax error. The droplet is
@@ -82,11 +82,11 @@ def test_every_single_quoted_interpolation_in_the_user_data_is_quoted() -> None:
     """The rule, not two spellings of it: every '${VAR}' in the heredoc is a _Q.
 
     A raw value in single quotes breaks first boot on any value containing `'`.
-    Checking only the two secrets left the image tag as a third such site."""
+    Checking only the secrets left the image tag as another such site."""
     heredoc = re.search(r"<<USERDATA\n(.*?)\nUSERDATA$", _script(), re.S | re.M)
     assert heredoc, "the user-data heredoc is gone"
     interpolated = re.findall(r"'\$\{([A-Za-z_]+)\}'", heredoc.group(1))
-    assert {"ADMIN_PASSWORD_Q", "CLAUDE_SUBSCRIPTION_TOKEN_Q", "TRINITY_IMAGE_TAG_Q"} <= set(interpolated)
+    assert {"ADMIN_PASSWORD_Q", "TRINITY_IMAGE_TAG_Q"} <= set(interpolated)
     raw = [v for v in interpolated if not v.endswith("_Q")]
     assert not raw, f"unquoted value(s) inside single quotes in the user-data: {raw}"
 
@@ -136,22 +136,22 @@ def _run_installer(tmp_path: Path, *, snap: bool, stdin: str, home: bool = True,
 
 @pytest.mark.parametrize("snap", [False, True], ids=["package-doctl", "snap-doctl"])
 @pytest.mark.parametrize(
-    "password,token,tag",
+    "password,tag",
     [
-        ("CorrectHorse!7Battery", "sk-ant-oat01-abcDEF123", "v0.9.5-rc2"),
-        ("Tr0ub4dor's!Horse", "sk-ant-oat01-it's-q'uoted", "v0.9.5-it's"),
-        ("Sh$ell`tick!7Aa\\", "sk-ant-oat01-$(id)`x`", "v0.9.5-rc2"),
+        ("CorrectHorse!7Battery", "v0.9.5-rc2"),
+        ("Tr0ub4dor's!Horse", "v0.9.5-it's"),
+        ("Sh$ell`tick!7Aa\\", "v0.9.5-rc2"),
     ],
     ids=["plain", "apostrophes", "shell-metachars"],
 )
 def test_generated_user_data_parses_and_carries_each_value_intact(
-    tmp_path: Path, snap: bool, password: str, token: str, tag: str,
+    tmp_path: Path, snap: bool, password: str, tag: str,
 ) -> None:
-    """The heredoc context is what matters: the token sits in `'…'` inside a
-    `$(…)` inside double quotes, which only a shell parsing the real file tests."""
+    """The heredoc context is what matters, which only a shell parsing the real
+    file tests."""
     proc = _run_installer(
         tmp_path, snap=snap, image_tag=tag,
-        stdin=f"{password}\n{password}\n{token}\n\n\ny\n",
+        stdin=f"{password}\n{password}\n\n\ny\n",
     )
     assert "no public IP yet" in proc.stderr, proc.stderr  # reached the end, via the stub
     user_data = tmp_path / "user-data.sh"
@@ -165,27 +165,31 @@ def test_generated_user_data_parses_and_carries_each_value_intact(
     syntax = subprocess.run(["bash", "-n", str(user_data)], capture_output=True, text=True)
     assert syntax.returncode == 0, f"first boot would die on a syntax error:\n{syntax.stderr}"
 
-    # Evaluate the real lines in their real context, with curl/jq stubbed to
-    # print what they were given instead of calling anything.
+    # Evaluate the real export lines in a shell and compare to the input.
     text = user_data.read_text()
     exports = "\n".join(l for l in text.splitlines() if l.startswith("export "))
-    block = re.search(r'^curl -fsS -X POST "\$API/api/subscriptions".*?>/dev/null$', text, re.S | re.M)
-    assert block, "the subscription-registration call is gone from the user-data"
     probe = f"""
 {exports}
-jq() {{ while [ $# -gt 0 ]; do [ "$1" = --arg ] && {{ printf '%s' "$3"; return; }}; shift; done; }}
-curl() {{ while [ $# -gt 0 ]; do [ "$1" = -d ] && {{ printf '%s' "$2" > "$OUT"; return; }}; shift; done; }}
-API=http://stub AUTH=stub
-{block.group(0)}
 printf '%s\\n%s' "$ADMIN_PASSWORD" "$TRINITY_IMAGE_TAG"
 """
     out = subprocess.run(
         ["bash", "-c", probe], capture_output=True, text=True, timeout=30,
-        env={"PATH": "/usr/bin:/bin", "OUT": str(tmp_path / "token.out")},
+        env={"PATH": "/usr/bin:/bin"},
     )
     assert out.returncode == 0, out.stderr
     assert out.stdout == f"{password}\n{tag}"
-    assert (tmp_path / "token.out").read_text() == token
+
+
+def test_the_installer_asks_for_no_claude_credential(tmp_path: Path) -> None:
+    """Connecting Claude belongs to the onboarding overlay's blocking step, which
+    checks the credential with Anthropic before saving it (trinity-enterprise#582).
+    The installer takes a password, a region and a name, and the droplet's first
+    boot registers nothing: three answers plus the confirmation reach the end."""
+    proc = _run_installer(tmp_path, snap=False, stdin="CorrectHorse!7Battery\nCorrectHorse!7Battery\n\n\ny\n")
+    assert "no public IP yet" in proc.stderr, proc.stderr
+    assert "setup-token" not in proc.stderr and "sk-ant-" not in proc.stderr, proc.stderr
+    user_data = (tmp_path / "user-data.sh").read_text()
+    assert "/api/subscriptions" not in user_data, "first boot still registers a Claude subscription"
 
 
 def test_a_snap_doctl_without_home_is_refused_before_any_question(tmp_path: Path) -> None:

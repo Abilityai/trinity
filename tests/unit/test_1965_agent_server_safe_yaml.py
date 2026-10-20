@@ -290,26 +290,28 @@ def test_an_honest_template_still_serves(info_router):
     assert result.get("has_template") is True
 
 
-def test_the_metrics_endpoint_refuses_the_same_bomb(info_router):
-    """Second `template.yaml` reader in the same file. Fixing one and not the
-    other leaves the identical amplifier one endpoint over — the shape of this
-    whole issue.
+def test_the_metrics_endpoint_parses_no_document_at_all(info_router):
+    """The second `template.yaml` reader in this file is GONE.
 
-    Asserts the NAMED refusal, not just `has_metrics is False`: a bomb parses
-    perfectly well under bare `safe_load` and yields no `metrics:` key, so the
-    unfixed code also answers `has_metrics: False`. Checking only that flag
-    would pass against the very tree this issue reports.
+    #1965 hardened `/api/metrics` to refuse an alias bomb by name. ent#479
+    retired the endpoint outright: it reads neither `template.yaml` nor
+    `metrics.json` any more and answers 410 with the superseded payload, so
+    the amplifier this test was written against has no input left. That is a
+    strictly stronger guarantee than the named refusal, and this asserts it
+    directly — a future tree that re-adds the file read would put a second
+    unhardened parser back in this file, and this test would go red.
     """
     import asyncio
+    import json as _json
 
     mod, template = info_router
     template.write_text(_alias_bomb(6))
 
-    result = asyncio.run(mod.get_metrics())
+    response = asyncio.run(mod.get_metrics())
 
-    assert result.get("has_metrics") is False
-    assert "a6" not in str(result), "the expanded bomb reached the response"
-    assert "not permitted" in result.get("message", ""), (
-        "the document was parsed rather than refused — this assertion is the "
-        "only thing separating the fixed tree from the unfixed one here"
-    )
+    assert response.status_code == 410
+    body = _json.loads(bytes(response.body).decode())
+    assert body.get("has_metrics") is False
+    assert body.get("finding") == "D-010"
+    assert "record_metrics" in body.get("superseded_by", "")
+    assert "a6" not in str(body), "the expanded bomb reached the response"

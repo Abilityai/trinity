@@ -443,6 +443,23 @@ describe('resolveComposerKey', () => {
     expect(resolveComposerKey({ key: 'ArrowDown', open: true, hasCandidates: false })).toBe('close')
   })
 
+  // ent#621 (Decision 36): the popup owns BARE arrows. It used to claim the
+  // arrow whatever the modifiers were, and the caller `preventDefault`s a
+  // `move-*`, so the Workspace's ⌥⇧↓ (switch chat) and ⌥↓ (switch agent) were
+  // silently dead for as long as an @-popup happened to be open — a handler
+  // claiming a chord it never declared. A modified arrow now passes.
+  it('claims a bare arrow only, and passes a chord it does not own', () => {
+    const open = { open: true, hasCandidates: true }
+    for (const mod of ['altKey', 'metaKey', 'ctrlKey', 'shiftKey']) {
+      expect(resolveComposerKey({ key: 'ArrowDown', ...open, [mod]: true }), mod).toBe('pass')
+      expect(resolveComposerKey({ key: 'ArrowUp', ...open, [mod]: true }), mod).toBe('pass')
+    }
+    expect(resolveComposerKey({ key: 'ArrowDown', altKey: true, shiftKey: true, ...open })).toBe('pass')
+    // Without candidates the popup used to CLOSE on a modified arrow; that was
+    // the same over-claim (it also prevented the event), so it passes too.
+    expect(resolveComposerKey({ key: 'ArrowDown', open: true, hasCandidates: false, altKey: true })).toBe('pass')
+  })
+
   it('accepts the top row on Tab, and lets Shift+Tab leave the composer', () => {
     expect(resolveComposerKey({ key: 'Tab', open: true, hasCandidates: true })).toBe('accept')
     expect(resolveComposerKey({ key: 'Tab', open: true, hasCandidates: true, shiftKey: true })).toBe('pass')
@@ -452,6 +469,19 @@ describe('resolveComposerKey', () => {
   it('dismisses on Escape only while open (principle 23)', () => {
     expect(resolveComposerKey({ key: 'Escape', open: true })).toBe('dismiss')
     expect(resolveComposerKey({ key: 'Escape', open: false })).toBe('pass')
+  })
+
+  it('drops a reply on Escape only once the popup is closed — innermost first (ent#738)', () => {
+    expect(resolveComposerKey({ key: 'Escape', hasReply: true })).toBe('drop-reply')
+    expect(resolveComposerKey({ key: 'Escape', open: true, hasReply: true })).toBe('dismiss')
+    expect(resolveComposerKey({ key: 'Escape', hasReply: false })).toBe('pass')
+    // An IME session uses Escape to abandon a candidate, never to drop the reply.
+    expect(resolveComposerKey({ key: 'Escape', hasReply: true, isComposing: true })).toBe('pass')
+    expect(resolveComposerKey({ key: 'Escape', hasReply: true, keyCode: 229 })).toBe('pass')
+    // Only Escape: every other key resolves exactly as it does without a reply.
+    for (const key of ['Enter', 'a', 'Tab', 'ArrowUp', 'Home']) {
+      expect(resolveComposerKey({ key, hasReply: true }), key).toBe(resolveComposerKey({ key }))
+    }
   })
 
   it('closes on a caret-moving key rather than accepting against stale bounds', () => {
@@ -693,7 +723,7 @@ describe('PortalConversation wiring', () => {
 
   it('advertises both triggers in the placeholder, and @ only with the capability', () => {
     const src = convSource()
-    expect(src).toMatch(/for playbooks/)
+    expect(src).toMatch(/for skills/)        // trinity-enterprise#754: "skills" on agent surfaces
     expect(src).toMatch(/multiAgentChatAvailable[\s\S]{0,120}@ to add an agent/)
   })
 })

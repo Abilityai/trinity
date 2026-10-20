@@ -41,6 +41,11 @@ export const MERMAID_CONFIG = Object.freeze({
   securityLevel: 'strict',
   htmlLabels: false,
   flowchart: Object.freeze({ htmlLabels: false }),
+  // mermaid 12 defaults to the ELK layout and the `neo` look; pin the v11
+  // pair so existing canvas diagrams keep their layout and style across the
+  // upgrade (#3285). A diagram's own `%%{init}%%` may still opt in.
+  layout: 'dagre',
+  look: 'classic',
   // ent#537 /cso: an `%%{init: {themeCSS}}%%` directive in agent source is
   // honoured under `strict`. Mermaid namespaces every rule under the diagram
   // id, so it cannot reach the page — but `@keyframes` are deliberately left
@@ -225,6 +230,26 @@ export function filterCanvases(list, query) {
  *
  * @param {{ visible: number, manage: boolean, query: string }} s
  */
+/**
+ * ent#724 — the dropdown option for one canvas. Agent-written titles run long
+ * ("Decision 1 — … — archived from main 2026-09-14"), and a native <option>
+ * cannot wrap, so the label is clamped at a word boundary with an ellipsis; the
+ * full title rides on the option's `title` and in the canvas header below.
+ * Pinned canvases carry the pin mark, since they also sort first.
+ */
+export const CANVAS_OPTION_MAX = 60
+
+export function canvasOptionLabel(canvas, max = CANVAS_OPTION_MAX) {
+  const full = String(canvas?.title || canvas?.canvas_id || '').replace(/\s+/g, ' ').trim()
+  let label = full
+  if (full.length > max) {
+    const cut = full.slice(0, max - 1)
+    const space = cut.lastIndexOf(' ')
+    label = `${(space > max * 0.6 ? cut.slice(0, space) : cut).replace(/[\s—–\-,:;·]+$/, '')}…`
+  }
+  return canvas?.pinned ? `📌 ${label}` : label
+}
+
 export function canvasSelectorVisible({ visible, manage, query }) {
   if (manage) return true
   if (String(query || '').trim()) return visible > 0
@@ -274,6 +299,39 @@ export function canvasAutoSelect(visible, selectedId, query) {
   if (!rows.length) return null
   if (rows.some((c) => c && c.canvas_id === selectedId)) return null
   return rows[0].canvas_id
+}
+
+/**
+ * #3218 — the canvas a list refresh brought that the panel had not seen: the
+ * one to follow, because the agent just created it for the reader.
+ *
+ * `knownIds` is the id set of the previous non-empty list, or `null` before
+ * the first load and after an empty list (then nothing is "new" — the first
+ * load keeps selecting the first row of the pinned-first order). The panel
+ * never passes an empty Set: an empty list is not a baseline (#3218 review C1).
+ * A list sharing NO id with the previous one is a different list, not an
+ * arrival — the panel is not keyed per agent, so switching agents swaps the
+ * whole list under it, and that must still read as a first load. Known limit:
+ * an agent that deletes every old canvas and creates one in the same refresh
+ * reads the same way, so that refresh opens `rows[0]`. Among several arrivals the most
+ * recently updated wins; a missing timestamp sorts last. The rule is "the id
+ * that appeared", never `rows[0]`: a pinned canvas sorting ahead does not
+ * steal the follow.
+ *
+ * @param {Set<string>|null} knownIds
+ * @param {Array<{canvas_id: string, updated_at?: string}>} rows
+ * @returns {string|null}
+ */
+export function canvasesAppeared(knownIds, rows) {
+  if (!knownIds || !Array.isArray(rows)) return null
+  if (knownIds.size && !rows.some((c) => c && knownIds.has(c.canvas_id))) return null
+  let best = null
+  for (const c of rows) {
+    const id = c && typeof c.canvas_id === 'string' ? c.canvas_id : ''
+    if (!id || knownIds.has(id)) continue
+    if (!best || String(c.updated_at || '') > String(best.updated_at || '')) best = c
+  }
+  return best ? best.canvas_id : null
 }
 
 /**

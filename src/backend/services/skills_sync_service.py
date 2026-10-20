@@ -227,9 +227,16 @@ class SkillsLibrarySyncService:
         semaphore = asyncio.Semaphore(_fleet_concurrency())
         results: Dict[str, Dict[str, Any]] = {}
 
+        # ent#530: resolve the library's sets ONCE per sweep, not per agent.
+        try:
+            from services import skill_set_service
+            sets_lib = await asyncio.to_thread(skill_set_service.library_sets)
+        except Exception:  # noqa: BLE001
+            sets_lib = None
+
         async def _one(agent_name: str) -> None:
             async with semaphore:
-                results[agent_name] = await self._reinject_agent(agent_name)
+                results[agent_name] = await self._reinject_agent(agent_name, sets_lib)
 
         if agents:
             await asyncio.gather(
@@ -306,13 +313,40 @@ class SkillsLibrarySyncService:
             return []
 
     @staticmethod
-    async def _reinject_agent(agent_name: str) -> Dict[str, Any]:
-        """One agent's re-inject, with every failure mode named."""
+    async def _reinject_agent(agent_name: str, sets_lib: Optional[dict] = None) -> Dict[str, Any]:
+        """One agent's re-inject, with every failure mode named.
+
+        ent#530 order: set-derived rows reconciled (DB, fail-closed) → names read →
+        inject (lock) → prune outside the lock when the set reconcile dropped
+        members, so a member removed upstream leaves a RUNNING agent now rather
+        than at its next restart.
+        """
         try:
+            dropped: list = []
+            if sets_lib is not None:
+                from services import skill_set_service
+                _, dropped = await asyncio.to_thread(skill_set_service.reconcile_agent, agent_name, sets_lib)
+            # trinity-enterprise#753: a library change can newly recommend
+            # approval for a skill this agent holds — gated before the re-inject;
+            # defaults of members the sync dropped go after the prune removed
+            # their packages (never raises).
+            from services import skill_gate_map_service
+            gate_ctx = skill_gate_map_service.GateContext(trigger="library_sync")
+            await skill_gate_map_service.reconcile_library_gates(agent_name, ctx=gate_ctx)
             skill_names = await asyncio.to_thread(db.get_agent_skill_names, agent_name)
             if not skill_names:
+                if dropped:
+                    prune = await skill_service.reconcile_agent_skills(agent_name, [])
+                    await skill_gate_map_service.reconcile_library_gates(
+                        agent_name, ctx=gate_ctx, add=False,
+                        drop_defaults=skill_gate_map_service.drop_after_prune(prune))
                 return {"status": "skipped", "reason": "no_skills"}
             result = await skill_service.inject_skills(agent_name, skill_names, force=False)
+            if dropped:
+                prune = await skill_service.reconcile_agent_skills(agent_name, skill_names)
+                await skill_gate_map_service.reconcile_library_gates(
+                    agent_name, ctx=gate_ctx, add=False,
+                    drop_defaults=skill_gate_map_service.drop_after_prune(prune))
             # #2703: the sweep changes the listing — open surfaces refetch.
             from services.skill_service import broadcast_skills_changed
             await broadcast_skills_changed(agent_name)

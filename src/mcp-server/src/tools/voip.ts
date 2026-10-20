@@ -10,6 +10,8 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { resolveExecutionId } from "./execution_id.js";
+import { INTENT_KEY_TEACHING, intentKeyParams } from "./intent_key.js";
 
 export function createVoipTools(client: TrinityClient, requireApiKey: boolean) {
   const getClient = (authContext?: McpAuthContext): TrinityClient => {
@@ -49,7 +51,9 @@ export function createVoipTools(client: TrinityClient, requireApiKey: boolean) {
         "via the Gemini Live voice bridge; after the call ends, the full " +
         "transcript is handed back to you to process. Requires VoIP to be " +
         "enabled and a Twilio voice number configured for this agent. " +
-        "Rate-limited and subject to a daily call cap (placing calls costs money).",
+        "Rate-limited and subject to a daily call cap (placing calls costs money)." +
+        INTENT_KEY_TEACHING +
+        " For a call the key is spent once the dial is accepted, answered or not.",
       parameters: z.object({
         to_number: z.string()
           .describe("Destination phone number in E.164 format, e.g. '+14155551234'."),
@@ -63,13 +67,15 @@ export function createVoipTools(client: TrinityClient, requireApiKey: boolean) {
           .describe(
             "Your current execution_id — shown in the 'Execution Context' block of your system " +
             "prompt. Pass it so a re-delivery of this turn does NOT place a duplicate phone call " +
-            "(effect-scoped idempotency, #1084). Optional: if omitted, the call proceeds without dedup."
+            "(effect-scoped idempotency, #1084). Optional: if omitted, the call proceeds without dedup." +
+            " The platform normally supplies this automatically (#2392); this param is a fallback for older agent images."
           ),
         dedup_label: z.string().optional()
           .describe(
             "Optional discriminator to intentionally place TWO distinct calls to the same number " +
             "in one turn. Default empty → at-most-one call per number per turn."
           ),
+        ...intentKeyParams,
       }),
       execute: async (
         params: {
@@ -79,6 +85,8 @@ export function createVoipTools(client: TrinityClient, requireApiKey: boolean) {
           agent_name?: string;
           execution_id?: string;
           dedup_label?: string;
+          idempotency_key?: string;
+          idempotency_ttl?: number;
         },
         context?: { session?: McpAuthContext }
       ) => {
@@ -90,8 +98,10 @@ export function createVoipTools(client: TrinityClient, requireApiKey: boolean) {
             to_number: params.to_number,
             context: params.context,
             process_transcript: params.process_transcript ?? true,
-            execution_id: params.execution_id,
+            execution_id: resolveExecutionId(authContext, params.execution_id),
             dedup_label: params.dedup_label,
+            idempotency_key: params.idempotency_key,
+            idempotency_ttl: params.idempotency_ttl,
           });
           return JSON.stringify({ success: true, agent_name: agentName, ...result }, null, 2);
         } catch (error) {

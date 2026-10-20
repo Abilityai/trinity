@@ -58,6 +58,26 @@ before an envelope exists to carry an error.
    This one is a *restriction on an already-authenticated caller*, not a
    security boundary: it runs last, and it fails open.
 
+## Who may poll or cancel a task (#3751)
+
+Each door binds a task handle to the caller that minted it:
+
+| Door | Binding |
+|---|---|
+| Bearer (MCP key or JWT) | `routers/a2a.py::_bearer_started_by` — the row's `triggered_by == "a2a"`, `source_user_id == caller.id` (never None), `source_mcp_key_id == caller.mcp_key_id` (None on both sides for a JWT) |
+| AAuth | `aauth_inbound.execution_owned_by(exec_id, identity)` |
+| Paid | `_payer_for_task` — the payer bound to the row |
+
+The key id, not the user id, is the bearer identity: every agent key of one
+owner resolves to that owner's user id and role, so the user id alone would let a
+sibling agent poll another agent's task. There is no owner/admin override for the
+same reason. A refusal is the unknown-id `Task not found` (no existence oracle),
+and a refused `tasks/cancel` signals nothing. A re-minted key loses its in-flight
+tasks, as it loses its `messageId` namespace. This scopes the A2A task handle
+only; `GET /api/agents/{name}/executions/{id}` and its terminate route are the
+execution REST surface (trinity-enterprise#875). Pinned by
+`tests/unit/test_3751_a2a_bearer_task_scope.py`.
+
 ## `messageId` dedup — why the scope carries the caller
 
 Invariant #18 wants a re-delivered task to not double-execute, and A2A's
@@ -149,6 +169,77 @@ breaker, activity rows, and cost tracking like any other trigger.
 | `_VALID_TRIGGERS` | `routers/executions.py` | listed | an unlisted value degrades to **no filter**, so `?triggered_by=a2a` would return every execution on the install |
 | `_AUTONOMOUS_TRIGGERS` | `services/task_execution_service.py` | listed | **the judgement call.** The set means "no human is watching the reply", so an unresolved slash-command run earns an Operating Room alert (#1410). A2A is dispatched by a remote *machine* caller — structurally the same as `agent`, which is already in the set — so nobody on this install sees the "Unknown command" text come back. The interactive-ish triggers deliberately left out (`manual`, `mcp`, `public`, `chat`, `session`) all have a person reading the reply. |
 
+## Long turns: `working` + poll (#3749)
+
+`message/send` used to hold the HTTP request for the whole agent turn. The
+bundled client's 30 s read timeout (`A2A_RPC_TIMEOUT`, `services/a2a_client.py`)
+then turned any longer turn into a 504, and the caller never learned the
+execution id. The request is now bounded and the turn is not:
+
+1. **Mint.** `_mint_a2a_execution` creates the execution row *before* dispatch.
+   The row is created `running`, with `model_used` resolved (`execute_task`
+   stamps it only on rows it creates itself) and `subscription_id`
+   best-effort. `execute_task(execution_id=...)` then skips its own row
+   creation. This is the pre-created-row contract `/chat` uses. The
+   idempotency claim is attached to the id at once (`attach_execution`). If
+   the mint fails, the claim is released with `fail()` and the caller gets
+   `-32603`. There is no fallback to an un-minted dispatch.
+2. **Detach + hold.** `_finish_send` holds the pre-#3749 tail unchanged:
+   terminal Task, `complete()` with the snapshot, AAuth ownership and activity,
+   the single `a2a_task` audit row. It runs as an `asyncio` task, kept alive by
+   a strong reference in `_INFLIGHT_SENDS` (#1968). `_hold_turn` waits with
+   `asyncio.wait`, never `wait_for`, under `A2A_SEND_WORKING_AFTER_SECONDS =
+   25.0`. That value is strictly under the client's 30 s and leaves room for a
+   10 s cold card fetch inside the MCP tool's 40 s outer limit.
+   `test_budget_is_below_client_rpc_timeout` pins both inequalities. Inside the
+   budget, the response and the snapshot are byte-identical to before.
+3. **Early answer.** Past the budget, the router answers from the **row**
+   (`_task_from_row`): `queued` → `submitted`, `running`/`pending_retry` →
+   `working`, a terminal row → the terminal Task (the turn ended at the
+   deadline), and `skipped` → `rejected`. It writes no snapshot and no audit
+   row. The claim is completed exactly once, by the tail, at the terminal.
+   AAuth: `remember_execution` (now `bool`) is written **before** the id is
+   disclosed. If it returns `False`, the request keeps holding, because the
+   id would 404 on that caller's `tasks/get`.
+4. **`configuration.blocking`** (A2A v0.3 `MessageSendConfiguration`). `true`
+   holds the whole turn (the old behaviour). `false` answers right after the
+   mint. Absent or non-bool uses the budget. `message/stream` ignores it.
+5. **Replay.** A re-send of a running `messageId` (`in_flight` with an attached
+   `execution_id`, scoped to the caller principal and checked against
+   `agent_name`) is answered from the row, so it gets `working` while the turn
+   runs and the terminal Task once the row has finished. That holds even
+   before the tail completes the claim, and after a restart mid-turn. A claim
+   with no id keeps the retryable `-32603`.
+
+**Paid door.** The mint happens inside `execute()`, after verify, dedup and
+the allow-list, so an unverified stranger never leaves a `running` row behind.
+The id travels back through `_TurnHandle.minted`. At the deadline with no id
+yet, the request waits for the mint or the terminal, whichever comes first.
+Before it answers `working`, it writes a `verify` row carrying the id for the
+admitted payer (captured by `run_a2a_paid_turn(on_verified=...)`), so
+`payer_owns_execution` is true mid-turn. That is the third `verify` row for
+the turn and is accepted (T6). A paid re-send while the turn runs keeps the
+shared orchestrator's `IN_FLIGHT` refusal (T2). The payer may `tasks/cancel`
+mid-turn: the turn is never settled and delivers no answer (T5).
+
+**The caller went away.** The app's HTTP middleware does not cancel a handler
+on client disconnect ([execution.md](../architecture/execution.md), Interactive
+turns on a pilot). Whether or not the handler is ever cancelled, the detached
+turn is not: it runs to its terminal, completes the claim and writes its audit
+row. The waiter inside `dispatch_and_await_terminal` is the detached turn, so
+its "caller went away" branch (a queued row left CANCELLED) can only fire at
+loop shutdown. A queued A2A turn whose caller left is claimed and run, bounded
+by `claim_budget`, and its result waits on `tasks/get`. A loop-shutdown
+`CancelledError` inside the tail re-raises **without** `fail()`. The container
+may still be running the turn, and the row is what a replay answers from.
+
+Residual, stated: a backend restart mid-turn loses that turn's `a2a_task`
+audit row, as it did before, while the row, `tasks/get` and replay still
+answer. Tests: `tests/unit/test_3749_a2a_working_task.py` (drives
+`_dispatch_jsonrpc` / `_send_paid_task` under `asyncio.run` with an
+Event-gated dispatch stub, because `TestClient` request loops would kill a
+detached task).
+
 ## Schema / migration
 
 `agent_ownership.a2a_exposed INTEGER DEFAULT 0` — dual-track (Invariant #3):
@@ -226,3 +317,186 @@ the seam's other hook.
 so an unadvertised skill is hidden, not unreachable. Anything that constrains
 what an external caller can actually reach would be a different mechanism
 (`allowed_tools`/guardrails) with its own threat model.
+
+## Payment gate (ent#679)
+
+The door authenticated a Trinity MCP key and nothing else, so a stranger —
+including a remote Trinity holding a perfectly good x402 payment token — got
+**401** and could never reach a 402, never pay, never be served. Requirement:
+`requirements/mcp.md` §32.6.
+
+**One branch, decided by the principal.** `Depends(get_current_user)` became
+`Depends(get_user_or_anonymous)`, a sibling that returns `None` on a **401 only**
+and re-raises a **403**. That asymmetry is the point: the connector and
+ephemeral-key fences raise 403, and a credential Trinity recognised and then
+fenced must not slide onto the payment path and buy the access it was refused.
+
+```
+principal is not None  → TODAY'S PATH, byte-identical: the three gates → dispatch.
+                         No facilitator call, no payment row, no payment metadata.
+principal is None      → per-IP + per-agent rate limit (before any DB/SDK work)
+                         → not exposed, or not priced   → today's 401 bytes + WWW-Authenticate
+                         → priced but SDK absent        → 501
+                         → exposed AND priced           → payment path
+```
+
+The free path is unchanged for internal fleet traffic, owner/shared callers and
+subscription tenants — by construction, not by a carve-out. The only agents
+whose anonymous answer differs from before are **exposed AND priced**, which
+their public well-known card already publishes.
+
+**Token, metadata first.** `params.message.metadata["x402.payment.payload"]` is
+re-encoded to the access token the facilitator consumes; the `payment-signature`
+header is the deprecated fallback. Metadata wins when both are present (the
+provider SDK's own precedence), so a client migrating between rails cannot have
+a stale header decide what it pays with. Re-encoding is signature-safe: the
+EIP-712 signature lives *inside* the payload, not over the base64 envelope.
+Every malformed shape falls through to the 402 rather than raising — all of it
+is caller-controlled input on a route reachable with no credential.
+
+**No extension handshake.** Trinity speaks the x402 message vocabulary and does
+not negotiate. Nothing reads or emits `X-A2A-Extensions`.
+
+**402/403 come from the paid door's own builders.** One requirements builder, two
+doors — a 402 built differently from the later verify is a rejection the caller
+cannot act on. `resource.url` names **this** door (`/a2a/{name}`): an x402 token
+signs the resource URL, so a token minted against `/api/paid/{name}/chat` cannot
+authorize an A2A call.
+
+**The money logic is not here.** `services/paid_turn_service.py` is shared with
+`routers/paid.py`, so the #1018 settle/replay/`success_unsettled` branches exist
+once. `services/a2a_payment_gate.py` is only the A2A-shaped adapter: what a token
+looks like on this wire, what a refusal looks like, and how an outcome becomes a
+Task. Settlement detail: [nevermined-payments.md](nevermined-payments.md).
+
+**The allow-list seam flips direction here.** `a2a_gate`'s allow-list fails
+**open** for an authenticated caller (a restriction layered on auth). For a payer
+it is consulted after verify with identity `x402:{payer}` and fails **closed** —
+on this path the payment *is* the authorization, so a seam failure must not
+void a configured control.
+
+**A payer can retrieve what it paid for.** `tasks/get` / `tasks/cancel` are
+allowed when the token verifies **and** the wallet matches that execution's
+payment-log rows. Every mismatch — including payer A polling payer B's existing
+task — answers byte-identical `-32001`, so the binding is not an existence
+oracle. The binding is written **when the turn's result exists, before the
+settle**: `run_paid_turn` logs a `verify` row carrying the execution id as soon
+as `execute()` returns, because when only the `settle` / `settle_failed` rows
+carried the pair, a payer was locked out of a finished task while its settle was
+still running, and for good when a concurrent settle wrote no row. Since #3749
+it is **also** written mid-turn when the turn outlives the `message/send`
+budget: the router writes the same `verify` row for the admitted payer before
+it answers `working` (see [Long turns](#long-turns-working--poll-3749)). A
+poll during the turn then reads `working`, and a payer's `tasks/cancel`
+cancels the turn, with no settle and no answer. No schema change; those
+columns were already on the row.
+
+**A refusal is classified once, rendered twice.** `routers/a2a.py`'s
+`_classify_paid_refusal` is the single table, consumed by `message/send` (which
+can answer with an HTTP status) and by `message/stream` (which cannot — the
+status line is gone by the time the body generator runs). Two properties it
+exists to hold: a verify that could not DECIDE — facilitator timeout, SDK error,
+saturated concurrency gate — is **our** unavailability, so it answers a JSON-RPC
+error with `data.retryable: true` rather than the 403 a remote Trinity reads as
+"stop retrying and buy another token", and is logged as a `verify` attempt
+rather than a `reject`; and the stream never answers `-32001` for a payment
+condition, since that is A2A **TaskNotFound** and tells a client its task
+vanished when the truth is "pay" / "not allowed" / "retry". `data.code`
+(`payment_rejected` · `verify_unavailable` · `not_allowed` · `in_flight` ·
+`execution_error`) is the discriminator those four instructions need. The paid
+door keeps its own 403 bytes unchanged.
+
+**Attribution, no schema change.** The payer wallet on the `settle` row, the
+execution row (`triggered_by="a2a"` + principal fields) and the platform audit
+row (IP + payer) already carry it. No column, no migration.
+
+**`triggered_by="a2a"` joins `INTERACTIVE_TRIGGERS`.** A remote caller waits
+in-line on both the free and the paid path, so both get the caller-went-away
+cancel and the claim budget — this changes queue treatment for the **principal**
+path too, deliberately, and keeps the `a2a` analytics bucket honest rather than
+filing paid A2A calls as REST paid chats.
+
+### The card states the price
+
+`_card_with_exposed_skills` is still **the** single card producer (ent#180
+FR-3), and it gains one step: `a2a_card_service.with_payment_extension`. A priced
+agent's card declares a `urn:nevermined:payment` extension carrying `agentId`,
+`planId`, `credits`, `paymentType` and `paymentInfoUrl`
+(`GET /api/paid/{name}/info`, the public "where to buy" document), so an
+x402-speaking client mints a token from the card alone and meets the paywall on
+its **first** request.
+
+- The card builder stays pure; the config read lives in the router, like the
+  skills provider lookup, and uses the no-decrypt `get_nevermined_config` — the
+  card publishes plan ids, never the API key.
+- **An unpriced or disabled agent's card is returned by identity** — byte-identical
+  to before. Every install that sells nothing is untouched.
+- The **official** A2A x402 extension URI is deliberately **not** declared, even
+  though the provider SDK's own card helper appends it. Declaring an extension
+  advertises its activation handshake; a generic client would activate it and
+  then wait for a negotiation that never comes.
+- `credits: 0` is a Nevermined **duration** plan (charged by time), declared as
+  `paymentType: "dynamic"` — `fixed`/0 reads as free and the SDK's own card
+  validator rejects that shape for a paid plan.
+- Fail-open: an unreadable payment config serves the card with no price block
+  and logs at WARNING. A card route has never 5xx'd, and the gate re-reads the
+  config and still answers 402, so the only cost is a priced agent briefly
+  looking free.
+
+**In an OSS-only build, a configured price block points at a door that 404s.**
+Exposure is set only by the entitled provider, so the paid A2A door is not
+reachable; the card says what the agent *costs*, not that the door is *open*.
+That is the same open-core line the paid chat door has always had — the gate is
+OSS mechanism with no new entitlement and no enterprise-submodule code.
+
+### Payment-gate testing
+
+`tests/unit/test_ent679_a2a_payment_gate.py` (the gate, over a TestClient),
+`tests/unit/test_ent679_paid_turn_service.py` (the shared orchestrator at its own
+layer, with the paid door's three existing test files unedited as the behaviour
+net) and `tests/unit/test_ent679_a2a_priced_card.py` (the card, both surfaces).
+
+The real facilitator (verify + settle) and what a duration-plan settle actually
+burns are **not** provable from the SDK source and are a live sandbox run before
+merge, not a unit test. Stated rather than hidden.
+
+## Outbound endpoint allowlist (trinity-enterprise#838, outbound-only since trinity-enterprise#885)
+
+Requirements: `requirements/mcp.md` §32.7.
+
+The admin's "trusted networks" list (setting key `a2a_trusted_networks`, name
+kept) is read **only on the outbound side**. Nothing on this inbound server
+consults it: every inbound call needs a Trinity credential or an x402 payment,
+whatever network it arrives from.
+
+```
+caller instance (agent → call_a2a_agent)                 provider instance
+  a2a_outbound_service.register / call_agent               POST /a2a/{name}
+   └ validate_endpoint → validate_a2a_endpoint_url          │ no credential → _anonymous_jsonrpc
+       public-HTTPS rule refuses (http / CGNAT)             │   limiter first; free path → 401
+       └ _validate_trusted_a2a_url(entries)                 │   (x402 path unchanged, ent#679)
+           name entry or CIDR; never metadata/              │ Trinity key → _authorize_inbound
+           loopback/platform; addresses pinned              │   (exposure, allow-list, access)
+   http://inst.<tailnet>/a2a/{name}  + Bearer key ──────►   │     → dispatch(triggered_by="a2a")
+```
+
+- **Storage**: `system_settings['a2a_trusted_networks']` (JSON list, typed
+  admin route only, the generic `PUT /api/settings/{key}` refuses the key).
+- **Checked twice**: when an endpoint is registered and again on every call
+  (`a2a_client` re-validates and pins the resolved addresses), so a name that
+  later resolves outside the allowed set is refused at call time.
+- **Off the list**: the v0.9.5 refusal, unchanged — `endpoint_private_address`
+  for a private/CGNAT address, `endpoint_not_https` for `http://`.
+- **Removed before 1.0 (ent#885)**: the keyless door, the internal-only scope
+  (`_internal_gate`, the card's internal base URL, the `a2a_internal_base_url`
+  setting), the inbound source resolution (proxy-container `X-Real-IP` trust,
+  cloudflared header sniffing) and the `source_host` attribution. The columns
+  `agent_ownership.a2a_scope`, `a2a_keyless_internal` and
+  `schedule_executions.source_host` (SQLite migration `a2a_internal_scope`,
+  Alembic `0096_a2a_internal_scope`) stay in the DDL, unread and unwritten; an
+  rc-era `internal` row is now an ordinary exposed agent. The exposure setter
+  is `PUT /api/enterprise/a2a/{agent}/exposure {enabled}` again.
+- **Tests**: `tests/unit/test_ent838_a2a_trusted_networks.py`,
+  `tests/unit/test_ent885_outbound_allowlist.py`,
+  `tests/unit/test_ent885_keyless_refused.py`,
+  `src/frontend/tests/unit/a2aPanelNoScope.spec.js`.

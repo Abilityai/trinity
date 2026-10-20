@@ -18,10 +18,25 @@ translation.
     (status_code, detail, headers) the router raises as an ``HTTPException``.
     The service builds the domain payload (an error dict/string); the status code
     is a mapping hint, not a FastAPI import.
+  * ``InterAgentDepthExceeded`` — an agent-to-agent hop past the configured
+    chain depth (#2806). Each router maps it explicitly to a named 403.
 """
 from __future__ import annotations
 
 from typing import NamedTuple, Optional
+
+from services.execution_envelope import TaskExecutionErrorCode
+
+
+def chat_trigger(x_source_agent: Optional[str], x_via_mcp: Optional[str]) -> str:
+    """``triggered_by`` of a ``POST /chat`` turn (#96, #3127): ``agent`` for
+    agent-to-agent, ``mcp`` for a user's MCP call, ``chat`` otherwise. Admission
+    (pull routing) and the execution row read the same value."""
+    if x_source_agent:
+        return "agent"
+    if x_via_mcp:
+        return "mcp"
+    return "chat"
 
 
 class ChatAdmission(NamedTuple):
@@ -33,6 +48,15 @@ class ChatAdmission(NamedTuple):
     capacity: object
     queue_result: str
     chat_timeout: int
+    # #2806: the depth to stamp on the child row — None for a non-agent
+    # principal (a root). Last, with a default, so the NamedTuple stays
+    # positionally compatible.
+    chain_depth: Optional[int] = None
+    # trinity-enterprise#752: the skill gate's decision (a
+    # `skill_gate_service.GateDecision`), recorded by the row's setup once the
+    # execution the agent will receive exists — never under this admission's
+    # capacity-slot id. Last, with a default, for the same reason.
+    gate: Optional[object] = None
 
 
 class ChatExecutionContext(NamedTuple):
@@ -48,6 +72,10 @@ class ChatExecutionContext(NamedTuple):
     chat_activity_id: object
     session: object
     is_queued: bool
+    # trinity-enterprise#752: a self-approved turn of a gated skill runs in its
+    # own session, never the agent's shared one (the next caller would resume
+    # it with the skill loaded). Last, with a default.
+    isolated_session: bool = False
 
 
 class ChatAdmissionReplay(NamedTuple):
@@ -73,3 +101,40 @@ class ChatDispatchError(Exception):
         self.status_code = status_code
         self.detail = detail
         self.headers = headers
+
+
+# The one spelling, shared with the X-Trinity-Error-Code vocabulary.
+INTER_AGENT_DEPTH_EXCEEDED = TaskExecutionErrorCode.INTER_AGENT_DEPTH_EXCEEDED.value
+
+
+class InterAgentDepthExceeded(Exception):
+    """An agent-to-agent hop past ``inter_agent_max_chain_depth`` (#2806).
+
+    Raised by ``dispatch_admission_service.enforce_inter_agent_depth`` before any
+    idempotency claim, capacity slot or execution row exists. Not retryable:
+    the depth only falls when the caller's own running turns finish, so the
+    message tells the calling model to stop rather than retry or re-route.
+    """
+
+    def __init__(self, caller: Optional[str], target: str, depth: int, max_depth: int):
+        super().__init__(
+            f"{INTER_AGENT_DEPTH_EXCEEDED}: {caller} -> {target} at depth {depth} > {max_depth}"
+        )
+        self.caller = caller
+        self.target = target
+        self.depth = depth
+        self.max_depth = max_depth
+
+    def detail(self) -> dict:
+        return {
+            "error": INTER_AGENT_DEPTH_EXCEEDED,
+            "depth": self.depth,
+            "max_depth": self.max_depth,
+            "caller": self.caller,
+            "target": self.target,
+            "message": (
+                f"Inter-agent chain depth limit reached ({self.depth} > {self.max_depth}). "
+                "Do not retry this call or route it through another agent; finish your "
+                "turn with what you have and report back to your caller."
+            ),
+        }

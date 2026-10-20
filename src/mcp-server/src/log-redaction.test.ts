@@ -190,7 +190,12 @@ describe("#2035 installed dependencies still match the redaction assumption", ()
   const sessionLogSites = (pkg: string) =>
     bundleFiles(pkg).flatMap((file) =>
       consoleCallArgs(readFileSync(file, "utf8"))
-        .filter((args) => /session/i.test(args))
+        // A site that LOGS a session: the word `session` on its own, or a
+        // `sessionId` interpolation. Not every mention of the substring —
+        // mcp-proxy 6.7 added `console.error("--sessionIdleTimeout must be
+        // …")`, an argv validation message that carries no id to redact and
+        // no prefix to find (dependabot #2830).
+        .filter((args) => /\bsession\b|\bsessionId\b/i.test(args))
         .map((args) => ({ file, args }))
     );
 

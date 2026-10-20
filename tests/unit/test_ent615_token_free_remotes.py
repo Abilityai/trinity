@@ -636,7 +636,7 @@ class TestTheSweep:
         assert report == {
             "remotes_scrubbed": 0, "harvested": 0, "seeded": 0, "refused": 0,
             "gitmodules_hits": 0, "helper_ok": 1, "competing_helpers": 0,
-            "root_readable": 1,
+            "root_readable": 1, "root_traversable": 1, "git_present": 1,
         }
 
     def test_a_caller_held_credential_can_be_SEEDED(self, sweep, helper_env, tmp_path):
@@ -969,21 +969,27 @@ def _git_service():
 class _RecordingExec:
     """Stands in for `execute_command_in_container`, recording every exec."""
 
-    def __init__(self, helper_ok: int = 1, root_readable: int = 1):
+    def __init__(self, helper_ok: int = 1, root_readable: int = 1,
+                 root_traversable: int = 1, git_present: int = 1):
         self.calls: list[dict] = []
         self.helper_ok = helper_ok
         self.root_readable = root_readable
+        self.root_traversable = root_traversable
+        self.git_present = git_present
 
     async def __call__(self, container_name, command, timeout=60, *,
                        environment=None, user="developer"):
         self.calls.append({
             "command": command, "environment": environment, "user": user,
+            "timeout": timeout,
         })
         if "base64 -d" in command and "sh -s" in command:
             return {"exit_code": 0, "output": (
                 f"TRINITY_SCRUB_REPORT remotes_scrubbed=1 harvested=0 seeded=0 "
                 f"refused=0 gitmodules_hits=0 helper_ok={self.helper_ok} "
-                f"competing_helpers=0 root_readable={self.root_readable}"
+                f"competing_helpers=0 root_readable={self.root_readable} "
+                f"root_traversable={self.root_traversable} "
+                f"git_present={self.git_present}"
             )}
         return {"exit_code": 0, "output": ""}
 
@@ -998,8 +1004,12 @@ def gs_with_exec():
     gs = _git_service()
     patches = []
 
-    def _install(helper_ok: int = 1, root_readable: int = 1) -> _RecordingExec:
-        recorder = _RecordingExec(helper_ok=helper_ok, root_readable=root_readable)
+    def _install(helper_ok: int = 1, root_readable: int = 1,
+                 root_traversable: int = 1, git_present: int = 1) -> _RecordingExec:
+        recorder = _RecordingExec(
+            helper_ok=helper_ok, root_readable=root_readable,
+            root_traversable=root_traversable, git_present=git_present,
+        )
         # #1028: `git_service` is a package. Each sibling module binds
         # `execute_command_in_container` at import, and `_detect_git_dir` lives
         # in `gitignore` and is reached as `gitignore._detect_git_dir(...)` — so
@@ -1076,18 +1086,31 @@ class TestTheCredentialNeverTouchesArgv:
         assert asyncio.run(gs.update_remote_pat("a1", "TOK", "acme/agent")) is False
         assert not [c for c in recorder.calls if "remote set-url" in c["command"]]
 
-    def test_the_sweep_is_bounded_in_the_container_too(self, gs_with_exec):
-        """`execute_command_in_container` accepts a `timeout` and forwards it
-        nowhere, so `asyncio.wait_for` alone frees the caller while the
-        `_docker_executor` pool thread stays pinned — fleet-wide, from a
-        background pass."""
+    def test_the_sweep_is_bounded(self, gs_with_exec):
+        """The sweep hands `SCRUB_TIMEOUT_S` to `execute_command_in_container`,
+        which enforces it in the container (freeing the `_docker_executor`
+        pool thread) and around the await (freeing the caller) — #2969."""
         gs = _git_service()
         recorder = gs_with_exec()
         import asyncio
 
         asyncio.run(gs.scrub_git_remote_tokens("a1"))
-        sweep_cmd = next(c["command"] for c in recorder.calls if "sh -s" in c["command"])
-        assert sweep_cmd.startswith(f"timeout {gs.SCRUB_TIMEOUT_S} ")
+        sweep = next(c for c in recorder.calls if "sh -s" in c["command"])
+        assert sweep["timeout"] == gs.SCRUB_TIMEOUT_S
+
+    def test_a_timed_out_sweep_reports_failure(self, gs_with_exec, monkeypatch):
+        gs = _git_service()
+        gs_with_exec()
+        import asyncio
+
+        async def _timed_out(container_name, command, timeout=60, **kw):
+            if "sh -s" in command:
+                return {"exit_code": 124, "output": "", "timed_out": True}
+            return {"exit_code": 0, "output": ""}
+
+        monkeypatch.setattr(gs.token_scrub, "execute_command_in_container", _timed_out)
+        report = asyncio.run(gs.scrub_git_remote_tokens("a1"))
+        assert report["success"] is False
 
 
 class TestRotationWithoutARecreate:
@@ -1312,12 +1335,107 @@ class TestTheSweepCannotReportWorkItDidNotDo:
         assert report["remotes_scrubbed"] == 1
 
 
+class TestNoRepositoryIsNotAnUnreadableOne:
+    """#2930. `root_readable=0` had two causes and only one is an operator's
+    problem. An agent from a `local:` template has no repository, so the
+    readability test failed on EXISTENCE — and every stock starter filed a
+    "could not check this agent's git remotes" alert on every fresh install,
+    telling a first-time operator to loosen a capability setting that was not
+    involved."""
+
+    def test_the_script_reports_no_repository_as_traversable_and_absent(
+        self, sweep, helper_env, tmp_path
+    ):
+        bare = tmp_path / "no-repo"
+        bare.mkdir()
+        report, _ = sweep(bare, GITHUB_PAT="env_tok")
+        assert report["root_traversable"] == 1, "the home itself was readable"
+        assert report["git_present"] == 0
+        assert report["root_readable"] == 0
+
+    def test_a_real_repo_reports_both(self, sweep, helper_env, tmp_path):
+        """The positive control for the pair — without it the assertion above
+        passes against flags hard-coded to 1/0."""
+        repo = _mkrepo(tmp_path / "present", _TOKEN_URL)
+        report, _ = sweep(repo, GITHUB_PAT="env_tok")
+        assert (report["root_traversable"], report["git_present"]) == (1, 1)
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="root bypasses the permission bits this test relies on",
+    )
+    def test_an_unreadable_home_is_not_traversable(
+        self, sweep, helper_env, tmp_path
+    ):
+        """The capability case the alarm exists for: ROOT cannot be entered, so
+        whether a repo is in there is unknowable — which is precisely why this
+        one still alarms."""
+        repo = _mkrepo(tmp_path / "locked", _TOKEN_URL)
+        repo.chmod(0o000)
+        try:
+            report, _ = sweep(repo, GITHUB_PAT="env_tok")
+        finally:
+            repo.chmod(0o755)
+        assert report["root_traversable"] == 0
+        assert report["root_readable"] == 0
+
+    def test_no_repository_files_no_alarm(self, gs_with_exec):
+        gs = _git_service()
+        gs_with_exec(helper_ok=1, root_readable=0, root_traversable=1, git_present=0)
+        import asyncio
+
+        with patch.object(gs.token_scrub, "_alarm_git_token_scrub_unreadable") as alarm:
+            report = asyncio.run(gs.scrub_git_remote_tokens("a1"))
+
+        assert report["git_present"] == 0
+        assert not alarm.called, (
+            "nothing to sweep is not a finding — this fired once per local-template "
+            "agent on every fresh install (#2930)"
+        )
+
+    def test_an_unreachable_repo_still_alarms(self, gs_with_exec):
+        """The ent#615 property this must not trade away: an all-zero report
+        from a tree the sweep could not see is never an all-clear."""
+        gs = _git_service()
+        gs_with_exec(helper_ok=1, root_readable=0, root_traversable=0, git_present=0)
+        import asyncio
+
+        with patch.object(gs.token_scrub, "_alarm_git_token_scrub_unreadable") as alarm:
+            asyncio.run(gs.scrub_git_remote_tokens("a1"))
+        assert alarm.called
+
+    def test_a_present_but_unreadable_repo_still_alarms(self, gs_with_exec):
+        """The other unreachable shape: the home is traversable, `.git` is
+        there, and it still could not be read."""
+        gs = _git_service()
+        gs_with_exec(helper_ok=1, root_readable=0, root_traversable=1, git_present=1)
+        import asyncio
+
+        with patch.object(gs.token_scrub, "_alarm_git_token_scrub_unreadable") as alarm:
+            asyncio.run(gs.scrub_git_remote_tokens("a1"))
+        assert alarm.called
+
+    def test_an_old_report_without_the_flags_still_alarms(self, gs_with_exec):
+        """Fail-safe direction: a report that carries neither flag parses both
+        as 0, which routes to the alarm — the pre-#2930 behaviour."""
+        gs = _git_service()
+        rec = gs_with_exec(helper_ok=1, root_readable=0)
+        rec.root_traversable = 0
+        rec.git_present = 0
+        import asyncio
+
+        with patch.object(gs.token_scrub, "_alarm_git_token_scrub_unreadable") as alarm:
+            asyncio.run(gs.scrub_git_remote_tokens("a1"))
+        assert alarm.called
+
+
 class TestAnUnreadableSweepReachesAnOperator:
     """The consumer half of [C1]. A report nobody can act on is not a fix."""
 
     def test_it_alarms_when_the_sweep_could_not_look(self, gs_with_exec):
         gs = _git_service()
-        gs_with_exec(helper_ok=1, root_readable=0)
+        # The capability case: ROOT itself could not be traversed (#2930).
+        gs_with_exec(helper_ok=1, root_readable=0, root_traversable=0, git_present=0)
         import asyncio
 
         with patch.object(gs.token_scrub, "_alarm_git_token_scrub_unreadable") as alarm:
@@ -1401,3 +1519,70 @@ class TestTheRootOwnershipClaimStaysHonest:
             "the passwordless-sudo grant is gone — re-check the root-ownership "
             "wording in security.md, the helper and the Dockerfile"
         )
+
+
+class TestOwnerMaintenance:
+    """Regression #3719: checked installation and owner-readable maintenance."""
+    def test_unseeded_sweep_uses_owner_after_checked_root_install(self, gs_with_exec):
+        import asyncio
+        gs = _git_service()
+        recorder = gs_with_exec()
+        report = asyncio.run(gs.scrub_git_remote_tokens("a1", git_dir="/home/developer/private"))
+        assert report["success"] is True
+        assert [call["user"] for call in recorder.calls] == ["root", "developer"]
+        assert all(call["timeout"] == gs.SCRUB_TIMEOUT_S for call in recorder.calls)
+        assert all(not call["environment"] for call in recorder.calls)
+
+    @pytest.mark.parametrize("timed_out", [False, True])
+    def test_failed_install_never_runs_a_sweep(self, gs_with_exec, monkeypatch, timed_out):
+        import asyncio
+        gs = _git_service()
+        gs_with_exec()
+        calls = []
+        async def execute(**kwargs):
+            calls.append(kwargs)
+            return {"exit_code": 124 if timed_out else 1, "timed_out": timed_out,
+                    "output": "private installation output"}
+        monkeypatch.setattr(gs.token_scrub, "execute_command_in_container", execute)
+        report = asyncio.run(gs.scrub_git_remote_tokens("a1", git_dir="/home/developer/private"))
+        assert report["success"] is False
+        assert len(calls) == 1
+        assert "sh -s" not in calls[0]["command"]
+
+    def test_seed_only_reaches_root_sweep_environment(self, gs_with_exec):
+        import asyncio
+        gs = _git_service()
+        recorder = gs_with_exec()
+        report = asyncio.run(gs.scrub_git_remote_tokens("a1", git_dir="/home/developer", seed_pat="synthetic-seed"))
+        assert report["success"] is True
+        assert [call["user"] for call in recorder.calls] == ["root", "root"]
+        assert recorder.calls[0]["environment"] is None
+        assert recorder.calls[1]["environment"] == {"TRINITY_SEED_PAT":"synthetic-seed"}
+        assert "synthetic-seed" not in recorder.commands
+
+    def test_sweep_command_passes_path_as_one_literal_argument(self, tmp_path, monkeypatch):
+        import subprocess
+        from services import git_credential_helper as helper
+        marker = tmp_path / "injected"
+        path = str(tmp_path / "space name") + "; touch " + str(marker)
+        monkeypatch.setattr(helper, "SCRUB_SCRIPT", 'printf "%s" "$1"')
+        monkeypatch.setattr(helper, "install_command", lambda: "true")
+        result = subprocess.run(["bash", "-c", helper.scrub_command(path)],
+                                text=True, capture_output=True, timeout=10)
+        assert result.returncode == 0
+        assert result.stdout == path
+        assert not marker.exists()
+
+
+    def test_seed_exec_exception_never_logs_environment_payload(self, gs_with_exec, monkeypatch, caplog):
+        import asyncio
+        gs = _git_service()
+        gs_with_exec()
+        async def execute(**kwargs):
+            if kwargs.get("environment"):
+                raise RuntimeError("synthetic-private-seed exec environment")
+            return {"exit_code":0,"output":""}
+        monkeypatch.setattr(gs.token_scrub, "execute_command_in_container", execute)
+        report = asyncio.run(gs.scrub_git_remote_tokens("a1", git_dir="/home/developer", seed_pat="synthetic-private-seed"))
+        assert report["success"] is False
+        assert "synthetic-private-seed" not in caplog.text

@@ -1,0 +1,78 @@
+{
+  "version": "1",
+  "date": "2026-09-30",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/2973-chain-depth-laundering",
+  "issue": "abilityai/trinity#2973",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_mcp_tools": 0,
+    "changed_responses": 5,
+    "new_token_claims": 1,
+    "new_scheduler_fields": 1,
+    "new_ops_settings": 1,
+    "migrations": 1
+  },
+  "findings": [],
+  "appendix": [
+    {
+      "id": 1,
+      "severity": "low",
+      "confidence": 8,
+      "status": "FIXED",
+      "category": "design",
+      "title": "Dispatch budget keyed on subscriber only allowed cross-source starvation",
+      "file": "src/backend/services/event_dispatch_service.py",
+      "resolution": "keyed on (source, subscriber) pair"
+    },
+    {
+      "id": 2,
+      "severity": "info",
+      "confidence": 6,
+      "status": "FIXED",
+      "category": "repudiation",
+      "title": "Unvouched loopback refusal recorded subscriber as actor",
+      "file": "src/backend/services/dispatch_admission_service.py",
+      "resolution": "caller None, collaboration activity skipped"
+    }
+  ],
+  "supply_chain_summary": "unchanged",
+  "filter_stats": {
+    "raised": 2,
+    "fixed": 2,
+    "open": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "open": 0
+  },
+  "trend": {
+    "previous": "cso-diff-2026-09-23-2806-chain-depth",
+    "resolved": [
+      "#2806 accepted residual: loops/schedule triggers/events start fresh roots"
+    ],
+    "new_open": 0
+  }
+}

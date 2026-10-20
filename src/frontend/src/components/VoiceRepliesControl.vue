@@ -5,7 +5,7 @@
     (VoiceChannelToggle). When enabled, the agent gains the send_voice_reply tool and
     chooses voice per message — replies are text by default.
   -->
-  <div class="pt-4 border-t border-gray-200 dark:border-gray-700">
+  <div :class="embedded ? '' : 'pt-4 border-t border-gray-200 dark:border-gray-700'">
     <div class="flex items-start gap-3">
       <label class="relative inline-flex items-center cursor-pointer mt-0.5" :class="{ 'opacity-50 cursor-not-allowed': !voice.available }">
         <input
@@ -22,7 +22,7 @@
         <div class="text-xs text-gray-500 dark:text-gray-400">
           Let this agent speak replies as a voice note (ElevenLabs). Replies are text by default —
           the agent chooses voice per message. Enable it per channel in each channel's settings.
-          <span v-if="!voice.available" class="block mt-1 text-status-warning-600 dark:text-status-warning-400">
+          <span v-if="!voice.available" class="block mt-1 text-status-warning-700 dark:text-status-warning-400">
             Voice is unavailable — the platform has no ElevenLabs API key configured.
           </span>
         </div>
@@ -46,7 +46,7 @@
           class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50"
         >Save</button>
       </div>
-      <p class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+      <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
         <template v-if="defaultVoiceId">Leave blank to use the platform default voice.</template>
         <template v-else>Paste a voice ID from your ElevenLabs account.</template>
       </p>
@@ -61,6 +61,8 @@ import api from '../api'
 
 const props = defineProps({
   agentName: { type: String, required: true },
+  // trinity-enterprise#887: a row of Settings › Channels, inside its card.
+  embedded: { type: Boolean, default: false },
 })
 
 const voice = ref({ enabled: false, available: false })

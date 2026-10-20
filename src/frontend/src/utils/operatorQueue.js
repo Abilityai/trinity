@@ -43,6 +43,52 @@ export function optionsOf(item) {
 }
 
 /**
+ * #3242: the ONE platform-reserved approval answer — "none of the offered
+ * options; the instruction is in `response_text`". Mirrors `SOMETHING_ELSE` in
+ * `src/backend/services/operator_queue_choices.py` and
+ * `src/mcp-server/src/types.ts` (parity-tested). Never shown raw to a person:
+ * see `decisionLabel`.
+ */
+export const SOMETHING_ELSE = '(something else)'
+export const SOMETHING_ELSE_LABEL = 'Something else'
+
+/** The ingestion clamp's placeholder (#1632) — a record, never a choice. */
+export const OPTIONS_DROPPED_MARKER = '(options omitted: exceeded size cap)'
+
+/**
+ * The agent's own options as pickable chips: `optionsOf` minus the reserved
+ * literal (rendered once, by the surface, as its own chip) and the size-cap
+ * marker. `optionsOf` and `queueResponseKind` stay unfiltered — they must agree
+ * with the sink about whether an approval offered anything.
+ *
+ * @param {{options?: unknown}|undefined} item
+ * @returns {string[]}
+ */
+export function offeredChips(item) {
+  return optionsOf(item).filter((o) => o !== SOMETHING_ELSE && o !== OPTIONS_DROPPED_MARKER)
+}
+
+/** A recorded decision as a person reads it: the reserved value is "Something else". */
+export function decisionLabel(response) {
+  return response === SOMETHING_ELSE ? SOMETHING_ELSE_LABEL : response
+}
+
+/**
+ * Is this approval decided only by its options (a platform-minted approval)?
+ * The sink refuses the reserved answer there (`not_off_menu`), so no surface
+ * offers the chip. Every projection — the Workspace's and the operator queue's
+ * list and item — carries the sink's own predicate as `decided_by_options`, and
+ * that boolean wins. The `gate-` prefix is only the fallback for an item that
+ * lacks the field (a payload from before #3242).
+ */
+export function decidedByOptions(item) {
+  if (!item || typeof item !== 'object') return false
+  if (typeof item.decided_by_options === 'boolean') return item.decided_by_options
+  const id = String(item.request_id || item.id || '').trim().toLowerCase()
+  return id.startsWith('gate-')
+}
+
+/**
  * Which controls an item gets — by TYPE, and total:
  *
  *   approval with usable options → 'approval'    (option buttons → note → Send)
@@ -107,6 +153,9 @@ export function buildQueueResponse({ kind, option, note = '', answer = '' } = {}
     case 'approval': {
       const opt = typeof option === 'string' ? option : option == null ? '' : String(option)
       if (!opt.length) return null
+      // #3242: the reserved answer needs the instruction — the agent cannot act
+      // on "none of these" alone.
+      if (opt === SOMETHING_ELSE && !(typeof note === 'string' && note.trim())) return null
       return queueResponseBody(opt, note)
     }
     case 'question': {
@@ -126,6 +175,8 @@ export const QUEUE_TYPE_LABELS = Object.freeze({
   approval: 'Needs approval',
   question: 'Question',
   alert: 'Heads up',
+  // #3130: the flood alarm became a budgeted platform type; it is still an alert.
+  queue_flood: 'Heads up',
 })
 
 /**
@@ -163,4 +214,477 @@ export const QUEUE_RESPONSE_NOT_RECORDED =
 export function respondRefusedAsNotPending(err) {
   const status = err?.response?.status
   return status === 409 || status === 400 || status === 404
+}
+
+/**
+ * #2915 — what the platform last established about the agent's own copy of an
+ * item, as ONE badge rule every surface calls (QueueCard, ResolvedCard, /m,
+ * PortalAsks). Returns `null` when nothing needs saying (confirmed, not aging,
+ * delivered) so a healthy card stays quiet; otherwise `{ label, variant, title }`
+ * for a `BaseBadge` (variant is a BaseBadge variant, never a raw colour).
+ *
+ * Inputs are the fields the API already carries: `sync_state`, `sync_detail`,
+ * `last_confirmed_at`, `delivery_state`, `delivery_detail`, `aging`,
+ * `aged_since`. The portal projection carries a coarse `sync` instead of
+ * `sync_state`; both spellings are read.
+ */
+export const SYNC_BADGE_COPY = Object.freeze({
+  changed: 'Changed by the agent',
+  closed_by_filer: 'Closed by the agent',
+  closed: 'Closed by the agent',
+  missing: 'Gone from the agent',
+  stale_id: 'Re-used id',
+  unconfirmed: 'Unconfirmed',
+  undelivered: 'Answer not delivered',
+  aging: 'Waiting',
+})
+
+export function queueSyncBadge(item) {
+  if (!item || typeof item !== 'object') return null
+  const state = item.sync_state || item.sync
+  // Delivery outranks sync on an answered item: "your answer never landed" is
+  // the fact the operator needs first.
+  if (item.delivery_state === 'undelivered') {
+    return { label: SYNC_BADGE_COPY.undelivered, variant: 'danger', title: deliveryTitle(item) }
+  }
+  if (state === 'changed') {
+    return { label: SYNC_BADGE_COPY.changed, variant: 'warning', title: changedTitle(item.sync_detail) + since(item) }
+  }
+  if (state === 'closed_by_filer' || state === 'closed') {
+    return { label: SYNC_BADGE_COPY.closed_by_filer, variant: 'warning', title: 'The agent closed this on its side; it is still waiting for you here.' + since(item) }
+  }
+  if (state === 'missing') {
+    return { label: SYNC_BADGE_COPY.missing, variant: 'warning', title: 'The agent no longer carries this item in its queue file.' + since(item) }
+  }
+  if (state === 'stale_id') {
+    return { label: SYNC_BADGE_COPY.stale_id, variant: 'neutral', title: 'The agent re-used this id after the item was closed; the re-ask was not admitted.' }
+  }
+  if (state === 'unconfirmed') {
+    return { label: SYNC_BADGE_COPY.unconfirmed, variant: 'neutral', title: unconfirmedTitle(item) }
+  }
+  if (item.aging) {
+    return { label: SYNC_BADGE_COPY.aging, variant: 'warning', title: item.aged_since ? `Past the aging bound since ${item.aged_since}` : 'Past the aging bound' }
+  }
+  return null
+}
+
+/**
+ * trinity-enterprise#610 §3g B5 — the badge a WORKSPACE reader sees. The same
+ * rule as `queueSyncBadge`, minus `unconfirmed`: that state means only that no
+ * confirming poll has read the row back from the agent's file yet — platform
+ * bookkeeping, nothing a client can act on (it read as "is this ask real?").
+ * An unconfirmed ask that is also aging still says "Waiting". Desktop and `/m`
+ * keep the full rule; they are the operator's door.
+ *
+ * @param {object|undefined} item
+ * @returns {{label: string, variant: string, title: string}|null}
+ */
+export function workspaceAskBadge(item) {
+  if (!item || typeof item !== 'object') return null
+  const state = item.sync_state || item.sync
+  if (state === 'unconfirmed' && item.delivery_state !== 'undelivered') {
+    return queueSyncBadge({ ...item, sync_state: null, sync: null })
+  }
+  return queueSyncBadge(item)
+}
+
+/**
+ * trinity-enterprise#610 §3g B3 — the options a QUESTION offered, as quick
+ * picks. `queueResponseKind` keeps a question free-text on purpose (desktop and
+ * `/m` rely on it); these only FILL the answer box, they never send. An option
+ * longer than the answer field accepts (`WorkspaceAskAnswer.response`,
+ * max 500) is left out rather than cut — a pick must be what the agent offered.
+ */
+export const QUICK_PICK_MAX = 500
+export function questionQuickPicks(item) {
+  if (!item || item.type !== 'question') return []
+  return optionsOf(item).filter((s) => s.length <= QUICK_PICK_MAX)
+}
+
+function changedTitle(detail) {
+  const fields = typeof detail === 'string' && detail ? detail.split(',').join(', ') : 'content'
+  return `The agent rewrote this item since it was ingested (${fields}). You are reading the original.`
+}
+
+/** " Since <ts>." when the platform recorded when it established the state. */
+function since(item) {
+  return item.sync_updated_at ? ` Since ${item.sync_updated_at}.` : ''
+}
+
+function deliveryTitle(item) {
+  const tried = item.delivery_updated_at ? ` Last tried ${item.delivery_updated_at}.` : ''
+  const terminal = item.status === 'cancelled' || item.status === 'expired'
+  switch (item.delivery_detail) {
+    case 'entry_changed': return 'The agent rewrote the item after you answered; the answer was not delivered.'
+    case 'closed_by_filer': return 'The agent closed the item on its side; the answer was not delivered.'
+    case 'entry_missing':
+      // A cancellation whose entry the agent already dropped has nothing left
+      // to land on: recorded, never retried, and not an escalation.
+      return terminal
+        ? "The agent's queue file no longer carries this item, so the cancellation could not be written; the agent has already dropped it."
+        : `The item is gone from the agent's queue file; the answer is re-added when the file is readable.${tried}`
+    case 'file_missing': return `The agent has no queue file; retrying.${tried}`
+    case 'agent_not_running': return 'The agent is not running; the answer is delivered when it starts.'
+    case 'conflict': return `The agent was writing its file at the same moment; retrying.${tried}`
+    default: return `The write to the agent failed; retrying.${tried}`
+  }
+}
+
+function unconfirmedTitle(item) {
+  const why = {
+    agent_not_running: 'the agent is not running',
+    timeout: 'the agent did not answer in time',
+    unreachable: 'the agent could not be reached',
+    invalid_json: "the agent's queue file is not valid JSON",
+    wrong_shape: "the agent's queue file is not the expected shape",
+    oversize_file: "the agent's queue file is too large to read",
+  }[item.sync_detail] || 'the platform could not reconcile it'
+  const when = item.last_confirmed_at ? ` Last confirmed ${item.last_confirmed_at}.` : ' Never confirmed.'
+  return `Not confirmed with the agent: ${why}.${when}`
+}
+
+/** True when a respond/answer was refused with 409 `item_diverged` (#2915). */
+export function respondRefusedAsDiverged(err) {
+  const status = err?.response?.status
+  if (status !== 409) return false
+  const detail = err?.response?.data?.detail
+  const code = detail && typeof detail === 'object' ? detail.code : null
+  return code === 'item_diverged'
+}
+
+export const QUEUE_RESPONSE_DIVERGED =
+  'The agent changed this item after you opened it. Review it and send again to answer anyway.'
+
+/**
+ * trinity-enterprise#751 — a gated-skill approval is decided only by the person
+ * it was addressed to; anyone else's answer is refused (403 `not_addressee`) and
+ * nothing is recorded. Refused by WHO answered, not by the item's state, so it is
+ * neither a "not recorded, refetch" nor a divergence.
+ */
+export function respondRefusedAsNotAddressee(err) {
+  if (err?.response?.status !== 403) return false
+  const detail = err?.response?.data?.detail
+  return Boolean(detail && typeof detail === 'object' && detail.code === 'not_addressee')
+}
+
+export const QUEUE_RESPONSE_NOT_ADDRESSEE =
+  'This approval was addressed to someone else; only they can decide it.'
+
+/**
+ * trinity-enterprise#611 — how an item ENDED, as ONE rule every surface renders
+ * (ResolvedCard, the `/m` "Recently ended" strip, PortalAsks). `null` while the
+ * item is still pending.
+ *
+ * `{ kind, label, who, when }`:
+ *   - `kind` — `answered | dismissed | cancelled | expired`: the ledger's
+ *     `disposition` (`dismissed`, trinity-enterprise#748: the person it was
+ *     addressed to chose not to answer; its status is `cancelled`),
+ *     else the terminal status (a row that ended before the ledger). The
+ *     Workspace projection's own `status` (`answered`) reads the same way.
+ *     #3247: `replaced` — a cancel the AGENT authored by replacing its own
+ *     ask (`disposed_by` / the projection's `ended_by` is `agent`); never a
+ *     person's cancel, a timeout or a platform ending.
+ *     trinity-enterprise#901: `withdrawn` — the agent ended its own ask with a
+ *     reason and no successor. Which of the two is the server's derived
+ *     `agent_ending`, read first; never inferred from the reason text or from
+ *     a `replaced_by` the Workspace projection may withhold. A row without the
+ *     field (an older payload) keeps reading `replaced`.
+ *   - `who` — the person, for the Operating Room (`disposed_by_email`, or a
+ *     legacy answer's `responded_by_email`); the Workspace projection's coarse
+ *     `ended_by` (`you` / `the operator`; `someone_else` → the projection's
+ *     `answered_by`, trinity-enterprise#816); `timeout` for an expiry; `the
+ *     platform` for a row the platform itself ended (#3246: `disposed_by =
+ *     'platform'`, or the projection's `ended_by = 'platform'`); `null` when the
+ *     platform does not know.
+ *   - `reason` — #3246: the platform's ending in words (`condition_cleared`,
+ *     `superseded`); trinity-enterprise#901: the agent's own one-line reason
+ *     for a withdraw (the Workspace's `ending_reason`, the operator row's
+ *     `disposition_reason`) — agent text, rendered on its own line, never in
+ *     the ending's words; `null` for every other ending. A platform ending is never a
+ *     person's answer and never a timeout.
+ *   - `alert` — the row is an alert: its expiry reads "nobody acted on it",
+ *     because nobody was asked anything.
+ *   - `when` — the ledger's `disposed_at`, the projection's `ended_at`, or a
+ *     legacy answer's `responded_at`. NEVER `created_at`: that is when the ask
+ *     was filed, and showing it as the ending time is the defect this replaces.
+ */
+export const ENDING_LABELS = Object.freeze({
+  answered: 'Answered',
+  dismissed: 'Dismissed',
+  cancelled: 'Cancelled',
+  expired: 'Expired',
+  replaced: 'Replaced',   // #3247
+  withdrawn: 'Withdrawn', // trinity-enterprise#901
+})
+
+/** #3246 — why the platform ended a row, in words. An unknown reason token
+ *  falls back to nothing rather than being printed raw. */
+export const PLATFORM_ENDING_REASONS = Object.freeze({
+  condition_cleared: 'the condition cleared',
+  superseded: 'superseded by a newer reading',
+})
+
+/** trinity-enterprise#844 — why the CLOCK's ending says more than "expired".
+ *  `outcome_unknown`: an approval whose action the platform did not hold (any
+ *  but a skill gate's) ran out of time, so nothing here can say whether the
+ *  agent went ahead without an answer. An unknown token falls back to nothing. */
+export const TIMEOUT_ENDING_REASONS = Object.freeze({
+  outcome_unknown: 'whether the action went ahead is unknown',
+})
+
+function endingKind(item) {
+  const kind = ledgerKind(item)
+  if (kind !== 'cancelled') return kind
+  // trinity-enterprise#901: the server's derived kind first.
+  if (item.agent_ending === 'replaced' || item.agent_ending === 'withdrawn') return item.agent_ending
+  if (item.disposed_by === 'agent' || item.ended_by === 'agent') return 'replaced'
+  return kind
+}
+
+function ledgerKind(item) {
+  const d = item.disposition
+  if (d === 'answered' || d === 'dismissed' || d === 'cancelled' || d === 'expired') return d
+  const s = item.status
+  if (s === 'responded' || s === 'acknowledged' || s === 'answered') return 'answered'
+  if (s === 'dismissed' || s === 'cancelled' || s === 'expired') return s
+  return null
+}
+
+export function queueEnding(item) {
+  if (!item || typeof item !== 'object') return null
+  const kind = endingKind(item)
+  if (!kind) return null
+  const when = item.disposed_at || item.ended_at || (kind === 'answered' ? item.responded_at : null) || null
+  let who = null
+  let reason = null
+  if (kind === 'expired') {
+    who = 'timeout'
+    reason = TIMEOUT_ENDING_REASONS[item.disposition_reason] || null
+  } else if (kind === 'replaced') {
+    who = 'the agent'
+  } else if (kind === 'withdrawn') {
+    who = 'the agent'
+    reason = item.ending_reason || item.disposition_reason || null
+  } else if (item.disposed_by === 'platform' || item.ended_by === 'platform') {
+    who = 'the platform'
+    reason = PLATFORM_ENDING_REASONS[item.disposition_reason] || null
+  } else if (item.ended_by === 'you') {
+    who = 'you'
+  } else if (item.ended_by === 'operator') {
+    who = 'the operator'
+  } else if (item.ended_by === 'someone_else') {
+    // trinity-enterprise#816: a shared ask — another person it was delivered
+    // to answered first. The projection names them only then (`answered_by`).
+    who = item.answered_by || 'someone else'
+  } else {
+    who = item.disposed_by_email || (kind === 'answered' ? item.responded_by_email : null) || null
+  }
+  return { kind, label: ENDING_LABELS[kind], who, when, reason, alert: item.type === 'alert' }
+}
+
+/** The ending in words: "Cancelled by op@…", "Answered by you",
+ *  "Ended by the platform — the condition cleared", "Expired — nobody answered
+ *  in time" ("nobody acted on it" for an alert; "…; whether the action went
+ *  ahead is unknown" for an unheld approval, trinity-enterprise#844), or the
+ *  bare label when nobody is known. */
+export function queueEndingText(ending) {
+  if (!ending) return ''
+  if (ending.kind === 'expired') {
+    const base = `${ending.label} — ${ending.alert ? 'nobody acted on it' : 'nobody answered in time'}`
+    return ending.reason ? `${base}; ${ending.reason}` : base
+  }
+  if (ending.who === 'the platform') {
+    return ending.reason ? `Ended by the platform — ${ending.reason}` : 'Ended by the platform'
+  }
+  return ending.who ? `${ending.label} by ${ending.who}` : ending.label
+}
+
+/** #3247 — a Workspace ask's ending in words. On a Workspace ask `replaced_by`
+ *  and `replaces` are the OTHER ask's request_id (the server projects them only
+ *  when this ask's addressee could already see that ask), not the operator
+ *  row's uuids — so the successor is named, never linked. */
+export function workspaceEndingText(ask) {
+  const ending = queueEnding(ask)
+  const text = queueEndingText(ending)
+  return ending?.kind === 'replaced' && ask.replaced_by ? `${text} with ${ask.replaced_by}` : text
+}
+
+/** trinity#3524 — the viewer's own answer to an ask they answered, from the
+ *  projection's `answer` (set only when `ended_by` is `you`). An approval
+ *  answered Approve / Reject reads as a verdict ("You approved"); any other
+ *  answer is quoted ("You answered “Ship it”"). `past` is the verdict word, or
+ *  null. Null when the viewer did not answer it. */
+const VERDICT_PAST = { approve: 'approved', reject: 'rejected' }
+export function workspaceOwnAnswer(ask) {
+  if (!ask || ask.ended_by !== 'you' || !ask.answer) return null
+  const past = ask.kind === 'approval'
+    ? VERDICT_PAST[String(ask.answer).trim().toLowerCase()] || null
+    : null
+  return { past, text: past ? `You ${past}` : `You answered “${ask.answer}”` }
+}
+
+/** #3247 — the successor's own line: "Replaces <request_id>", or '' . */
+export function workspaceReplacesText(ask) {
+  return ask && ask.replaces ? `Replaces ${ask.replaces}` : ''
+}
+
+function relativeAgo(iso, now) {
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return null
+  const diffMin = Math.floor((now - then) / 60000)
+  if (diffMin < 1) return 'just now'
+  if (diffMin < 60) return `${diffMin}m ago`
+  const diffHr = Math.floor(diffMin / 60)
+  if (diffHr < 24) return `${diffHr}h ago`
+  return `${Math.floor(diffHr / 24)}d ago`
+}
+
+/**
+ * #3246 — a pending platform alert is ONE row per condition, updated in place by
+ * every new reading, so a row seen many times must not read as a fresh alert.
+ * "seen N times · last seen 5m ago" when `context.seen_count > 1`; `''` for an
+ * ended row, a row seen once, and anything that is not an alert.
+ */
+export function queueSeenLine(item, now = Date.now()) {
+  if (!item || item.status !== 'pending' || item.type !== 'alert') return ''
+  const n = Number(item.context && item.context.seen_count)
+  if (!Number.isInteger(n) || n < 2) return ''
+  const ago = item.last_seen_at ? relativeAgo(item.last_seen_at, now) : null
+  return ago ? `seen ${n} times · last seen ${ago}` : `seen ${n} times`
+}
+
+/** What the resolved feed sorts by (#627 AC6): when the item ended; a legacy
+ *  answer's time; else — the only timestamp such a row has — when it was filed. */
+export function queueEndingSortTime(item) {
+  return (item && (item.disposed_at || item.responded_at || item.created_at)) || ''
+}
+
+/** Up to `max` items that ENDED, most recent ending first — the `/m` strip. */
+export function recentlyEnded(items, max = 5) {
+  if (!Array.isArray(items)) return []
+  return items
+    .filter((i) => queueEnding(i))
+    .sort((a, b) => String(queueEndingSortTime(b)).localeCompare(String(queueEndingSortTime(a))))
+    .slice(0, max)
+}
+
+/**
+ * trinity-enterprise#611 (#627 AC6) — the re-ask link, as badges: a re-ask
+ * names the expired ask it re-raises ("Re-ask of …"), and the expired ask names
+ * the ask that re-raised it ("Re-asked as …"). The successor carries the link
+ * (`supersedes_expired` = the predecessor's platform id); the predecessor
+ * stores nothing, so its side is found among the loaded `items`. A re-ask whose
+ * predecessor is not loaded still says it is one. One fact per badge: an ask in
+ * a chain gets both. Each badge is `{ key, prefix, id, title }`; `id` is the
+ * other ask's request_id (machine text), or null when it is not loaded.
+ *
+ * #3247 — a replace is linked on BOTH rows (`replaces` on the successor,
+ * `replaced_by` on the predecessor, platform ids), so each side is said from
+ * its own row; the loaded list only supplies the other ask's request_id.
+ */
+export function queueReaskBadges(item, items = []) {
+  if (!item || typeof item !== 'object') return []
+  const list = Array.isArray(items) ? items : []
+  const out = []
+  if (item.supersedes_expired) {
+    const pred = list.find((i) => i && i.id === item.supersedes_expired)
+    out.push(pred?.request_id
+      ? { key: 'reask-of', prefix: 'Re-ask of', id: pred.request_id, title: `Re-asks "${pred.title}", which expired unanswered.` }
+      : { key: 'reask-of', prefix: 'Re-ask of an expired ask', id: null, title: 'Re-asks an earlier ask that expired unanswered.' })
+  }
+  const succ = item.id ? list.find((i) => i && i.supersedes_expired === item.id) : null
+  if (succ) {
+    out.push({
+      key: 'reasked-as',
+      prefix: succ.request_id ? 'Re-asked as' : 'Re-asked',
+      id: succ.request_id || null,
+      title: `The agent asked again after this expired: "${succ.title}".`,
+    })
+  }
+  if (item.replaces) {
+    const pred = list.find((i) => i && i.id === item.replaces)
+    out.push(pred?.request_id
+      ? { key: 'replaces', prefix: 'Replaces', id: pred.request_id, title: `The agent replaced "${pred.title}" with this ask.` }
+      : { key: 'replaces', prefix: 'Replaces an earlier ask', id: null, title: 'The agent replaced an earlier ask with this one.' })
+  }
+  if (item.replaced_by) {
+    const next = list.find((i) => i && i.id === item.replaced_by)
+    out.push(next?.request_id
+      ? { key: 'replaced-by', prefix: 'Replaced by', id: next.request_id, title: `The agent replaced this ask with "${next.title}".` }
+      : { key: 'replaced-by', prefix: 'Replaced by a newer ask', id: null, title: 'The agent replaced this ask with a newer one.' })
+  }
+  return out
+}
+
+/**
+ * trinity-enterprise#610 §3g L6 (E2 seam) — the parts of an ask's agent-authored
+ * brief that are shown: `why`, `recommendation`, `if_no_answer`, each a
+ * non-empty string, else absent. Nothing to show is `null`, so a card with no
+ * brief renders no brief block at all. The server stores and projects the
+ * brief (L8); this only decides what of it is displayable. Agent text: the
+ * renderer (PortalMarkdown → DOMPurify) is the XSS boundary.
+ *
+ * @param {{brief?: unknown}|undefined} item
+ * @returns {{why?: string, recommendation?: string, if_no_answer?: string}|null}
+ */
+const BRIEF_TEXT_FIELDS = Object.freeze(['why', 'recommendation', 'if_no_answer'])
+export function briefOf(item) {
+  const b = item?.brief
+  if (!b || typeof b !== 'object' || Array.isArray(b)) return null
+  const out = {}
+  for (const k of BRIEF_TEXT_FIELDS) {
+    if (typeof b[k] === 'string' && b[k].trim()) out[k] = b[k]
+  }
+  return Object.keys(out).length ? out : null
+}
+
+/**
+ * The brief's per-option consequence, for an APPROVAL's offered options only:
+ * a key that is not an offered option, or a value that is not a string, is
+ * dropped (the server filters too — this is the renderer's belt). A question or
+ * an alert has no impact line.
+ *
+ * @param {{kind?: string, type?: string, options?: unknown, brief?: unknown}} item
+ * @returns {Object<string, string>}
+ */
+export function briefImpactFor(item) {
+  const kind = item?.kind ?? item?.type
+  const impact = item?.brief?.impact
+  if (kind !== 'approval' || !impact || typeof impact !== 'object' || Array.isArray(impact)) return {}
+  const offered = new Set(optionsOf({ options: item.options }))
+  // No prototype: an option literally named `constructor` must read as absent,
+  // not as Object's native function (A2 round 1, /cso nit).
+  const out = Object.create(null)
+  for (const [opt, text] of Object.entries(impact)) {
+    if (offered.has(opt) && typeof text === 'string' && text.trim()) out[opt] = text
+  }
+  return out
+}
+
+/** "If you don't answer by Oct 1, 3:00 PM" — or plainly, with no deadline. */
+export function ifNoAnswerLabel(expiresAt) {
+  const at = expiresAt ? Date.parse(expiresAt) : NaN
+  if (!Number.isFinite(at)) return "If you don't answer"
+  const when = new Date(at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+  return `If you don't answer by ${when}`
+}
+
+/**
+ * trinity-enterprise#611 — the rows of an ask's `proposal`: the exact action a
+ * person is asked to approve. The prompt tells agents to put it there "so the
+ * operator can verify what they are approving", so every card that offers the
+ * decision renders these rows (components/operator/QueueProposal.vue).
+ *
+ * One row per top-level field, in the order the agent wrote them. Text is shown
+ * verbatim; any other value (a number, a boolean, null, a nested object or
+ * list) as compact JSON, so nothing is summarised away. Anything that is not a
+ * plain object has no rows. Agent-authored: callers render the values as text,
+ * never as markup.
+ */
+export function proposalRows(proposal) {
+  if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal)) return []
+  return Object.entries(proposal).map(([key, value]) => ({
+    key,
+    value: typeof value === 'string' ? value : JSON.stringify(value),
+  }))
 }

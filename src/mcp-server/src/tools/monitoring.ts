@@ -7,7 +7,7 @@
  */
 
 import { z } from "zod";
-import { TrinityClient } from "../client.js";
+import { TrinityClient, type FleetAgentSync } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 
 /**
@@ -43,7 +43,13 @@ export function createMonitoringTools(
       description:
         "Get fleet-wide agent health summary. " +
         "Returns overall health status including counts of healthy, degraded, unhealthy, and critical agents. " +
-        "Also returns a list of all agents with their current health status.",
+        "Also returns a list of all agents with their current health status and issues. " +
+        "Each agent carries a `sync` block — git sync health read from the platform's poller: " +
+        "binding (agent/deployment), auto_sync_enabled, ahead/behind (origin on the agent's own branch), " +
+        "dirty_files, last_successful_push_at, divergence_age_s, state (green/yellow/red/unknown), " +
+        "reason, recommendation, frozen — or null when the agent has no git binding. " +
+        "`sync_summary` totals the git-bound agents (diverged, frozen, auto_sync_off, dirty, red, yellow). " +
+        "A red sync adds a 'sync: <reason> — <recommendation>' entry to the agent's issues; it never changes status.",
       parameters: z.object({}),
       execute: async (
         _params: Record<string, never>,
@@ -70,6 +76,7 @@ export function createMonitoringTools(
               runtime_available?: boolean;
               last_check_at?: string;
               issues: string[];
+              sync?: FleetAgentSync | null;
             }) => ({
               name: a.name,
               status: a.status,
@@ -77,11 +84,58 @@ export function createMonitoringTools(
               network_reachable: a.network_reachable,
               last_check_at: a.last_check_at,
               issues_count: a.issues?.length || 0,
+              // trinity-enterprise#707: the strings carry the red-sync
+              // recommendation; `sync` is null for an agent with no git binding.
+              issues: a.issues ?? [],
+              sync: a.sync ?? null,
             })),
+            sync_summary: result.sync_summary ?? null,
           }, null, 2);
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
           console.error(`[get_fleet_health] Error: ${errorMessage}`);
+          return JSON.stringify({
+            success: false,
+            error: errorMessage,
+          }, null, 2);
+        }
+      },
+    },
+
+    // ========================================================================
+    // get_fleet_sync_audit - Fleet git sync audit (#390, trinity-enterprise#707)
+    // ========================================================================
+    getFleetSyncAudit: {
+      name: "get_fleet_sync_audit",
+      description:
+        "Get the fleet git sync audit: one entry per git-bound agent you can access " +
+        "(admins: every agent) with branch, last pushed sha/time, unpushed_commits, dirty_tree, " +
+        "duplicate_binding (two agents pushing the same repo+branch), and the sync health the " +
+        "platform's poller keeps — ahead, behind (origin on the agent's own branch), dirty_files, " +
+        "diverged_since, divergence_age_s, last_successful_push_at, state (green/yellow/red/unknown), " +
+        "reason, recommendation, binding (agent/deployment), auto_sync_enabled, frozen. " +
+        "The summary totals in_sync, ahead, dirty, duplicate_bindings, diverged, frozen, auto_sync_off, red. " +
+        "Numbers are as of the last poll (about a minute); use this instead of reading git inside containers.",
+      parameters: z.object({}),
+      execute: async (
+        _params: Record<string, never>,
+        context?: { session?: McpAuthContext }
+      ) => {
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        console.log("[get_fleet_sync_audit] Fetching fleet sync audit");
+
+        try {
+          const result = await apiClient.getFleetSyncAudit();
+          return JSON.stringify({
+            success: true,
+            agents: result.agents,
+            summary: result.summary,
+          }, null, 2);
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          console.error(`[get_fleet_sync_audit] Error: ${errorMessage}`);
           return JSON.stringify({
             success: false,
             error: errorMessage,
@@ -145,6 +199,10 @@ export function createMonitoringTools(
             issues: result.issues,
             uptime_percent_24h: result.uptime_percent_24h,
             avg_latency_24h_ms: result.avg_latency_24h_ms,
+            // ent#479: informational only — a stale business metric is never
+            // in `issues` and never moves `aggregate_status`. Read
+            // get_metrics for the values behind these names.
+            metrics: result.metrics ?? null,
           }, null, 2);
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);

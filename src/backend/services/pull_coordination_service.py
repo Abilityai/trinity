@@ -22,14 +22,17 @@ authority (aligned with ``task_execution_service.apply_result``).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from config import MAX_REDELIVERY
 from database import db
 from models import TaskExecutionStatus
+from services import channel_completion_report
 from services import event_dispatch_service
 from services import subscription_auto_switch
 from services.activity_service import activity_service
@@ -41,6 +44,7 @@ from services.platform_prompt_service import (
 from services.slot_service import SLOT_TTL_BUFFER
 from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
 from utils.credential_sanitizer import sanitize_execution_log, sanitize_response
+from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +73,18 @@ def _resolve_agent_runtime(agent_name: Optional[str]) -> str:
         return "claude-code"
 
 
+def _served_person(row: dict) -> Optional[str]:
+    """The person the claimed run serves (ent#814/ent#886), read off the row by
+    the same helper the push composer uses. Lazy import (as below), fail-soft."""
+    try:
+        from services.task_execution_service import served_person_for_row
+
+        return served_person_for_row(row)
+    except Exception as e:  # noqa: BLE001 — never block a claim on the seat line
+        logger.debug("[PullCoordination] served person for %s: %s", row.get("id"), e)
+        return None
+
+
 def _compose_pull_system_prompt(
     agent_name: Optional[str],
     triggered_by: Optional[str],
@@ -76,6 +92,13 @@ def _compose_pull_system_prompt(
     *,
     execution_id: Optional[str],
     model: Optional[str] = None,
+    source_user_email: Optional[str] = None,
+    source_agent_name: Optional[str] = None,
+    source_mcp_key_name: Optional[str] = None,
+    timeout_seconds: Optional[int] = None,
+    schedule_context: Optional[dict] = None,
+    attempt: Optional[int] = None,
+    served_person_email: Optional[str] = None,
 ) -> Optional[str]:
     """Compose platform prompt + execution context + caller override for a
     pull-claimed turn (#1629). Fail-open: on ANY composition error the turn runs
@@ -85,15 +108,31 @@ def _compose_pull_system_prompt(
     ``model`` (ent#243) selects the prompt tier. It is passed explicitly rather
     than left to default because this context previously omitted the field
     entirely — not ``None``-valued, absent — so every pull-claimed turn would
-    have resolved VERBOSE forever with nothing to indicate why."""
+    have resolved VERBOSE forever with nothing to indicate why.
+
+    #3114: the provenance, timeout, schedule and attempt fields match what
+    ``task_execution_service._compose_effective_system_prompt`` builds on
+    push, so an interactive turn routed to the queue sees the same context.
+    ``served_person_email`` (ent#814/ent#886) likewise: the caller reads it off
+    the claimed row through the same ``served_person_for_row`` push uses."""
     runtime = _resolve_agent_runtime(agent_name)
     try:
+        schedule_context = schedule_context or {}
         exec_ctx = ExecutionContext(
             agent_name=agent_name,
             mode=ExecutionContext.derive_mode(triggered_by),
             triggered_by=triggered_by,
+            source_user_email=source_user_email,
+            source_agent_name=source_agent_name,
+            source_mcp_key_name=source_mcp_key_name,
+            timeout_seconds=timeout_seconds,
+            attempt=attempt,
+            schedule_name=schedule_context.get("name"),
+            schedule_cron=schedule_context.get("cron"),
+            schedule_next_run=schedule_context.get("next_run"),
             execution_id=execution_id,
             model=model,
+            served_person_email=served_person_email,
         )
         return compose_system_prompt(
             execution_context=exec_ctx,
@@ -182,25 +221,103 @@ _TASK_OVERRIDE_KEYS = (
 # ---------------------------------------------------------------------------
 
 
+def record_worker_poll(agent_name: str) -> None:
+    """Stamp the agent's last claim attempt for canary B-08 (#2840).
+
+    Called on every claim attempt, empty or not: an idle worker polls at least
+    every 15s, so a stale stamp on an agent with idle workers means the pool
+    is dead or cannot reach the backend. Best-effort — a Redis failure must
+    never block a claim.
+    """
+    try:
+        from services.pull_pilot import PULL_POLL_KEY_PREFIX, PULL_POLL_TTL_SECONDS
+        from services.slot_service import get_slot_service
+
+        get_slot_service().redis.set(
+            f"{PULL_POLL_KEY_PREFIX}{agent_name}", time.time(), ex=PULL_POLL_TTL_SECONDS
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("[#2840] could not record pull poll for %s", agent_name, exc_info=True)
+
+
 def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]:
-    """Atomically claim the oldest queued task for ``agent_name`` on behalf of
-    ``worker_id``. Returns the §3.1 claim response, or None when the queue is
+    """Atomically claim the next queued task for ``agent_name`` on behalf of
+    ``worker_id``: interactive turns first (#2842), never a second turn of a
+    conversation already running (#2843). Returns the §3.1 claim response, or None when the queue is
     empty (router → §3.2 empty claim).
 
     The lease TTL reuses the slot-TTL convention: the agent's
     ``execution_timeout_seconds`` plus ``SLOT_TTL_BUFFER`` (so a legitimately
     long turn's lease outlives its deadline exactly as a slot would).
+
+    #2846: the turn limit is clamped to that same timeout (read once here,
+    applied in `_build_claim_response` before the prompt is composed, #3321), so
+    the turn always ends inside its lease. This is what keeps a healthy turn
+    from being re-delivered while it still runs — the job the (never built)
+    lease-renewal heartbeat was specified for.
     """
-    lease_seconds = int(db.get_execution_timeout(agent_name)) + SLOT_TTL_BUFFER
-    row = db.claim_next_queued(agent_name, worker_id=worker_id, lease_seconds=lease_seconds)
+    record_worker_poll(agent_name)
+    cap = int(db.get_execution_timeout(agent_name))
+    from services.pull_pilot import INTERACTIVE_TRIGGERS, WAITING_CONVERSATION_PREFIX
+
+    row = db.claim_next_queued(
+        agent_name,
+        worker_id=worker_id,
+        lease_seconds=cap + SLOT_TTL_BUFFER,
+        interactive_triggers=INTERACTIVE_TRIGGERS,
+        waiting_conversation_prefix=WAITING_CONVERSATION_PREFIX,
+    )
     if not row:
         return None
-    return _build_claim_response(row)
+    return _build_claim_response(row, cap=cap)
 
 
-def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
+def _turn_limit(requested: Any, cap: int) -> Tuple[int, Optional[int]]:
+    """``(limit, shortened_from)`` — ``requested`` capped at the agent timeout.
+
+    A row carries the timeout copied at enqueue; it exceeds ``cap`` when the
+    agent's timeout was lowered while the row waited. Absent/invalid → ``cap``.
+    """
+    try:
+        asked = int(requested)
+    except (TypeError, ValueError):
+        return cap, None
+    if asked <= 0:
+        return cap, None
+    return (cap, asked) if asked > cap else (asked, None)
+
+
+def _shortened_note(execution: Any) -> str:
+    """Suffix for a timeout error when the row asked for more than the agent allows.
+
+    Best-effort: runs before the terminal CAS write, so it must never raise.
+    """
+    try:
+        meta = json.loads(execution.backlog_metadata or "{}")
+        nested = meta.get("task_overrides") if isinstance(meta, dict) else None
+        requested = (nested or {}).get("timeout_seconds") or meta.get("timeout_seconds")
+        # Compares against the agent's CURRENT timeout, so the note states
+        # the two numbers rather than claiming the claim shortened this run
+        # (the timeout may have changed after the claim).
+        cap = int(db.get_execution_timeout(execution.agent_name))
+    except Exception:  # noqa: BLE001 — a missing note must not block the terminal
+        return ""
+    limit, shortened_from = _turn_limit(requested, cap)
+    if shortened_from is None:
+        return ""
+    return (
+        f" (this job asked for {shortened_from}s but the agent's timeout is "
+        f"{limit}s; raise the agent's timeout to give it longer)"
+    )
+
+
+def _build_claim_response(row: Dict[str, Any], cap: Optional[int] = None) -> Dict[str, Any]:
     """Reconstruct the §3.1 claim response from a claimed ``schedule_executions``
     row + its ``backlog_metadata`` JSON.
+
+    ``cap`` is the agent timeout: when given, the turn limit is clamped to it
+    (#2846) BEFORE the platform prompt is composed, so the prompt states the
+    limit the turn actually runs under (#3321).
 
     Per the schema's honest-scope caveat, the pilot "rides the existing
     ``backlog_metadata`` reconstruction shape" — the coordination frame fields
@@ -249,6 +366,12 @@ def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
     }
     if meta.get("file_ids") is not None:
         payload["file_ids"] = meta.get("file_ids")
+    # #3114: the push payload's `persist_session` and `images`, carried for
+    # rows `execute_task` queued. Absent on every other producer's row.
+    if meta.get("persist_session") is not None:
+        payload["persist_session"] = bool(meta.get("persist_session"))
+    if meta.get("images"):
+        payload["images"] = meta.get("images")
 
     # #1629: compose the platform system prompt (parity with the push path) and
     # hand it to the worker via task_overrides.system_prompt — the field the pull
@@ -270,6 +393,14 @@ def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
     nested = meta.get("task_overrides")
     if isinstance(nested, dict):
         overrides.update({k: v for k, v in nested.items() if v is not None})
+    if cap is not None:
+        limit, shortened_from = _turn_limit(overrides.get("timeout_seconds"), cap)
+        overrides["timeout_seconds"] = limit
+        if shortened_from is not None:
+            logger.warning(
+                "[#2846] %s: turn limit shortened from %ss to %ss (agent %s timeout)",
+                row["id"], shortened_from, limit, row.get("agent_name"),
+            )
     # ent#243: a caller override is what the worker will actually run, so it wins
     # over the row's recorded model_used; either may be absent → VERBOSE.
     overrides["system_prompt"] = _compose_pull_system_prompt(
@@ -278,6 +409,13 @@ def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
         overrides.get("system_prompt"),
         execution_id=row["id"],
         model=overrides.get("model") or row.get("model_used"),
+        source_user_email=row.get("source_user_email"),
+        source_agent_name=row.get("source_agent_name"),
+        source_mcp_key_name=row.get("source_mcp_key_name"),
+        timeout_seconds=overrides.get("timeout_seconds"),
+        schedule_context=meta.get("schedule_context") if isinstance(meta.get("schedule_context"), dict) else None,
+        attempt=meta.get("attempt"),
+        served_person_email=_served_person(row),
     )
     payload["task_overrides"] = overrides
 
@@ -349,15 +487,137 @@ def _context_used(metadata: Dict[str, Any], tokens: Optional[int]) -> Optional[i
 _SWITCH_FAILURE_KINDS = {"billing": "rate_limit", "auth": "auth"}
 
 
-def _switch_failure_kind(error_code: Optional[str]) -> Optional[str]:
+def _switch_failure_kind(
+    error_code: Optional[str], error_text: str = ""
+) -> Optional[str]:
     """Which SUB-003 failure kind, if any, a pull terminal's code means (#2643).
 
     An ALLOWLIST, deliberately: a code this map has not heard of switches
     nothing. The inverse — "switch unless the code is one we know is benign" —
     would churn an agent through every subscription it owns the first time a
     worker reports a crash class nobody has taught this map about.
+
+    #3012: a worker older than #3012 reports a model the CLI refused as 503 →
+    ``auth``. No subscription can fix that, so the text overrides the code.
     """
+    from services.failure_classifier import is_model_rejection
+
+    if is_model_rejection(error_text):
+        return None
     return _SWITCH_FAILURE_KINDS.get((error_code or "").strip().lower())
+
+
+def _spawn_breaker_verdict(agent_name: str, row_status, is_auth: bool) -> None:
+    """Record a pulled terminal's dispatch-breaker outcome in the background.
+
+    SUCCESS records a success, an auth failure records ``auth``, anything else
+    records nothing (a failure's ``None`` would read as a success). Fail-open.
+    """
+    if row_status == TaskExecutionStatus.SUCCESS:
+        code = None
+    elif is_auth:
+        code = "auth"
+    else:
+        return
+    try:
+        # Lazy: task_execution_service imports half the service layer.
+        from services import task_execution_service as tes
+
+        tes._spawn_bg(
+            tes._record_dispatch_terminal(
+                agent_name, tes.dispatch_breaker_active(agent_name), code
+            )
+        )
+    except Exception as e:
+        logger.warning("[#2514] breaker verdict for %s not recorded: %s", agent_name, e)
+
+
+# Strong refs to in-flight delivery tasks: a bare create_task can be collected
+# mid-flight (same reason as activity_service._inflight_close_tasks).
+_inflight_delivery_tasks: "set[asyncio.Task[Any]]" = set()
+
+
+def _delivery_metadata(execution: Any) -> Optional[Dict[str, Any]]:
+    """The queued row's metadata when it asks for post-turn delivery, else None.
+
+    Read from the row fetched BEFORE the terminal CAS. The #1449 scrub is a
+    retention job over authoritative terminals, so the blob is still present.
+    """
+    try:
+        meta = json.loads(getattr(execution, "backlog_metadata", None) or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    wants = (
+        meta.get("save_to_session")
+        or meta.get("collaboration_activity_id")
+        or (meta.get("is_self_task") and meta.get("self_task_activity_id"))
+    )
+    return meta if wants else None
+
+
+async def _deliver_and_signal(
+    execution: Any, meta: Dict[str, Any], applied_status: Any
+) -> None:
+    """Run the shared post-turn delivery for a pulled turn, then wake the sync
+    waiter with the chat session it was saved to. The waiter is signalled even
+    when delivery fails: the terminal is already committed."""
+    from services.backlog_service import request_from_metadata
+    from services.chat_execution_service import run_post_turn_delivery
+    from services.sync_waiter import signal_sync_waiter
+    from services.task_execution_service import result_from_execution_row
+
+    chat_session_id = None
+    try:
+        result = result_from_execution_row(execution.id)
+        # Deliver only the terminal this CAS wrote. A late SUCCESS correcting a
+        # FAILED row spawns its own delivery; the FAILED one must not re-read
+        # the corrected row and deliver it a second time.
+        if result is not None and result.status == applied_status:
+            # The terminal CAS wrote duration_ms from the claim-time started_at.
+            applied = db.get_execution(execution.id)
+            execution_time_ms = getattr(applied, "duration_ms", None)
+            chat_session_id = await run_post_turn_delivery(
+                agent_name=execution.agent_name,
+                request=request_from_metadata(meta),
+                result=result,
+                execution_id=execution.id,
+                collaboration_activity_id=meta.get("collaboration_activity_id"),
+                user_id=meta.get("user_id"),
+                user_email=meta.get("user_email"),
+                subscription_id=meta.get("subscription_id"),
+                is_self_task=meta.get("is_self_task") or False,
+                self_task_activity_id=meta.get("self_task_activity_id"),
+                execution_time_ms=execution_time_ms,
+            )
+    except Exception as e:  # noqa: BLE001 — never affect a committed terminal
+        logger.warning(
+            "[#2329] post-turn delivery failed for %s: %s", execution.id, type(e).__name__
+        )
+    finally:
+        signal_sync_waiter(execution.id, None, chat_session_id)
+
+
+def _spawn_post_turn_delivery(execution: Any, applied_status: Any) -> None:
+    """Sync entry from the CAS-won branch. Nothing to deliver, or no running
+    loop: wake the waiter now. Otherwise deliver first, then wake it."""
+    from services.sync_waiter import signal_sync_waiter
+
+    meta = _delivery_metadata(execution)
+    if meta is not None:
+        try:
+            task = asyncio.get_running_loop().create_task(
+                _deliver_and_signal(execution, meta, applied_status)
+            )
+        except RuntimeError as e:
+            logger.warning("[#2329] post-turn delivery skipped for %s (no loop): %s",
+                           execution.id, e)
+        else:
+            _inflight_delivery_tasks.add(task)
+            task.add_done_callback(_inflight_delivery_tasks.discard)
+            return
+    signal_sync_waiter(execution.id, None, None)
 
 
 def apply_task_result(
@@ -428,17 +688,25 @@ def apply_task_result(
 
     sanitized_content = sanitize_response(content) if content is not None else None
 
+    # #3114: the Session tab reads compact events off the result; persist them
+    # so a sync caller rebuilding its result from this row still gets them.
+    compact_events = metadata.get("compact_events") or []
+    compact_json = json.dumps(compact_events) if compact_events else None
+
     if row_status == TaskExecutionStatus.SUCCESS:
         won = db.update_execution_status(
             execution_id=execution_id,
             status=TaskExecutionStatus.SUCCESS,
-            response=sanitized_content,
-            cost=cost,
-            context_used=context_used,
-            context_max=context_max,
-            execution_log=log_json,
-            tool_calls=log_json,
-            claude_session_id=session_id,
+            result=ExecutionResult(
+                response=sanitized_content,
+                cost=cost,
+                context_used=context_used,
+                context_max=context_max,
+                execution_log=log_json,
+                tool_calls=log_json,
+                claude_session_id=session_id,
+                compact_metadata=compact_json,
+            ),
             claim_token=claim_token,
         )
     else:
@@ -447,14 +715,20 @@ def apply_task_result(
         err_text = sanitized_content or ""
         if error_code:
             err_text = f"[{error_code}] {err_text}".strip()
+        if (error_code or "").strip().lower() == "timeout":
+            # #2846: name the setting to change when the claim clamped the limit.
+            err_text += _shortened_note(execution)
         won = db.update_execution_status(
             execution_id=execution_id,
             status=row_status,
-            error=err_text or None,
-            response=sanitized_content,
-            cost=cost,
-            context_used=context_used,
-            context_max=context_max,
+            result=ExecutionResult(
+                error=err_text or None,
+                response=sanitized_content,
+                cost=cost,
+                context_used=context_used,
+                context_max=context_max,
+                compact_metadata=compact_json,
+            ),
             claim_token=claim_token,
         )
 
@@ -480,6 +754,15 @@ def apply_task_result(
             terminal_status=row_status,
             summary_or_error=summary,
             cost=cost,
+        )
+        # #3114: a delegated child that ran on a pull pilot reports back to the
+        # channel / portal / room it came from, exactly as the push terminals
+        # do. `report_completion` skips INLINE_CHANNEL_TRIGGERS turns itself.
+        channel_completion_report.spawn_completion_report(
+            execution_id=execution_id,
+            agent_name=execution.agent_name,
+            status=str(getattr(row_status, "value", row_status)),
+            summary_or_error=summary,
         )
         # #1804: the pull sink is a CAS-won terminal writer, so it owns closing
         # the paired dispatch activity — the issue names this as one of the next
@@ -523,7 +806,7 @@ def apply_task_result(
         switch_kind = (
             None
             if row_status == TaskExecutionStatus.SUCCESS
-            else _switch_failure_kind(error_code)
+            else _switch_failure_kind(error_code, err_text)
         )
         if switch_kind is not None:
             subscription_auto_switch.spawn_subscription_failure(
@@ -531,6 +814,15 @@ def apply_task_result(
                 error_message=err_text or f"[{error_code}] pull terminal",
                 failure_kind=switch_kind,
             )
+        # #2514: the dispatch-breaker verdict (#526 D10), as the push terminals
+        # record it. Without it a pilot's breaker never trips on a pulled auth
+        # failure and never closes on the half-open probe it pulled.
+        _spawn_breaker_verdict(execution.agent_name, row_status, is_auth)
+        # #2329: apply the caller's post-turn delivery settings (chat-session
+        # save, collaboration / self-task finalisation) exactly as the push
+        # drain does, then wake a sync waiter in this process. Its DB poll
+        # covers a caller held by another worker (#3114).
+        _spawn_post_turn_delivery(execution, row_status)
         return ResultApplyOutcome("applied", row_status)
 
     # CAS lost — reclassify against the freshly-read row.

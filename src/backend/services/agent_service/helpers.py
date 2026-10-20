@@ -15,6 +15,7 @@ from fastapi import HTTPException
 
 from models import User, AgentStatus
 from database import db
+from dependencies import principal_reach
 from db.agents import SYSTEM_AGENT_NAME
 from services.docker_service import (
     docker_client,
@@ -225,7 +226,12 @@ def visible_agent_names(current_user: User) -> Optional[set]:
     shared — except the DB set also contains the caller's OWN agents that
     currently have no container (#1747 documents that state as routine). It
     never contains somebody else's agent.
+
+    An agent key gets its reach, never None (trinity-enterprise#872).
     """
+    reach = principal_reach(current_user)
+    if reach is not None:
+        return reach
     if current_user.role == "admin":
         return None
     metadata = db.get_all_agent_metadata(current_user.email or "")
@@ -246,7 +252,12 @@ def get_accessible_agents(current_user: User) -> list:
 
     OPTIMIZED: Uses batch query to fetch all metadata in 2 queries total
     instead of 8-10 queries per agent (N+1 problem fix).
+
+    An agent key sees only its reach (trinity-enterprise#872): it carries its
+    owner's role, so the admin branch below would otherwise list every agent.
     """
+    reach = principal_reach(current_user)
+
     # Fast Docker call (no stats) - avoids slow Docker API calls
     all_agents = list_all_agents_fast()
 
@@ -265,6 +276,8 @@ def get_accessible_agents(current_user: User) -> list:
     for agent in all_agents:
         agent_dict = agent.dict() if hasattr(agent, 'dict') else dict(agent)
         agent_name = agent_dict.get("name")
+        if reach is not None and agent_name not in reach:
+            continue
 
         # Get metadata from batch result (not individual queries)
         metadata = all_metadata.get(agent_name)
@@ -327,7 +340,14 @@ def accessible_agent_names(current_user: User) -> Optional[List[str]]:
     Returns None for admins (no filter — see every agent).
     Returns a list (possibly empty) for non-admins.
     Used by fleet-level endpoints that filter schedule_executions by agent_name.
+
+    An agent key gets its reach, from the DB, never None (trinity-enterprise#872),
+    so `narrow_to_agent` access-gates its `?agent=` and a stopped child's
+    history still shows.
     """
+    reach = principal_reach(current_user)
+    if reach is not None:
+        return sorted(reach)
     if current_user.role == "admin":
         return None
     return [a["name"] for a in get_accessible_agents(current_user)]
@@ -461,6 +481,9 @@ def get_latest_version(base_name: str) -> Optional[AgentStatus]:
     return max(existing, key=get_version)
 
 
+_SHARED_IN_PREFIX = "/home/developer/shared-in/"
+
+
 async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
     """
     Check if container's shared folder mounts match the current config.
@@ -487,7 +510,13 @@ async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
         if "/home/developer/shared-out" in mount_dests:
             return False  # Config says no expose, but mount exists
 
-    # Check consume mounts
+    # Check consume mounts — in BOTH directions, like the expose branch above
+    # (trinity-enterprise#739). The set is computed through `is_permitted`, so a
+    # grant withdrawn since the container was built leaves a mount that is
+    # present but no longer expected; that is drift, and the start-time
+    # recreate drops it. Checking only "expected but missing" let a withdrawn
+    # grant's mount survive every restart.
+    expected = set()
     if config.consume_enabled:
         available = db.get_available_shared_folders(agent_name)
         for source_agent in available:
@@ -496,10 +525,21 @@ async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
             # Check if volume exists (async to avoid blocking)
             try:
                 await volume_get(source_volume)
-                if mount_path not in mount_dests:
-                    return False  # Should be mounted but isn't
+            except docker.errors.NotFound:
+                continue  # Volume doesn't exist yet, OK to skip
             except Exception:
-                pass  # Volume doesn't exist yet, OK to skip
+                # Docker unreadable is not "no volume" (#2196): an unknown
+                # answer must not read as drift and recreate a running
+                # container, so keep whatever mount is there.
+                if mount_path in mount_dests:
+                    expected.add(mount_path)
+                continue
+            if mount_path not in mount_dests:
+                return False  # Should be mounted but isn't
+            expected.add(mount_path)
+    for dest in mount_dests:
+        if dest and dest.startswith(_SHARED_IN_PREFIX) and dest not in expected:
+            return False  # Mounted but no longer permitted (or consume disabled)
 
     return True
 
@@ -570,6 +610,41 @@ def check_guardrails_env_matches(container, agent_name: str) -> bool:
         return False
 
 
+def check_pull_mode_env_matches(container, agent_name: str) -> bool:
+    """#3590: the container's ``TRINITY_PULL_MODE`` flag agrees with the
+    ``PULL_MODE_PILOT_AGENTS`` allowlist. ``False`` signals ``start_agent``
+    to recreate — a pilot running a pre-flag container (the allowlist was
+    edited after create, or the container was rebuilt by a path that forgot
+    the opt-in) runs no pull worker while the backend routes its work to the
+    durable queue; a de-piloted agent still carrying the flag keeps pulling.
+    Canary B-08 reports both states as ``workers_missing`` and used to send
+    the operator to a manual recreate.
+
+    Flag only — the pool size (``TRINITY_MAX_PARALLEL_TASKS``) is NOT compared:
+    a changed parallel limit is #3039's live resize, not a recreate on every
+    start. Fail-safe: unreadable attrs match, never a 500 on the start path.
+    """
+    from services.pull_pilot import is_pull_pilot_agent
+
+    try:
+        attrs = container.attrs
+        if not attrs:
+            return True  # not observed — never a drift verdict on a blind read
+        env_list = attrs.get("Config", {}).get("Env", []) or []
+        env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
+    except Exception:  # noqa: BLE001 — attrs absent or shaped differently
+        return True
+    baked = env_dict.get("TRINITY_PULL_MODE", "").strip().lower() == "true"
+    piloted = bool(is_pull_pilot_agent(agent_name))
+    if baked != piloted:
+        return False
+    # #3814: a piloted system agent also needs the URL its worker polls with
+    # (regular agents always carry it). Without it the pool never starts.
+    if piloted and is_system_agent_name(agent_name):
+        return bool(env_dict.get("TRINITY_BACKEND_URL"))
+    return True
+
+
 def check_agent_auth_token_env_matches(container, agent_name: str) -> bool:
     """#1159: verify the container's ``TRINITY_AGENT_AUTH_TOKEN`` matches the
     token derived for the agent's CURRENT name. Returns ``True`` if it matches,
@@ -587,6 +662,33 @@ def check_agent_auth_token_env_matches(container, agent_name: str) -> bool:
     env_list = container.attrs.get("Config", {}).get("Env", [])
     env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
     return env_dict.get("TRINITY_AGENT_AUTH_TOKEN") == derive_agent_token(agent_name)
+
+
+def check_agent_name_env_matches(container, agent_name: str) -> bool:
+    """#3813: the container's ``AGENT_NAME`` env and ``trinity.agent-name``
+    label name the agent's CURRENT name. ``False`` (→ recreate) when either is
+    present and different.
+
+    Rename moves only the Docker container name. The first start after it
+    recreates via the token predicate above, and that recreate now re-bakes the
+    name too. This predicate repairs agents that went through that recreate
+    before it did: token current, name stale, so nothing else fires. The agent
+    server reads ``AGENT_NAME`` for ``/health``, the heartbeat, pull worker ids,
+    the result callback and git auto-sync, all of which 403 under the old name.
+
+    Absent values match: every create site bakes both, and an absent value is
+    never a drift verdict (same rule as ``check_pull_mode_env_matches``).
+    Unreadable attrs match, never a 500 on the start path.
+    """
+    try:
+        config = container.attrs.get("Config", {}) or {}
+        env_list = config.get("Env", []) or []
+        env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
+        label = (config.get("Labels") or {}).get("trinity.agent-name")
+    except Exception:  # noqa: BLE001 — attrs absent or shaped differently
+        return True
+    env_name = env_dict.get("AGENT_NAME")
+    return (env_name is None or env_name == agent_name) and (label is None or label == agent_name)
 
 
 def check_agent_mcp_key_matches(container, agent_name: str) -> bool:

@@ -24,10 +24,10 @@
         <div class="text-sm font-medium text-gray-900 dark:text-gray-100">Voice replies on {{ channelLabel }}</div>
         <div class="text-xs text-gray-500 dark:text-gray-400">
           Allow this agent to answer with a spoken voice note here (it chooses per message).
-          <span v-if="!available" class="block mt-1 text-status-warning-600 dark:text-status-warning-400">
+          <span v-if="!available" class="block mt-1 text-status-warning-700 dark:text-status-warning-400">
             Voice is unavailable — the platform has no ElevenLabs key configured.
           </span>
-          <span v-else-if="!agentEnabled" class="block mt-1 text-status-warning-600 dark:text-status-warning-400">
+          <span v-else-if="!agentEnabled" class="block mt-1 text-status-warning-700 dark:text-status-warning-400">
             Enable voice replies for this agent in Settings first.
           </span>
         </div>

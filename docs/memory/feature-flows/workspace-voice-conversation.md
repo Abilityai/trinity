@@ -298,8 +298,9 @@ label row records it.
   be a dead affordance with a footnote.
 - **The Talk door** (`?voice=1`, #2559): `/workspace?agent=<name>&voice=1` starts
   the call on landing, but the param alone is **never** the authority. The intent
-  is armed IN THE APP — `AgentHeader`'s Talk button calls
-  `portalVoiceMode.js::armVoiceAutoStart()` before `router.push` — and
+  is armed IN THE APP — `AgentHeader`'s Talk button called
+  `portalVoiceMode.js::armVoiceAutoStart()` before `router.push` (that button was
+  removed by trinity-enterprise#950, so nothing arms it today) — and
   `voiceAutoStart()` honours it only when armed **and** an agent actually landed
   **and** the principal is a platform session. The armed flag is a module-scoped
   `let`, so it lives exactly as long as the document: a pasted, bookmarked or

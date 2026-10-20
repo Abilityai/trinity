@@ -315,6 +315,7 @@ def test_supported_file_set_renders(file_set: tuple[str, ...]) -> None:
             "ADMIN_PASSWORD": secrets.token_urlsafe(18) + "Aa1!",
             "REDIS_PASSWORD": secrets.token_hex(24),
             "REDIS_BACKEND_PASSWORD": secrets.token_hex(24),
+            "POSTGRES_PASSWORD": secrets.token_hex(24),  # hosted (#3159)
         },
     )
     assert proc.returncode == 0, f"{_flags(file_set)} does not render:\n{proc.stderr}"

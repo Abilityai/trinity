@@ -18,7 +18,8 @@ singleton and imports `AgentClient` at module scope, and the Workspace asks path
 must not drag either in to answer a question about a list of strings.
 """
 
-from typing import Optional, Sequence
+import unicodedata
+from typing import Optional, Sequence, Tuple
 
 # The placeholder `operator_queue_service` substitutes when an agent's own
 # options blob blows the ingestion size cap (#1632). It is NOT an offered
@@ -26,6 +27,73 @@ from typing import Optional, Sequence
 # it has no usable options and is exempt below.
 OPTIONS_DROPPED_MARKER = "(options omitted: exceeded size cap)"
 
+# The ONE platform-reserved decision every approval accepts besides its own
+# options (#3242): "none of these — here is what to do instead". The person's
+# instruction travels in `response_text`, never as `response` (the #2375 class).
+# Markdown-inert and plain English on purpose: a human can read it raw in an
+# export, and `__x__` would render bold wherever it leaks. Mirrored verbatim in
+# `src/frontend/src/utils/operatorQueue.js` and `src/mcp-server/src/types.ts`
+# (parity-tested). Never filtered out of `usable_options`: an approval whose
+# only option is this literal must stay closed to every other string.
+SOMETHING_ELSE = "(something else)"
+
+# Zero-width / invisible format characters an agent could slip into a lookalike
+# of the chip (#3243): ZWSP, ZWNJ, ZWJ, LRM, RLM, word joiner, BOM. `str.split()`
+# does not treat them as whitespace, so they are removed before the compare.
+_ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u200e\u200f\u2060\ufeff"))
+
+
+def reads_as_something_else(option) -> bool:
+    """Whether an agent-authored option would read as the platform's chip
+    (#3243, from the #3242 security pass): "Something else" in any case, with or
+    without surrounding whitespace or parentheses. The exact literal included —
+    a lookalike next to the real chip lets an ask show two "something else"
+    choices that mean different things.
+
+    NFKC folds fullwidth letters and fullwidth parentheses onto ASCII, and the
+    zero-width characters are dropped first, so neither hides the chip.
+    Cross-script confusables (Cyrillic "е", Greek "ο", …) are deliberately out
+    of scope: closing them needs a confusables table, not a normal form."""
+    if not isinstance(option, str):
+        return False
+    folded = unicodedata.normalize("NFKC", option.translate(_ZERO_WIDTH))
+    core = folded.strip().strip("()").strip()
+    return " ".join(core.split()).casefold() == "something else"
+
+
+def options_cap_violation(
+    options, *, max_options: int, max_chars: int
+) -> Optional[Tuple[str, dict]]:
+    """The one authoring rule for an ask's options (#3243), shared by the
+    native raise and the queue-file ingest so the two cannot drift.
+
+    Returns `(code, extras)` for the first violation, or None. In order: more
+    than `max_options` choices (`SOMETHING_ELSE` itself is never counted — the
+    platform adds it), an option that reads as `SOMETHING_ELSE` without being
+    it, then an option longer than `max_chars` (Python `len`, code points).
+    Count before length: splitting an ask is the bigger fix. The extras are
+    integers only — option text is agent-authored and never echoed back.
+    A non-list, or a non-string element, is not this rule's question."""
+    if not isinstance(options, list):
+        return None
+    count = sum(1 for o in options if o != SOMETHING_ELSE)
+    if count > max_options:
+        return "too_many_options", {"limit": max_options, "count": count}
+    for index, option in enumerate(options):
+        if option != SOMETHING_ELSE and reads_as_something_else(option):
+            return "invalid_options", {"index": index}
+    for index, option in enumerate(options):
+        if isinstance(option, str) and len(option) > max_chars:
+            return "option_too_long", {"limit": max_chars, "index": index, "length": len(option)}
+    return None
+
+
+def title_cap_violation(title, *, max_chars: int) -> Optional[Tuple[str, dict]]:
+    """The hard title limit on an agent-raised ask (#3243): `title_too_long`
+    with the limit and the length, or None."""
+    if isinstance(title, str) and len(title) > max_chars:
+        return "title_too_long", {"limit": max_chars, "length": len(title)}
+    return None
 
 class ResponseNotOfferedError(ValueError):
     """An approval decision that is not one of the item's own options.
@@ -43,6 +111,49 @@ class ResponseNotOfferedError(ValueError):
             f"{response!r} is not one of the options this approval offered: "
             f"{self.options}"
         )
+
+
+class ReservedAnswerError(ValueError):
+    """A refusal of the reserved `SOMETHING_ELSE` decision (#3242). Each
+    subclass carries the named `code` both writers answer with as a 422."""
+
+    code = "reserved_answer"
+
+
+class InstructionRequiredError(ReservedAnswerError):
+    """`SOMETHING_ELSE` with no instruction in `response_text`: an answer the
+    agent cannot act on — "none of these" alone is Deny or a dismissal."""
+
+    code = "instruction_required"
+
+    def __init__(self):
+        super().__init__(
+            f"{SOMETHING_ELSE!r} means none of the offered options; the "
+            "instruction for what to do instead must be in `response_text`."
+        )
+
+
+class ReservedValueError(ReservedAnswerError):
+    """`SOMETHING_ELSE` on an item that is not an approval: there is no menu to
+    step off, and the agent would read a refusal of options it never offered."""
+
+    code = "reserved_value"
+
+    def __init__(self):
+        super().__init__(
+            f"{SOMETHING_ELSE!r} is reserved for approvals; answer a question "
+            "with the answer itself."
+        )
+
+
+class NotOffMenuError(ReservedAnswerError):
+    """`SOMETHING_ELSE` on a platform-minted approval (a skill gate counts only
+    its own options, and no agent reads the text): decided by its options."""
+
+    code = "not_off_menu"
+
+    def __init__(self):
+        super().__init__("This approval is decided by its options; pick one of them.")
 
 
 def usable_options(item: dict) -> Optional[list]:
@@ -65,8 +176,18 @@ def usable_options(item: dict) -> Optional[list]:
     return choices or None
 
 
-def validate_response_choice(item: dict, response: Optional[str]) -> None:
+def validate_response_choice(
+    item: dict, response: Optional[str], *, response_text: Optional[str]
+) -> None:
     """Raise `ResponseNotOfferedError` when an approval's decision was not offered.
+
+    `SOMETHING_ELSE` is handled FIRST (#3242): accepted on any approval whose
+    `response_text` carries an instruction (`InstructionRequiredError` when it is
+    blank), refused on every other item type (`ReservedValueError`). It is
+    checked before membership, so an agent that offered the literal itself gets
+    the reserved meaning, not a second one. `response_text` is keyword-only and
+    required so a stale two-argument call fails loudly instead of skipping the
+    instruction rule.
 
     Exact string match, deliberately. The options are AGENT-authored, so the
     agent is the only party that knows whether `"approve"` and `"Approve"` mean
@@ -84,6 +205,12 @@ def validate_response_choice(item: dict, response: Optional[str]) -> None:
     approval, was it one the agent offered?
     """
     if not response:
+        return
+    if response == SOMETHING_ELSE:
+        if (item or {}).get("type") != "approval":
+            raise ReservedValueError()
+        if not (response_text or "").strip():
+            raise InstructionRequiredError()
         return
     choices = usable_options(item)
     if choices is None:

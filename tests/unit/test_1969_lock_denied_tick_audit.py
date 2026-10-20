@@ -362,7 +362,7 @@ def test_audit_helper_is_still_failure_isolated():
     """
     source = (_REPO / "src" / "scheduler" / "service.py").read_text(encoding="utf-8")
     start = source.index("def _record_skipped_agent_schedule(")
-    helper = source[start : source.index("def _record_skipped_process_schedule(")]
+    helper = source[start : source.index("async def _execute_schedule(")]
     assert "try:" in helper and "except Exception" in helper, (
         "_record_skipped_agent_schedule no longer isolates its failures, and "
         "it is now called from the cron execution path (#1969)"

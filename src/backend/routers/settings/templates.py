@@ -336,7 +336,7 @@ async def update_template_registry(
         source="api",
         actor_user=current_user,
         actor_ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={
             "url": {"old": previous_url, "new": settings_service.get_template_registry_url()},
@@ -379,7 +379,7 @@ async def delete_template_registry(
         source="api",
         actor_user=current_user,
         actor_ip=request.client.host if request.client else None,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={
             "previous_url": previous_url,

@@ -12,6 +12,8 @@ Passwordless email-based authentication with verification codes. Users enter the
 ## Revision History
 | Date | Changes |
 |------|---------|
+| 2026-10-09 | **trinity-enterprise#837** — sharing and access-request approval stop writing the whitelist; the Settings whitelist form gains a role picker (default `user`) and a Role column; a `user` signing in at `/login` lands in `/workspace`. See [workspace-only-role.md](workspace-only-role.md). |
+| 2026-09-29 | **Binding a sign-in email needs mailbox proof (trinity-enterprise#720)**: new `POST /api/users/me/email/code` sends a bind code; `PUT /api/users/me/email` now requires it (console-provider admin bypass, audited unverified), caps wrong guesses at 5 per 10 min under `otp_attempts:bind:{user_id}:{email}`, and `users.email` is unique (case-insensitive). See [Binding a Sign-In Email](#binding-a-sign-in-email-trinity-enterprise720). |
 | 2026-07-04 | **Enumeration hardening (#186)**: `request_email_login_code()` now returns a **byte-identical** body + status for whitelisted, non-whitelisted, and rate-limited emails — the generic `{"success": true, "message": "If your email is registered, you'll receive a code shortly"}` (dropped the distinct `"Verification code sent…"` message and `expires_in_seconds`). Over-limit returns the same generic 200 (WARN-logged `"email-code suppressed: rate limit"`, **no 429**). The verification email is dispatched **fire-and-forget** (`asyncio.create_task`, strong-ref set) so the whitelisted path's latency matches the immediate-return paths — closing the body/status/timing membership oracle (pentest 3.3.3). Frontend safe: `stores/auth.js` falls back to `|| 600` when `expires_in_seconds` is absent. |
 | 2026-05-18 | **Contextual email subjects (#890)**: `send_verification_code()` gains optional `agent_name` and `context_label` params. When `agent_name` is set, subject becomes `Your Trinity access code for "{agent_name}"`; when `context_label` is set, subject becomes `Your {context_label} verification code`. A new private `_get_verification_email_html()` generates an HTML body with inline CSS, 36px monospace code block, and contextual intro text. `auth.py` now passes `context_label="Trinity login"`; `public.py` now passes `agent_name=link["agent_name"]`. |
 | 2026-03-26 | **OTP rate limiting added**: `verify_email_login_code()` now enforces both IP-based rate limiting (existing) and new per-email OTP rate limiting (5 failed attempts → 429 for 10 minutes, Redis key `otp_attempts:{email}`). `confirm_verification_code()` in public.py also gains IP-based rate limiting. New helpers: `check_otp_rate_limit(email)`, `record_otp_attempt(email, success)`. |
@@ -31,9 +33,10 @@ As an admin, I want to control who can access the platform via an email whitelis
 - **UI**: `src/frontend/src/views/Settings.vue:291-390` - Email Whitelist management section
 - **API**: `POST /api/auth/email/request` - Request verification code (lines 140-198 in auth.py)
 - **API**: `POST /api/auth/email/verify` - Verify code and login (lines 201-268 in auth.py)
+- **API**: `POST /api/users/me/email/code` + `PUT /api/users/me/email` - Bind a sign-in email to the signed-in account (routers/users.py, trinity-enterprise#720)
 - **API**: `GET /api/settings/email-whitelist` - List whitelisted emails (lines 429-443 in settings.py)
 - **API**: `POST /api/settings/email-whitelist` - Add email to whitelist (lines 446-478 in settings.py)
-- **API**: `DELETE /api/settings/email-whitelist/{email}` - Remove from whitelist (lines 481-503 in settings.py)
+- **API**: `DELETE /api/settings/email-whitelist/{email:path}` - Remove from whitelist (`routers/settings/whitelist.py`; `:path` so a stored value containing `/` is removable, #3456)
 
 ---
 
@@ -126,50 +129,15 @@ As an admin, I want to control who can access the platform via an email whitelis
 
 ---
 
-## Auto-Whitelist on Agent Sharing
+## Agent sharing no longer whitelists (trinity-enterprise#837)
 
-When an agent is shared with a new email, that email is automatically added to the whitelist:
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     Agent Sharing → Auto-Whitelist                   │
-└─────────────────────────────────────────────────────────────────────┘
-
-  Owner shares agent with email
-┌────────────────────────────┐
-│  AgentDetail.vue           │
-│  "Share Agent" dialog      │
-│  Enter email, click Share  │
-└─────────┬──────────────────┘
-          │
-          │ POST /api/agents/{agent_name}/share
-          │ { "email": "newuser@example.com" }
-          │
-          v
-┌─────────────────────────────────────────┐
-│  sharing.py:share_agent_endpoint()      │
-│  1. Validate ownership                  │
-│  2. Create share record                 │
-│  3. Check if EMAIL_AUTH_ENABLED         │
-│  4. If enabled: auto-add to whitelist   │
-│     - db.add_to_whitelist()             │
-│     - source="agent_sharing"            │
-│  5. Audit log                           │
-│  6. WebSocket broadcast                 │
-└─────────┬───────────────────────────────┘
-          │
-          v
-┌─────────────────────────────────────────┐
-│  email_whitelist table updated          │
-│  - email: newuser@example.com           │
-│  - added_by: owner_id                   │
-│  - source: "agent_sharing"              │
-│  - added_at: 2025-12-26T10:00:00Z       │
-└─────────────────────────────────────────┘
-
-Result: New user can now login with email code
-        without admin manually adding them
-```
+Until #837, sharing an agent (and approving an access request) also added the email to this
+whitelist at `user`. Neither does now: the share row is the person's Workspace access, and they
+sign in there with the emailed code. A platform account is an admin's decision — add the email
+here (Settings → Access → Email Whitelist now has a role picker, default `user`), or change a
+role in User Management. The role a new account takes still comes from its whitelist row (#314);
+a `user` is Workspace-only, and `/login` lands one in `/workspace`
+([workspace-only-role.md](workspace-only-role.md)). Rows earlier shares wrote stay.
 
 ---
 
@@ -361,7 +329,7 @@ async verifyEmailCode(email, code) {
 | 304-324 | Add email form | Input field + Add button |
 | 327-383 | Whitelist table | Shows email, source, date, actions |
 | 356-380 | Table rows | Iterates over `emailWhitelist` array |
-| 361-366 | Source badges | Auto (Agent Sharing) or Manual |
+| 361-366 | Source badges | Auto (Agent Sharing), or `whitelistSourceLabel(source)`: Manual, Access tab, else the stored source |
 | 372-378 | Remove button | DELETE action per email |
 | 385-387 | Help text | "When you share an agent..." tip |
 | 505-510 | Whitelist state | `emailWhitelist`, `newEmail`, loading flags |
@@ -427,26 +395,24 @@ async function loadEmailWhitelist() {
   }
 }
 
-// Add email to whitelist
+// Add email to whitelist (#3455). `settingsStore.addWhitelistEmail` runs
+// `utils/emailWhitelist.js::validateWhitelistEmail` first and rejects WITHOUT a
+// request when the value is not one address; the reason — the client rule's or
+// the server's 422 `detail` — is rendered beside the field by `InlineError`.
 async function addEmailToWhitelist() {
   if (!newEmail.value) return
 
   addingEmail.value = true
-  error.value = null
+  whitelistAddError.value = ''
 
   try {
-    await axios.post('/api/settings/email-whitelist', {
-      email: newEmail.value,
-      source: 'manual'
-    }, {
-      headers: authStore.authHeader
-    })
+    await settingsStore.addWhitelistEmail(newEmail.value)
 
     newEmail.value = ''
     await loadEmailWhitelist()
     showSuccessMessage()
   } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to add email'
+    whitelistAddError.value = apiErrorMessage(e, 'Could not add that address. …')
   } finally {
     addingEmail.value = false
   }
@@ -460,9 +426,9 @@ async function removeEmailFromWhitelist(email) {
   error.value = null
 
   try {
-    await axios.delete(`/api/settings/email-whitelist/${encodeURIComponent(email)}`, {
-      headers: authStore.authHeader
-    })
+    // `utils/emailWhitelist.js::whitelistEntryUrl` — the exact stored value as
+    // ONE encoded path segment; never validated, so any listed row can go (#3456).
+    await settingsStore.removeWhitelistEmail(email)
 
     await loadEmailWhitelist()
     showSuccessMessage()
@@ -522,6 +488,7 @@ CREATE INDEX idx_email_login_codes_code ON email_login_codes(code)
 | `is_email_whitelisted(email)` | 27-35 | Check if email is in whitelist |
 | `add_to_whitelist(email, added_by, source, *, default_role)` | 37-90 | Add email to whitelist (default_role is a required kwarg, #314) |
 | `get_whitelist_default_role(email)` | 92-103 | Read default_role for a whitelisted email |
+| `cap_whitelist_default_role(email, role)` | — | Lower an existing row to `role` when it ranks above it; never raises one, never creates one (one conditional UPDATE). Called by `PUT /api/users/{username}/role` before the role is written (trinity-enterprise#837): the row is what an account created for the address gets — again after a re-bind — so it may never rank above the account |
 | `remove_from_whitelist(email)` | 69-83 | Remove email from whitelist |
 | `list_whitelist(limit)` | 85-104 | Get all whitelisted emails with metadata |
 | `create_login_code(email, expiry_minutes)` | 110-145 | Generate 6-digit code with 10 min expiry |
@@ -657,6 +624,28 @@ Used by the public-facing verification flow (separate from the main email login)
 
 **Note:** This endpoint does not apply per-email OTP rate limiting (`check_otp_rate_limit`); only the IP-based limit is enforced here.
 
+### Email-code sign-in policy (ent#849)
+
+`POST /api/auth/email/request` and `/verify` ask `services/login_policy_gate.py::email_code_allowed()`
+right after the `email_auth_enabled` check, before the body is read. When a
+registered provider refuses, both answer **403 `email_code_disabled`** — the same
+bytes for every address, no rate-limit budget spent. `GET /api/auth/mode` adds
+`email_code_login_enabled` (`email_auth_enabled` AND the gate); `Login.vue`
+hides only the email-code form on it. SSO buttons and **Admin Login** sit outside
+that block and stay reachable, and the page holds its loading state until the
+SSO provider list is known. `POST /token` never asks the gate.
+
+The same gate covers the other email-code sign-in surfaces: MCP inline auth
+(no code minted, redeem refused), Workspace guest sign-in, Telegram/WhatsApp
+`/login`, the Slack `require_email` check and public-link email verification (refused for platform users and
+whitelisted addresses only; outsiders keep codes; refusals read like a normal
+send or a wrong code, and while codes are refused every request step sends in a
+detached task so timing does not reveal membership; the public-link request
+step also counts every request per address, so its 429 lands on the same
+request for both). A stale login page that
+gets `email_code_disabled` re-reads `/api/auth/mode` and says to sign in with
+SSO; the CLI prints the same next step.
+
 ### Second Factor Pending (#5 / #2322)
 
 `POST /api/auth/email/verify` runs the same `services/mfa_gate.py::gate_login`
@@ -679,6 +668,68 @@ error for the grant endpoint, an absent field for the JSON one. See
 
 OSS-only builds register no provider, `gate_login` returns `None`, and this
 section does not apply.
+
+### Binding a Sign-In Email (trinity-enterprise#720)
+
+Every sign-in path resolves the account by email alone, so the address on a
+`users` row *is* that identity. Binding one therefore needs proof of the
+mailbox, and an address can sit on only one account.
+
+**Caller**: `stores/auth.js::bindOwnEmail(email, code)` — tries the bind once
+without a code; on `400 code_required` it requests a code and returns
+`{ needsCode: true }`, then the caller retries with the code.
+`resendEmailBindCode(email)` re-sends.
+
+Both routes (`src/backend/routers/users.py`) take `require_interactive`: a
+JWT session only — agent, MCP and system keys get **403**. Both first
+normalise the address (trim + lower-case) and refuse one another account holds.
+
+#### POST /api/users/me/email/code
+
+1. Validate shape → `400 invalid_email`; held by another account → `409 email_in_use`.
+2. Provider is `console` (the code would only reach the server log) and the
+   caller is not an admin → `409 email_verification_unavailable`.
+3. More than 3 codes for that address in 10 minutes → `429 too_many_codes`.
+4. `db.create_login_code(email, expiry_minutes=10, purpose="email_bind:<user id>")`,
+   then mail it (send failure → `502 email_send_failed`). Audited as
+   `email_bind_code_sent`. Returns `{sent, expires_in_seconds}`.
+
+**Code purpose**: `email_login_codes.purpose` is `NULL` for a sign-in code and
+`email_bind:<user id>` for a bind code. `verify_login_code` matches on purpose,
+so a bind code never signs anyone in, a sign-in code never binds, and a code
+minted by one account cannot complete another account's bind.
+
+#### PUT /api/users/me/email
+
+| Case | Result |
+|------|--------|
+| `code` present, attempt counter already at 5 | `429 too_many_attempts` — even the right code is refused |
+| `code` present and wrong/expired | `400 invalid_code` (counter +1) |
+| `code` present and right | bind; counter cleared; audited `email_bound`, `verified: true` |
+| no `code`, provider can deliver | `400 code_required` |
+| no `code`, provider `console`, caller is admin | bind without proof; audited `email_bind_unverified`, `verified: false` (the #82 transition) |
+| no `code`, provider `console`, caller not admin | `409 email_verification_unavailable` |
+| address held by another account (incl. a lost race on the index) | `409 email_in_use` |
+
+**Attempt cap**: reuses the sign-in OTP limiter (`routers/auth.py`
+`check_otp_rate_limit` / `record_otp_attempt`, `OTP_MAX_ATTEMPTS = 5`,
+`OTP_RATE_WINDOW = 600s`) under the bind-scoped key
+`otp_attempts:bind:{user_id}:{email}`. It is deliberately **not** the bare
+`otp_attempts:{email}` key: wrong bind guesses must not lock the address's
+owner out of email sign-in (the same reason the portal uses `portal:`).
+Like sign-in, it fails open when Redis is unavailable.
+
+**Uniqueness**: `idx_users_email_unique ON users(lower(email)) WHERE email IS
+NOT NULL`, and every `users.email` write goes through one checked writer that
+raises `EmailInUseError`. The `ent720_email_identity` migration (SQLite) /
+Alembic `0085_ent720_email_identity` (PostgreSQL) resolves pre-existing
+duplicates first: per address the **earliest-created** account keeps it, every
+other account's email is set to `NULL`, and the migration log names those
+accounts by username (never the address). Their owners lose email sign-in to
+that address until they bind another.
+
+**Tests**: `tests/unit/test_ent720_email_binding.py`;
+`src/frontend/tests/unit/emailBindProof.spec.js`.
 
 ### Whitelist Management Endpoints (`src/backend/routers/settings.py`)
 
@@ -725,7 +776,7 @@ Add email to whitelist.
 ```
 
 **Business Logic:**
-1. Parse request and lowercase email (lines 460-463)
+1. Parse and validate the request (#3455). `db_models.EmailWhitelistAdd` trims and lower-cases `email` and refuses anything that is not one address — empty, longer than 254 characters, containing whitespace or control characters, or not exactly one `@` with text on both sides. An entry is always a single address: the whitelist is matched by exact lower-cased address, with no domain or wildcard form. A refusal — or a body that is not a JSON object — is **422** with a one-sentence string `detail` naming the reason (never the echoed value).
 2. Add to whitelist (lines 466-467)
    - `db.add_to_whitelist(email, current_user.username, source, default_role=add_request.default_role)`
    - `default_role` is a required keyword-only kwarg (defaults to `"user"` on the Pydantic request model); see #314.
@@ -741,9 +792,9 @@ Add email to whitelist.
 }
 ```
 
-#### DELETE /api/settings/email-whitelist/{email} (Lines 481-503)
+#### DELETE /api/settings/email-whitelist/{email:path}
 
-Remove email from whitelist.
+Remove email from whitelist. The value is matched case-insensitively against the stored row and is **not** validated, so rows that predate #3455 remain removable. The `:path` converter is what lets a stored value containing `/` match at all (#3456) — the router decodes `%2F` before matching; nothing else is registered under `/email-whitelist/`, so it claims no sibling route. Clients send the value as one URL-encoded segment. 404 when no row matches.
 
 **Response:**
 ```json
@@ -753,32 +804,10 @@ Remove email from whitelist.
 }
 ```
 
-### Agent Sharing Auto-Whitelist (`src/backend/routers/sharing.py:44-56`)
+### Agent Sharing Auto-Whitelist — retired (trinity-enterprise#837)
 
-When an agent is shared, automatically add recipient to whitelist:
-
-```python
-# Lines 44-56: Auto-add email to whitelist if email auth is enabled
-from config import EMAIL_AUTH_ENABLED
-email_auth_setting = db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
-if email_auth_setting.lower() == "true":
-    try:
-        db.add_to_whitelist(
-            share_request.email,
-            current_user.username,
-            source="agent_sharing",
-            default_role="user",  # chat-only grant — #314
-        )
-    except Exception:
-        # Already whitelisted or error - continue anyway
-        pass
-```
-
-**Key behavior:**
-- Runs after successful share creation
-- Silent failure if email already whitelisted
-- Source is marked as `"agent_sharing"` for audit trail
-- Does NOT block agent sharing if whitelist add fails
+`share_agent_endpoint` and `decide_access_request_endpoint` no longer call `add_to_whitelist`.
+The `agent_sharing` / `access_request` sources remain on rows written before the change.
 
 ---
 
@@ -864,6 +893,10 @@ class EmailLoginResponse(BaseModel):
 ---
 
 ## Security Considerations
+
+### Binding the sign-in email is session-only (trinity-enterprise#711)
+
+The address an account signs in with is its sign-in identity, so changing it is a human, signed-in act. `PUT /api/users/me/email` (`routers/users.py`) therefore takes `Depends(require_interactive)`: a signed-in (JWT) session only; every MCP key, the person's own `user` key included, gets 403 and the column does not move. `PUT` / `DELETE /api/users/me/github-pat` take the same rule. See requirements `auth.md` §2.8.
 
 ### Email Enumeration Prevention
 
@@ -1492,7 +1525,7 @@ curl -X GET "http://localhost:8001/api/audit/events?event_type=authentication&ac
 - [x] POST /api/auth/email/verify endpoint
 - [x] GET /api/settings/email-whitelist endpoint
 - [x] POST /api/settings/email-whitelist endpoint
-- [x] DELETE /api/settings/email-whitelist/{email} endpoint
+- [x] DELETE /api/settings/email-whitelist/{email:path} endpoint
 - [x] Email service (console, SMTP, SendGrid, Resend)
 - [x] Rate limiting (3 per 10 min)
 - [x] Email enumeration prevention
@@ -1589,9 +1622,12 @@ This allows distinguishing between:
 
 ### Source Tracking
 
-The whitelist tracks how emails were added (visible in Settings UI):
+The whitelist tracks how emails were added (visible in Settings UI; the label comes from
+`utils/emailWhitelist.js::whitelistSourceLabel`):
 - `source="manual"` - ✋ Manual badge - Added by admin via Settings page
-- `source="agent_sharing"` - 🤝 Auto badge - Auto-added when agent was shared
+- `source="agent_sharing"` - 🤝 Auto badge - Auto-added when agent was shared (before trinity-enterprise#837)
+- `source="access_tab"` - "Access tab" - an account given from an agent's Access tab (trinity-enterprise#837)
+- any other source (`sso`, `cli`, `access_request`, …) - shown as stored, never as "Manual"; no source reads "—"
 
 This provides an audit trail and helps admins understand whitelist growth.
 

@@ -88,13 +88,13 @@ def test_default_timeout_constant_is_30_minutes(runtime_config_tree: ast.Module)
 
 
 # ---------------------------------------------------------------------------
-# execute_claude_code wiring
+# execute_claude_code wiring (the subprocess body lives in _execute_claude_code_once since #2958)
 # ---------------------------------------------------------------------------
 
 
 def test_chat_reads_guardrails_execution_timeout(source: str, tree: ast.Module) -> None:
     """Chat mode must resolve timeout from the shared guardrails field."""
-    body = _function_source(source, _find_function(tree, "execute_claude_code"))
+    body = _function_source(source, _find_function(tree, "_execute_claude_code_once"))
     assert 'guardrails.get("execution_timeout_sec")' in body, (
         "chat mode must read execution_timeout_sec from guardrails"
     )
@@ -105,7 +105,7 @@ def test_chat_reads_guardrails_execution_timeout(source: str, tree: ast.Module) 
 
 def test_chat_has_inner_process_wait_timeout(source: str, tree: ast.Module) -> None:
     """Inner process.wait must be bounded by timeout_seconds."""
-    body = _function_source(source, _find_function(tree, "execute_claude_code"))
+    body = _function_source(source, _find_function(tree, "_execute_claude_code_once"))
     assert "process.wait(timeout=timeout_seconds)" in body, (
         "inner subprocess wait must pass the timeout"
     )
@@ -119,7 +119,7 @@ def test_chat_has_inner_process_wait_timeout(source: str, tree: ast.Module) -> N
 
 def test_chat_has_outer_asyncio_wait_for(source: str, tree: ast.Module) -> None:
     """Outer wait_for is the async safety net with a 60s grace buffer."""
-    body = _function_source(source, _find_function(tree, "execute_claude_code"))
+    body = _function_source(source, _find_function(tree, "_execute_claude_code_once"))
     assert "asyncio.wait_for(" in body, (
         "chat mode must wrap the executor call in asyncio.wait_for"
     )
@@ -133,7 +133,7 @@ def test_chat_has_outer_asyncio_wait_for(source: str, tree: ast.Module) -> None:
 
 def test_chat_timeout_returns_http_504(source: str, tree: ast.Module) -> None:
     """Both timeout paths must raise HTTPException(504)."""
-    body = _function_source(source, _find_function(tree, "execute_claude_code"))
+    body = _function_source(source, _find_function(tree, "_execute_claude_code_once"))
     # Count 504 raises — expect at least 2 (one per timeout path).
     count = body.count("status_code=504")
     assert count >= 2, f"expected ≥2 HTTP 504 raises in chat mode, found {count}"

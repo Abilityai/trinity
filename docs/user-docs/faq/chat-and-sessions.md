@@ -4,7 +4,7 @@
 
 ## How do I start chatting with an agent?
 
-Two places. The **Workspace** (`/workspace`, opened from the nav in its own browser tab) is the main one: click an agent in the sidebar and you land in the chat you were last in with it — its pinned **Main** chat the first time — and the conversation keeps its memory from turn to turn. The **Chat** tab on the agent's detail page is a quick stateless surface — fine for one-off questions, but each message starts fresh. Either way the agent must be running. See [Workspace](../sharing-and-access/workspace.md) and [Agent Chat](../agents/agent-chat.md).
+Two places. The **Workspace** (`/workspace`, opened from the nav in its own browser tab) is the main one: click an agent in the sidebar and you land in the chat you were last in with it — its pinned **Main** chat the first time — and the conversation keeps its memory from turn to turn. The **Chat** tab on the agent's detail page is a quick surface for one-off questions: each message runs as a new agent session, with the last 20 messages included for context. Either way the agent must be running. See [Workspace](../sharing-and-access/workspace.md) and [Agent Chat](../agents/agent-chat.md).
 
 ## What's the difference between the Workspace and the Chat tab?
 
@@ -32,15 +32,23 @@ Every (you, agent) pair has one pinned **Main** chat: it is always the first tab
 
 ## How do I start a new chat with an agent, and can I rename it?
 
-**New chat** in the conversation header (or **⌘J** / **Ctrl+J**) starts a fresh chat with the agent in front of you; **New chat** in the sidebar opens the agent picker instead. A provisional tab appears at once and the chat itself is created when you send the first message. Trinity names it from that message (and takes a second pass if your opener was only a greeting); to rename it, click the pencil beside its title or edit it on the sidebar row — one line of up to 100 characters, Enter saves, Esc abandons, and a name you typed always stands. Only Main can't be renamed. A direct link `/workspace?agent=<name>` opens your most recent chat with that agent, and `?new=1` forces a fresh one. See [Workspace](../sharing-and-access/workspace.md#starting-a-chat).
+**New chat** in the conversation header (or **⌘J** / **Ctrl+J**) starts a fresh chat with the agent in front of you; **New chat** in the sidebar opens the agent picker instead. A provisional tab appears at once and the chat itself is created when you send the first message. Trinity names it from that message (and takes a second pass if your opener was only a greeting); to rename it, click the pencil beside its title or edit it on the sidebar row — one line of up to 100 characters, Enter saves, Esc abandons, and a name you typed always stands. Only Main can't be renamed. A direct link `/workspace?agent=<name>` lands on that agent the way a click on its sidebar row does — its chat with an unread reply first, else the chat you last had open with it in this tab, else a draft, else a new chat — and `?new=1` forces a fresh one. See [Workspace](../sharing-and-access/workspace.md#starting-a-chat).
+
+## Will I lose what I was typing if I switch to another agent or chat?
+
+No. Unsent text survives switching agents, chat tabs and rooms, and comes back exactly as you left it. Every chat or room holding unsent text is marked **Draft** in the sidebar and on its tab. Sending clears the draft, and **Reset** carries it onto the new Main. Drafts are kept in this browser only; signing out deletes them, while a session that times out keeps them. See [Workspace](../sharing-and-access/workspace.md#the-composer).
+
+## What is "Suggested for you" in the Workspace?
+
+A short list computed for you and the agent in front of you: questions it is waiting on you to answer, decisions past their review date, skills you haven't run, a nudge when you haven't talked to it in a while, and — for the agent's owner or an admin — schedules that keep failing, never ran, or won't run because autonomy is off. Each item shows the signal it came from. Accepting one never sends anything: it pre-fills the composer or opens the section or page it names. **Dismiss** hides an item until its state changes. It appears on the Info tab and below the hints on an empty chat, for platform users only. See [Workspace](../sharing-and-access/workspace.md#suggestions).
 
 ## How do I make the agent forget the conversation and start fresh?
 
-Start a new chat (**New chat** or **⌘J** / **Ctrl+J**): it has no memory of the previous one. If you're in the agent's **Main**, use **Reset** in the header instead — it archives the current Main and starts the agent cold, keeping the old conversation in your list as an ordinary chat. Reach for either when the agent is going in circles, when you're switching topic and don't want bleed-over, or when repeated auto-compaction has degraded its answers. On the Chat tab every message already starts fresh, so there is nothing to clear. See [Continuous Conversations](../agents/agent-session.md#clearing-working-memory).
+Start a new chat (**New chat** or **⌘J** / **Ctrl+J**): it has no memory of the previous one. If you're in the agent's **Main**, use **Reset** in the header instead — it archives the current Main and starts the agent cold, keeping the old conversation in your list as an ordinary chat. Reach for either when the agent is going in circles, when you're switching topic and don't want bleed-over, or when repeated auto-compaction has degraded its answers. On the Chat tab each message already runs as a new agent session, with only the last 20 messages sent along as context, so there is no working memory to clear. See [Continuous Conversations](../agents/agent-session.md#clearing-working-memory).
 
 ## What do `/` and `@` do in the Workspace composer?
 
-They open a typeahead. Type `/` at the start of a word for the agent's playbooks — picking one splices its starter prompt into the field without sending — and `@` to bring another agent in. ↓ then Enter (or Tab for the top row) inserts the pick, Esc dismisses the list, and Enter on its own always sends. Picking an `@` agent from a 1:1 opens a **room** containing both agents and posts your message there; rooms are covered in the [Collaboration FAQ](collaboration.md), and `/` playbooks are not offered inside one. See [Workspace](../sharing-and-access/workspace.md#the-composer).
+They open a typeahead. Type `/` at the start of a word for the agent's skills — picking one splices its starter prompt into the field without sending — and `@` to bring another agent in. ↓ then Enter (or Tab for the top row) inserts the pick, Esc dismisses the list, and Enter on its own always sends. Picking an `@` agent from a 1:1 opens a **room** containing both agents and posts your message there; rooms are covered in the [Collaboration FAQ](collaboration.md), and `/` skills are not offered inside one. See [Workspace](../sharing-and-access/workspace.md#the-composer).
 
 ## Who can see my chat history?
 
@@ -48,7 +56,7 @@ Chat messages are saved to the platform database and survive container restarts 
 
 ## Where can I see what a chat message cost?
 
-Every assistant reply is recorded with its cost, token usage, and execution time, and each session tracks cumulative cost across the conversation. For a per-run breakdown, the agent's **Tasks** tab lists each execution with its cost and a context-usage bar, plus a Total Cost rollup, and the Execution Detail page shows dedicated Cost and Context cards. The agent header also shows today's spend with a 7-day trend. The Workspace deliberately shows no cost or model figures — its band, Info tab and Work tab speak in outcomes — so for the numbers go to the agent's Tasks tab or the Executions page. See [Executions](../operations/executions.md).
+Every assistant reply is recorded with its cost, token usage, and execution time, and each session tracks cumulative cost across the conversation. For a per-run breakdown, the agent's **Tasks** tab lists each execution with its cost and a context-usage bar, plus a Total Cost rollup, and the Execution Detail page shows dedicated Cost and Context cards. The agent's Overview also shows today's spend with a 7-day trend. The Workspace deliberately shows no cost or model figures — its band, Info tab and Work tab speak in outcomes — so for the numbers go to the agent's Tasks tab or the Executions page. See [Executions](../operations/executions.md).
 
 ## Can several chats run on the same agent at once?
 
@@ -56,7 +64,7 @@ Yes, up to the agent's parallel-capacity limit (`max_parallel_tasks`, default 3)
 
 ## Why am I told the conversation is already handling a message?
 
-Turns on one conversation are serialized on purpose — two simultaneous resumes of the same session could corrupt its state. Send a second message while one is still running and you get a busy response with a retry hint rather than a queue. Wait for the current turn to finish, or start a separate chat for the parallel line of work. See [Continuous Conversations](../agents/agent-session.md).
+Turns on one conversation are serialized on purpose — two simultaneous resumes of the same session could corrupt its state. Send a second message while one is still running and it waits up to 30 seconds for the first to finish, then gets a busy response with a retry hint — it is not queued. Wait for the current turn to finish, or start a separate chat for the parallel line of work. See [Continuous Conversations](../agents/agent-session.md).
 
 ## How can I tell what the agent is doing while it works in the Workspace?
 
@@ -69,6 +77,26 @@ In the Workspace and on the Chat tab, **Send** becomes **Stop** while a turn run
 ## Why did my message fail, and why isn't there always a Retry button?
 
 A failed send tells you the real reason — the agent is busy, the turn timed out, the message was too large, there were too many messages, or the agent hit its usage limit — rather than a bare failure. **Retry** is offered only when nothing reached the agent: a turn the agent already ran is not silently sent and billed twice, so in that case ask again in your own words. An agent that is stopped or unreachable is labelled above the field before you type; the message still sends and the server's refusal is the answer. See [Workspace](../sharing-and-access/workspace.md#while-the-agent-works).
+
+## Why does a chat turn show as failed when the agent had already written part of an answer?
+
+Because the run ended in an error, and Trinity records that as a failure rather than passing the partial text — or an error message such as *API Error: 500* — off as the agent's reply. The execution is marked failed with the real error, which you can read on the Execution Detail page, and the chat route answers with an error status instead of a normal reply. If the evidence shows the agent did finish the turn and only its final result event was lost, Trinity recovers the reply instead of failing it. See [Chat API](../api-reference/chat-api.md#failed-turns).
+
+## Will my chat pick up where a scheduled run left off?
+
+No. A chat continues only its own session, never the most recent session on the agent, so a schedule or other background run that happened in between does not leak into your conversation. That holds on Claude Code and Gemini agents alike. To deliberately carry a finished run's context into a chat, open the execution and click **Continue as Chat**: the Chat tab opens with a banner naming the execution, and the agent has the full context of that run. The button appears once the run has finished and has a resumable session. See [Agent Chat](../agents/agent-chat.md#continue-as-chat).
+
+## Do `chat_with_agent` calls share a conversation with my Workspace chats?
+
+No — they are separate conversations. A sequential `chat_with_agent` call (and `POST /api/agents/{name}/chat`, which the `trinity` CLI also uses) continues the agent's own chat session, which every caller of that route shares. Your Workspace chats are yours alone, and the Chat tab replays its own transcript with no session at all. The agent's owner or an admin can wipe the shared session with `DELETE /api/agents/{name}/chat/history`; it also starts fresh after a model change. On an agent in the experimental pull-mode pilot, each caller gets their own `/chat` conversation instead. See [Agent Chat](../agents/agent-chat.md#mcp-tools) and [Chat API](../api-reference/chat-api.md#pull-mode-pilot-agents).
+
+## Where are my earlier conversations on the Chat tab?
+
+In the session dropdown at the top left of the Chat tab: it lists previous chats with their date, message count and last message, and selecting one loads it. **New Chat** starts an empty one. These conversations are stored in the platform database and survive container restarts, but remember the tab is stateless — reopening an old chat shows its messages and replays the last 20 of them as text on the next turn; the agent has no working memory of it. See [Agent Chat](../agents/agent-chat.md#session-management).
+
+## Why does the Chat tab say "Agent Not Running"?
+
+The Chat tab needs a running container, so for a stopped agent it shows **Agent Not Running** — *Start the agent to begin chatting* — in place of the input. Start the agent from its header and the input returns. The same applies to the chat API: `POST /chat` on a stopped agent answers 503. See [Managing Agents](../agents/managing-agents.md).
 
 ## Can the agent keep working on something in the background while I chat?
 
@@ -84,7 +112,7 @@ Yes, on both surfaces, though the pickers differ. In the **Workspace**, platform
 
 ## What are the Fable 5 and Sonnet 5 models?
 
-Fable is the most capable tier — reach for it on the longest, hardest, most involved tasks where quality matters more than speed. **Fable 5.1** is the current one; Fable 5 is still offered and still supported, just no longer the latest in its tier. Sonnet 5 is the fast, smart everyday model, and it carries a 1M-token context window, so it holds far more of a long conversation or large codebase before compaction. Both appear by name in the Chat tab's model picker, in the agent's Model Selection setting, and in the per-schedule and per-loop overrides. The Workspace dropdown speaks in tiers instead: **Balanced — fast and smart** is Sonnet 5, **Most capable** is Opus 5, and **Fastest** is Haiku. See [Agent Configuration](../agents/agent-configuration.md#model-selection).
+Fable is the most capable tier — reach for it on the longest, hardest, most involved tasks where quality matters more than speed. **Fable 5.1** is the current one; Fable 5 is still offered and still supported, just no longer the latest in its tier. Sonnet 5 is the fast, smart everyday model, and it carries a 1M-token context window, so it holds far more of a long conversation or large codebase before compaction. Both appear by name in the Chat tab's model picker, in the agent's Model Selection setting, and in the per-schedule and per-loop overrides. The Workspace dropdown speaks in tiers instead: **Balanced — fast and smart** is Sonnet 5, **Most capable** is Opus 5.5, and **Fastest** is Haiku. See [Agent Configuration](../agents/agent-configuration.md#model-selection).
 
 ## Does chat render markdown, and can I attach files?
 
@@ -94,9 +122,17 @@ Replies render as markdown on both surfaces — headings, lists, tables and code
 
 Click the paperclip, drop files anywhere on the conversation (*Drop files to send to …*), or paste a copied image or file into the message field — up to 20 files per drop, 25 MB each, uploaded one after another with a progress chip apiece; a refused file names itself and the limit. Sent files land in the agent's inbox inside its workspace and appear under **Files you sent** in the rail's **Files** tab, alongside **Files from {agent}** for anything it shared back. Click a name to preview it (images, Markdown and text up to 256 KB; ← and → step through the previewable files) or **Download** to save it. The bin icon deletes a file you sent or removes a shared file from your list without touching the share; an agent's owner signed in as a platform user also gets **Delete for everyone**. See [Workspace](../sharing-and-access/workspace.md#the-rail).
 
+## How do I remove an attachment before sending it?
+
+Click the **×** on the file's chip in the composer. A file still waiting to upload never uploads; one already uploaded is deleted from the agent's inbox again, and in a room from every participant's inbox. The × does nothing while a send is settling or while an `@mention` is carrying your files into a room. A file that was sent with a message is removed from the rail's **Files** tab instead, with the bin icon. See [Workspace → The composer](../sharing-and-access/workspace.md#the-composer).
+
 ## How do I know a reply has arrived when I'm not looking at the chat?
 
 Three ways. While anything is unread, the browser tab's title carries the count — `(3) Trinity — Workspace` — and the agent's row in the sidebar shows its own unread badge (questions the agent is waiting on you to answer are counted separately). Inside a chat, if you've scrolled up to re-read something, an arriving message doesn't pull you back down: a **N new messages** control appears, and sending, opening a chat or clicking it returns you to the bottom. Opening the chat clears the count; unread badges count 1:1 chats only, not rooms. See [Workspace](../sharing-and-access/workspace.md#reading-replies).
+
+## How is the Workspace Inbox sorted?
+
+The **Action** tab lists the asks waiting on you newest first. A **Sort asks** switch in the list's head line changes it to **Urgency**: asks expiring within 24 hours first (soonest first), then by priority, then the oldest first. The switch is remembered for you in this browser, a link can carry it (`?sort=urgency`), and the rail's **Asks** tab always uses the newest-first order. **Unread** and **All** are by recency and have no switch. Rows hold their place while you stay on a tab — a poll never re-sorts them under you, and changing the sort re-sorts once. See [Workspace → The Inbox](../sharing-and-access/workspace.md#the-inbox).
 
 ## Can I switch the Workspace between light and dark mode?
 
@@ -104,7 +140,11 @@ Yes. The theme switch sits at the right end of every chat and room header, and i
 
 ## What are the tabs in the rail beside the conversation?
 
-The rail is the right-hand column, collapsed to a strip of icons by default; its state is remembered across chats and reloads, and a dot on a tab means something happened since you last looked. **Work** lists the agent's executions from this chat and its history; **Loops** runs and watches loops on the agent (see the [Scheduling FAQ](scheduling-and-automation.md)); **Canvas** shows the agent's canvases — what a canvas is and who sees it is in the [Advanced Features FAQ](advanced-features.md), and pinning, deleting, sharing and "this canvas" are answered below; **Files** holds files you sent and files the agent shared; **Info** is the agent's context — your chats with it, what it can do, and its published reports. Work and Loops are for platform users only; an external client sees the other three, with only the canvases the agent published to its roster. See [Workspace](../sharing-and-access/workspace.md#the-rail).
+The rail is the right-hand column, collapsed to a strip of icons by default; its state is remembered across chats and reloads, and a dot on a tab means something happened since you last looked. In order: **Info** is the agent's context — suggestions for you, the agent's role when it has one, your chats with it, what it can do, its published reports, what it remembers about you, and the decisions you recorded with it; **Canvas** shows the agent's canvases — what a canvas is and who sees it is in the [Advanced Features FAQ](advanced-features.md), and pinning, deleting, sharing and "this canvas" are answered below; **Files** holds files you sent and files the agent shared; **Projects**, on instances licensed for them, the agent's projects; **Asks** lists the asks this agent is waiting on you for and is always there — with nothing waiting it offers **Open the Inbox**; **Work** lists the agent's executions from this chat and its history; **Loops** runs and watches loops on the agent (see the [Scheduling FAQ](scheduling-and-automation.md)). Work, Loops and Projects are for platform users only; an external client sees the others, with only the canvases the agent published to its roster. See [Workspace](../sharing-and-access/workspace.md#the-rail).
+
+## What is the Steward card on a project page?
+
+It names who stewards the project — the person or agent that owns its health and verifies finished tasks — with the project's health as a badge, and says what is behind that. For an agent steward it shows the last sweep (the last time the agent read its digest), its next scheduled run, and says **No sweep recorded yet** or **No sweep scheduled** plainly when that is the case, because Trinity does not run the steward: the agent moves the project only on its own schedule. For a person steward it lists what is waiting on them — tasks to verify, tasks blocked or waiting on a decision, tasks untouched for a week, a health update due — and offers **Open I steward** when that person is you. With nobody named, the creator stewards the project. See [Workspace Projects → The steward](../sharing-and-access/workspace-projects.md#the-steward).
 
 ## Why did the agent update a canvas I wasn't looking at, or say which canvas it changed?
 
@@ -112,7 +152,7 @@ Because the canvas you have open on the rail's **Canvas** tab is what "this" mea
 
 ## Can I pin or delete canvases, and who is allowed to?
 
-Only the agent's owner (or an admin), signed in as a platform user; anyone else gets a read-only panel rather than buttons that would refuse. On the rail's **Canvas** tab, **Manage** shows each canvas with its age, a pin toggle and **Delete**, and a checkbox per row feeds **Delete selected** with one confirmation naming the count; the same controls live on the agent's **Canvas** tab on Agent Detail. A pinned canvas carries 📌 and comes first in the chips, rewriting it never un-pins it, and once an agent has more than six canvases a **Search canvases…** box filters by title or id. Pins and deletions are yours, never the agent's — it cannot pin its own canvas — and both are recorded in the audit log. The header states two facts and draws no conclusion from them — *Updated 2h ago · agent last ran 40m ago* — so read both timestamps before retiring anything. Each agent holds at most 100 canvases; the [Agents FAQ](agents.md#is-there-a-limit-on-how-many-canvases-an-agent-can-hold) covers the limit. See [Workspace → The rail](../sharing-and-access/workspace.md#the-rail).
+Only the agent's owner (or an admin), signed in as a platform user; anyone else gets a read-only panel rather than buttons that would refuse. On the rail's **Canvas** tab, **Manage** shows each canvas with its age, a pin toggle and **Delete**, and a checkbox per row feeds **Delete selected** with one confirmation naming the count; the same controls live on the agent's **Canvas** tab on Agent Detail. **Manage** sits at the end of the canvas control row and opens its list below the row. A pinned canvas carries 📌 and comes first in the dropdown, rewriting it never un-pins it, and once an agent has more than six canvases a **Search canvases…** box filters by title or id. Pins and deletions are yours, never the agent's — it cannot pin its own canvas — and both are recorded in the audit log. The header states two facts and draws no conclusion from them — *Updated 2h ago · agent last ran 40m ago* — so read both timestamps before retiring anything. Each agent holds at most 100 canvases; the [Agents FAQ](agents.md#is-there-a-limit-on-how-many-canvases-an-agent-can-hold) covers the limit. See [Workspace → The rail](../sharing-and-access/workspace.md#the-rail).
 
 ## How do I share a canvas with someone outside Trinity, or save it as a PDF?
 
@@ -124,4 +164,4 @@ The chat is very long and the thread is windowed: the Workspace renders the newe
 
 ## Can I talk to my agent with voice?
 
-Yes. Click **Talk** in the agent's header, or the call button — the leftmost control in the Workspace composer — in the chat you want the call to belong to. The orb takes the conversation column with the agent's canvas beside it, speech runs both ways, and when the call ends the spoken turns sit in that chat as one collapsed **Voice call · N min** block, so the agent's next typed turn knows what was said. The separate microphone control in the composer only dictates into the message field. Voice needs a Gemini API key on the platform and is for signed-in platform users only — the Chat tab is text only, and the [Advanced Features FAQ](advanced-features.md) covers what the agent can do during a call. See [Voice Chat](../advanced/voice-chat.md).
+Yes. In the Workspace, click the call button — the leftmost control in the composer — in the chat you want the call to belong to. The orb takes the conversation column with the agent's canvas beside it, speech runs both ways, and when the call ends the spoken turns sit in that chat as one collapsed **Voice call · N min** block, so the agent's next typed turn knows what was said. The separate microphone control in the composer only dictates into the message field. Voice needs a Gemini API key on the platform and is for signed-in platform users only — the Chat tab is text only, and the [Advanced Features FAQ](advanced-features.md) covers what the agent can do during a call. See [Voice Chat](../advanced/voice-chat.md).

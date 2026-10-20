@@ -492,3 +492,20 @@ def test_preflight_reason_matches_what_the_real_deploy_reports(env, monkeypatch)
     assert preview["reason"] == real["reason"]
     assert preview["status_code"] == real["status_code"]
     assert preview["template"] == real["template"]
+
+
+def test_manifest_kind_reaches_the_create_call(env):
+    """trinity-enterprise#704: each member's declared `kind` rides the
+    AgentConfig handed to create; an undeclared one stays None (the platform
+    default applies downstream)."""
+    manifest = (
+        "name: test-sys\nagents:\n  web:\n    template: local:default\n"
+        "    kind: deployment\n  brain:\n    template: local:default\n"
+    )
+    resp = _deploy(env, manifest)
+    assert resp.status_code == 200, resp.text
+    kinds = {
+        c.kwargs["config"].name: c.kwargs["config"].kind
+        for c in env.m.create_agent.await_args_list
+    }
+    assert kinds == {"test-sys-web": "deployment", "test-sys-brain": None}

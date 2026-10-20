@@ -141,6 +141,19 @@ leave an agent able to request a dump in front of a client.
 - Per-report sharing distinct from the agent's access model.
 
 
+## Addressed by role (trinity-enterprise#606)
+
+`ReportCreate.to` names who the report is for as a **role** (`primary | approver | viewer | operator`); the platform resolves the person through `services/role_addressing.resolve` — the same rule asks use — and the agent never picks or sees a person.
+
+| `to` resolves to | Stored `addressed_to_email` |
+|---|---|
+| `operator`, nobody, or the agent's **owner** | `NULL` — operator-only (the owner reads reports on the operator surface) |
+| exactly one other person | that email, after the same `agent_on_roster(..., include_owned=False)` check `audience_email` gets; off the roster → 422 `role_unreachable` |
+| several people | 422 `role_resolves_to_several` (a report has one reader) |
+| an unfilled / unknown role | 422 `role_unassigned` / `invalid_to` |
+
+`to` + `audience_email` together → 422 `addressing_conflict`. `audience_email` alone still works for two releases (deprecation logged once per agent). Neither → operator-only, unchanged. The MCP `report` tool echoes `addressed_to_role`, never the resolved person.
+
 ## Agent read-back (#1538)
 
 The write path was one-way: an agent could publish a report and never see it again, so a

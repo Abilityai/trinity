@@ -18,10 +18,20 @@
     "also_absorbed": "19 files had IMPROVED below their old entries; those are now recorded at their real values, so the stale-ceiling check has something true to compare against.",
     "paying_down": "This freeze is a starting line, not an endorsement. Lowering an entry needs no ceremony \u2014 regenerate and the guard keeps biting at the new level.",
     "2638": "SubscriptionsPanel.vue raw_gray 165 -> 173 (+8): the API-key fallback toggle row. Not paid down because there is nothing to pay it down TO \u2014 `gray` is the sanctioned chrome family and tailwind.config.js defines no semantic neutral to replace it with (status-*/state-*/brand-*/accent-*/action-* are all meaning-carrying). The 8 classes are the label, the help text and the toggle's off-state, copied verbatim from the three identical toggles immediately above it; inventing a one-off semantic token for the fourth would make it the odd one out and leave the other three unconverted. Re-frozen in its own commit as the guard's own message prescribes, and scoped to this ONE entry rather than regenerated, so no unrelated drift is absorbed with it.",
+    "_ent841_note": "2026-10-08, ent#841: components/OverflowTabs.vue raw_gray 26 -> 28 (+2) \u2014 the hover ground of the new tab close button (gray-100 light / gray-750 dark, the contract's chrome fills). The \u00d7 itself takes the tab's own ink (text-current) and its disabled state is an opacity on the glyph, so the first draft's 6 gray classes were trimmed to these 2; there is no semantic neutral to move a hover ground to. Scoped to this ONE entry rather than regenerated, so no unrelated drift is absorbed with it. raw_nongray stays 0.",
     "_2718_note": "2026-09-12, #2718: hardcoded_colors 456 -> 447 in 8 files, none of it a code change. The scanner counted a `#` followed by three or six hex digits anywhere in a <template>, so issue references in rendered copy ((ent#184), (#526), >#847</a>) were read as colours; ExecutionsPanel, OverviewPanel, ScheduleAnalyticsCard, settings/OperatorIntakePanel, settings/TelemetrySharingPanel, views/Settings and views/enterprise/Index each lose their only phantom, ReliabilityPanel both of its. Nothing else moves: raw_nongray, raw_gray and semantic_tokens are untouched, and no sample changes line.",
+    "_ent610_a2_note": "2026-09-30, trinity-enterprise#610 PR A2 review round 1: components/OverflowTabs.vue raw_gray 22 -> 26 (+4) \u2014 the new `neutral` badge tone (bg-gray-100 / dark:bg-gray-750 / text-gray-700 / dark:text-gray-300) for the Inbox's per-agent facet counts, which read as success-green \"done\" beside the urgent Action count. A share of a count is no event's outcome, so it cannot be a status-* token, and tailwind.config.js defines no semantic neutral: gray is the sanctioned ladder. components/portal/PortalAsks.vue raw_gray 28 -> 27 (-1, recorded so the stale-ceiling check stays true): the chip and field recipes were folded into shared constants with the dark border moved to gray-500 for 3:1 on the amber card. Edited by hand for these two entries only \u2014 the scanner's --baseline mode rewrites the file and drops this refrozen block \u2014 so no unrelated drift is absorbed.",
     "_2616_note": "2026-09-10, #2616: components/portal/PortalMarkdown.vue raw_gray 13 -> 34 (+21). The Workspace transcript had no typographic treatment at all; covering tables, headings, ordered lists, blockquotes and rules costs a surface/border/ink pair per element in BOTH themes, and those are gray by definition (the contract's 'everything else is gray'). raw_nongray stays 0 and hardcoded_colors stays 0.",
     "_ent625_note": "2026-09-16, trinity-enterprise#625: components/NavBar.vue raw_nongray 35 -> 23, raw_gray 125 -> 113. The inline light/dark/system picker in the user menu is replaced by the shared ThemeChoice primitive (semantic tokens), which the new Workspace theme switch consumes too. A SHRINK, recorded exactly as the guard's stale-ceiling check requires; scoped to this one entry so no unrelated drift is absorbed. The new files (base/ThemeChoice.vue, base/ThemeIcon.vue, portal/PortalThemeSwitch.vue) carry 0 raw_nongray and stay off the baseline, where the guard holds them to zero.",
-    "ent554": "components/canvas/CanvasPanel.vue raw_gray 46 -> 62 (+16): the Share / Download PDF buttons, the share panel's dividers and its option detail + note text. The branch predates the #2605 freeze, so the guard first bit at the merge train. Not paid down: `gray` is the sanctioned chrome family and there is no semantic neutral to move it to; the classes copy the panel's existing header chrome verbatim. Re-frozen in its own commit as the guard prescribes, scoped to this ONE entry."
+    "ent554": "components/canvas/CanvasPanel.vue raw_gray 46 -> 62 (+16): the Share / Download PDF buttons, the share panel's dividers and its option detail + note text. The branch predates the #2605 freeze, so the guard first bit at the merge train. Not paid down: `gray` is the sanctioned chrome family and there is no semantic neutral to move it to; the classes copy the panel's existing header chrome verbatim. Re-frozen in its own commit as the guard prescribes, scoped to this ONE entry.",
+    "_1923_1924_note": "#1923/#1924: two entries move, scoped by hand rather than regenerated. ConfirmDialog.vue raw_gray 9 -> 7 (IMPROVED \u2014 its bespoke backdrop div and the gray-500/gray-900 overlay went away when it adopted BaseModal, and a stale ceiling fails the guard too). base/BaseModal.vue is new at 0/2/0 \u2014 the overlay ground and nothing else. Deliberately NOT regenerated: a wholesale run deleted this entire refrozen block and absorbed canvas/CanvasDocument.vue and views/SharedCanvas.vue, two files that landed on dev after this branch was cut and have nothing to do with it. Same rule the 2638 note states.",
+    "_1925_note": "#1925: two entries move, both DOWN, scoped by hand. Operations.vue raw_nongray 26 -> 0 and raw_gray 60 -> 28 \u2014 adopting OverflowTabs deleted six hand-rolled tab buttons whose active/badge states were raw blue-500/600/100/900 and gray-*; the primitive carries the tokens. Settings.vue raw_gray 690 -> 683, its tab strip for the same reason (raw_nongray unchanged at 59 \u2014 the rest of that file is untouched). Not regenerated: see the _1923_1924_note above for what a wholesale run destroys. NavBar.vue raw_nongray 23 -> 7 and raw_gray 113 -> 93 (post-rebase compose with ent#625) in the same issue's third surface: the priority+ link row replaced six hand-written <router-link>s \u2014 each repeating border-blue-500/dark:border-blue-400 and a purple-100/700/900/200 PRO pill \u2014 with one v-for over a data-driven set whose active and pill classes are semantic (action-primary, accent-purple). The 7 that remain are the user-menu theme buttons and the avatar fallback, untouched by this issue.",
+    "_2202_note": "#2202: McpKeysTab.vue raw_gray 97 -> 83. The panel gained a filter bar, a bounded-list footer and a three-way empty state, which needed two new container borders \u2014 so the additions were built from the Base* primitives (#2122) and paid for by converting the create form's hand-rolled name input and description textarea to BaseInput/BaseTextarea in the same component. Edited by hand, not regenerated: a wholesale scan run deletes this block.",
+    "_2201_note": "#2201: HostTelemetry.vue raw_gray 7 -> 4. The three meter separators are decoration (now aria-hidden) and their one class string is hoisted to a constant instead of repeated three times; the no-data placeholder gained a dark half it was missing. Edited by hand, not regenerated.",
+    "_ent738_note": "2026-10-01, trinity-enterprise#738: components/portal/PortalAgentBubble.vue raw_gray 9 -> 10 (+1). The message action row's Copy and the new Reply now share one button recipe (ACTION_BUTTON), at the ink of the rating thumbs beside them: gray-500 light / gray-400 dark. Copy was gray-400 in light with no dark half, 2.54:1 on white, under the 3:1 an icon needs; the +1 is that dark half (text-gray-400 -> text-gray-500 is one-for-one). Gray is the neutral ink ladder; there is no semantic token to move to. The Inbox pane's reply arrow moved into the bubble with it (PortalInboxPane.vue has no baseline entry). raw_nongray stays 0. Edited by hand for this one entry, not regenerated.",
+    "_3164_note": "#3164: two entries move DOWN, scoped by hand. BindRepoPanel.vue raw_gray 46 -> 41 and CreateAgentModal.vue raw_gray 135 -> 126: each hand-rolled GitHub-token input moved into the shared SavedGithubTokenField.vue (new, 0 raw_nongray, off the baseline where the guard holds it to zero). Not regenerated: a wholesale run drops this block and absorbs unrelated drift.",
+    "_3738_note": "#3738: components/portal/PortalConversation.vue raw_gray 90 -> 85 (-5, a shrink). Its attachment chip moved into the shared components/portal/PortalAttachmentChip.vue (new; 0 raw_nongray, off the baseline where the guard holds it to zero). The chip's new \u00d7 adds no colour: its glyph is text-current and its hover ground is a black/white overlay, which the scanner does not count. components/portal/PortalRoom.vue raw_gray 47 -> 42 (-5) for the same reason, in the room composer's checkpoint. Edited by hand for these two entries, not regenerated.",
+    "_ent754_note": "2026-10-08, trinity-enterprise#754: components/PlaybooksPanel.vue (4 raw_nongray, 48 raw_gray) and components/SkillsPanel.vue (0 / 63) are DELETED \u2014 the two tabs merged into one Skills tab. Their entries are removed by hand (a missing file would read as a stale ceiling); totals are left as they were, since the ratchet never reads them. The new files (components/skills/SkillsTab.vue, SkillCard.vue, SkillAssignModal.vue, SkillDetailsModal.vue, ExecutionGateMarker.vue) carry 0 raw_nongray and stay off the baseline, where the guard holds them to zero. Not regenerated: a wholesale run drops this block and absorbs unrelated drift."
   },
   "files": {
     "src/frontend/src/App.vue": {
@@ -31,7 +41,7 @@
     },
     "src/frontend/src/components/A2aPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 104,
+      "raw_gray": 87,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/AccessPanel.vue": {
@@ -40,9 +50,9 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/AgentHeader.vue": {
-      "raw_nongray": 7,
-      "raw_gray": 125,
-      "hardcoded_colors": 3
+      "raw_nongray": 0,
+      "raw_gray": 57,
+      "hardcoded_colors": 0
     },
     "src/frontend/src/components/AgentListPanel.vue": {
       "raw_nongray": 28,
@@ -81,7 +91,7 @@
     },
     "src/frontend/src/components/BindRepoPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 46,
+      "raw_gray": 41,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/BrainPanel.vue": {
@@ -92,11 +102,6 @@
     "src/frontend/src/components/CapacityMeter.vue": {
       "raw_nongray": 0,
       "raw_gray": 4,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/CapacityPanel.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 14,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/ChannelConfigDialog.vue": {
@@ -126,7 +131,7 @@
     },
     "src/frontend/src/components/ConfirmDialog.vue": {
       "raw_nongray": 0,
-      "raw_gray": 9,
+      "raw_gray": 7,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/ConnectorChannelPanel.vue": {
@@ -136,7 +141,7 @@
     },
     "src/frontend/src/components/CreateAgentModal.vue": {
       "raw_nongray": 0,
-      "raw_gray": 135,
+      "raw_gray": 62,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/CredentialSetupChecklist.vue": {
@@ -171,7 +176,7 @@
     },
     "src/frontend/src/components/FileSharingPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 49,
+      "raw_gray": 37,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/FileTreeNode.vue": {
@@ -200,8 +205,8 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/GitPanel.vue": {
-      "raw_nongray": 24,
-      "raw_gray": 152,
+      "raw_nongray": 17,
+      "raw_gray": 112,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/GuardrailsPanel.vue": {
@@ -216,7 +221,7 @@
     },
     "src/frontend/src/components/HostTelemetry.vue": {
       "raw_nongray": 1,
-      "raw_gray": 7,
+      "raw_gray": 4,
       "hardcoded_colors": 6
     },
     "src/frontend/src/components/ImportIntentPicker.vue": {
@@ -275,8 +280,8 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/NavBar.vue": {
-      "raw_nongray": 23,
-      "raw_gray": 113,
+      "raw_nongray": 7,
+      "raw_gray": 93,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/NeverminedPanel.vue": {
@@ -286,7 +291,7 @@
     },
     "src/frontend/src/components/OverflowTabs.vue": {
       "raw_nongray": 0,
-      "raw_gray": 22,
+      "raw_gray": 28,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/OverviewPanel.vue": {
@@ -297,11 +302,6 @@
     "src/frontend/src/components/PermissionsPanel.vue": {
       "raw_nongray": 0,
       "raw_gray": 31,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/PlaybooksPanel.vue": {
-      "raw_nongray": 4,
-      "raw_gray": 48,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/PortalClientsPanel.vue": {
@@ -344,11 +344,6 @@
       "raw_gray": 57,
       "hardcoded_colors": 0
     },
-    "src/frontend/src/components/ResourceModal.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 13,
-      "hardcoded_colors": 0
-    },
     "src/frontend/src/components/RunningStateToggle.vue": {
       "raw_nongray": 0,
       "raw_gray": 6,
@@ -382,11 +377,6 @@
     "src/frontend/src/components/SkillSourcesPanel.vue": {
       "raw_nongray": 0,
       "raw_gray": 75,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/SkillsPanel.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 63,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/SlackAgentBotPanel.vue": {
@@ -474,6 +464,11 @@
       "raw_gray": 3,
       "hardcoded_colors": 0
     },
+    "src/frontend/src/components/base/BaseModal.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 2,
+      "hardcoded_colors": 0
+    },
     "src/frontend/src/components/base/BaseSelect.vue": {
       "raw_nongray": 0,
       "raw_gray": 2,
@@ -516,7 +511,7 @@
     },
     "src/frontend/src/components/canvas/CanvasPanel.vue": {
       "raw_nongray": 0,
-      "raw_gray": 58,
+      "raw_gray": 48,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/canvas/CanvasPieChart.vue": {
@@ -601,7 +596,7 @@
     },
     "src/frontend/src/components/portal/PortalAgentBubble.vue": {
       "raw_nongray": 0,
-      "raw_gray": 9,
+      "raw_gray": 10,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalAgentDetails.vue": {
@@ -616,7 +611,7 @@
     },
     "src/frontend/src/components/portal/PortalAsks.vue": {
       "raw_nongray": 8,
-      "raw_gray": 28,
+      "raw_gray": 27,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalAvatar.vue": {
@@ -646,7 +641,7 @@
     },
     "src/frontend/src/components/portal/PortalConversation.vue": {
       "raw_nongray": 0,
-      "raw_gray": 90,
+      "raw_gray": 85,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalDeliverables.vue": {
@@ -706,12 +701,12 @@
     },
     "src/frontend/src/components/portal/PortalRoom.vue": {
       "raw_nongray": 0,
-      "raw_gray": 47,
+      "raw_gray": 42,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalSidebar.vue": {
       "raw_nongray": 0,
-      "raw_gray": 43,
+      "raw_gray": 29,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalSkeleton.vue": {
@@ -816,7 +811,7 @@
     },
     "src/frontend/src/components/settings/McpKeysTab.vue": {
       "raw_nongray": 0,
-      "raw_gray": 97,
+      "raw_gray": 83,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/settings/OperatorIntakePanel.vue": {
@@ -832,11 +827,6 @@
     "src/frontend/src/components/settings/RoomBudgetDefaultsPanel.vue": {
       "raw_nongray": 10,
       "raw_gray": 28,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/settings/SettingsPanel.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 16,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/settings/SsoPanel.vue": {
@@ -960,8 +950,8 @@
       "hardcoded_colors": 130
     },
     "src/frontend/src/views/Operations.vue": {
-      "raw_nongray": 26,
-      "raw_gray": 60,
+      "raw_nongray": 0,
+      "raw_gray": 28,
       "hardcoded_colors": 0
     },
     "src/frontend/src/views/Portal.vue": {
@@ -976,13 +966,13 @@
     },
     "src/frontend/src/views/Settings.vue": {
       "raw_nongray": 59,
-      "raw_gray": 690,
+      "raw_gray": 683,
       "hardcoded_colors": 0
     },
     "src/frontend/src/views/SetupPassword.vue": {
       "raw_nongray": 0,
       "raw_gray": 0,
-      "hardcoded_colors": 48
+      "hardcoded_colors": 46
     },
     "src/frontend/src/views/enterprise/Audit.vue": {
       "raw_nongray": 43,
@@ -993,11 +983,16 @@
       "raw_nongray": 9,
       "raw_gray": 27,
       "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/AgentHeaderMeta.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 19,
+      "hardcoded_colors": 0
     }
   },
   "totals": {
     "raw_nongray": 815,
-    "raw_gray": 8760,
+    "raw_gray": 8752,
     "hardcoded_colors": 447,
     "semantic_tokens": 4030,
     "files_with_violations": 198

@@ -17,14 +17,13 @@
  *     `agent_name`, and withhold the payload on denial behind a compound
  *     uniform reason — the id is the caller's only input, and naming the agent
  *     would tell it whose loop that is.
- *   - The backend behind all three is owner-equivalent for an agent key
- *     (architecture.md Invariant #8): this is a tool-surface gate, not a
- *     capability boundary. Whether the boundary should hold one hop down is
- *     abilityai/trinity-enterprise#629.
+ *   - The backend holds the same line one hop down: since
+ *     abilityai/trinity-enterprise#629 an agent key reaches only itself, its
+ *     edges and the agents it spawned (`dependencies.agent_may_reach`).
  */
 
 import { z } from "zod";
-import { TrinityClient } from "../client.js";
+import { ApiError, TrinityClient, depthRefusalFromError } from "../client.js";
 import type { LoopStatus, McpAuthContext } from "../types.js";
 import { accessDenied, checkAgentEdge, resolveClient } from "../access.js";
 import type { DenyCallContext } from "../access.js";
@@ -61,8 +60,18 @@ export function createLoopTools(
         ? await checkAgentEdge(apiClient, authContext, agentName)
         : { allowed: false as const, reason: "loop payload carries no agent_name" };
     if (access.allowed) return null;
+    return loopDenial(context, authContext, loopId, access.reason ?? "access denied");
+  };
+
+  /** The one uniform loop refusal; `internalReason` goes to the log and the audit row only. */
+  const loopDenial = (
+    context: DenyCallContext | undefined,
+    authContext: McpAuthContext | undefined,
+    loopId: string,
+    internalReason: string
+  ): string => {
     const caller = authContext?.agentName || authContext?.userId || "unknown";
-    console.log(`[Access Denied] loop ${loopId}: ${caller}: ${access.reason}`);
+    console.log(`[Access Denied] loop ${loopId}: ${caller}: ${internalReason}`);
     return accessDenied(
       context,
       {
@@ -71,9 +80,26 @@ export function createLoopTools(
         reason: `Loop '${loopId}' not found or not accessible`,
         hint: LOOP_DENIAL_HINT,
       },
-      access.reason
+      internalReason
     );
   };
+
+  /**
+   * The backend refused the loop READ itself (ent#629: an agent key reaches a
+   * loop's agent only within its reach, checked before the payload is
+   * returned). That is the same answer this layer's gate gives, so it gets the
+   * same uniform body — never a raw `API error (403)`. A 404 (no such loop)
+   * keeps the backend's own shape.
+   */
+  const deniedRead = (
+    context: DenyCallContext | undefined,
+    authContext: McpAuthContext | undefined,
+    loopId: string,
+    error: unknown
+  ): string | null =>
+    error instanceof ApiError && error.status === 403
+      ? loopDenial(context, authContext, loopId, "backend refused the loop read (403)")
+      : null;
 
   const resolveAgentName = (
     authContext: McpAuthContext | undefined,
@@ -256,6 +282,9 @@ export function createLoopTools(
           });
           return JSON.stringify({ success: true, ...result }, null, 2);
         } catch (error) {
+          // #2973: a chain-depth refusal is a result to stop on, not an error.
+          const refusal = depthRefusalFromError(error, agentName);
+          if (refusal) return JSON.stringify(refusal, null, 2);
           const msg = error instanceof Error ? error.message : String(error);
           console.error(`[run_agent_loop] error: ${msg}`);
           return JSON.stringify({ success: false, error: msg }, null, 2);
@@ -288,6 +317,8 @@ export function createLoopTools(
           if (denial) return denial;
           return JSON.stringify({ success: true, ...loop }, null, 2);
         } catch (error) {
+          const refused = deniedRead(context, authContext, params.loop_id, error);
+          if (refused) return refused;
           const msg = error instanceof Error ? error.message : String(error);
           return JSON.stringify({ success: false, error: msg }, null, 2);
         }
@@ -318,6 +349,8 @@ export function createLoopTools(
         try {
           loop = await apiClient.getLoopStatus(params.loop_id);
         } catch (error) {
+          const refused = deniedRead(context, authContext, params.loop_id, error);
+          if (refused) return refused;
           const msg = error instanceof Error ? error.message : String(error);
           return JSON.stringify(
             {

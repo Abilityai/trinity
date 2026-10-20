@@ -26,9 +26,16 @@ import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
  * adopt this without changing it.
  *
  * @param {import('vue').Ref<HTMLElement|null>} scrollEl the scrolling container
- * @param {{threshold?: number}} [options]
+ * @param {{threshold?: number, enabled?: () => boolean}} [options]
+ *   `enabled` — is there a transcript to stick to? When it returns false the
+ *   container is NOT a transcript (a new chat's empty state: identity, hints,
+ *   suggestions): nothing is pinned to the bottom, growth is left alone, and an
+ *   explicit `pinToBottom()` (a thread load) puts the reader at the TOP instead.
+ *   Pinning an empty state to the bottom scrolled the agent's identity out of
+ *   view and moved "Things you can ask" every time a late section arrived.
+ *   Defaults to always-on, which is what every other surface wants.
  */
-export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX } = {}) {
+export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX, enabled = () => true } = {}) {
   // A thread opens at the bottom, so following is the starting state — and it
   // must be, because the first `onArrive` can fire before any scroll event has
   // told us where the reader is.
@@ -64,6 +71,14 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX } = 
 
   /** The user asked to be at the bottom: go there and start following again. */
   async function pinToBottom() {
+    if (!enabled()) {
+      // No transcript yet: an empty state reads from the top.
+      await nextTick()
+      if (scrollEl.value) scrollEl.value.scrollTop = 0
+      following.value = true
+      unread.value = 0
+      return
+    }
     await scrollToBottomNow()
     following.value = true
     unread.value = 0
@@ -82,6 +97,19 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX } = 
   function reset() {
     following.value = true
     unread.value = 0
+  }
+
+  /**
+   * Stop following WITHOUT moving — for a deliberate jump to an earlier point
+   * (trinity-enterprise#610: the Inbox's "Open in chat" anchor).
+   *
+   * The observer re-pins to the bottom on every size change while `following`
+   * is true, so a `scrollIntoView` on an older message would be undone by the
+   * next markdown re-flow. Detaching first leaves the reader where the anchor
+   * put them; the normal scroll rule re-arms following if they scroll down.
+   */
+  function detach() {
+    following.value = false
   }
 
   /**
@@ -104,6 +132,7 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX } = 
   }
 
   function pin() {
+    if (!enabled()) return   // no transcript to stick to (see `enabled`)
     const el = scrollEl.value
     // The element can go away between the arrival and the tick (a thread
     // switch, an unmount) — a normal race, not a failure.
@@ -163,6 +192,7 @@ export function useStickToBottom(scrollEl, { threshold = STICK_THRESHOLD_PX } = 
     pinToBottom,
     scrollToLatest,
     reset,
+    detach,
   }
 }
 

@@ -43,7 +43,7 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
 
-def iso_cutoff(hours: int = 0, *, minutes: int = 0) -> str:
+def iso_cutoff(hours: int = 0, *, minutes: int = 0, seconds: int = 0) -> str:
     """
     Compute a past-cutoff ISO timestamp in the same format as utc_now_iso().
 
@@ -68,12 +68,13 @@ def iso_cutoff(hours: int = 0, *, minutes: int = 0) -> str:
         minutes: Additional minutes in the past (positive, keyword-only).
             Combine with `hours` for arbitrary windows, or use alone for
             sub-hour windows.
+        seconds: Additional seconds in the past (positive, keyword-only).
 
     Returns:
         ISO timestamp matching the format of utc_now_iso().
     """
     return (
-        datetime.now(timezone.utc) - timedelta(hours=hours, minutes=minutes)
+        datetime.now(timezone.utc) - timedelta(hours=hours, minutes=minutes, seconds=seconds)
     ).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
 
@@ -163,6 +164,68 @@ def duration_ms_between(
     """
     ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
     return None if ms > _PG_INT4_MAX else ms
+
+
+def terminal_completed_at(given: Optional[datetime], *, floor: Optional[datetime]) -> datetime:
+    """The instant a terminal write records as ``completed_at`` (#3589).
+
+    ``None`` — every writer that finalizes as the turn ends — is now. A value
+    is the moment the PRODUCER says the turn ended: the #2944 watchdog claim
+    passes the agent's ``retained_at``, which is ≥ 180 s (the claim grace) plus
+    up to one 300 s cleanup cycle before the write, and stamping "now" there
+    recorded a 64 s turn as 5 m 33 s — a fabricated duration on a recovery
+    path, the #45 / #767 / #1804 class.
+
+    Four rules, in ONE place so every producer of a terminal timestamp
+    inherits them (``update_execution_status`` and ``complete_activity`` both
+    call this):
+
+    * naive → UTC, the ``parse_iso_timestamp`` / ``to_utc_iso`` convention;
+    * never in the future: a producer clock ahead of ours is clamped to now and
+      logged, so a billed duration can never exceed the wall clock that has
+      actually elapsed;
+    * never before ``floor`` — the row's own server-written ``started_at``: a
+      turn cannot end before it starts. Both producers of the instant are
+      agent-controlled (the retained-results file and the #1083 callback), and
+      retention hard-DELETEs on ``completed_at < cutoff``, so an unfloored past
+      value lets an agent backdate its row into the next sweep — a self-erasing
+      audit trail (trinity-enterprise#882). The floor wins over the future-clamp
+      when a skewed ``started_at`` sits ahead of our clock, because "cannot end
+      before it starts" is the invariant retention reads; duration is 0 either
+      way. A floored write is still a successful claim, never a refusal.
+      ``floor`` is keyword-only and required — ``None`` is an explicit
+      "this writer has no trusted start instant" decision, never an omission;
+    * the low end (producer clock behind ours) stays the #1832 clamp in
+      ``duration_ms_between``.
+    """
+    now = utc_now()
+    resolved = now if given is None else given
+    if resolved.tzinfo is None:
+        resolved = resolved.replace(tzinfo=timezone.utc)
+    if resolved > now:
+        import logging  # local: this module has no logger of its own
+
+        logging.getLogger(__name__).warning(
+            "[#3589] terminal completed_at %s is %.1fs in the future — clamping "
+            "to now (producer clock ahead of ours)",
+            resolved.isoformat(), (resolved - now).total_seconds(),
+        )
+        resolved = now
+    if floor is not None and floor.tzinfo is None:
+        # Same convention as `given`: a naive instant is UTC, never a crash
+        # on the terminal write path.
+        floor = floor.replace(tzinfo=timezone.utc)
+    if floor is not None and resolved < floor:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "[#3589] terminal completed_at %s is %.1fs before started_at — "
+            "flooring at started_at (a backdated producer value would erase the "
+            "row on the next retention sweep)",
+            resolved.isoformat(), (floor - resolved).total_seconds(),
+        )
+        resolved = floor
+    return resolved
 
 
 def parse_env_content(content: str) -> List[Tuple[str, str]]:

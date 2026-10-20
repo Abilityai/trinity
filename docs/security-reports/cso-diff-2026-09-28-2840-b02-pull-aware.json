@@ -1,0 +1,71 @@
+{
+  "version": "1.1",
+  "date": "2026-09-28",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/2840-b02-pull-aware",
+  "issue": "abilityai/trinity#2840",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    9,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": [
+      "GET /api/internal/next-task (adds a Redis timestamp write after auth)"
+    ],
+    "new_redis_keys": [
+      "agent:pull_poll:{agent_name}"
+    ],
+    "new_data_reads": [
+      "container Config.Env: TRINITY_PULL_MODE, TRINITY_MAX_PARALLEL_TASKS only"
+    ],
+    "new_invariants": [
+      "B-08"
+    ]
+  },
+  "findings": [],
+  "fixed_during_audit": [],
+  "appendix": [
+    {
+      "status": "accepted",
+      "note": "record_worker_poll: sync Redis call in an async route; existing pattern, DoS excluded by rule"
+    }
+  ],
+  "supply_chain_summary": "no dependency changes",
+  "filter_stats": {
+    "candidates": 1,
+    "dropped_hard_exclusion": 1,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "mutations": [
+    {
+      "mutation": "pilot lookup returns False",
+      "result": "e2e test red"
+    },
+    {
+      "mutation": "env collector keeps every key",
+      "result": "e2e test red"
+    }
+  ],
+  "trend": {
+    "note": "diff-mode report; no prior report for these files"
+  }
+}

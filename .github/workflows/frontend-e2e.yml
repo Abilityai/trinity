@@ -22,6 +22,8 @@ name: frontend-e2e
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: [dev]   # #2945: Tier 2 — runs on every push burst to dev, folded into `dev-ci`
   schedule:
     - cron: '0 7 * * *'   # 07:00 UTC — nightly on dev
   workflow_dispatch:
@@ -33,7 +35,8 @@ concurrency:
   # One run per PR (cancel superseded pushes); scheduled/dispatch runs keyed by ref
   # so a nightly never cancels a PR run and vice versa.
   group: frontend-e2e-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A push burst to dev collapses to its tail SHA the same way a PR's pushes do.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -119,6 +122,7 @@ jobs:
       always() &&
       ( github.event_name == 'schedule'
         || github.event_name == 'workflow_dispatch'
+        || github.event_name == 'push'
         || needs.changes.outputs.frontend == 'true'
         || needs.changes.result == 'failure'
         || contains(github.event.pull_request.labels.*.name, 'ui') )
@@ -133,9 +137,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # PR events check out the merge ref (default); scheduled/dispatch runs
+          # PR events check out the merge ref (default); a push checks out the pushed
+          # SHA (not `dev` HEAD, which may already have moved); scheduled/dispatch runs
           # target `dev` explicitly (github.ref would otherwise be the default branch).
-          ref: ${{ github.event_name == 'pull_request' && github.ref || 'dev' }}
+          ref: ${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && github.sha || 'dev' }}
 
       - uses: actions/setup-node@v7
         with:

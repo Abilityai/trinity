@@ -7,9 +7,10 @@ import asyncio
 import logging
 import threading
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, List
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
 from ..models import AgentInfo
 from ..safe_yaml import AliasPolicy, load_hardened_yaml
@@ -104,6 +105,59 @@ def _clone_status() -> str:
     return "ok"
 
 
+GUARDRAIL_REGISTRATION = "/etc/claude-code/managed-settings.json"
+
+
+def _guardrails_registration() -> str:
+    """#3105: per-request check that the guardrail hook registration is intact.
+
+    startup.sh checks once at boot, but `developer` holds NOPASSWD sudo, so the
+    file can be removed or loosened later in the container's life. Claude Code
+    then runs no hooks and logs nothing. Enum only, like `clone_status`.
+    A sudo rewrite that keeps root:root 0444 still reads "ok"; the bash_deny
+    sudo patterns are the other half of this control.
+    """
+    try:
+        st = os.stat(GUARDRAIL_REGISTRATION)
+    except OSError:
+        return "missing"
+    if st.st_uid != 0:
+        return "not_root_owned"
+    if os.access(GUARDRAIL_REGISTRATION, os.W_OK):
+        return "writable"
+    return "ok"
+
+
+SKILL_GATE_REGISTRATION = "/etc/claude-code/managed-settings.d/50-skill-gate.json"
+SKILL_GATE_HOOK_FILES = ("/opt/trinity/hooks/skill-gate.py", "/opt/trinity/hooks/_skill_gate.py")
+
+
+def _skill_gate_hook() -> str:
+    """trinity-enterprise#752: is the gated-skill hook in force in this container?
+
+    Only Claude Code has it (D4), and an image built before it has none — a
+    gated agent in either state is not enforced in-container, which the
+    platform can now say. The same checks as `guardrails_registration` over
+    the drop-in, its directory and both scripts. Enum only.
+    """
+    from ..services.runtime_adapter import _CLAUDE_RUNTIMES
+
+    if str(agent_state.agent_runtime or "").lower() not in _CLAUDE_RUNTIMES:   # as get_runtime()
+        return "unsupported_runtime"
+    paths = (SKILL_GATE_REGISTRATION, os.path.dirname(SKILL_GATE_REGISTRATION)) + tuple(SKILL_GATE_HOOK_FILES)
+    stats = []
+    for path in paths:
+        try:
+            stats.append((path, os.stat(path)))
+        except OSError:
+            return "missing"
+    if any(st.st_uid != 0 for _path, st in stats):
+        return "not_root_owned"
+    if any(os.access(path, os.W_OK) for path, _st in stats):
+        return "writable"
+    return "ok"
+
+
 @router.get("/")
 async def root():
     """Root endpoint - no UI, just API info"""
@@ -190,6 +244,12 @@ async def health_check():
         # reporting a running-but-empty agent as healthy. Enum only — no
         # agent-controlled strings on this unauthenticated endpoint.
         "clone_status": _clone_status(),
+        # #3105: "ok"|"missing"|"not_root_owned"|"writable" — stat of the
+        # guardrail registration on every request, not only at boot.
+        "guardrails_registration": _guardrails_registration(),
+        # trinity-enterprise#752: the same, for the gated-skill hook, plus
+        # "unsupported_runtime" (no hooks on Codex / Gemini).
+        "skill_gate_hook": _skill_gate_hook(),
         "diagnostics": _diagnostics(),
     }
 
@@ -281,66 +341,38 @@ def get_template_path() -> Path:
 
 @router.get("/api/metrics")
 async def get_metrics():
+    """Superseded (trinity-enterprise#479, finding D-010).
+
+    This route used to read `/home/developer/metrics.json` and return its
+    contents as the agent's CURRENT values. The point store replaced it:
+    `record_metrics` writes points, `GET /api/agents/{name}/metrics` composes
+    them with the `template.yaml` declarations, and that read is store-only so
+    it answers for a stopped agent — which is precisely what this file-read
+    could never do.
+
+    The route stays (§49.7 keeps it rather than breaking any caller still
+    holding the URL) but it no longer READS the file. Serving those values
+    would make the file a second source of truth for a number the registry
+    owns, and "serve the file when the store looks empty" is exactly how two
+    sources drift apart unnoticed — the backend half of this read was deleted
+    for that reason, and Invariant #5 means the agent half cannot keep it.
+
+    It answers with the superseded payload and HTTP 410: gone, permanently,
+    with the replacement named. Declarations still come from
+    `GET /api/template-info`, and the file's presence is reported as D-010.
     """
-    Get agent custom metrics.
-
-    Returns metric definitions from template.yaml and current values from metrics.json.
-
-    Response:
-    - has_metrics: Whether agent has custom metrics defined
-    - definitions: List of metric definitions from template.yaml
-    - values: Current metric values from metrics.json
-    - last_updated: Timestamp from metrics.json (if available)
-    """
-    # 1. Read template.yaml for metric definitions
-    template_path = get_template_path()
-    if not template_path.exists():
-        return {
+    return JSONResponse(
+        status_code=410,
+        content={
             "has_metrics": False,
-            "message": "No template.yaml found"
-        }
-
-    try:
-        # #1965: same document, same REJECT policy as `/api/template-info`.
-        template_data = load_hardened_yaml(
-            template_path.read_text(),
-            kind="template",
-            alias_policy=AliasPolicy.REJECT,
-        )
-    except Exception as e:
-        logger.warning(f"Failed to read template.yaml: {e}")
-        return {
-            "has_metrics": False,
-            "message": f"Failed to read template.yaml: {str(e)}"
-        }
-
-    metric_definitions = template_data.get("metrics", [])
-
-    if not metric_definitions:
-        return {
-            "has_metrics": False,
-            "message": "No metrics defined in template.yaml"
-        }
-
-    # 2. Read current values from metrics.json
-    metrics_path = Path("/home/developer/metrics.json")
-
-    values: Dict[str, Any] = {}
-    last_updated: Optional[str] = None
-
-    if metrics_path.exists():
-        try:
-            data = json.loads(metrics_path.read_text())
-            last_updated = data.pop("last_updated", None)
-            values = data
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse metrics.json: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to read metrics.json: {e}")
-
-    return {
-        "has_metrics": True,
-        "definitions": metric_definitions,
-        "values": values,
-        "last_updated": last_updated
-    }
+            "superseded_by": (
+                "record_metrics / GET /api/agents/{name}/metrics"
+            ),
+            "finding": "D-010",
+            "message": (
+                "metrics.json is superseded and no longer served — record "
+                "these values with `record_metrics`; read them back from "
+                "GET /api/agents/{name}/metrics"
+            ),
+        },
+    )

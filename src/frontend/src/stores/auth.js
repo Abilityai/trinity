@@ -21,6 +21,10 @@ export const useAuthStore = defineStore('auth', {
     authError: null,
     // Runtime mode detection (from backend)
     emailAuthEnabled: null,  // Email-based authentication
+    emailCodeLoginEnabled: null,  // ent#849: email-code form allowed (SSO policy can turn it off)
+    // #3655: can this install deliver email? false = no provider, codes go to the backend log.
+    // null (not read yet, or an older backend) reads as "yes", the old behaviour.
+    emailDeliveryAvailable: null,
     modeDetected: false,
     // Enterprise 2FA (#5): set when a login returns an MFA challenge instead
     // of a token. { token, enrolled, enrollmentRequired }. The Login view
@@ -85,6 +89,10 @@ export const useAuthStore = defineStore('auth', {
       try {
         const response = await axios.get('/api/auth/mode')
         this.emailAuthEnabled = response.data.email_auth_enabled !== false
+        // ent#849: an older backend has no field; it follows email_auth_enabled there.
+        this.emailCodeLoginEnabled = this.emailAuthEnabled &&
+          response.data.email_code_login_enabled !== false
+        this.emailDeliveryAvailable = response.data.email_delivery_available !== false
         this.modeDetected = true
 
         console.log(`🔐 Auth mode: EMAIL=${this.emailAuthEnabled}`)
@@ -93,6 +101,7 @@ export const useAuthStore = defineStore('auth', {
         console.error('Failed to detect auth mode:', error)
         // Default to email auth if detection fails
         this.emailAuthEnabled = true
+        this.emailCodeLoginEnabled = true
         this.modeDetected = true
         return true
       }
@@ -288,12 +297,49 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
+    // #3164: whether the signed-in user has a personal GitHub token saved in
+    // Settings — PRESENCE only, the value never leaves the backend. Fork-to-own
+    // and repo binding use it in place of a typed token. A failed read answers
+    // false, so the form keeps asking (the safe direction).
+    async fetchGithubPatStatus() {
+      try {
+        const { data } = await axios.get('/api/users/me/github-pat')
+        // `usable` (present AND decryptable) when the backend sends it.
+        return !!(data?.usable ?? data?.configured)
+      } catch (e) {
+        console.warn('Failed to read GitHub token status:', e?.message || e)
+        return false
+      }
+    },
+
     // Bind a sign-in email to the current account (#82 / #2381), then re-read
     // the profile so `userEmail` — and every predicate reading it — updates in
     // place. Throws on failure; the caller owns the InlineError (ent#581).
-    async setOwnEmail(email) {
-      await axios.put('/api/users/me/email', { email }, { headers: this.authHeader })
+    //
+    // trinity-enterprise#720: a bind needs proof of the mailbox. Without a
+    // `code` this tries the bind once — which succeeds only for the audited
+    // admin transition on an install that cannot deliver mail — and when the
+    // server answers `code_required` it has the code sent and returns
+    // `{ needsCode: true }`; the caller then asks for it and calls again WITH
+    // the code. `{ bound: true }` once the email is on the account.
+    async bindOwnEmail(email, code = null) {
+      try {
+        await axios.put('/api/users/me/email', code ? { email, code } : { email }, { headers: this.authHeader })
+      } catch (e) {
+        const detail = e?.response?.data?.detail
+        if (!code && e?.response?.status === 400 && detail?.code === 'code_required') {
+          await axios.post('/api/users/me/email/code', { email }, { headers: this.authHeader })
+          return { needsCode: true }
+        }
+        throw e
+      }
       await this.fetchUserProfile()
+      return { bound: true }
+    },
+
+    // Re-send the bind code for `email` (ent#720).
+    async resendEmailBindCode(email) {
+      await axios.post('/api/users/me/email/code', { email }, { headers: this.authHeader })
     },
 
     // Login with username/password (for admin login)
@@ -341,9 +387,9 @@ export const useAuthStore = defineStore('auth', {
 
     // Request a verification code via email
     async requestEmailCode(email) {
-      if (!this.emailAuthEnabled) {
-        this.authError = 'Email authentication is disabled'
-        return { success: false, error: 'Email authentication is disabled' }
+      if (!this.emailCodeLoginEnabled) {
+        this.authError = 'Email-code sign-in is disabled'
+        return { success: false, error: 'Email-code sign-in is disabled' }
       }
 
       try {
@@ -355,7 +401,8 @@ export const useAuthStore = defineStore('auth', {
         }
       } catch (error) {
         console.error('Request email code failed:', error)
-        const detail = error.response?.data?.detail || 'Failed to send verification code'
+        let detail = error.response?.data?.detail || 'Failed to send verification code'
+        if (detail === 'email_code_disabled') detail = await this._emailCodeTurnedOff()
         this.authError = detail
         return { success: false, error: detail }
       }
@@ -363,8 +410,8 @@ export const useAuthStore = defineStore('auth', {
 
     // Verify email code and login
     async verifyEmailCode(email, code) {
-      if (!this.emailAuthEnabled) {
-        this.authError = 'Email authentication is disabled'
+      if (!this.emailCodeLoginEnabled) {
+        this.authError = 'Email-code sign-in is disabled'
         return false
       }
 
@@ -382,10 +429,18 @@ export const useAuthStore = defineStore('auth', {
         return true
       } catch (error) {
         console.error('Verify email code failed:', error)
-        const detail = error.response?.data?.detail || 'Invalid or expired verification code'
+        let detail = error.response?.data?.detail || 'Invalid or expired verification code'
+        if (detail === 'email_code_disabled') detail = await this._emailCodeTurnedOff()
         this.authError = detail
         return false
       }
+    },
+
+    // ent#849: the policy was switched off after this page loaded. Re-read the
+    // mode so the form disappears, and say what to do instead.
+    async _emailCodeTurnedOff() {
+      await this.detectAuthMode()
+      return 'Email-code sign-in is turned off. Sign in with SSO.'
     },
 
     // =========================================================================

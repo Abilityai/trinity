@@ -1,3 +1,4 @@
+# mcp: git.ts (get_git_status, git_sync, get_git_log, git_pull, get_git_sync_state, reset_to_main_preserve_state)
 """
 Git synchronization routes for GitHub-native agents (Phase 7).
 
@@ -17,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from models import (
     AutoSyncToggle,
+    PullSyncToggle,
     BindAgentRepoRequest,
     BindAgentRepoResponse,
     FreezeSchedulesToggle,
@@ -28,8 +30,10 @@ from models import (
 )
 from database import db
 from dependencies import (
+    capability_fence,
     get_current_user,
     reject_agent_principal,
+    require_person,
     AuthorizedAgentByName,
     OwnedAgentByName,
 )
@@ -68,7 +72,7 @@ async def _audit_git(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={**details, "success": success},
     )
@@ -120,10 +124,74 @@ async def get_git_status(
         status["db_config"] = {
             "last_sync_at": git_config.last_sync_at.isoformat() if git_config.last_sync_at else None,
             "last_commit_sha": git_config.last_commit_sha,
-            "sync_enabled": git_config.sync_enabled
+            "sync_enabled": git_config.sync_enabled,
+            # trinity-enterprise#704: the binding, so the Git panel can say
+            # whether this agent writes its own branch or is pull-only.
+            "source_mode": bool(git_config.source_mode),
+            # PR #3022 review: whether the agent saves its work to GitHub. Not
+            # `not source_mode`: a fork-to-own agent is source-mode on its own
+            # fork AND auto-pushes there. A source-mode row with auto-sync on is
+            # that population (creation turns auto-sync on for a source-mode
+            # agent only when it forked); a working branch pushes even while
+            # its auto-sync is paused (operator Push).
+            "pushes": (not git_config.source_mode) or bool(
+                getattr(git_config, "auto_sync_enabled", False)),
         }
 
     return status
+
+
+async def _refresh_metric_registry(agent_name: str, source: str) -> Dict:
+    """Re-read `template.yaml` and reconcile the metric registry (ent#477).
+
+    Every git write that can bring a NEW `template.yaml` into the container
+    (`pull`, `reset-to-main-preserve-state`, `sync` with `strategy=pull_first`)
+    is a point at which the declared metrics may have changed under the
+    registry's feet — and none of them ever re-read the file before ent#477.
+
+    Non-fatal by construction and deliberately **shape-preserving**: the result
+    goes to the log and to the existing `_audit_git` success `details`, never to
+    the response body. The git panel and the MCP `git_pull` tool both consume
+    these responses, and an opaque extra key on a pull result is worse than a
+    log line for the one operator who needs it (S10).
+
+    An unreadable template (agent stopped, exec failed, YAML refused) leaves
+    the registry exactly as it was — absence of evidence is never a retirement
+    (#2196).
+    """
+    from services import metric_registry
+
+    try:
+        summary = await metric_registry.refresh_from_running_agent(
+            agent_name, source=source
+        )
+    except metric_registry.RefreshUnavailable as e:
+        logger.info(
+            "[ent#477] metric registry not refreshed after %s on %s: %s",
+            source, agent_name, e.reason,
+        )
+        return {"status": "unavailable", "reason": e.reason}
+    except Exception as e:  # noqa: BLE001 — a registry refresh never fails a git op
+        logger.warning(
+            "[ent#477] metric registry refresh failed after %s on %s: %s",
+            source, agent_name, e,
+        )
+        return {"status": "error"}
+
+    if summary.changed:
+        logger.info(
+            "[ent#477] metric registry updated after %s on %s: %s",
+            source, agent_name, summary.to_dict(),
+        )
+    return {
+        "status": "ok",
+        "declared": summary.declared,
+        "created": summary.created,
+        "updated": summary.updated,
+        "revived": summary.revived,
+        "retired": summary.retired,
+        "type_change_refused": summary.type_change_refused,
+    }
 
 
 @router.post("/{agent_name}/git/sync")
@@ -198,19 +266,29 @@ async def sync_to_github(
             headers=conflict_headers,
         )
 
+    sync_details = {
+        "commit_sha": result.commit_sha,
+        "files_changed": result.files_changed,
+        "branch": result.branch,
+        "strategy": body.strategy,
+        "removed_paths": result.removed_paths,  # #2529
+    }
+    # ent#477 (S1) — `pull_first` is the ONE sync strategy that pulls, and it is
+    # the path the in-container 15-minute auto-sync heartbeat does not take
+    # (that one pushes, so no backend hook sees it at all — the container-start
+    # hook and the explicit refresh route are what cover an agent editing its
+    # own template). A plain `normal`/`force_push` sync brought nothing in.
+    if body.strategy == "pull_first":
+        sync_details["metric_registry"] = await _refresh_metric_registry(
+            agent_name, "sync"
+        )
     await _audit_git(
         action="sync",
         request=request,
         current_user=current_user,
         agent_name=agent_name,
         success=True,
-        details={
-            "commit_sha": result.commit_sha,
-            "files_changed": result.files_changed,
-            "branch": result.branch,
-            "strategy": body.strategy,
-            "removed_paths": result.removed_paths,  # #2529
-        },
+        details=sync_details,
     )
 
     return {
@@ -320,7 +398,11 @@ async def pull_from_github(
         current_user=current_user,
         agent_name=agent_name,
         success=True,
-        details={"strategy": body.strategy},
+        details={
+            "strategy": body.strategy,
+            # ent#477 — a pull can bring a new `metrics:` block in.
+            "metric_registry": await _refresh_metric_registry(agent_name, "pull"),
+        },
     )
 
     return result
@@ -513,7 +595,7 @@ async def initialize_github_sync(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={
                 "github_repo": repo_full_name,
@@ -694,7 +776,7 @@ async def clear_agent_github_pat(
 # ============================================================================
 
 
-@router.post("/{agent_name}/git/reset-to-main-preserve-state")
+@router.post("/{agent_name}/git/reset-to-main-preserve-state", dependencies=[Depends(capability_fence("instructions.manage"))])
 async def reset_to_main_preserve_state(
     agent_name: OwnedAgentByName,
     request: Request,
@@ -746,6 +828,8 @@ async def reset_to_main_preserve_state(
             "commit_sha": result.get("commit_sha"),
             "files_preserved": result.get("files_preserved"),
             "working_branch": result.get("working_branch"),
+            # ent#477 — adopting the main baseline replaces `template.yaml`.
+            "metric_registry": await _refresh_metric_registry(agent_name, "reset"),
         },
     )
 
@@ -899,6 +983,27 @@ async def bind_agent_to_own_repo(
 
     reject_agent_principal(current_user)
 
+    from services.agent_service.fork_to_own import (
+        fork_pat_required, saved_token_message, saved_token_not_for_others,
+    )
+
+    # #3164: no form token → the CALLER's own saved personal token (Settings →
+    # GitHub token), read by user id. Never the agent's per-agent token (that
+    # is the agent's current identity, not the binding person's) and never the
+    # platform token, which must not become a user-owned repo's identity.
+    if body.github_pat is not None:
+        user_pat, token_source = body.github_pat.get_secret_value(), "form"
+    else:
+        # Only for the caller's OWN agent. `OwnedAgentByName` admits an admin
+        # too, and the admin's personal token must not become another user's
+        # agent identity by default.
+        owner = db.get_agent_owner(agent_name) or {}
+        if owner.get("owner_id") != current_user.id:
+            raise saved_token_not_for_others()
+        user_pat, token_source = db.get_user_github_pat(current_user.id), "saved"
+        if not user_pat:
+            raise fork_pat_required()
+
     destination = body.destination_repo
     scope = idempotency_service.make_agent_scope(agent_name)
     # Verb-folded key: a client reusing ONE Idempotency-Key across different
@@ -959,7 +1064,7 @@ async def bind_agent_to_own_repo(
             outcome = await _bind(
                 agent_name=agent_name,
                 destination_repo=destination,
-                user_pat=body.github_pat.get_secret_value(),
+                user_pat=user_pat,
                 private=body.private,
                 owner_username=current_user.username,
             )
@@ -976,9 +1081,11 @@ async def bind_agent_to_own_repo(
         })
         with contextlib.suppress(Exception):
             idempotency_service.fail(idem)
+        saved_message = saved_token_message(e.code, e.message) if token_source == "saved" else None
         raise HTTPException(
             status_code=e.status_code,
-            detail={"error": e.message, "code": e.code, "partial": e.partial},
+            detail={"error": saved_message or e.message, "code": e.code, "partial": e.partial,
+                    **({"token_source": "saved"} if saved_message else {})},
         )
     except HTTPException as e:
         # Lock contention / 503 — no agent state was touched.
@@ -1000,7 +1107,10 @@ async def bind_agent_to_own_repo(
         # charset guard (`models._validate_pat_secret`) is the primary fix;
         # this is the belt, because the next foreign exception type is not
         # knowable in advance.
-        safe = scrub_secret_and_urls(str(e), body.github_pat.get_secret_value())
+        # `user_pat`, not `body.github_pat`: on the saved-token path the body
+        # carries no token, and dereferencing it here raised before the scrub,
+        # skipping the audit row and the idempotency release (#3164 review).
+        safe = scrub_secret_and_urls(str(e), user_pat)
         logger.error(
             "repo-bind: unexpected failure for %s (%s): %s",
             agent_name, type(e).__name__, safe,
@@ -1115,6 +1225,34 @@ async def set_auto_sync_config(
     return {"agent_name": agent_name, "auto_sync_enabled": body.enabled}
 
 
+@router.get("/{agent_name}/git/pull-sync")
+async def get_pull_sync_config(agent_name: AuthorizedAgentByName):
+    """trinity-enterprise#703: whether the agent's container pulls origin on its
+    own. The agent's pull loop reads this every cycle with its own key."""
+    config = db.get_git_config(agent_name)
+    if not config:
+        raise HTTPException(status_code=404, detail="Git not configured")
+    return {
+        "agent_name": agent_name,
+        "pull_sync_enabled": bool(getattr(config, "pull_sync_enabled", False)),
+    }
+
+
+@router.put("/{agent_name}/git/pull-sync")
+async def set_pull_sync_config(
+    agent_name: OwnedAgentByName,
+    body: PullSyncToggle,
+    current_user: User = Depends(require_person),
+):
+    """trinity-enterprise#703: turn the container's pull cycle on or off; live
+    on the agent's next pull cycle, no recreate."""
+    config = db.get_git_config(agent_name)
+    if not config:
+        raise HTTPException(status_code=404, detail="Git not configured")
+    db.set_git_pull_sync_enabled(agent_name, body.enabled)
+    return {"agent_name": agent_name, "pull_sync_enabled": body.enabled}
+
+
 @router.get("/{agent_name}/git/freeze-schedules-if-failing")
 async def get_freeze_schedules_config(agent_name: AuthorizedAgentByName):
     """Return whether scheduled executions should pause when sync is failing."""
@@ -1146,12 +1284,21 @@ async def set_freeze_schedules_config(
 
 @router.get("/{agent_name}/git/sync-state")
 async def get_agent_sync_state(agent_name: AuthorizedAgentByName):
-    """Return the persisted sync-state row for this agent (#389)."""
+    """Return the persisted sync-state row for this agent (#389).
+
+    trinity-enterprise#706: plus the backend's verdict (`state`, `reason`,
+    `recommendation`, `binding`, `freeze`, the ages — `services/sync_health_view.py`).
+    MCP `get_git_sync_state` passes this JSON through unchanged.
+    """
+    from services.sync_health_view import sync_view
+
     row = db.get_sync_state(agent_name)
+    view = sync_view(row, db.get_git_config(agent_name))
     if row is None:
         return {
             "agent_name": agent_name,
             "last_sync_status": "never",
             "consecutive_failures": 0,
+            **view,
         }
-    return row
+    return {**row, **view}

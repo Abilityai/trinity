@@ -106,11 +106,21 @@ import {
   useClientPortalStore, PLATFORM_LOGIN_ROUTE, portalHttp, setPlatformSessionLostHandler,
 } from '@/stores/clientPortal'
 import { __setAuthed, __logout } from '@/stores/auth'
+import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { draftStorageKey } from '@/components/portal/portalDrafts'
 import {
   WORKSPACE_ROOT, signOutLabelFor, SIGN_OUT_LABEL_PLATFORM, SIGN_OUT_LABEL_CLIENT,
 } from '@/components/portal/portalUtils'
 
 const PORTAL_TOKEN_KEY = 'trinity.portalToken'
+
+// vitest 5 clears every mock's call history before EACH test (`clearMocks`
+// now defaults to true). `clientPortal.js` registers its interceptors once,
+// at import, so by the time a test runs `use.mock.calls` is already empty.
+// Capture the registered handlers here, at module scope, before any test's
+// clear — this is the same handler the browser runs, not a restatement.
+const requestInterceptor = portalHttp.interceptors.request.use.mock.calls[0][0]
+const responseRejectInterceptor = portalHttp.interceptors.response.use.mock.calls[0][1]
 
 describe('workspace session', () => {
   beforeEach(() => {
@@ -267,6 +277,41 @@ describe('signing out of the workspace signs out (#2258)', () => {
     expect(fresh.isClientSignedIn).toBe(false)
     expect(fresh.isPlatformSession).toBe(false)
     expect(localStorage.getItem(PORTAL_TOKEN_KEY)).toBeNull()
+  })
+
+  // trinity-enterprise#657: drafts are message text. An explicit sign-out takes
+  // the person's bucket with it — on a shared browser the portal token is
+  // removed at the same moment — and it has to happen BEFORE `signOut()` nulls
+  // `clientEmail`, or the drafts store's identity is already null and the
+  // clear removes nothing. Expiry keeps the bucket: a draft is what the person
+  // comes back for.
+  it('an explicit sign-out removes the person\'s drafts bucket from storage', async () => {
+    localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
+    setActivePinia(createPinia())
+    const store = useClientPortalStore()
+    store.clientEmail = 'ada@example.com'
+    const drafts = usePortalDraftsStore()
+    drafts.set('thread:1', 'unsent words')
+    const bucket = draftStorageKey('ada@example.com')
+    expect(localStorage.getItem(bucket)).not.toBeNull()
+
+    await store.signOutEverywhere()
+
+    expect(localStorage.getItem(bucket)).toBeNull()
+    expect(drafts.has('thread:1')).toBe(false)
+  })
+
+  it('an EXPIRED session keeps the drafts bucket — expiry is not the person\'s act', () => {
+    localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
+    setActivePinia(createPinia())
+    const store = useClientPortalStore()
+    store.clientEmail = 'ada@example.com'
+    usePortalDraftsStore().set('thread:1', 'unsent words')
+    const bucket = draftStorageKey('ada@example.com')
+
+    store.endSession({ expired: true, resumePath: '/workspace/c/abc' })
+
+    expect(localStorage.getItem(bucket)).not.toBeNull()
   })
 
   it('an EXPIRED portal session does not end a platform session — expiry is not a sign-out', () => {
@@ -546,7 +591,7 @@ describe('an expired client session does not become the operator (#2261)', () =>
     // store-decided from inherited. It is now unconditional: delete, then set
     // from the store.
     expireOnAPlatformBrowser()
-    const handler = portalHttp.interceptors.request.use.mock.calls[0][0]
+    const handler = requestInterceptor
 
     const withInherited = handler({ headers: { Authorization: 'Bearer platform-jwt-from-defaults' } })
     const withNothing = handler({ headers: {} })
@@ -562,7 +607,7 @@ describe('an expired client session does not become the operator (#2261)', () =>
     localStorage.setItem(PORTAL_TOKEN_KEY, 'portal-token')
     setActivePinia(createPinia())
     useClientPortalStore()
-    const handler = portalHttp.interceptors.request.use.mock.calls[0][0]
+    const handler = requestInterceptor
 
     const out = handler({ headers: { Authorization: 'Bearer something-stale' } })
     expect(out.headers.Authorization).toBe('Bearer portal-token')
@@ -617,7 +662,7 @@ describe('an expired client session does not become the operator (#2261)', () =>
     const onLost = vi.fn()
     setPlatformSessionLostHandler(onLost)
 
-    const reject = portalHttp.interceptors.response.use.mock.calls[0][1]
+    const reject = responseRejectInterceptor
     // The arm re-rejects (it is an interceptor, not a handler of last resort);
     // the assertion is about the side effect, so swallow the rejection.
     reject({ response: { status: 401 } }).catch(() => {})
@@ -638,7 +683,7 @@ describe('an expired client session does not become the operator (#2261)', () =>
 
     const onLost = vi.fn()
     setPlatformSessionLostHandler(onLost)
-    const reject = portalHttp.interceptors.response.use.mock.calls[0][1]
+    const reject = responseRejectInterceptor
     reject({ response: { status: 401 } }).catch(() => {})
 
     expect(onLost).toHaveBeenCalledTimes(1)

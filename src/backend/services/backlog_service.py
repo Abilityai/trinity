@@ -34,8 +34,33 @@ from typing import Any, Dict, Optional
 from models import ParallelTaskRequest, TaskExecutionStatus
 from services.slot_service import get_slot_service
 from utils.helpers import utc_now_iso
+from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
+
+
+def request_from_metadata(metadata: Dict[str, Any]) -> ParallelTaskRequest:
+    """Rebuild the caller's `ParallelTaskRequest` from a queued row's
+    `backlog_metadata` (the flat keys `enqueue` writes).
+
+    #2329: the push drain and the pull sink both read the request back through
+    this one function, so a delivery key added to `enqueue` reaches both paths.
+    """
+    return ParallelTaskRequest(
+        message=metadata.get("message") or "",
+        model=metadata.get("model"),
+        allowed_tools=metadata.get("allowed_tools"),
+        system_prompt=metadata.get("system_prompt"),
+        timeout_seconds=metadata.get("timeout_seconds"),
+        max_turns=metadata.get("max_turns"),
+        async_mode=True,
+        save_to_session=metadata.get("save_to_session") or False,
+        user_message=metadata.get("user_message"),
+        create_new_session=metadata.get("create_new_session") or False,
+        chat_session_id=metadata.get("chat_session_id"),
+        resume_session_id=metadata.get("resume_session_id"),
+        inject_result=metadata.get("inject_result") or False,
+    )
 
 
 class BacklogService:
@@ -69,6 +94,11 @@ class BacklogService:
         collaboration_activity_id: Optional[str],
         is_self_task: bool = False,
         self_task_activity_id: Optional[str] = None,
+        conversation_key: Optional[str] = None,
+        persist_session: bool = False,
+        schedule_context: Optional[dict] = None,
+        attempt: Optional[int] = None,
+        images: Optional[list] = None,
     ) -> bool:
         """Persist an async task request as a QUEUED backlog item.
 
@@ -115,10 +145,35 @@ class BacklogService:
             "collaboration_activity_id": collaboration_activity_id,
             "is_self_task": is_self_task,
             "self_task_activity_id": self_task_activity_id,
+            # #3114: pull-pilot rows only. The claim hands persist_session and
+            # images to the worker and composes the prompt from
+            # schedule_context and attempt. `images` is base64 vision input in
+            # the push payload's shape; the #1449 scrub NULLs the whole blob
+            # once the row is authoritative-terminal.
+            "persist_session": persist_session,
+            "schedule_context": schedule_context,
+            "attempt": attempt,
+            "images": images or None,
         }
         queued_at = utc_now_iso()
+        # #2843: a pilot's worker claims these, so tag the conversation a turn
+        # continues and the claim will never run two of its turns at once.
+        # Non-pilots are drained by the backend and keep today's behaviour.
+        from services.pull_pilot import is_pull_pilot_agent
+
+        # #3114: an explicit key from `execute_task` names the conversation
+        # directly ("session:<key>", "public:<id>", ...) and wins.
+        if is_pull_pilot_agent(agent_name):
+            conversation_key = (
+                conversation_key
+                or request.chat_session_id
+                or request.resume_session_id
+                or None
+            )
+        else:
+            conversation_key = None
         ok = db.update_execution_to_queued(
-            execution_id, json.dumps(metadata), queued_at
+            execution_id, json.dumps(metadata), queued_at, conversation_key
         )
         if not ok:
             # update_execution_to_queued is CAS-guarded on status == RUNNING
@@ -246,7 +301,9 @@ class BacklogService:
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=f"Backlog drain failed: corrupt metadata ({e})",
+                result=ExecutionResult(
+                    error=f"Backlog drain failed: corrupt metadata ({e})",
+                ),
             )
             await slots.release_slot(agent_name, execution_id)
             return False
@@ -265,7 +322,9 @@ class BacklogService:
             db.update_execution_status(
                 execution_id=execution_id,
                 status=TaskExecutionStatus.FAILED,
-                error=f"Backlog drain spawn failed: {e}",
+                result=ExecutionResult(
+                    error=f"Backlog drain spawn failed: {e}",
+                ),
             )
             await slots.release_slot(agent_name, execution_id)
             return False
@@ -289,21 +348,7 @@ class BacklogService:
         """
         from services.chat_execution_service import run_async_task
 
-        request = ParallelTaskRequest(
-            message=metadata.get("message") or "",
-            model=metadata.get("model"),
-            allowed_tools=metadata.get("allowed_tools"),
-            system_prompt=metadata.get("system_prompt"),
-            timeout_seconds=metadata.get("timeout_seconds"),
-            max_turns=metadata.get("max_turns"),
-            async_mode=True,
-            save_to_session=metadata.get("save_to_session") or False,
-            user_message=metadata.get("user_message"),
-            create_new_session=metadata.get("create_new_session") or False,
-            chat_session_id=metadata.get("chat_session_id"),
-            resume_session_id=metadata.get("resume_session_id"),
-            inject_result=metadata.get("inject_result") or False,
-        )
+        request = request_from_metadata(metadata)
 
         task = asyncio.create_task(
             run_async_task(
@@ -362,7 +407,9 @@ class BacklogService:
 
         n = db.expire_stale_queued(max_age_hours)
         if n:
-            logger.info(f"[Backlog] Expired {n} stale queued rows (>{max_age_hours}h)")
+            # Warning, not info (#2840): a row nobody picked up for a day is a
+            # failure, and on a pull pilot this is the only trace it leaves.
+            logger.warning(f"[Backlog] Expired {n} stale queued rows (>{max_age_hours}h)")
         return n
 
     async def drain_orphans_all(self) -> int:
@@ -400,14 +447,3 @@ class BacklogService:
                 f"[Backlog] Cancelled {n} queued rows for agent '{agent_name}' ({reason})"
             )
         return n
-
-
-# Global singleton
-_backlog_service: Optional[BacklogService] = None
-
-
-def get_backlog_service() -> BacklogService:
-    global _backlog_service
-    if _backlog_service is None:
-        _backlog_service = BacklogService()
-    return _backlog_service

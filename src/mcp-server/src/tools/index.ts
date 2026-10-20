@@ -9,6 +9,7 @@ export { createChatTools } from "./chat.js";
 export { createDocsTools } from "./docs.js";
 export { createExecutionTools } from "./executions.js";
 export { createSkillsTools } from "./skills.js";
+export { createSkillSourceTools } from "./skill_sources.js";
 export { createSubscriptionTools } from "./subscriptions.js";
 export { createNeverminedTools } from "./nevermined.js";
 export { createEventTools } from "./events.js";

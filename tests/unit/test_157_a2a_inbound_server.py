@@ -39,6 +39,11 @@ from services import a2a_gate  # noqa: E402
 pytestmark = pytest.mark.unit
 
 
+# #3751: a bearer caller polls/cancels only a task it started through A2A. Rows
+# these tests poll as the fixture user carry that user's starter fields.
+_STARTED_BY_ALICE = {"triggered_by": "a2a", "source_user_id": 1, "source_mcp_key_id": "k1"}
+
+
 # --------------------------------------------------------------------------- #
 # Card generator honesty (pure unit)
 # --------------------------------------------------------------------------- #
@@ -87,6 +92,16 @@ def client(monkeypatch):
         can_user_access_agent=lambda user, name: name in state["access"],
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=_cancel_queued,
+        # #3749: message/send mints the row before dispatch; the stub's id is
+        # the one the execute stub below echoes back.
+        create_task_execution=lambda **kw: (
+            state.__setitem__("minted", kw), types.SimpleNamespace(id="exec-123"))[1],
+        get_agent_subscription_id=lambda name: None,
+        # ent#679: the card producer reads the payment config to decide whether
+        # to declare a price. Nothing in this file is priced — stub it
+        # explicitly so the "card unchanged" assertions below prove the
+        # unpriced path rather than the fail-open exception path.
+        get_nevermined_config=lambda name: None,
     )
     monkeypatch.setattr(a2a, "db", fake_db)
 
@@ -101,8 +116,11 @@ def client(monkeypatch):
 
     # Fake task-execution service → deterministic success.
     class _Result:
-        def __init__(self):
-            self.execution_id = "exec-123"
+        def __init__(self, execution_id=None):
+            # #3749: echo the id the router minted (a stub that returned its own
+            # literal would make every id assertion below prove nothing); the
+            # stream path, which does not mint, keeps the literal.
+            self.execution_id = execution_id or "exec-stream"
             self.status = "success"
             self.response = "hello from bot"
             self.error = None
@@ -110,7 +128,7 @@ def client(monkeypatch):
     class _Svc:
         async def execute_task(self, **kwargs):
             state["last_execute"] = kwargs
-            return _Result()
+            return _Result(kwargs.get("execution_id"))
 
     # NOTE: the unit harness loads a duplicate `services.*` module, so patching
     # `services.task_execution_service` directly does NOT reach the router. We
@@ -148,6 +166,7 @@ def client(monkeypatch):
         def __init__(self, key=None, replay=False, in_flight=False, snapshot=None):
             self.key, self.replay, self.in_flight, self.snapshot = key, replay, in_flight, snapshot
             self.enabled = True
+            self.execution_id = None
 
     class _Idem:
         def begin(self, scope, key):
@@ -157,6 +176,9 @@ def client(monkeypatch):
             if rec is not None:
                 return _Dec(key=(scope, key), replay=True, snapshot=rec)
             return _Dec(key=(scope, key))
+
+        def attach_execution(self, decision, execution_id):
+            pass
 
         def complete(self, decision, execution_id, snapshot):
             if decision.key is not None:
@@ -175,7 +197,12 @@ def client(monkeypatch):
     app.include_router(a2a.a2a_server_router)
     user = types.SimpleNamespace(id=1, username="alice", email="alice@example.com",
                                  role="user", agent_name=None, mcp_key_id="k1")
-    app.dependency_overrides[deps.get_current_user] = lambda: user
+    # ent#679: the route's dependency is now `get_user_or_anonymous`, which
+    # CALLS `get_current_user` directly rather than depending on it — so an
+    # override of the latter is never consulted and every test here would
+    # silently exercise the anonymous payment branch instead (→ 401, not the
+    # principal path). Override what the route actually depends on.
+    app.dependency_overrides[deps.get_user_or_anonymous] = lambda: user
 
     return types.SimpleNamespace(http=TestClient(app), state=state, a2a_gate=a2a_gate, user=user)
 
@@ -299,7 +326,7 @@ def test_message_send_idempotent_replay_does_not_reexecute(client):
 # tasks/get + tasks/cancel
 # --------------------------------------------------------------------------- #
 def test_tasks_get_maps_status(client):
-    client.state["executions"]["exec-9"] = {"agent_name": "bot", "status": "success", "response": "done"}
+    client.state["executions"]["exec-9"] = {**_STARTED_BY_ALICE, "agent_name": "bot", "status": "success", "response": "done"}
     r = client.http.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "tasks/get", "params": {"id": "exec-9"}})
     task = r.json()["result"]
     assert task["status"]["state"] == "completed"
@@ -313,7 +340,7 @@ def test_tasks_get_unknown_or_foreign_is_task_not_found(client):
 
 
 def test_tasks_cancel(client):
-    client.state["executions"]["exec-c"] = {"agent_name": "bot", "status": "running"}
+    client.state["executions"]["exec-c"] = {**_STARTED_BY_ALICE, "agent_name": "bot", "status": "running"}
     r = client.http.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {"id": "exec-c"}})
     assert r.json()["result"]["status"]["state"] == "canceled"
     assert client.state["terminated"] == ("bot", "exec-c")
@@ -322,7 +349,7 @@ def test_tasks_cancel(client):
 def test_tasks_cancel_queued_row_cancels_in_backlog_not_on_agent(client):
     """A queued execution has no container process — cancelling must go through
     the backlog CAS, not a registry call that 404s and reports success anyway."""
-    client.state["executions"]["exec-q"] = {"agent_name": "bot", "status": "queued"}
+    client.state["executions"]["exec-q"] = {**_STARTED_BY_ALICE, "agent_name": "bot", "status": "queued"}
     r = client.http.post("/a2a/bot", json={
         "jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {"id": "exec-q"}})
     assert r.json()["result"]["status"]["state"] == "canceled"
@@ -335,7 +362,7 @@ def test_tasks_cancel_queued_row_cancels_in_backlog_not_on_agent(client):
 def test_tasks_cancel_reports_failure_when_terminate_fails(client):
     """The bool from terminate_execution_on_agent is the caller's only honest
     signal — a discarded False told the caller "canceled" for a live task."""
-    client.state["executions"]["exec-r"] = {"agent_name": "bot", "status": "running"}
+    client.state["executions"]["exec-r"] = {**_STARTED_BY_ALICE, "agent_name": "bot", "status": "running"}
     client.state["terminate_result"] = False
     r = client.http.post("/a2a/bot", json={
         "jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {"id": "exec-r"}})
@@ -344,7 +371,7 @@ def test_tasks_cancel_reports_failure_when_terminate_fails(client):
 
 @pytest.mark.parametrize("status", ["success", "failed", "cancelled"])
 def test_tasks_cancel_terminal_row_is_not_cancelable(client, status):
-    client.state["executions"]["exec-t"] = {"agent_name": "bot", "status": status}
+    client.state["executions"]["exec-t"] = {**_STARTED_BY_ALICE, "agent_name": "bot", "status": status}
     r = client.http.post("/a2a/bot", json={
         "jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {"id": "exec-t"}})
     assert r.json()["error"]["code"] == -32002
@@ -525,7 +552,8 @@ def test_message_stream_emits_working_then_final_completed(client):
 def test_message_send_in_flight_duplicate_is_retryable_error(client, monkeypatch):
     class _InFlight:
         def begin(self, scope, key):
-            return types.SimpleNamespace(key=(scope, key), replay=True, in_flight=True, snapshot=None, enabled=True)
+            return types.SimpleNamespace(key=(scope, key), replay=True, in_flight=True, snapshot=None, enabled=True,
+                                         execution_id=None)
         def complete(self, *a, **k):
             pass
         def fail(self, *a, **k):
@@ -545,7 +573,7 @@ def test_message_send_in_flight_duplicate_is_retryable_error(client, monkeypatch
     ("running", "working"), ("queued", "submitted"), ("weird", "working"),
 ])
 def test_tasks_get_state_mapping_all(client, status, expected):
-    client.state["executions"]["e"] = {"agent_name": "bot", "status": status, "response": "r", "error": "boom"}
+    client.state["executions"]["e"] = {**_STARTED_BY_ALICE, "agent_name": "bot", "status": status, "response": "r", "error": "boom"}
     r = client.http.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "tasks/get", "params": {"id": "e"}})
     assert r.json()["result"]["status"]["state"] == expected
 
@@ -606,7 +634,8 @@ def test_tasks_get_accepts_object_row_not_only_dict(client):
     """Regression (live-caught): db.get_execution returns a ScheduleExecution
     OBJECT, not a dict — tasks/get must read via attribute access, not .get()."""
     client.state["executions"]["obj-1"] = types.SimpleNamespace(
-        agent_name="bot", status="success", response="from object", error=None)
+        agent_name="bot", status="success", response="from object", error=None,
+        **_STARTED_BY_ALICE)
     r = client.http.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "tasks/get", "params": {"id": "obj-1"}})
     task = r.json()["result"]
     assert task["status"]["state"] == "completed"

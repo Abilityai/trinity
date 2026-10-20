@@ -1,0 +1,68 @@
+{
+  "version": "1.1",
+  "date": "2026-09-18",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "fix/2889-503-skip-laundering -> dev",
+  "issue": "abilityai/trinity#2889",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_tools": 0,
+    "websocket": 0,
+    "docker": "unchanged",
+    "dependencies": "unchanged",
+    "ci": "unchanged",
+    "migrations": 0,
+    "changed_response_surface": "X-Trinity-Error-Code header on sync /chat and /task 4xx/5xx (closed enum)"
+  },
+  "findings": [],
+  "appendix": [],
+  "supply_chain_summary": {
+    "python": "unchanged",
+    "node": "unchanged"
+  },
+  "filter_stats": {
+    "candidates": 7,
+    "refuted": 5,
+    "excluded_by_rule": 2,
+    "detail": [
+      "header discloses a coarser class than the prose body the same authorized caller already gets \u2014 refuted",
+      "header value injection \u2014 refuted: enum .value or nothing; non-string sends no header",
+      "dict-bodied auto_switch shapes \u2014 refuted: header only, body untouched",
+      "dispatch-breaker 503 X-Circuit-Open \u2014 refuted: untouched",
+      "evidence text in pytest reasons \u2014 refuted: scrubbed upstream, bounded, test logs only",
+      "session preflight probe cost \u2014 excluded (#1 DoS/cost; test-env only, once per session)",
+      "_detail_text regex \u2014 excluded (#16; linear, bounded body, test code)"
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior": "cso-diff-2026-09-17-2419-utilization-fraction",
+    "prior_findings": 0,
+    "this_findings": 0,
+    "direction": "stable"
+  }
+}

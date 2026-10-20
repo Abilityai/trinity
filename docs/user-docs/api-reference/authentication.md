@@ -28,7 +28,11 @@ curl -s -X POST http://localhost:8000/api/token \
    `POST /api/auth/email/verify` with `{"email": "user@example.com", "code": "123456"}`
 3. Returns a JWT token on success.
 
+Both steps take a JSON object. A body that is not valid JSON, or not an object, answers `422` with `Request body must be a JSON object`; a missing or malformed field answers `422` in FastAPI's validation shape. On `/verify` a malformed body also counts as a failed attempt for the per-address rate limit, so it is not a free probe. `POST /api/access/request` parses its body the same way.
+
 The verify step re-checks the email allow-list before redeeming a code. An address that is not allow-listed gets the same 401 as a wrong code, whatever channel minted the code.
+
+A sign-in email belongs to at most one account, compared case-insensitively. Every sign-in path finds the account by its email, so whoever holds an address holds that identity — which is why changing it needs proof (see [Changing your sign-in email](#changing-your-sign-in-email)).
 
 The same email code can sign you in from inside an MCP client without any key — see [MCP Server → Signing in with an email code](../integrations/mcp-server.md#signing-in-with-an-email-code-instead-of-a-key).
 
@@ -42,10 +46,11 @@ returns **HTTP 403** — the login is not complete, so no session is issued:
  "enrollment_required": false, "challenge_token": "eyJ..."}
 ```
 
-There is **no `access_token`** and **no `token_type`**. Finish the login at
-`/api/enterprise/2fa/login/verify` (or `/login/enroll/start` +
-`/login/enroll/confirm` if the account has not enrolled yet) using the
-`challenge_token` — that is what returns the real token.
+There is **no `access_token`** and **no `token_type`**. Finish the login by
+presenting the `challenge_token` to the second-factor verification step (or the
+enrollment step, if the account has not enrolled yet) — that is what returns the
+real token. Two-factor authentication requires an entitlement; on an instance
+where it is enabled, its routes are listed in the API docs at `/docs`.
 
 Three outcomes, three status codes:
 
@@ -54,6 +59,8 @@ Three outcomes, three status codes:
 | 200 | Session issued — `access_token` present |
 | 403 | Credentials correct, second factor required — no session |
 | 401 | Credentials rejected — no session, no challenge |
+
+One other 403 exists: before first-run setup has created the admin, `POST /api/token` answers `403` with `setup_required`.
 
 The email route (`/api/auth/email/verify`) is not an OAuth2 grant and keeps its
 200 for the same case, simply omitting `access_token`.
@@ -84,6 +91,15 @@ so an unattended credential can start receiving 403s without its own
 configuration changing. For automation, prefer an **MCP API key**
 (`trinity_mcp_*`), which is not subject to the second-factor flow.
 
+### Changing your sign-in email
+
+Binding a new sign-in email takes proof that you own the mailbox:
+
+1. `POST /api/users/me/email/code` with `{"email": "new@example.com"}` sends a 6-digit code to the **new** address (at most 3 codes per 10 minutes).
+2. `PUT /api/users/me/email` with `{"email": "new@example.com", "code": "123456"}` binds it.
+
+A bind code completes only your own bind and never signs anyone in; a sign-in code never binds. Wrong guesses are capped as for email sign-in. An address another account already holds is refused with `409 email_in_use`. On an install that cannot deliver email (no email provider configured), an admin may bind without a code, and the bind is audited as unverified; anyone else gets `409 email_verification_unavailable`. Both routes accept a signed-in session only. In the UI this is **Settings → General → Admin sign-in email**, or the **Sign-in email** step of first-run setup.
+
 ### Using Tokens
 
 Include the token in the `Authorization` header for all authenticated requests:
@@ -101,13 +117,17 @@ Every MCP key carries a scope. The scope is fixed at creation and decides what t
 | Scope | What it can reach | How it is created |
 |-------|-------------------|-------------------|
 | `user` | **The owner's full role**, including admin. Every write, every MCP tool. Never expires. | Any user, for themselves — **Settings → MCP Keys → Create API Key** (the default; admins see it as the **Standard** choice under **Key scope**) |
-| `agent` | Its own agent (heartbeats, reports, result callbacks) plus whatever its owner has shared with it; agent-to-agent calls are governed by the permissions matrix. **Never satisfies an admin gate.** | Minted automatically when an agent is created and injected into the container |
+| `agent` | Its own agent (heartbeats, reports, result callbacks), the agents it is permitted to call, and the agents it spawned — see [What an agent key reaches](#what-an-agent-key-reaches). **Never satisfies an admin gate.** | Minted automatically when an agent is created and injected into the container |
 | `system` | The platform's own system agent; bypasses agent permission checks | Minted for `trinity-system` only |
-| `connector` | Consumption-only, bound to one agent: its playbooks and chat, nothing else | Minted from the agent's **Expose via MCP** panel (`POST /api/agents/{name}/connector/key`, owner only); the secret is shown once |
+| `connector` | Consumption-only, bound to one agent: its exposed skills and chat, nothing else | Minted from the agent's **Expose via MCP** panel (`POST /api/agents/{name}/connector/key`, owner only); the secret is shown once |
 | `portal_delegate` | Exactly one route — exchanging an end-user email for a Workspace session, so a trusted backend can act as that person. Every other path is refused. | Admin, human-only — the **Portal delegate** choice on the create-key form; the exchange endpoint requires an entitlement |
 | `ops` | **Read-only, route-fenced**: `GET /api/version`, fleet status/health/schedules/alerts/costs/auth-report under `/api/ops/`, `GET /api/monitoring/status`, host and container telemetry, the agent roster, execution stats and slots, execution history and the live log stream, subscription usage. Every write and every other endpoint is refused; it gets no MCP tools and cannot open the event stream. | Admin, from an interactive browser session only — the **Ops (read-only)** choice on the create-key form. No key of any scope can mint one |
 
+Scope fences match the path the request was actually routed to, never a URL rebuilt from the `Host` header. Separately, any request whose `Host` header contains `/`, `?`, `#`, `\`, `@`, whitespace or a control character is refused with `400 Invalid Host header` (a WebSocket handshake is closed with code 1008), so a crafted header cannot make a forbidden route look like an allowed one.
+
 The keys page badges non-standard scopes (**Agent**, **Ops (read-only)**, **System**, **Portal Delegate**) so a bounded key is never mistaken for a personal one. Requesting any other scope on `POST /api/mcp/keys` is a 400.
+
+**Creating or listing keys needs a signed-in session.** `POST /api/mcp/keys` (every scope), `POST /api/mcp/keys/ensure-default` and `GET /api/mcp/keys` accept only a browser or login (JWT) session. An MCP key of any scope, your own `user` key included, gets a 403 and no key is created or listed. Both create routes write a `key_create` entry to the audit log. The list shows your own keys; an admin sees every key.
 
 **A key is a narrowing of its owner, never a decoupling.** An `ops` key is the bounded machine credential for a monitoring dashboard that must keep working under enforced two-factor authentication (key validation never passes through the second-factor flow). It still requires its owner to hold the admin role at call time: demoting or suspending the owner stops the key. Mint ops keys under a dedicated service admin account, and revoke-and-re-mint any ops key held by a departing admin.
 
@@ -117,10 +137,11 @@ The keys page badges non-standard scopes (**Agent**, **Ops (read-only)**, **Syst
 
 An MCP key resolves to the user who owns it, **carrying that user's role**. On a default installation where the admin owns the agents, an agent's injected key would otherwise satisfy a plain "admin only" check.
 
-Two gates stop that:
+Three gates stop that:
 
 - **Admin gates are an allowlist over scopes.** Only a browser session, a `user` key, and the `system` key can pass an admin-only endpoint; `agent`, `connector`, `portal_delegate`, `ops` and any scope invented later are refused. An individual read endpoint may opt the `ops` scope in — the ops routes above do — but the owner's admin role is still checked afterwards.
 - **Endpoints whose blast radius is operator-scale require a human caller** in addition to an admin role — API keys are rejected there regardless of the owner's role.
+- **Grant and identity routes require a person.** Some owner-level routes grant an agent new power or change who you are. They reject agent-scoped keys even when the owner is an admin (see the lists below).
 
 The human-only gate applies to:
 
@@ -135,7 +156,24 @@ The human-only gate applies to:
 - Writing an agent evaluation
 - Adding or removing organizational (`dept-*` / `reports-to-*`) tags
 
+Two more sets of routes are human-only for any owner, not only admins:
+
+- **A person only** — a browser session or the person's own `user` key. Agent-scoped keys (on their own agent or any other), the system key, and every other scope get a 403 with code `person_required`. This covers `PUT /api/agents/{name}/autonomy`, `capabilities`, `capacity` and `api-key-setting`, plus turning an agent's git pull sync on or off (`PUT /api/agents/{name}/git/pull-sync`). The refusal comes before the owner check, so it reveals nothing about whether the agent exists. An agent's own key can still create, enable and disable its schedules; autonomy decides whether they fire.
+- **A person, or an agent an admin granted the permission** — `PUT /api/agents/{name}/read-only`, `resources`, `timeout`, `public-channel-model` and `guardrails` accept an agent key only while that agent holds **Manage other agents**, only on an agent its owner owns, and never its own read-only mode or guardrails. Without the grant the agent gets a named 403 (`agent_management_not_permitted`). Other agent writes are fenced the same way: another agent's schedules, instruction files, creating and deleting agents, and skills. See [Agent Configuration → Permissions to Change Itself](../agents/agent-configuration.md#permissions-to-change-itself).
+- **A signed-in session only** — no MCP key of any scope, your own included. This covers creating or listing MCP keys, changing your sign-in email (`POST /api/users/me/email/code` and `PUT /api/users/me/email`), setting or clearing your personal GitHub token (`PUT` / `DELETE /api/users/me/github-pat`), and your stored UI preferences (`/api/users/me/preferences`).
+
 If you hit a 403 on one of these from an automation, that is the gate working as intended — perform the action from the UI or with a user session.
+
+### What an agent key reaches
+
+An agent-scoped key carries its owner's role, but on the backend's own routes it reaches only:
+
+- **Its own agent.**
+- **Agents it may call** — those its owner allowed on its [Permissions](../collaboration/agent-permissions.md) tab. It can chat with them, give them tasks and loops, and read their history and logs. Being allowed to call an agent never lets it manage that agent.
+- **Agents it spawned** with its current key. It can call and manage those.
+- **The owner's other agents, on the routes a granted permission covers** — for example another agent's schedule routes for an agent holding **Change other agents' schedules**. See [Permissions to Change Itself](../agents/agent-configuration.md#permissions-to-change-itself).
+
+Any other agent is refused with the same answer as an agent the key may not access (usually `404`, as for one that does not exist), so the key learns nothing about it. This applies whether the agent calls through MCP tools or straight against the backend with its injected key. The operator queue an agent key reads is narrowed the same way, and an agent key never gets the admin view of every user's chat history or sessions. Fleet-wide routes with no agent in the path — the agent list, execution and sync-health summaries, tag counts, telemetry, subscriptions and the `/ws/events` stream among them — answer an agent key with the same reach, never its owner's whole fleet. Two fleet health sweeps keep the owner's view, and a few routes are for people only. The full list is in [Agent Permissions](../collaboration/agent-permissions.md). People, `user` keys and the system key are not affected.
 
 ### WebSocket Authentication
 
@@ -144,7 +182,7 @@ Two real-time endpoints, two credentials:
 | Endpoint | Credential | Who sees what |
 |----------|-----------|---------------|
 | `/ws?ticket=<ticket>` | A single-use, 30-second ticket from `POST /api/ws/ticket` (JWT in `Authorization`). The browser uses this; an MCP client never opens `/ws`. | Scoped to the agents the ticket's user can access: an event naming agents is delivered only when every agent it names is one you may access. Admins see everything. Both live delivery and the reconnect replay are filtered. An unknown or suspended account is closed with code 4001. |
-| `/ws/events?token=trinity_mcp_…` | An MCP key in the query string (Trinity Connect and external listeners) | Events for the agents the key's owner can access. Only `user`, `agent` (non-ephemeral agents only) and `system` keys may open it; `ops`, `connector` and `portal_delegate` keys are closed with code 4003. |
+| `/ws/events?token=trinity_mcp_…` | An MCP key in the query string (Trinity Connect and external listeners) | Events for the agents the key's owner can access; an `agent` key gets only its own reach (see [What an agent key reaches](#what-an-agent-key-reaches)), re-read when an agent is created, deleted, shared or renamed. Only `user`, `agent` (non-ephemeral agents only) and `system` keys may open it; `ops`, `connector` and `portal_delegate` keys are closed with code 4003. |
 
 ### API Endpoints
 
@@ -153,16 +191,20 @@ Two real-time endpoints, two credentials:
 | `/api/token` | POST | None | Admin login (form-encoded) |
 | `/api/auth/email/request` | POST | None | Request email verification code |
 | `/api/auth/email/verify` | POST | None | Verify email code, returns token |
-| `/api/auth/mode` | GET | None | Get auth mode configuration |
+| `/api/auth/mode` | GET | None | Get auth mode configuration — `email_auth_enabled`, `email_code_login_enabled`, `email_delivery_available` (`false` when no email provider can send; the login page then says the code is in the backend log), `setup_completed` |
 | `/api/auth/logout` | POST | JWT | Revoke the current token immediately (idempotent; no-op for MCP keys) |
 | `/api/auth/validate` | GET | JWT | Validate current token (rejects revoked tokens) |
 | `/api/users/me` | GET | JWT | Get current user info |
+| `/api/users/me/email/code` | POST | JWT only (MCP keys refused) | Send a confirmation code to a new sign-in email |
+| `/api/users/me/email` | PUT | JWT only (MCP keys refused) | Bind a new sign-in email — body `{email, code}` |
 | `/api/setup/status` | GET | None | First-time setup status |
 | `/api/setup/admin-password` | POST | None | First-run admin creation — provisions the **first** admin only; 403 whenever a usable admin account already exists, whatever the setup flag says |
 | `/health` | GET | None | Health check (503 while schema migrations are incomplete) |
 | `/api/access/request` | POST | None | Public self-signup — adds the submitted email to the login allow-list. **Disabled by default** (403) until an admin enables public access requests |
-| `/api/mcp/keys` | POST | JWT | Create MCP API key — body `{name, description?, scope?}`; `scope` defaults to `user`, admins may request `portal_delegate` or `ops` |
-| `/api/mcp/keys` | GET | JWT | List MCP API keys |
+| `/api/mcp/keys` | POST | JWT only (MCP keys refused) | Create MCP API key — body `{name, description?, scope?}`; `scope` defaults to `user`, admins may request `portal_delegate` or `ops` |
+| `/api/mcp/keys/ensure-default` | POST | JWT only (MCP keys refused) | Create a default `user` key if you have none; returns `null` when one already exists |
+| `/api/mcp/keys` | GET | JWT only (MCP keys refused) | List MCP API keys — your own, or every key for an admin |
+| `/api/mcp/keys/{id}` | GET | JWT | One of your MCP API keys (never the secret) |
 | `/api/mcp/keys/{id}/revoke` | POST | JWT | Revoke (deactivate) an MCP API key |
 | `/api/mcp/keys/{id}` | DELETE | JWT | Permanently delete an MCP API key |
 | `/api/ws/ticket` | POST | JWT | Mint a single-use 30-second ticket for `/ws` (503 when Redis is unavailable) |

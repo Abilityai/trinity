@@ -57,7 +57,7 @@
             <!-- Honest status: there is no live-session count to show. Portal
                  sessions are stateless JWTs with no server-side store, so the
                  only truthful signal is when sessions were last cut off. -->
-            <p v-if="c.sessions_revoked_at" class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+            <p v-if="c.sessions_revoked_at" class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
               Sessions ended {{ formatWhen(c.sessions_revoked_at) }}
             </p>
           </div>

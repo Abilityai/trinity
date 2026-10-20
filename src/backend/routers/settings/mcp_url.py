@@ -13,6 +13,7 @@ import httpx
 from typing import List, Dict, Any
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
+from utils.public_url import public_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -113,9 +114,20 @@ from services.subscription_headroom_alerts import (
 router = APIRouter()
 
 MCP_URL_SETTING_KEY = "mcp_external_url"
+PUBLIC_CHAT_URL_SETTING_KEY = "public_chat_url"
 
 def _get_default_mcp_url(request: Request) -> str:
-    """Compute the auto-detected MCP URL from the request hostname."""
+    """Compute the auto-detected MCP URL from the request hostname.
+
+    Behind an HTTPS proxy (`X-Forwarded-Proto: https`, read by
+    `public_base_url`) the proxy serves `/mcp` on the same origin, so the URL is
+    `https://<host>/mcp` with no `:8080` (#2907). The hostname is the `Host`
+    header: the frontend nginx forwards the client's `$host`, and no other
+    route trusts `X-Forwarded-Host`.
+    """
+    origin = public_base_url(request)
+    if origin.startswith("https://"):
+        return f"{origin}/mcp"
     host = request.headers.get("host", "localhost:8080")
     hostname = host.split(":")[0]
     if hostname in ("localhost", "127.0.0.1"):
@@ -154,6 +166,38 @@ def _validate_mcp_url(url: str) -> str:
         )
 
     return url
+
+
+@router.get("/public-chat-url")
+async def get_public_chat_url(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    The instance's public chat URL, or `None` when none is configured (#2202).
+
+    A dedicated route because *unset* is the normal state for this key, not an
+    error. The Settings page read it through the generic `GET /api/settings/{key}`,
+    which answers 404 for a key that was never written — so every visit to every
+    Settings tab logged a failed request in the browser console, and a genuine
+    failure on that call was indistinguishable from the ordinary case. The store
+    already treated 404 as "unset", so nothing was broken; what was lost was the
+    signal, and no client-side handling can suppress the browser's own network
+    log.
+
+    Deliberately NOT a widening of the generic route: its 404 is the documented
+    contract for every other key and is depended on outside this repo (the ops
+    agent, scripts, the MCP surface). This follows the `/mcp-url` precedent
+    instead — a named route for a named setting.
+
+    Admin-gated to match the generic getter it replaces for this key; no caller
+    outside Settings reads it. Lives in this module so it is included ABOVE the
+    `generic` `/{key}` catch-all (Invariant #4 — see the package `__init__`), or
+    "public-chat-url" routes as a setting key named exactly that.
+    """
+    assert_admin(current_user)
+
+    return {"key": PUBLIC_CHAT_URL_SETTING_KEY, "value": db.get_setting_value(PUBLIC_CHAT_URL_SETTING_KEY)}
 
 
 @router.get("/mcp-url")

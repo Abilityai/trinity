@@ -214,8 +214,11 @@ def test_adoption_is_refused_once_the_install_has_sources(monkeypatch):
     monkeypatch.setattr(svc_mod.db, "list_skill_sources", lambda: [])
     monkeypatch.setattr(svc_mod.db, "count_skill_sources", lambda: 3)   # configured
     alarms = []
+    # #3246: the refusal reports through the platform alert seam.
+    from services import platform_alerts
     monkeypatch.setattr(
-        svc_mod.db, "create_operator_queue_item", lambda agent, item: alarms.append(item)
+        platform_alerts, "observe",
+        lambda agent, kind, key=None, **kw: alarms.append({"type": "alert", **kw}),
     )
 
     service = svc_mod.SkillService.__new__(svc_mod.SkillService)
@@ -277,8 +280,11 @@ def test_a_refusal_raises_an_operator_alarm_not_just_a_log_line(monkeypatch):
     monkeypatch.setattr(svc_mod, "get_skills_library_branch", lambda: "main", raising=False)
     monkeypatch.setattr(svc_mod.db, "list_skill_sources", lambda: [])
     monkeypatch.setattr(svc_mod.db, "count_skill_sources", lambda: 0)
+    # #3246: the refusal reports through the platform alert seam.
+    from services import platform_alerts
     monkeypatch.setattr(
-        svc_mod.db, "create_operator_queue_item", lambda agent, item: alarms.append(item)
+        platform_alerts, "observe",
+        lambda agent, kind, key=None, **kw: alarms.append({"type": "alert", **kw}),
     )
 
     service = svc_mod.SkillService.__new__(svc_mod.SkillService)
@@ -302,7 +308,8 @@ def test_the_alarm_never_blocks_a_sync(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("operator queue down")
 
-    monkeypatch.setattr(svc_mod.db, "create_operator_queue_item", boom)
+    from services import platform_alerts
+    monkeypatch.setattr(platform_alerts, "observe", boom)
 
     service = svc_mod.SkillService.__new__(svc_mod.SkillService)
     service.library_root = Path(tempfile.mkdtemp())

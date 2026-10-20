@@ -11,9 +11,9 @@ table handle in ``db/tables.py``; the engine is resolved via ``db/engine.py``.
 """
 
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
-from sqlalchemy import select, insert, delete, or_
+from sqlalchemy import select, insert, delete, or_, update
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
@@ -36,6 +36,12 @@ class SkillsOperations:
             assigned_at=datetime.fromisoformat(row["assigned_at"]),
             # ent#237: None on rows written before multi-source.
             source_id=row["source_id"],
+            # #2914: None unless the last injection recorded a name conflict.
+            delivery_status=row["delivery_status"],
+            # ent#596: the agent that made the assignment; None for a human.
+            assigned_by_agent=row["assigned_by_agent"],
+            # ent#530: False = present only because an assigned set names it.
+            individual=row.get("individual") is None or bool(row.get("individual")),
         )
 
     # =========================================================================
@@ -60,12 +66,53 @@ class SkillsOperations:
                 agent_skills.c.assigned_by,
                 agent_skills.c.assigned_at,
                 agent_skills.c.source_id,
+                agent_skills.c.delivery_status,
+                agent_skills.c.assigned_by_agent,
+                agent_skills.c.individual,
             )
             .where(agent_skills.c.agent_name == agent_name)
             .order_by(agent_skills.c.skill_name)
         )
         with get_engine().connect() as conn:
             return [self._row_to_skill(row) for row in conn.execute(stmt).mappings()]
+
+    def set_skill_delivery_status(
+        self, agent_name: str, conflicted: List[str], resolved: List[str]
+    ) -> None:
+        """Record the inject path's verdict on the assignment rows (#2914).
+
+        `conflicted` rows are stamped `conflict`; `resolved` rows (names that
+        landed — injected, unchanged, or fallback) have the stamp cleared.
+        Names the injection could not decide on (a failed restore) are in
+        neither list and keep whatever they had: a failed sync is not a
+        resolution. One transaction, so a partially-applied verdict can't
+        outlive a crash between the two statements. Unassigned names match no
+        row and are silently ignored — the row is the only thing this writes.
+        """
+        conflicted = [n for n in conflicted if n]
+        resolved = [n for n in resolved if n]
+        if not conflicted and not resolved:
+            return
+        with get_engine().begin() as conn:
+            if conflicted:
+                conn.execute(
+                    update(agent_skills)
+                    .where(
+                        agent_skills.c.agent_name == agent_name,
+                        agent_skills.c.skill_name.in_(conflicted),
+                    )
+                    .values(delivery_status="conflict")
+                )
+            if resolved:
+                conn.execute(
+                    update(agent_skills)
+                    .where(
+                        agent_skills.c.agent_name == agent_name,
+                        agent_skills.c.skill_name.in_(resolved),
+                        agent_skills.c.delivery_status.is_not(None),
+                    )
+                    .values(delivery_status=None)
+                )
 
     def get_agent_skill_names(self, agent_name: str) -> List[str]:
         """
@@ -91,6 +138,7 @@ class SkillsOperations:
         skill_name: str,
         assigned_by: str,
         source_id: Optional[str] = None,
+        assigned_by_agent: Optional[str] = None,
     ) -> Optional[AgentSkill]:
         """
         Assign a skill to an agent.
@@ -116,6 +164,7 @@ class SkillsOperations:
             assigned_by=assigned_by,
             assigned_at=now,
             source_id=source_id,
+            assigned_by_agent=assigned_by_agent,
         )
         try:
             with get_engine().begin() as conn:
@@ -129,6 +178,7 @@ class SkillsOperations:
                 assigned_by=assigned_by,
                 assigned_at=datetime.fromisoformat(now),
                 source_id=source_id,
+                assigned_by_agent=assigned_by_agent,
             )
         except IntegrityError:
             # Skill already assigned
@@ -159,9 +209,24 @@ class SkillsOperations:
         skill_names: List[str],
         assigned_by: str,
         source_ids: Optional[Dict[str, str]] = None,
+        assigned_by_agent: Optional[str] = None,
+        set_resolver: Optional[Callable[[Dict[str, Optional[str]]], Optional[set]]] = None,
+        result: Optional[dict] = None,
     ) -> int:
         """
-        Set skills for an agent (full replacement).
+        Set skills for an agent (full replacement of the INDIVIDUAL assignments).
+
+        ent#530: ``set_resolver(held)`` maps the agent's held sets
+        (``{set: source_id}``, read INSIDE this transaction under the agent
+        lock, so a set assigned concurrently cannot be missed) to every skill
+        they name, or None when any cannot be resolved. A row a set names
+        survives the replace whether or not it is listed: listed, it keeps its
+        individual flag (a legacy client writing back what it read can neither
+        drop nor promote a member); unlisted, it is demoted to individual = 0
+        (the set still holds it — the single-unassign rule). Fail-closed: with an
+        unresolved set every existing set-derived row is kept. No resolver keeps
+        the pre-ent#530 behaviour. ``result['names']`` receives the names the
+        agent holds afterwards.
 
         Removes all existing skills and assigns the new list.
 
@@ -181,22 +246,92 @@ class SkillsOperations:
         source_ids = source_ids or {}
 
         with get_engine().begin() as conn:
+            # ent#530: lock BEFORE the first read. Every read below feeds the
+            # delete-all + reinsert, so a set assigned between a read and a
+            # later lock would have its member rows deleted from under it.
+            if set_resolver is not None:
+                from .skill_sets import lock_agent_rows
+                lock_agent_rows(conn, agent_name)
+            # #2914: the replace is delete-all + reinsert, so a retained name
+            # would lose its recorded `conflict` on every Save — and the PUT
+            # only re-injects ADDED names, so nothing would put it back until
+            # the next start. Carry the verdict across for names that stay.
+            kept_status = {
+                row.skill_name: row.delivery_status
+                for row in conn.execute(
+                    select(agent_skills.c.skill_name, agent_skills.c.delivery_status)
+                    .where(
+                        agent_skills.c.agent_name == agent_name,
+                        agent_skills.c.delivery_status.is_not(None),
+                    )
+                )
+            }
+            # ent#596: the same delete-all + reinsert would re-stamp every KEPT
+            # name with THIS caller — so an orchestrator's next replace would
+            # make a skill a human assigned last month read as "assigned by
+            # trinity-pm, today". Attribution belongs to the act that created
+            # the assignment; a replace that keeps a name did not create it.
+            kept_by = {
+                row.skill_name: (row.assigned_by, row.assigned_at, row.assigned_by_agent)
+                for row in conn.execute(
+                    select(
+                        agent_skills.c.skill_name,
+                        agent_skills.c.assigned_by,
+                        agent_skills.c.assigned_at,
+                        agent_skills.c.assigned_by_agent,
+                    ).where(agent_skills.c.agent_name == agent_name)
+                )
+            }
+
+            existing = {
+                row.skill_name: row.individual is None or bool(row.individual)
+                for row in conn.execute(
+                    select(agent_skills.c.skill_name, agent_skills.c.individual)
+                    .where(agent_skills.c.agent_name == agent_name)
+                )
+            }
+            set_named: set = set()
+            if set_resolver is not None:
+                from .skill_sets import agent_held_sets
+                resolved = set_resolver(agent_held_sets(conn, agent_name))
+                set_named = (
+                    {n for n, ind in existing.items() if not ind}   # fail closed
+                    if resolved is None else set(resolved)
+                )
+            listed = set(skill_names)
+            kept_by_set = {n for n in existing if n in set_named and n not in listed}
+
+            def _individual(name: str) -> int:
+                if name in kept_by_set:
+                    return 0
+                # A listed set member keeps what it was; a new listed name is individual.
+                return 0 if (name in set_named and existing.get(name) is False) else 1
+
             # Remove all existing skills for this agent
             conn.execute(
                 delete(agent_skills).where(agent_skills.c.agent_name == agent_name)
             )
 
-            # Add new skills
-            for skill_name in skill_names:
+            # Add new skills — the listed ones, then the rows a set still holds.
+            names = list(dict.fromkeys(list(skill_names) + sorted(kept_by_set)))
+            if result is not None:
+                result["names"] = names
+            for skill_name in names:
                 try:
                     with conn.begin_nested():
+                        by, at, by_agent = kept_by.get(
+                            skill_name, (assigned_by, now, assigned_by_agent)
+                        )
                         conn.execute(
                             insert(agent_skills).values(
                                 agent_name=agent_name,
                                 skill_name=skill_name,
-                                assigned_by=assigned_by,
-                                assigned_at=now,
+                                assigned_by=by,
+                                assigned_at=at,
                                 source_id=source_ids.get(skill_name),
+                                delivery_status=kept_status.get(skill_name),
+                                assigned_by_agent=by_agent,
+                                individual=_individual(skill_name),
                             )
                         )
                 except IntegrityError:

@@ -145,7 +145,7 @@
         </div>
         <div>
           <label for="voip-cap" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-            Daily call cap <span class="text-gray-400 dark:text-gray-500">(optional)</span>
+            Daily call cap <span class="text-gray-500 dark:text-gray-400">(optional)</span>
           </label>
           <input
             id="voip-cap"

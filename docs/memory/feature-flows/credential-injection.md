@@ -58,7 +58,6 @@ As a platform user, I want to add credentials to my agent so that MCP servers an
 | Agent Detail → Credentials Tab | `POST /api/agents/{name}/credentials/inject` | Inject files directly |
 | Agent Detail → Credentials Tab | `POST /api/agents/{name}/credentials/export` | Export to encrypted file |
 | Agent Detail → Credentials Tab | `POST /api/agents/{name}/credentials/import` | Import from encrypted file |
-| Agent Startup | `POST /api/internal/decrypt-and-inject` | Auto-import on start |
 
 ---
 
@@ -183,26 +182,16 @@ const exportToGit = async () => {
 
 ### Backend (`src/backend/routers/credentials.py`)
 ```python
-@router.post("/agents/{agent_name}/credentials/export", response_model=CredentialExportResponse)
-async def export_credentials(agent_name: str, current_user: User = Depends(get_current_user)):
-    """Export agent credentials to encrypted file in workspace."""
-    encryption_service = CredentialEncryptionService()
-
-    # Read credential files from agent
-    file_paths = ['.env', '.mcp.json']
-    files = await encryption_service.read_agent_credential_files(agent_name, file_paths)
-
-    # Encrypt and write to agent
-    encrypted = encryption_service.encrypt(files)
-    await encryption_service.write_agent_credential_files(
-        agent_name, {'.credentials.enc': encrypted}
-    )
-
-    return CredentialExportResponse(
-        status="success",
-        files_exported=len(files),
-        encrypted_file=".credentials.enc"
-    )
+@router.post("/agents/{agent_name}/credentials/export")
+async def export_credentials(
+    request: Request,
+    agent_name: str = Depends(get_owned_agent_by_name),   # owner or admin, else uniform 404 (#186); connector -> 403
+    current_user: User = Depends(get_current_user)
+):
+    reject_agent_principal(current_user)                  # agent-scoped key -> 403 "human-only" (ent#69 Part 2)
+    # container missing -> 404; not running -> 400
+    encrypted_file, files_exported = await get_credential_encryption_service().export_to_agent(agent_name)
+    # audited (SEC-001); agent server unreachable -> 503
 ```
 
 ### Encryption Service (`src/backend/services/credential_encryption.py`)
@@ -260,75 +249,55 @@ const importFromGit = async () => {
 
 ### Backend (`src/backend/routers/credentials.py`)
 ```python
-@router.post("/agents/{agent_name}/credentials/import", response_model=CredentialImportResponse)
-async def import_credentials(agent_name: str, current_user: User = Depends(get_current_user)):
-    """Import credentials from encrypted file in agent workspace."""
-    encryption_service = CredentialEncryptionService()
-
-    # Read encrypted file
-    enc_files = await encryption_service.read_agent_credential_files(
-        agent_name, ['.credentials.enc']
-    )
-
-    if '.credentials.enc' not in enc_files:
-        raise HTTPException(status_code=404, detail="No .credentials.enc file found")
-
-    # Decrypt
-    files = encryption_service.decrypt(enc_files['.credentials.enc'])
-
-    # Write decrypted files to agent
-    await encryption_service.write_agent_credential_files(agent_name, files)
-
-    return CredentialImportResponse(
-        status="success",
-        files_imported=list(files.keys()),
-        message=f"Imported {len(files)} file(s)"
-    )
+@router.post("/agents/{agent_name}/credentials/import")
+async def import_credentials(
+    request: Request,
+    agent_name: str = Depends(get_owned_agent_by_name),   # owner or admin, else uniform 404 (#186); connector -> 403
+    current_user: User = Depends(get_current_user)
+):
+    reject_agent_principal(current_user)                  # agent-scoped key -> 403 "human-only" (ent#69 Part 2)
+    # container missing -> 404; not running -> 400
+    files = await get_credential_encryption_service().import_to_agent(agent_name)
+    # missing .credentials.enc / wrong key -> 400; agent server unreachable -> 503; audited (SEC-001)
 ```
 
 ---
 
-## Flow 4: Auto-Import on Agent Startup
+## Flow 4: A committed `.credentials.enc` at startup (imported by the backend, not by `startup.sh` — #3510)
 
-### Overview
-When an agent starts and has `.credentials.enc` but no `.env`, automatically decrypt and inject credentials.
+`docker/base-image/startup.sh` never decrypts a committed `.credentials.enc`:
+the platform key never reaches the container. The **backend** imports it once
+the agent is ready — `lifecycle.inject_assigned_credentials()` →
+`credential_encryption.import_to_agent()`. That import is skipped for
+ephemeral agents, installs with no encryption key, and already-running
+containers; in those cases the owner imports it with **Import from Git** on the
+Credentials tab or the `import_credentials` MCP tool (Flow 3). Subscription-mode
+agents import it too (#3510, ruled 2026-10-19): their MCP keys live there, and
+the agent server force-unsets Anthropic API-key variables at every spawn under
+subscription (#2114), so an imported `ANTHROPIC_API_KEY` cannot shadow the
+subscription. The startup script says so on stdout:
 
-### Startup Script (`docker/base-image/startup.sh`)
 ```bash
-# Auto-import encrypted credentials if .env doesn't exist
 if [ -f ".credentials.enc" ] && [ ! -f ".env" ]; then
-    echo "Found .credentials.enc without .env, importing credentials..."
-    curl -s -X POST "http://backend:8000/api/internal/decrypt-and-inject" \
-         -H "Content-Type: application/json" \
-         -d "{\"agent_name\": \"$AGENT_NAME\"}" || echo "Failed to import credentials"
+    echo "Found .credentials.enc but no .env: this script does not decrypt it."
+    echo "  The platform imports it once the agent is ready (not when no encryption"
+    echo "  key is configured). If .env is still missing,"
+    echo "  the owner imports it: Credentials tab > Import from Git (or the import_credentials MCP tool)."
 fi
 ```
 
-### Internal Endpoint (`src/backend/routers/internal.py`)
-```python
-@router.post("/decrypt-and-inject")
-async def decrypt_and_inject(request: InternalDecryptInjectRequest):
-    """Internal endpoint for agent startup - no auth required."""
-    encryption_service = CredentialEncryptionService()
-
-    # Read encrypted file from agent
-    enc_files = await encryption_service.read_agent_credential_files(
-        request.agent_name, ['.credentials.enc']
-    )
-
-    if '.credentials.enc' not in enc_files:
-        return {"status": "skipped", "reason": "No .credentials.enc found"}
-
-    # Decrypt and write
-    files = encryption_service.decrypt(enc_files['.credentials.enc'])
-    await encryption_service.write_agent_credential_files(request.agent_name, files)
-
-    return {"status": "success", "files_written": list(files.keys())}
-```
+Until #3510 the script called `POST /api/internal/decrypt-and-inject`, a route
+that never existed, so the path failed on every start and blamed a missing
+encryption key. An agent-callable decrypt was ruled out on 2026-10-15: the file
+lives in the agent's own home, so the agent could stage another agent's blob
+there and have the platform decrypt it. `tests/unit/test_3510_startup_backend_paths.py`
+fails if the agent image calls a backend path the app does not register.
 
 ---
 
 ## MCP Tools
+
+**Who sees which tool (#3435).** `export_credentials`, `import_credentials` and `get_credential_encryption_key` each carry a per-tool `canAccess` allow-list `{user, system}` — exactly the scopes their backend gates admit — so an agent-scoped session neither lists nor can call them (FastMCP answers "not found"). Their descriptions name the caller class (owner or admin for export/import, administrator for the key). A backend 403 comes back as `{success:false, error, human_only|admin_only|not_authorized}` through `accessDenied`, so the audit row reads `denied` (#2807); 400/404/503 are still thrown. No backend gate changed. `inject_credentials` is still advertised to agent sessions (shrink-only baseline in `tool-visibility.test.ts`).
 
 ### inject_credentials
 ```typescript
@@ -417,6 +386,8 @@ async def decrypt_and_inject(request: InternalDecryptInjectRequest):
 
 ## Frontend UI
 
+**Reading the files (trinity-enterprise#819).** View and Edit read `.env` / `.mcp.json` through `GET /api/agents/{name}/files/download`, which is owner-tier for credential paths: the owner and admins read them; anyone else gets 403 `owner_tier_path`. The panel reads first: Edit opens the editor only on content or a 404 (a file not created yet), View only on content; any other failure keeps the editor closed and shows the server's message in an `InlineError` beside the file list. The checklist and Quick Inject merge base (`readExistingEnv`) surfaces a coded 403's message instead of "try again once the agent is reachable". See [file-browser.md](file-browser.md).
+
 ### CredentialsPanel.vue Structure
 
 ```
@@ -483,7 +454,8 @@ async def decrypt_and_inject(request: InternalDecryptInjectRequest):
      would be a privilege **grant**. The harvest goes to
      `.trinity/git-credential`, which nothing exports.
 9. **`.env` may not set loader/exec-redirecting names** (`execution_env.PROTECTED_KEYS`
-   + the ent#615 prefix rule): `PATH`, `LD_PRELOAD`, `NODE_OPTIONS`,
+   + the ent#615 prefix rule): `PATH`, `LD_PRELOAD`, `CLAUDE_CODE_SHELL_PREFIX`
+   (trinity-enterprise#787), `NODE_OPTIONS`,
    `GIT_SSH_COMMAND`, `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`,
    `GIT_CONFIG_NOSYSTEM`, `GIT_ASKPASS`, `GIT_PROXY_COMMAND`, … — the file is
    agent-writable and is re-read at every spawn, and `GIT_CONFIG_NOSYSTEM`

@@ -72,7 +72,8 @@ async function openRail(page) {
 }
 
 async function selectCanvas(page, canvasId) {
-  await page.locator(`[data-testid="canvas-select"] [data-canvas-id="${canvasId}"]`).click({ timeout: 10000 })
+  // ent#724: the selector is a dropdown now, not a chip strip.
+  await page.getByTestId('canvas-select').selectOption(canvasId, { timeout: 10000 })
   await expect(page.locator(`[data-testid="canvas-panel"][data-canvas-id="${canvasId}"]`)).toBeVisible()
 }
 

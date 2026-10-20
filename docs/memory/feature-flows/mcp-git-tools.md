@@ -34,7 +34,7 @@ sync/recovery without an LLM turn and investigate exactly what a tool did.
 | **MCP tool** | `git_sync` | Stage + commit + push to working branch. Owner-only. `strategy: normal\|pull_first\|force_push`. |
 | **MCP tool** | `get_git_log` | Recent commits (limit clamped 1–100, default 10). Read-only. |
 | **MCP tool** | `git_pull` | Pull from GitHub. `strategy: clean\|stash_reapply\|force_reset`. Owner + shared accessors. |
-| **MCP tool** | `get_git_sync_state` | Persisted `agent_sync_state` row (#389) — last status, consecutive failures, ahead/behind. Read-only. |
+| **MCP tool** | `get_git_sync_state` | Persisted `agent_sync_state` row (#389) — last status, consecutive failures, ahead/behind, and (ent#706) `dirty_files` / `diverged_since` / `last_successful_push_at` plus the backend's `state` / `reason` / `recommendation` / `binding` / `freeze`. A pass-through of the backend JSON. Read-only. |
 | **MCP tool** | `reset_to_main_preserve_state` | ⚠️ DESTRUCTIVE recovery (#384) — adopt `origin/main`, force-with-lease. Owner-only. |
 | **API** (admin) | `GET /api/audit-log?request_id=<id>` | Join an MCP `mcp_operation` row to the backend `git_operation` row it triggered. |
 

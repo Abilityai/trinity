@@ -522,14 +522,56 @@ class TestSubscriptionAutoAssign:
         """Helper to delete a subscription."""
         api_client.delete(f"/api/subscriptions/{sub_id}")
 
+    # Every subscription this suite registers is named `test-…`. Anything else
+    # on the target instance belongs to its operator (#2420).
+    SUITE_PREFIX = "test-"
+
+    def _foreign_subscriptions(self, api_client):
+        """Names of subscriptions this suite did not create."""
+        response = api_client.get("/api/subscriptions")
+        assert_status(response, 200)
+        return [
+            sub["name"] for sub in response.json()
+            if not sub["name"].startswith(self.SUITE_PREFIX)
+        ]
+
+    def _skip_if_foreign_subscriptions(self, api_client, what: str):
+        """Skip when operator-owned subscriptions would win the auto-assign.
+
+        Since #2409 a new agent goes to the subscription with the most cached
+        provider HEADROOM. An operator's real subscription has a reading and
+        the suite's fake tokens never do, so it outranks every one of them and
+        `what` cannot be observed. Same precondition and wording as
+        `test_create_agent_no_subscriptions` (#2420).
+        """
+        foreign = self._foreign_subscriptions(api_client)
+        if foreign:
+            pytest.skip(
+                "target instance has operator-owned subscriptions "
+                f"({len(foreign)}); {what} needs a disposable stack and this "
+                "suite will not delete them (#2420)"
+            )
+
     def test_create_agent_no_subscriptions(self, api_client: TrinityApiClient):
         """Agent created with no subscriptions uses platform API key."""
-        # Clear ALL subscriptions first to ensure clean state
-        # (prior tests may have left subscriptions that would auto-assign)
+        # Clear the suite's OWN leftovers (prior tests may have left
+        # subscriptions that would auto-assign) — never the operator's. This
+        # used to delete every subscription on the instance, which dropped a
+        # developer's whole fleet to API-key auth mid-run and could not be
+        # undone: the token is not readable back through the API (#2420).
         subs_response = api_client.get("/api/subscriptions")
-        if subs_response.status_code == 200:
-            for sub in subs_response.json():
+        assert_status(subs_response, 200)
+        for sub in subs_response.json():
+            if sub["name"].startswith(self.SUITE_PREFIX):
                 api_client.delete(f"/api/subscriptions/{sub['id']}")
+
+        foreign = self._foreign_subscriptions(api_client)
+        if foreign:
+            pytest.skip(
+                "target instance has operator-owned subscriptions "
+                f"({len(foreign)}); the no-subscription precondition needs a "
+                "disposable stack and this suite will not delete them (#2420)"
+            )
 
         agent_name = f"test-noauto-{uuid.uuid4().hex[:8]}"
         try:
@@ -543,18 +585,23 @@ class TestSubscriptionAutoAssign:
         """Agent created with subscription registered is auto-assigned."""
         sub_name = f"test-auto-sub-{uuid.uuid4().hex[:8]}"
         agent_name = f"test-auto-{uuid.uuid4().hex[:8]}"
+        # An operator-owned subscription is a legitimate auto-assign candidate
+        # too (the ranking is by headroom, #2409), so the exact name is only
+        # determined when this test's subscription is the only one.
+        foreign = self._foreign_subscriptions(api_client)
         sub_id = self._create_subscription(api_client, sub_name)
         try:
             self._create_agent(api_client, agent_name)
             auth = self._get_auth(api_client, agent_name)
             assert auth["auth_mode"] == "subscription"
-            assert auth["subscription_name"] == sub_name
+            assert auth["subscription_name"] in [sub_name, *foreign]
         finally:
             self._cleanup_agent(api_client, agent_name)
             self._cleanup_subscription(api_client, sub_id)
 
     def test_round_robin_distribution(self, api_client: TrinityApiClient):
         """Two subscriptions distribute agents evenly via round-robin."""
+        self._skip_if_foreign_subscriptions(api_client, "the round-robin precondition")
         sub_a_name = f"test-rr-a-{uuid.uuid4().hex[:8]}"
         sub_b_name = f"test-rr-b-{uuid.uuid4().hex[:8]}"
         sub_a_id = self._create_subscription(api_client, sub_a_name)
@@ -589,9 +636,12 @@ class TestSubscriptionAutoAssign:
 
     def test_alphabetical_tiebreak(self, api_client: TrinityApiClient):
         """Equal agent counts resolve by alphabetical subscription name."""
-        # Create in reverse alphabetical order to verify sorting
-        sub_beta = f"beta-tie-{uuid.uuid4().hex[:6]}"
-        sub_alpha = f"alpha-tie-{uuid.uuid4().hex[:6]}"
+        self._skip_if_foreign_subscriptions(api_client, "the tiebreak precondition")
+        # Create in reverse alphabetical order to verify sorting. Both carry the
+        # suite prefix so a concurrent test never mistakes them for the
+        # operator's (#2420); "test-alpha" still sorts before "test-beta".
+        sub_beta = f"{self.SUITE_PREFIX}beta-tie-{uuid.uuid4().hex[:6]}"
+        sub_alpha = f"{self.SUITE_PREFIX}alpha-tie-{uuid.uuid4().hex[:6]}"
         beta_id = self._create_subscription(api_client, sub_beta)
         alpha_id = self._create_subscription(api_client, sub_alpha)
 

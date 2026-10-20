@@ -274,11 +274,25 @@ def test_the_agent_file_write_back_skips_platform_alarms():
     )
 
 
-def test_acknowledging_a_platform_alarm_does_not_spend_the_agents_turn():
+def test_acknowledging_a_platform_alarm_does_not_spend_the_agents_turn(monkeypatch):
     """'Got it' posts to /respond like any other answer, so without this gate an
-    acknowledge dispatches a full execute_task on the rated agent."""
-    src = (REPO / "src/backend/routers/operator_queue.py").read_text()
-    assert "if item and not operator_queue_service.is_platform_minted(item):" in src
+    acknowledge dispatches a full execute_task on the rated agent.
+
+    trinity-enterprise#611: every answer now reaches the resume through the ask
+    sink's default observer — asserted on that path, with the agent opted in so
+    the platform-minted rule is the only thing that can stop the dispatch."""
+    import services.ask_service as sink
+    import services.operator_resume_service as ors
+
+    spawned = []
+    monkeypatch.setattr(sink, "_opted_in", lambda agent: True)
+    monkeypatch.setattr(ors, "spawn_resume_dispatch", lambda item, **kw: spawned.append(item))
+    alarm = {"id": "u-1", "request_id": "workspace-problem-abc123", "agent_name": "rated-agent",
+             "status": "responded", "response": "Got it"}
+    mine = {"id": "u-2", "request_id": "deploy-approval-42", "agent_name": "rated-agent",
+            "status": "responded", "response": "approve"}
+    sink._wake_filer(sink.EndingEvent("answered", (alarm, mine), "op@example.com"))
+    assert [i["request_id"] for i in spawned] == ["deploy-approval-42"]
 
 
 def test_the_context_blob_carries_no_client_words_or_address(monkeypatch):

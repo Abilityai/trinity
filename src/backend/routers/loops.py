@@ -14,7 +14,10 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 
 from database import db
-from dependencies import get_authorized_agent, get_current_user, assert_agent_access, resolve_source_agent
+from dependencies import (
+    agent_may_reach, get_authorized_agent, get_current_user, assert_agent_access, resolve_source_agent,
+    workspace_route,
+)
 from models import (
     LoopRunResponse,
     LoopStatusResponse,
@@ -23,6 +26,7 @@ from models import (
     StopLoopResponse,
     User,
 )
+from services import dispatch_admission_service
 from services.loop_service import get_loop_service
 
 logger = logging.getLogger(__name__)
@@ -115,7 +119,13 @@ def _build_status_response(loop: dict) -> LoopStatusResponse:
 
 
 def _check_loop_access(loop: dict, user: User) -> None:
-    """Caller must be the loop initiator, agent owner, or admin."""
+    """Caller must be the loop initiator, agent owner, or admin.
+
+    trinity-enterprise#629: reach first. An agent key carries its owner's role
+    and user id, so both shortcuts below would admit it to every sibling's loop
+    (each one "started by" the shared owner)."""
+    if not agent_may_reach(user, loop["agent_name"]):
+        raise HTTPException(status_code=403, detail="Access denied")
     if user.role == "admin":
         return
     if loop["started_by_user_id"] == user.id:
@@ -158,7 +168,8 @@ def _reject_timeout_above_cap(agent_name: str, requested_seconds: Optional[int])
                 "message": (
                     f"Loop timeout_per_run {requested_seconds}s exceeds agent "
                     f"execution_timeout_seconds {cap}s. Raise the agent cap "
-                    f"first via PUT /api/agents/{agent_name}/timeout."
+                    f"first: the agent's owner sets it via PUT /api/agents/{agent_name}/timeout "
+                    "(an agent key cannot)."
                 ),
                 "agent_cap_seconds": cap,
                 "requested_seconds": requested_seconds,
@@ -171,6 +182,7 @@ def _reject_timeout_above_cap(agent_name: str, requested_seconds: Optional[int])
 # ---------------------------------------------------------------------------
 
 @agent_router.post("/{name}/loops", response_model=StartLoopResponse, status_code=202)
+@workspace_route("the Workspace rail starts a loop on an agent the person can reach")
 async def start_loop(
     payload: StartLoopRequest,
     name: str = Depends(get_authorized_agent),
@@ -212,6 +224,17 @@ async def start_loop(
     )
     _source_agent = current_user.agent_name or _resolved_source
 
+    # #2973: a loop started by an agent inherits the starter's chain depth
+    # (#2806) and is refused past the max. Captured HERE and persisted on the
+    # loop row, because later iterations run after the starter's turn has ended.
+    # An InterAgentDepthExceeded maps to the named 403 in main.py.
+    chain_depth = await dispatch_admission_service.enforce_inter_agent_depth(
+        current_user=current_user,
+        target=name,
+        endpoint=f"/api/agents/{name}/loops",
+        x_via_mcp=None,
+    )
+
     service = get_loop_service()
     loop_row = await service.start_loop(
         agent_name=name,
@@ -233,6 +256,7 @@ async def start_loop(
         # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
         source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
         source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+        chain_depth=chain_depth,
     )
     return StartLoopResponse(
         loop_id=loop_row["id"],
@@ -244,6 +268,7 @@ async def start_loop(
 
 
 @agent_router.get("/{name}/loops", response_model=List[LoopStatusResponse])
+@workspace_route("the Workspace rail lists the loops on the agents the person can reach (anyone's loops on them, as before)")
 def list_loops(
     name: str = Depends(get_authorized_agent),
     status: Optional[str] = None,
@@ -266,6 +291,7 @@ def get_loop_status(loop_id: str, current_user: User = Depends(get_current_user)
 
 
 @loop_router.post("/{loop_id}/stop", response_model=StopLoopResponse)
+@workspace_route("the Workspace rail stops a loop on an agent the person can reach (the starter, the owner or a share, as before)")
 async def stop_loop(loop_id: str, current_user: User = Depends(get_current_user)):
     loop = db.get_loop(loop_id)
     if loop is None:

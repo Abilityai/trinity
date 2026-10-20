@@ -38,7 +38,15 @@ pytestmark = pytest.mark.unit
 AGENT = "scout"
 EMAIL = "bob@example.com"
 SESSION = "ps_1"
-OPUS = "claude-opus-5"
+# The curated "Most capable" Workspace model — READ from the catalog, not named.
+# The id behind that tier moves on every Opus release: #2987 moved it from
+# `claude-opus-5` to `claude-opus-5-5`, and the literal that stood here turned
+# `test_a_curated_model_is_accepted` red for a reason unrelated to anything this
+# file tests. Every use below means "a valid curated model", never a specific id.
+# `model_catalog` is a stdlib-only leaf (no DB at import), so this is safe here.
+from services.model_catalog import MODEL_CATALOG as _CATALOG  # noqa: E402
+
+OPUS = next(m.id for m in _CATALOG if m.workspace and m.workspace_tier == "Most capable")
 HAIKU = "claude-haiku-4-5-20251001"
 # public-channel-selectable but deliberately NOT workspace-selectable — the one
 # id that proves "the inherited value is not re-laundered through the composer's
@@ -348,6 +356,8 @@ def _fake_core_db(captured, monkeypatch, *, override=None):
             return override
 
         def create_task_execution(self, **kwargs):
+            if kwargs.get("fields") is not None:  # #1482: inline the parameter object
+                kwargs.update(vars(kwargs.pop("fields")))
             captured.append(kwargs)
             return types.SimpleNamespace(id=f"exec_{len(captured)}")
 
@@ -648,8 +658,8 @@ def test_the_generic_failure_is_unchanged_when_no_model_was_chosen(svc, monkeypa
 def test_a_usage_limit_never_blames_the_model(svc, monkeypatch, code):
     """THE regression guard on the tempting version of this feature.
 
-    There is no "this model is unavailable" code in the #2320 ladder
-    (`_PULL_ERROR_CODES` has no model member), and AUTH/BILLING merge into ONE
+    The one model code in the #2320 ladder is #3012's MODEL_UNSUPPORTED (the
+    runtime refused the model), which is its own branch; AUTH/BILLING merge into ONE
     "reached its usage limit" answer with a true and specific cause. Rewording
     that branch whenever a model was chosen would tell a person their model
     choice broke a turn that an exhausted subscription broke — and would send

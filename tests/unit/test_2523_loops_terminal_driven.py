@@ -173,15 +173,19 @@ class _DB:
         return rid
 
     def finalize_loop_run(self, rid, **kw):
+        # CAS on status='running', as the real one (#3316).
         for runs in self.runs.values():
             for r in runs:
                 if r["id"] == rid:
+                    if r["status"] != "running":
+                        return False
                     for k, v in kw.items():
                         if k == "execution_id" and v is None:
                             continue
                         r[k] = v
                     r["completed_at"] = "now"
-                    return
+                    return True
+        return False
 
     def list_loop_runs(self, lid):
         return [dict(r) for r in sorted(self.runs.get(lid, []), key=lambda r: r["run_number"])]
@@ -195,6 +199,8 @@ class _DB:
 
     # executions
     def create_task_execution(self, **kw):
+        if kw.get("fields") is not None:  # #1482: inline the parameter object
+            kw.update(vars(kw.pop("fields")))
         eid = f"exec_{len(self.executions) + 1}"
         self.executions[eid] = _Execution(eid)
         return self.executions[eid]
@@ -202,7 +208,8 @@ class _DB:
     def get_execution(self, eid):
         return self.executions.get(eid)
 
-    def update_execution_status(self, *, execution_id, status, error=None, **_kw):
+    def update_execution_status(self, *, execution_id, status, result=None, **_kw):
+        error = result.error if result is not None else None  # #1482
         row = self.executions.get(execution_id)
         if row is None:
             return False

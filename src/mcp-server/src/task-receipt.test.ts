@@ -31,10 +31,10 @@ function stubFetch(routes: Array<[string, Handler]>) {
   return calls;
 }
 
-function json(body: unknown, status = 200) {
+function json(body: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
   });
 }
 
@@ -192,5 +192,61 @@ describe("#2661 chat(): the sequential route honours the same 409 rule", () => {
     stubFetch([["/chat", () => json({ detail: "nope" }, 409)]]);
     const client = new TrinityClient("http://backend:8000", "tok");
     await assert.rejects(() => client.chat("agent-a", "m"), /API error \(409\)/);
+  });
+});
+
+describe("#3245 a replayed response says it is a replay (idempotent_replay)", () => {
+  beforeEach(() => { globalThis.fetch = realFetch; });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (realTimeout === undefined) delete process.env.MCP_CHAT_TIMEOUT_MS;
+    else process.env.MCP_CHAT_TIMEOUT_MS = realTimeout;
+  });
+
+  const RECEIPT = { status: "accepted", execution_id: "ex-replayed-3245", agent_name: "agent-a",
+    async_mode: true, message: "Task accepted." };
+  const REPLAY = { "X-Idempotent-Replay": "true" };
+
+  for (const route of ["task", "chat"] as const) {
+    it(`${route}(): a 200 with X-Idempotent-Replay: true carries idempotent_replay: true`, async () => {
+      stubFetch([[`/${route}`, () => json(RECEIPT, 200, REPLAY)]]);
+      const client = new TrinityClient("http://backend:8000", "tok");
+      const out = await client[route]("agent-a", "m") as Record<string, unknown>;
+      assert.equal(out.idempotent_replay, true);
+      assert.equal(out.execution_id, "ex-replayed-3245");
+    });
+
+    it(`${route}(): a 200 without the header has no idempotent_replay field`, async () => {
+      stubFetch([[`/${route}`, () => json(RECEIPT)]]);
+      const client = new TrinityClient("http://backend:8000", "tok");
+      const out = await client[route]("agent-a", "m") as Record<string, unknown>;
+      assert.equal("idempotent_replay" in out, false);
+    });
+
+    it(`${route}(): the 409 in-flight receipt is marked as a replay`, async () => {
+      stubFetch([[`/${route}`, () => json({ detail: { execution_id: "ex-409-3245" } }, 409)]]);
+      const client = new TrinityClient("http://backend:8000", "tok");
+      const out = await client[route]("agent-a", "m") as Record<string, unknown>;
+      assert.equal(out.idempotent_replay, true);
+      assert.equal(out.execution_id, "ex-409-3245");
+    });
+  }
+
+  it("a non-object replay body is returned unchanged", async () => {
+    stubFetch([["/task", () => json("plain", 200, REPLAY)]]);
+    const client = new TrinityClient("http://backend:8000", "tok");
+    assert.equal(await client.task("agent-a", "m"), "plain");
+  });
+
+  it("the client's own timeout-recovery receipt carries no marker (absence is not 'fresh')", async () => {
+    process.env.MCP_CHAT_TIMEOUT_MS = "20";
+    stubFetch([
+      ["/task", hangUntilAbort],
+      ["/executions?limit=50", () => json([row({ id: "ex-live" })])],
+    ]);
+    const client = new TrinityClient("http://backend:8000", "tok");
+    const out = await client.task("agent-a", "do the thing", undefined, undefined, { keyId: "key-1" }) as Record<string, unknown>;
+    assert.equal(out.execution_id, "ex-live");
+    assert.equal("idempotent_replay" in out, false);
   });
 });

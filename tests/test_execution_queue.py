@@ -10,6 +10,7 @@ Feature Flow: execution-queue.md
 import pytest
 import time
 from testkit.api_client import TrinityApiClient
+from testkit.readiness import require_agent_answer
 from testkit.assertions import (
     assert_status,
     assert_status_in,
@@ -125,6 +126,7 @@ class TestQueueStatusDuringExecution:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_queue_busy_during_chat(
         self,
         api_client: TrinityApiClient,
@@ -162,8 +164,7 @@ class TestQueueStatusDuringExecution:
 
         checker.join()
 
-        if chat_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(chat_response, what="POST /chat")
 
         # We should have detected busy at some point (unless very fast)
         # This is informational - fast responses may not trigger busy
@@ -336,6 +337,7 @@ class TestQueueWithParallelTasks:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_parallel_task_does_not_show_in_queue(
         self,
         api_client: TrinityApiClient,
@@ -358,8 +360,7 @@ class TestQueueWithParallelTasks:
             timeout=30.0
         )
 
-        if task_response.status_code == 503:
-            pytest.skip("Agent server not ready")
+        require_agent_answer(task_response, what="POST /task")
 
         # Async mode returns 202 Accepted with execution_id
         if task_response.status_code not in [200, 202]:

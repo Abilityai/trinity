@@ -7,22 +7,29 @@ Lightweight pub/sub system for inter-agent event pipelines. Agents emit named ev
 - **Event** -- A named occurrence emitted by an agent with a structured JSON payload. Stored in the `agent_events` table.
 - **Subscription** -- A rule that says "when agent X emits event type Y, send agent Z an async task with message template M". Stored in the `agent_event_subscriptions` table.
 - **Message Template** -- The `target_message` of a subscription. Supports `{{payload.field}}` interpolation. The subscriber's task message is built from the event payload.
-- **Permission-Gated** -- Uses existing `agent_permissions`. The subscribing agent must have permission to call the source agent.
+- **Permission-Gated** -- Uses existing `agent_permissions`. The subscribing agent must have permission to call the source agent. Trinity checks this when the subscription is created and again on every delivery, so withdrawing the permission stops deliveries at the next event. The subscription is kept, and granting the permission again resumes it. An agent subscribing to its own events needs no permission (except for the reserved `agent.task.*` namespace, below).
 
 ## How It Works
 
 1. Agent A emits an event: `emit_event(event_type="report_ready", payload={"url": "...", "summary": "..."})`
 2. Trinity checks all subscriptions matching agent A + event type `report_ready`.
 3. For each matching subscription, an async task is dispatched to the subscribing agent.
-4. The task message is built from the subscription's template with payload fields interpolated.
+4. The task message is built from the subscription's template with payload fields interpolated. Each interpolated value is wrapped in `⟦ ⟧`, credential-sanitized and capped at 4000 characters, and the message gets a line telling the subscriber that the marked text is data, not instructions. Event payloads are limited to 64 KiB.
 5. Events are persisted and visible via API.
 6. WebSocket broadcast provides real-time event visibility.
 
+### Delivery limits
+
+Two limits stop an event chain from running away:
+
+- **Chain depth.** When an agent emits an event that matches a subscription, the subscriber's task counts as one more hop in the agent-to-agent call chain. Past the chain-depth limit (default 8) the emit is refused with `403` `inter_agent_depth_exceeded` before anything is stored, and `emit_event` returns it as a `retryable: false` result. See [Agent Network → Chain-Depth Limit](agent-network.md#concepts).
+- **Hourly dispatch cap.** Trinity counts dispatches from one source agent to one subscriber agent per hour, across every subscription between the two. Past the cap (default 120, operator setting `event_dispatch_max_fires_per_hour`, 1–10,000) further dispatches from that source are skipped until the hour resets. The first skip in each hour raises one high-priority alert on the subscriber, saying a subscription may be looping. The event itself is still recorded. If Redis is unavailable, the cap is not enforced.
+
 ## Task-Completion Events (system-emitted)
 
-Trinity deterministically emits `agent.task.completed` and `agent.task.failed` at **every** execution terminal of an agent. These are **system-emitted**: the platform synthesizes them at the execution chokepoint with no agent in the loop. They ride the same subscription machinery as agent-emitted events.
+Trinity deterministically emits `agent.task.completed` and `agent.task.failed` at **every** terminal of a task run of an agent — a schedule, a `parallel=true` delegation, a fan-out subtask, a Chat-tab, Session, Slack/Telegram or public-link turn, and the like. Only the backend's synchronous `/chat` route emits none: a sequential `chat_with_agent` call (`parallel=false`), unless the experimental pull-pilot routing sends it through the task path. These are **system-emitted**: the platform synthesizes them at the execution chokepoint with no agent in the loop. They ride the same subscription machinery as agent-emitted events.
 
-**The win: wake instead of poll.** Subscribe to a worker's `agent.task.completed` (or `agent.task.failed`) and you get an **automatic report-back task** the moment that worker's execution finishes -- no need to hold a call open or poll `get_execution_result`. This is the async-first alternative to `chat_with_agent(async=true)` followed by polling (see [Agent Network](agent-network.md)).
+**The win: wake instead of poll.** Subscribe to a worker's `agent.task.completed` (or `agent.task.failed`) and you get an **automatic report-back task** the moment that worker's execution finishes -- no need to hold a call open or poll `get_execution_result`. This is the async-first alternative to `chat_with_agent(parallel=true, async=true)` followed by polling (see [Agent Network](agent-network.md)).
 
 ```
 subscribe_to_event(
@@ -64,7 +71,7 @@ With **zero matching subscriptions**, nothing happens: no event row is written a
 
 ### Reporting back to the person who asked
 
-Subscriptions wake an *agent*. Independently of them, a job that started from a conversation and finished later — because the agent delegated it to another agent, or kicked off background work — reports its outcome back to the conversation it came from, success and failure alike. Four places can receive that report:
+Subscriptions wake an *agent*. Independently of them, a job that started from a conversation and finished later — because the agent delegated it to another agent, or kicked off background work — reports its outcome back to the conversation it came from, success and failure alike. For agent-to-agent delegation this holds when the agent hands the work off with `chat_with_agent(..., parallel=true, async=true)`, which reports back by default (pass `execution_id="manual"` to keep one call quiet); a plain sequential delegation is not guaranteed to report back separately, since the agent answers with the reply itself. Four places can receive that report:
 
 | Where the job started | Where the outcome lands |
 |-----------------------|-------------------------|
@@ -82,9 +89,9 @@ An ordinary turn that already answered inline is never reported a second time. E
 | Tool | Description |
 |------|-------------|
 | `emit_event(event_type, payload)` | Emit a named event with data |
-| `subscribe_to_event(source_agent, event_type, target_message)` | Create a subscription |
-| `list_event_subscriptions(agent_name)` | List subscriptions |
-| `delete_event_subscription(subscription_id)` | Remove a subscription |
+| `subscribe_to_event(source_agent, event_type, target_message)` | Create a subscription. Needs an agent-scoped key: the caller is the subscriber |
+| `list_event_subscriptions(direction?)` | List the calling agent's subscriptions: `subscriber` (events it listens for), `source` (others listening to it), or `both` (default) |
+| `delete_event_subscription(subscription_id)` | Remove a subscription (the subscribing agent's owner only) |
 
 ### API Endpoints
 
@@ -97,8 +104,8 @@ An ordinary turn that already answered inline is never reported a second time. E
 | `/api/event-subscriptions/{id}` | DELETE | Delete |
 | `/api/events` | POST | Emit event (agent-scoped) |
 | `/api/agents/{name}/emit-event` | POST | Emit for specific agent |
-| `/api/agents/{name}/events` | GET | Event history |
-| `/api/events` | GET | All events |
+| `/api/agents/{name}/events` | GET | Event history for one agent you can access |
+| `/api/events` | GET | Events from the agents you can access (admins see all). Filters: `source_agent`, `event_type`, `limit` (up to 500). A `source_agent` you cannot access returns `403` |
 
 ## See Also
 

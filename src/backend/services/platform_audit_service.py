@@ -43,6 +43,15 @@ class AuditEventType(str, Enum):
     SITE_ACCESS = "site_access"  # SITE-001: agent website proxy visits
     OPERATOR_QUEUE = "operator_queue"  # Issue #1017: bulk clear actions
     NOTIFICATION = "notification"  # Issue #1017: bulk dismiss
+    # trinity-enterprise#478 — metric-point quota and rate events ONLY, never
+    # a row per accepted batch: `audit_log` is append-only and undeletable for
+    # 365 days, so a per-batch row would be up to 86k permanent rows per agent
+    # per day at the cap. An agent hitting its daily cap is the security-
+    # relevant signal; a normal write is visible through the counts.
+    METRICS = "metrics"
+    # trinity-enterprise#820 — one row per write / delete / mkdir through the
+    # agent Files routes (human clicks and capability writes, not a stream).
+    AGENT_FILES = "agent_files"
     SYSTEM = "system"
 
 
@@ -53,6 +62,7 @@ class AuditActorType(str, Enum):
     AGENT = "agent"        # agent container acting on its own
     MCP_CLIENT = "mcp_client"  # external client via MCP API key
     SYSTEM = "system"      # platform itself (scheduler, system agent)
+    EXTERNAL_AGENT = "external_agent"  # a non-Trinity principal verified by protocol (AAuth, ent#623)
 
 
 class PlatformAuditService:
@@ -89,6 +99,10 @@ class PlatformAuditService:
         actor_user: Optional[Any] = None,        # Pydantic User model
         actor_agent_name: Optional[str] = None,
         actor_ip: Optional[str] = None,
+        # ent#623: an external agent identity verified by protocol (AAuth). Such
+        # a caller has no user row, no key and no local agent name, and without
+        # this the row would be attributed to the platform itself.
+        actor_external_id: Optional[str] = None,
         # Explicit actor email, for principals the resolver cannot derive one
         # for. #848 inline-auth callers hold no key, no user row at call time
         # and no agent name — the verified email is their only identity, and
@@ -156,6 +170,7 @@ class PlatformAuditService:
                 actor_agent_name=actor_agent_name,
                 mcp_scope=mcp_scope,
                 mcp_key_id=mcp_key_id,
+                actor_external_id=actor_external_id,
             )
             # Resolver wins when it found a real identity; the explicit value is
             # a fallback, not an override.
@@ -212,10 +227,11 @@ class PlatformAuditService:
         actor_agent_name: Optional[str],
         mcp_scope: Optional[str],
         mcp_key_id: Optional[str],
+        actor_external_id: Optional[str] = None,
     ) -> tuple:
         """Determine (actor_type, actor_id, actor_email) from inputs.
 
-        Precedence: user > agent > mcp_scope=='system' > mcp_client.
+        Precedence: user > agent > external agent > mcp_scope=='system' > mcp_client.
         Returns ('system', 'trinity-system', None) for system events with no
         identifiable actor — never returns all-None so the NOT NULL
         actor_type column is satisfied.
@@ -228,6 +244,8 @@ class PlatformAuditService:
             )
         if actor_agent_name:
             return (AuditActorType.AGENT.value, actor_agent_name, None)
+        if actor_external_id:
+            return (AuditActorType.EXTERNAL_AGENT.value, actor_external_id, None)
         if mcp_scope == "system":
             return (AuditActorType.SYSTEM.value, "trinity-system", None)
         if mcp_key_id:

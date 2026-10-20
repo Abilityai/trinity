@@ -48,7 +48,7 @@ def _deps():
 def _request(method: str, path: str):
     """The two fields the fence reads. It touches no DB and no Redis — which is
     exactly why, unlike the ephemeral fence, it has nothing that can fail open."""
-    return SimpleNamespace(method=method, url=SimpleNamespace(path=path))
+    return SimpleNamespace(method=method, scope={"path": path})
 
 
 # --------------------------------------------------------------------------- #

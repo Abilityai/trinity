@@ -58,7 +58,7 @@
       </div>
 
       <!-- Status / result line -->
-      <p v-if="message" :class="['mt-2 text-sm', error ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-600 dark:text-status-success-400']">
+      <p v-if="message" :class="['mt-2 text-sm', error ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-700 dark:text-status-success-400']">
         {{ message }}
       </p>
       <p v-else-if="status.configured" class="mt-2 text-sm text-gray-600 dark:text-gray-400">
@@ -71,7 +71,7 @@
         No personal token — your new agents fall back to the platform's shared token.
       </p>
 
-      <p class="mt-3 text-xs text-gray-400 dark:text-gray-500">
+      <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
         Stored encrypted; never shown again after saving. A classic token needs the
         <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">repo</code> scope, or use a fine-grained token with Contents read access.
       </p>

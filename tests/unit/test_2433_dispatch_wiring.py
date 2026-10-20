@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from unit._write_params import flat_kwargs
 
 pytestmark = pytest.mark.unit
 
@@ -173,7 +174,7 @@ def test_terminate_cancels_a_locally_parked_execution_without_the_agent():
     assert result == {"status": "cancelled_while_parked", "execution_id": "exec-1"}
     assert calls == [], "a parked row must be cancelled without asking the agent"
     fake_db.update_execution_status.assert_called_once()
-    assert fake_db.update_execution_status.call_args.kwargs["status"] == "cancelled"
+    assert flat_kwargs(fake_db.update_execution_status.call_args)["status"] == "cancelled"
     capacity.release_if_matches.assert_awaited_once_with("agent-a", "exec-1")
 
 
@@ -364,7 +365,7 @@ def test_chat_budget_finalizer_writes_cancelled_and_raises_409_for_a_cancelled_p
                 budget_exc=exc, task_execution_id="exec-1", chat_activity_id="act-1", collaboration_activity_id=None,
             ))
     assert ei.value.status_code == 409
-    assert fake_db.update_execution_status.call_args.kwargs["status"] == "cancelled"
+    assert flat_kwargs(fake_db.update_execution_status.call_args)["status"] == "cancelled"
     assert ca.call_args.kwargs["status"] == "cancelled"
 
 
@@ -378,7 +379,7 @@ def test_chat_budget_finalizer_keeps_failed_503_for_a_real_exhaustion():
                 budget_exc=exc, task_execution_id="exec-1", chat_activity_id="act-1", collaboration_activity_id=None,
             ))
     assert ei.value.status_code == 503
-    assert fake_db.update_execution_status.call_args.kwargs["status"] == "failed"
+    assert flat_kwargs(fake_db.update_execution_status.call_args)["status"] == "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -428,10 +429,10 @@ def _drive_execute_task(post_side_effect):
 def test_execute_task_records_a_cancelled_park_as_cancelled():
     result, mock_db = _drive_execute_task(acl.BackendAgentCallCancelled("agent-a", 3, 8, 12000))
     assert result.status == "cancelled"
-    assert mock_db.update_execution_status.call_args.kwargs["status"] == "cancelled"
+    assert flat_kwargs(mock_db.update_execution_status.call_args)["status"] == "cancelled"
 
 
 def test_execute_task_still_records_a_real_exhaustion_as_failed():
     result, mock_db = _drive_execute_task(acl.BackendAgentCallBudgetExhausted("agent-a", 3, 8, 3600000))
     assert result.status == "failed"
-    assert mock_db.update_execution_status.call_args.kwargs["status"] == "failed"
+    assert flat_kwargs(mock_db.update_execution_status.call_args)["status"] == "failed"

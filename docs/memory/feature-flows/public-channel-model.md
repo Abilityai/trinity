@@ -37,7 +37,7 @@ the agent behaves in my own chats.
 ## Backend
 - `GET /api/agents/{name}/public-channel-model` (any authenticated accessor) → raw
   override, `resolved_model`, `is_overridden`, `platform_default`, `available_models`.
-- `PUT /api/agents/{name}/public-channel-model` (owner-only via `can_user_share_agent`) →
+- `PUT /api/agents/{name}/public-channel-model` (owner-only via `can_user_share_agent`; person-only via `Depends(require_person)`, #2996 — agent- and system-scoped keys get 403 `person_required`) →
   set/clear; 422 on an off-whitelist value; audit `CONFIGURATION:update_public_channel_model`.
 - Both in `routers/agent_config.py`; request model `PublicChannelModelUpdate` (`models.py`).
 

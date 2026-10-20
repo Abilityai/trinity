@@ -93,17 +93,19 @@
 
     <!-- Stats -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+      <!-- #3449: Pending is the global count; the other cards describe the rows
+           loaded below, so the third is "Shown", never a "Total". -->
+      <div data-testid="notif-stat-pending" class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
         <div class="text-3xl font-bold text-status-danger-600 dark:text-status-danger-400">{{ notificationsStore.pendingCount }}</div>
         <div class="text-xs text-gray-500 dark:text-gray-400">Pending</div>
       </div>
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-        <div class="text-3xl font-bold text-status-success-600 dark:text-status-success-400">{{ acknowledgedCount }}</div>
+        <div class="text-3xl font-bold text-status-success-700 dark:text-status-success-400">{{ acknowledgedCount }}</div>
         <div class="text-xs text-gray-500 dark:text-gray-400">Acknowledged</div>
       </div>
-      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-        <div class="text-3xl font-bold text-gray-900 dark:text-white">{{ notificationsStore.totalCount }}</div>
-        <div class="text-xs text-gray-500 dark:text-gray-400">Total</div>
+      <div data-testid="notif-stat-shown" class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+        <div class="text-3xl font-bold text-gray-900 dark:text-white">{{ displayedNotifications.length }}</div>
+        <div class="text-xs text-gray-500 dark:text-gray-400">Shown</div>
       </div>
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
         <div class="text-3xl font-bold text-blue-600 dark:text-blue-400">{{ Object.keys(notificationsStore.agentCounts).length }}</div>
@@ -182,7 +184,7 @@
       <!-- Loading state (#1926) — the body used to render blank during the
            first fetch: neither list, nor empty state, nor spinner. -->
       <div v-if="firstLoad" class="px-6 py-12 text-center" aria-busy="true">
-        <svg class="w-8 h-8 mx-auto mb-4 animate-spin text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24">
+        <svg class="w-8 h-8 mx-auto mb-4 animate-spin text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24">
           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
         </svg>
@@ -265,7 +267,7 @@
                 <span class="px-2 py-0.5 rounded" :class="getTypeBadge(notification.notification_type)">
                   {{ notification.notification_type }}
                 </span>
-                <span v-if="notification.status === 'acknowledged'" class="flex items-center gap-1 text-status-success-600 dark:text-status-success-400">
+                <span v-if="notification.status === 'acknowledged'" class="flex items-center gap-1 text-status-success-700 dark:text-status-success-400">
                   <CheckIcon class="w-3 h-3" />
                   Acknowledged
                 </span>
@@ -608,7 +610,7 @@ function getPriorityIconBg(priority) {
 function getPriorityIconColor(priority) {
   const classes = {
     urgent: 'text-status-danger-600 dark:text-status-danger-400',
-    high: 'text-status-urgent-600 dark:text-status-urgent-400',
+    high: 'text-status-urgent-700 dark:text-status-urgent-400',
     normal: 'text-status-info-600 dark:text-status-info-400',
     low: 'text-gray-600 dark:text-gray-400',
   }

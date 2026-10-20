@@ -157,7 +157,10 @@ describe('queueTypeLabel — desktop QueueCard labels, shared', () => {
     expect(queueTypeLabel('approval')).toBe('Needs approval')
     expect(queueTypeLabel('question')).toBe('Question')
     expect(queueTypeLabel('alert')).toBe('Heads up')
-    expect(QUEUE_TYPE_LABELS).toEqual({ approval: 'Needs approval', question: 'Question', alert: 'Heads up' })
+    // #3130: plus the budgeted flood alarm, labelled as the alert it was.
+    expect(QUEUE_TYPE_LABELS).toEqual({
+      approval: 'Needs approval', question: 'Question', alert: 'Heads up', queue_flood: 'Heads up',
+    })
   })
   it('falls back to the raw type string, and to "" when there is none — never a blank from a wrong field name', () => {
     expect(queueTypeLabel('custom')).toBe('custom')

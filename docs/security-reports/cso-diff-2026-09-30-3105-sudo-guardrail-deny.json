@@ -1,0 +1,59 @@
+{
+  "version": "1.1",
+  "date": "2026-09-30",
+  "mode": "diff",
+  "scope": "all",
+  "confidence_gate": 8,
+  "branch": "feature/3105-sudo-guardrail-deny",
+  "issue": "abilityai/trinity#3105",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "bash_hook_patterns": 2,
+    "health_fields": 1
+  },
+  "findings": [],
+  "fixed_during_audit": [
+    {
+      "severity": "HIGH",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "category": "guardrail-bypass",
+      "title": "bash_deny regex backtracking outlasts the hook timeout",
+      "file": "docker/base-image/hooks/guardrails-baseline.json",
+      "test": "tests/unit/test_3105_sudo_guardrail_deny.py::test_patterns_do_not_backtrack"
+    }
+  ],
+  "appendix": [
+    "/health guardrails_registration enum visible to agent-network peers",
+    "regex evasion via variables/encoding is a documented limit"
+  ],
+  "supply_chain_summary": "unchanged",
+  "filter_stats": {
+    "candidates": 4,
+    "reported": 0,
+    "fixed": 1
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "n/a (diff)"
+}

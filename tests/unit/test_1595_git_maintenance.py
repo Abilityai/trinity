@@ -433,7 +433,10 @@ class TestSyncStateWriter:
 
 
 class TestAutoSyncCycle:
-    def test_skips_when_repo_lock_held(self, repo):
+    def test_skips_when_repo_lock_held(self, repo, monkeypatch):
+        # PR #3021: a background cycle now waits a bounded time for the lock;
+        # 0 restores the immediate skip this test pins.
+        monkeypatch.setenv("GIT_SYNC_LOCK_WAIT_SECONDS", "0")
         assert _REPO_LOCK.acquire(blocking=False)
         try:
             result = _run_auto_sync_once(repo)
@@ -532,6 +535,11 @@ class TestLoopDispatchesViaThread:
             raise asyncio.CancelledError  # first iteration is enough
 
         monkeypatch.setattr(auto_sync.asyncio, "to_thread", _fake_to_thread)
+        # #3010: each cycle is gated on the owner's flag; with no platform to
+        # ask, the env decides — enabled here so the first cycle dispatches.
+        for var in ("TRINITY_BACKEND_URL", "TRINITY_MCP_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("GIT_SYNC_AUTO", "true")
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(auto_sync.run_auto_sync_loop(repo, interval_seconds=0))
         # Resolve the expected function through sys.modules at assert time:

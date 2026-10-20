@@ -58,8 +58,8 @@ describe("connector tools", () => {
     await tools.runPlaybook.execute({ name: "cso", input: "scan repo" }, { session: session("agent-1") });
     assert.equal(chats.length, 1);
     assert.equal(chats[0].agent, "agent-1");
-    assert.match(chats[0].message, /cso/);
-    assert.match(chats[0].message, /scan repo/);
+    // #3274: the slash form is what the skill gate reads, pinned exactly.
+    assert.equal(chats[0].message, "/cso scan repo");
   });
 
   it("run_playbook refuses a playbook the connector does not expose", async () => {

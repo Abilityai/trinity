@@ -35,8 +35,9 @@ from services.template_service import (
     collect_mcp_credential_warnings,
 )
 from services.docker_service import get_agent_container
-from services.docker_utils import container_stop, container_start
+from services.docker_utils import container_stop, container_start, agent_volume_labels
 from utils.helpers import sanitize_agent_name
+from dependencies import agent_may_reach
 from services.settings_service import get_agent_quota_for_role
 from redis_breaker_util import SingleFlightLock  # #1920 shared single-flight lock
 from services.mcp_validator import validate_mcp_config, McpValidationError
@@ -544,10 +545,7 @@ def _ensure_fresh_workspace_volume(client, workspace_vol: str, version_name: str
 
     client.volumes.create(
         name=workspace_vol,
-        labels={
-            "trinity.platform": "agent-workspace",
-            "trinity.agent-name": version_name,
-        },
+        labels=agent_volume_labels(version_name, "agent-workspace"),
     )
 
 
@@ -1109,6 +1107,24 @@ async def deploy_local_agent_logic(
         # 6b. Agent quota enforcement: per-role limits (QUOTA-001)
         # Skip for redeploys of existing agents owned by this user
         existing_versions = get_agents_by_prefix(base_name)
+        # Refuse a base name the caller may not manage (trinity-enterprise#872)
+        # — before the quota check, the deploy lock and the stop-previous
+        # step below, which would otherwise stop another user's agent (or, for
+        # an admin-owned agent key, a sibling it did not spawn) and create
+        # `<base>-N` beside it.
+        for v in existing_versions:
+            if not (
+                db.can_user_share_agent(current_user.username, v.name)
+                and agent_may_reach(current_user, v.name, manage=True)
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "error": f"Agent name '{base_name}' is in use by an agent you cannot manage. "
+                                 f"Choose a different name.",
+                        "code": "NAME_OWNED_BY_ANOTHER_USER"
+                    }
+                )
         owned = db.get_agents_by_owner(current_user.username)
         is_redeploy = any(v.name in owned for v in existing_versions)
         if not is_redeploy:

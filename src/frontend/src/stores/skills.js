@@ -17,6 +17,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import api from '../api'
+import { pendingApprovalMessage } from '../utils/skillGate'
 
 // #2703 — a bulk PUT that delivers several skills fires ONE `agent_skills_changed`,
 // but a Library click storm fires many; consumers refetch once per burst.
@@ -33,6 +34,11 @@ export const useSkillsStore = defineStore('skills', () => {
   const agentName = ref(null)
 
   const loading = ref(false)
+  // #754: this agent's Shared reads have all answered (status, assignments,
+  // the library list when configured, then the sets read). Until then nothing
+  // may be inferred from `assigned` being empty — not "No shared skills yet",
+  // not "left over from the library", not an Assign draft.
+  const sharedLoaded = ref(false)
   const saving = ref(false)
   const injecting = ref(false)
   const error = ref(null)
@@ -46,6 +52,51 @@ export const useSkillsStore = defineStore('skills', () => {
 
   const assignedNames = computed(() => new Set(assigned.value.map(s => s.skill_name)))
 
+  // ent#530 — skill sets. `sets` is the agent's assigned sets with their honest
+  // status (GET /skill-sets); `librarySets` is what could be assigned. Both are
+  // context beside the skills list, so a failed read is its own named state
+  // (`setsError`) and never blanks the skills.
+  const sets = ref([])
+  const librarySets = ref([])
+  const setsError = ref(null)
+  const setsLoaded = ref(false)
+  const setBusy = ref(null)          // the set name being written, not a boolean
+  const setWriteError = ref(null)
+  const lastSetResult = ref(null)    // {set_name, members_added, status, suggested_schedules}
+  const removalDeferred = ref(null)  // the set whose unassign could not remove its members yet
+
+  // Names present ONLY because an assigned set names them. The bulk PUT sends
+  // the individual list; these are shown ticked-and-locked, since unticking one
+  // cannot remove it while its set is assigned.
+  const setOnlyNames = computed(() => new Set(
+    assigned.value.filter(s => s.individual === false).map(s => s.skill_name)
+  ))
+  const individualNames = computed(() => new Set(
+    assigned.value.filter(s => s.individual !== false).map(s => s.skill_name)
+  ))
+  function viaSets(name) {
+    return assigned.value.find(s => s.skill_name === name)?.via_sets || []
+  }
+  const assignableSets = computed(() => {
+    const held = new Set(sets.value.map(x => x.name))
+    return librarySets.value.filter(x => !held.has(x.name))
+  })
+
+  // trinity-enterprise#754 — the agent's OWN listing (its `.claude/skills/`),
+  // from `GET /playbooks?last_known=true`: live when the agent answers, else the
+  // last successful listing the platform kept. It describes the container, not
+  // the platform's assignments, so it is held apart from `assigned`.
+  //   agentListState: idle | live | last_known | none (stopped/unreachable, no
+  //   copy kept — a known state, not a failure) | failed (the read itself failed)
+  const agentList = ref([])
+  const agentListPaths = ref([])
+  const agentListState = ref('idle')
+  const agentListAt = ref(null)        // captured_at of a last-known list
+  const agentListReason = ref(null)    // stopped | unreachable, for a last-known list
+  const agentListError = ref(null)
+  const agentListLoaded = ref(false)   // a read has SUCCEEDED (live, last-known or none)
+  let agentListSeq = 0
+
   // #2703 — the delivery report of the LAST save: {status, reason?, skills:{...}}
   // — see `utils/skillDelivery.js` for the wording. Kept beside
   // `injectionResults` for the same reason that one is separate from
@@ -54,7 +105,7 @@ export const useSkillsStore = defineStore('skills', () => {
 
   // #2703 — per-agent "the listing changed" ticks, driven by the thin
   // `agent_skills_changed` WS trigger. Consumers that own a `loadPlaybooks()`
-  // (ChatPanel, PlaybooksPanel, usePlaybookAutocomplete) watch their agent's
+  // (ChatPanel, SkillsTab, usePlaybookAutocomplete) watch their agent's
   // entry and refetch through the access-controlled route; the payload carries
   // no skill names (the #918 / ent#305 rule). Debounced per agent here so the
   // consumers stay dumb.
@@ -74,12 +125,20 @@ export const useSkillsStore = defineStore('skills', () => {
     library.value.filter(s => assignedNames.value.has(s.name))
   )
 
+  // #2914 — names whose assignment row carries `delivery_status: 'conflict'`:
+  // the agent has its own `.claude/skills/<name>/`, the platform refused to
+  // write over it, and the agent's copy is what runs. Durable (it rides the
+  // row, not the session's last injection), so the tab shows it on load.
+  const conflictNames = computed(() => new Set(
+    assigned.value.filter(s => s.delivery_status === 'conflict').map(s => s.skill_name)
+  ))
+
   /**
    * Why the tab has nothing to show, as a single discriminator so the panel
    * never renders a dead empty state (explicit AC).
    */
   const emptyReason = computed(() => {
-    if (!libraryStatus.value) return null
+    if (!sharedLoaded.value || !libraryStatus.value) return null
     if (!libraryStatus.value.configured) return 'library_unconfigured'
     if (library.value.length === 0) return 'library_empty'
     if (assigned.value.length === 0) return 'none_assigned'
@@ -90,13 +149,108 @@ export const useSkillsStore = defineStore('skills', () => {
     if (agentName.value !== name) {
       agentName.value = name
       assigned.value = []
+      sharedLoaded.value = false
+      sets.value = []
+      setsError.value = null
+      setsLoaded.value = false
+      lastSetResult.value = null
+      removalDeferred.value = null
+      setWriteError.value = null
       injectionResults.value = {}
       lastInjectionAt.value = null
+      lastDelivery.value = null
+      // #754: a verb still in flight for the previous agent is not this one's
+      // (its answer is dropped below), so its busy flags do not carry over.
+      saving.value = false
+      injecting.value = false
+      setBusy.value = null
+      resetAgentList()
     }
   }
 
+  function resetAgentList() {
+    agentList.value = []
+    agentListPaths.value = []
+    agentListState.value = 'idle'
+    agentListAt.value = null
+    agentListReason.value = null
+    agentListError.value = null
+    agentListLoaded.value = false
+  }
+
+  /**
+   * #754: the agent's own listing. A stopped or unreachable agent answers its
+   * last-known list (labelled with when and why); with no kept copy the
+   * answer is a 503/504/404, which is "none", a KNOWN state. Only any other
+   * failure is `failed`, and a failed refresh keeps what is on screen (the
+   * design system's stale rule: never overwrite data with an empty payload).
+   */
+  async function loadAgentList(name = agentName.value) {
+    if (!name) return
+    const seq = ++agentListSeq
+    try {
+      const { data } = await api.get(`/api/agents/${name}/playbooks`, { params: { last_known: true } })
+      if (seq !== agentListSeq || name !== agentName.value) return
+      if (!Array.isArray(data?.skills)) {
+        // Plan §3: a 200 that is not a listing is a failure to name, never an
+        // empty list ("this agent has no skills of its own").
+        agentListError.value = "The agent answered without a skills list"
+        if (!agentListLoaded.value) agentListState.value = 'failed'
+        return
+      }
+      agentList.value = data.skills
+      // An image whose server runs as `developer` scans one folder under two
+      // names and lists it twice; each folder is named once.
+      agentListPaths.value = Array.isArray(data?.skill_paths) ? [...new Set(data.skill_paths)] : []
+      agentListState.value = data?.last_known ? 'last_known' : 'live'
+      agentListAt.value = data?.last_known?.captured_at || null
+      agentListReason.value = data?.last_known?.reason || null
+      agentListError.value = null
+      agentListLoaded.value = true
+    } catch (e) {
+      if (seq !== agentListSeq || name !== agentName.value) return
+      if ([404, 503, 504].includes(e?.response?.status)) {
+        agentList.value = []
+        agentListPaths.value = []
+        agentListState.value = 'none'
+        agentListAt.value = null
+        agentListReason.value = null
+        agentListError.value = null
+        agentListLoaded.value = true
+        return
+      }
+      agentListError.value = detailText(e, "Could not load this agent's skills")
+      if (!agentListLoaded.value) agentListState.value = 'failed'
+    }
+  }
+
+  /**
+   * #754: run a skill now. `async_mode` — the shared client times out at 30 s
+   * and a run can take far longer, so the run is accepted and opened on the
+   * Tasks tab rather than awaited here. A 202 is a raised approval (nothing
+   * ran, trinity#3274); a refusal or any other failure throws to the caller.
+   * @returns {Promise<{held: string} | {executionId: string|null}>}
+   */
+  async function runSkill(skillName) {
+    const response = await api.post(`/api/agents/${agentName.value}/task`, {
+      message: `/${skillName}`,
+      async_mode: true,
+    })
+    const held = pendingApprovalMessage(response)
+    if (held) return { held }
+    const data = response?.data || {}
+    return { executionId: data.execution_id ?? data.task_execution_id ?? null }
+  }
+
+  // #754: the tab stays open across agents (AgentDetail is KeepAlive'd), so
+  // every answer below is checked against the agent it was asked for — an
+  // answer for a previous agent is dropped, never shown or written as this one's.
+  let loadSeq = 0
+
   async function load(name) {
     setAgent(name)
+    const seq = ++loadSeq
+    const current = () => seq === loadSeq && name === agentName.value
     loading.value = true
     error.value = null
     try {
@@ -106,6 +260,7 @@ export const useSkillsStore = defineStore('skills', () => {
         api.get('/api/skills/library/status'),
         api.get(`/api/agents/${name}/skills`),
       ])
+      if (!current()) return
       libraryStatus.value = status.data
       assigned.value = mine.data || []
 
@@ -118,35 +273,120 @@ export const useSkillsStore = defineStore('skills', () => {
       // failure and must say so.
       if (libraryStatus.value?.configured) {
         const lib = await api.get('/api/skills/library')
+        if (!current()) return
         library.value = lib.data || []
+        await loadSets()
+        if (!current()) return
       } else {
         library.value = []
       }
+      sharedLoaded.value = true
     } catch (e) {
+      if (!current()) return
       error.value = e?.response?.data?.detail || 'Could not load skills'
     } finally {
-      loading.value = false
+      if (seq === loadSeq) loading.value = false
     }
   }
 
-  /** Bulk save — the whole assignment set in one PUT (AC: bulk save supported). */
+  /** ent#530 — never throws: a set outage is named in `setsError`, the skills still render. */
+  async function loadSets() {
+    const name = agentName.value
+    try {
+      const [mine, lib] = await Promise.all([
+        // probe: the Skills tab is where missing credentials are flagged (one exec per load).
+        api.get(`/api/agents/${name}/skill-sets`, { params: { probe: true } }),
+        api.get('/api/skills/library/sets'),
+      ])
+      if (name !== agentName.value) return
+      sets.value = mine.data || []
+      librarySets.value = lib.data || []
+      setsError.value = null
+      setsLoaded.value = true
+    } catch (e) {
+      if (name !== agentName.value) return
+      setsError.value = detailText(e, 'Could not load skill sets')
+    }
+  }
+
+  async function _refreshRows(name) {
+    try {
+      const { data } = await api.get(`/api/agents/${name}/skills`)
+      if (name === agentName.value) assigned.value = data || []
+    } catch { /* keep the previous rows; loadSets reports its own failure */ }
+    if (name === agentName.value) await loadSets()
+  }
+
+  async function assignSet(setName) {
+    const name = agentName.value
+    setBusy.value = setName
+    setWriteError.value = null
+    try {
+      const { data } = await api.post(
+        `/api/agents/${name}/skill-sets/${encodeURIComponent(setName)}`,
+        {}, { timeout: ASSIGN_TIMEOUT_MS },
+      )
+      if (name !== agentName.value) return null
+      lastSetResult.value = data || null
+      lastDelivery.value = data?.delivery ?? null
+      await _refreshRows(name)
+      return true
+    } catch (e) {
+      if (name !== agentName.value) return null
+      setWriteError.value = detailText(e, `Could not assign set ${setName}`)
+      return false
+    } finally {
+      if (name === agentName.value) setBusy.value = null
+    }
+  }
+
+  async function unassignSet(setName) {
+    const name = agentName.value
+    setBusy.value = setName
+    setWriteError.value = null
+    try {
+      const { data } = await api.delete(`/api/agents/${name}/skill-sets/${encodeURIComponent(setName)}`)
+      if (name !== agentName.value) return null
+      if (lastSetResult.value?.set_name === setName) lastSetResult.value = null
+      removalDeferred.value = data?.removal_deferred ? setName : null
+      await _refreshRows(name)
+      return true
+    } catch (e) {
+      if (name !== agentName.value) return null
+      setWriteError.value = detailText(e, `Could not unassign set ${setName}`)
+      return false
+    } finally {
+      if (name === agentName.value) setBusy.value = null
+    }
+  }
+
+  /**
+   * Bulk save — the whole assignment set in one PUT (AC: bulk save supported).
+   * @returns {Promise<boolean|null>} true saved, false failed, null when the
+   *   page moved to another agent meanwhile (the save may have landed on the
+   *   previous agent; nothing about it is shown on this one).
+   */
   async function saveAssignments(names) {
+    const name = agentName.value
     saving.value = true
     error.value = null
     try {
       const { data: saved } = await api.put(
-        `/api/agents/${agentName.value}/skills`, { skills: names }, { timeout: ASSIGN_TIMEOUT_MS },
+        `/api/agents/${name}/skills`, { skills: names }, { timeout: ASSIGN_TIMEOUT_MS },
       )
+      if (name !== agentName.value) return null
       // #2703: the PUT now delivers; `null` means nothing was added.
       lastDelivery.value = saved?.delivery ?? null
-      const { data } = await api.get(`/api/agents/${agentName.value}/skills`)
+      const { data } = await api.get(`/api/agents/${name}/skills`)
+      if (name !== agentName.value) return null
       assigned.value = data || []
       return true
     } catch (e) {
+      if (name !== agentName.value) return null
       error.value = e?.response?.data?.detail || 'Could not save skill assignments'
       return false
     } finally {
-      saving.value = false
+      if (name === agentName.value) saving.value = false
     }
   }
 
@@ -161,14 +401,25 @@ export const useSkillsStore = defineStore('skills', () => {
    * green check.
    */
   async function inject() {
+    const name = agentName.value
     injecting.value = true
     error.value = null
     try {
-      const { data } = await api.post(`/api/agents/${agentName.value}/skills/inject`)
+      const { data } = await api.post(`/api/agents/${name}/skills/inject`)
+      if (name !== agentName.value) return null
       injectionResults.value = data?.results || {}
       lastInjectionAt.value = new Date().toISOString()
+      // #2914: the sync also rewrites each row's durable verdict (`conflict`
+      // stamped or cleared), and the conflict badge reads the ROW so it
+      // survives a reload — so re-read the rows, not just this run's results.
+      // Best-effort: the results above are already the honest answer.
+      try {
+        const { data: rows } = await api.get(`/api/agents/${name}/skills`)
+        if (name === agentName.value) assigned.value = rows || []
+      } catch { /* keep the previous rows; the injection results still render */ }
       return data
     } catch (e) {
+      if (name !== agentName.value) return null
       // 409 = an injection is already running (SkillInjectionBusy). Say so
       // rather than reporting a generic failure the operator can't act on.
       error.value = e?.response?.status === 409
@@ -176,27 +427,48 @@ export const useSkillsStore = defineStore('skills', () => {
         : (e?.response?.data?.detail || 'Skill sync failed')
       return null
     } finally {
-      injecting.value = false
+      if (name === agentName.value) injecting.value = false
     }
   }
 
   function clear() {
     agentName.value = null
     assigned.value = []
+    sharedLoaded.value = false
+    sets.value = []
+    librarySets.value = []
+    setsError.value = null
+    setsLoaded.value = false
+    setWriteError.value = null
+    lastSetResult.value = null
+    removalDeferred.value = null
     library.value = []
     libraryStatus.value = null
     injectionResults.value = {}
     lastInjectionAt.value = null
     lastDelivery.value = null
     error.value = null
+    resetAgentList()
   }
 
   return {
     library, libraryStatus, assigned, agentName,
-    loading, saving, injecting, error,
+    loading, sharedLoaded, saving, injecting, error,
     injectionResults, lastInjectionAt, lastDelivery,
     changedAt, noteSkillsChanged,
-    assignedNames, assignedSkills, emptyReason,
+    assignedNames, assignedSkills, conflictNames, emptyReason,
     setAgent, load, saveAssignments, inject, clear,
+    sets, librarySets, setsError, setsLoaded, setBusy, setWriteError, lastSetResult, removalDeferred,
+    setOnlyNames, individualNames, assignableSets, viaSets,
+    loadSets, assignSet, unassignSet,
+    agentList, agentListPaths, agentListState, agentListAt, agentListReason, agentListError, agentListLoaded,
+    loadAgentList, runSkill,
   }
 })
+
+/** A named refusal carries `{code, message}` (ent#530); older routes a string. */
+export function detailText(e, fallback) {
+  const d = e?.response?.data?.detail
+  if (d && typeof d === 'object') return d.message || fallback
+  return d || fallback
+}

@@ -51,6 +51,7 @@ import logging
 from typing import Optional
 
 from database import db
+from utils.admin_identity import admin_username
 from models import AgentConfig, User
 from services.docker_service import docker_client
 from redis_breaker_util import get_breaker_redis, SingleFlightLock
@@ -59,7 +60,6 @@ logger = logging.getLogger(__name__)
 
 CORNELIUS_AGENT_NAME = "cornelius"
 CORNELIUS_TEMPLATE = "github:Abilityai/cornelius"
-CORNELIUS_OWNER = "admin"  # seeded under the admin account, like the system agent
 
 # Durable "already seeded" marker (system_settings KV — no migration).
 _SEEDED_FLAG = "cornelius_seeded"
@@ -130,7 +130,7 @@ class CorneliusAgentService:
         # 3. Owner must exist. On a truly-fresh pre-setup boot the admin row is not
         #    created until first-time setup completes; skip WITHOUT setting the flag
         #    so the setup-completion trigger (or a later boot) retries.
-        admin_row = db.get_user_by_username(CORNELIUS_OWNER)
+        admin_row = db.get_user_by_username(admin_username())
         if not admin_row:
             return self._skip(
                 result, "deferred",
@@ -210,16 +210,40 @@ class CorneliusAgentService:
         `request=None` — the HTTP request object is not dereferenced by the create
         path (verified).
         """
+        # The routers FACADE, not `services.agent_service.crud` directly: the
+        # facade injects `ws_manager`, and without one the `agent_created`
+        # broadcast is a silent no-op — an already-open browser is never told
+        # this agent exists. `system_service._default_create_agent_fn` documents
+        # the same choice for the fleet seeder; taking the service door here
+        # made Cornelius the one seeded agent that announced nothing.
         # Imported lazily to avoid a router/service import cycle at module load.
-        from services.agent_service.crud import create_agent_internal
+        from routers.agents import create_agent_internal
 
         config = AgentConfig(
             name=CORNELIUS_AGENT_NAME,
             template=CORNELIUS_TEMPLATE,
             # resources / tools / capabilities / runtime are read from the bundled
             # template.yaml inside create_agent_internal.
+            # trinity-enterprise#705: pinned pull-only. The template is a SHARED
+            # public upstream; the agent-default working branch would push this
+            # agent's knowledge base into it whenever the resolved token happens
+            # to have write access there (the ent#162 class).
+            kind="deployment",
+            source_mode=True,
         )
-        await create_agent_internal(config, admin_user, request=None)
+        # The template declares `fork_to_own: required` (2026-09-11), which the
+        # clone path enforces by 400 for any caller that does not fork. The
+        # seeder structurally cannot: it runs at first boot with no user present
+        # and no token to fork with, so before this door every fresh install
+        # ended with three agents and a "Cornelius seed failed" alert.
+        #
+        # What makes the door safe is the pin above, not the flag: the gate
+        # exists to stop a push into the shared upstream, and a pull-only agent
+        # has none. `_apply_fork_to_own` re-checks that shape itself, so this
+        # flag cannot open the gate for a create that could push.
+        await create_agent_internal(
+            config, admin_user, request=None, allow_unforked_pull_only=True,
+        )
 
     def _agent_is_present(self) -> bool:
         """Is a Cornelius actually claiming the name? (#1790)

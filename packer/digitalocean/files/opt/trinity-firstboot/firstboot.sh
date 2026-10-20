@@ -1,6 +1,7 @@
 #!/bin/bash
-# First-boot configuration for a Trinity DigitalOcean 1-Click droplet (#2281).
-# Runs ONCE per droplet, from /var/lib/cloud/scripts/per-instance/001-trinity.
+# First-boot configuration for a Trinity DigitalOcean 1-Click droplet (#2281)
+# and a Trinity AWS Marketplace instance (#3004). Runs ONCE per instance, from
+# /var/lib/cloud/scripts/per-instance/001-trinity.
 #
 # Everything droplet-specific happens here and nothing here is baked into the
 # snapshot. Almost all of it is now `start.sh --provision --site-only`, which is
@@ -20,7 +21,15 @@ CRED_FILE="${STATE_DIR}/admin-credentials"
 USER_SUPPLIED_PW="${STATE_DIR}/admin-password"
 TRINITY_DIR=/opt/trinity
 LOG=/var/log/trinity-firstboot.log
+# Which image this is, baked by 01-provision.sh. Absent on snapshots built
+# before #3004, which were all DigitalOcean.
+CLOUD="$(cat "${STATE_DIR}/cloud" 2>/dev/null || echo digitalocean)"
 
+# Root-only before anything is written to it: the log records the admin path
+# and the instance's setup, and a new file would otherwise take the default
+# umask.
+touch "$LOG"
+chmod 0600 "$LOG"
 exec > >(tee -a "$LOG") 2>&1
 echo "=== Trinity first boot: $(date -u +%FT%TZ) ==="
 
@@ -48,15 +57,27 @@ chmod 0700 "$STATE_DIR"
 # Accepted risk (2026-09-10): until that first visit, anyone who finds the IP
 # can claim the instance. It is empty at that moment and can be destroyed; see
 # docs/DEPLOYMENT.md -> Security Recommendations.
+#
+# AWS (#3004) takes neither path. Marketplace review requires the first admin to
+# prove control of the instance with a value unique to it, and forbids requiring
+# user data. So an AWS instance ignores any user-data password and exports
+# ADMIN_PASSWORD_SOURCE=instance-id: start.sh writes the instance ID from IMDSv2
+# to the claim file, and /setup asks for it before creating the admin.
 # --- admin-source (behaviour-tested; see test_2281_firstboot_password) ---
 ADMIN_PASSWORD=""
-if [ -s "$USER_SUPPLIED_PW" ]; then
+if [ "${CLOUD:-}" = "aws" ]; then
+    rm -f "$USER_SUPPLIED_PW"
+elif [ -s "$USER_SUPPLIED_PW" ]; then
     ADMIN_PASSWORD="$(head -c 512 "$USER_SUPPLIED_PW" | tr -d '\r\n')"
     shred -u "$USER_SUPPLIED_PW" 2>/dev/null || rm -f "$USER_SUPPLIED_PW"
 fi
 if [ -n "$ADMIN_PASSWORD" ]; then
     PW_SOURCE="user-data"
     export ADMIN_PASSWORD
+elif [ "${CLOUD:-}" = "aws" ]; then
+    PW_SOURCE="instance-id"
+    unset ADMIN_PASSWORD
+    export ADMIN_PASSWORD_SOURCE=instance-id
 else
     PW_SOURCE="browser"
     unset ADMIN_PASSWORD
@@ -99,10 +120,18 @@ fi
 # The admin source travels in the environment exported above: ADMIN_PASSWORD
 # (user-data) or ADMIN_PASSWORD_SOURCE=browser (claim at /setup). start.sh
 # persists either into .env.
+#
+# The AWS image passes `--cloud aws --provenance aws-marketplace` (#3004).
 cd "$TRINITY_DIR"
 export TRINITY_IMAGE_TAG="$(cat "${STATE_DIR}/baked-image-tag" 2>/dev/null || echo latest)"
-./scripts/deploy/start.sh \
-    --provision --cloud digitalocean --site-only --provenance do-marketplace \
-    --hosted --unattended
+if [ "$CLOUD" = "aws" ]; then
+    ./scripts/deploy/start.sh \
+        --provision --cloud aws --site-only --provenance aws-marketplace \
+        --hosted --unattended
+else
+    ./scripts/deploy/start.sh \
+        --provision --cloud digitalocean --site-only --provenance do-marketplace \
+        --hosted --unattended
+fi
 
 echo "=== Trinity first boot complete ==="

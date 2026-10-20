@@ -1,0 +1,70 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-05",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/752-gated-skill-hook",
+  "issue": "abilityai/trinity-enterprise#752",
+  "base": "09f9d0868",
+  "commits": [],
+  "audited": "uncommitted worktree diff against 09f9d0868 plus untracked files (36 changed +897/-69, 15 new)",
+  "counts_as_full_run": false,
+  "phases_run": [0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "phases_not_applicable": {
+    "3": "no dependency manifest, lockfile or install line in the diff",
+    "4": "no workflow in the diff"
+  },
+  "stack_cve_quicklist": [
+    {"component": "starlette", "verdict": "not reachable", "why": "the new route gates on the key (get_self_agent), not a path; dependencies.py fences read request.scope['path']"},
+    {"component": "claude-code", "verdict": "patched", "pin": "2.1.281", "note": "exec-form spawn verified in the 2.1.281 bundle; CLI pin ratchet added (test_ent752_cli_pin.py)"},
+    {"component": "runc/docker-host", "verdict": "operator host check", "note": "marker exec adds docker exec only for gated agents, rate-limited"},
+    {"component": "node-clis-base-image", "verdict": "patched", "note": "gemini-cli 0.62.0 and codex 0.147.0 are pinned; the row's 'unpinned' premise is stale"},
+    {"component": "vite/vitest/axios/redis", "verdict": "not touched"}
+  ],
+  "attack_surface": {
+    "new_endpoints": ["POST /api/skill-gate/check (agent-callable, key-derived agent, AGENT_CALLABLE census)"],
+    "unauthenticated_changes": ["agent /health gains skill_gate_hook (enum only)"],
+    "in_container_processes": ["PreToolUse hook on Skill|Agent|Task, runs as developer, exec form, env -i, -I -S"],
+    "privileged_exec": ["root docker exec with a constant argv writes/removes /opt/trinity/skill-gates-active"],
+    "agent_context_ingress": ["refusal tool result: platform text + matched gate keys + the agent's own subagent value (one line, 128 chars)"],
+    "backend_to_agent": ["/api/chat payload isolated_session via agent_post_with_retry"],
+    "schema": "none (new state value in skill_gate_requests)"
+  },
+  "checks": [
+    {"phase": 2, "check": "secret prefixes in added non-test lines", "result": "none"},
+    {"phase": 2, "check": "key never logged / never in argv", "evidence": "test_each_outcome_is_logged_without_the_key; Authorization header only"},
+    {"phase": 5, "check": "image ends as developer; root-owned hook files; main managed-settings.json untouched", "evidence": "test_ent752_managed_registration.py"},
+    {"phase": 6, "check": "agent self boundary on the new route", "evidence": "test_ent752_check_endpoint.py (6 non-self principals 403, gone-agent 404, sibling answers about itself, agent-naming body 422)"},
+    {"phase": 7, "check": "auth guards", "evidence": "test_293, test_2996_human_only_routes, test_1310_auth_wiring, test_186, test_ent614, test_agent_auth_header_guard, test_292, test_2036 — 259 passed"},
+    {"phase": 7, "check": "runtime route census", "evidence": "ran via a scratch interpreter stubbing only opentelemetry.exporter: 3/3 passed; CI runs it natively"},
+    {"phase": 7, "check": "hook never exits 1, never hangs", "evidence": "crash injection x4 + logger-start failure; 10 s deadline; FIFO traps"},
+    {"phase": 8, "check": "invisible/bidi/tag-block unicode over 51 files", "result": "0 hits"},
+    {"phase": 9, "check": "A01 clearance binding uniform", "evidence": "test_every_run_id_costs_the_same_two_reads; ended-record states clear nothing"},
+    {"phase": 9, "check": "A09 refusal audit bounded", "evidence": "test_an_agent_cannot_fill_the_audit_log_by_varying_the_run_id"},
+    {"phase": 9, "check": "A10 failure direction stated on every new guard", "result": "stated"}
+  ],
+  "findings": [],
+  "hypotheses": [],
+  "considered_and_dismissed": [
+    "heal triggers a root exec on the agent's own container: constant argv, map-derived effect, 1 per agent per 5 min",
+    "an agent learns whether a skill is gated on itself: by design (#751 contract thread point 4)",
+    "the hook reads files the agent can read: same user; names never persisted",
+    "empty LD_* pins: glibc ignores empty values",
+    "agent-authored names in its own guardrails log line: agent output, not a platform credential (not the ent#292 class)",
+    "stated limit understated (nested claude needs no forged id: a /<skill> prompt expands with no tool call) — corrected in this branch"
+  ],
+  "coverage_gaps": [
+    "no base-image build in this run (operator constraint: no local Docker operations); build smoke, image ownership/modes, runtime UIDs, .pth census and the hook inside a real agent container pending /verify-local + localhost eyeball"
+  ],
+  "supply_chain_summary": {"scanner": "none (no dependency change in the diff)", "new_dependencies": 0},
+  "filter_stats": {"candidates_considered": 6, "reported": 0, "below_gate": 0},
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "trend": {
+    "prior": "cso-diff-2026-10-02-ent751-gated-skills",
+    "resolved": [],
+    "persistent": [],
+    "new": [],
+    "note": "the #751 report's open note (prose / resumed-context invocations are #752's lane) is closed for Claude Code, open for Codex/Gemini (D4)"
+  },
+  "remediation": []
+}

@@ -1,32 +1,26 @@
 /**
- * Sync health indicator helpers (#389 S1).
+ * Sync health indicator helpers (#389 S1, trinity-enterprise#706).
  *
- * Classifies a per-agent sync-health entry into one of four colors so the
- * dashboard can render a small dot next to each agent:
+ * The BACKEND owns the sync state. `GET /api/agents/sync-health` serves each
+ * agent's `state` (green / yellow / red / unknown), an operator-readable
+ * `reason` and a `recommendation`, all computed by one policy module
+ * (src/backend/services/sync_freeze_policy.py — the same rule the scheduler's
+ * freeze uses). This file only maps that state to a colour and shows the
+ * reason; it holds no threshold, so the dot can never disagree with the
+ * freeze.
  *
- *   green  — last sync succeeded, recent, working branch in sync
- *   yellow — last sync succeeded but stale (>24h, <7d)
- *   red    — failed, very stale (>7d), OR behind_working > 0 (P6: peer wrote)
- *   gray   — no sync attempt yet, or auto-sync disabled and never manual-synced
+ *   green  — the agent and its repository agree
+ *   yellow — diverged for 24 h or less (any divergence for a deployment)
+ *   red    — a failed sync, diverged > 24 h, dirty > 24 h, or auto-sync on
+ *            with no heartbeat for 7 days
+ *   gray   — no observation yet (`unknown`), or no entry
  */
 
-const DAY_MS = 24 * 60 * 60 * 1000
-const WEEK_MS = 7 * DAY_MS
+const STATE_COLOURS = new Set(['green', 'yellow', 'red'])
 
 export function classifySyncHealth(entry) {
-  if (!entry) return 'gray'
-  const status = entry.last_sync_status || 'never'
-  if (status === 'never') return 'gray'
-
-  if (entry.behind_working && entry.behind_working > 0) return 'red'
-  if (status === 'failed') return 'red'
-
-  const lastAt = entry.last_sync_at ? new Date(entry.last_sync_at).getTime() : null
-  if (!lastAt) return 'gray'
-  const age = Date.now() - lastAt
-  if (age >= WEEK_MS) return 'red'
-  if (age >= DAY_MS) return 'yellow'
-  return 'green'
+  const state = entry && entry.state
+  return STATE_COLOURS.has(state) ? state : 'gray'
 }
 
 export function syncHealthColor(entry) {
@@ -39,19 +33,8 @@ export function syncHealthColor(entry) {
 }
 
 export function syncHealthLabel(entry) {
-  if (!entry) return 'Sync status unknown'
-  const status = entry.last_sync_status || 'never'
-  if (status === 'never') return 'No sync attempts yet'
-  if (entry.behind_working && entry.behind_working > 0) {
-    return `Working branch has ${entry.behind_working} unseen commit(s) from a peer`
-  }
-  if (status === 'failed') {
-    const summary = entry.last_error_summary || 'unknown error'
-    const failures = entry.consecutive_failures || 0
-    return `Last sync failed (${failures} in a row): ${summary}`
-  }
-  if (entry.last_sync_at) {
-    return `Last synced ${new Date(entry.last_sync_at).toLocaleString()}`
-  }
-  return 'Sync status: success'
+  if (!entry || !entry.reason) return 'Sync status unknown'
+  return entry.recommendation
+    ? `${entry.reason} — ${entry.recommendation}`
+    : entry.reason
 }

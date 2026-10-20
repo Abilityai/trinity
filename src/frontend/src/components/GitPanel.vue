@@ -13,11 +13,11 @@
 
     <!-- Git Not Enabled -->
     <div v-else-if="!gitStatus?.git_enabled" class="text-center py-8">
-      <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
       </svg>
       <p class="mt-2 text-gray-500 dark:text-gray-400">Git sync not enabled for this agent</p>
-      <p class="text-sm text-gray-400 dark:text-gray-500 mt-1">Push this agent to a GitHub repository to enable sync</p>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Push this agent to a GitHub repository to enable sync</p>
 
       <!-- Initialize Button -->
       <button
@@ -206,6 +206,8 @@
                   </svg>
                   {{ gitStatus.branch }}
                 </span>
+                <!-- trinity-enterprise#704: own branch vs pull-only -->
+                <GitBindingBadge :pushes="gitStatus.db_config?.pushes ?? null" :source-mode="gitStatus.db_config?.source_mode ?? null" />
                 <span v-if="gitStatus.ahead > 0" class="text-xs text-status-success-600">
                   {{ gitStatus.ahead }} ahead
                 </span>
@@ -215,7 +217,41 @@
               </div>
             </div>
           </div>
-          <div class="flex items-center space-x-2">
+          <!-- trinity-enterprise#887: Pull and Push live here now. They were
+               the header's git row; the decision on trinity#966 keeps the
+               operational half of git on this tab and nowhere else. The verbs
+               run through AgentDetail's useGitSync (conflict modal included). -->
+          <div class="flex flex-wrap items-center justify-end gap-2">
+            <BaseButton
+              :variant="gitBehind > 0 ? 'primary' : 'secondary'"
+              size="sm"
+              :disabled="gitPushing"
+              :loading="gitPulling"
+              loading-label="Pulling…"
+              :title="gitBehind > 0 ? `Pull ${gitBehind} commit(s) from GitHub` : 'Already up to date'"
+              data-testid="git-pull"
+              @click="$emit('git-pull')"
+            >{{ gitBehind > 0 ? `Pull (${gitBehind})` : 'Pull' }}</BaseButton>
+            <BaseButton
+              :variant="gitHasChanges ? 'primary' : 'secondary'"
+              size="sm"
+              :disabled="gitPulling"
+              :loading="gitPushing"
+              loading-label="Pushing…"
+              :title="gitHasChanges ? 'Push changes to GitHub' : 'No changes to push'"
+              data-testid="git-push"
+              @click="$emit('git-push')"
+            >{{ gitHasChanges ? `Push (${gitChangesCount})` : 'Push' }}</BaseButton>
+            <BaseButton
+              variant="ghost"
+              size="sm"
+              :disabled="gitPulling || gitPushing"
+              :loading="gitLoading"
+              loading-label="Refreshing…"
+              title="Refresh git status"
+              data-testid="git-refresh"
+              @click="$emit('git-refresh')"
+            >Refresh</BaseButton>
             <span
               :class="[
                 'px-2 py-1 text-xs font-medium rounded-full',
@@ -303,160 +339,27 @@
         </p>
       </div>
 
-      <!-- Bind to your own repo (ent#109). Its own component: GitPanel is
-           already long, and the #1430 raw-color ratchet is per-file. -->
-      <BindRepoPanel
-        :agent-name="agentName"
-        :agent-status="agentStatus"
-        :is-tokenless="isTokenless"
-        @bound="loadGitStatus"
-      />
-
-      <!-- GitHub PAT Settings (#347) -->
-      <div class="border-t dark:border-gray-700 pt-4 mt-4">
-        <h3 class="text-sm font-medium text-gray-900 dark:text-white mb-3">GitHub Authentication</h3>
-
-        <!-- PAT Status -->
-        <div v-if="patStatus" class="bg-gray-50 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-          <div class="flex items-center justify-between">
-            <div class="flex items-center space-x-3">
-              <svg class="h-5 w-5 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-              </svg>
-              <div>
-                <p class="text-sm font-medium text-gray-900 dark:text-white">
-                  {{ patStatus.configured ? 'Agent-specific PAT' : 'Using Global PAT' }}
-                </p>
-                <p class="text-xs text-gray-500 dark:text-gray-400">
-                  <span v-if="patStatus.configured" class="text-status-success-600 dark:text-status-success-400">Custom PAT configured for this agent</span>
-                  <span v-else-if="patStatus.has_global" class="text-blue-600 dark:text-blue-400">Using system-wide GitHub PAT from Settings</span>
-                  <span v-else class="text-status-warning-600 dark:text-status-warning-400">No PAT configured - git operations may fail</span>
-                </p>
-              </div>
-            </div>
-            <button
-              @click="showPatModal = true"
-              class="inline-flex items-center px-3 py-1.5 border border-gray-300 dark:border-gray-600 shadow-sm text-xs font-medium rounded text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-action-primary-500"
-            >
-              {{ patStatus.configured ? 'Change' : 'Configure' }}
-            </button>
-          </div>
-
-          <!-- Clear button if configured -->
-          <div v-if="patStatus.configured" class="mt-3 pt-3 border-t border-gray-200 dark:border-gray-600">
-            <button
-              @click="clearPat"
-              :disabled="patSaving"
-              class="text-xs text-status-danger-600 dark:text-status-danger-400 hover:text-status-danger-800 dark:hover:text-status-danger-300"
-            >
-              Clear agent PAT (revert to global)
-            </button>
-          </div>
-        </div>
-
-        <!-- Loading PAT status -->
-        <!-- #1921: the PAT-status line, placeholder-shaped. -->
-        <div v-else class="py-4" aria-busy="true">
-          <div class="h-3 w-1/2 rounded bg-gray-100 dark:bg-gray-800/60 animate-pulse motion-reduce:animate-none"></div>
-          <span class="sr-only">Loading…</span>
-        </div>
-      </div>
-
-      <!-- PAT Configuration Modal -->
-      <div v-if="showPatModal" class="fixed inset-0 z-50 overflow-y-auto" aria-labelledby="pat-modal-title" role="dialog" aria-modal="true">
-        <div class="flex items-center justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-          <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true" @click="closePatModal"></div>
-          <div class="inline-block align-bottom bg-white dark:bg-gray-800 rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
-            <div class="bg-white dark:bg-gray-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
-              <div class="sm:flex sm:items-start">
-                <div class="mx-auto flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full bg-action-primary-100 dark:bg-action-primary-900/30 sm:mx-0 sm:h-10 sm:w-10">
-                  <svg class="h-6 w-6 text-action-primary-600 dark:text-action-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-                  </svg>
-                </div>
-                <div class="mt-3 text-center sm:mt-0 sm:ml-4 sm:text-left flex-1">
-                  <h3 class="text-lg leading-6 font-medium text-gray-900 dark:text-white" id="pat-modal-title">
-                    Configure GitHub PAT
-                  </h3>
-                  <div class="mt-4 space-y-4">
-                    <!-- Error Message -->
-                    <div v-if="patError" class="rounded-md bg-status-danger-50 dark:bg-status-danger-900/30 p-4">
-                      <p class="text-sm text-status-danger-800 dark:text-status-danger-300">{{ patError }}</p>
-                    </div>
-
-                    <!-- Success Message -->
-                    <div v-if="patSuccess" class="rounded-md bg-status-success-50 dark:bg-status-success-900/30 p-4">
-                      <p class="text-sm text-status-success-800 dark:text-status-success-300">{{ patSuccess }}</p>
-                    </div>
-
-                    <!-- PAT Input -->
-                    <div>
-                      <label for="github-pat" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                        Personal Access Token
-                      </label>
-                      <input
-                        type="password"
-                        id="github-pat"
-                        v-model="newPat"
-                        placeholder="ghp_xxxxxxxxxxxx"
-                        :disabled="patSaving"
-                        class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm dark:bg-gray-700 dark:text-white font-mono"
-                      />
-                      <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                        Token must have <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">repo</code> scope
-                      </p>
-                    </div>
-
-                    <!-- Info Box -->
-                    <div class="rounded-md bg-blue-50 dark:bg-blue-900/30 p-4">
-                      <div class="flex">
-                        <svg class="h-5 w-5 text-blue-400 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                          <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
-                        </svg>
-                        <div class="ml-3 flex-1 text-xs text-blue-700 dark:text-blue-300">
-                          <p><strong>Per-agent PAT</strong> allows this agent to use a different GitHub account than other agents.</p>
-                          <p class="mt-1">The PAT is validated against GitHub and encrypted at rest.</p>
-                          <p class="mt-1"><strong>Note:</strong> Restart the agent for the new PAT to take effect in git operations.</p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="bg-gray-50 dark:bg-gray-700 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
-              <button
-                type="button"
-                @click="savePat"
-                :disabled="!newPat || patSaving"
-                class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-action-primary-600 text-base font-medium text-white hover:bg-action-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-action-primary-500 sm:ml-3 sm:w-auto sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <svg v-if="patSaving" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
-                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                {{ patSaving ? 'Validating...' : 'Save PAT' }}
-              </button>
-              <button
-                type="button"
-                @click="closePatModal"
-                :disabled="patSaving"
-                class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 dark:border-gray-600 shadow-sm px-4 py-2 bg-white dark:bg-gray-800 text-base font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-action-primary-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
+      <!-- trinity-enterprise#888: configuration left this tab. Binding the
+           repository, the GitHub token and the sync settings live in
+           Settings › Storage; this tab keeps status, changes, commits, pull
+           and push. -->
+      <p v-if="canConfigure" class="text-[12.5px] text-gray-600 dark:text-gray-400 border-t border-gray-200 dark:border-gray-750 pt-4" data-testid="git-config-moved">
+        Repository binding, the GitHub token and auto-sync are in
+        <router-link
+          :to="{ query: { ...$route.query, tab: 'settings', section: 'storage' } }"
+          class="font-medium text-action-primary-600 hover:text-action-primary-700 dark:text-action-primary-400 dark:hover:text-action-primary-300"
+        >Settings › Storage</router-link>.
+      </p>
     </div>
+
   </div>
 </template>
 
 <script setup>
+import GitBindingBadge from './GitBindingBadge.vue'
+import BaseButton from './base/BaseButton.vue'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
-import BindRepoPanel from './BindRepoPanel.vue'
 
 const props = defineProps({
   agentName: {
@@ -466,8 +369,20 @@ const props = defineProps({
   agentStatus: {
     type: String,
     default: 'stopped'
-  }
+  },
+  // The pull/push verbs' state, owned by AgentDetail's useGitSync
+  // (trinity-enterprise#887 moved the buttons here from the header).
+  gitPulling: { type: Boolean, default: false },
+  gitPushing: { type: Boolean, default: false },
+  gitBehind: { type: Number, default: 0 },
+  gitHasChanges: { type: Boolean, default: false },
+  gitChangesCount: { type: Number, default: 0 },
+  gitLoading: { type: Boolean, default: false },
+  // Whether the viewer may reach Settings › Storage at all (owner-only); a
+  // shared operator gets the status without a link to a tab they do not have.
+  canConfigure: { type: Boolean, default: true },
 })
+defineEmits(['git-pull', 'git-push', 'git-refresh'])
 
 const agentsStore = useAgentsStore()
 
@@ -488,22 +403,6 @@ const repoName = ref('')
 const createRepo = ref(true)
 const privateRepo = ref(true)
 
-// PAT configuration state (#347)
-const patStatus = ref(null)
-const showPatModal = ref(false)
-const newPat = ref('')
-const patSaving = ref(false)
-const patError = ref(null)
-const patSuccess = ref(null)
-
-// ent#109: drives the bind panel's copy. `patStatus.configured` is the
-// per-agent PAT row; `has_global` is the platform token, which deliberately
-// never reaches a tokenless container's remote (ent#123) — so an agent with
-// only a global PAT is still tokenless from git's point of view.
-const isTokenless = computed(
-  () => !!patStatus.value && !patStatus.value.configured
-)
-
 const loadGitStatus = async () => {
   loading.value = true
   try {
@@ -511,8 +410,6 @@ const loadGitStatus = async () => {
     // Also load git log if status shows git is enabled
     if (gitStatus.value?.git_enabled && gitStatus.value?.branch) {
       gitLog.value = await agentsStore.getGitLog(props.agentName, 10)
-      // Load PAT status when git is enabled (#347)
-      await loadPatStatus()
     }
   } catch (err) {
     console.error('Failed to load git status:', err)
@@ -567,59 +464,6 @@ const closeInitializeModal = () => {
   repoName.value = ''
 }
 
-// PAT management methods (#347)
-const loadPatStatus = async () => {
-  try {
-    patStatus.value = await agentsStore.getGitHubPATStatus(props.agentName)
-  } catch (err) {
-    console.error('Failed to load PAT status:', err)
-    patStatus.value = { configured: false, source: 'global', has_global: false }
-  }
-}
-
-const savePat = async () => {
-  if (!newPat.value) return
-
-  patSaving.value = true
-  patError.value = null
-  patSuccess.value = null
-
-  try {
-    const response = await agentsStore.setGitHubPAT(props.agentName, newPat.value)
-    patSuccess.value = `PAT configured successfully for GitHub user: ${response.github_username}`
-    await loadPatStatus()
-    // Close modal after short delay to show success message
-    setTimeout(() => {
-      closePatModal()
-    }, 1500)
-  } catch (error) {
-    patError.value = error.response?.data?.detail || error.message || 'Failed to save PAT'
-  } finally {
-    patSaving.value = false
-  }
-}
-
-const clearPat = async () => {
-  if (!confirm('Clear the agent-specific PAT and revert to using the global PAT?')) return
-
-  patSaving.value = true
-  try {
-    await agentsStore.clearGitHubPAT(props.agentName)
-    await loadPatStatus()
-  } catch (error) {
-    console.error('Failed to clear PAT:', error)
-  } finally {
-    patSaving.value = false
-  }
-}
-
-const closePatModal = () => {
-  if (patSaving.value) return
-  showPatModal.value = false
-  newPat.value = ''
-  patError.value = null
-  patSuccess.value = null
-}
 
 const formatDate = (dateString) => {
   if (!dateString) return 'Unknown'
@@ -660,6 +504,12 @@ watch(() => props.agentStatus, (newStatus) => {
   if (newStatus === 'running') {
     loadGitStatus()
   }
+})
+
+// A pull or push run from the buttons above changes what this tab shows;
+// re-read once the verb settles (stale-while-revalidate, no skeleton).
+watch(() => props.gitPulling || props.gitPushing, (busy, wasBusy) => {
+  if (wasBusy && !busy) loadGitStatus()
 })
 
 onMounted(() => {

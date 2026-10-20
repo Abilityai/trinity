@@ -35,6 +35,8 @@ test is driven with an explicit `asyncio.run`).
 import asyncio
 import types
 
+from unittest.mock import AsyncMock
+
 import pytest
 from fastapi import HTTPException
 
@@ -256,6 +258,18 @@ def github(monkeypatch):
 
     monkeypatch.setattr(ts, "_fetch_template_yaml_result", _fetch)
     monkeypatch.setattr(ts, "_get_github_pat", lambda: PLATFORM_PAT)
+    # #3725: the creation read now falls through to the remaining token
+    # tiers and a credential-free path when the preferred tier cannot read.
+    # Default every new seam to "nothing else can read either" so each test
+    # here keeps stating only the input it is about — and none reaches the
+    # network (the real probe is a `git ls-remote` against github.com).
+    state["ladder"] = []
+    monkeypatch.setattr(crud, "resolve_github_pat_candidates",
+                        lambda *a, **k: list(state["ladder"]))
+    monkeypatch.setattr(ts, "_fetch_template_yaml_raw_result",
+                        lambda repo, sha: ({}, "HTTP 500"))
+    monkeypatch.setattr(crud.git_service, "probe_anonymous_ref",
+                        AsyncMock(return_value=("transient", "")))
     ts._metadata_cache.clear()
 
     async def _ok(*a, **k):
@@ -273,6 +287,10 @@ def github(monkeypatch):
         def answers(self, **by_pat):
             """`answers(**{PLATFORM_PAT: ({}, "HTTP 404"), ...})`"""
             state["answers"].update(by_pat)
+
+        def ladder(self, *entries):
+            """#3725: the `(pat, tier)` tiers the chain may fall through to."""
+            state["ladder"] = list(entries)
 
         def catalog_for(self, repo="acme/second-brain"):
             """The catalog dict, built the way `GET /api/templates` builds it —
@@ -296,6 +314,14 @@ def github(monkeypatch):
                 template=template, fork_to_own=None,
                 source_branch=None, source_mode=True,
                 import_intent=None,  # ent#15 (#2040)
+                # trinity-enterprise#705: the two attributes the real AgentConfig
+                # always carries and the kind default reads. `source_mode=True` is
+                # set explicitly here, so it is in the set — exactly what a real
+                # `AgentConfig(source_mode=True)` reports — and the default never
+                # probes push access (no extra GitHub call).
+                name="second-brain", kind=None, ephemeral=None,
+                model_fields_set={"template", "fork_to_own", "source_branch",
+                                  "source_mode", "import_intent"},
             )
             return catalog, asyncio.run(crud._resolve_template(config, _user()))
 
@@ -348,15 +374,26 @@ def test_a_poisoned_catalog_cache_does_not_block_a_creator_who_can_read(github):
 
 
 def test_an_outage_on_the_CREATION_read_still_refuses(github):
-    """The fail-closed property itself, unchanged — only its input moved."""
+    """The fail-closed property itself, unchanged — only its input moved.
+
+    Rewritten for #3725: a 403 on the creator's read no longer refuses by
+    itself, because another path may read the template (the remaining token
+    tiers, then an anonymous SHA-pinned read). The property that stays is
+    the one ent#14 S2 pinned: a template NO path can read refuses. So the
+    platform tier is unreadable too, and the credential-free path (stubbed
+    transient in the fixture) cannot prove the repo public.
+    """
+    github.ladder((CREATOR_PAT, "per_user"), (PLATFORM_PAT, "global"))
     github.answers(**{
-        PLATFORM_PAT: ({"display_name": "Fine"}, None),   # catalog looks healthy
+        PLATFORM_PAT: ({}, "HTTP 403"),                    # also unreadable
         CREATOR_PAT: ({}, "HTTP 403"),                     # the read that matters
     })
     with pytest.raises(HTTPException) as exc:
         github.create()
     assert exc.value.status_code == 503
     assert exc.value.detail["code"] == "TEMPLATE_METADATA_UNAVAILABLE"
+    assert [a["tier"] for a in exc.value.detail["attempts"]] == [
+        "per_user", "global", "anonymous"]
 
 
 def test_the_gate_costs_no_extra_github_calls(github):
@@ -393,4 +430,73 @@ def test_required_declared_by_EITHER_read_refuses(github):
     })
     with pytest.raises(HTTPException) as exc:
         github.create(branch="feature-x")
+    assert exc.value.detail["code"] == "FORK_TO_OWN_REQUIRED"
+
+
+# ---------------------------------------------------------------------------
+# The first-run seeder's door (ent#107): open only for a create that cannot push
+# ---------------------------------------------------------------------------
+
+def _seed_config(**over):
+    """The shape `cornelius_agent_service._provision` builds: pinned pull-only
+    (trinity-enterprise#705), no fork block, no token to fork with."""
+    base = dict(kind="deployment", source_mode=True)
+    base.update(over)
+    return _config(**base)
+
+
+def _apply_seeder(config, *, allow=True):
+    return asyncio.run(
+        crud._apply_fork_to_own(
+            config=config,
+            current_user=_user(),
+            gh_template={"fork_to_own": "required"},
+            github_repo_for_agent="Abilityai/cornelius",
+            github_pat_for_agent=None,
+            github_pat_tier="none",
+            url_branch=None,
+            source_metadata={},
+            source_metadata_reason=None,
+            allow_unforked_pull_only=allow,
+        )
+    )
+
+
+def test_seeder_door_lets_a_pinned_pull_only_create_past_required():
+    """The seeder runs at first boot with no user and no token, so it can never
+    satisfy `fork_to_own: required`. Pinned pull-only, it also cannot push — the
+    bind the gate exists to prevent — so it is let through."""
+    repo, pat, tier, upstream = _apply_seeder(_seed_config())
+    assert repo == "Abilityai/cornelius"
+    assert pat is None          # still tokenless
+    assert upstream is None     # nothing forked
+
+
+def test_required_still_400s_the_seeder_door_when_it_is_shut():
+    """Same inputs, flag off: the ordinary caller's 400 is unchanged."""
+    with pytest.raises(HTTPException) as exc:
+        _apply_seeder(_seed_config(), allow=False)
+    assert exc.value.status_code == 400
+    assert exc.value.detail["code"] == "FORK_TO_OWN_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    "over, why",
+    [
+        ({"kind": "agent"}, "an agent gets a working branch — it can push"),
+        ({"source_mode": False}, "working-branch mode — it can push"),
+        ({"source_mode": None}, "unset is not pinned; only an explicit True is"),
+    ],
+)
+def test_seeder_door_refuses_a_shape_that_could_push(over, why):
+    """The flag is not trusted on its own.
+
+    A caller passing it while building a config that pushes would reopen exactly
+    the bind ent#162 closed — a private knowledge base reaching the shared public
+    upstream. The gate re-derives the pinned-pull-only shape rather than taking
+    the call site's word, so each of these still 400s WITH the flag set.
+    """
+    with pytest.raises(HTTPException) as exc:
+        _apply_seeder(_seed_config(**over))
+    assert exc.value.status_code == 400, why
     assert exc.value.detail["code"] == "FORK_TO_OWN_REQUIRED"

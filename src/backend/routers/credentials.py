@@ -22,7 +22,7 @@ from models import (
     CredentialRequirementsResponse,
 )
 from config import OAUTH_CONFIGS, BACKEND_URL
-from dependencies import get_current_user, require_admin, get_authorized_agent_by_name, get_owned_agent_by_name, reject_agent_principal
+from dependencies import get_current_user, require_admin, get_authorized_agent_by_name, get_owned_agent_by_name, human_only, reject_agent_principal
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, get_agent_status_from_container
 from services.mcp_validator import validate_mcp_config, McpValidationError
@@ -215,7 +215,7 @@ async def get_agent_credential_requirements(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={
             "state": report["state"],
@@ -433,7 +433,7 @@ async def inject_credentials(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
         details={"files": list(request_body.files.keys()) + list(request_body.files_b64.keys())},
     )
@@ -454,7 +454,7 @@ async def inject_credentials(
     )
 
 
-@router.post("/agents/{agent_name}/credentials/export")
+@router.post("/agents/{agent_name}/credentials/export", dependencies=[Depends(human_only)])
 async def export_credentials(
     request: Request,
     agent_name: str = Depends(get_owned_agent_by_name),
@@ -497,7 +497,7 @@ async def export_credentials(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"files_exported": files_exported},
         )
@@ -529,7 +529,7 @@ async def export_credentials(
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
 
-@router.post("/agents/{agent_name}/credentials/import")
+@router.post("/agents/{agent_name}/credentials/import", dependencies=[Depends(human_only)])
 async def import_credentials(
     request: Request,
     agent_name: str = Depends(get_owned_agent_by_name),
@@ -572,7 +572,7 @@ async def import_credentials(
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"files_imported": list(files.keys())},
         )

@@ -59,14 +59,28 @@ def test_the_workflow_exists_and_parses():
     assert _doc()["jobs"].keys() >= {"discover", "test", "comment"}
 
 
+RUN_CORE = WORKFLOW.parents[2] / "tests" / "run-core.sh"
+
+
+def _ignore_flags(text: str) -> set:
+    import re
+
+    return set(re.findall(r"--ignore=\S+", text))
+
+
 def test_membership_is_directory_based_not_a_file_list():
-    """The AC that keeps this from rotting: `--ignore=unit`, exactly as
-    `tests/run-core.sh` defines the same suite. A hand-listed set would drift
-    the moment #1895 moves a file, and the drift is silent."""
+    """The AC that keeps this from rotting: the same `--ignore=` set as
+    `tests/run-core.sh` defines for the same suite. A hand-listed set would
+    drift the moment #1895 moves a file, and the drift is silent. Parity, not a
+    literal: a flag dropped from one side only (#3432 retired
+    `--ignore=process_engine`) fails here instead of rotting."""
     cmds = _commands(_runs(_test_job()))
     assert "--ignore=unit" in cmds
-    assert "--ignore=process_engine" in cmds
     assert "pytest" in cmds
+    run_core = _commands(RUN_CORE.read_text(encoding="utf-8"))
+    assert _ignore_flags(cmds) == _ignore_flags(run_core), (
+        "the workflow's --ignore set drifted from tests/run-core.sh"
+    )
     # No per-file enumeration: a `test_*.py` literal in the invocation would
     # mean the membership is hand-maintained again.
     import re
@@ -160,11 +174,17 @@ def test_the_job_running_pr_code_has_no_write_token():
         f"the PR-code job gained scope beyond contents:read: {test_perms}"
     )
 
+    # #3103: the one permitted checkout is the trusted verdict module, pinned
+    # to this workflow's own commit and sparse to scripts/ci — never PR code.
     comment = _doc()["jobs"]["comment"]
-    steps = str(comment["steps"])
-    assert "actions/checkout" not in steps, (
-        "the write-scoped comment job must not check out PR code"
-    )
+    for step in comment["steps"]:
+        if str(step.get("uses", "")).startswith("actions/checkout"):
+            w = step.get("with") or {}
+            assert w.get("ref") == "${{ github.sha }}", (
+                "the write-scoped comment job must not check out PR code"
+            )
+            assert w.get("persist-credentials") is False
+            assert w.get("sparse-checkout") == "scripts/ci"
 
 
 def test_the_job_running_pr_code_holds_no_secrets():

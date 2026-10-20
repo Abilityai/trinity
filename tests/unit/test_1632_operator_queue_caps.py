@@ -38,6 +38,7 @@ from services.operator_queue_service import (  # noqa: E402
     OperatorQueueSyncService,
     _clamp_ingested_item,
     _truncate_with_marker,
+    changed_fields,
     _valid_execution_id,
     _TRUNC_MARKER,
     _OPTIONS_DROPPED_MARKER,
@@ -46,6 +47,7 @@ from services.operator_queue_service import (  # noqa: E402
     OPERATOR_QUEUE_CONTEXT_MAX_BYTES,
     OPERATOR_QUEUE_MAX_PENDING_PER_AGENT,
 )
+from services.ask_service import ASK_TYPES  # noqa: E402
 from services.rate_limiter import RateLimitResult  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -66,12 +68,33 @@ def _denied():
 def _fake_db(pending=0, exists=False, create_side_effect=None):
     db = MagicMock()
     db.operator_queue_item_exists.return_value = exists
-    db.count_operator_queue_pending_for_agent.return_value = pending
+    # Keyed on the read's kwargs (#3130): the flood alert is now created through
+    # the #1677 budget, whose `item_type="queue_flood"` read must not see the
+    # agent's depth — a flat return_value would refuse every flood alert.
+    db.count_operator_queue_pending_for_agent.side_effect = (
+        lambda agent, item_type=None, exclude_request_id_prefixes=None:
+        0 if item_type else pending)
     if create_side_effect is not None:
         db.create_operator_queue_item.side_effect = create_side_effect
     db.mark_operator_queue_acknowledged.return_value = False
     db.get_operator_queue_responded_for_agent.return_value = []
     db.get_operator_queue_terminal_for_agent.return_value = []
+    # #2915: the sync index replaced the per-entry exists() probe. Explicit
+    # empties, not MagicMock defaults — a MagicMock iterates as empty and
+    # `in` is False, which would keep these suites green without exercising
+    # the path (the #2826 C1 class).
+    db.get_operator_queue_sync_index_for_agent.return_value = {"open": [], "terminal": {}, "foreign": []}
+    db.set_operator_queue_sync_state.return_value = False
+    db.set_operator_queue_delivery_state.return_value = False
+    # trinity-enterprise#611: the poller creates through the outcome accessor.
+    # Route it through the plain create mock, so every assertion here still
+    # counts the poller's creates and a raising create still raises.
+    db.create_operator_queue_item_with_outcome.side_effect = (
+        lambda agent, item, **kw: (db.create_operator_queue_item(agent, item, **kw), True))
+    db.mark_operator_queue_unconfirmed.return_value = 0
+    db.refresh_operator_queue_last_confirmed.return_value = 0
+    db.mark_operator_queue_undelivered_for_stopped_agents.return_value = []
+    db.get_setting_value.return_value = "24"
     return db
 
 
@@ -153,9 +176,11 @@ class TestDepthCap:
 
         asyncio.run(svc._sync_agent("a"))
 
-        # At the cap the very first admittable item breaks — exists() is probed
-        # at most once (for that first item), never 500×.
-        assert db.operator_queue_item_exists.call_count <= 1
+        # At the cap the very first admittable item breaks. #2915 replaced the
+        # per-entry exists() probe with ONE sync-index read per agent, so the
+        # bound is now: one index fetch, zero per-entry probes, never 500×.
+        assert db.operator_queue_item_exists.call_count == 0
+        assert db.get_operator_queue_sync_index_for_agent.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +346,73 @@ class TestClamp:
             _clamp_ingested_item(bad)  # must not raise
 
 
+
+# ---------------------------------------------------------------------------
+# #3385: `type` is agent-authored free text — bounded at ingest like title.
+# ---------------------------------------------------------------------------
+
+# The type literals the platform itself writes, the longest first. A bound that
+# altered one of these would re-type a platform row.
+_PLATFORM_TYPES = sorted(
+    set(oqs._BUDGETED_ALERT_TYPES) | {
+        "workspace_problem_report", "cost_limit_approaching", "cost_limit_exceeded",
+        "operator_queue_sync", "watchdog_recovery", "monitoring_alert", "queue_flood",
+    },
+    key=len, reverse=True,
+)
+
+
+class TestClampType:
+    def test_oversize_type_shortened_with_marker(self):
+        out = _clamp_ingested_item({"id": "x", "type": "x" * 100_000})
+        assert len(out["type"]) == oqs.OPERATOR_QUEUE_TYPE_MAX
+        assert out["type"].endswith(_TRUNC_MARKER)
+
+    def test_one_over_cap_gets_marker(self):
+        out = _clamp_ingested_item({"id": "x", "type": "y" * (oqs.OPERATOR_QUEUE_TYPE_MAX + 1)})
+        assert len(out["type"]) == oqs.OPERATOR_QUEUE_TYPE_MAX
+        assert out["type"].endswith(_TRUNC_MARKER)
+
+    @pytest.mark.parametrize(
+        "value", list(_PLATFORM_TYPES) + list(ASK_TYPES) + ["t" * 64])
+    def test_legit_types_unchanged(self, value):
+        assert _clamp_ingested_item({"id": "x", "type": value})["type"] == value
+
+    def test_platform_types_fit_the_cap(self):
+        # The cap must stay above every platform literal, or the clamp re-types one.
+        assert len(_PLATFORM_TYPES[0]) < oqs.OPERATOR_QUEUE_TYPE_MAX
+
+    def test_missing_type_stays_missing(self):
+        # Absent ⇒ absent, so create_item's "question" default still applies.
+        assert "type" not in _clamp_ingested_item({"id": "x", "title": "t"})
+
+    def test_non_str_type_passes_through(self):
+        assert _clamp_ingested_item({"id": "x", "type": 7})["type"] == 7
+
+
+_RAW_TYPE = "approval" + "z" * 100_000
+
+
+@pytest.mark.parametrize("row_type, entry_type", [
+    # The row stores the clamped value; the agent's file still holds the raw one.
+    (_truncate_with_marker(_RAW_TYPE, 64), _RAW_TYPE),
+    # A row ingested before #3385 stored the raw value: it still compares equal.
+    (_RAW_TYPE, _RAW_TYPE),
+    # A non-str type on both sides is not a rewrite either.
+    (5, 5),
+], ids=["clamped-row-vs-raw-entry", "legacy-raw-row", "int-type"])
+def test_3385_clamped_type_is_not_a_rewrite(row_type, entry_type):
+    row = {"title": "t", "question": "q", "type": row_type}
+    entry = {"title": "t", "question": "q", "type": entry_type}
+    assert changed_fields(row, entry) == []
+
+
+def test_3385_rewrite_inside_the_kept_prefix_is_still_a_rewrite():
+    row = {"title": "t", "question": "q", "type": _truncate_with_marker(_RAW_TYPE, 64)}
+    entry = {"title": "t", "question": "q", "type": "question" + "z" * 100_000}
+    assert changed_fields(row, entry) == ["type"]
+
+
 class TestClampBoundaries:
     def test_title_exactly_at_cap_no_marker(self):
         exact = "T" * OPERATOR_QUEUE_TITLE_MAX
@@ -419,7 +511,7 @@ class TestExemptionAndFloodAlert:
         assert db.create_operator_queue_item.call_count == 1
         item = db.create_operator_queue_item.call_args.args[1]
         assert item["id"].startswith("queue-flood-a-")   # un-guessable id (C2)
-        assert item["type"] == "alert"
+        assert item["type"] == "queue_flood"            # budgeted (#3130)
         assert item["priority"] == "high"
         assert "7 request(s)" in item["question"]        # not clamped
         rate.assert_not_called()                          # exempt from the rate cap
@@ -618,6 +710,10 @@ _STUB_ROW_ID = "__row_uuid__"
 
 
 class _FakeConn:
+    # trinity-enterprise#611: the create reads the INSERT result's rowcount (the
+    # `inserted` flag of create_item_with_outcome); the stub reports an insert.
+    rowcount = 1
+
     def __init__(self, scalar=0):
         self._scalar = scalar
 
@@ -703,6 +799,18 @@ class TestDbBelt:
         # #1631: the belt passed and the create proceeded, so create_item returns
         # the re-read row's platform uuid (not the agent's request_id).
         assert rid == _STUB_ROW_ID
+
+    def test_belt_rejects_oversize_type(self):
+        # #3385: a caller that skips the ingest clamp still can't store a huge type.
+        ops = _ops()
+        with pytest.raises(ValueError, match="'type' exceeds"):
+            ops.create_item("agent", {"id": "x", "type": "t" * 2_000})
+
+    def test_belt_passes_64_four_byte_chars_of_type(self, monkeypatch):
+        # A clamped type at the cap is at most 64 chars; 4-byte chars are 256 bytes.
+        _patch_engine(monkeypatch, _FakeEngine())
+        ops = _ops()
+        assert ops.create_item("agent", {"id": "x", "type": "\U0001d11e" * 64}) == _STUB_ROW_ID
 
     def test_missing_id_still_raises_valueerror(self):
         # #1525 belt preserved.

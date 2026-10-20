@@ -239,9 +239,10 @@ export function createConnectorTools(
             });
           }
 
-          const message = input
-            ? `Please run the "${name}" playbook.\n\nInput:\n${input}`
-            : `Please run the "${name}" playbook.`;
+          // trinity-enterprise#751: invoke the playbook by its name, the way
+          // the Playbooks tab does, so a gated one is recognised by the skill
+          // gate (a prose request would pass it unread).
+          const message = input ? `/${name} ${input}` : `/${name}`;
           const result = await dispatchChat(context?.session, agent, message);
           return JSON.stringify(result, null, 2);
         } catch (err) {

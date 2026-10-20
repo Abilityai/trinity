@@ -1,6 +1,6 @@
 # Creating Agents
 
-Agents are created from templates or from scratch. Each agent runs as an isolated Docker container with its own filesystem, credentials, and MCP server configuration.
+Agents are created from templates or from scratch. Each agent runs as an isolated Docker container with its own filesystem, credentials, and MCP server configuration, on the runtime its template chooses: Claude Code, Gemini CLI, or OpenAI Codex.
 
 > 📺 **Watch:** [Build an AI Recruiter Agent](https://youtu.be/K7hFWyFIf-Y) *(Jun 2026)* · [Build and Deploy Agents in Cursor](https://youtu.be/amqiysdlEWY) *(Apr 2026)* · [From Zero to Deployed](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -30,7 +30,7 @@ A default install therefore shows starter templates plus whatever the registry o
 | `.mcp.json.template` | MCP config template with `${VAR}` placeholders for credential injection |
 | `.env.example` | Example credentials file listing required environment variables |
 
-All bundled templates ship the canonical `.gitignore`, so an agent created from one never auto-commits caches, virtualenvs, or local databases into its repository. An agent created from any GitHub repository with auto-sync on gets the same rules merged into its `.gitignore` right after creation, before the first sync cycle can commit runtime state or credential files.
+All bundled templates ship the canonical `.gitignore`, so an agent created from one never auto-commits caches, virtualenvs, or local databases into its repository. An agent created from any GitHub repository with auto-sync on gets the same rules merged into its `.gitignore` right after creation, before the first sync cycle can commit runtime state or credential files. `.claude/settings.json` is not on that list, so a template's project settings are committed; Trinity keeps a copy out of a commit only when its content would break other clones or carries a credential — see [GitHub Sync](../integrations/github-sync.md#what-happens-to-claudesettingsjson).
 
 **Runtime options** control which CLI the agent uses. An agent's runtime — Claude Code, OpenAI Codex, or Gemini CLI — is chosen via `runtime.type` in `template.yaml` (see [Agent Runtimes](agent-runtimes.md)):
 
@@ -67,6 +67,8 @@ When you create an agent, Trinity performs these steps in order:
 Once an agent is running, Trinity validates its workspace against best-practice conventions and surfaces the results in the **Overview** tab on the Agent Detail page. This is advisory — it never blocks creation or deployment.
 
 The check covers things like a present and valid `template.yaml`, a non-gitignored `.claude/` directory, defined playbooks, and accidentally committed secrets, grouped into findings ranked HARD / SOFT / INFO. Claude-specific checks (such as `CLAUDE.md` and `.claude/` skills) are skipped for Codex and Gemini agents.
+
+The panel headline counts only must-fix (HARD) findings: *N must-fix compatibility issues*, *No must-fix issues* followed by the number of recommendations, or *Compatible — all checks passing*. AI checks skipped for the same reason (for example, no Anthropic key) collapse into one line. A template with no `resources` block passes: the agent inherits the admin's fleet-wide default. A declared `resources` block is checked with the same rules agent creation uses, so the report accepts exactly the values creation accepts. Agents created from the bundled starters report no must-fix findings.
 
 The 9 gitignore-related findings offer a one-click **Fix** button: Trinity rewrites the agent's `.gitignore` in place. The change is uncommitted until the agent's next git sync. Re-run the analysis at any time with **Re-run analysis**.
 
@@ -133,9 +135,13 @@ When you create an agent from a repository you already have — rather than a cu
 
 | Intent | What happens | Git sync |
 |--------|--------------|----------|
-| **Clone** | The default. Trinity clones the repository and keeps it wired to that remote. | Yes — the agent pushes back to the source repo |
+| **Clone** | The default. Trinity clones the repository and keeps it wired to that remote. | Yes — on its own working branch when the repository is yours; otherwise pull-only (see below) |
 | **Fork** | Trinity forks the repository into your own GitHub account first (requires the template to declare `fork_to_own`). | Yes — to your fork, with `upstream` pointing at the original |
 | **Copy** | Trinity takes a one-time snapshot of the files, strips the `.git` history, and gives the agent a standalone workspace. | **No** — no remote, no token, no sync |
+
+**Clone: agent or deployment.** A cloned repository is treated as an **agent** by default: it gets a working branch it alone writes, auto-sync, and paused schedules while sync fails — but only when your GitHub account owns the repository, the token is your own (not the platform-wide one), and it can push. A template picked from the list is a catalog entry and is always pull-only. The catalog is the admin-configured list, else the remote registry, plus the bundled defaults, matched by repository name (case and a trailing `.git` do not matter). A repository outside it — your own repo entered under **Import a GitHub repository** — is judged by the ownership and push checks above, not treated as a catalog template. Otherwise the agent is created pull-only, and the create response's `git_mode.reason` says why. Pass `kind: "deployment"` to run a codebase pull-only on purpose.
+
+In the create dialog, a custom repository with the **Clone** intent asks **What is this repository?** — **An agent** (the repository is the agent's memory, skills and state, saved to its own branch) or **A deployment of a codebase** (a product the agent runs, which only pulls). The question is not asked for list templates, local or blank agents, copy, fork, or fork-to-own. After a GitHub-backed create, the dialog shows what Trinity decided and why, and warns plainly when an agent you asked for was created **pull-only**. The agent's **Git** tab then carries a badge: **Agent · own branch**, **Agent · own repo**, or **Pull-only**. Details: [GitHub Sync → Creating an agent with sync](../integrations/github-sync.md#creating-an-agent-with-sync).
 
 **Copy** is the right choice when you want to start *from* someone's repository without staying attached to it. The agent gets the files and nothing else: no GitHub credentials are stored, no remote is configured, and the agent never appears on git-sync surfaces. If you later decide you do want a repository, use **Initialize GitHub Sync** on the agent's Git tab.
 
@@ -149,11 +155,13 @@ The check is advisory — the agent exists either way, and you can re-run the an
 
 ### UI Flow
 
-1. Click **Create Agent** in the Dashboard header, or **Use Template** on the Library page.
-2. Select a template source. GitHub templates display as cards with metadata from `template.yaml`. For a free-form repository, pick the import intent (clone / fork / copy).
-3. Enter an agent name (lowercase, hyphens only) — this is the immutable slug.
-4. Optionally set a **display label** (max 120 characters) — the friendly name shown across the UI. Leave it blank to render under the slug.
-5. Click **Create**, then review the inline compatibility result.
+1. Click **Create Agent** in the Dashboard header, or **Use Template** on the Library page. The **New agent** dialog opens at one fixed size: a source list on the left, the selected source and its details on the right. Each pane scrolls on its own; the header, the footer and the list never move, whatever you pick.
+2. Pick a source in the left pane. **Search templates** narrows the list by name, description or repository. The list has a **Start** group — **Blank agent** (selected by default) and **Import a GitHub repository** — followed by **Featured** (fork-to-own templates), **Local templates** (the bundled starters) and **GitHub templates** (the admin-configured or registry list). The right pane names the selection with a badge (**Local template**, **GitHub template**, or **Your own copy** for a fork-to-own template) and its description. For **Import a GitHub repository**, a **Repository** field (`owner/repo` or a full GitHub URL) and the import intent (clone / fork / copy) appear under the name; a clone also asks **What is this repository?** (see above), and a fork or a fork-to-own template asks for the destination repository and a token.
+3. Enter a **Name** — the name shown across the UI, for example `My Research Agent`. The **ID** row under the field previews the permanent slug Trinity will create (`my-research-agent`): spaces and other unsupported characters become hyphens and everything is lowercased. It is used in URLs, containers and API keys and cannot be changed later. **Edit** lets you type a different ID; **Use name** derives it from the name again. A name or ID with no ASCII letter or digit formats to nothing, so **Create agent** stays disabled and the field asks for at least one letter or number.
+4. The read-only **Runtime** row says what the agent will run on: **Claude Code** for a blank agent, otherwise *set by the template* (or repository) — Claude Code unless its `template.yaml` declares another. There is no runtime picker in the dialog.
+5. Click **Create agent**, then review the inline compatibility result and, for a GitHub-backed agent, the git-mode notice. The new agent appears on the Dashboard at once.
+
+The typed name becomes the agent's **display label** when it differs from the ID and is at most 120 characters; a longer name is not an error — the agent is created and renders under its ID. The API receives what you typed (the name, or the ID you entered under **Edit**) and applies the same formatting itself, so the ID it creates is the one the dialog previewed. To change the label later, see [Managing Agents](managing-agents.md#display-label).
 
 ### API
 
@@ -171,7 +179,7 @@ Idempotency-Key: <optional-unique-key>
 }
 ```
 
-`import_intent` accepts `fork`, `copy`, or `clone`, and applies only to `github:` templates. Omit it for the legacy behaviour. Supplying an `Idempotency-Key` makes a retried create safe: the same key within 24 hours replays the original response instead of creating a second agent, and a duplicate still in flight returns 409.
+`import_intent` accepts `fork`, `copy`, or `clone`, and applies only to `github:` templates. `kind` accepts `agent` (the default) or `deployment` and decides whether a `github:` agent gets a working branch; the response's `git_mode` carries the decision and its `reason`. Omit it for the legacy behaviour. Supplying an `Idempotency-Key` makes a retried create safe: the same key within 24 hours replays the original response instead of creating a second agent, and a duplicate still in flight returns 409.
 
 A copy-intent response carries an `import_snapshot` block recording the source repo, branch, commit SHA, and file count.
 
@@ -181,7 +189,7 @@ A copy-intent response carries an `import_snapshot` block recording the source r
 create_agent(name="my-agent", template="github:Org/repo@branch", import_intent="copy")
 ```
 
-The MCP tool accepts `copy` and `clone`. Fork stays UI/REST-only because it needs fork parameters.
+The MCP tool accepts `copy` and `clone`, and the same optional `kind` (`agent` or `deployment`). Fork stays UI/REST-only because it needs fork parameters.
 
 ### Fork-to-Own Templates
 
@@ -206,10 +214,11 @@ The agent's container is labeled so it can be discovered and managed by the plat
 
 ## Limitations
 
-- Agent names must be unique, lowercase, with hyphens allowed. No spaces or special characters.
+- Agent names must be unique. The slug keeps only ASCII letters, digits, `-`, `_` and `.`; anything else becomes a hyphen, the result is lowercased, and it must start with a letter or digit.
 - The `base_image` must match the configured allowlist. Requests for blocked images return HTTP 403.
 - Private GitHub repositories require a GitHub PAT to be configured before use as a template source.
 - A public GitHub template clones with no token, but only in **source mode**. The anonymous clone can't push, so pushing changes back, Working-Branch mode, and fork-to-own still require a token.
+- Reading a public template's `template.yaml` at creation doesn't need a token either. When a token is present, Trinity tries your saved token, then the platform token, and when neither can read it, a tokenless read once the repository proves public. A token GitHub rejects as invalid is skipped for that create (never on a fork, and never for a rate limit or an outage). If nothing can read the template, the create is refused with `503` and the refusal lists every attempt by tier and outcome (`detail.attempts`) — never a token or a URL. The create response's `git_mode.token_tier` shows which token the agent was created with, and `git_mode.rejected_token_tier` shows any token that was skipped.
 - Template metadata from GitHub is cached for 10 minutes. Changes to `template.yaml` may not appear immediately.
 - A **copy**-intent agent has no upstream by design. If both its container and its workspace volume are lost, a rebuild produces an empty workspace rather than re-fetching — Trinity will not silently pull whatever the source repository looks like *now*. Export the agent's data periodically if that matters; the creation audit entry records the source repo and exact commit.
 - An unresolvable or invalid local template id is rejected at creation rather than producing an empty agent.

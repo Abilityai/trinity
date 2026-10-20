@@ -19,6 +19,7 @@ markers = [
     "smoke: mark test as smoke test (fast, no agent)",
     "slow: mark test as slow running (chat execution)",
     "requires_agent: test requires a running agent",
+    "requires_model: test executes a real model turn (chat/task/fan-out) — opts into the #2889 provider preflight",
     "unit: unit tests that don't need backend",
     "integration: mark test as integration test",
     "journey: a promise the platform makes to a person, tested end to end against a live stack (#2335)",

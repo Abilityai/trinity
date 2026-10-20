@@ -17,7 +17,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { queueResponseKind } from '../../src/utils/operatorQueue.js'
+import { queueResponseKind, queueTypeLabel } from '../../src/utils/operatorQueue.js'
 
 const read = (rel) =>
   readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
@@ -29,6 +29,7 @@ describe('an unrecognised queue type is informational, so it acknowledges', () =
   it.each([
     ['skill_not_found (#1410, live since it landed)', 'skill_not_found'],
     ['workspace_problem_report (ent#499)', 'workspace_problem_report'],
+    ['queue_flood (#3130, the budgeted flood alarm)', 'queue_flood'],
     ['a type this build has never heard of', 'invented_tomorrow'],
   ])('%s → acknowledge', (_label, type) => {
     expect(queueResponseKind({ type })).toBe('acknowledge')
@@ -71,5 +72,11 @@ describe('neither card re-implements the switch', () => {
     // got an empty response area and no way out of the queue.
     const src = read(CARD)
     expect(src).toMatch(/v-else\s+class="flex justify-end"/)
+  })
+})
+
+describe('the flood alarm keeps the label it had as an alert (#3130)', () => {
+  it('reads "Heads up", like the alert it used to be', () => {
+    expect(queueTypeLabel('queue_flood')).toBe(queueTypeLabel('alert'))
   })
 })

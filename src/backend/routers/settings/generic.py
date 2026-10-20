@@ -216,6 +216,24 @@ async def update_setting(
             ),
         )
 
+    # #2899: the fleet-wide agent resource defaults go through the dedicated
+    # route, which validates against the same VALID_CPU / VALID_MEMORY sets the
+    # container-create path enforces. This generic PUT takes `Dict[str, str]`
+    # with no validation, and a junk default here is not a cosmetic setting: it
+    # is read at create time as the fallback for every agent whose template and
+    # caller declare no `resources`, where `normalize_cpu` / `normalize_memory`
+    # reject it with a 400 — i.e. one bad write silently stops agent creation
+    # fleet-wide, for the exact population (the bundled starters) that relies on
+    # the default. Same shape as the #506 ceiling above.
+    if key in (AGENT_DEFAULT_CPU_KEY, AGENT_DEFAULT_MEMORY_KEY):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/agent-defaults/resources "
+                "(validated against the cpu/memory values container creation accepts)"
+            ),
+        )
+
     # #1609: proactive caps go through the dedicated range-validated route.
     if key in PROACTIVE_RATE_LIMIT_DEFAULTS:
         raise HTTPException(
@@ -304,6 +322,7 @@ async def update_setting(
             ),
         )
 
+    from config import OPS_SETTINGS_VALIDATION
     from services.settings_service import RETENTION_OPS_KEYS
 
     if key in RETENTION_OPS_KEYS:
@@ -314,6 +333,23 @@ async def update_setting(
                 "PUT /api/settings/ops/config (type- and range-validated, "
                 "audit-logged). See GET /api/settings/retention for the "
                 "effective values (ent#297)"
+            ),
+        )
+
+    # ent#297's redirect, generalised (trinity-enterprise#478 / E4): a key that
+    # HAS validation must have exactly ONE write path, or the validation is
+    # advisory. The retention block above named one subset by hand, which left
+    # every other validated ops key — `metrics_daily_point_cap` among them —
+    # reachable here unchecked, where garbage is stored verbatim and then 500s
+    # the reader that calls `int()` on it. The rule is now the property, not a
+    # list someone has to remember to extend.
+    if key in OPS_SETTINGS_VALIDATION:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is a validated ops setting and must be set via "
+                "PUT /api/settings/ops/config (type- and range-validated, "
+                "audit-logged)"
             ),
         )
 
@@ -370,6 +406,45 @@ async def update_setting(
                 f"{key} holds encrypted outbound A2A endpoints and must be set via "
                 "PUT /api/settings/a2a-endpoints (admin + human-only, SSRF-validated, "
                 "audit-logged)"
+            ),
+        )
+
+    # ent#623: the AAuth instance signing key is an AES-256-GCM envelope that
+    # IS this instance's identity to every AAuth peer. A plaintext write would
+    # corrupt it (AAuth then fails closed, confusingly); a replaced envelope
+    # would silently change the identity peers trust. Nothing writes it but
+    # `services.aauth.keys`, which creates it once.
+    from services.aauth.keys import SIGNING_KEY_SETTING
+
+    if key == SIGNING_KEY_SETTING:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is managed by the AAuth key service and cannot be set through the API",
+        )
+
+    # ent#862: the AAuth switches and the issuer are grants (publish this
+    # instance's key, accept signed callers, change every agent's identity), so
+    # they go through the dedicated route, which is admin AND interactive and
+    # validates the issuer. This catch-all is admin-only: an MCP key carrying an
+    # admin owner's role would otherwise flip them.
+    from services.aauth import config as aauth_config
+
+    if key in aauth_config.SETTINGS_ROUTE_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/aauth "
+                "(admin + interactive-only, issuer validated, audit-logged)"
+            ),
+        )
+
+    if key == "a2a_trusted_networks":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/a2a-trusted-networks, "
+                "which refuses the platform's own networks, loopback and "
+                "link-local ranges (trinity-enterprise#838)."
             ),
         )
 
@@ -486,7 +561,7 @@ async def update_setting(
             source="api",
             actor_user=current_user,
             actor_ip=request.client.host if request.client else None,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
             details={"setting": key, "action": "update"},
         )
@@ -569,6 +644,29 @@ async def delete_setting(
             ),
         )
 
+    # ent#623: deleting the AAuth signing key re-keys this instance on next
+    # use — every AAuth peer's cached trust silently stops matching.
+    from services.aauth.keys import SIGNING_KEY_SETTING
+
+    if key == SIGNING_KEY_SETTING:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is managed by the AAuth key service and cannot be cleared through the API",
+        )
+
+    # ent#862: same reason as on PUT — clearing the issuer or a switch is a change
+    # to this instance's AAuth posture, made through the dedicated route.
+    from services.aauth import config as aauth_config
+
+    if key in aauth_config.SETTINGS_ROUTE_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be changed via PUT /api/settings/aauth "
+                "(admin + interactive-only, audit-logged)"
+            ),
+        )
+
     # ent#14: blocked here as well as on PUT, unlike the #1644 retention acks.
     # Deleting an ack re-arms a guard and therefore fails safe; deleting
     # `template_registry_enabled` reverts it to its default of ON, which
@@ -597,7 +695,7 @@ async def delete_setting(
                 source="api",
                 actor_user=current_user,
                 actor_ip=request.client.host if request.client else None,
-                endpoint=str(request.url.path),
+                endpoint=request.scope["path"],
                 request_id=getattr(request.state, "request_id", None),
                 details={"setting": key, "action": "delete"},
             )

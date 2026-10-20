@@ -1,28 +1,50 @@
+# mcp: operator_queue.ts (list_operator_queue, get_operator_queue_item, respond_to_operator_queue — a person-scoped key only; ask_operator → agent_router's raise; get_my_ask → agent_router's self-readback; withdraw_ask → agent_router's self-withdraw, trinity-enterprise#901)
 """
 Operator Queue API Router (OPS-001).
 
 REST API for the Operating Room — lists queue items, submits responses,
 and provides statistics. Items are synced from agent JSON files by the
 operator_queue_service background poller.
+
+Every way an ask ENDS — answer, cancel, bulk cancel — goes through
+`services/ask_service.py` (trinity-enterprise#611); the routes here validate,
+gate and map errors. Only a person ends an ask (`reject_non_person_principal`).
 """
 
 import json
-from typing import Optional, Set
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from models import BulkCancelRequest, ClearResolvedRequest, OperatorResponse
+import logging
+from typing import Any, Dict, List, Optional, Set
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from models import (
+    BulkCancelRequest,
+    ClearResolvedRequest,
+    OperatorAskCreate,
+    OperatorAskWithdraw,
+    OperatorCancel,
+    OperatorResponse,
+)
 
 from database import db
-from dependencies import get_current_user
+from dependencies import (
+    get_current_user,
+    get_self_acting_agent,
+    is_person_principal,
+    principal_reach,
+    reject_non_person_principal,
+)
 from db_models import User
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services.operator_queue_choices import (
-    ResponseNotOfferedError,
-    validate_response_choice,
-)
-from services import operator_queue_service, operator_resume_service
+from services.operator_queue_choices import ReservedAnswerError, ResponseNotOfferedError
+from services import ask_service, operator_queue_service, skill_gate_service
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api/operator-queue", tags=["operator-queue"])
+
+# trinity-enterprise#611: the agent's own readback lives under the agent it
+# belongs to (Invariant #15; the `routers/loops.py` two-router precedent).
+agent_router = APIRouter(prefix="/api/agents", tags=["operator-queue"])
 
 # WebSocket manager injected from main.py
 _websocket_manager = None
@@ -43,18 +65,127 @@ def _accessible_set(current_user: User) -> Optional[Set[str]]:
 
     Returns None for admins (no filter — sees everything).
     Returns a set (possibly empty) for regular users.
+
+    trinity-enterprise#629: an agent key carries its OWNER's role, so on an
+    admin-owned install it got None — every agent's queue. It always gets a set,
+    narrowed to its reach (itself, its edges, the agents it spawned) — the one
+    reach source every fleet route reads (`dependencies.principal_reach`,
+    trinity-enterprise#872).
     """
+    reach = principal_reach(current_user)
+    if reach is not None:
+        return reach
     if current_user.role == "admin":
         return None
-    user_email = current_user.email or ""
-    names = db.get_accessible_agent_names(user_email, is_admin=False)
-    return set(names)
+    return set(db.get_accessible_agent_names(current_user.email or "", is_admin=False))
+
+
+def _owned_set(current_user: User) -> Optional[Set[str]]:
+    """The agents this caller OWNS, for the owner-only rows
+    (trinity-enterprise#866), or None when that rule does not apply: an admin
+    sees every row. A machine key never reaches an owner-only row at all — it is
+    about a person (#715) — so its set is irrelevant and it gets None too."""
+    if current_user.role == "admin" or not is_person_principal(current_user):
+        return None
+    return set(db.get_agents_by_owner(current_user.username))
+
+
+def _hidden_from(item: Dict[str, Any], owned: Optional[Set[str]]) -> bool:
+    """An owner-only row (a client's complaint) on an agent this caller does not
+    own (trinity-enterprise#866). To them it reads like a row that is not there."""
+    return (owned is not None and operator_queue_service.is_owner_only(item)
+            and item.get("agent_name") not in owned)
+
+
+def _drop_hidden(items: List[Dict[str, Any]], owned: Optional[Set[str]]) -> List[Dict[str, Any]]:
+    return [item for item in items if not _hidden_from(item, owned)]
+
+
+def _hidden_for(item: Dict[str, Any], current_user: User) -> bool:
+    """`_hidden_from` for one row, resolving the caller's agents only when the
+    row is owner-only — every other row costs no lookup."""
+    return (operator_queue_service.is_owner_only(item)
+            and _hidden_from(item, _owned_set(current_user)))
 
 
 def _assert_agent_accessible(agent_name: str, accessible: Optional[Set[str]]) -> None:
     """Raise 403 if the user cannot access the given agent."""
     if accessible is not None and agent_name not in accessible:
         raise HTTPException(status_code=403, detail="Access denied")
+
+
+# What a MACHINE principal (an agent-, system-, ops-, connector- or
+# portal_delegate key, and whatever scope ships next) reads of a queue row
+# (trinity-enterprise#611, #715). It reads the queue for its own work, never to
+# learn which person answered or ended an ask, or whom it was for. An ALLOWLIST,
+# like `_READBACK_FIELDS` below, so a column added later stays out until someone
+# decides a machine should read it. Withheld: `responded_by_id`,
+# `responded_by_email`, `addressed_to_email` (a file entry's too — a sibling's
+# rows are readable by the same key), `disposed_by_email`, `resolved_to`.
+# A person — a JWT session or the person's own user-scoped key
+# (`is_person_principal`) — reads the whole row.
+_MACHINE_ROW_FIELDS = (
+    "id", "agent_name", "request_id", "type", "status", "priority",
+    "title", "question", "options", "context", "execution_id",
+    "created_at", "expires_at", "response", "response_text", "responded_at",
+    "acknowledged_at", "cleared_at",
+    "sync_state", "sync_detail", "sync_updated_at", "last_confirmed_at",
+    "delivery_state", "delivery_detail", "delivery_updated_at",
+    "divergence_acknowledged_at",
+    "disposition", "disposed_at", "disposed_by", "disposition_reason", "batch_id",
+    "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
+    "replaces", "replaced_by",  # #3247 — uuids; the readback maps them to request_ids
+    "aging", "aged_since",
+    "subject", "last_seen_at",  # #3246: a platform alert's condition key + latest reading
+)
+
+
+def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict[str, Any]]:
+    if is_person_principal(current_user):
+        # #3242: whether the reserved "(something else)" answer applies — the
+        # sink's own predicate, so no operator surface offers a chip that 422s.
+        # A bare boolean; the machine view never needs it (it cannot answer).
+        # trinity-enterprise#755: `gate` is the gated-skill approval card's
+        # platform view (None for every other row) — who asked, who it waits
+        # on, whether THIS person may decide, how it ended.
+        return [{**item, "decided_by_options": ask_service.decided_by_options(item),
+                 "gate": skill_gate_service.card_view(
+                     item, viewer_email=current_user.email,
+                     run_viewer=current_user.username, name_approvers=True),
+                 # trinity-enterprise#901: which ending the agent authored
+                 # (replaced | withdrawn | None), derived once server-side.
+                 "agent_ending": ask_service.agent_ending_kind(item)}
+                for item in items]
+    # #715: the platform's heads-ups ABOUT a person (a client's complaint, the
+    # client addresses behind a shared inbox) are the operator's, not a machine's.
+    return [
+        {key: item[key] for key in _MACHINE_ROW_FIELDS if key in item}
+        for item in items
+        if not operator_queue_service.is_about_a_person(item)
+    ]
+
+
+# The agent's own readback (trinity-enterprise#611). An ALLOWLIST, so a column
+# added later stays out until someone decides an agent should read it. No person's
+# email, no person refs, no platform sync internals; `to_role` is the role the ask
+# was addressed to, never the person it resolved to.
+_READBACK_FIELDS = (
+    "id", "request_id", "agent_name", "type", "priority", "status",
+    "title", "question", "options", "created_at", "expires_at",
+    "response", "response_text", "responded_at",
+    "disposition", "disposed_at", "disposed_by", "disposition_reason",
+    "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
+    "replaces", "replaced_by",  # #3247 — mapped to request_ids below
+)
+
+
+def _actor(current_user: User, request: Request) -> ask_service.Actor:
+    return ask_service.Actor(
+        email=current_user.email or current_user.username,
+        user=current_user,
+        ip=request.client.host if request.client else None,
+        endpoint=request.scope["path"],
+    )
 
 
 # ============================================================================
@@ -70,21 +201,55 @@ async def list_queue_items(
     since: Optional[str] = Query(None, description="Items created after this ISO timestamp"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    agent_names: Optional[List[str]] = Query(
+        None,
+        description=(
+            "Narrow to these agents (repeat the parameter per name, at most 500). "
+            "Only ever narrows what the caller may see (trinity-enterprise#815)."
+        ),
+    ),
+    cursor: Optional[str] = Query(
+        None,
+        description=(
+            "Keyset walk: 'start' to begin, then each page's next_cursor. Within one "
+            "walk no item is returned twice or skipped while the queue changes "
+            "(trinity-enterprise#815). Omit for offset paging."
+        ),
+    ),
     current_user: User = Depends(get_current_user),
 ):
-    """List operator queue items with optional filters."""
-    accessible = _accessible_set(current_user)
-    items = db.list_operator_queue_items(
-        status=status,
-        type=type,
-        priority=priority,
-        agent_name=agent_name,
-        since=since,
-        limit=limit,
-        offset=offset,
-        accessible_agent_names=accessible,
-    )
-    return {"items": items, "count": len(items)}
+    """List operator queue items with optional filters.
+
+    trinity-enterprise#815: complete within `limit` — every visibility filter
+    runs in SQL before the cut — and says so: `total`, `has_more`,
+    `next_offset` (see `operator_queue_service.list_for_principal`). An
+    agent-scoped key is narrowed to `{self} ∪ permitted` before the cut;
+    `agent_names` narrows any caller further.
+    """
+    owned = _owned_set(current_user)
+    try:
+        return operator_queue_service.list_for_principal(
+            current_user,
+            accessible=_accessible_set(current_user),
+            exclude_about_a_person=not is_person_principal(current_user),
+            # trinity-enterprise#866: a client's complaint is the agent owner's.
+            owned_agents=owned,
+            # #2915: aging is computed once, here, from the operator's bound —
+            # the frontend renders `aging`/`aged_since`, it never recomputes
+            # them. The two flag counts are the visible escalation (undelivered
+            # answers, items the agent closed on its side) the Operations header
+            # shows instead of minting queue items about queue items.
+            project=lambda rows: _for_principal(
+                operator_queue_service.annotate_aging(_drop_hidden(rows, owned)), current_user),
+            filters=dict(status=status, type=type, priority=priority,
+                         agent_name=agent_name, since=since),
+            limit=limit,
+            offset=offset,
+            agent_names=agent_names,
+            cursor=cursor,
+        )
+    except operator_queue_service.QueueListError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
 
 
 @router.get("/stats")
@@ -106,34 +271,23 @@ async def bulk_cancel_queue_items(
 
     Only the listed ids are touched; non-pending or inaccessible ids are
     skipped (reported in `skipped`). Affects all operators of the agents.
+
+    trinity-enterprise#611: a person only; the sweep's rows share one
+    `batch_id` (returned), carry the optional `reason`, and are audited and
+    woken as ONE event — the ids it actually cancelled, never the ids asked for.
     """
+    reject_non_person_principal(current_user)
     accessible = _accessible_set(current_user)
     ids = list(dict.fromkeys(body.ids))  # dedupe, keep order — honest skipped count
-    cancelled = db.bulk_cancel_operator_queue_items(ids, accessible)
-    skipped = len(ids) - cancelled
-
-    if cancelled > 0:
-        await platform_audit_service.log(
-            event_type=AuditEventType.OPERATOR_QUEUE,
-            event_action="bulk_cancel",
-            source="api",
-            actor_user=current_user,
-            actor_ip=request.client.host if request.client else None,
-            target_type="operator_queue",
-            endpoint=str(request.url.path),
-            details={"cancelled": cancelled, "skipped": skipped, "ids": body.ids},
-        )
-        if _websocket_manager:
-            await _websocket_manager.broadcast(json.dumps({
-                "type": "operator_queue_cleared",
-                "data": {
-                    "scope": "pending",
-                    "count": cancelled,
-                    "cleared_by": current_user.email or current_user.username,
-                }
-            }))
-
-    return {"cancelled": cancelled, "skipped": skipped}
+    # trinity-enterprise#866: an owner-only row a caller cannot read is not
+    # theirs to end either; it counts as skipped, like an inaccessible id.
+    cancellable = [i for i in ids
+                   if not _hidden_for(db.get_operator_queue_item(i) or {}, current_user)]
+    ending = ask_service.bulk_cancel(
+        cancellable, accessible, actor=_actor(current_user, request), reason=body.reason,
+    )
+    cancelled = len(ending.rows)
+    return {"cancelled": cancelled, "skipped": len(ids) - cancelled, "batch_id": ending.batch_id}
 
 
 @router.post("/clear-resolved")
@@ -169,16 +323,17 @@ async def clear_resolved_queue_items(
             actor_ip=request.client.host if request.client else None,
             target_type="operator_queue",
             target_id=body.agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             details={"cleared": cleared, "agent_name": body.agent_name},
         )
         if _websocket_manager:
+            # #715: the count only. A fleet-level trigger reaches every `/ws`
+            # connection, and any key can mint a ticket; listeners refetch.
             await _websocket_manager.broadcast(json.dumps({
                 "type": "operator_queue_cleared",
                 "data": {
                     "scope": "resolved",
                     "count": cleared,
-                    "cleared_by": current_user.email or current_user.username,
                 }
             }))
 
@@ -192,26 +347,44 @@ async def get_queue_item(
 ):
     """Get a single queue item by ID."""
     item = db.get_operator_queue_item(item_id)
-    if not item:
+    # trinity-enterprise#631: a person's tag is read through its addressee's own
+    # door only — to the operator's door it is a row that is not there.
+    if not item or operator_queue_service.is_person_tag(item):
         raise HTTPException(status_code=404, detail="Queue item not found")
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(item["agent_name"], accessible)
-    return item
+    if _hidden_for(item, current_user):
+        raise HTTPException(status_code=404, detail="Queue item not found")  # ent#866
+    visible = _for_principal(operator_queue_service.annotate_aging([item]), current_user)
+    if not visible:
+        # #715: a row about a person reads, to a machine, like one that is not there.
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    return visible[0]
 
 
 @router.post("/{item_id}/respond")
 async def respond_to_queue_item(
     item_id: str,
     body: OperatorResponse,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ):
-    """Submit an operator response to a pending queue item."""
+    """Submit an operator response to a pending queue item.
+
+    trinity-enterprise#611: a person only — refused before the row is read, so an
+    agent key learns nothing about which ids exist. The answer, its ledger, its
+    audit row, its broadcast and the ent#329 resume all happen in the ask sink.
+    """
+    reject_non_person_principal(current_user)
     existing = db.get_operator_queue_item(item_id)
-    if not existing:
+    # trinity-enterprise#631: the same "not there" GET gives a person's tag.
+    if not existing or operator_queue_service.is_person_tag(existing):
         raise HTTPException(status_code=404, detail="Queue item not found")
 
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(existing["agent_name"], accessible)
+    if _hidden_for(existing, current_user):
+        raise HTTPException(status_code=404, detail="Queue item not found")  # ent#866
 
     if existing["status"] != "pending":
         raise HTTPException(
@@ -219,14 +392,49 @@ async def respond_to_queue_item(
             detail=f"Cannot respond to item with status '{existing['status']}'"
         )
 
-    # #2376: the decision has to be one the AGENT offered. Nothing checked this
-    # at any layer, so #2370 recorded `"approved"` against `["Approve", "Deny"]`
-    # for five months with no 4xx — the agent read back a string it never
-    # offered. Named 422 rather than a bare one: the options are agent-authored,
-    # so a refusal that does not list them leaves the operator guessing.
+    # #2915: the agent rewrote or closed its own copy of this item after the
+    # platform ingested it. The card the human read is the platform's frozen
+    # snapshot; delivering an answer to it would hand the agent a decision
+    # about a different question. Refused, named, until the human has SEEN the
+    # divergence and answers anyway (`acknowledge_divergence`, set by the UI on
+    # the second click). The portal answer path carries the same rule.
+    if (
+        existing.get("sync_state") in operator_queue_service.REFUSE_RESPONSE_STATES
+        and not body.acknowledge_divergence
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "item_diverged",
+                "message": "The agent changed this item after you opened it. Review it and send again.",
+                "sync_state": existing.get("sync_state"),
+                "sync_detail": existing.get("sync_detail"),
+            },
+        )
+
     try:
-        validate_response_choice(existing, body.response)
+        # #2376: the decision has to be one the AGENT offered — checked by the
+        # ask sink, the one writer of an answer (trinity-enterprise#611), before
+        # anything is written.
+        ending = ask_service.answer(
+            existing,
+            response=body.response,
+            response_text=body.response_text,
+            actor=_actor(current_user, request),
+            responded_by_id=str(current_user.id),
+            # #2989 review: the acknowledgement is recorded on the row so the
+            # write-back delivers into the entry as it is now ("send again to
+            # answer anyway").
+            divergence_acknowledged=bool(
+                body.acknowledge_divergence
+                and existing.get("sync_state") in operator_queue_service.REFUSE_RESPONSE_STATES
+            ),
+        )
     except ResponseNotOfferedError as e:
+        # Nothing checked this at any layer before #2376, so #2370 recorded
+        # `"approved"` against `["Approve", "Deny"]` for five months with no 4xx.
+        # Named 422 rather than a bare one: the options are agent-authored, so a
+        # refusal that does not list them leaves the operator guessing.
         raise HTTPException(
             status_code=422,
             detail={
@@ -235,69 +443,62 @@ async def respond_to_queue_item(
                 "offered_options": e.options,
             },
         )
-
-    item = db.respond_to_operator_queue_item(
-        item_id=item_id,
-        response=body.response,
-        response_text=body.response_text,
-        responded_by_id=str(current_user.id),
-        responded_by_email=current_user.email or current_user.username,
-    )
-
-    # Lost the race: the item left 'pending' between the check above and the
-    # UPDATE (e.g. a bulk-cancel landed). The response was NOT recorded —
-    # surface that instead of a silent 200 (#1017).
-    if item and item.pop("_status_conflict", False):
+    except ReservedAnswerError as e:
+        # #3242: the reserved "(something else)" decision — named so the caller
+        # can act: `instruction_required`, `reserved_value` or `not_off_menu`.
+        raise HTTPException(status_code=422, detail={"code": e.code, "message": str(e)})
+    except ask_service.AskNotFound:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    except ask_service.AskNotAddressee:
+        # trinity-enterprise#751: a gated-skill approval is decided only by a
+        # person it was addressed to.
+        raise HTTPException(status_code=403, detail={
+            "code": "not_addressee",
+            "message": "This approval was addressed to someone else; only they can decide it.",
+        })
+    except ask_service.AskConflict as conflict:
+        # The response was NOT recorded — surfaced instead of a silent 200
+        # (#1017). `expired`: still pending but past its deadline (#611) — the
+        # poller has not swept it yet, and an approval must not land after it.
+        if conflict.code == "expired":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "expired",
+                    "message": "This ask expired before it was answered — the response was not recorded.",
+                },
+            )
         raise HTTPException(
             status_code=409,
-            detail=f"Item is no longer pending (now '{item['status']}') — response was not recorded"
+            detail=f"Item is no longer pending (now '{conflict.item['status']}') — response was not recorded"
         )
-
-    # ent#329 — respond → re-trigger dispatch. Hung off the CAS *win* only: the
-    # 409 above already returned for a lost race, so reaching here means this
-    # caller's answer is the one that landed. Backgrounded so respond stays fast;
-    # a no-opt-in agent costs one flag read. The answer is already committed, so
-    # this can never roll it back.
-    # ent#499: a PLATFORM-minted item opened no loop for the agent to resume —
-    # it never asked, is not waiting, and for a problem report is the subject of
-    # the complaint. Dispatching would spend one of its turns on a prompt
-    # carrying the client's email and verbatim words, which ent#366 withholds
-    # from that agent by design. Same predicate the responded write-back uses.
-    if item and not operator_queue_service.is_platform_minted(item):
-        operator_resume_service.spawn_resume_dispatch(
-            item,
-            response=body.response,
-            response_text=body.response_text,
-            responded_by_email=current_user.email or current_user.username,
-        )
-
-    # Broadcast WebSocket event
-    if _websocket_manager and item:
-        await _websocket_manager.broadcast(json.dumps({
-            "type": "operator_queue_responded",
-            "data": {
-                "id": item_id,
-                "agent_name": item["agent_name"],
-                "responded_by_email": current_user.email or current_user.username,
-                "response": body.response,
-            }
-        }))
-
-    return item
+    return ending.rows[0]
 
 
 @router.post("/{item_id}/cancel")
 async def cancel_queue_item(
     item_id: str,
+    request: Request,
+    body: Optional[OperatorCancel] = None,
     current_user: User = Depends(get_current_user),
 ):
-    """Cancel a pending queue item."""
+    """Cancel a pending queue item.
+
+    trinity-enterprise#611: a person only; an optional `reason` (≤ 500 chars) is
+    recorded on the row and framed as data in the agent's wake. Audited,
+    broadcast and woken through the ask sink; a cancel that lost the race to an
+    answer or an expiry is a 409, never a 200 over an ending that did not happen.
+    """
+    reject_non_person_principal(current_user)
     existing = db.get_operator_queue_item(item_id)
-    if not existing:
+    # trinity-enterprise#631: the same "not there" GET gives a person's tag.
+    if not existing or operator_queue_service.is_person_tag(existing):
         raise HTTPException(status_code=404, detail="Queue item not found")
 
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(existing["agent_name"], accessible)
+    if _hidden_for(existing, current_user):
+        raise HTTPException(status_code=404, detail="Queue item not found")  # ent#866
 
     if existing["status"] != "pending":
         raise HTTPException(
@@ -305,8 +506,25 @@ async def cancel_queue_item(
             detail=f"Cannot cancel item with status '{existing['status']}'"
         )
 
-    item = db.cancel_operator_queue_item(item_id)
-    return item
+    try:
+        ending = ask_service.cancel(
+            item_id, actor=_actor(current_user, request), reason=body.reason if body else None,
+        )
+    except ask_service.AskNotFound:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    except ask_service.AskNotAddressee:
+        # trinity-enterprise#751: only its addressee or an admin cancels a
+        # gated-skill approval.
+        raise HTTPException(status_code=403, detail={
+            "code": "not_addressee",
+            "message": "This approval was addressed to someone else; only they or an admin can cancel it.",
+        })
+    except ask_service.AskConflict as conflict:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Item is no longer pending (now '{conflict.item['status']}') — it was not cancelled"
+        )
+    return ending.rows[0]
 
 
 @router.get("/agents/{agent_name}")
@@ -319,9 +537,119 @@ async def get_agent_queue_items(
     """Get queue items for a specific agent."""
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(agent_name, accessible)
+    owned = _owned_set(current_user)
+    owner_only = ({} if owned is None else
+                  dict(owner_only_request_id_prefixes=operator_queue_service.OWNER_ONLY_ID_PREFIXES,
+                       owner_agent_names=owned))
     items = db.list_operator_queue_items(
         agent_name=agent_name,
         status=status,
         limit=limit,
+        # trinity-enterprise#815: a machine's about-a-person exclusion runs in
+        # SQL, before the limit, so those rows can no longer empty the page.
+        exclude_request_id_prefixes=(
+            None if is_person_principal(current_user)
+            else operator_queue_service.ABOUT_A_PERSON_ID_PREFIXES),
+        **owner_only,  # trinity-enterprise#866: before the limit, like the line above
     )
+    items = _for_principal(
+        operator_queue_service.annotate_aging(_drop_hidden(items, owned)), current_user)
     return {"agent_name": agent_name, "items": items, "count": len(items)}
+
+
+# ============================================================================
+# The agent raises an ask, and reads it back (trinity-enterprise#611)
+# ============================================================================
+
+@agent_router.post("/{name}/operator-queue")
+async def raise_my_ask(
+    body: OperatorAskCreate,
+    response: Response,
+    name: str = Depends(get_self_acting_agent),
+    current_user: User = Depends(get_current_user),
+    x_trinity_execution_id: Optional[str] = Header(None, max_length=128),
+):
+    """An agent asks a person for a decision — one call, validated here, stored,
+    broadcast, and answered with a receipt. No file is written.
+
+    The calling agent only, as itself (`get_self_acting_agent`): the record
+    says an agent raised it. 201 with the receipt on a create; 200 with the
+    FIRST ask's receipt (`status: "replayed"`) when this `request_id` was
+    already raised, so a retry is a no-op. Refusals carry named codes — 422
+    for a malformed ask, 429 for the caps.
+    """
+    try:
+        receipt = ask_service.raise_ask(
+            name,
+            body.model_dump(exclude_none=True),
+            raised_by="agent",
+            channel="mcp",
+            actor_user=current_user,
+            # ent#661 v3: the raising turn as the platform saw it (#2392).
+            platform_execution_id=x_trinity_execution_id,
+        )
+    except ask_service.AskRejected as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail={"code": e.code, "message": e.message, **e.extra},
+        )
+    response.status_code = 201 if receipt["status"] == "created" else 200
+    return receipt
+
+
+@agent_router.get("/{name}/operator-queue/{request_id}")
+async def get_my_ask(
+    request_id: str,
+    name: str = Depends(get_self_acting_agent),
+):
+    """How one of this agent's asks stands, by the `request_id` the agent chose.
+
+    The agent's delivery channel for an ending: still readable after Clear All
+    (which only hides a row from the operator's list), and the only way an agent
+    that was stopped when its ask ended learns how it ended. The calling agent
+    only, as itself (`get_self_acting_agent`); a redacted projection
+    (`_READBACK_FIELDS`) that never carries a person's email.
+    """
+    item = db.get_operator_queue_item_for_agent_by_request_id(name, request_id)
+    # #715 / trinity-enterprise#751: a row whose text names a person (a skill-gate
+    # card or notice — its id is readable in the executor's own skipped run) is
+    # the operator's; the same 404 as an unknown id.
+    if not item or operator_queue_service.is_about_a_person(item):
+        raise HTTPException(status_code=404, detail="Ask not found")
+    readback = {key: item.get(key) for key in _READBACK_FIELDS}
+    # The row stores the predecessor's uuid; the agent knows its asks by the
+    # request_id it chose, and the receipt names the predecessor that way too.
+    readback["supersedes_expired"] = ask_service.request_id_of(item.get("supersedes_expired"))
+    # #3247: the replace link, both ways, the same way.
+    readback["replaces"] = ask_service.request_id_of(item.get("replaces"))
+    readback["replaced_by"] = ask_service.request_id_of(item.get("replaced_by"))
+    # trinity-enterprise#901: which ending the agent authored (replaced |
+    # withdrawn | None), derived once server-side, never inferred from the link.
+    readback["agent_ending"] = ask_service.agent_ending_kind(item)
+    return readback
+
+
+@agent_router.post("/{name}/operator-queue/{request_id}/withdraw")
+async def withdraw_my_ask(
+    request_id: str,
+    body: OperatorAskWithdraw,
+    name: str = Depends(get_self_acting_agent),
+    current_user: User = Depends(get_current_user),
+):
+    """The agent ends one of its OWN pending asks with a reason and no successor
+    (trinity-enterprise#901) — the question answered itself, the action is no
+    longer needed. The calling agent only, as itself (`get_self_acting_agent`;
+    deliberately NOT `reject_non_person_principal` — this door is agent-only).
+    200 with the receipt (`status: "withdrawn"`), or `status: "replayed"` when
+    this agent already withdrew it. Refusals carry named codes: 404
+    `ask_not_found` (uniform — unknown, another agent's, a gate's, the
+    platform's), 409 `ask_ended` (a person answered or ended it first; the
+    answer stands), 422 `invalid_reason`.
+    """
+    try:
+        return ask_service.withdraw(name, request_id, body.reason, actor_user=current_user)
+    except ask_service.AskRejected as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail={"code": e.code, "message": e.message, **e.extra},
+        )

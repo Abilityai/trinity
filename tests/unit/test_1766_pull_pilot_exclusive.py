@@ -24,10 +24,10 @@ The three properties proven here make the pilot flag a true **either/or**:
   2. **Consumer** — the backend never drains a pilot's queue, so the agent's
      worker pool is the sole claimant. One guard covers every drain path
      (release callback, 60s orphan sweep, ``drain_on_release``).
-  3. **Carve-out** — interactive triggers are excluded and still take the
-     synchronous push path (``TARGET_ARCHITECTURE.md`` Open Question 7's scope
-     cut), so human chat is not parked behind N batch tasks and per-session
-     ``--resume`` serialization is untouched.
+  3. **Carve-out** — the UI ``/chat`` trigger (``chat``) still takes the
+     synchronous push path. Every other interactive trigger is pulled on a
+     pilot (#3114); the claim orders them ahead of batch work (#2842) and runs
+     one turn per conversation at a time (#2843).
 
 Plus the inertness property the whole dark-ship rests on: with an empty
 allowlist (the default) every path is byte-for-byte unchanged.
@@ -182,7 +182,7 @@ class TestPullOwnsDispatch:
     @pytest.mark.parametrize(
         "trigger",
         ["agent", "event", "schedule", "webhook", "reminder", "loop", "fan_out",
-         "a2a", "operator_response"],
+         "a2a", "operator_response", "retry"],
     )
     def test_pilot_owns_the_autonomous_triggers_dispatch_can_deliver(self, pilot, trigger):
         """Narrowed by #2048, re-widened by #2391 and #2523.
@@ -219,12 +219,19 @@ class TestPullOwnsDispatch:
         assert pull_owns_dispatch("alice", "schedule") is False
         assert pull_owns_dispatch("alice", "agent") is True
 
-    @pytest.mark.parametrize("trigger", ["manual", "user", "chat", "voip", "voice", None])
-    def test_pilot_does_not_own_interactive_triggers(self, pilot, trigger):
-        """Open Question 7 scope cut: human turns keep the synchronous path."""
+    @pytest.mark.parametrize("trigger", ["manual", "user", "voip", "voice", "chat"])
+    def test_pilot_owns_interactive_triggers(self, pilot, trigger):
+        """#3114, #3127: interactive turns reach a pilot through the durable
+        queue, ``/chat`` included."""
         from services.agent_service.pull_mode import pull_owns_dispatch
 
-        assert pull_owns_dispatch("alice", trigger) is False
+        assert pull_owns_dispatch("alice", trigger) is True
+
+    def test_pilot_does_not_own_unknown(self, pilot):
+        """An unclassified trigger falls back to push."""
+        from services.agent_service.pull_mode import pull_owns_dispatch
+
+        assert pull_owns_dispatch("alice", None) is False
 
     def test_empty_allowlist_is_inert(self, monkeypatch):
         monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", "")
@@ -274,10 +281,12 @@ class TestProducerGate:
         slot_service.acquire_slot.assert_not_awaited()
         backlog_service.enqueue.assert_awaited_once()
 
-    def test_pilot_interactive_work_still_pushes(
+    def test_pilot_interactive_work_is_queued(
         self, capacity, slot_service, backlog_service, pilot
     ):
-        """The carve-out, on the same agent: a human turn is admitted."""
+        """#3114: a human turn on a pilot is queued like autonomous work, with
+        no ZADD, even with a slot free."""
+        slot_service.acquire_slot = AsyncMock(return_value=True)
         result = asyncio.run(
             capacity.acquire(
                 agent_name="alice",
@@ -287,9 +296,26 @@ class TestProducerGate:
                 overflow_payload=_payload("manual"),
             )
         )
-        assert result.state == "admitted"
-        slot_service.acquire_slot.assert_awaited_once()
-        backlog_service.enqueue.assert_not_awaited()
+        assert result.state == "queued_persistent"
+        slot_service.acquire_slot.assert_not_awaited()
+        backlog_service.enqueue.assert_awaited_once()
+
+    def test_pilot_chat_trigger_is_queued(
+        self, capacity, slot_service, backlog_service, pilot
+    ):
+        """Trigger ``chat`` reaches the durable queue too (#3127)."""
+        result = asyncio.run(
+            capacity.acquire(
+                agent_name="alice",
+                execution_id="exec-2b",
+                max_concurrent=3,
+                overflow_policy="queue_persistent",
+                overflow_payload=_payload("chat"),
+            )
+        )
+        assert result.state == "queued_persistent"
+        slot_service.acquire_slot.assert_not_awaited()
+        backlog_service.enqueue.assert_awaited_once()
 
     def test_non_pilot_autonomous_work_unchanged(
         self, capacity, slot_service, backlog_service, pilot

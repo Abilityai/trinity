@@ -266,3 +266,148 @@ def test_runner_venv_is_not_tracked():
         "tests/.venv is tracked; run-full.sh creates it per-machine and a tracked "
         "copy (dir, file or symlink) makes the bootstrap machine-specific"
     )
+
+
+# ---------------------------------------------------------------------------
+# The guard that truncated the run for three weeks (#2888)
+# ---------------------------------------------------------------------------
+# `for _d in tests/*/` was evaluated after the runner had `cd`'d into `tests/`,
+# so it looked for `tests/tests/*/`, matched nothing, stayed a literal `*`,
+# failed classification and `exit 1`'d before the api / standalone / postgres
+# tiers. The guard now lives in `harness/check_test_dirs.py`, takes the
+# directory explicitly, and is exercised here — the inline version was the one
+# part of the harness with no test at all.
+
+
+def _shell_array(text: str, name: str) -> list[str]:
+    m = re.search(rf"^{name}=\(([^)]*)\)", text, re.M)
+    assert m, f"{name}=( ... ) not found in run-full.sh"
+    return m.group(1).split()
+
+
+def _check_test_dirs():
+    import sys
+
+    sys.path.insert(0, str(_TESTS))
+    from harness import check_test_dirs
+
+    return check_test_dirs
+
+
+def test_the_directory_guard_does_not_glob_relative_to_the_cwd():
+    text = _run_full()
+    # Matched as CODE (a `for ... in` over the glob), not as a substring: the
+    # runner's own comment names the bad glob to explain it, which is the
+    # read-the-prose trap this file already documents for itself.
+    assert not re.search(r"^\s*for\s+\S+\s+in\s+tests/\*/", text, re.M), (
+        "run-full.sh globs `tests/*/` again — after its own `cd` that is "
+        "`tests/tests/*/`, matches nothing, and aborts the run on the literal `*`"
+    )
+    assert re.search(r'check_test_dirs\.py "\$TESTS_DIR"', text), (
+        "the directory guard must be handed TESTS_DIR explicitly, never left to "
+        "infer it from the cwd"
+    )
+
+
+def test_the_directory_guard_passes_on_the_real_tree():
+    """Run the guard the way the runner does, over the real tests/ tree with the
+    real owner lists. If this fails, so does every full-suite run."""
+    text = _run_full()
+    known = _shell_array(text, "TIER_DIRS") + _shell_array(text, "NON_TIER_DIRS")
+    assert _check_test_dirs().main(["check_test_dirs.py", str(_TESTS), *known]) == 0
+
+
+def _tree(tmp_path: Path, *dirs: str, with_test: tuple[str, ...] = ()) -> Path:
+    root = tmp_path / "tests"
+    root.mkdir()
+    for d in dirs:
+        (root / d).mkdir(parents=True)
+    for d in with_test:
+        (root / d).mkdir(parents=True, exist_ok=True)
+        (root / d / "test_x.py").write_text("def test_x():\n    pass\n")
+    return root
+
+
+def test_the_directory_guard_passes_a_fully_wired_tree(tmp_path):
+    root = _tree(tmp_path, "harness", with_test=("unit", "integration"))
+    assert _check_test_dirs().main(
+        ["check_test_dirs.py", str(root), "unit", "integration", "harness"]
+    ) == 0
+
+
+def test_the_directory_guard_names_an_unwired_directory_that_holds_tests(tmp_path, capsys):
+    """AC #2: the guard still fires for a genuinely unwired directory — the
+    "add one temporarily" proof, made permanent."""
+    root = _tree(tmp_path, with_test=("unit", "orphaned_tier"))
+    rc = _check_test_dirs().main(["check_test_dirs.py", str(root), "unit"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "orphaned_tier/" in out
+    assert "TIER_DIRS" in out
+
+
+def test_the_directory_guard_ignores_directories_that_hold_no_tests(tmp_path):
+    """`__pycache__`, `reports/`, the venv and a stale local checkout with only
+    `node_modules` are on every developer machine and collected by nothing;
+    naming them would fail every run — the same truncation, sign flipped."""
+    root = _tree(
+        tmp_path,
+        "__pycache__", "reports", ".venv", ".pytest_cache",
+        "stale_local_checkout/node_modules", "stale_local_checkout/__pycache__",
+        with_test=("unit",),
+    )
+    (root / "stale_local_checkout" / "node_modules" / "test_lib.py").write_text("")
+    assert _check_test_dirs().main(["check_test_dirs.py", str(root), "unit"]) == 0
+
+
+def test_the_directory_guard_fails_a_stale_owner_entry(tmp_path, capsys):
+    """A renamed tier directory keeps its `--ignore=` line (pytest ignores a
+    missing path silently) while the new name is swept into `api`."""
+    root = _tree(tmp_path, with_test=("unit",))
+    rc = _check_test_dirs().main(["check_test_dirs.py", str(root), "unit", "renamed_away"])
+    assert rc == 1
+    assert "renamed_away/" in capsys.readouterr().out
+
+
+def test_the_directory_guard_refuses_an_empty_owner_list(tmp_path):
+    root = _tree(tmp_path, with_test=("unit",))
+    assert _check_test_dirs().main(["check_test_dirs.py", str(root)]) == 2
+
+
+def test_every_tier_the_runner_can_run_is_declared_for_the_ledger():
+    """The end-of-run ledger fails a declared tier with no result row. It can
+    only do that for tiers it knows about, so every `run_tier NAME` line — and
+    the two tiers that record themselves by hand — must be in DECLARED_TIERS."""
+    text = _run_full()
+    declared = _shell_array(text, "DECLARED_TIERS")
+    invoked = set(re.findall(r"^\s*run_tier\s+([a-z-]+)\s", text, re.M))
+    invoked |= set(re.findall(r"^\s*record\s+(standalone|postgres)\s", text, re.M))
+    assert set(declared) == invoked, (
+        f"DECLARED_TIERS={sorted(declared)} but the runner invokes {sorted(invoked)}"
+    )
+    assert len(declared) == len(set(declared))
+
+
+def test_a_declared_tier_with_no_result_row_fails_the_run():
+    """AC #4: a tier the control flow never reached is named and fails the run,
+    and an exit before the summary announces itself as an abort."""
+    text = _run_full()
+    assert re.search(r'record "\$_t" FAIL "tier NEVER RAN', text), (
+        "run-full.sh no longer fails a declared tier that has no result row"
+    )
+    assert "trap on_exit EXIT" in text
+    assert "ABORTED before the summary" in text
+    # The abort message must be computed from what was recorded, not from a
+    # flag one exit path sets — every exit path has to trip it.
+    assert 'if [ "$SUMMARY_PRINTED" = 0 ]' in text
+    assert text.count("SUMMARY_PRINTED=1") == 1
+    assert text.index("SUMMARY_PRINTED=1") > text.index("tier NEVER RAN")
+
+
+def test_a_deselected_tier_is_listed_as_skipped_not_passed():
+    """`--tier unit` is a legitimate partial run; the summary must still say
+    which tiers it did not cover, and the verdict must not read as full."""
+    text = _run_full()
+    assert 'record_deselected "$_t" "deselected by --tier"' in text
+    assert 'record_deselected postgres "deselected by --no-pg"' in text
+    assert "not a full-suite result" in text

@@ -22,11 +22,19 @@ from sqlalchemy import select, insert, update, delete, func, and_, cast, Text
 from .engine import get_engine
 from .tables import email_whitelist, email_login_codes, users
 from utils.helpers import utc_now_iso
+from .users import EmailInUseError
 
-# Valid role values for new users. Kept local to avoid a circular import with
-# dependencies.py (which imports from database, which imports from this module).
-# Must stay in sync with dependencies.ROLE_HIERARCHY.
-_VALID_DEFAULT_ROLES = {"user", "operator", "creator", "admin"}
+# Valid role values for new users, lowest first. Kept local to avoid a circular
+# import with dependencies.py (which imports from database, which imports from
+# this module). Must equal dependencies.ROLE_HIERARCHY — pinned by
+# tests/unit/test_837_role_change_audit.py.
+_ROLE_ORDER = ("user", "operator", "creator", "admin")
+_VALID_DEFAULT_ROLES = frozenset(_ROLE_ORDER)
+
+# Sources that wrote whitelist rows nobody chose a role for: agent sharing and
+# access-request approval, both at `user`, until trinity-enterprise#837 stopped
+# them. A deliberate grant replaces such a row instead of bouncing off it.
+_SHARING_SOURCES = frozenset({"agent_sharing", "access_request"})
 
 
 class EmailAuthOperations:
@@ -67,7 +75,9 @@ class EmailAuthOperations:
                 so every callsite makes the role decision deliberately (#314).
 
         Returns:
-            True if added, False if already exists
+            True if added — or if it replaced a row that sharing or an
+            access-request approval wrote (trinity-enterprise#837) — False if
+            another row already exists.
 
         Raises:
             ValueError: If default_role is not a recognized role.
@@ -78,14 +88,25 @@ class EmailAuthOperations:
                 f"Must be one of {sorted(_VALID_DEFAULT_ROLES)}"
             )
 
-        # Check if already exists
-        if self.is_email_whitelisted(email):
+        existing_source = self._whitelist_source(email)
+        if existing_source is not None and existing_source not in _SHARING_SOURCES:
             return False
 
         # Get user ID
         user = self._user_ops.get_user_by_username(added_by)
         if not user:
             raise ValueError(f"User not found: {added_by}")
+
+        if existing_source is not None:
+            # A sharing-written row, replaced by this grant (trinity-enterprise#837).
+            with get_engine().begin() as conn:
+                conn.execute(
+                    update(email_whitelist)
+                    .where(func.lower(email_whitelist.c.email) == email.lower())
+                    .values(added_by=user["id"], added_at=utc_now_iso(),
+                            source=source, default_role=default_role)
+                )
+            return True
 
         stmt = insert(email_whitelist).values(
             email=email.lower(),
@@ -97,6 +118,48 @@ class EmailAuthOperations:
         with get_engine().begin() as conn:
             conn.execute(stmt)
         return True
+
+    def cap_whitelist_default_role(self, email: str, role: str) -> bool:
+        """Lower an email's whitelist row to `role` when it ranks above it
+        (trinity-enterprise#837).
+
+        A row's role is what an account created for the address gets — at a first
+        sign-in, and again if that account later re-binds to another address. A
+        role change must never leave the row above the account, or a demoted
+        person could re-bind away and sign in with the old address at the old
+        role. It only ever LOWERS the row: raised on a promotion, the row would
+        hand the old address a second account at the new role after a re-bind —
+        one a later demotion of the first would not reach. One conditional
+        UPDATE, so it cannot race another writer upward. Never creates a row;
+        returns whether one was lowered.
+        """
+        if role not in _VALID_DEFAULT_ROLES:
+            raise ValueError(
+                f"Invalid role: {role!r}. Must be one of {sorted(_VALID_DEFAULT_ROLES)}"
+            )
+        above = _ROLE_ORDER[_ROLE_ORDER.index(role) + 1:]
+        if not above:
+            return False
+        stmt = (
+            update(email_whitelist)
+            .where(func.lower(email_whitelist.c.email) == email.lower())
+            .where(email_whitelist.c.default_role.in_(above))
+            .values(default_role=role)
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount > 0
+
+    def _whitelist_source(self, email: str) -> Optional[str]:
+        """The source of an email's whitelist row, `""` for a row with none,
+        or None when the email has no row."""
+        stmt = select(email_whitelist.c.source).where(
+            func.lower(email_whitelist.c.email) == email.lower()
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if not row:
+            return None
+        return row["source"] or ""
 
     def get_whitelist_default_role(self, email: str) -> Optional[str]:
         """Return the default_role for a whitelisted email, or None if not found."""
@@ -152,9 +215,14 @@ class EmailAuthOperations:
     # Login Code Operations
     # =========================================================================
 
-    def create_login_code(self, email: str, expiry_minutes: int = 10) -> dict:
+    def create_login_code(self, email: str, expiry_minutes: int = 10,
+                          purpose: Optional[str] = None) -> dict:
         """
         Generate a 6-digit login code for an email.
+
+        purpose (ent#720): NULL is a sign-in code. An email-bind code carries
+        `email_bind:<user id>` so it can only complete THAT account's bind, and
+        neither kind of code is accepted where the other is expected.
 
         Returns:
             dict with code_id, code, expires_at
@@ -172,6 +240,7 @@ class EmailAuthOperations:
             created_at=created_at.isoformat(),
             expires_at=expires_at.isoformat(),
             verified=0,
+            purpose=purpose,
         )
         with get_engine().begin() as conn:
             conn.execute(stmt)
@@ -184,9 +253,11 @@ class EmailAuthOperations:
             "expires_in_seconds": expiry_minutes * 60
         }
 
-    def verify_login_code(self, email: str, code: str) -> Optional[dict]:
+    def verify_login_code(self, email: str, code: str,
+                          purpose: Optional[str] = None) -> Optional[dict]:
         """
-        Verify a login code for an email.
+        Verify a login code for an email. `purpose` must match exactly — the
+        default (None) accepts only sign-in codes (ent#720).
 
         Returns:
             dict with code verification result, or None if invalid
@@ -205,6 +276,8 @@ class EmailAuthOperations:
                         func.lower(email_login_codes.c.email) == email.lower(),
                         email_login_codes.c.code == code,
                         email_login_codes.c.verified == 0,
+                        (email_login_codes.c.purpose.is_(None) if purpose is None
+                         else email_login_codes.c.purpose == purpose),
                     )
                 )
                 .order_by(email_login_codes.c.created_at.desc())
@@ -236,11 +309,31 @@ class EmailAuthOperations:
             }
 
     def count_recent_code_requests(self, email: str, minutes: int = 10) -> int:
-        """Count how many code requests were made for this email recently."""
+        """Count recent SIGN-IN code requests for this email (`purpose IS NULL`).
+
+        ent#720: bind codes are excluded. Counting them would let any signed-in
+        user request bind codes for someone else's address and keep its owner's
+        sign-in codes suppressed; the bind route limits its caller instead
+        (`count_recent_codes_for_purpose`)."""
         cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
         stmt = select(func.count().label("count")).where(
             and_(
                 func.lower(email_login_codes.c.email) == email.lower(),
+                email_login_codes.c.purpose.is_(None),
+                email_login_codes.c.created_at > cutoff,
+            )
+        )
+        with get_engine().connect() as conn:
+            result = conn.execute(stmt).mappings().first()
+        return result["count"] if result else 0
+
+    def count_recent_codes_for_purpose(self, purpose: str, minutes: int = 10) -> int:
+        """Count recent codes minted for one purpose, across every address (ent#720:
+        the per-account bind allowance, `email_bind:<user id>`)."""
+        cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+        stmt = select(func.count().label("count")).where(
+            and_(
+                email_login_codes.c.purpose == purpose,
                 email_login_codes.c.created_at > cutoff,
             )
         )
@@ -283,20 +376,11 @@ class EmailAuthOperations:
         if role not in _VALID_DEFAULT_ROLES:
             role = "user"
 
-        # Create new user
-        now = utc_now_iso()
-        # Username = email (lowercase)
-        username = email.lower()
-
-        stmt = insert(users).values(
-            username=username,
-            email=email.lower(),
-            role=role,
-            created_at=now,
-            updated_at=now,
-        )
-        with get_engine().begin() as conn:
-            conn.execute(stmt)
-
-        # Return the created user
-        return self._user_ops.get_user_by_email(email)
+        # Create new user — through the one checked writer (ent#720), which
+        # also keeps a reclaimed `username = email` from becoming a 500.
+        try:
+            return self._user_ops.insert_email_user(email, role)
+        except EmailInUseError:
+            # Lost a race with a concurrent first sign-in for the same address:
+            # that account is this person's account.
+            return self._user_ops.get_user_by_email(email)

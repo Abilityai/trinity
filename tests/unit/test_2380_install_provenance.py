@@ -67,6 +67,8 @@ MARKETPLACE = "do-marketplace"
 OTHER_MARKETPLACE = "vultr-marketplace"
 SCRIPT = "script"
 DO_SCRIPT = "do-script"
+AWS_MARKETPLACE = "aws-marketplace"  # #3004
+AWS_SCRIPT = "aws-script"  # #3004
 UNKNOWN = "unknown"
 
 
@@ -170,7 +172,7 @@ class TestConfigContract:
         cfg = _config()
         assert cfg.INSTALL_SOURCE_UNKNOWN == UNKNOWN
         assert cfg.INSTALL_SOURCE_VALUES == frozenset(
-            {MARKETPLACE, OTHER_MARKETPLACE, SCRIPT, DO_SCRIPT, UNKNOWN}
+            {MARKETPLACE, OTHER_MARKETPLACE, AWS_MARKETPLACE, SCRIPT, DO_SCRIPT, AWS_SCRIPT, UNKNOWN}
         )
 
     def test_marketplace_sources_are_a_strict_subset(self):
@@ -178,7 +180,7 @@ class TestConfigContract:
         marketplace value that cannot be recorded could never fire the guide."""
         cfg = _config()
         assert cfg.MARKETPLACE_INSTALL_SOURCES == frozenset(
-            {MARKETPLACE, OTHER_MARKETPLACE}
+            {MARKETPLACE, OTHER_MARKETPLACE, AWS_MARKETPLACE}
         )
         assert cfg.MARKETPLACE_INSTALL_SOURCES < cfg.INSTALL_SOURCE_VALUES
         assert cfg.INSTALL_SOURCE_UNKNOWN not in cfg.MARKETPLACE_INSTALL_SOURCES
@@ -187,6 +189,7 @@ class TestConfigContract:
         # question with a different set — widening this one instead would make
         # the install claim a vendor listing it never came from.
         assert DO_SCRIPT not in cfg.MARKETPLACE_INSTALL_SOURCES
+        assert AWS_SCRIPT not in cfg.MARKETPLACE_INSTALL_SOURCES
 
     def test_the_guide_set_is_marketplace_plus_the_do_script_install(self):
         """#2380's amended AC. The guide's subject is "public cloud VM at a bare
@@ -201,7 +204,7 @@ class TestConfigContract:
         say — fires on every paying client's instance, permanently."""
         cfg = _config()
         assert cfg.HARDENING_GUIDE_INSTALL_SOURCES == frozenset(
-            {MARKETPLACE, OTHER_MARKETPLACE, DO_SCRIPT}
+            {MARKETPLACE, OTHER_MARKETPLACE, AWS_MARKETPLACE, DO_SCRIPT, AWS_SCRIPT}
         )
         assert cfg.MARKETPLACE_INSTALL_SOURCES < cfg.HARDENING_GUIDE_INSTALL_SOURCES
         assert cfg.HARDENING_GUIDE_INSTALL_SOURCES < cfg.INSTALL_SOURCE_VALUES
@@ -333,7 +336,7 @@ class TestRecorderSqlite:
         [
             "do-marketplac",        # the realistic typo
             "DO-MARKETPLACE",       # case: the marker is matched exactly
-            "aws-marketplace",      # a channel that does not exist yet
+            "gcp-marketplace",      # a channel that does not exist yet
             "; DROP TABLE users",
             "true",
         ],
@@ -586,7 +589,7 @@ class TestResolver:
         assert svc.get_install_source() == value
 
     @pytest.mark.parametrize(
-        "rogue", ["aws-marketplace", "do-marketplac", "true", "", "   "]
+        "rogue", ["gcp-marketplace", "do-marketplac", "true", "", "   "]
     )
     def test_a_row_outside_the_allowlist_reads_as_unknown(self, monkeypatch, rogue):
         """Defence in depth against a value written by any path other than the

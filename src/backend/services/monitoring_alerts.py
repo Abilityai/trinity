@@ -343,39 +343,6 @@ class MonitoringAlertService:
         await self._broadcast_alert(notification)
         return notification.id
 
-    async def alert_stuck_execution(
-        self,
-        agent_name: str,
-        execution_id: str,
-        duration_minutes: int
-    ) -> Optional[str]:
-        """Send alert when execution is stuck."""
-        condition = f"stuck:{execution_id}"
-
-        if db.is_in_alert_cooldown(agent_name, condition, self.config.degraded_cooldown):
-            return None
-
-        notification = db.create_notification(
-            agent_name=agent_name,
-            data=NotificationCreate(
-                notification_type="alert",
-                title=f"Agent {agent_name} has stuck execution",
-                message=f"Execution {execution_id} has been running for {duration_minutes} minutes",
-                priority="high",
-                category="health",
-                metadata={
-                    "agent_name": agent_name,
-                    "execution_id": execution_id,
-                    "duration_minutes": duration_minutes,
-                    "timestamp": utc_now_iso()
-                }
-            )
-        )
-
-        db.set_alert_cooldown(agent_name, condition)
-        await self._broadcast_alert(notification)
-        return notification.id
-
     async def alert_resource_critical(
         self,
         agent_name: str,
@@ -444,6 +411,43 @@ class MonitoringAlertService:
         )
 
         db.set_alert_cooldown(agent_name, condition)
+        await self._broadcast_alert(notification)
+        return notification.id
+
+    async def alert_event_dispatch_budget_exhausted(
+        self,
+        agent_name: str,
+        source: str,
+        limit: int,
+    ) -> Optional[str]:
+        """Event dispatches from ``source`` into ``agent_name`` hit the hourly cap.
+
+        #2973: fired once per window by ``event_dispatch_service`` (on the first
+        dispatch past the cap), so no cooldown is needed. An event chain that
+        re-emits at the end of every turn never runs deep enough for the
+        chain-depth guard to see it; this is the only stop, and the owner
+        should know it fired.
+        """
+        notification = db.create_notification(
+            agent_name=agent_name,
+            data=NotificationCreate(
+                notification_type="alert",
+                title=f"Agent {agent_name} event dispatches capped",
+                message=(
+                    f"Event-subscription dispatches from {source} into {agent_name} "
+                    f"reached {limit} this hour; further dispatches from that source "
+                    "are skipped until the window resets. A subscription may be looping."
+                ),
+                priority="high",
+                category="health",
+                metadata={
+                    "agent_name": agent_name,
+                    "source": source,
+                    "limit": limit,
+                    "timestamp": utc_now_iso(),
+                },
+            ),
+        )
         await self._broadcast_alert(notification)
         return notification.id
 

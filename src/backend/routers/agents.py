@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, capability_fence
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -57,6 +57,7 @@ from services.agent_service import (
     get_accessible_agents,
     # Lifecycle
     start_agent_internal,
+    public_skills_result,
     # CRUD
     create_agent_internal as _create_agent_internal,
     # Deploy
@@ -111,7 +112,8 @@ async def create_agent_internal(
     current_user: User,
     request: Request,
     skip_name_sanitization: bool = False,
-    adopt_existing_workspace: bool = False
+    adopt_existing_workspace: bool = False,
+    allow_unforked_pull_only: bool = False,
 ) -> AgentStatus:
     """
     Internal function to create an agent.
@@ -124,7 +126,8 @@ async def create_agent_internal(
         request=request,
         skip_name_sanitization=skip_name_sanitization,
         ws_manager=manager,
-        adopt_existing_workspace=adopt_existing_workspace
+        adopt_existing_workspace=adopt_existing_workspace,
+        allow_unforked_pull_only=allow_unforked_pull_only,
     )
 
 
@@ -167,10 +170,27 @@ async def list_agents_endpoint(
     # would be an N+1 on the fleet's hottest endpoint. Agents without a label
     # are absent from the map and render under their slug, as they do today.
     all_labels = db.get_display_labels_for_agents(agent_names)
+    # ent#527 rider (ruling 2026-09-24): the owner's readiness stamp on the list
+    # and the fleet grid — batched for the same reason. Only stamped agents carry
+    # one; `None` means "no stamp", never a guessed `calibrating`. The stamp is
+    # decoration: a failed read degrades to "no stamp" rather than failing the
+    # whole list.
+    try:
+        all_readiness = db.get_role_readiness_for_agents(agent_names)
+    except Exception:
+        logger.warning("[ent#527] readiness read failed; listing without stamps", exc_info=True)
+        all_readiness = {}
+    # Whether a calibrating stamp is actually holding a scheduled brief — the
+    # role card's own predicate, one batched schedule read, so the list's
+    # tooltip never claims a pause the card does not (PR #3038 review).
+    from services.role_readiness_gate import briefs_held_for_list
+    held = briefs_held_for_list(agents, all_readiness)
 
     for agent in agents:
         agent["tags"] = all_tags.get(agent.get("name"), [])
         agent["display_label"] = all_labels.get(agent.get("name"))
+        agent["readiness"] = all_readiness.get(agent.get("name"))
+        agent["brief_held"] = agent.get("name") in held
 
     return agents
 
@@ -264,31 +284,46 @@ async def get_all_sync_health(
 ):
     """Dashboard batch endpoint for sync-health dots (#389).
 
-    Returns one entry per accessible agent. Entries join `agent_sync_state`
-    with the per-agent auto-sync flag so the UI can colour dots and badge
-    agents that have auto-sync off.
+    Returns one entry per accessible agent. trinity-enterprise#706: each entry
+    carries the backend's verdict — `state` / `reason` / `recommendation` /
+    `binding` / `freeze` from `services/sync_health_view.py` — and the new
+    columns, so the dot renders a state the backend owns. The pre-#706 keys are
+    unchanged. One shared query (`db.list_sync_health_rows`) replaces the
+    per-table reads (still no N+1, #73).
     """
+    from services.sync_health_view import sync_view
+
     accessible = {a["name"] for a in get_accessible_agents(current_user)}
-    rows = db.list_sync_states()
-    by_name = {r["agent_name"]: r for r in rows if r["agent_name"] in accessible}
-    # #73: one scoped query instead of an N+1 per-agent lookup.
-    auto_sync_map = db.get_all_git_auto_sync_enabled(accessible)
+    rows = db.list_sync_health_rows(accessible)
 
     entries = []
     for name in sorted(accessible):
-        row = by_name.get(name)
+        bound = rows.get(name)
+        row = (bound or {}).get("state")
+        config = (bound or {}).get("config")
+        view = sync_view(row, config)
+        row = row or {}
         entries.append({
             "agent_name": name,
-            "auto_sync_enabled": auto_sync_map.get(name, False),
-            "last_sync_at": (row or {}).get("last_sync_at"),
-            "last_sync_status": (row or {}).get("last_sync_status") or "never",
-            "consecutive_failures": (row or {}).get("consecutive_failures") or 0,
-            "last_error_summary": (row or {}).get("last_error_summary"),
-            "behind_working": (row or {}).get("behind_working") or 0,
-            "behind_main": (row or {}).get("behind_main") or 0,
-            "ahead_working": (row or {}).get("ahead_working") or 0,
-            "ahead_main": (row or {}).get("ahead_main") or 0,
-            "git_dir_bytes": (row or {}).get("git_dir_bytes"),  # #1596 bloat curve
+            "auto_sync_enabled": bool((config or {}).get("auto_sync_enabled")),
+            "last_sync_at": row.get("last_sync_at"),
+            "last_sync_status": row.get("last_sync_status") or "never",
+            "consecutive_failures": row.get("consecutive_failures") or 0,
+            "last_error_summary": row.get("last_error_summary"),
+            "behind_working": row.get("behind_working") or 0,
+            "behind_main": row.get("behind_main") or 0,
+            "ahead_working": row.get("ahead_working") or 0,
+            "ahead_main": row.get("ahead_main") or 0,
+            "git_dir_bytes": row.get("git_dir_bytes"),  # #1596 bloat curve
+            # trinity-enterprise#706
+            "dirty_files": row.get("dirty_files"),
+            "last_successful_push_at": row.get("last_successful_push_at"),
+            "state": view["state"],
+            "reason": view["reason"],
+            "recommendation": view["recommendation"],
+            "binding": view["binding"] if config else None,
+            "divergence_age_s": view["divergence_age_s"],
+            "freeze": view["freeze"],
         })
     return {"agents": entries}
 
@@ -359,13 +394,20 @@ async def get_all_agent_slots(
     Returns:
     - agents: Dict mapping agent_name to {"max": N, "active": M}
     - timestamp: ISO timestamp of response
+
+    Scoped to the agents the caller may see (trinity-enterprise#872): an admin
+    person every agent, anyone else their visible set, an agent key its reach.
     """
     from db_models import BulkSlotState
     from services.capacity_manager import get_capacity_manager
+    from services.agent_service.helpers import visible_agent_names
     from datetime import datetime
 
     # Get all agents with their capacities
     agent_capacities = db.get_all_agents_parallel_capacity()
+    visible = visible_agent_names(current_user)  # None = sees every agent
+    if visible is not None:
+        agent_capacities = {n: c for n, c in agent_capacities.items() if n in visible}
 
     # CAPACITY-CONSOLIDATE (#428): bulk capacity meter via CapacityManager.
     capacity = get_capacity_manager()
@@ -404,7 +446,6 @@ async def get_all_permission_edges(
     """
     # Get accessible agents once (not N times)
     accessible = {a['name'] for a in get_accessible_agents(current_user)}
-
     # Single DB query filtered at SQL level
     edges = db.get_all_permission_edges(accessible)
 
@@ -455,7 +496,7 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     agent_dict["is_shared"] = not agent_dict["is_owner"] and not is_admin and \
                                db.is_agent_shared_with_user(agent_name, current_user.username)
     agent_dict["is_system"] = owner.get("is_system", False) if owner else False
-    agent_dict["can_share"] = db.can_user_share_agent(current_user.username, agent_name)
+    agent_dict["can_share"] = (db.can_user_share_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name, manage=True))
     # ent#181: the detail endpoint is what AgentHeader loads on page open — it
     # must carry the label too, or the header shows the slug until the first
     # edit and the surfaces disagree (§1.3.1 FR-3). One extra read; not the list
@@ -493,6 +534,18 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     return agent_dict
 
 
+async def _require_create_capability(request: Request, current_user, config) -> None:
+    """trinity-enterprise#164: an agent creating a DURABLE agent needs
+    `agents.manage`. Spawning an ephemeral ("ghost") helper does not — ent#69
+    already bounds it (TTL, quota, the ephemeral key fence) and agents rely on
+    it (decided 2026-10-05). Humans pass by scope, as everywhere."""
+    if getattr(config, "ephemeral", None):
+        return
+    from dependencies import enforce_agent_capability
+    await enforce_agent_capability(request, current_user, "agents.manage",
+                                   target=getattr(config, "name", None))
+
+
 @router.post("")
 async def create_agent_endpoint(
     config: AgentConfig,
@@ -510,6 +563,8 @@ async def create_agent_endpoint(
     caller (2026-07-20 learning: another user's identical key must never replay
     a foreign create response).
     """
+    # Before the idempotency claim: a refused create must not hold a key.
+    await _require_create_capability(request, current_user, config)
     idem = None
     if idempotency_key:
         scope = f"agent_create:{current_user.id}"
@@ -577,7 +632,7 @@ async def create_agent_endpoint(
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=config.name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
         details={
             "template": getattr(config, "template", None),
             "base_image": getattr(config, "base_image", None),
@@ -593,7 +648,7 @@ async def create_agent_endpoint(
     return result
 
 
-@router.post("/deploy-local")
+@router.post("/deploy-local", dependencies=[Depends(capability_fence("agents.manage"))])
 async def deploy_local_agent(
     body: DeployLocalRequest,
     request: Request,
@@ -672,7 +727,7 @@ async def deploy_local_agent(
     return result
 
 
-@router.delete("/{agent_name}")
+@router.delete("/{agent_name}", dependencies=[Depends(capability_fence("agents.manage", ephemeral_target_exempt=True))])
 async def delete_agent_endpoint(agent_name: str, request: Request, current_user: User = Depends(get_current_user)):
     """Delete an agent."""
     # Check for system agent first - no one can delete these
@@ -700,6 +755,7 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
         if manager:
             await manager.broadcast(json.dumps({
                 "event": "agent_deleted",
+                "type": "agent_deleted",  # #3109: the dashboard keys on `type`
                 "data": {"name": agent_name}
             }))
         # Honest status (review LOW): False = another discard already in
@@ -783,6 +839,16 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     # during the retention window.
     db.delete_agent_ownership(agent_name)
 
+    # trinity-enterprise#751: a gated request still waiting on this agent can no
+    # longer run against it — cancel it and tell the requester. Best effort.
+    try:
+        from services import skill_gate_service
+        await skill_gate_service.cancel_pending_for_agent(
+            agent_name, actor_email=current_user.email, actor_user=current_user,
+            reason="agent_deleted")
+    except Exception as e:
+        logger.warning(f"Failed to cancel gated requests for deleted agent {agent_name}: {e}")
+
     # SEC-001: audit delete after all cleanup and ownership removal committed.
     await platform_audit_service.log(
         event_type=AuditEventType.AGENT_LIFECYCLE,
@@ -792,12 +858,13 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
         actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
-        endpoint=str(request.url.path),
+        endpoint=request.scope["path"],
     )
 
     if manager:
         await manager.broadcast(json.dumps({
             "event": "agent_deleted",
+            "type": "agent_deleted",  # #3109: the dashboard keys on `type`
             "data": {"name": agent_name}
         }))
 
@@ -829,7 +896,7 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
             details={
                 "credentials_injection": credentials_status,
                 # #1809: record container replacement + cause (config_drift |
@@ -866,6 +933,13 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
             "message": f"Agent {agent_name} started",
             "credentials_injection": credentials_status,
             "credentials_result": credentials_result,
+            # #2991: skill delivery, mirroring the credentials pair. Dropping it
+            # here made a `conflict` or a failed package invisible to every REST
+            # and MCP caller. `skills_result` is a PROJECTION (names, statuses,
+            # codes — never the raw per-skill error text); a no-op start still
+            # answers `skipped` with a reason, never an absent field.
+            "skills_injection": result.get("skills_injection", "unknown"),
+            "skills_result": public_skills_result(result.get("skills_result")),
             # #1809: whether (and why) this start replaced the container —
             # answers "why did my container id change / uptime reset".
             "recreated": bool(result.get("recreated")),
@@ -913,7 +987,7 @@ async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reques
             actor_ip=request.client.host if request.client else None,
             target_type="agent",
             target_id=agent_name,
-            endpoint=str(request.url.path),
+            endpoint=request.scope["path"],
         )
 
         event = {
@@ -1443,6 +1517,14 @@ async def send_voice_reply_endpoint(
 
     # Only user-facing channel turns have a deliverable voice destination.
     channel = execution.source_channel or execution.triggered_by
+    # #3232: a delegated child carries its parent's channel context only so its
+    # completion report (consent-gated, ent#224/ent#265) can find the way back.
+    # It must not speak into that conversation itself — this route has no
+    # proactive-consent check. `source_channel_agent` is set by inheritance and
+    # by a gated request's wake-up (`turn_audience._is_delegated`), so non-NULL
+    # = inherited.
+    if getattr(execution, "source_channel_agent", None):
+        return {"delivered": False, "channel": channel, "reason": "delegated_turn"}
     if channel == app_config.PORTAL_SOURCE_CHANNEL:
         # #2157: the Workspace has no audio destination — but it is NOT text-only;
         # it narrates the agent's text whenever the client turns the speaker on.
@@ -1516,8 +1598,9 @@ async def agent_heartbeat(agent_name: str, payload: HeartbeatPayload, request: R
 
     Authenticated with the agent's own ``TRINITY_MCP_API_KEY`` (Option B,
     least-privilege) — *not* the user JWT and not the master internal secret.
-    An agent may only heartbeat itself: the key must be agent-scoped and its
-    bound ``agent_name`` must equal the path. User/system/null keys → 403.
+    An agent may only heartbeat itself: the key must be agent-scoped (or the
+    system agent's own system-scoped key, #3814) and its bound ``agent_name``
+    must equal the path. User/null keys → 403.
 
     Validation runs with ``track_usage=False`` so a 5s beat doesn't amplify the
     key's ``usage_count`` or write to SQLite on every beat. The write is
@@ -1596,7 +1679,7 @@ async def agent_execution_result(
     async-marker gate**.
 
     Acceptance rules (fail-closed):
-      * Missing/non-Bearer auth, or a user/system/wrong-agent key → 403.
+      * Missing/non-Bearer auth, or a user or wrong-agent key → 403.
       * Execution missing or not owned by ``agent_name`` → 404.
       * Execution already terminal → idempotent replay → 200 ``{replayed: true}``
         (the row is final; no write happens — safe to ACK so the agent stops
@@ -1613,9 +1696,8 @@ async def agent_execution_result(
     callback is a no-op (no double activity close / breaker churn / slot drain).
     """
     from services import heartbeat_service
+    from services.execution_envelope import terminal_from_callback_payload
     from services.task_execution_service import (
-        TaskExecutionErrorCode,
-        TerminalEnvelope,
         dispatch_breaker_active,
         get_task_execution_service,
     )
@@ -1711,49 +1793,11 @@ async def agent_execution_result(
             )
 
     # ---- Build the normalized terminal + apply -----------------------------
-    # #679: 3-way map — success→SUCCESS, cancelled→CANCELLED, everything else
-    # (incl. unknown forward-compat values) →FAILED. CANCELLED flows through
-    # apply_result (release_slot=True); the replay gate above already short-
-    # circuits a terminate-wrote-first CANCELLED row, and the reverse race
-    # (callback CANCELLED first) makes the later terminate write a CAS no-op.
-    #
-    # Finding 2 (CSO 2026-06-22): an auth/rate terminal must NOT be reclassified
-    # as a clean cancellation even when the agent labels it "cancelled". The
-    # agent side already guards this (result_callback._is_auth_or_rate), but the
-    # callback is the backend trust boundary — a buggy or mixed-version agent
-    # that POSTs status:"cancelled" carrying error_code:"auth" (or an auth/
-    # rate_limit terminal_reason) would otherwise silently dodge the AUTH
-    # dispatch breaker / SUB-003 auto-switch. Mirror the guard so the invariant
-    # ("auth/rate is never cancellation") holds regardless of the caller image.
-    is_auth_or_rate = (
-        payload.error_code == TaskExecutionErrorCode.AUTH.value
-        or payload.terminal_reason in ("auth", "rate_limit")
-    )
-    if payload.status == "success":
-        status = TaskExecutionStatus.SUCCESS
-    elif payload.status == "cancelled" and not is_auth_or_rate:
-        status = TaskExecutionStatus.CANCELLED
-    else:
-        status = TaskExecutionStatus.FAILED
-    error_code = None
-    if payload.error_code:
-        try:
-            error_code = TaskExecutionErrorCode(payload.error_code)
-        except ValueError:
-            # Unknown codes are non-fatal — apply_result only special-cases AUTH.
-            error_code = None
-
-    envelope = TerminalEnvelope(
-        execution_id=execution_id,
-        status=status,
-        response=payload.response,
-        error=payload.error,
-        error_code=error_code,
-        metadata=payload.metadata or {},
-        execution_log=payload.execution_log,
-        session_id=payload.session_id,
-        execution_time_ms=payload.execution_time_ms,
-    )
+    # The 3-way status map and the auth-is-never-cancellation guard live in
+    # `terminal_from_callback_payload` (services/execution_envelope.py) since
+    # #2944, because the cleanup watchdog now reads the same envelope shape off
+    # an agent's retained terminal — one classification, two callers.
+    envelope = terminal_from_callback_payload(payload, execution_id)
 
     svc = get_task_execution_service()
     result = await svc.apply_result(
@@ -1776,71 +1820,6 @@ async def agent_execution_result(
             execution_id, result.status, payload.terminal_reason,
         )
     return {"ok": True, "replayed": False, "status": result.status}
-
-
-# ============================================================================
-# Activity Stream Endpoints
-# ============================================================================
-
-@router.get("/{agent_name}/activities")
-async def get_agent_activities(
-    agent_name: AuthorizedAgentByName,
-    activity_type: Optional[str] = None,
-    activity_state: Optional[str] = None,
-    limit: int = 100
-):
-    """Get activity history for a specific agent."""
-    container = get_agent_container(agent_name)
-    if not container:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    activities = db.get_agent_activities(
-        agent_name=agent_name,
-        activity_type=activity_type,
-        activity_state=activity_state,
-        limit=limit
-    )
-
-    return {
-        "agent_name": agent_name,
-        "count": len(activities),
-        "activities": activities
-    }
-
-
-@router.get("/activities/timeline")
-async def get_activity_timeline(
-    start_time: Optional[str] = None,
-    end_time: Optional[str] = None,
-    activity_types: Optional[str] = None,
-    limit: int = 100,
-    current_user: User = Depends(get_current_user)
-):
-    """Get cross-agent activity timeline."""
-    types_list = activity_types.split(",") if activity_types else None
-
-    all_activities = db.get_activities_in_range(
-        start_time=start_time,
-        end_time=end_time,
-        activity_types=types_list,
-        limit=limit * 2
-    )
-
-    filtered_activities = []
-    for activity in all_activities:
-        agent_name = activity.get("agent_name")
-        if db.can_user_access_agent(current_user.username, agent_name):
-            filtered_activities.append(activity)
-            if len(filtered_activities) >= limit:
-                break
-
-    return {
-        "count": len(filtered_activities),
-        "start_time": start_time,
-        "end_time": end_time,
-        "activity_types": types_list,
-        "activities": filtered_activities  # Frontend expects "activities" (fixed 2026-01-15)
-    }
 
 
 # ============================================================================

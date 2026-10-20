@@ -61,8 +61,16 @@ _ALLOWED_CALLERS = {
         "platform-only: idempotent id per portal client's legacy dir (ent#308)",
     ("database.py", "DatabaseManager.create_operator_queue_item"):
         "the facade delegation itself (the _operator_queue_ops.create_item spelling)",
-    ("services/agent_client/circuit.py", "_emit_dormant_alert"):  # 1028: package split
-        "platform-only: edge-triggered after consecutive failed CB probes (cb-dormant)",
+    ("database.py", "DatabaseManager.create_operator_queue_item_with_outcome"):
+        "the facade delegation itself (trinity-enterprise#611: the file poller's create, "
+        "which also reports whether it inserted)",
+    ("database.py", "DatabaseManager.create_native_operator_queue_item"):
+        "the facade delegation itself (trinity-enterprise#611: the native create)",
+    ("services/ask_service.py", "raise_ask"):
+        "the native (MCP) ask seam itself (trinity-enterprise#611): agent-authored, so "
+        "NOT platform-only — bounded instead by the #1632 depth cap, enforced ATOMICALLY "
+        "per agent inside create_native_item, and by the SAME per-agent + fleet rate "
+        "buckets as the file seam; every field validated at the call",
     ("services/archive_storage.py", "_alarm_unwritable_archive_dir"):
         "platform-only: raised from probe_archive_writability() at the start of an "
         "archival RUN (daily maintenance cadence), and the id is bucketed per path "
@@ -89,18 +97,7 @@ _ALLOWED_CALLERS = {
         "create — must never be throttled (the reason a db-sink bound was rejected)",
     ("services/operator_queue_service.py", "OperatorQueueSyncService._sync_agent"):
         "the #1632-capped agent-file ingestion seam itself (depth+rate+clamp)",
-    ("services/operator_queue_service.py",
-     "OperatorQueueSyncService._maybe_emit_flood_alert"):
-        "the #1632 flood alert: cooldown-gated, one per episode",
-    ("services/subscription_headroom_alerts.py", "_emit"):
-        "platform-only: edge-triggered per weekly window via a deterministic "
-        "id (sub-headroom-{sid}-{reset-day}-{tier}) whose ON CONFLICT DO NOTHING "
-        "makes a re-emit a no-op; volume is bound by the sweep cadence and a "
-        "per-cycle cap. Agent-CHOSEN names do reach the body (an agent may "
-        "spawn children and name them) but arrive sanitized and capped at five "
-        "per alert — it is the VOLUME an agent cannot drive, which is what this "
-        "exemption rests on (ent#434)",
-    ("services/operator_queue_service.py", "create_bounded_alert"):
+    ("services/operator_queue_service.py", "create_bounded_alert_outcome"):
         "the #1677 budget helper's own admit-path create (the seam itself)",
     ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
         "the #1677 budget episode alert: cooldown-gated, bucketed reserved id",
@@ -108,13 +105,6 @@ _ALLOWED_CALLERS = {
         "platform-only: edge-gated (fresh) + idempotent id (#1644)",
     ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
         "platform-only: assignment-driven, quasi-idempotent id (ent#236)",
-    ("services/skill_service.py", "SkillService._record_adoption_failure"):
-        "platform-only: the only input is `skills_library_url`, blocked on the "
-        "generic settings PUT by routers/settings.py LEGACY_SKILLS_LIBRARY_KEYS "
-        "(ent#346), so no agent can drive volume; the steady-state branch is "
-        "additionally idempotent by a URL-derived id ⇒ ≤1 row per refused URL. "
-        "NOT admin-driven — ent#236's auto-sync calls the same sync_library() "
-        "unattended on a 300s-86400s timer (#2744)",
     ("services/skills_sync_service.py",
      "SkillsLibrarySyncService._announce_fleet_failures"):
         "platform-only: leader-locked, one per sync run (ent#236)",
@@ -122,11 +112,10 @@ _ALLOWED_CALLERS = {
         "platform-only: edge-triggered once per failure series (2→3 crossing, #389)",
     ("services/sync_health_service.py", "SyncHealthService._emit_git_bloat_alert"):
         "platform-only: edge-triggered per threshold crossing (#1595)",
-    ("services/system_agent_service.py",
-     "SystemAgentService._emit_base_image_stale_alert"):
-        "platform-only: per-process cooldown, hosted on trinity-system (#1816)",
-    ("services/system_agent_service.py", "SystemAgentService._emit_start_failed_alert"):
-        "platform-only: time-bucketed idempotent id, hosted on trinity-system (#1816)",
+    ("services/sync_health_service.py", "SyncHealthService._emit_sync_diverged_alert"):
+        "platform-only: deterministic per-episode id (sync-diverged-{agent}-"
+        "{diverged_since}), and an episode must last > 24 h before it can raise "
+        "one, so at most one per agent per day (trinity-enterprise#706)",
     ("services/system_seed_service.py", "SystemSeedService._notify_operator"):
         "platform-only: deterministic id ⇒ ≤1 open row per seed kind (ent#124)",
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
@@ -150,6 +139,19 @@ def _receiver_names(node: ast.AST) -> list[str]:
     return names
 
 
+# trinity-enterprise#611 added two creates beside the original: the file
+# poller's `…_with_outcome` and the native ask's create. Each is a way to put a
+# row in the queue, so each is a spelling this guard must see — a new create
+# method is exactly how an unclassified emitter would slip past a guard that
+# matched one name.
+_FACADE_CREATES = (
+    "create_operator_queue_item",
+    "create_operator_queue_item_with_outcome",
+    "create_native_operator_queue_item",
+)
+_OPS_CREATES = ("create_item", "create_item_with_outcome", "create_native_item")
+
+
 def _is_emitter_call(call: ast.Call) -> bool:
     """True for any spelling of the operator-queue create.
 
@@ -164,12 +166,12 @@ def _is_emitter_call(call: ast.Call) -> bool:
     """
     func = call.func
     if isinstance(func, ast.Name):
-        return func.id == "create_operator_queue_item"
+        return func.id in _FACADE_CREATES
     if not isinstance(func, ast.Attribute):
         return False
-    if func.attr == "create_operator_queue_item":
+    if func.attr in _FACADE_CREATES:
         return True
-    if func.attr == "create_item":
+    if func.attr in _OPS_CREATES:
         return any(
             n in ("_operator_queue_ops", "OperatorQueueOperations")
             for n in _receiver_names(func.value)

@@ -13,9 +13,11 @@ from fastapi import HTTPException
 
 from models import User
 from database import db
+from dependencies import agent_may_reach
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
+from services import metric_read_service
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +137,13 @@ def _enrich_widgets_with_history(
             if widget_type not in ("metric", "progress", "status"):
                 continue
 
+            # ent#479: a bound widget's history came from the point store in
+            # `bind_dashboard_widgets`; overwriting it with the snapshot
+            # table's values would show a chart of what the dashboard polled
+            # rather than of what the agent measured.
+            if metric_read_service.is_bound(widget):
+                continue
+
             # Get widget key
             widget_key = widget.get("id") or f"s{section_idx}_w{widget_idx}"
 
@@ -199,7 +208,7 @@ async def get_agent_dashboard_logic(
     - status: Agent status (running/stopped)
     - error: Error message if parsing failed
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
+    if not (db.can_user_access_agent(current_user.username, agent_name) and agent_may_reach(current_user, agent_name)):
         raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
 
     container = get_agent_container(agent_name)
@@ -279,6 +288,15 @@ async def get_agent_dashboard_logic(
                             )
                             logger.debug(f"Captured dashboard snapshot for {agent_name} (mtime: {current_mtime})")
 
+                # ent#479: bind `metric:` widgets AFTER the cache write and
+                # the snapshot capture, so a value the registry owns is never
+                # written into `agent_dashboard_values` — the snapshot table
+                # must not become a second source for a number ent#476 made
+                # single-sourced. Degrades per widget; never 5xxs a dashboard.
+                if data.get("has_dashboard") and data.get("config"):
+                    metric_read_service.bind_dashboard_widgets(
+                        data["config"], agent_name)
+
                 # Enrich with history if requested
                 if include_history and data.get("has_dashboard") and data.get("config"):
                     _enrich_widgets_with_history(data["config"], agent_name, history_hours)
@@ -322,6 +340,13 @@ def _serve_cached_or_error(
         stale_data["status"] = "running"
         stale_data["stale"] = True
         stale_data["stale_reason"] = error_reason
+
+        # Both paths bind (E-E2): a cached dashboard's bound widgets still
+        # carry CURRENT numbers, because the point store is live even when the
+        # container that wrote the YAML is not.
+        if stale_data.get("config"):
+            metric_read_service.bind_dashboard_widgets(
+                stale_data["config"], agent_name)
 
         if include_history and stale_data.get("config"):
             _enrich_widgets_with_history(stale_data["config"], agent_name, history_hours)

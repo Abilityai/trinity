@@ -78,19 +78,27 @@ def _get_redis():
 # Authorization (Option B — least-privilege)
 # ---------------------------------------------------------------------------
 def authorize_heartbeat(validation_result: Optional[Dict], agent_name: str) -> bool:
-    """True iff the validated MCP key is the agent's OWN agent-scoped key.
+    """True iff the validated MCP key is the agent's OWN key.
 
-    An agent may only heartbeat *itself*. User-, system-, and null-scoped keys
-    are rejected, as is an agent-scoped key whose bound agent_name differs from
-    the path. Keeping this a pure predicate (no Redis, no FastAPI) makes the
-    security decision unit-testable independent of the HTTP glue.
+    An agent may only heartbeat *itself*: the key's bound agent_name must equal
+    the path. Two scopes qualify: ``agent``, and ``system`` for the system agent
+    alone (#3814) — `trinity-system`'s key is minted for its own name and then
+    flipped to ``system``, so it is still a credential the platform bound to one
+    agent. A system-scoped key never acts for any other name. User, connector
+    and null-scoped keys are rejected. Gates the heartbeat, the #1083 callback
+    and both pull seams. Keeping this a pure predicate (no Redis, no FastAPI)
+    makes the security decision unit-testable independent of the HTTP glue.
     """
-    if not validation_result:
+    if not validation_result or validation_result.get("agent_name") != agent_name:
         return False
-    return (
-        validation_result.get("scope") == "agent"
-        and validation_result.get("agent_name") == agent_name
-    )
+    scope = validation_result.get("scope")
+    if scope == "agent":
+        return True
+    if scope == "system":
+        from db.agents import SYSTEM_AGENT_NAME
+
+        return agent_name == SYSTEM_AGENT_NAME
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -233,20 +241,6 @@ def _unsupported_status() -> Dict:
         "heartbeat_active_executions": None,
         "heartbeat_memory_mb": None,
     }
-
-
-def heartbeat_status(agent_name: str) -> Dict:
-    """Single-agent liveness compute. Redis-None fails open to ``unsupported``."""
-    redis = _get_redis()
-    if redis is None:
-        return _unsupported_status()
-    try:
-        raw = redis.get(_hb_key(agent_name))
-        seen = bool(redis.get(_seen_key(agent_name)))
-    except Exception:  # noqa: BLE001
-        logger.debug("heartbeat: status failed for %s", agent_name, exc_info=True)
-        return _unsupported_status()
-    return _compute_status(_parse_payload(raw), seen, time.time())
 
 
 def heartbeat_status_bulk(agent_names: List[str]) -> Dict[str, Dict]:

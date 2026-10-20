@@ -41,7 +41,7 @@ from ._runtime_config import (
     _load_guardrails,
     merged_disallowed_tools,
 )
-from .execution_env import build_execution_env
+from .execution_env import build_execution_env, auth_override_env_layers
 from .error_classifier import (
     _classify_empty_result,
     _classify_signal_exit,
@@ -49,6 +49,9 @@ from .error_classifier import (
     _format_rate_limit_error,
     _is_auth_failure_message,
     _is_rate_limit_message,
+    _model_rejection_detail,
+    _model_rejection_message,
+    _stream_error_reason,
 )
 from .jsonl_recovery import (
     _extract_compact_events_from_jsonl,
@@ -424,10 +427,35 @@ def _try_recover_completed_turn(ctx: "HeadlessRunContext") -> bool:
     # Same session-id resolution as the #678 sibling path: the id Claude echoed
     # back wins; fall back to the UUID we put on the command line (unset when
     # the race wedged the reader before init, and empty on a --resume run).
-    effective_session_id = ctx.metadata.session_id or ctx.claude_session_uuid or None
+    # (#1025) `ctx` is a parameter, not a closure, so this correctly targets
+    # the finalize snapshot when one was taken. On the non-snapshot path this
+    # mutates the list `execute_headless_task` still holds — harmless, and the
+    # same aliasing every other recovery step here already relies on.
+    return _recover_completed_turn_into(
+        metadata=ctx.metadata,
+        response_parts=ctx.response_parts,
+        session_id=ctx.metadata.session_id or ctx.claude_session_uuid or None,
+        since_iso=ctx.task_start_iso,
+        label=ctx.task_session_id,
+    )
+
+
+def _recover_completed_turn_into(
+    *,
+    metadata: ExecutionMetadata,
+    response_parts: List[str],
+    session_id: Optional[str],
+    since_iso: Optional[str],
+    label: Optional[str],
+) -> bool:
+    """The #1870 recovery core, shared by the headless path and the sync chat
+    path (#2968). On positive on-disk evidence that the turn finished, replaces
+    ``response_parts`` with the notice + recovered answer, flags ``metadata``
+    and returns True. Otherwise returns False. Never raises."""
+    effective_session_id = session_id
     try:
         recovered = _recover_completed_turn_from_jsonl(
-            effective_session_id, since_iso=ctx.task_start_iso
+            effective_session_id, since_iso=since_iso
         )
     except Exception as e:  # noqa: BLE001 — must never mask the 502 with a 500
         # `%r` on the session id, not `%s`: `resume_session_id` reaches
@@ -451,21 +479,16 @@ def _try_recover_completed_turn(ctx: "HeadlessRunContext") -> bool:
     # authoritative for this turn's assistant text and that fragment is a
     # subset of it; appending would duplicate it. Mirrors the parser's own
     # `if result_text: clear(); append()` idiom.
-    #
-    # (#1025) `ctx` is a parameter, not a closure, so this correctly targets
-    # the finalize snapshot when one was taken. On the non-snapshot path this
-    # mutates the list `execute_headless_task` still holds — harmless, and the
-    # same aliasing every other recovery step here already relies on.
-    ctx.response_parts[:] = [_RECOVERY_NOTICE, recovered]
-    ctx.metadata.recovered_from_jsonl = True   # #678 continuity
-    ctx.metadata.recovered_terminal = True     # §2.5 C1 — the precise signal
+    response_parts[:] = [_RECOVERY_NOTICE, recovered]
+    metadata.recovered_from_jsonl = True   # #678 continuity
+    metadata.recovered_terminal = True     # §2.5 C1 — the precise signal
     logger.warning(
         "event=completed_turn_recovered_from_jsonl session_id=%r chars=%d "
         "task=%r — runtime reported error_during_execution but the transcript "
         "shows stop_reason=end_turn; surfacing the recovered answer as success",
         effective_session_id,
         len(recovered),
-        ctx.task_session_id,
+        label,
     )
     return True
 
@@ -630,6 +653,10 @@ class HeadlessRunContext:
     # _finalize_headless_result snapshots its read fields before reading them.
     reader_may_be_live: bool = False
 
+    # #3470: the request's per-spawn credential (an `AuthOverride`), applied as
+    # the top env layer of THIS spawn only. None = the container's baseline.
+    auth_override: Optional[object] = None
+
     # Shared mutable buffers (populated by stream_parser via process_stream_line)
     response_parts: List[str] = field(default_factory=list)
     execution_log: List[ExecutionLogEntry] = field(default_factory=list)
@@ -679,6 +706,7 @@ def _setup_headless_command(
     resume_session_id: Optional[str],
     persist_session: bool,
     images: Optional[List[Dict]],
+    auth_override=None,
 ) -> HeadlessRunContext:
     """Build the claude CLI command and initialise the run context.
 
@@ -800,6 +828,7 @@ def _setup_headless_command(
         images=images,
         prompt=prompt,
         claude_session_uuid=claude_session_uuid,
+        auth_override=auth_override,
         # #1521: seed the fallback context window from the model catalog. The
         # stream parser overwrites it from the runtime's modelUsage.contextWindow
         # when present; this catalog value is the fallback for the salvage /
@@ -852,6 +881,10 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
     # descendant across fork/exec/setsid/double-fork. Cleanup uses it
     # to identify and kill orphans that escape both the pgid sweep
     # and the FD-based pipe-writer sweep.
+    # #3470: a SUB-003 re-issue carries the credential it must run on; it is a
+    # layer of THIS spawn's env and nothing else (the container's own auth is
+    # untouched, so a concurrent turn is unaffected).
+    auth_extra, auth_drop = auth_override_env_layers(ctx.auth_override)
     process = subprocess.Popen(
         ctx.cmd,
         stdin=subprocess.PIPE,
@@ -861,6 +894,7 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
         bufsize=1,  # Line buffered
         start_new_session=True,
         env=build_execution_env({
+            **auth_extra,
             EXECUTION_TAG_NAME: ctx.task_session_id,
             # #2127: how long `claude --print` waits for background subagents /
             # workflows before giving up on them. Its own default is 10 min,
@@ -875,7 +909,7 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
             # the single authority. Not set to 0 (wait forever) deliberately —
             # that would delete the CLI's runaway guard entirely.
             "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": str(int(ctx.effective_timeout * 1000)),
-        }),
+        }, drop=auth_drop),
     )
     ctx.process = process
     # #2127: seed the idle clock HERE, at spawn — before the reader threads
@@ -1346,6 +1380,20 @@ def _finalize_headless_result(
             detail=f"Authentication failure: {auth_msg[:300]}. Check subscription token or API key configuration."
         )
 
+    # #3012: Claude Code refused the model (CLI too old for the id, or an id the
+    # API does not know). Exit 1 with zero tokens, so without this it fell to
+    # the zero-token heuristic below and came back 503 — which the backend reads
+    # as an auth failure and answers by rotating the agent through every
+    # subscription and onto the platform API key. No subscription can fix it.
+    # Keyed on the stream parser's record first so a future exit-0 shape is
+    # caught too; the stderr marker is the fallback for a non-zero exit only.
+    model_rejection = _model_rejection_message(
+        ctx.metadata, verbose_transcript if ctx.return_code != 0 else ""
+    )
+    if model_rejection is not None:
+        logger.error(f"[Headless Task] Model rejected by Claude Code: {model_rejection[:200]}")
+        raise HTTPException(status_code=400, detail=_model_rejection_detail(model_rejection))
+
     # Check for errors
     if ctx.return_code != 0:
         # Issue #516: Signal terminations (timeout SIGKILL, OOM, parent SIGTERM,
@@ -1360,8 +1408,11 @@ def _finalize_headless_result(
             logger.warning(f"[Headless Task] {detail}")
             raise HTTPException(status_code=status_code, detail=detail)
 
+        # #3340: an error the stream named outranks stderr, which is often
+        # empty or unrelated noise on an API error.
+        stream_error = _stream_error_reason(ctx.metadata)
         error_preview = verbose_transcript[:500] if verbose_transcript else ""
-        if not error_preview:
+        if stream_error or not error_preview:
             # Try to provide a meaningful fallback based on common failure patterns
             error_preview = _diagnose_exit_failure(ctx.return_code, ctx.metadata)
 
@@ -1391,6 +1442,13 @@ def _finalize_headless_result(
                 f"[Headless Task] Zero tokens processed with exit code {ctx.return_code}. "
                 f"Stderr: {error_preview[:200]}"
             )
+            # #3340: the stream gave the reason, so say it instead of "no output".
+            # Auth-patterned text never gets here (the branch above took it).
+            if stream_error:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Execution failed: {error_preview[:300]}",
+                )
             raise HTTPException(
                 status_code=503,
                 detail=(
@@ -1601,6 +1659,7 @@ async def execute_headless_task(
     resume_session_id: Optional[str] = None,
     persist_session: bool = False,
     images: Optional[List[Dict]] = None,
+    auth_override=None,
 ) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
     """
     Execute Claude Code in headless mode for parallel task execution.
@@ -1651,6 +1710,7 @@ async def execute_headless_task(
             resume_session_id=resume_session_id,
             persist_session=persist_session,
             images=images,
+            auth_override=auth_override,
         )
 
         registry = get_process_registry()
@@ -1659,14 +1719,30 @@ async def execute_headless_task(
         # its wait on the subprocess; the outer wait_for is a safety net
         # with a small grace period for drain/cleanup.
         loop = asyncio.get_event_loop()
+        waiter_abandoned = threading.Event()
+
+        def run_owned_subprocess():
+            try:
+                return _run_headless_subprocess(ctx)
+            finally:
+                # Cancelling run_in_executor cannot stop an already-running
+                # thread. Its waiter has already used its finally, so the
+                # worker must release ownership when it actually finishes.
+                if waiter_abandoned.is_set():
+                    loop.call_soon_threadsafe(lambda: registry.unregister(ctx.task_session_id))
+
         try:
             try:
                 await asyncio.wait_for(
                     # #2433: the dedicated pool — never the CPU-sized default.
-                    loop.run_in_executor(_HEADLESS_EXECUTOR, _run_headless_subprocess, ctx),
+                    loop.run_in_executor(_HEADLESS_EXECUTOR, run_owned_subprocess),
                     timeout=ctx.effective_timeout + 60
                 )
+            except asyncio.CancelledError:
+                waiter_abandoned.set()
+                raise
             except asyncio.TimeoutError:
+                waiter_abandoned.set()
                 # Inner machinery should have raised first; safety net.
                 logger.error(
                     f"[Headless Task] Outer timeout on task {ctx.task_session_id} "

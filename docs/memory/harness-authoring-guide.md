@@ -82,7 +82,9 @@ runtime MUST wire all four:
    agent's persistent identity file if the CLI reads a different one (Codex reads
    `AGENTS.md`, so `startup.sh` mirrors `CLAUDE.md` → `AGENTS.md`).
 2. **Sandbox / read-only mode** — the read-only signal is
-   `~/.trinity/read-only-config.json` (`enabled`), the same file Claude's
+   root-owned `/opt/trinity/read-only-config.json` (`enabled`), falling back to
+   `~/.trinity/read-only-config.json` while the root file is missing; neither
+   present means not read-only (trinity-enterprise#787). These are the files Claude's
    PreToolUse hook reads. Your runtime can't run Claude hooks, so read the file
    and translate. **Caution:** if your CLI ships an *internal* sandbox that needs
    user namespaces (Codex's bubblewrap), it will fail inside the hardened agent

@@ -1,0 +1,107 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-08",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/754-skills-tab-merge",
+  "issue": "abilityai/trinity-enterprise#754",
+  "base": "51b01c786",
+  "audited": "7ab943948",
+  "counts_as_full_run": false,
+  "phases_run": [
+    0,
+    1,
+    2,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_not_applicable": {
+    "3": "no manifest or lockfile change",
+    "4": "no workflow change"
+  },
+  "stack_cve_quicklist": [
+    {
+      "component": "all rows",
+      "verdict": "not touched by diff"
+    }
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_reads": 8,
+    "new_query_params": [
+      "last_known",
+      "probe"
+    ],
+    "new_storage": [
+      "redis agent:skills_list:{name} (<=256 KB, cleared on teardown and create)"
+    ],
+    "new_outbound": [
+      "one /health GET per manager tab load via services/agent_auth (3 s, no breaker)"
+    ],
+    "agent_context_ingress_new": 0,
+    "new_mcp_tools": 0,
+    "new_migrations": 0
+  },
+  "checks": {
+    "guard_suites": "11 files, 277 passed (agent_auth header, 1965 safe_yaml, 186 enumeration, 2996 human-only census, 1310 auth wiring, 293 admin gate, ent435 settings sink, 292 cmdline credential, ent614 source agent, models centralized, 2094 path-param pairing)",
+    "secrets_scan_added_lines": "0 (email hits are the Ana@Example.com casefolding fixtures)",
+    "enterprise_docs_guard_added_doc_lines": "0",
+    "invisible_unicode_added_lines": "0",
+    "v_html_added": "0 in code (one doc line stating 'no v-html'; one test resets document.body)",
+    "focus": {
+      "probe_auth": "is_person_principal AND can_manage_agent_skills (routers/skill_gate.py:116); system key and skills.manage agent key tested refused",
+      "public_view": "PUBLIC_SKILL_FIELDS allowlist (agent_skills_listing.py:59-62); source/dir/approval never reach an anonymous visitor",
+      "self_approved_flags": "booleans only; people only (machine keys read false; operator ruling)",
+      "redis_cap": "MAX_CACHED_BYTES 256 KB checked before SET; oversize drops the older copy; recall shape-checked"
+    }
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "LOW",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "error-text-disclosure",
+      "owasp_2025": "A10",
+      "asi": null,
+      "llm": null,
+      "phase": 9,
+      "file": "src/backend/services/agent_skills_listing.py; src/backend/routers/public.py",
+      "symbol": "fetch_live; get_public_playbooks",
+      "title": "Docker daemon fault during the listing's container reload echoed to the caller, including the anonymous public link",
+      "exploit": "A public-link holder requests GET /api/public/playbooks/{token} while the Docker daemon returns 500 on the container inspect (or drops the socket); the catch-all returns the docker-py text with the daemon URL, API version and full container id. The caller cannot cause the fault. Regression: the public route never reloaded at the base.",
+      "recommendation": "Map any non-NotFound reload failure to a named outcome; never echo exception text on the unauthenticated route.",
+      "resolution": "fixed in-branch with tests (852fcc4fd): reload failures -> unreachable 503 'Could not read the agent's state' (logged); public catch-all answers a fixed sentence; mutation-proven",
+      "verifier": "independent agent: CONFIRMED (LOW)"
+    }
+  ],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "no Docker pass (diff mode, no image/compose/dependency change; Docker untouched by operator rule) \u2014 agent-server change exercised standalone; full /verify-local pending",
+    "PostgreSQL not exercised locally (no schema change)",
+    "live end-to-end not run (pending /verify-local)"
+  ],
+  "supply_chain_summary": {
+    "scanner": "n/a (no dependency change)"
+  },
+  "filter_stats": {
+    "candidates": 1,
+    "reported": 1
+  },
+  "totals": {
+    "CRITICAL": 0,
+    "HIGH": 0,
+    "MEDIUM": 0,
+    "LOW": 1
+  },
+  "trend": "prior: cso-diff-2026-10-07-ent753-skill-gate-map finding 1 (set_by to agent keys) stays fixed; same class (machine key infers who approves) resurfaced in review and was closed by the people-only ruling (c78eb6631) before this audit; new: finding 1 (fixed); direction flat"
+}

@@ -1,3 +1,4 @@
+# mcp: monitoring.ts (get_fleet_health, get_agent_health, trigger_health_check)
 """
 Monitoring API Router (MON-001).
 
@@ -23,6 +24,8 @@ from db_models import (
     FleetHealthSummary,
     AgentHealthDetail,
     AgentHealthSummary,
+    AgentSyncHealth,
+    FleetSyncSummary,
 )
 from services.monitoring_service import (
     perform_health_check,
@@ -115,6 +118,35 @@ def _build_agent_summary(name: str, check: Optional[Dict[str, Any]]) -> AgentHea
     )
 
 
+def _merge_sync_health(
+    agents: List[AgentHealthSummary], agent_names: List[str]
+) -> Optional[FleetSyncSummary]:
+    """Annotate each summary with its git sync block (trinity-enterprise#707).
+
+    The heartbeat precedent: an annotation, never a `status` change, so the
+    sort and the health counts are untouched. A red agent gains one
+    `sync: <reason> — <recommendation>` issue. Everything is computed before
+    anything is applied, and a fault leaves every `sync` None and returns None
+    — the sync read degrades on its own, never into "aggregation failed".
+    """
+    from services.sync_health_view import fleet_sync, sync_issue
+
+    try:
+        blocks, totals = fleet_sync(agent_names)
+        models = {name: AgentSyncHealth(**block) for name, block in blocks.items()}
+        issues = {name: sync_issue(block) for name, block in blocks.items()}
+        summary = FleetSyncSummary(**totals)
+    except Exception:
+        logger.exception("Fleet sync-health read failed for %d agents", len(agent_names))
+        return None
+    for agent in agents:
+        agent.sync = models.get(agent.name)
+        issue = issues.get(agent.name)
+        if issue:
+            agent.issues = [*agent.issues, issue]
+    return summary
+
+
 def _status_sort_key(summary: AgentHealthSummary) -> int:
     """Sort key for fleet status — most severe first, unknowns in the middle."""
     return _STATUS_SORT_ORDER.get(summary.status, 3)
@@ -180,8 +212,14 @@ async def get_fleet_status(
 
     # Filter to accessible agents (unless admin)
     if current_user.role != "admin":
-        accessible = get_accessible_agents(current_user)
-        accessible_names = {a["name"] for a in accessible}
+        agent = getattr(current_user, "agent_name", None)
+        if isinstance(agent, str) and agent:
+            # trinity-enterprise#706 D12: an agent key's fleet sweep sees its
+            # owner's set (get_accessible_agents would narrow it to its reach).
+            accessible_names = set(db.get_accessible_agent_names(
+                current_user.email or "", is_admin=False) or [])
+        else:
+            accessible_names = {a["name"] for a in get_accessible_agents(current_user)}
         agent_names = [n for n in all_agent_names if n in accessible_names]
     else:
         agent_names = all_agent_names
@@ -220,6 +258,8 @@ async def get_fleet_status(
                 agent.heartbeat_memory_mb = hb["heartbeat_memory_mb"]
                 agent.heartbeat_state = hb["heartbeat_state"]
 
+        sync_summary = _merge_sync_health(agents, agent_names)
+
         agents.sort(key=_status_sort_key)
     except Exception:
         logger.exception("Fleet health aggregation failed for %d agents", len(agent_names))
@@ -256,12 +296,34 @@ async def get_fleet_status(
         ),
         agents=agents,
         circuit_breakers=cb_data,
+        sync_summary=sync_summary,
     )
 
 
 # ============================================================================
 # Agent Health Endpoints
 # ============================================================================
+
+def _declared_metrics_block(agent_name: str):
+    """The informational declared-metric freshness block (ent#479 C5).
+
+    Attached in the ROUTER, after both build paths, rather than inside
+    `perform_health_check` — the scheduled fleet loop runs that function on
+    every agent every cycle, and a business-metric read has no business
+    costing the health loop a store query per agent per cycle.
+
+    Wrapped: a store failure yields `None`, never a failed health check. The
+    health of the platform does not depend on whether an agent's revenue
+    number is current.
+    """
+    try:
+        from services import metric_read_service
+        return metric_read_service.freshness_summary(agent_name)
+    except Exception as e:  # noqa: BLE001 — informational, never fatal
+        logger.debug("[Health] Metrics block unavailable for %s: %s",
+                     agent_name, e)
+        return None
+
 
 @router.get("/agents/{agent_name}", response_model=AgentHealthDetail)
 async def get_agent_health(
@@ -281,7 +343,13 @@ async def get_agent_health(
 
     if not aggregate_check:
         # No health data - trigger a check
-        return await perform_health_check(agent_name, DEFAULT_CONFIG, store_results=True)
+        fresh = await perform_health_check(
+            agent_name, DEFAULT_CONFIG, store_results=True)
+        # Both build paths get the block, or a caller whose agent has never
+        # been checked would be told it has no metrics rather than that it has
+        # not been checked.
+        fresh.metrics = _declared_metrics_block(agent_name)
+        return fresh
 
     # Build detailed response
     from db_models import DockerHealthCheck, NetworkHealthCheck, BusinessHealthCheck
@@ -338,7 +406,7 @@ async def get_agent_health(
     from services.circuit_breaker_view import build_circuit_breaker_block
     circuit_breaker = build_circuit_breaker_block(agent_name)
 
-    return AgentHealthDetail(
+    detail = AgentHealthDetail(
         agent_name=agent_name,
         aggregate_status=aggregate_check.get("status", "unknown"),
         last_check_at=aggregate_check.get("checked_at"),
@@ -351,6 +419,8 @@ async def get_agent_health(
         avg_latency_24h_ms=round(avg_latency, 2) if avg_latency else None,
         circuit_breaker=circuit_breaker,
     )
+    detail.metrics = _declared_metrics_block(agent_name)
+    return detail
 
 
 @router.get("/agents/{agent_name}/history")

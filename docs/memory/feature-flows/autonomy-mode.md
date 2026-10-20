@@ -43,7 +43,7 @@ As an agent owner, I want to toggle autonomous operation for my agent so that I 
 ### API
 - `GET /api/agents/autonomy-status` - Bulk status for dashboard
 - `GET /api/agents/{name}/autonomy` - Per-agent status with schedule counts
-- `PUT /api/agents/{name}/autonomy` - Toggle autonomy on/off
+- `PUT /api/agents/{name}/autonomy` - Toggle autonomy on/off (person-only, #2996 — see Security Considerations)
 
 ---
 
@@ -376,6 +376,7 @@ async def set_autonomy_status_logic(
     current_user: User
 ) -> dict:
     """Set the autonomy status for an agent."""
+    # The route already refused non-person principals (Depends(require_person), #2996).
     # Only owner can modify autonomy
     if not db.can_user_share_agent(current_user.username, agent_name):
         raise HTTPException(status_code=403, detail="Only the owner can modify autonomy settings")
@@ -618,6 +619,7 @@ logger.info(
 
 1. **Access Control**: Only users with access to an agent can view its autonomy status
 2. **Owner-Only Toggle**: Only the agent owner (or admin) can modify autonomy settings (uses `can_user_share_agent` permission)
+2a. **Person-only (#2996)**: the route takes `Depends(require_person)` — a JWT session or the owner's own `user`-scoped key. Agent- and system-scoped keys (and every other key scope) get 403 `person_required` before the owner check, whatever agent they address. See requirements `auth.md` §2.8. Autonomy decides whether **unattended cron** fires (`scheduler/service.py` gates `triggered_by == "schedule"`); a manual `trigger_schedule` is not gated by it, and the agent's own schedule tools (create / enable / disable) stay agent-callable.
 3. **System Agent Protection**: System agents are excluded from autonomy controls entirely
 4. **Dashboard Filtering**: Bulk status endpoint only returns agents the user can access, excluding system agents
 

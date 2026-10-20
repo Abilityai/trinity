@@ -223,6 +223,64 @@ class TestProcessFileUploads:
         assert not failed
         assert imgs == []
 
+    @staticmethod
+    def _zip_bytes() -> bytes:
+        import io
+        import zipfile
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("doc.pdf", "x" * 40000)
+        return buf.getvalue()
+
+    async def _upload(self, raw):
+        with (
+            patch.object(_svc, "container_exec_run", new=AsyncMock(return_value=(0, b""))),
+            patch.object(_svc, "container_put_archive", new=AsyncMock(return_value=True)),
+        ):
+            return await _svc.process_file_uploads(
+                raw_files=[raw], agent_name="a", container=MagicMock(),
+                session_id="s", uploader="u"
+            )
+
+    @pytest.mark.asyncio
+    async def test_real_zip_accepted_with_unmocked_magic(self):
+        """#3046: a real ZIP must pass MIME validation with python-magic un-mocked."""
+        raw = self._make_raw(name="doc.zip", mimetype="application/zip", data=self._zip_bytes())
+        descs, udir, failed, _ = await self._upload(raw)
+        assert udir is not None
+        assert not any("rejected" in d for d in descs)
+        assert not failed
+
+    @pytest.mark.asyncio
+    async def test_zip_accepted_when_libmagic_misdetects_buffer(self):
+        """#3046: libmagic 5.46 reports a ZIP buffer as application/octet-stream."""
+        fake_magic = MagicMock()
+        fake_magic.from_buffer.return_value = "application/octet-stream"
+        raw = self._make_raw(name="doc.zip", mimetype="application/zip", data=self._zip_bytes())
+        with (
+            patch.object(_svc, "_MAGIC_AVAILABLE", True),
+            patch.object(_svc, "magic", fake_magic, create=True),
+        ):
+            descs, udir, failed, _ = await self._upload(raw)
+        assert udir is not None
+        assert not any("rejected" in d for d in descs)
+        assert not failed
+
+    @pytest.mark.asyncio
+    async def test_non_zip_declared_as_zip_still_rejected(self):
+        """The ZIP shortcut only applies to bytes that carry a ZIP signature."""
+        fake_magic = MagicMock()
+        fake_magic.from_buffer.return_value = "application/x-dosexec"
+        raw = self._make_raw(name="doc.zip", mimetype="application/zip", data=b"MZ\x90\x00" + b"\x00" * 64)
+        with (
+            patch.object(_svc, "_MAGIC_AVAILABLE", True),
+            patch.object(_svc, "magic", fake_magic, create=True),
+        ):
+            descs, _, _, _ = await self._upload(raw)
+        assert any("rejected (file type mismatch)" in d for d in descs)
+        fake_magic.from_buffer.assert_called_once()
+
     @pytest.mark.asyncio
     async def test_max_files_limit_enforced(self):
         container = MagicMock()

@@ -40,6 +40,9 @@ _FIRSTBOOT = (
     _ROOT / "packer" / "digitalocean" / "files" / "opt" / "trinity-firstboot" / "firstboot.sh"
 )
 _BAKERY = _ROOT / "packer" / "digitalocean" / "scripts" / "01-provision.sh"
+# The imageless Vultr lane (#2282) is the FOURTH caller. It carries no snapshot,
+# so it is the likeliest place for a re-implementation to reappear.
+_VULTR = _ROOT / "scripts" / "deploy" / "vultr-vendor-data.sh"
 
 
 def _code(path: Path) -> str:
@@ -62,13 +65,29 @@ def test_firstboot_calls_the_shared_installer_for_the_site_phase() -> None:
 
 
 def test_bakery_calls_the_shared_installer_for_the_machine_phase() -> None:
+    """One bakery, two clouds (#3004): the AWS bundle runs this script with
+    TRINITY_CLOUD=aws, and an unset value keeps the DigitalOcean build as it was."""
     body = _BAKERY.read_text()
-    assert "./scripts/deploy/start.sh --provision --cloud digitalocean --machine-only" in body
+    assert './scripts/deploy/start.sh --provision --cloud "${TRINITY_CLOUD}" --machine-only' in body
+    assert 'TRINITY_CLOUD="${TRINITY_CLOUD:-digitalocean}"' in body
+    assert re.search(r"^\s*digitalocean\|aws\) ;;$", body, re.MULTILINE), (
+        "the bakery must refuse a cloud start.sh does not know"
+    )
+
+
+def test_firstboot_passes_the_aws_provenance_on_the_aws_image() -> None:
+    body = _FIRSTBOOT.read_text()
+    assert "--provision --cloud aws --site-only --provenance aws-marketplace" in body
+    assert 'CLOUD="$(cat "${STATE_DIR}/cloud"' in body
+    assert 'echo "${TRINITY_CLOUD}" > /etc/trinity/cloud' in _BAKERY.read_text(), (
+        "first boot reads the cloud the bakery must record"
+    )
 
 
 def test_packer_tree_does_not_re_implement_provisioning() -> None:
-    """No fourth copy: the packer scripts install nothing and configure nothing."""
-    for path in (_FIRSTBOOT, _BAKERY):
+    """No fourth copy: the per-provider scripts install nothing and configure
+    nothing — they call the shared installer."""
+    for path in (_FIRSTBOOT, _BAKERY, _VULTR):
         body = _code(path)
         for forbidden in (
             "docker-ce",          # Docker install
@@ -81,6 +100,16 @@ def test_packer_tree_does_not_re_implement_provisioning() -> None:
     # The bakery still pulls images — that IS its job, and the one thing the
     # shared installer must not do at build time.
     assert "docker pull" in _code(_BAKERY)
+
+
+def test_every_provider_entry_point_calls_the_shared_installer() -> None:
+    """One implementation, four callers: the bakery (machine phase), the 1-Click
+    first boot, the DigitalOcean doc installer's user-data, and Vultr's vendor
+    data."""
+    for path in (_FIRSTBOOT, _BAKERY, _VULTR):
+        assert "scripts/deploy/start.sh" in path.read_text(), (
+            f"{path.name} must call the shared installer, never re-implement it"
+        )
 
 
 def test_firewall_has_no_port_list() -> None:
@@ -114,7 +143,7 @@ def test_firewall_returns_established_before_it_drops() -> None:
 def test_containers_cannot_reach_the_cloud_metadata_service() -> None:
     """The droplet's user-data is served verbatim from link-local for the life of
     the machine, and on a script-installed instance it carries the Trinity admin
-    password and the operator's Claude subscription token. An agent container is
+    password. An agent container is
     exactly the untrusted-code case, so the range is blocked outbound.
 
     Two things are asserted, and the ordering one is the load-bearing half: the
@@ -159,7 +188,9 @@ def test_ufw_and_iptables_persistent_are_never_both_installed() -> None:
             f"a comment: {live}. ufw Breaks both, so installing one removes ufw. "
             "Reboot persistence is trinity-docker-firewall.service's job."
         )
-    assert re.search(r"apt-get install\b[^\n]*\bufw\b", _code(_START)), (
+    # provision_apt is start.sh's own apt-get wrapper (#2282 adds a dpkg-lock
+    # timeout there, because imageless first boot races unattended-upgrades).
+    assert re.search(r"(?:apt-get|provision_apt) install\b[^\n]*\bufw\b", _code(_START)), (
         "start.sh --provision no longer installs ufw"
     )
 
@@ -240,8 +271,10 @@ def test_the_provisioned_caddyfile_gates_on_demand_tls_on_the_backend() -> None:
     # asserted as a BLOCK: `on_demand` anywhere in the file is satisfied by the
     # global `on_demand_tls` option above, so deleting this site — which is the
     # whole feature — passed the previous spelling of this test.
-    site = re.search(r"^https:// \{\n(.*?)^\}", caddy, re.S | re.M)
-    assert site, "the catch-all https:// site is gone — a saved domain reaches nothing"
+    # Hostname wildcards, never a bare `https://` (#3004: a subject-less site
+    # captures clients that send no SNI; see test_3004_aws_provision).
+    site = re.search(r"^https://\*\.\*,[^\n]*\{\n(.*?)^\}", caddy, re.S | re.M)
+    assert site, "the on-demand domain site is gone — a saved domain reaches nothing"
     assert re.search(r"tls \{[^}]*\bon_demand\b", site.group(1), re.S), (
         "the catch-all site does not request an on-demand certificate"
     )

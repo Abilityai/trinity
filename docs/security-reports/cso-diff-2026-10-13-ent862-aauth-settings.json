@@ -1,0 +1,41 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-13",
+  "mode": "diff",
+  "scope": "feature/ent862-aauth-graduate vs origin/dev (merge-base 984f8f4c8)",
+  "issue": "abilityai/trinity-enterprise#862",
+  "pr": null,
+  "counts_as_full_run": false,
+  "phases_run": ["0", "1", "2-diff", "5-compose", "6-mcp", "7-ASI03", "9-A01", "9-A10", "12", "13", "14"],
+  "findings": [
+    {
+      "id": 1,
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "settings-generic-door",
+      "owasp_2025": "A01",
+      "asi": "ASI03",
+      "llm": null,
+      "phase": "9",
+      "file": "src/backend/routers/settings/generic.py",
+      "line": 183,
+      "title": "aauth_person_server / aauth_resource_allowlist still writable via the admin-only generic settings catch-all",
+      "pre_existing": true,
+      "verifier": "independent agent — CONFIRMED, MEDIUM",
+      "remediation": "applied in-branch after the audit: both keys join SETTINGS_ROUTE_KEYS and PUT /api/settings/aauth takes person_server + resource_allowlist (validated, empty clears); demo.sh moved to the route",
+      "closure_evidence": "tests/unit/test_ent862_aauth_settings.py generic-door parametrisation over five keys"
+    }
+  ],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "full-history secrets archaeology not run (diff mode)",
+    "dependency scanners not run (no dependency change in diff)",
+    "CI/CD workflow audit not run (no workflow change in diff)",
+    "image internals / Docker pass not run (no Dockerfile change in diff)",
+    "frontend panels not exercised by a human in both themes"
+  ],
+  "supply_chain_summary": {"scanner": "none (no dependency change)", "new_install_scripts": 0},
+  "totals": {"critical": 0, "high": 0, "medium": 1, "low": 0}
+}

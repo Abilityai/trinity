@@ -56,8 +56,14 @@ from .provisioning import (  # noqa: F401
     generate_instance_id,
     generate_working_branch,
     initialize_git_in_container,
+    is_push_denied,
     probe_anonymous_repo_access,
+    probe_push_access,
     reserve_and_generate_instance_id,
+)
+from .ref_probes import (  # noqa: F401  (#3725)
+    probe_anonymous_ref,
+    probe_tokened_repo_access,
 )
 from .remotes import (  # noqa: F401
     ContainerGitState,

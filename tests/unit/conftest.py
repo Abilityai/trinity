@@ -69,6 +69,21 @@ os.environ.setdefault(
     "TRINITY_DB_PATH",
     str(Path(_tempfile.gettempdir()) / f"trinity-unit-tests-{os.getpid()}.db"),
 )
+# #2944: the agent server's retained-terminal store defaults to
+# `~/.trinity/retained-results`; the `/api/task` and `/api/chat` handlers write
+# there on every terminal, so a handler test would otherwise leave files in the
+# developer's real home. Same per-process isolation as the DB path.
+os.environ.setdefault(
+    "TRINITY_RETAINED_RESULTS_DIR",
+    str(Path(_tempfile.gettempdir()) / f"trinity-unit-retained-{os.getpid()}"),
+)
+# #2958: `reset_session()` and a successful chat turn write/clear the chat
+# session keep-set marker (default `/home/developer/.trinity/chat-session.json`).
+# Same per-process isolation; tests that assert on it point it at tmp_path.
+os.environ.setdefault(
+    "TRINITY_CHAT_SESSION_FILE",
+    str(Path(_tempfile.gettempdir()) / f"trinity-unit-chat-session-{os.getpid()}.json"),
+)
 
 # Ensure src/backend is importable before test modules are collected.
 #

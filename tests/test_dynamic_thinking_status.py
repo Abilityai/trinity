@@ -13,6 +13,7 @@ Related flow: docs/memory/feature-flows/authenticated-chat-tab.md
 """
 
 import pytest
+from testkit.readiness import require_agent_answer
 import time
 import json
 import httpx
@@ -181,6 +182,7 @@ class TestStatusLabelMapping:
 class TestAsyncModeSubmission:
     """THINK-001: Async mode task submission returns execution_id immediately."""
 
+    @pytest.mark.requires_model
     def test_async_mode_returns_accepted(
         self,
         api_client: TrinityApiClient,
@@ -196,10 +198,7 @@ class TestAsyncModeSubmission:
             timeout=30.0,
         )
 
-        if response.status_code == 503:
-            pytest.skip("Agent server not ready (503)")
-        if response.status_code == 429:
-            pytest.skip("Agent at capacity (429)")
+        require_agent_answer(response, what="POST /task")
 
         assert_status(response, 200)
         data = assert_json_response(response)
@@ -207,6 +206,7 @@ class TestAsyncModeSubmission:
         assert data["status"] == "accepted", f"Expected 'accepted', got '{data['status']}'"
         assert data["execution_id"], "execution_id should not be empty"
 
+    @pytest.mark.requires_model
     def test_async_mode_execution_id_is_pollable(
         self,
         api_client: TrinityApiClient,
@@ -223,8 +223,7 @@ class TestAsyncModeSubmission:
             timeout=30.0,
         )
 
-        if submit_response.status_code in [503, 429]:
-            pytest.skip(f"Agent not ready ({submit_response.status_code})")
+        require_agent_answer(submit_response, what="POST /task")
 
         assert_status(submit_response, 200)
         execution_id = submit_response.json()["execution_id"]
@@ -243,6 +242,7 @@ class TestAsyncModeSubmission:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_async_mode_completes_eventually(
         self,
         api_client: TrinityApiClient,
@@ -259,8 +259,7 @@ class TestAsyncModeSubmission:
             timeout=30.0,
         )
 
-        if submit_response.status_code in [503, 429]:
-            pytest.skip(f"Agent not ready ({submit_response.status_code})")
+        require_agent_answer(submit_response, what="POST /task")
 
         assert_status(submit_response, 200)
         execution_id = submit_response.json()["execution_id"]
@@ -307,6 +306,7 @@ class TestSSEStreamDuringExecution:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_sse_stream_available_during_execution(
         self,
         api_client: TrinityApiClient,
@@ -323,8 +323,7 @@ class TestSSEStreamDuringExecution:
             timeout=30.0,
         )
 
-        if submit_response.status_code in [503, 429]:
-            pytest.skip(f"Agent not ready ({submit_response.status_code})")
+        require_agent_answer(submit_response, what="POST /task")
 
         assert_status(submit_response, 200)
         execution_id = submit_response.json()["execution_id"]
@@ -382,6 +381,7 @@ class TestAsyncModeSessionPersistence:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_async_mode_with_save_to_session(
         self,
         api_client: TrinityApiClient,
@@ -412,8 +412,7 @@ class TestAsyncModeSessionPersistence:
             timeout=30.0,
         )
 
-        if submit_response.status_code in [503, 429]:
-            pytest.skip(f"Agent not ready ({submit_response.status_code})")
+        require_agent_answer(submit_response, what="POST /task")
 
         assert_status(submit_response, 200)
         execution_id = submit_response.json()["execution_id"]
@@ -471,6 +470,7 @@ class TestAsyncModeSessionPersistence:
 
     @pytest.mark.slow
     @pytest.mark.requires_agent
+    @pytest.mark.requires_model
     def test_async_mode_session_contains_messages(
         self,
         api_client: TrinityApiClient,
@@ -492,8 +492,7 @@ class TestAsyncModeSessionPersistence:
             timeout=30.0,
         )
 
-        if submit_response.status_code in [503, 429]:
-            pytest.skip(f"Agent not ready ({submit_response.status_code})")
+        require_agent_answer(submit_response, what="POST /task")
 
         assert_status(submit_response, 200)
         execution_id = submit_response.json()["execution_id"]

@@ -48,6 +48,28 @@ for _p in (str(_BACKEND), str(_BASE_IMAGE)):
 # `ImportError: module services.subscription_auto_switch not in sys.modules`
 # from an importlib.reload several hundred tests later).
 
+_UNSET = object()
+
+
+@pytest.fixture(autouse=True)
+def _restore_message_router_binding():
+    """The tests below re-import `adapters.message_router` inside a
+    `patch.dict(sys.modules, …)` that mocks `adapters.base`. On exit the
+    dict puts the original module back in `sys.modules`, but NOT the
+    `adapters` package's `message_router` attribute the re-import rebound —
+    and `import adapters.message_router as mr` resolves through that
+    attribute. A later test then got the module built on the mocked
+    `ChannelResponse` (seen as `test_ent751_gate_callers` failing only after
+    `test_1533` + this file). Put the binding back after every test."""
+    import adapters
+    saved = getattr(adapters, "message_router", _UNSET)
+    yield
+    if saved is _UNSET:
+        if "message_router" in vars(adapters):
+            delattr(adapters, "message_router")
+    else:
+        adapters.message_router = saved
+
 
 # ---------------------------------------------------------------------------
 # Stub heavy agent_server dependencies so we can import models in isolation

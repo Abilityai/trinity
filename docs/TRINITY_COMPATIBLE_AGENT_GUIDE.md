@@ -57,10 +57,13 @@ name: my-agent                    # Unique identifier (lowercase, hyphens ok)
 display_name: "My Agent"          # Human-readable name for UI
 description: "What this agent does"
 
-# Resource limits (required)
+# Resource limits (optional — omit to inherit the platform default that the
+# instance admin sets under Settings; declare them only when this agent needs
+# something other than that default, since a value here OVERRIDES what a
+# manifest or API caller asks for)
 resources:
-  cpu: "2"                        # CPU cores (string)
-  memory: "4g"                    # Memory limit (e.g., "2g", "4g", "8g")
+  cpu: "2"                        # 1, 2, 4, 8 or 16 (string)
+  memory: "4g"                    # 1g, 2g, 4g, 8g, 16g or 32g
 ```
 
 See [template.yaml Schema](#templateyaml-schema) for complete field reference.
@@ -228,11 +231,11 @@ __pycache__/
 .claude/sessions/
 .claude/shell-snapshots/
 .claude/plugins/
-# settings.json is baked by the Trinity base image with container-only hook
-# paths (/opt/trinity/hooks/*.py). Committing it bricks any clone made outside
-# the container: the missing hook script exits 2, which Claude Code reads as
-# "block this tool call", so every Bash/Edit/Write fails there. (#2036)
-.claude/settings.json
+# .claude/settings.json is NOT ignored: it is your project settings and may be
+# committed (ent#708). Trinity keeps it out of a commit only when it carries
+# container paths (/opt/trinity/ hooks, which brick a clone made outside the
+# container, #2036) or credential-bearing keys (env, apiKeyHelper, awsAuthRefresh,
+# awsCredentialExport, gcpAuthRefresh, otelHeadersHelper) — on disk either way.
 .claude/remote-settings.json
 .claude/policy-limits.json
 .claude/backups/
@@ -358,45 +361,112 @@ just deleting the file.
 
 ## Directory Structure
 
-Every Trinity-compatible agent follows this structure:
+This is a convention, not a mechanism. The platform reads and writes a fixed set of paths by name; everything else is yours to arrange. Two facts shape it: inside the container the git repo root is `/home/developer` (`$HOME`, #1703), and that directory is a durable volume that outlives the container (it survives stop/start, recreate and image upgrades). So the useful question for any folder is not "where does it go in the tree" but "which zone is it in".
 
-```
-my-agent/
-├── .git/
-├── .gitignore                     # CRITICAL: excludes secrets
-│
-├── CLAUDE.md                      # Agent instructions
-├── README.md                      # Human documentation
-├── template.yaml                  # Trinity metadata + credential schema
+### Recommended workspace layout
+
+Three zones: **Ⓟ platform-owned** (the platform reads or writes it by path — do not rename or reorganise it), **Ⓒ committed** (your agent, versioned in git) and **Ⓥ volume-only** (lives on the durable volume, never committed).
+
+```text
+/home/developer/                   # repo root = $HOME (#1703); a durable volume
+├── .gitignore               Ⓒ     # derived from the zones, see below
+├── CLAUDE.md                Ⓒ     # agent instructions
+├── README.md                Ⓒ     # human documentation
+├── template.yaml            Ⓒ     # Trinity metadata + credential schema
+├── .mcp.json.template       Ⓒ     # MCP config with ${VAR} placeholders (.mcp.json is derived, never committed)
+├── .env.example             Ⓒ     # documents required credentials (.env itself is never committed)
+├── dashboard.yaml           Ⓒ     # optional; see Agent Dashboard
 │
 ├── .claude/
-│   ├── agents/                    # Agent's own sub-agents (optional)
-│   ├── commands/                  # Slash commands (optional)
-│   ├── skills/                    # Symlinks to assigned platform skills (auto-managed)
-│   ├── skills-library/            # Read-only mount of all platform skills
-│   └── settings.local.json        # Claude Code settings
+│   ├── skills/<name>/       Ⓒ     # your own skills and the library skills assigned to you
+│   ├── agents/              Ⓒ     # sub-agents (optional)
+│   └── commands/            Ⓒ     # slash commands (optional)
 │
-├── .mcp.json.template             # MCP config with ${VAR} placeholders
-├── .env.example                   # Documents required credentials
+├── memory/                  Ⓒ     # the agent's memory — one named directory, committed
+├── docs/                    Ⓒ     # agent documentation, including intent docs
+├── reports/<kind>/          Ⓒ     # dated, append-only: reports/<kind>/YYYY-MM-DD-<slug>.md
+├── project_files/<slug>/    Ⓒ     # one folder per managed project (inside follows the project standard)
+├── scripts/                 Ⓒ     # helper scripts (optional)
 │
-├── docs/                          # Agent documentation (recommended)
-│   └── ...
+├── data/                    Ⓟ Ⓥ   # runtime state; the export/import boundary (data_paths)
+├── public/                  Ⓟ     # the only folder share_file reads
+├── uploads/                 Ⓟ     # files people attach in chat or through the API
+├── shared-out/              Ⓟ     # shared folder you expose (when enabled)
+├── shared-in/<agent>/       Ⓟ     # shared folders you consume (when enabled)
+├── content/                 Ⓟ Ⓥ   # large generated media; created at start, gitignored
+├── .trinity/                Ⓟ     # shared with the platform — see the zone table
 │
-├── outputs/                       # Generated content (COMMITTED)
-│   ├── reports/
-│   └── data/
-│
-├── content/                       # Large generated assets (NOT COMMITTED)
-│   ├── videos/                    # Generated video files
-│   ├── audio/                     # Generated audio files
-│   ├── images/                    # Generated images
-│   └── exports/                   # Data exports, large files
-│
-├── data/                          # Runtime data — SQLite DBs, datasets (NOT COMMITTED; see data_paths)
-│
-├── scripts/                       # Helper scripts (optional)
-└── resources/                     # Static resources (optional)
+├── .tmp/                    Ⓥ     # $TMPDIR — the one scratch directory
+└── <role>/                  Ⓥ     # a side clone of another repo, e.g. canon/
 ```
+
+| Zone | What lives there | Committed? | Who writes it |
+|------|------------------|------------|---------------|
+| Ⓟ Platform-owned | `data/`, `public/`, `uploads/`, `shared-out/`, `shared-in/<agent>/`, `content/`, `.trinity/` | `data/` never (gitignored once you declare `data_paths`); `content/` never. Of `.trinity/`, only the re-includes in the [`.gitignore` list](#5-gitignore-required) (`setup.sh`, `pipelines/`, `plugins.yaml`, …) | The platform and the agent. `.trinity/` is reserved by the platform, but the agent itself writes `operator-queue.json`, `persistent-state.yaml` and `pipelines/` there; people cannot edit it from the Files tab |
+| Ⓒ Committed workspace | Identity and config files at the root, `.claude/{skills,agents,commands}/`, `memory/`, `docs/`, `reports/<kind>/`, `project_files/<slug>/`, `scripts/` | Yes | The author and the agent |
+| Ⓥ Volume-only runtime | `data/`, `content/`, `$TMPDIR` (`~/.tmp/`), side clones | No — they persist on the volume, not in git | The agent |
+
+Notes on individual entries:
+
+- **`project_files/<slug>/`** is the managed-project folder; its inside (charter, tasks, log) is defined by the project standard in the [agent-dev plugin](user-docs/abilities/agent-dev-plugin.md), not here. A *shared* project lives in the fleet's canon repo at `projects/<slug>/` instead, which is why the agent-repo folder is not called `projects/`.
+- **`reports/<kind>/`** holds dated, append-only files (`reports/weekly/2026-10-19-summary.md`). Never rewrite last period's file; add the next one.
+- **Scratch goes in `$TMPDIR`** (`~/.tmp/`), which the platform sets, creates and gitignores, and which is exec-capable because it is on the volume. Work in one subdirectory per job (`~/.tmp/<job>/`) and remove only that subdirectory; never clear `~/.tmp` wholesale — `~/.tmp/codex/` holds the Codex login, and pip/npm use it too. Do not use `/tmp`: it is a small RAM-backed `noexec` tmpfs, sized by the operator, and lost on recreate.
+- **`.claude/skills/<name>/`** is a plain directory per skill: your own skills and the library skills assigned to you both land there (see [Platform Skills](#platform-skills)).
+
+### Three rules that matter more than the tree
+
+1. **The root holds only identity and config files.** `CLAUDE.md`, `README.md`, `template.yaml`, `.mcp.json.template`, `.env.example`, `.gitignore`, and `dashboard.yaml` if you have one. Work products go in a named folder (`reports/`, `docs/`, `project_files/<slug>/`), never loose at the root.
+2. **Derived files are regenerated, never hand-edited.** `.mcp.json` is written from `.mcp.json.template` by credential injection; `dashboard.yaml` is written by its `/update-dashboard` playbook if you have one; the two managed regions of `.gitignore` are rewritten on every sync. Change the source, then regenerate.
+3. **Memory goes in one named directory: the repo-level `memory/`, committed** so it travels with the agent to every instance. It is also shared across all users of the agent and committed to git, so no user's personal details go there — use `write_user_memory` for per-person facts. Claude Code's auto-memory under `~/.claude/projects/` (it writes `~/.claude/projects/<cwd-slug>/memory/`) is gitignored, local to this volume and shared across all users of the agent; do not treat it as the agent's memory, and never put personal data there either. See [Memory Management](#memory-management).
+
+### Other repositories in the workspace
+
+When the agent needs another repo's files (a canon, a shared library, a dataset repo), use a **gitignored side clone**: one top-level directory per clone, named for its role (`canon/`, `styleguide/`, …), added to your own `.gitignore` rules. There is no wrapper directory; the fleet's canon layer already clones to `canon/`, and a marketplace installer that clones a repo picks its own directory name the same way.
+
+Keep the clone current from `.trinity/setup.sh`, which runs on every container start:
+
+```bash
+# in .trinity/setup.sh — clone if missing, fast-forward if present, print the sha
+if [ ! -d "$HOME/canon/.git" ]; then
+  git clone https://github.com/your-org/your-canon.git "$HOME/canon"
+else
+  git -C "$HOME/canon" pull --ff-only || echo "canon: not fast-forwardable, left as is"
+fi
+echo "canon at $(git -C "$HOME/canon" rev-parse --short HEAD)"
+```
+
+- **No token in the URL, and no secret in `setup.sh`.** A token in a clone URL is written into that clone's `.git/config` in plain text and shows up in the process table on every fetch, and `setup.sh` is committed. If the clone needs authentication, let a git credential helper supply it — the platform keeps tokens out of its own remote URLs for the same reason — and put durable credentials through [Credential Management](#credential-management).
+- **`git pull --ff-only`, not `fetch` + `reset --hard`.** A reset on every start discards whatever the agent wrote in that clone since the last push. Use `fetch` + `reset --hard origin/<branch>` only for a clone the agent never writes to, and say so in a comment next to it.
+- **Present is not current.** Do not skip the refresh when the directory already exists; the volume outlives every restart, so an early exit pins the clone at whatever it was the first time.
+
+**Submodules** are for one case only: you need an exact pin of the other repo recorded in the agent's own history. Know the costs first. Agent creation does not initialise submodules, and the platform's git pull fails when the pinned pointer moves (#2366). A template **reset to main** overwrites tracked files except those listed in `.trinity/persistent-state.yaml` (without that file, a default set: `workspace/`, `.trinity/`, `.mcp.json`, `.claude.json` and `.claude/.credentials.json`; the kept files are snapshotted to `.trinity/backup/<ts>/` first), and never touches untracked ones; it rewrites the submodule pointer but does not re-checkout the submodule, so the checkout is left stale. A force-replace pull (offered when a pull conflicts, and through the MCP `git_pull` tool) is different: it resets to the remote and deletes untracked files that are not gitignored, so keep work you need committed or in a gitignored folder. (An ordinary pull rebases onto the remote and does not reset.) A gitignored side clone is untouched by all of these.
+
+### Why the `.gitignore` looks the way it does
+
+The [`.gitignore` list](#5-gitignore-required) under Required Files is the zones written down. Do not copy it; read it as:
+
+```text
+Credentials (.env, .env.*, .mcp.json, *.pem, *.key, .ssh/) -> never committed, by any zone
+Shell init / history, .cache/, .local/, .npm/             -> instance-specific; belong to this container
+.trinity/* plus its ! re-includes                         -> platform-owned; only the files you author are committed
+.tmp/                                                     -> volume-only scratch ($TMPDIR)
+content/, *.db/*.sqlite, node_modules/, .venv/, caches    -> volume-only runtime and bulk data
+data/ (added when you declare data_paths)                 -> platform-owned, volume-only
+.claude/projects/, sessions/, todos/, ...                 -> Claude Code's own runtime state on the volume
+```
+
+The one thing the list cannot know is *your* volume-only directories. Add one line per side clone (`canon/`) to your own rules, between the two managed regions. Everything else in the committed zone is committed by default.
+
+### Sources
+
+- [Runtime Data (`data_paths`)](#runtime-data-data_paths--1169) and [Agent data](user-docs/agents/agent-data.md) — `data/`
+- [Shared Folders](#shared-folders) and [Agent network](user-docs/collaboration/agent-network.md) — `shared-out/`, `shared-in/`
+- [Agent files](user-docs/agents/agent-files.md) — `public/`, `share_file`, uploads
+- [Content Folder Convention](#content-folder-convention) — `content/`
+- [Package Persistence](#package-persistence) — `.trinity/setup.sh`
+- [Memory Management](#memory-management) — `memory/`
+- [Agent-dev plugin](user-docs/abilities/agent-dev-plugin.md) — `project_files/<slug>/` and the project standard
+- The platform instructions injected into every agent's system prompt, whose "Your environment" block names the same platform-owned paths
 
 ---
 
@@ -414,7 +484,7 @@ data_paths:
 
 Why this matters:
 
-- **It's already durable.** `/home/developer` is a persistent Docker volume that survives container restarts, recreation, image upgrades, and template re-pulls (`git reset --hard`). You do **not** need a separate volume.
+- **It's already durable.** `/home/developer` is a persistent Docker volume that survives container restarts, recreation, image upgrades, template pulls and a reset to the template's main (`git reset --hard` touches only tracked files, and `data/` is untracked). The exception is a force-replace pull (offered when a pull conflicts, and through the MCP `git_pull` tool): it also runs `git clean -fd`, which deletes untracked `data/` unless you declare `data_paths`, so that `data/` is gitignored. You do **not** need a separate volume.
 - **It stays out of git.** When you declare `data_paths`, Trinity appends `data/` to your agent's `.gitignore` at creation, so runtime data is never committed (no repo bloat, no accidental data leak). A template shipping its own `.gitignore` should pre-include `data/`.
 - **It's portable.** The owner can export the data as a tar and import it into another agent/instance:
   - `POST /api/agents/{name}/data/export` — download a tar of `data/` (or `?format=base64` for small data inline).
@@ -542,10 +612,13 @@ display_name: "My Agent"          # Human-readable name for UI
 description: |
   Multi-line description of what this agent does.
 
-# Resource limits (required)
+# Resource limits (optional — omit to inherit the platform default that the
+# instance admin sets under Settings; declare them only when this agent needs
+# something other than that default, since a value here OVERRIDES what a
+# manifest or API caller asks for)
 resources:
-  cpu: "2"                        # CPU cores (string)
-  memory: "4g"                    # Memory limit (e.g., "2g", "4g", "8g")
+  cpu: "2"                        # 1, 2, 4, 8 or 16 (string)
+  memory: "4g"                    # 1g, 2g, 4g, 8g, 16g or 32g
 
 # === RUNTIME CONFIGURATION (Optional) ===
 # Defaults to Claude Code if not specified
@@ -643,7 +716,7 @@ git:
   push_enabled: true              # Only applies to Working Branch Mode
   commit_paths:                   # Paths auto-committed on sync (Working Branch Mode only)
     - memory/
-    - outputs/
+    - reports/
     - CLAUDE.md
   ignore_paths:
     - .mcp.json
@@ -669,7 +742,7 @@ metrics:
     warning_threshold: 80         # Optional (percentage type): yellow if below
     critical_threshold: 50        # Optional (percentage type): red if below
     values:                       # Required for status type only
-      - value: "active"           # Value written to metrics.json
+      - value: "active"           # The value you pass to record_metrics
         color: "green"            # green|red|yellow|gray|blue|orange
         label: "Active"           # Display label in UI
 
@@ -1025,7 +1098,7 @@ To persist credentials across deployments:
 
 1. **Export**: Click "Export to Git" → encrypts `.env` and `.mcp.json` → writes `.credentials.enc`
 2. **Commit**: The `.credentials.enc` file is safe to commit (AES-256-GCM encrypted)
-3. **Auto-import**: On agent start, if `.credentials.enc` exists but `.env` doesn't, credentials are automatically decrypted and injected
+3. **Import**: `startup.sh` does not decrypt the file. The platform imports a `.credentials.enc` once the agent is ready, except on installs with no encryption key; there the owner imports it once with **Import from Git** on the Credentials tab (or the `import_credentials` MCP tool)
 
 ### Your Agent Should
 
@@ -1060,11 +1133,11 @@ Permission checks before any agent-to-agent communication:
 
 ### 60-Second MCP Call Timeout
 
-> **Design Limitation**: Claude Code enforces a hardcoded 60-second timeout on all MCP HTTP tool calls. Any `chat_with_agent` call that takes longer than 60 seconds will fail regardless of the `timeout_seconds` parameter.
+> **Design Limitation**: an MCP client gives up on a tool call at its own ceiling (30–60 seconds is typical). Trinity's MCP server stops waiting first — at `MCP_CHAT_TIMEOUT_MS`, 25 seconds by default — and answers a synchronous `chat_with_agent` with a receipt (`status: "queued_timeout"` plus the `execution_id`) while the work keeps running. `timeout_seconds` does not extend that wait.
 
 When designing agents that collaborate with other agents, ensure that:
-- Synchronous MCP calls complete within 60 seconds
-- Complex tasks use the async pattern (`parallel=true, async=true`) and poll for results
+- A receipt is treated as "running", never as a failure: the outcome is read with `get_execution_result`, and the call is never re-sent unless the outcome is a confirmed `failed` or `cancelled` — then it is re-sent word for word to retry. Every agent is taught this as the delegation contract in its platform prompt (§Agent Collaboration); the `chat_with_agent` tool description carries the same text
+- Complex tasks use the async pattern (`parallel=true, async=true`) from the start
 - Large data exchanges use shared folders instead of MCP return values
 
 See the [Multi-Agent System Guide](MULTI_AGENT_SYSTEM_GUIDE.md#design-limitation-60-second-mcp-call-timeout) for workaround patterns.
@@ -1418,16 +1491,169 @@ Agents can define custom KPIs displayed in the Trinity UI Metrics tab. This enab
 
 ### How It Works
 
-1. Define metrics in `template.yaml` under `metrics:`
-2. Agent writes values to `metrics.json` in workspace
-3. Trinity UI displays metrics in the Metrics tab (auto-refresh every 30 seconds)
-4. **Agent must be running** for metrics to be visible
+1. You declare metrics in `template.yaml` under `metrics:`.
+2. Trinity reads that block and builds a per-agent **metric registry** — a
+   validated, persisted record of what this agent claims to measure
+   (trinity-enterprise#477). It is reconciled when the agent is created, when a
+   `git pull` / reset / `pull_first` sync brings a new `template.yaml` in, when
+   the container starts, and whenever you ask it to.
+3. Your agent records **values** against those declarations.
+4. Trinity renders them.
+
+Step 3 is the **`record_metrics` MCP tool** (trinity-enterprise#478), and it is
+the only write path — there is no second one and there will not be a third:
+
+```
+record_metrics(points=[
+  {"metric": "cycles_completed", "value": 3},
+  {"metric": "revenue", "value": 1240.50, "dims": {"region": "eu"}},
+  {"metric": "pipeline_state", "value": "healthy",
+   "ts": "2026-09-22T08:00:00Z"},
+], execution_id="<from your Execution Context block>")
+```
+
+Each point is checked against the registry your declaration built. A batch is
+all-or-nothing: if one point is wrong the whole batch is refused and every bad
+point comes back with a reason code and a fix, so you can correct and re-send.
+Four rules are worth knowing before your first call:
+
+- **Declare first.** An undeclared name is refused with `metric_undeclared`.
+  Add it to `metrics:` in `template.yaml` and call
+  `refresh_metric_definitions` — the refusal's hint names that tool.
+- **Values are not coerced.** `"42"` is not `42`, `true` is not `1`, and a
+  `status` metric takes one of its declared labels, not a number.
+- **Identity is `(metric, ts, dims)` — the value is not part of it.** Sending
+  the same value twice deduplicates instead of double-counting. Sending a
+  **different value at the same `(metric, ts, dims)` corrects** the stored point
+  in place, and the result counts it as `corrected`. Keep the `ts` of the
+  period the number describes (the week's close, say), so the chart stays one
+  point per period. Last write wins.
+- **Pass `execution_id`.** It links the batch to the turn and makes a
+  re-delivered turn replay instead of recording twice. Without it, and without
+  your own `ts`, a retry is treated as a new observation. Within one turn,
+  re-sending a batch identical to an earlier one replays it (`replayed: true`,
+  nothing written) even if you corrected the value in between. To restate it
+  back, pass a fresh `idempotency_key`.
+
+The old path — writing `metrics.json` into the workspace — is **retired**
+(trinity-enterprise#479). Nothing reads that file any more:
+`GET /api/agents/{name}/metrics` keeps its URL but is backed by the point store,
+and it does **not** fall back to the file when the store is empty. An agent
+still writing one gets compatibility finding **D-010**, which names the file's
+keys and, separately, the keys that are declared nowhere. Delete the file once
+you have declared its keys and switched to `record_metrics`.
+
+Step 2 is what makes the fields below validated rather than merely documented:
+a declaration Trinity cannot read is **dropped** from the registry and reported
+as compatibility finding `D-009`, and a point recorded against a metric the
+registry does not hold is rejected.
+
+### Objectives name your metrics by name
+
+If your agent has a role and a canon (Tandem framework §3.4), its objective
+files set **targets** for these same metrics:
+
+```yaml
+# canon/objectives/q4-close-rate.yaml
+metrics:
+  - name: close_rate       # <- the SAME name as your template.yaml metrics: entry
+    direction: up          # up | down | hold
+    target: 35
+    by: 2026-12-31
+guard_metrics:             # optional: numbers that must not move meanwhile
+  - name: cost_per_lead
+    target: 40             # the level to hold, once you have a baseline
+    tolerance: 5
+```
+
+`name` is the whole link: an objective does not carry its own copy of the
+number, it names a metric you declared and Trinity joins the two
+(trinity-enterprise#666). Two consequences worth knowing:
+
+- **A name an objective uses must be declared in your `metrics:` block.** If it
+  is not, the objective still shows — with a finding saying so and naming the
+  fix, never a blank cell. Add it to `template.yaml` and call
+  `refresh_metric_definitions`. (If the metric belongs to the role that *owns*
+  the objective and you merely appear in its `supporting_agents`, there is
+  nothing for you to fix — you get `metric_not_declared_here` instead.)
+- **Declare `direction:` somewhere.** Without it on either the template metric
+  or the objective's entry, nothing can say whether you are behind or ahead —
+  only what the number is.
+
+Read the join with the **`get_objectives`** MCP tool. It gives you target,
+actual, freshness and the gap in one call, so do not compute a gap yourself
+from `get_metrics` plus the file: `gap.status` is *position* relative to the
+target (`behind` / `on_target` / `ahead`, or `on_target` / `off_target` for
+`hold`), and `stale: true` means do not act on that number — record a fresh
+point first.
+
+A **guard** row carries `role: "guard"`. It is always judged as a hold —
+`on_target` within its `tolerance` or `off_target`, never behind or ahead,
+whatever the metric's own direction — and it is counted in `summary.guards`,
+apart from the objective's own metrics. A guard with no `target` yet shows the
+finding `guard_target_unset`.
 
 ### File Locations
 
-The agent server reads from the agent's working directory (`/home/developer/`):
-- **Definitions**: `/home/developer/template.yaml`
-- **Values**: `/home/developer/metrics.json`
+- **Definitions**: `/home/developer/template.yaml` — read by the backend into
+  the registry; also readable through
+  `GET /api/agents/{name}/metrics/definitions`.
+- **Values**: the `metric_points` store, written only by `record_metrics`.
+  `/home/developer/metrics.json` is **retired** — unread, never served, and
+  reported as D-010 if present. The agent-server route that used to serve it,
+  `GET /api/metrics` on the container, is retired in place: it still exists but
+  reads no file and answers `410` with
+  `{has_metrics: false, superseded_by: "record_metrics / GET /api/agents/{name}/metrics", finding: "D-010"}`.
+
+### Keeping the Registry in Sync
+
+The registry is rebuilt from `template.yaml` at creation, on `git pull` /
+`reset-to-main-preserve-state` / `git sync --pull_first`, and on container
+start. **If your agent edits its own `metrics:` block and pushes** — the common
+case, since the in-container auto-sync pushes rather than pulls — nothing on
+the backend has seen the change until the agent restarts. Either restart it or
+call:
+
+```bash
+POST /api/agents/{name}/metrics/definitions/refresh
+```
+
+The agent can call this itself with its own Trinity key. It is idempotent, and
+it needs the agent to be **running** (409 otherwise). If the template cannot be
+read or parsed, the registry is left exactly as it is (503) — Trinity never
+retires a definition because it failed to read the file.
+
+### Reading your own metrics back
+
+`get_metrics(metric?, window?, since?, until?)` (trinity-enterprise#479) returns
+your declarations joined to your recorded points, with a freshness verdict on
+each. It is **self-scoped**: your key reads your own metrics and no one else's.
+
+```
+get_metrics()                      # every declared metric, bucketed, auto window
+get_metrics(metric="revenue", window="30d")   # one metric, raw points
+```
+
+Two things to know before you interpret the answer:
+
+- **Staleness has one rule, and it is not yours to compute:**
+  `stale ⟺ now − last_point_at > 2 × cadence`. A metric with **no declared
+  `cadence:`** is **never stale** — there is nothing for it to be late against,
+  and `stale` comes back `null` rather than `false`, because "not stale" and
+  "unanswerable" are different answers. If you want Trinity to be able to tell
+  an operator that your number has gone quiet, declare a cadence.
+- **`series` is bounded.** The default read gives you buckets (≤ 120 per
+  series), not every point. Raw points come back only when you ask for one
+  metric by name, capped, newest first.
+
+An undeclared name comes back as `{success: false, undeclared: true}` with a
+hint naming `refresh_metric_definitions` — the tool never throws, so a metric
+read cannot end your turn.
+
+Your declared metrics also render as **tiles on your Dashboard tab with no
+`dashboard.yaml` at all**, and they render even when you are stopped. Each tile
+shows when its point was recorded; a stale one is visibly marked rather than
+shown as current. That is the payoff for declaring a cadence.
 
 ### template.yaml Metric Definitions
 
@@ -1457,7 +1683,7 @@ metrics:
     type: status
     label: "State"
     values:                         # Required for status type
-      - value: "active"             # The value in metrics.json
+      - value: "active"             # The value you pass to record_metrics
         color: "green"              # green, red, yellow, gray, blue, orange
         label: "Active"             # Display label
       - value: "idle"
@@ -1479,26 +1705,107 @@ metrics:
     label: "Cache Size"
 ```
 
-### metrics.json Format
+#### Additional fields
 
-Your agent writes current values to `metrics.json`:
+Four optional fields make a declaration useful to the platform rather than only
+to a human reading it:
 
-```json
-{
-  "messages_processed": 42,
-  "avg_response_time": 125.5,
-  "success_rate": 87.5,
-  "current_state": "active",
-  "last_cycle_duration": 120,
-  "cache_size": 1048576,
-  "last_updated": "2025-12-10T10:30:00Z"
-}
+```yaml
+metrics:
+  - name: research_cycles
+    type: counter
+    label: "Research Cycles"
+    cadence: 1h                     # how often you expect to record a point
+    direction: up_good              # up_good | down_good | neutral (default)
+    aggregation: sum                # last (default) | sum | avg
+    dimensions: [region, source]    # the dimension keys a point may carry
+    x-owner: research-team          # `x-` keys pass through untouched
 ```
 
-**Notes:**
-- Keys must match the `name` field in template.yaml
-- `last_updated` is optional but recommended (shown as "Updated X ago" in UI)
-- Values are read when the Metrics tab is viewed or refreshed
+| Field | What it is for |
+|-------|----------------|
+| `cadence` | The expected interval between points. Freshness is judged against it ("no point within 2× cadence"), so `1h` means a gap over two hours is worth surfacing. Written as `<n>s`/`m`/`h`/`d`/`w` or an ISO 8601 duration (`PT15M`, `P1D`, `P1DT12H`, `P1W`). Must be between 60 seconds and 366 days. **Years and months are rejected** — `1y` and `P1M` are not fixed durations, so they cannot be compared against a timestamp. |
+| `direction` | Which way is good, so a rise can be rendered as an improvement rather than just a change. |
+| `aggregation` | How a window of points collapses into one number. |
+| `dimensions` | The dimension keys a recorded point is allowed to carry. Each follows the `name` charset; at most 10. |
+| `x-…` | Your own annotations. Preserved verbatim (up to 20 keys / 1 KB per metric) and never interpreted. |
+
+#### Rules Trinity enforces
+
+- `name` must match `^[a-z][a-z0-9_]{0,63}$`. It is the key your points are
+  stored under, so `Cycles` and `cycles` are not two metrics — the first is
+  simply invalid.
+- `type` must be one of the six above. `values:` is required for `status` and
+  refused for everything else.
+- Thresholds must be numbers (`true` is not a number).
+- Status colors come from `green`, `red`, `yellow`, `gray`, `blue`, `orange`,
+  `purple`.
+- Limits: 50 metrics per agent, 50 status values, 10 dimensions; `label` ≤ 200
+  characters, `description` ≤ 1000, `unit` ≤ 32.
+- **A malformed entry is dropped, not repaired.** The rest of your block still
+  works, and the compatibility report (`D-009`) names exactly what was dropped
+  and why.
+
+#### Changing a metric later
+
+Everything except `type` updates in place on the next sync — rename a label,
+add a threshold, tighten a cadence.
+
+**Changing a metric's `type` is a new metric name; the old one retires.**
+Trinity refuses an in-place type change: points are stored by name, so turning
+a `status` into a `gauge` would leave every value already recorded
+uninterpretable. The refusal is not silent — the definitions response shows
+`type_conflict` with the type you declared, and the refresh summary names it.
+Pick a new name and let the old metric retire; that keeps the break visible
+instead of corrupting the history.
+
+A metric you delete from `template.yaml` is **retired**, not erased — its
+definition is kept so past values can still be read, and re-declaring the same
+name brings the original row back.
+
+#### How long values are kept
+
+Points are kept for `metrics_retention_days` (default 365, `0` = forever) and
+an agent may record `metrics_daily_point_cap` of them per UTC day (default
+100,000, `0` = unlimited). Both are operator-adjustable — an operator sets them
+through Settings, or bootstraps them with `METRICS_RETENTION_DAYS` /
+`METRICS_DAILY_POINT_CAP` — and both are **enforced**: a sweep prunes past the
+window, and crossing the cap is a 429 telling you when to come back. Read the
+live numbers from `GET /api/agents/{name}/metrics/definitions` → `policy`
+rather than hard-coding them; they now carry `enforced: true` and say which
+tier supplied each value.
+
+Two consequences for an author. A backfill older than the window is refused
+(`ts_before_retention`) rather than accepted and pruned minutes later. And the
+cap counts WRITES, not observation times, so backfilling last year's points
+still spends today's budget.
+
+### `metrics.json` — retired, and how to migrate off it
+
+Older guides told you to write current values into
+`/home/developer/metrics.json`. **Nothing reads that file.** It is not served,
+not used as a fallback, and its presence is reported as compatibility finding
+**D-010**: *"metrics.json is superseded and no longer served — record these
+values with `record_metrics`"*, with the detail naming its keys and which of
+them have no `template.yaml metrics:` entry.
+
+The container's own `GET /api/metrics` no longer reads it either. That route is
+kept so nothing 404s, but it parses nothing and answers `410` with
+`{has_metrics: false, superseded_by: "record_metrics / GET /api/agents/{name}/metrics", finding: "D-010"}`.
+Read your declarations from `GET /api/template-info` and your values from
+`GET /api/agents/{name}/metrics` (or the `get_metrics` MCP tool).
+
+Trinity refuses to serve it deliberately rather than as an oversight. Two
+sources for one number is the problem this whole area exists to remove, and
+"serve the file when there is nothing better" is exactly how two sources drift
+apart without anyone noticing.
+
+To migrate, per key:
+
+1. Declare it in `template.yaml` under `metrics:` (with a `cadence:`).
+2. Call `refresh_metric_definitions` (or restart the agent).
+3. Replace the file write with `record_metrics(points=[...])`.
+4. Delete `/home/developer/metrics.json`.
 
 ### Complete Example
 
@@ -1539,29 +1846,35 @@ metrics:
     label: "Last Cycle"
 ```
 
-**Updating metrics in your agent:**
-```bash
-# In a script or via Claude Code
-cat > /home/developer/metrics.json << 'EOF'
-{
-  "research_cycles": 5,
-  "findings_discovered": 23,
-  "research_status": "idle",
-  "last_cycle_duration": 180,
-  "last_updated": "2025-12-10T10:30:00Z"
-}
-EOF
+**Recording values from your agent:**
 ```
+record_metrics(points=[
+  {"metric": "research_cycles", "value": 5},
+  {"metric": "findings_discovered", "value": 23},
+  {"metric": "research_status", "value": "idle"},
+  {"metric": "last_cycle_duration", "value": 180},
+], execution_id="<from your Execution Context block>")
+```
+
+No timestamp is needed — Trinity stamps it. Pass your own `ts` only when you are
+recording an observation from a *different* moment: a backfill, or a period
+close (a weekly total stamped at the week's end). To correct that figure later,
+send the new value with the **same** `ts` and dims. It restates the point
+rather than adding a second one.
 
 **In CLAUDE.md instructions:**
 ```markdown
 ## Metrics Tracking
 
-After each research cycle, update metrics.json:
-- Increment `research_cycles`
-- Update `findings_discovered` count
-- Set `research_status` to "active" during work, "idle" when done
-- Record `last_cycle_duration` in seconds
+After each research cycle, call `record_metrics` with:
+- `research_cycles` — the new total
+- `findings_discovered` — the new total
+- `research_status` — "active" during work, "idle" when done
+- `last_cycle_duration` — seconds
+
+Pass the `execution_id` from your Execution Context block so a re-delivered
+turn replays instead of double-counting. Never write metrics.json — it is
+retired and nothing reads it.
 ```
 
 ---
@@ -1570,11 +1883,22 @@ After each research cycle, update metrics.json:
 
 Agents can define a custom dashboard displayed in the Trinity UI Dashboard tab.
 
+### You may not need one
+
+If you declare metrics in `template.yaml` and record them with
+`record_metrics`, Trinity renders them as **tiles on your Dashboard tab with no
+`dashboard.yaml` at all** (trinity-enterprise#479). Each tile carries the value,
+the point time and a stale mark, and they render even while you are stopped.
+
+Write a `dashboard.yaml` when you want *more* than your numbers — tables, lists,
+markdown, links, images — or when you want to arrange them into sections.
+
 ### File Location
 
 Save the dashboard configuration to **`/home/developer/dashboard.yaml`** — the root of the agent's working directory.
 
-If the file does not exist, no dashboard will be displayed.
+If the file does not exist, your declared metrics are still shown as tiles; the
+rest of the dashboard simply has nothing to render.
 
 ### Basic Structure
 
@@ -1607,9 +1931,9 @@ sections:
 
 | Type | Required Fields | Description |
 |------|----------------|-------------|
-| `metric` | label, value | Number with optional trend (up/down) |
-| `status` | label, value, color | Colored badge |
-| `progress` | label, value | Progress bar (0-100) |
+| `metric` | label, value¹ | Number with optional trend (up/down) |
+| `status` | label, value¹, color¹ | Colored badge |
+| `progress` | label, value¹ | Progress bar (0-100) |
 | `text` | **content** | Plain text (NOT `text` or `value`) |
 | `markdown` | **content** | Rendered markdown |
 | `table` | columns, rows | Tabular data |
@@ -1619,7 +1943,55 @@ sections:
 | `divider` | - | Horizontal line |
 | `spacer` | - | Vertical space |
 
+¹ Not required when the widget carries `metric: <name>` — Trinity fills it from
+the declared metric (see below). Older base images still require it; keep a
+placeholder there.
+
 This table is the closed set. Anything else — a chart, badge, or countdown widget, for example — is stripped by the agent server before render, appears in the Dashboard tab's warning banner, and fails compatibility check D-002 by name. For trend lines, give `metric`/`progress` widgets a stable `id:` — Trinity records their values on every fetch and draws the sparkline itself.
+
+### Binding a widget to a declared metric
+
+Do **not** hand-write a business number into `dashboard.yaml`. Declare it, record
+it, and name it:
+
+```yaml
+widgets:
+  - type: metric
+    label: "Monthly Revenue"
+    metric: revenue          # the template.yaml metrics: name
+```
+
+Trinity fills `value`, `color`, sparkline `history`, the point time and the
+stale mark from the registry on every read, and it **skips** bound widgets when
+it snapshots the dashboard — so the number keeps exactly one source.
+
+Works on `metric`, `status` and `progress` widgets. An undeclared name shows the
+reason on the widget and **no number**; a metric store outage degrades that one
+widget and leaves the rest of the dashboard alone.
+
+> **Older base images: keep a placeholder `value:`.** The relaxed validation
+> (`value` — and `color` on a status widget — optional when `metric:` is set)
+> ships in the agent base image. An agent running an image built before
+> trinity-enterprise#479 still enforces the strict rule, so its `dashboard.yaml`
+> fails validation and the tab falls back to the cached copy, which an operator
+> reads as "stale" for entirely the wrong reason. Until your agent is on a
+> rebuilt image, write both:
+>
+> ```yaml
+>   - type: metric
+>     label: "Monthly Revenue"
+>     metric: revenue
+>     value: 0          # placeholder for older base images; the backend
+>                       # OVERWRITES it whenever the binding resolves, so this
+>                       # number is never what an operator sees
+> ```
+>
+> Remove it once the agent is rebuilt. Keeping it costs nothing but noise.
+
+**Unbound widgets still work** — an author-written `value:` is read from the file
+and snapshotted for history, exactly as before. For a *business* number that path
+is deprecated: it has no declaration, no validation and no cadence, so nothing
+can say whether what it shows is still current.
 
 ### Widget Examples (All Types)
 
@@ -1791,33 +2163,36 @@ Stage advancement, retry, and escalation are owned by your agent: run a single `
 
 ## Operator Communication Is Asynchronous (fire-and-park) — #1402
 
-All human/operator communication on Trinity is **asynchronous**, mediated by the operator queue (`~/.trinity/operator-queue.json` ⇄ the Operating Room UI). Design your agent around this from day one:
+All human/operator communication on Trinity is **asynchronous**, mediated by the operator queue (the Operating Room UI). An agent raises an ask with the **`ask_operator`** MCP tool: the platform validates it at the call, stores it, shows it to the person and returns a receipt. The queue file (`~/.trinity/operator-queue.json`) still works as a fallback for two releases, then it is removed. Design your agent around this from day one:
 
 **The contract: fire-and-park, never block-and-wait.**
 
-1. **Park** the request (approval / question / alert) by appending an entry to the queue file.
+1. **Park** the request (approval / question / alert) with `ask_operator`, or, as the fallback, by appending an entry to the queue file.
 2. **End the turn.** A turn must never wait, poll, or sleep for a human response — a human may answer in minutes or days, and a blocked turn burns its entire timeout budget while pinning platform capacity. Never assume a synchronous human answer is available mid-turn.
-3. **Process responses in a later turn.** At the start of each autonomous run, check the queue file for `status: "responded"` items, act on them, then mark them `"acknowledged"`.
+3. **Process the outcome in a later turn.** `get_my_ask` returns how an ask ended (answered, cancelled or expired, with the answer when there is one), and the Execution Context block of the system prompt lists the agent's asks that ended in the last 24 hours and the ones still pending. Do not re-ask what is still pending (#3247): if the facts changed, raise the new ask with `replaces` set to the pending ask's `request_id` — the earlier ask ends as replaced, never edited in place; if a person answered first the replace is refused `replaces_ended` and the answer stands, and repeating a pending ask's `proposal` without `replaces` is refused `already_pending`. For a queue-file entry, check the file for `status: "responded"` items, act on them, then mark them `"acknowledged"`. On an approval the answer is one of the agent's own options or the platform-reserved value `(something else)` (#3242): none of the options is approved — carry out none of them — and the person's instruction is in `response_text`. Never list `(something else)` as an option yourself; `ask_operator` refuses it. Write atomic asks (#3243): one decision per ask, a one-glance title (at most 120 characters), and at most 5 short options that name the choice only — the full rules are in the `ask_operator` tool description, and a queue-file entry over the caps is held as `invalid_options` / `invalid_title`.
 
-**Ask before irreversible actions.** Before an action the platform cannot undo or verify — payments, emails/messages through the agent's own credentials, public posts, destructive deletions — park an `approval` and end the turn when uncertain. This matters most under re-delivery: pull-mode coordination (#1081) re-runs a turn whose worker died, so a task you receive may have partially run before. Check your own records and the queue file before repeating an irreversible effect; do the reversible parts first and gate only the irreversible step.
+**Ask before irreversible actions.** Before an action the platform cannot undo or verify — payments, emails/messages through the agent's own credentials, public posts, destructive deletions — park an `approval` and end the turn when uncertain. Put the exact action in the ask's `proposal`. This matters most under re-delivery: pull-mode coordination (#1081) re-runs a turn whose worker died, so a task you receive may have partially run before. Check your own records and your earlier asks before repeating an irreversible effect; do the reversible parts first and gate only the irreversible step.
 
-**Request IDs must be globally unique.** Derive them from the current execution ID (`approval-{execution_id}-{short-slug}`, execution ID is in the Execution Context block of your system prompt). Date-serial IDs (`req-20260307-001`) collide across agents and a colliding request is silently swallowed; a derived ID also makes a re-park under re-delivery idempotent instead of duplicating the request.
+**Request IDs must be globally unique.** Derive them from the current execution ID (`approval-{execution_id}-{short-slug}`, execution ID is in the Execution Context block of your system prompt). Asking again with the same ID returns the first ask's receipt instead of making a second ask, which makes a re-park under re-delivery idempotent. The same rule makes date-serial IDs (`req-20260307-001`) dangerous: a second task that picks the same ID gets the first ask's receipt and its own request is never raised.
 
-**Plan for the response's return path.** The operator's answer is written back to your queue file within seconds, but only a *future turn* can act on it:
+**Plan for the response's return path.** Only a *future turn* can act on the answer:
 
-- An agent with a schedule or heartbeat picks it up on the next run — nothing extra needed.
-- An agent with **no** future turn (one-shot webhook/chat tasks) must include resume instructions in the request itself ("after approving, re-trigger schedule X" / "send me a chat message with your decision") — otherwise an approved action never executes.
-- Set `expires_at` on gating requests; an `expired` flip means "not approved — do not proceed."
+- When the receipt says `wakes_on_ending: true` (the owner turned on "Wake this agent when its asks end"), the platform starts a turn when the ask ends.
+- An agent with a schedule or heartbeat picks the outcome up on the next run — nothing extra needed.
+- An agent with **no** future turn (one-shot webhook/chat tasks) and no wake must include resume instructions in the request itself ("after approving, re-trigger schedule X" / "send me a chat message with your decision") — otherwise an approved action never executes.
+- Set `expires_at` on gating requests. An expired ask is denied by timeout: do not proceed, and do not re-ask the same action without new information. A re-ask names the expired ask in `supersedes_expired`; repeating an expired `proposal` without that link is refused.
 
-**This is a compliance contract, not a security boundary.** The agent writes and reads its own queue file, so a misbehaving or prompt-injected agent can skip parking or forge a response. Operators must not treat "the agent asked for approval" as a guarantee; rails that need a hard guarantee belong behind confined Trinity-owned tools, not agent-side judgment. The queue's value here is disciplined recovery plus an audit trail.
+**This is a compliance contract, not a security boundary.** The agent decides whether to ask at all, so a misbehaving or prompt-injected agent can skip parking; with the queue file it can also forge a response in its own file. Only a person can end an ask raised with `ask_operator` (agent- and system-scoped keys are refused), and `get_my_ask` reads the platform's record rather than a file the agent writes. Even so, operators must not treat "the agent asked for approval" as a guarantee; rails that need a hard guarantee belong behind confined Trinity-owned tools, not agent-side judgment. The queue's value here is disciplined recovery plus an audit trail.
 
-The full queue-file protocol (JSON schema, request types, priorities, hygiene) is documented in the platform system prompt every agent receives; the escalation-grouping convention for pipelines is in [Agent-Defined Pipelines](#agent-defined-pipelines-919) above.
+The `ask_operator` tool description documents every field and each named refusal; the fallback queue-file protocol (JSON schema, request types, priorities, hygiene) is in the platform system prompt every agent receives. The escalation-grouping convention for pipelines is in [Agent-Defined Pipelines](#agent-defined-pipelines-919) above.
 
 ---
 
 ## Memory Management
 
 Agents manage their own memory. Trinity provides storage, not strategy. Each agent can implement memory however it sees fit.
+
+The recommended home is the repo-level `memory/`, committed, so it travels with the agent — see [Directory Structure](#directory-structure); it is shared across every user of the agent, so per-person facts go through `write_user_memory`.
 
 ### Example Structure (Optional)
 
@@ -1826,7 +2201,7 @@ This is a suggested pattern, not a requirement:
 ```
 memory/
 ├── context.md           # Long-term learned context
-├── preferences.json     # User preferences
+├── preferences.json     # Agent preferences (never a person's details — use write_user_memory)
 ├── session_notes/       # Per-session working notes
 │   └── 2025-12-05.md
 └── summaries/           # Compressed old context
@@ -1878,11 +2253,11 @@ When generating videos, save them to `content/videos/`.
 When exporting data, save to `content/exports/`.
 ```
 
-### outputs/ vs content/
+### reports/ vs content/
 
 | Directory | Synced to Git? | Use For |
 |-----------|---------------|---------|
-| `outputs/` | ✅ Yes | Small files you want versioned (reports, summaries) |
+| `reports/<kind>/` | ✅ Yes | Small dated files you want versioned (`reports/weekly/2026-10-19-summary.md`; see [Directory Structure](#directory-structure)). Older templates use `outputs/`, which still works |
 | `content/` | ❌ No | Large files that shouldn't be in Git (videos, audio) |
 
 ---
@@ -1972,7 +2347,7 @@ pip install --user opencv-python moviepy
 An agent is Trinity-compatible if:
 
 ### Required Files
-- [ ] Has `template.yaml` with required fields (name, display_name, description, version, resources)
+- [ ] Has `template.yaml` with required fields (name, display_name, description, version); `resources` is optional and inherits the instance default when omitted
 - [ ] Has `CLAUDE.md` with identity and domain-specific instructions
 - [ ] Has `.mcp.json.template` with `${VAR}` placeholders (if using MCP servers)
 - [ ] Has `.env.example` documenting required credentials
@@ -2044,7 +2419,7 @@ Before publishing, verify:
 ### Domain Focus
 - Keep CLAUDE.md focused on your agent's specialty
 - Let Trinity handle collaboration and infrastructure
-- Use outputs/ for generated content
+- Put versioned work products in named folders (`reports/<kind>/`, `docs/`); large media in `content/`
 
 ### Documentation
 - Keep documentation in a `docs/` folder
@@ -2140,6 +2515,8 @@ Closing stdout only (not stderr) preserves error messages from a failing
 
 | Date | Changes |
 |------|---------|
+| 2026-10-19 | **Recommended workspace layout (#3797)**: Directory Structure restated as three zones (platform-owned / committed / volume-only), with three rules (root holds identity and config only; derived files are regenerated; memory goes in the committed `memory/`), `project_files/<slug>/`, `$TMPDIR` scratch, gitignored side clones vs submodules (#2366), and the `.gitignore` read as a consequence of the zones. Removes the stale `.claude/skills-library/` mount line |
+| 2026-09-22 | **Reading metrics (ent#479)**: added `get_metrics` and the one `2 x cadence` staleness rule (declare a `cadence:` or your metric can never be called stale); declared metrics render as Dashboard tiles with no `dashboard.yaml`; `dashboard.yaml` widgets may bind `metric: <name>`, with the placeholder-`value:` rule for agents on a pre-#479 base image, and a binding to a **retired** metric is refused (`metric_retired`) rather than shown as current. **`metrics.json` is retired** — unread, never served, reported as D-010, with migration steps; the container's `GET /api/metrics` is retired in place and answers `410` with the superseded payload |
 | 2026-09-06 | **Widget Types**: stated as a closed set; no chart/badge/countdown widget exists (#2110) |
 | 2026-02-05 | **Credential System Refactor (CRED-002)**: Updated Credential Management section for new simplified system; Direct file injection replaces Redis-based assignments; Export/Import with encrypted `.credentials.enc` for git storage; Auto-import on agent startup |
 | 2026-01-27 | **Advanced Skills & CLAUDE.md**: Added 8 new skill frontmatter fields (`disable-model-invocation`, `user-invocable`, `argument-hint`, `model`, `context`, `agent`, `hooks`); Added invocation control table; Added string substitutions (`$ARGUMENTS`, `$N`, `${CLAUDE_SESSION_ID}`); Added dynamic context injection (`!`command``); Added skill size guidelines; Added CLAUDE.md imports (`@path` syntax) and best practices table |
