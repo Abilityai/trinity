@@ -136,7 +136,7 @@ payments-py==1.18.0
 a2a-sdk==0.3.26
 mcp==1.30.0
 python-socketio==5.14.3
-pyjwt==2.14.0
+pyjwt==2.15.0
 jsonschema==4.26.0
 websocket-client==1.9.2
 helicone-helpers==1.2.1
