@@ -6047,6 +6047,39 @@
       "description": "A gated request held from the Chat tab is saved once to the chat session with its notice (source gate:<request_id>), the 202 names the session, a foreign session id falls back to the sender's own, and a failed save still answers pending. A person re-sending the same request while one is pending gets it back ahead of the caps; an agent, another person, another text or a decided request each raise their own. The session read carries the request's state and decision text; the voice context leaves held rows out."
     },
     {
+      "file": "unit/test_3402_workspace_held_history.py",
+      "feature": "#3402",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "A Workspace turn the skill gate held or refused never reaches a later prompt: the next cold turn has neither the held request nor its notice, whatever was decided, nor a refused request; a held turn with no pre-created row is kept out by its mark alone; the client's thread and the reply poll still show both; a retried refused message that then runs is conversation again; the voice summary leaves them out; the voice-delta cursor skips a held notice; the registered migration marks rows held before the column. Real schema and the real gate backstop. Mutation-proven at each call site."
+    },
+    {
+      "file": "unit/test_3402_public_group_held_rows.py",
+      "feature": "#3402",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "A public link's next turn (sync and async) and the MEM-001 summary never see a held or refused request; the visitor's message is marked as it is stored when it invokes a gated skill, before the gate decides; a message or group chatter stored while the gate map cannot be read is left unmarked, and the verdict marks a turn the gate then refuses; the visitor's own history still shows it; a held or quote-held Telegram group turn and group chatter naming a gated skill are marked, and the group history block leaves them out; the store excludes marked rows by default and a verdict never overwrites a verdict; the registered migration runs twice on the old shape. Mutation-proven."
+    },
+    {
+      "file": "unit/test_3402_room_gate_holds.py",
+      "feature": "#3402",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "The room re-hold loop: a later wake does not raise a second approval for a held post; a warm wake still gets the ordinary post that shared the held one's delta; a new request is still held; another agent still reads the post; a rejected request does not come back after the skill is un-gated; a standing refusal is recorded and a transient one is not; a wake left with nothing to answer dispatches nothing; MCP read_room by the agent leaves its holds out; a failed holds read re-holds rather than shows; holds are per agent and written once; AGENT_REFS cascade. Real schema and the real gate. Mutation-proven."
+    },
+    {
       "file": "unit/test_3590_rebuild_pull_env.py",
       "feature": "#3590",
       "added": "2026-10-12",

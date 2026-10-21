@@ -1,0 +1,45 @@
+{
+  "version": "diff",
+  "date": "2026-10-20",
+  "mode": "diff-daily",
+  "scope": "feature/3402-held-turn-history vs origin/dev",
+  "phases_run": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    9,
+    12,
+    13,
+    14
+  ],
+  "stack_cve_quicklist": "unchanged by this diff (no pin, Dockerfile or lockfile touched)",
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": [
+      "GET /api/rooms/{id} (narrows for agent principals)"
+    ],
+    "agent_context_ingress": "reduced: held/refused gated requests and their notices removed from every prompt builder"
+  },
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "full-repo phases not run in diff mode (history secrets, dependency scan, CI/CD, image internals)",
+    "Alembic 0101_held_gate_turns not executed against PostgreSQL locally (CI pg-migrations)"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none (no dependency changes in diff)"
+  },
+  "filter_stats": {
+    "candidates": 0,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "narrows the 'history is not re-read' note open since cso-diff-2026-10-02-ent751-gated-skills; no fingerprints added"
+}

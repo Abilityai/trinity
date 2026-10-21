@@ -22,8 +22,9 @@ from typing import Optional
 from config import ROOM_SOURCE_CHANNEL
 from services import person_mention_service
 from services.platform_prompt_service import build_user_facing_room_prompt
-from services.skill_gate_errors import SkillGateError
+from services.skill_gate_errors import SkillApprovalRequired, SkillGateError, hold_marker
 from utils.helpers import utc_now_iso
+from utils.skill_invocation import find_gated_invocations
 
 from . import db
 
@@ -576,6 +577,17 @@ def get_room(current_user, room_id: str, since_seq: int = 0) -> dict:
     room = _require_membership(room_id, current_user)
     participants = db.list_participants(room_id)
     messages = db.get_messages(room_id, since_seq)
+    # trinity#3402: an agent reading the room (MCP `read_room`) is not handed
+    # what its own skill gate stopped — the rule its wakes follow. People see
+    # everything. Fails closed: this read is not scanned by any gate.
+    kind, identity = _caller(current_user)
+    if kind == "agent":
+        try:
+            held = db.gate_held_seqs(room_id, identity)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("room %s: gate holds unreadable for %s (%s)", room_id, identity, e)
+            raise RoomError(503, "room_unavailable", "Couldn't read the room right now.") from e
+        messages = [m for m in messages if m["seq"] not in held]
     own_tags = _annotate_own_tags(current_user, room_id, messages)
     return {
         **room,
@@ -1522,6 +1534,52 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
         _post_system(room_id, f"{agent_name} is still busy with an earlier turn.")
 
 
+def _without_gate_holds(room_id: str, agent_name: str, delta: list[dict]) -> list[dict]:
+    """trinity#3402: ``delta`` minus what this agent's skill gate already stopped
+    — a post it held (or refused for good) and the notice line. The transcript
+    AND the text the gate scans are built from what this returns, so nothing is
+    shown that is not scanned. Fails OPEN: unread, the post is scanned again and
+    held again (one more ask) — over-gating, never an unchecked request."""
+    try:
+        held = db.gate_held_seqs(room_id, agent_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("room %s: gate holds unreadable for %s (%s) — showing the delta "
+                       "unfiltered; the gate still scans all of it", room_id, agent_name, e)
+        return delta
+    kept = [m for m in delta if m.get("seq") not in held]
+    # The SAME list when nothing was removed: the caller reads identity as
+    # "this delta held nothing this agent's gate stopped".
+    return delta if len(kept) == len(delta) else kept
+
+
+def _record_gate_hold(room_id: str, agent_name: str, shown: list[dict],
+                      notice_seq: Optional[int], exc: SkillGateError) -> None:
+    """trinity#3402: never put this request to this agent again. Without it the
+    next wake asks a second time (or refuses forever) and a cold one replays
+    the post as prose. Recorded: each shown post whose OWN text invokes a skill
+    gated on this agent — the gate's own matcher, which cannot match across the
+    line the transcript joins posts with — and the notice line. A refusal that
+    clears by itself records nothing: the next wake delivers the post again."""
+    from services import skill_gate_service
+
+    if not (isinstance(exc, SkillApprovalRequired)
+            or getattr(exc, "code", None) in skill_gate_service.STANDING_REFUSALS):
+        return
+    try:
+        gates = skill_gate_service.read_gates(agent_name)
+    except Exception:  # noqa: BLE001 — unreadable now: the next wake re-holds it once
+        gates = {}
+    seqs = [m["seq"] for m in shown
+            if m.get("seq") is not None and m.get("sender_kind") != "system"
+            and find_gated_invocations(m.get("content"), gates)]
+    seqs.append(notice_seq)
+    try:
+        db.record_gate_holds(room_id, agent_name, seqs, hold_marker(exc), utc_now_iso())
+    except Exception:  # noqa: BLE001
+        logger.error("room %s: could not record what %s's skill gate stopped — its next "
+                     "wake raises it again", room_id, agent_name, exc_info=True)
+
+
 async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
                              chain_depth: int) -> None:
     """One agent turn: delta -> execute_task -> auto-post the reply.
@@ -1547,16 +1605,23 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         return
 
     top_seq = max(m["seq"] for m in delta)
+    # trinity#3402: never what this agent's gate already stopped — not shown,
+    # so not scanned (one list feeds both). Left with nothing to answer, the
+    # wake is over. The cursor stays (it moves on a reply): the next wake reads
+    # these rows again and leaves them out again.
+    visible = _without_gate_holds(room_id, agent_name, delta)
+    if visible is not delta and not any(m.get("sender_kind") != "system" for m in visible):
+        return
     # #3210: what the agent is SHOWN is bounded; what it is marked as having
     # read is not — the cursor still moves past every message in the delta,
     # omitted ones included, or each later wake would be handed the same
     # overflow again. (`top_seq` is read above, from the rows the table
     # returned: the line standing in for an omitted run has no seq.)
-    shown = _fit_transcript(delta, agent_name)
-    if shown is not delta:
+    shown = _fit_transcript(visible, agent_name)
+    if shown is not visible:
         logger.info("room %s: transcript for %s is over budget — showing %d of %d "
                     "messages", room_id, agent_name,
-                    sum(1 for m in shown if m.get("seq") is not None), len(delta))
+                    sum(1 for m in shown if m.get("seq") is not None), len(visible))
     # The WS broadcast reaches clients that are CONNECTED right now. A client
     # that reloads mid-turn missed it and has nothing to re-derive the state
     # from — the room looked idle while two agents were thinking. So the state
@@ -1648,7 +1713,11 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         raise
     except SkillGateError as e:
         # trinity-enterprise#751: nothing ran; say why in the room.
-        _post_system(room_id, getattr(e, "message", None) or str(e))
+        notice_seq = _post_system(room_id, getattr(e, "message", None) or str(e))
+        # trinity#3402: and never put that request to this agent again. The
+        # cursor keeps its rule — it moves on a reply — so anything else in
+        # this delta is delivered on the next wake.
+        _record_gate_hold(room_id, agent_name, shown, notice_seq, e)
         return
     except Exception as e:  # noqa: BLE001 — a failed turn is VISIBLE, never silent
         logger.warning("room %s: turn for %s raised: %s", room_id, agent_name, e)
