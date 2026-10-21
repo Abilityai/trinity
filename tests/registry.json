@@ -6267,6 +6267,17 @@
         "unit"
       ],
       "description": "Controls parity (checkpoint D): read-only renders the exact permission set {edit:deny,bash:deny,webfetch:allow}; each mapped Claude name (Write/Edit/MultiEdit/NotebookEdit→edit, Bash→bash, WebFetch→webfetch, WebSearch→websearch — the pinned v1.18.32 schema) from disallowed_tools and from PLATFORM_DENIED_TOOLS (through merged_disallowed_tools, never a second reader) lands on its key; headless allowed_tools denies mapped keys none of whose names is listed and None/[] restricts nothing; precedence read-only deny > guardrail/platform deny > allowed_tools > binary default with deny sticky (read-only's webfetch:allow yields to a WebFetch guardrail); the operator's own permission block is merged deny-sticky; every unmapped name comes back as a `trinity-control` execution-log entry (`guardrail not mapped: X` / `allowed_tools not mapped: X`) plus one WARNING line, platform denials logged only; the seam through _prepare_turn_config and through execute_headless on the stubbed subprocess; the result-callback envelope keeps cost_usd=None (T6) and model_name from the resolved -m. Mutation: each map row, the read-only set, each precedence rule, the allowlist denial, the merge stickiness, the surfacing and the None-cost parity each turn a test red."
+    },
+    {
+      "file": "unit/test_2981_playbook_dispatch.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "security",
+        "unit"
+      ],
+      "description": "Playbook dispatch (checkpoint E, ruling T2): every SKILL.md found through routers/skills.py (skill_search_paths + scan_skills_directory — one reader) renders one per-turn opencode.json `command:` entry {template: \"Follow the skill at <abs SKILL.md> with arguments: $ARGUMENTS\", description: one line, capped} — body never embedded, dirs without SKILL.md skipped, project beats personal, unsafe names skipped with one WARNING, per-turn entries beat the shared config's; split_playbook_prefix dispatches only a scanned name on the first non-blank line (args + riders newline-preserved, bare /name → empty message, unknown /name / mid-text / no slash pass through unchanged) and refuses arguments carrying OpenCode's !`cmd` shell shape (run outside the permission layer, prompt.ts v1.18.32); _build_command emits --command; chat and headless argv on the stubbed subprocess carry --command <name> -- <args> (no separator for a bare /name) and leave no turn dir. Mutation: dropping the --command hand-off turns the execute-path tests red."
     }
   ]
 }

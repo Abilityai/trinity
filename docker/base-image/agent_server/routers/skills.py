@@ -363,6 +363,20 @@ def scan_skills_directory(skills_dir: Path) -> List[SkillInfo]:
     return skills
 
 
+def skill_search_paths(home_dir: Path) -> List[Path]:
+    """The skills directories, in precedence order: project, then personal.
+
+    The ONE path list — `GET /api/skills` and the OpenCode playbook commands
+    (#2981) both read it, so a playbook the Playbooks tab shows is a playbook
+    `/name` dispatches. The server runs as `developer`, so in the agent
+    container both are one folder: it is scanned and named once.
+    """
+    return list(dict.fromkeys([
+        home_dir / '.claude' / 'skills',
+        Path.home() / '.claude' / 'skills'  # Personal skills
+    ]))
+
+
 @router.get("/api/skills", response_model=SkillsResponse)
 async def list_skills():
     """
@@ -375,13 +389,7 @@ async def list_skills():
     Returns skill metadata parsed from SKILL.md YAML frontmatter.
     """
     home_dir = Path('/home/developer')
-
-    # Skills directories to scan. The server runs as `developer`, so in the
-    # agent container both are one folder: it is scanned and named once.
-    skill_paths = list(dict.fromkeys([
-        home_dir / '.claude' / 'skills',
-        Path.home() / '.claude' / 'skills'  # Personal skills
-    ]))
+    skill_paths = skill_search_paths(home_dir)
 
     all_skills: List[SkillInfo] = []
     scanned_paths: List[str] = []

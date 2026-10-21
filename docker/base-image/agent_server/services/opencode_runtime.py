@@ -130,7 +130,7 @@ from ._runtime_config import (
 )
 from .activity_tracking import complete_tool_execution, start_tool_execution
 from .execution_env import build_execution_env
-from . import opencode_mcp, opencode_provider
+from . import opencode_commands, opencode_mcp, opencode_provider
 from .opencode_provider import OpenCodeProviderConfigError
 from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
@@ -385,6 +385,7 @@ def _prepare_turn_config(
     model: Optional[str] = None,
     env_out: Optional[Dict[str, str]] = None,
     permission: Optional[Dict[str, str]] = None,
+    commands: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> str:
     """Build this turn's private ``XDG_CONFIG_HOME`` and return its path.
 
@@ -405,7 +406,9 @@ def _prepare_turn_config(
     guardrails, platform denials, headless ``allowed_tools``); it is merged
     over the operator's own ``permission:`` with deny sticky
     (:func:`merge_permission_block`) and rendered into the same per-turn
-    ``opencode.json`` — checkpoint D of #2981.
+    ``opencode.json`` — checkpoint D of #2981. ``commands`` are the playbook
+    ``command:`` entries (:mod:`opencode_commands`, checkpoint E), laid over
+    the shared config's own ``command:`` so a same-named skill wins.
 
     Why per-turn and not one shared file: ``opencode run`` has no
     system-prompt flag (verified against the real ``--help``), so the platform
@@ -458,6 +461,12 @@ def _prepare_turn_config(
         config["permission"] = merge_permission_block(
             config.get("permission"), permission
         )
+    if commands:
+        existing_commands = config.get("command")
+        config["command"] = {
+            **(existing_commands if isinstance(existing_commands, dict) else {}),
+            **commands,
+        }
 
     config_path = os.path.join(config_dir, "opencode.json")
     with open(config_path, "w", encoding="utf-8") as fh:
@@ -1285,6 +1294,7 @@ class OpenCodeRuntime(AgentRuntime):
         model: Optional[str],
         session_id: Optional[str],
         directory: Optional[str],
+        command: Optional[str] = None,
     ) -> List[str]:
         cmd = ["opencode", "run", "--format", "json", "--auto"]
         if model:
@@ -1293,6 +1303,9 @@ class OpenCodeRuntime(AgentRuntime):
             cmd += ["--session", session_id]
         if directory:
             cmd += ["--dir", directory]
+        if command:
+            # A scanned skill name only (`opencode_commands.split_playbook_prefix`).
+            cmd += ["--command", command]
         return cmd
 
     # -- core subprocess execution (stubbed in unit tests) -------------------
@@ -1357,13 +1370,25 @@ class OpenCodeRuntime(AgentRuntime):
                 ", ".join(_UNMAPPED_TEXT[o].format(tool=n) for o, n in unmapped),
             )
 
+        # Playbooks → per-turn `command:` entries (checkpoint E, ruling T2). The
+        # one entry both chat and headless reach, so `/name args` dispatches
+        # the same way from either. Discovery never fails a turn: with no
+        # commands every prompt is prose, which is what it was before.
+        try:
+            commands = opencode_commands.discover_playbook_commands(Path(_AGENT_HOME))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[OpenCode] playbook discovery failed (%s); no /commands", exc)
+            commands = {}
+        command, message = opencode_commands.split_playbook_prefix(prompt, commands)
+
         env_defaults: Dict[str, str] = {}
         turn_dir = _prepare_turn_config(
             execution_id, system_prompt, model, env_out=env_defaults,
-            permission=permission,
+            permission=permission, commands=commands,
         )
         cmd = self._build_command(
-            model=model, session_id=session_id, directory=_AGENT_HOME
+            model=model, session_id=session_id, directory=_AGENT_HOME,
+            command=command,
         )
         # End-of-options separator, VERIFIED against v1.18.32 rather than
         # assumed: `opencode run -- "Reply with exactly the word ZEBRA."`
@@ -1371,8 +1396,12 @@ class OpenCodeRuntime(AgentRuntime):
         # not diverted into yargs' `argv['--']`. Without it a prompt that
         # happens to begin with '-' ("-v, what changed?") is parsed as a flag
         # and the turn either errors or silently runs on an empty message.
-        cmd.append("--")
-        cmd.append(prompt)
+        # A bare `/name` sends no message at all (`run.ts:420`, v1.18.32:
+        # `--command` alone is a valid turn).
+        if command is None:
+            cmd += ["--", prompt]
+        elif message:
+            cmd += ["--", message]
 
         root = _opencode_root()
         env = build_execution_env({
@@ -1413,9 +1442,9 @@ class OpenCodeRuntime(AgentRuntime):
         registry = get_process_registry()
         logger.info(
             "[OpenCode] run model=%s session=%s read_only=%s permission=%s "
-            "execution_id=%s",
+            "command=%s execution_id=%s",
             model or "(default)", bool(session_id), read_only,
-            json.dumps(permission, sort_keys=True), execution_id,
+            json.dumps(permission, sort_keys=True), command or "-", execution_id,
         )
 
         # stdin=DEVNULL: the prompt is a positional arg, so OpenCode must never
