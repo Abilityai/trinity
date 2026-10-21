@@ -112,7 +112,7 @@
           />
 
           <!-- Tabs -->
-          <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : '']">
+          <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : '']" data-testid="agent-tabs">
             <!-- #1114: tabs overflow into a "More ▾" dropdown instead of horizontal scroll -->
             <!-- trinity-enterprise#887: Settings is pinned at the end of the
                  strip, outside the overflow — the one configuration home is

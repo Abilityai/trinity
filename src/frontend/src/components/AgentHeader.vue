@@ -419,14 +419,19 @@
     <!-- ROW 4: the GitHub line — only when a repository is connected. No
          Pull / Push / Refresh here (the Git tab owns the verbs). The live
          status lands after first paint, so the row is RESERVED up front for
-         an agent whose template is a GitHub repository (`gitExpected`): a
-         skeleton while the status is in flight, a sentence while the agent
-         is stopped (the status is only readable from a running container),
-         and the line once it is bound. A local-template agent gets the row
-         only if its status turns out to name a remote. -->
+         an agent known to have a repository (`gitExpected`): a skeleton
+         while the status is in flight, a sentence while the agent is
+         stopped (the status is only readable from a running container),
+         and the line once it is bound. An agent with no repo on record gets
+         the row only if its status turns out to name a remote.
+         Every branch carries the SAME content floor as the bound line
+         (`min-h-[1.5rem]`, AgentHeaderMeta's own), so the row is one height
+         before and after the status lands (#3872, principle 6): the old
+         row-level 2.25rem floor sat below what the bound line needs, and the
+         header shifted 5px even when the row was reserved. -->
     <div
       v-if="gitBound || gitExpected"
-      class="px-4 py-2 border-t border-gray-100 dark:border-gray-750 flex items-center min-w-0 min-h-[2.25rem]"
+      class="px-4 py-2 border-t border-gray-100 dark:border-gray-750 flex items-center min-w-0"
       data-testid="agent-header-git"
     >
       <AgentHeaderMeta
@@ -438,10 +443,10 @@
       />
       <span
         v-else-if="agent.status === 'running' && gitStatus === null"
-        class="block h-3 w-72 max-w-full rounded bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"
+        class="flex items-center min-h-[1.5rem] min-w-0 max-w-full"
         aria-busy="true"
-      ><span class="sr-only">Loading repository state…</span></span>
-      <span v-else class="text-[12.5px] text-gray-600 dark:text-gray-400" data-testid="agent-header-git-idle">
+      ><span class="block h-3 w-72 max-w-full rounded bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none" aria-hidden="true"></span><span class="sr-only">Loading repository state…</span></span>
+      <span v-else class="flex items-center min-h-[1.5rem] text-[12.5px] text-gray-600 dark:text-gray-400" data-testid="agent-header-git-idle">
         {{ agent.status === 'running' ? 'No repository connected.' : 'Repository state is read from the running agent — start it to see the branch and sync.' }}
       </span>
     </div>
@@ -692,10 +697,18 @@ const activeSlots = computed(() => {
 })
 
 const gitBound = computed(() => !!(props.gitStatus?.git_enabled && props.gitStatus?.remote_url))
-// The one fact about the repository known at first paint: an agent deployed
-// from a `github:` template has one. (`agent.git_mode` is null for these on a
-// live payload, so it cannot be the signal.) Reserves row 4 so it never pops.
-const gitExpected = computed(() => typeof props.agent.template === 'string' && props.agent.template.startsWith('github:'))
+// What is known about the repository at first paint, so row 4 never pops.
+// #3872: the detail payload's `git_configured` — the persisted git config,
+// which survives stops and recovery and is what the backend itself treats as
+// "GitHub-backed". The template string alone was the signal before, and it is
+// false for an agent deployed locally and bound afterwards (a `local:` label,
+// or none — #1811): for those the row appeared only when the status landed.
+// The `github:` template keeps reserving against a backend without the flag.
+// (`agent.git_mode` is null on a live payload, so it cannot be the signal.)
+const gitExpected = computed(() => (
+  props.agent.git_configured === true
+  || (typeof props.agent.template === 'string' && props.agent.template.startsWith('github:'))
+))
 
 const router = useRouter()
 

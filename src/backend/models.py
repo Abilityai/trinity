@@ -321,6 +321,10 @@ class AgentStatus(BaseModel):
     base_image_version: Optional[str] = None  # Version of trinity-agent-base image
     ephemeral: Optional[bool] = False  # trinity-enterprise#69: ghost agent (budgeted, hard-discarded)
     display_label: Optional[str] = None  # ent#181: human-facing name; None = render `name` (the slug)
+    # #3872: a persisted git config exists (the repo is bound) — set by the
+    # detail endpoint only; the header reserves its GitHub row on it at first
+    # paint. None = not resolved (the list path never reads it).
+    git_configured: Optional[bool] = None
     # trinity-enterprise#15: copy-intent provenance — {source_repo, source_branch,
     # head_sha, file_count}; set only on the create response of a snapshot import.
     import_snapshot: Optional[Dict[str, Any]] = None
