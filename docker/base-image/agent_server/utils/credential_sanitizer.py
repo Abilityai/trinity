@@ -428,6 +428,39 @@ _credential_values: Optional[Set[str]] = None
 
 REDACTION_PLACEHOLDER = "***REDACTED***"
 
+# --- #3840: config values that share a vendor prefix are not secrets ----------
+# The vendor prefixes in SENSITIVE_VAR_PATTERNS (`FIBERY_.*`, `GITHUB_.*`,
+# `TRINITY_MCP.*`, …) also put the VALUE of every matching variable into the
+# exact-value set, and step 1 of `sanitize_text` erases that value wherever it
+# appears. So `FIBERY_HOST=acme.fibery.io` erased the hostname from every link
+# an agent handed out: `https://***REDACTED***/Client_Ops/Client_Tasks/3103`.
+#
+# A name ending in a non-secret suffix stays out of the VALUE set, unless the
+# name also carries a secret word: `SLACK_WEBHOOK_URL` and `FIBERY_TOKEN_URL`
+# still redact, because a webhook URL IS the credential. Credentials embedded
+# in a config URL are still caught by shape (`redact_url_userinfo`, and the
+# `KEY=value` pass for `?token=`). Only the value set narrows: the `KEY=value`
+# pass keeps every vendor prefix, so `FIBERY_HOST=…` in a dump still redacts.
+_NON_SECRET_NAME_SUFFIXES = (
+    "_HOST", "_HOSTNAME", "_DOMAIN", "_URL", "_URI", "_ENDPOINT", "_PORT",
+    "_REPO", "_REPOSITORY", "_BRANCH", "_ORG", "_OWNER", "_TEAM_ID",
+    "_WORKSPACE", "_REGION", "_PROJECT", "_PROJECT_ID",
+)
+_SECRET_NAME_WORDS = (
+    "KEY", "TOKEN", "SECRET", "PASS", "PWD", "CREDENTIAL", "AUTH", "BEARER",
+    "HOOK", "SIGN", "DSN",
+)
+
+
+def _is_credential_value_name(var_name: str) -> bool:
+    """True if the VALUE of `var_name` belongs in the exact-value set (#3840)."""
+    if not any(pattern.match(var_name) for pattern in _sensitive_var_re):
+        return False
+    upper = var_name.upper()
+    if any(word in upper for word in _SECRET_NAME_WORDS):
+        return True
+    return not upper.endswith(_NON_SECRET_NAME_SUFFIXES)
+
 
 def _load_credential_values() -> Set[str]:
     """
@@ -439,10 +472,8 @@ def _load_credential_values() -> Set[str]:
     # Get values from environment variables matching sensitive patterns
     for var_name, var_value in os.environ.items():
         if var_value and len(var_value) >= 8:  # Skip short values
-            for pattern in _sensitive_var_re:
-                if pattern.match(var_name):
-                    values.add(var_value)
-                    break
+            if _is_credential_value_name(var_name):
+                values.add(var_value)
 
     # Also read from .env file if it exists
     env_file = os.path.expanduser("~/.env")
@@ -465,10 +496,8 @@ def _load_credential_values() -> Set[str]:
                         # identically), so redaction happened to work.
                         var_value = _unquote_env_value(var_value.strip())
                         if var_value and len(var_value) >= 8:
-                            for pattern in _sensitive_var_re:
-                                if pattern.match(var_name):
-                                    values.add(var_value)
-                                    break
+                            if _is_credential_value_name(var_name):
+                                values.add(var_value)
         except Exception as e:
             logger.warning(f"Failed to read .env file for credential values: {e}")
 
