@@ -6055,7 +6055,7 @@
         "security",
         "unit"
       ],
-      "description": "A public link's next turn (sync and async) and the MEM-001 summary never see a held or refused request; the visitor's message is marked as it is stored when it invokes a gated skill, before the gate decides; the visitor's own history still shows it; a held or quote-held Telegram group turn and group chatter naming a gated skill are marked, and the group history block leaves them out; the store excludes marked rows by default and a verdict never overwrites a verdict; the registered migration runs twice on the old shape. Mutation-proven."
+      "description": "A public link's next turn (sync and async) and the MEM-001 summary never see a held or refused request; the visitor's message is marked as it is stored when it invokes a gated skill, before the gate decides; a message or group chatter stored while the gate map cannot be read is left unmarked, and the verdict marks a turn the gate then refuses; the visitor's own history still shows it; a held or quote-held Telegram group turn and group chatter naming a gated skill are marked, and the group history block leaves them out; the store excludes marked rows by default and a verdict never overwrites a verdict; the registered migration runs twice on the old shape. Mutation-proven."
     },
     {
       "file": "unit/test_3402_room_gate_holds.py",

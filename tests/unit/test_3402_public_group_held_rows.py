@@ -67,6 +67,21 @@ def gated(monkeypatch):
                         lambda agent: {"pay-invoice": _GATE.SkillGate()} if agent == AGENT else {})
 
 
+def _unreadable_for(monkeypatch, reads):
+    """The gate map cannot be read for the next `reads` reads — a transient
+    database blip — and then answers as before."""
+    healthy = _GATE.list_skill_gates
+    left = {"n": reads}
+
+    def _read(agent):
+        if left["n"]:
+            left["n"] -= 1
+            raise RuntimeError("database is locked")
+        return healthy(agent)
+
+    monkeypatch.setattr(_GATE, "list_skill_gates", _read)
+
+
 # ---------------------------------------------------------------------------
 # Public links — the real service over the real schema
 # ---------------------------------------------------------------------------
@@ -144,6 +159,32 @@ def test_a_message_naming_a_gated_skill_is_marked_before_the_gate_decides(public
     with patch.object(tes, "dispatch_and_await_terminal", _peek):
         public.send(HELD)
     assert seen["rows"] == [(HELD, "named")]
+
+
+@pytest.mark.parametrize("unreadable_reads, expected", [
+    (1, (None, True)),                          # the map is back by dispatch: the turn runs
+    (2, ("refused:gate_unavailable", False)),   # still unreadable: the backstop refuses it
+], ids=["back-by-dispatch", "still-unreadable"])
+def test_an_unreadable_gate_map_never_hides_a_message_for_good(public, monkeypatch,
+                                                               unreadable_reads, expected):
+    """The mark written with the row fails OPEN: nothing ever clears `named`, so
+    a turn that then runs would lose its message from every later prompt while
+    its reply stayed. The verdict marks a turn the gate stops — still unreadable
+    at dispatch, the backstop refuses it."""
+    import services.task_execution_service as tes
+
+    _unreadable_for(monkeypatch, unreadable_reads)
+    run = tes.dispatch_and_await_terminal          # the fixture's stub
+
+    async def _backstop_first(**kw):
+        _GATE.read_gates(AGENT)                    # what the dispatch-time backstop reads first
+        return await run(**kw)
+
+    monkeypatch.setattr(tes, "dispatch_and_await_terminal", _backstop_first)
+    public.send("which invoices are overdue?")
+    (row,) = [r for r in public.rows() if r.role == "user"]
+    public.send("thanks")
+    assert (row.gate_hold, "which invoices are overdue?" in public.sent[-1]["message"]) == expected
 
 
 def test_an_async_public_turn_hands_the_background_the_stored_message(public, monkeypatch):
@@ -410,6 +451,15 @@ def test_untagged_group_chatter_naming_a_gated_skill_is_marked_when_recorded(gat
 
 def test_ordinary_chatter_is_recorded_exactly_as_before(gated):
     db = _turn(_group("standup moved to 11", observe_only=True, untagged=True), AsyncMock())
+    assert "gate_hold" not in db.add_public_chat_message.call_args.kwargs
+
+
+def test_chatter_recorded_while_the_gate_map_is_unreadable_is_stored_unmarked(gated, monkeypatch):
+    """Chatter is never dispatched, so no verdict would ever clear a mark the
+    blip wrote: the group would lose it for good."""
+    _unreadable_for(monkeypatch, 1)
+    db = _turn(_group("standup moved to 11", observe_only=True, untagged=True), AsyncMock())
+    assert db.add_public_chat_message.called
     assert "gate_hold" not in db.add_public_chat_message.call_args.kwargs
 
 

@@ -454,8 +454,13 @@ def gate_hold_on_write(agent_name: str, text: Optional[str]) -> Dict[str, str]:
     every later prompt from the moment it is stored — a turn built while this
     one is still inside the gate's check, and group chatter the gate never sees.
     The verdict overwrites the mark (`mark_public_chat_messages_held`). An
-    unreadable gate map keeps the row out too: "could not tell" is never
-    "nothing is gated" (`read_gates`)."""
+    unreadable gate map stores the row unmarked: nothing would ever clear a
+    `named` mark, so a turn that then ran would lose its message from every
+    later prompt. The verdict still marks each turn the gate holds or refuses
+    (the dispatch-time read refuses `gate_unavailable` while the map is still
+    unreadable). The gap is a message invoking a gated skill that is stored
+    during the blip and never dispatched: group chatter, or a turn that fails
+    before its dispatch."""
     from db.public_chat import GATE_HOLD_NAMED
 
     if not text:
@@ -463,7 +468,7 @@ def gate_hold_on_write(agent_name: str, text: Optional[str]) -> Dict[str, str]:
     try:
         gates = read_gates(agent_name)
     except SkillGateRefused:
-        return {"gate_hold": GATE_HOLD_NAMED}
+        return {}
     return {"gate_hold": GATE_HOLD_NAMED} if find_gated_invocations(text, gates) else {}
 
 
