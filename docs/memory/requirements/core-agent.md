@@ -509,8 +509,11 @@
   use, so a single cap would be spent by activity the user cannot undo, making
   the 409's "unstar some first" advice false. Unstarring a chat that carries no
   read cursor deletes its row.
-- **Known gap**: rooms report `unread: 0`. A room keeps its own seq cursor, and
-  reconciling the two cursor models is follow-up work; stars work for both kinds.
+- **Rooms (trinity-enterprise#959)**: a room's unread is counted on the same per-viewer
+  timestamp cursor (`chat_kind = 'room'`, written when the person opens the room) and the
+  ent#557 baseline — agent messages only, and only for a room the viewer is an active
+  participant of in the identity space their credential acts in (§5.40 *Rooms*). Stars work
+  for both kinds.
 - **Not this issue**: opening an agent's own **page** (a destination with its own
   content rather than a chat) is abilityai/trinity-enterprise#360.
 - **Flow**: `docs/memory/feature-flows/workspace-sidebar-ia.md`
@@ -3831,7 +3834,7 @@ to localStorage in the clear.
 
 ### 5.40 Workspace Inbox — what needs you and what came back, across your agents (trinity-enterprise#610)
 - **Status**: 🚧 In progress (PR A: landing, Unread, All, the reading pane; PR B: role-addressed
-  Action after abilityai/trinity#3028; PR C: rooms in Unread)
+  Action after abilityai/trinity#3028; rooms in Unread and All: trinity-enterprise#959)
 - **Requirement ID**: WORKSPACE_INBOX
 - **GitHub Issue**: abilityai/trinity-enterprise#610 (preceded by the asks-honesty fix, §26.8)
 - **Description**: The Workspace opens on an **Inbox**: one place that answers "what needs me"
@@ -3849,8 +3852,8 @@ to localStorage in the clear.
   | Tab | Membership | Source |
   |---|---|---|
   | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked; **Newest first by default** (raised time, newest first; ties on id), **Urgency on the sort control** — expiring within 24h first (soonest first), then priority (critical > high > medium > low), then the longest-waiting (§3g C1, unchanged); see *Action's sort* below (trinity-enterprise#856) | the ONE asks list (`openAsks`) |
-  | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included | the sidebar's `threads` + `GET /chat-state?previews=true` |
-  | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed; rooms wait for PR C), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule, the 200-ask read cap when hit, and — to a viewer with rooms — that rooms are not here yet (§3g D-4) | the same two lists |
+  | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included; **rooms I am in count as chats** (one row per room, trinity-enterprise#959) | the sidebar's `threads` + `GET /chat-state?previews=true` |
+  | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed), **the rooms I am a member of** (trinity-enterprise#959), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule and the 200-ask read cap when hit (§3g D-4) | the same two lists |
 - **One unread model (AC 6)**: the unit of Unread is a **chat**, read through the existing
   #557 cursor (`POST /chat-state/thread/{id}/read`); there is no second cursor and no per-item
   read row. An arrival is an assistant message in my chat **or** a report addressed to me that
@@ -3894,6 +3897,30 @@ to localStorage in the clear.
   confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
   tab visit; a partial failure names how many failed and those chats keep their count (the S4
   rollback) (§3g A9).
+- **Rooms (trinity-enterprise#959, the rest of AC 2)**: a room — a chat with more than one
+  agent — is a chat row in Unread and All, named by its agents ("Ada, Bo") and its title.
+  - *What is new*: an **agent's** message in the room after my read cursor (`POST
+    /chat-state/room/{id}/read`), or after my account baseline for a room I have never opened
+    — the chat rule (`role = 'assistant'`) in a room's terms. My own messages and the room's
+    system lines never count.
+  - *Who sees it*: membership is the grant. The count, the preview excerpt and the row exist
+    only for a room where the viewer has an active participant row in the identity space
+    their credential acts in — `workspace_user` + email for a Workspace session, `user` +
+    username for a platform session (ent#362) — so a non-member never gets a room's row, id,
+    name or count, even holding a cursor row for its id (the cursor write takes any id,
+    invariant #8). The rooms list marks each room `member` (an admin lists every room); the
+    Inbox draws a room only when `member` is true, and a deep link to another room resolves
+    to nothing.
+  - *Reading it*: opening a room row shows its new messages in the pane (the room's own
+    membership-scoped read), then reads it — after the render, like a chat; **Open in chat**
+    opens the room. The room on screen reads itself on open and whenever an agent message
+    lands in it, so the sidebar never badges the room being read. Mark all read reads a room
+    as a room.
+  - *Counts*: the room's count rides the same `sidebarThreads` projection, so the sidebar,
+    the agent rows (a room credits every agent in it), the tab title and the Inbox still read
+    one number (Σ "N new" == came).
+  - No new table, store or migration: the room cursor is a `enterprise_portal_chat_state`
+    row of the existing `room` kind.
 - **Where an ask lives (the 2026-09-30 ruling as amended, PR A2 on ent#734's data)**: an ask
   raised during a chat turn is a tile in THAT chat's thread, placed by server time among the
   messages and answerable in place; once ended — at once when answered there, the confirmation
@@ -4029,7 +4056,7 @@ to localStorage in the clear.
   - Archived chats stay in Unread; Σ "N new" equals the "came back" count.
   - Counts for the viewer's own chats with agents no longer on their roster are in the
     chat-state payload (since ent#359/#557) but nothing renders them.
-  - Rooms are not in Unread until PR C (no human room read cursor exists).
+  - Rooms are in Unread and All for their members since trinity-enterprise#959 (*Rooms* above).
 - **Not in scope**: the editable "What would be sent" (09-20 ruling); #609; the `people_for`
   provider; `may_end` (rides #164); run pills with step labels (need a message→execution link).
 - **Flow**: `docs/memory/feature-flows/workspace-inbox.md`

@@ -887,6 +887,20 @@ addressee's Main and that Main is touched (`added=0`). That is what makes the
 deliverable arm count it, gives the card an inline home and an anchor, and keeps
 the Main visible to `sidebarThreads` (which hides `is_main && !last_message_at`).
 
+**A room's unread is the same cursor, read through membership (trinity-enterprise#959).**
+`db.unread_room_arrivals(email, kind, identity)` counts agent messages after the viewer's
+`chat_kind = 'room'` cursor (or the #557 baseline), in one windowed statement that also
+yields the latest arrival and the first unread id. It reaches a message only by JOINing the
+viewer's own **active participant row** in the identity space their credential acts in —
+`service.room_reader_of(principal)`: a platform session is `user` + `PortalPrincipal.username`,
+a Workspace session `workspace_user` + email, anything else no rooms at all (fail closed) —
+because the cursor write accepts any room id (invariant #8) and a count read any other way
+would be an oracle over rooms the viewer is not in. `get_chat_state(room_reader=…)` fills the
+room entries' `unread` and emits cursorless member rooms under the same cap rule; the rooms
+list marks each row `member` (an admin lists every room), and the Inbox draws a room only when
+it is true. The rooms' own `last_read_seq` stays the agents' delta cursor. No table, no
+migration, no `/ws` change (ent#531 is untouched: nothing new rides a broadcast).
+
 **The frontend.** Route `/workspace/inbox` (`WorkspaceInbox`) renders in the same
 `Portal.vue` shell, as a stage branch `isInboxRoute && stage.state === 'ready'`
 after the room branches and before the conversation, so a roster error or an empty
