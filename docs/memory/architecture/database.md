@@ -87,6 +87,7 @@ CREATE TABLE agent_ownership (
     spawned_by_key_id TEXT,                        -- trinity-enterprise#69 Part 2: parent MCP key id (stable identity)
     volume_base_name TEXT,                         -- #1664: base name of the agent's data volumes (NULL = agent_name);
                                                    -- pinned at rename (volumes keep the old name), frozen across re-renames
+    config_storage_format TEXT,                   -- #3722: NULL legacy; volume-v1 requires preserved read-only config
     FOREIGN KEY (owner_id) REFERENCES users(id),
     FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
 );

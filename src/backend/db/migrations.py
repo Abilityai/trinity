@@ -3274,6 +3274,19 @@ def _migrate_agent_sync_state_gc_signals(cursor, conn):
     )
 
 
+def _migrate_agent_config_storage_format(cursor, conn):
+    """#3722: distinguish legacy config from required persistent config volumes.
+
+    No backfill: existing agents retain their original recovery semantics.
+    New persistent creation records volume-v1 atomically with its owner row.
+    """
+    _safe_add_column(
+        cursor, "agent_ownership", "config_storage_format",
+        "ALTER TABLE agent_ownership ADD COLUMN config_storage_format TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_volume_base_name(cursor, conn):
     """#1664 — pin an agent's Docker data-volume identity to the ownership row.
 
@@ -5760,4 +5773,5 @@ MIGRATIONS = [
     ("proactive_consent_not_asked", _migrate_proactive_consent_not_asked),
     ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
     ("admin_email_not_username", _migrate_admin_email_not_username),
+    ("agent_config_storage_format", _migrate_agent_config_storage_format),
 ]

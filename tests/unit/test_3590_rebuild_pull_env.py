@@ -50,7 +50,7 @@ PILOT = "b9-pull"
 # The regression: rebuild from nothing
 # ---------------------------------------------------------------------------
 
-def _drive_rebuild(monkeypatch, agent_name: str, *, mint_key: bool = True) -> dict:
+def _drive_rebuild(monkeypatch, agent_name: str, *, mint_key: bool = True, volume_base=None, storage_format="volume-v1") -> dict:
     """Run the real `recreate_missing_container` with Docker, the DB and the
     sibling env helpers patched out; return the env handed to the shared
     provision tail. `_apply_persisted_auth_env` is stubbed on purpose: the pull
@@ -72,16 +72,30 @@ def _drive_rebuild(monkeypatch, agent_name: str, *, mint_key: bool = True) -> di
     monkeypatch.setattr(mod, "get_agent_default_resources", Mock(return_value={"cpu": "2", "memory": "4g"}))
 
     fake_db = MagicMock()
+    fake_db.get_agent_config_storage_format.return_value = storage_format
     fake_db.get_agent_owner.return_value = {"owner_username": "bob"}
     fake_db.get_resource_limits.return_value = {}
     fake_db.get_git_config.return_value = None
     fake_db.deactivate_agent_mcp_keys.return_value = 0
     fake_db.create_agent_mcp_api_key.return_value = Mock(api_key="trinity_mcp_x") if mint_key else None
-    fake_db.get_volume_base_name.side_effect = lambda n: n
+    volume_base = volume_base or agent_name
+    fake_db.get_volume_base_name.side_effect = lambda n: volume_base
     monkeypatch.setattr(mod, "db", fake_db)
+    import services.docker_utils as docker_utils
+    monkeypatch.setattr(docker_utils, "_resolve_instance_id", lambda: "test-instance")
+    saved_config = SimpleNamespace(name=f"agent-{volume_base}-config", attrs={"Labels": {
+        "trinity.agent-name": volume_base, "trinity.platform": "agent-config",
+        "trinity.instance": "test-instance",
+    }})
+    monkeypatch.setattr(mod, "volume_get", AsyncMock(return_value=saved_config))
 
     asyncio.run(mod.recreate_missing_container(agent_name))
     assert "env_vars" in captured, "the rebuild never reached the provision tail"
+    if storage_format == "volume-v1":
+        assert captured["base_volumes"][f"agent-{volume_base}-config"] == {"bind": "/config", "mode": "ro"}
+    else:
+        mod.volume_get.assert_not_awaited()
+        assert all(mount["bind"] != "/config" for mount in captured["base_volumes"].values())
     return captured["env_vars"]
 
 
@@ -466,3 +480,11 @@ def test_every_caller_of_the_provision_tail_applies_pull_env():
         f"{missing} hand an env to the provision tail without calling apply_pull_mode_env — "
         "a pilot built there runs no pull worker (#3590)"
     )
+
+
+def test_rebuild_retains_config_under_pre_rename_volume_identity(monkeypatch):
+    _drive_rebuild(monkeypatch, "renamed-agent", volume_base="original-agent")
+
+
+def test_3722_legacy_recovery_keeps_stock_behavior_without_adopting_config(monkeypatch):
+    _drive_rebuild(monkeypatch, "legacy-agent", storage_format=None)

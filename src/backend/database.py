@@ -1203,6 +1203,9 @@ class DatabaseManager:
             volume_base, exclude_agent=exclude_agent
         )
 
+    def get_agent_config_storage_format(self, agent_name: str):
+        return self._agent_ops.get_agent_config_storage_format(agent_name)
+
     def get_volume_base_name(self, agent_name: str):
         return self._agent_ops.get_volume_base_name(agent_name)
 

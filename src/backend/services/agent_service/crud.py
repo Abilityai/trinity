@@ -9,6 +9,8 @@ import os
 import re
 import json
 import secrets
+import shutil
+import tempfile
 import docker
 import logging
 from dataclasses import dataclass, field
@@ -62,6 +64,7 @@ from .fork_to_own import (
     saved_token_not_for_agents,
 )
 from . import snapshot_import
+from .config_volume import create_config_volume, remove_created_config_volume, ConfigVolumeHandle, ConfigVolumeConflict
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
 from .capabilities import (
@@ -393,6 +396,7 @@ class _RollbackHandles:
     # the #1667 leftover-volume guard from 409ing the user's retry).
     copy_staging_dir: Optional[str] = None
     copy_volume_name: Optional[str] = None
+    config_volume: Optional[ConfigVolumeHandle] = None
 
 
 def _apply_ephemeral_pregates(config: AgentConfig, current_user: User) -> Optional[str]:
@@ -1985,93 +1989,141 @@ def _stage_config_files(
                 },
             )
 
-    cred_files_dir = Path(f"/tmp/agent-{config.name}-creds")
-    cred_files_dir.mkdir(exist_ok=True)
-
-    # Write template-generated files (.env, .mcp.json, etc.)
-    for filepath, content in generated_files.items():
-        file_path = _safe_cred_file_path(filepath, cred_files_dir)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(file_path, "w") as f:
-            f.write(content)
-
-    agent_config = {
-        "agent": {
-            "base_image": config.base_image,
-            "resources": config.resources,
-            "tools": config.tools,
-            "mcp_servers": config.mcp_servers,
-            "custom_instructions": config.custom_instructions,
-            "credentials": {}  # CRED-002: Credentials injected after creation
-        }
-    }
-
-    config_path = Path(f"/tmp/agent-{config.name}.yaml")
-    with open(config_path, "w") as f:
-        yaml.dump(agent_config, f)
-
-    credentials_path = Path(f"/tmp/agent-{config.name}-credentials.json")
-    with open(credentials_path, "w") as f:
-        json.dump({}, f)  # CRED-002: Empty credentials, injected after creation
-
-    template_volume = None
-    cred_files_volume = None
-    if config.template:
-        if config.template.startswith("github:"):
-            pass  # Agent clones at startup
-        elif config.template.startswith("local:"):
-            # Local template - strip "local:" prefix for path resolution.
-            # Curated templates (under /agent-configs/templates) bind their
-            # host path to /template; the agent's startup.sh copies it to
-            # /home/developer on first boot. Deploy-local templates (under
-            # /data/deployed-templates) do NOT bind here — deploy.py has
-            # already pre-populated the agent's workspace volume directly
-            # via put_archive (#950). The bind-mount transport relied on
-            # backend's /data and the agent's host bind resolving to the
-            # same host path, which was true in prod compose (host bind)
-            # but not in dev compose (named volume).
-            raw_name = config.template[6:]
-            curated_path = _safe_local_template_path(
-                raw_name, _LOCAL_TEMPLATE_ROOTS[0]
-            )
-            if curated_path.exists():
-                # `or`, NOT `os.getenv(key, default)` (#1759): an EMPTY
-                # HOST_TEMPLATES_PATH made `Path("") / name` collapse to the
-                # bare name, which Docker reads as a NAMED VOLUME — an empty
-                # one mounted at /template, i.e. a silently blank template.
-                # That is this issue's bug class, one seam over.
-                host_templates_base = (
-                    os.getenv("HOST_TEMPLATES_PATH") or _default_host_templates_base()
-                )
-                # raw_name already validated by _safe_local_template_path; the
-                # join here is on a value that survived the regex + resolve
-                # barriers above, so the bind source can't traverse out.
-                host_template_path = Path(host_templates_base) / curated_path.name
-                template_volume = {str(host_template_path): {'bind': '/template', 'mode': 'ro'}}
-
-        if generated_files:
-            cred_files_volume = {str(cred_files_dir): {'bind': '/generated-creds', 'mode': 'ro'}}
-
-    # #1197: validate/normalize template resource fields against the allowed
-    # set BEFORE any side effects (MCP key, subscription, container). A
-    # Kubernetes-style `cpu: "0.5"` / `memory: "512Mi"` from a source repo's
-    # template.yaml used to reach the raw `int(cpu)` at container-create and
-    # abort with an opaque ValueError — leaving an orphaned mcp_api_keys row.
-    # Fail fast here with an actionable 400 instead, and write the canonical
-    # values back so the container labels + limits use them.
-    if config.resources is None:
-        config.resources = {}
+    # Persistent config is archived into Docker, so per-attempt private staging
+    # avoids concurrent creators mixing payloads or reusing a deleted owner's
+    # generated files. Ephemeral transport remains unchanged in this fix.
+    staging_root = (Path(tempfile.mkdtemp(prefix="trinity-agent-config-"))
+                    if not config.ephemeral else None)
     try:
-        config.resources['cpu'] = normalize_cpu(
-            config.resources.get('cpu'), _get_default_resource('cpu')
-        )
-        config.resources['memory'] = normalize_memory(
-            config.resources.get('memory'), _get_default_resource('memory')
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        cred_files_dir = (staging_root / "generated-creds" if staging_root
+                          else Path(f"/tmp/agent-{config.name}-creds"))
+        # Keep the containment barrier at each filesystem sink, as in
+        # _install_bundled_avatar. In particular, a legacy ephemeral name must
+        # never turn its /tmp fallback into a path outside the staging root.
+        allowed_root = os.path.join(str((staging_root or Path("/tmp")).resolve()), "")
+        cred_dir_path = os.path.realpath(cred_files_dir)
+        if not cred_dir_path.startswith(allowed_root):
+            raise ValueError("Credential staging directory escaped its root")
+        os.makedirs(cred_dir_path, exist_ok=True)
 
-    return config_path, credentials_path, template_volume, cred_files_volume
+        # Write template-generated files (.env, .mcp.json, etc.)
+        for filepath, content in generated_files.items():
+            file_path = _safe_cred_file_path(filepath, cred_files_dir)
+            credential_root = os.path.join(cred_dir_path, "")
+            file_target = os.path.realpath(file_path)
+            parent_target = os.path.dirname(file_target)
+            if not file_target.startswith(credential_root):
+                raise ValueError("Credential staging file escaped its root")
+            if not parent_target.startswith(allowed_root):
+                raise ValueError("Credential staging parent escaped its root")
+            os.makedirs(parent_target, exist_ok=True)
+            with open(file_target, "w") as f:
+                f.write(content)
+
+        agent_config = {
+            "agent": {
+                "base_image": config.base_image,
+                "resources": config.resources,
+                "tools": config.tools,
+                "mcp_servers": config.mcp_servers,
+                "custom_instructions": config.custom_instructions,
+                "credentials": {}  # CRED-002: Credentials injected after creation
+            }
+        }
+
+        config_path = staging_root / "agent-config.yaml" if staging_root else Path(f"/tmp/agent-{config.name}.yaml")
+        config_target = os.path.realpath(config_path)
+        if not config_target.startswith(allowed_root):
+            raise ValueError("Agent configuration escaped its staging root")
+        with open(config_target, "w") as f:
+            yaml.dump(agent_config, f)
+
+        credentials_path = staging_root / "credentials.json" if staging_root else Path(f"/tmp/agent-{config.name}-credentials.json")
+        credentials_target = os.path.realpath(credentials_path)
+        if not credentials_target.startswith(allowed_root):
+            raise ValueError("Agent credentials escaped their staging root")
+        with open(credentials_target, "w") as f:
+            json.dump({}, f)  # CRED-002: Empty credentials, injected after creation
+
+        template_volume = None
+        cred_files_volume = None
+        if config.template:
+            if config.template.startswith("github:"):
+                pass  # Agent clones at startup
+            elif config.template.startswith("local:"):
+                # Local template - strip "local:" prefix for path resolution.
+                # Curated templates (under /agent-configs/templates) bind their
+                # host path to /template; the agent's startup.sh copies it to
+                # /home/developer on first boot. Deploy-local templates (under
+                # /data/deployed-templates) do NOT bind here — deploy.py has
+                # already pre-populated the agent's workspace volume directly
+                # via put_archive (#950). The bind-mount transport relied on
+                # backend's /data and the agent's host bind resolving to the
+                # same host path, which was true in prod compose (host bind)
+                # but not in dev compose (named volume).
+                raw_name = config.template[6:]
+                curated_path = _safe_local_template_path(
+                    raw_name, _LOCAL_TEMPLATE_ROOTS[0]
+                )
+                curated_root = os.path.join(str(_LOCAL_TEMPLATE_ROOTS[0].resolve()), "")
+                curated_target = os.path.realpath(curated_path)
+                if not curated_target.startswith(curated_root):
+                    raise ValueError("Curated template escaped its root")
+                if os.path.exists(curated_target):
+                    # `or`, NOT `os.getenv(key, default)` (#1759): an EMPTY
+                    # HOST_TEMPLATES_PATH made `Path("") / name` collapse to the
+                    # bare name, which Docker reads as a NAMED VOLUME — an empty
+                    # one mounted at /template, i.e. a silently blank template.
+                    # That is this issue's bug class, one seam over.
+                    host_templates_base = (
+                        os.getenv("HOST_TEMPLATES_PATH") or _default_host_templates_base()
+                    )
+                    # raw_name already validated by _safe_local_template_path; the
+                    # join here is on a value that survived the regex + resolve
+                    # barriers above, so the bind source can't traverse out.
+                    host_template_path = Path(host_templates_base) / curated_path.name
+                    template_volume = {str(host_template_path): {'bind': '/template', 'mode': 'ro'}}
+
+            if generated_files:
+                cred_files_volume = {str(cred_files_dir): {'bind': '/generated-creds', 'mode': 'ro'}}
+
+        # #1197: validate/normalize template resource fields against the allowed
+        # set BEFORE any side effects (MCP key, subscription, container). A
+        # Kubernetes-style `cpu: "0.5"` / `memory: "512Mi"` from a source repo's
+        # template.yaml used to reach the raw `int(cpu)` at container-create and
+        # abort with an opaque ValueError — leaving an orphaned mcp_api_keys row.
+        # Fail fast here with an actionable 400 instead, and write the canonical
+        # values back so the container labels + limits use them.
+        if config.resources is None:
+            config.resources = {}
+        try:
+            config.resources['cpu'] = normalize_cpu(
+                config.resources.get('cpu'), _get_default_resource('cpu')
+            )
+            config.resources['memory'] = normalize_memory(
+                config.resources.get('memory'), _get_default_resource('memory')
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        return config_path, credentials_path, template_volume, cred_files_volume
+    except BaseException:
+        if staging_root is not None:
+            shutil.rmtree(staging_root, ignore_errors=True)
+        raise
+
+
+def _cleanup_persistent_config_staging(staging_root: Path) -> None:
+    # The helper returns only this attempt's private mkdtemp directory.
+    # Keep the deletion sink bounded even if a future caller changes
+    # that return contract; never infer authority from a user filename.
+    staging_parent = os.path.realpath(staging_root)
+    temporary_root = os.path.join(os.path.realpath(tempfile.gettempdir()), "")
+    if not staging_parent.startswith(temporary_root):
+        raise ValueError("Configuration cleanup escaped the temporary root")
+    if not os.path.basename(staging_parent).startswith("trinity-agent-config-"):
+        raise ValueError("Configuration cleanup requires private staging")
+    shutil.rmtree(staging_parent, ignore_errors=True)
 
 
 def _build_base_env(config: AgentConfig) -> dict:
@@ -2461,6 +2513,7 @@ async def _build_volume_mounts(
     template_volume: Optional[dict],
     cred_files_volume: Optional[dict],
     template_shared_folders: Optional[dict],
+    config_volume_name: Optional[str] = None,
 ) -> dict:
     """Assemble the container volume-mount spec: config/creds/encrypted-data
     binds, the durable workspace (skipped for volume-less ghosts, ent#69), the
@@ -2481,16 +2534,19 @@ async def _build_volume_mounts(
     # Removing it here (instead of adding it to recreate_missing_container)
     # makes both paths agree and closes the surface. The volume itself is not
     # deleted, so anything historically written to it remains on the host.
-    volumes = {
-        str(config_path): {'bind': '/config/agent-config.yaml', 'mode': 'ro'},
-        str(credentials_path): {'bind': '/config/credentials.json', 'mode': 'ro'},
-    }
+    volumes = (
+        {config_volume_name: {'bind': '/config', 'mode': 'ro'}}
+        if config_volume_name else {
+            str(config_path): {'bind': '/config/agent-config.yaml', 'mode': 'ro'},
+            str(credentials_path): {'bind': '/config/credentials.json', 'mode': 'ro'},
+        }
+    )
     if not config.ephemeral:
         await _workspace_volume_mount(config, volumes)
 
     if template_volume:
         volumes.update(template_volume)
-    if cred_files_volume:
+    if cred_files_volume and not config_volume_name:
         volumes.update(cred_files_volume)
 
     await _shared_folder_mounts(config, volumes, template_shared_folders)
@@ -2673,7 +2729,7 @@ def _register_agent(
             spawned_by_key_id = parent_key.id if parent_key else None
         except Exception as e:
             logger.warning(f"Could not resolve parent key id for {current_user.agent_name}: {e}")
-    db.register_agent_owner(
+    registered = db.register_agent_owner(
         config.name,
         current_user.username,
         require_email=get_agent_default_require_email(),
@@ -2686,7 +2742,10 @@ def _register_agent(
         # budget overshoot to a single in-flight execution and shrinks
         # the blast radius of an untrusted workspace.
         max_parallel_tasks=(1 if config.ephemeral else None),
+        config_storage_format=(None if config.ephemeral else "volume-v1"),
     )
+    if not registered and not config.ephemeral:
+        raise RuntimeError("Agent ownership registration failed")
 
     # ent#1640: persist the optional display label set at creation. Reuses the
     # same setter as PUT /label (trim + blank→NULL), on the row just created.
@@ -3047,7 +3106,7 @@ def _rollback_failed_creation(handles: _RollbackHandles) -> None:
     # mcp_api_keys row (one per failed attempt). Roll it back too.
     if handles.agent_mcp_key:
         try:
-            db.delete_agent_mcp_api_key(handles.agent_name)
+            db.delete_mcp_api_key(handles.agent_mcp_key.id, handles.agent_mcp_key.username)
         except Exception as cleanup_exc:
             logger.warning(
                 "Failed to roll back MCP key for %s after creation "
@@ -3065,6 +3124,14 @@ def _cleanup_copy_artifacts(handles: _RollbackHandles) -> None:
     Removing the volume keeps the #1667 leftover-volume guard from 409ing the
     user's retry; safe because ``copy_volume_name`` is set only after this
     attempt created+populated it."""
+    if handles.config_volume and docker_client:
+        try:
+            # No force: a container or registered owner that survived a late
+            # failure keeps its configuration. Exact creation claim is checked.
+            if not db.is_agent_name_reserved(handles.agent_name):
+                remove_created_config_volume(docker_client, handles.config_volume)
+        except Exception:
+            logger.warning("Could not reclaim this attempt's configuration volume")
     snapshot_import.cleanup_staging(handles.copy_staging_dir)
     if handles.copy_volume_name and docker_client:
         try:
@@ -3704,169 +3771,257 @@ async def create_agent_internal(
         cred_files_volume,
     ) = _stage_config_files(config, tr.template_data, tr.github_template_path)
 
-    # Phase: Agent-to-Agent Collaboration — mint the agent-scoped MCP key
-    # (a rollback handle, rolled back in the except below).
-    agent_mcp_key, trinity_mcp_url = _mint_agent_mcp_key(config, current_user)
+    try:
+        # Phase: Agent-to-Agent Collaboration — mint the agent-scoped MCP key
+        # (a rollback handle, rolled back in the except below).
+        agent_mcp_key, trinity_mcp_url = _mint_agent_mcp_key(config, current_user)
 
-    env_vars, auto_assigned_subscription_id = _build_env_vars(
-        config, agent_mcp_key, trinity_mcp_url, tr
-    )
-
-    # trinity-enterprise#69: atomic ephemeral quota reservation, placed
-    # immediately before the docker block so every later failure path releases
-    # it via the except/else rollback below.
-    ephemeral_slot_reserved, ephemeral_owner_id = _reserve_ephemeral_slot(
-        config, current_user
-    )
-
-    # AC #3: assemble the rollback handles the except/else read. Only the
-    # orchestrator populates them; each field mirrors a value fixed BEFORE the
-    # docker block, so this is byte-identical to reading the locals in place.
-    handles = _RollbackHandles(
-        agent_name=config.name,
-        agent_mcp_key=agent_mcp_key,
-        git_instance_id=tr.git_instance_id,
-        github_repo_for_agent=tr.github_repo_for_agent,
-        ephemeral_slot_reserved=ephemeral_slot_reserved,
-        ephemeral_owner_id=ephemeral_owner_id,
-        # ent#313: stamped before anything can create a container, so the
-        # rollback can tell a container THIS attempt created from one that was
-        # already there.
-        container_floor_ts=utc_now_iso(),
-        # trinity-enterprise#15: staged snapshot dir travels into the rollback
-        # so a mid-try failure never strands it.
-        copy_staging_dir=(
-            tr.copy_snapshot.staging_dir if tr.copy_snapshot else None
-        ),
-    )
-
-    if docker_client:
-        # ent#313: the except-path needs whatever handle we got. It stays None
-        # when the failure happens inside container creation itself — the
-        # reclaim re-derives it by name under provenance gates.
-        created_container = None
-        try:
-            # Persist the resolved PAT as the per-agent PAT (#347) onto the
-            # agent_git_config row the reservation above just created. Inside
-            # this try so a failure hits the except below and rolls back the
-            # reserved row + MCP key. ent#162 — persist ONLY for a deliberate
-            # identity (fork-to-own #93 or the creator's per-user PAT), NEVER
-            # the `global` tier (Decision 2: keep github_pat_encrypted NULL so
-            # propagation keeps reaching it on admin rotation).
-            if tr.github_pat_tier in ("fork", "per_user") and tr.github_repo_for_agent:
-                if not db.set_agent_github_pat(config.name, tr.github_pat_for_agent):
-                    raise RuntimeError(
-                        f"failed to persist per-agent GitHub PAT for {config.name}"
-                    )
-
-            # trinity-enterprise#15: copy intent — stream the staged snapshot
-            # (+ .trinity-initialized marker) into the workspace volume BEFORE
-            # the container exists; `_workspace_volume_mount` below then adopts
-            # the volume this attempt just created (the #1667 refusal gate
-            # already passed pre-try, so no other owner can claim it).
-            if tr.copy_snapshot:
-                from .deploy import _prepopulate_workspace_from_template
-                # Armed BEFORE the call (review F4): `_prepopulate` creates the
-                # volume first and can fail mid-stream — an unarmed handle
-                # would strand a half-populated volume that 409s the user's
-                # retry via the #1667 guard until the orphan sweep. Safe
-                # single-flight: the #1667 gate already proved no volume
-                # existed pre-try, so anything under this name is ours.
-                handles.copy_volume_name = f"agent-{config.name}-workspace"
-                await asyncio.to_thread(
-                    _prepopulate_workspace_from_template,
-                    config.name,
-                    Path(tr.copy_snapshot.staging_dir),
-                )
-                snapshot_import.cleanup_staging(tr.copy_snapshot.staging_dir)
-                handles.copy_staging_dir = None
-
-            volumes = await _build_volume_mounts(
-                config,
-                config_path,
-                credentials_path,
-                template_volume,
-                cred_files_volume,
-                tr.template_shared_folders,
-            )
-            # #2215: allocate the SSH port HERE — inside the rollback fence and
-            # as close to `containers.run` as possible. Two reasons it is not
-            # up with the other pre-try resolution steps: (1) the allocator now
-            # fails LOUD on a Docker listing fault (a swallowed fault would
-            # allocate 2222 over the existing fleet), and a raise before this
-            # try would strand the `agent_git_config` reservation
-            # `_resolve_template` already wrote — after which every create of
-            # that name fails `agent_git_config already exists`, Cornelius's
-            # next-boot retry included; (2) the per-port Redis reservation is
-            # TTL-bounded (600s), so the ent#15 snapshot prepopulate and the
-            # volume builds above must not eat into it. `auto_allocated_port`
-            # is captured BEFORE the mutation — captured after it, the gate is
-            # always-False and the bind-conflict retry ships dead. Only an
-            # auto-allocated port may move between attempts; a caller-pinned
-            # port never silently changes (a published port differing from the
-            # requested one is a surprise with security texture).
-            auto_allocated_port = config.port is None
-            if config.port is None:
-                config.port = get_next_available_port()
-            container = await _run_agent_container_with_port_retry(
-                config,
-                volumes,
-                env_vars,
-                current_user,
-                ephemeral_expires_at,
-                handles,
-                auto_allocated_port,
-            )
-            created_container = container
-            agent_status = get_agent_status_from_container(container)
-            if tr.copy_snapshot:
-                # trinity-enterprise#15: surface snapshot provenance on the
-                # create response (the endpoint folds it into the audit entry).
-                agent_status.import_snapshot = {
-                    "source_repo": tr.copy_snapshot.source_repo,
-                    "source_branch": tr.copy_snapshot.source_branch,
-                    "head_sha": tr.copy_snapshot.head_sha,
-                    "file_count": tr.copy_snapshot.file_count,
-                }
-            await _broadcast_agent_created(agent_status, ws_manager)
-            # trinity-enterprise#705: tell the CALLER how the git mode was decided.
-            # Set after the broadcast on purpose: /ws is unfiltered (#918) and the
-            # reason names the repo, so it rides the create response only.
-            agent_status.git_mode = tr.git_mode_decision
-            _register_agent(
-                config,
-                current_user,
-                tr.template_data,
-                ephemeral_expires_at,
-                auto_assigned_subscription_id,
-            )
-            await _materialize_agent_files(
-                config,
-                tr.template_data,
-                tr.github_repo_for_agent,
-                tr.fork_upstream_repo,
-                tr.github_pat_for_agent,
-                tr.declared_schedules,
-                current_user.username,
-                tr.declared_plugins,
-                tr.declared_metrics,
-            )
-            return agent_status
-        except Exception as e:
-            _rollback_failed_creation(handles)
-            # ent#313: and the container + its name-keyed Redis state, which the
-            # DB/quota rollback above deliberately left to a watchdog that only
-            # covers ephemeral agents.
-            await _reclaim_failed_creation_container(handles, created_container, e)
-            # trinity-enterprise#15: AFTER the container reclaim, so the volume
-            # this attempt pre-populated is no longer mounted and its removal
-            # keeps the #1667 guard from 409ing the retry.
-            _cleanup_copy_artifacts(handles)
-            logger.error(f"Failed to create agent {config.name}: {e}")
-            raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
-    else:
-        _release_ephemeral_on_no_docker(handles)
-        raise HTTPException(
-            status_code=503,
-            detail="Docker not available - cannot create agents in demo mode"
+        env_vars, auto_assigned_subscription_id = _build_env_vars(
+            config, agent_mcp_key, trinity_mcp_url, tr
         )
+
+        # trinity-enterprise#69: atomic ephemeral quota reservation, placed
+        # immediately before the docker block so every later failure path releases
+        # it via the except/else rollback below.
+        ephemeral_slot_reserved, ephemeral_owner_id = _reserve_ephemeral_slot(
+            config, current_user
+        )
+
+        # AC #3: assemble the rollback handles the except/else read. Only the
+        # orchestrator populates them; each field mirrors a value fixed BEFORE the
+        # docker block, so this is byte-identical to reading the locals in place.
+        handles = _RollbackHandles(
+            agent_name=config.name,
+            agent_mcp_key=agent_mcp_key,
+            git_instance_id=tr.git_instance_id,
+            github_repo_for_agent=tr.github_repo_for_agent,
+            ephemeral_slot_reserved=ephemeral_slot_reserved,
+            ephemeral_owner_id=ephemeral_owner_id,
+            # ent#313: stamped before anything can create a container, so the
+            # rollback can tell a container THIS attempt created from one that was
+            # already there.
+            container_floor_ts=utc_now_iso(),
+            # trinity-enterprise#15: staged snapshot dir travels into the rollback
+            # so a mid-try failure never strands it.
+            copy_staging_dir=(
+                tr.copy_snapshot.staging_dir if tr.copy_snapshot else None
+            ),
+        )
+
+        if docker_client:
+            # ent#313: the except-path needs whatever handle we got. It stays None
+            # when the failure happens inside container creation itself — the
+            # reclaim re-derives it by name under provenance gates.
+            created_container = None
+            registration_committed = False
+            container_failure = None
+            container_submitted = False
+            try:
+                # Persist the resolved PAT as the per-agent PAT (#347) onto the
+                # agent_git_config row the reservation above just created. Inside
+                # this try so a failure hits the except below and rolls back the
+                # reserved row + MCP key. ent#162 — persist ONLY for a deliberate
+                # identity (fork-to-own #93 or the creator's per-user PAT), NEVER
+                # the `global` tier (Decision 2: keep github_pat_encrypted NULL so
+                # propagation keeps reaching it on admin rotation).
+                if tr.github_pat_tier in ("fork", "per_user") and tr.github_repo_for_agent:
+                    if not db.set_agent_github_pat(config.name, tr.github_pat_for_agent):
+                        raise RuntimeError(
+                            f"failed to persist per-agent GitHub PAT for {config.name}"
+                        )
+
+                # trinity-enterprise#15: copy intent — stream the staged snapshot
+                # (+ .trinity-initialized marker) into the workspace volume BEFORE
+                # the container exists; `_workspace_volume_mount` below then adopts
+                # the volume this attempt just created (the #1667 refusal gate
+                # already passed pre-try, so no other owner can claim it).
+                if tr.copy_snapshot:
+                    from .deploy import _prepopulate_workspace_from_template
+                    # Armed BEFORE the call (review F4): `_prepopulate` creates the
+                    # volume first and can fail mid-stream — an unarmed handle
+                    # would strand a half-populated volume that 409s the user's
+                    # retry via the #1667 guard until the orphan sweep. Safe
+                    # single-flight: the #1667 gate already proved no volume
+                    # existed pre-try, so anything under this name is ours.
+                    handles.copy_volume_name = f"agent-{config.name}-workspace"
+                    await asyncio.to_thread(
+                        _prepopulate_workspace_from_template,
+                        config.name,
+                        Path(tr.copy_snapshot.staging_dir),
+                    )
+                    snapshot_import.cleanup_staging(tr.copy_snapshot.staging_dir)
+                    handles.copy_staging_dir = None
+
+                if not config.ephemeral:
+                    seed_dir = Path(next(iter(cred_files_volume))) if cred_files_volume else None
+                    config_task = asyncio.create_task(asyncio.to_thread(
+                        create_config_volume, docker_client, config.name,
+                        config_path, credentials_path, seed_dir, config.base_image,
+                    ))
+                    try:
+                        handles.config_volume = await asyncio.shield(config_task)
+                    except asyncio.CancelledError:
+                        # A thread cannot be canceled. Retain its result before
+                        # rollback/staging cleanup, including repeated cancels.
+                        while not config_task.done():
+                            try:
+                                await asyncio.shield(config_task)
+                            except asyncio.CancelledError:
+                                continue
+                            except Exception:
+                                break  # Worker owns its failure rollback.
+                        if not config_task.cancelled() and config_task.exception() is None:
+                            handles.config_volume = config_task.result()
+                        raise
+                volumes = await _build_volume_mounts(
+                    config,
+                    config_path,
+                    credentials_path,
+                    template_volume,
+                    cred_files_volume,
+                    tr.template_shared_folders,
+                    config_volume_name=handles.config_volume.name if handles.config_volume else None,
+                )
+                # #2215: allocate the SSH port HERE — inside the rollback fence and
+                # as close to `containers.run` as possible. Two reasons it is not
+                # up with the other pre-try resolution steps: (1) the allocator now
+                # fails LOUD on a Docker listing fault (a swallowed fault would
+                # allocate 2222 over the existing fleet), and a raise before this
+                # try would strand the `agent_git_config` reservation
+                # `_resolve_template` already wrote — after which every create of
+                # that name fails `agent_git_config already exists`, Cornelius's
+                # next-boot retry included; (2) the per-port Redis reservation is
+                # TTL-bounded (600s), so the ent#15 snapshot prepopulate and the
+                # volume builds above must not eat into it. `auto_allocated_port`
+                # is captured BEFORE the mutation — captured after it, the gate is
+                # always-False and the bind-conflict retry ships dead. Only an
+                # auto-allocated port may move between attempts; a caller-pinned
+                # port never silently changes (a published port differing from the
+                # requested one is a surprise with security texture).
+                auto_allocated_port = config.port is None
+                if config.port is None:
+                    config.port = get_next_available_port()
+                container_submitted = True
+                container_request = _run_agent_container_with_port_retry(
+                    config,
+                    volumes,
+                    env_vars,
+                    current_user,
+                    ephemeral_expires_at,
+                    handles,
+                    auto_allocated_port,
+                )
+                if config.ephemeral:
+                    container = await container_request
+                else:
+                    container_task = asyncio.create_task(container_request)
+                    try:
+                        container = await asyncio.shield(container_task)
+                    except asyncio.CancelledError:
+                        # Docker's executor worker may still create/start the
+                        # container. Settle it before considering config removal.
+                        while not container_task.done():
+                            try:
+                                await asyncio.shield(container_task)
+                            except asyncio.CancelledError:
+                                continue
+                            except Exception:
+                                break
+                        if not container_task.cancelled() and container_task.exception() is None:
+                            created_container = container_task.result()
+                        elif not container_task.cancelled():
+                            # Preserve the settled worker's error for native
+                            # rollback: a cancelled waiter must not erase a
+                            # name conflict and reclaim a foreign container.
+                            container_failure = container_task.exception()
+                        raise
+                created_container = container
+                agent_status = get_agent_status_from_container(container)
+                if tr.copy_snapshot:
+                    # trinity-enterprise#15: surface snapshot provenance on the
+                    # create response (the endpoint folds it into the audit entry).
+                    agent_status.import_snapshot = {
+                        "source_repo": tr.copy_snapshot.source_repo,
+                        "source_branch": tr.copy_snapshot.source_branch,
+                        "head_sha": tr.copy_snapshot.head_sha,
+                        "file_count": tr.copy_snapshot.file_count,
+                    }
+                await _broadcast_agent_created(agent_status, ws_manager)
+                # trinity-enterprise#705: tell the CALLER how the git mode was decided.
+                # Set after the broadcast on purpose: /ws is unfiltered (#918) and the
+                # reason names the repo, so it rides the create response only.
+                agent_status.git_mode = tr.git_mode_decision
+                _register_agent(
+                    config,
+                    current_user,
+                    tr.template_data,
+                    ephemeral_expires_at,
+                    auto_assigned_subscription_id,
+                )
+                registration_committed = True
+                await _materialize_agent_files(
+                    config,
+                    tr.template_data,
+                    tr.github_repo_for_agent,
+                    tr.fork_upstream_repo,
+                    tr.github_pat_for_agent,
+                    tr.declared_schedules,
+                    current_user.username,
+                    tr.declared_plugins,
+                    tr.declared_metrics,
+                )
+                return agent_status
+            except (Exception, asyncio.CancelledError) as e:
+                # Registration commits owner intent. Preserve registered agents
+                # and fail closed on an unreadable ownership row. A lost Docker
+                # reply alone is not ownership: native reclaim handles it with
+                # the existing name-conflict and creation-provenance guards.
+                preserve = registration_committed
+                if not config.ephemeral and not preserve:
+                    try:
+                        preserve = db.is_agent_name_reserved(config.name)
+                    except Exception:
+                        preserve = True
+                if not config.ephemeral and preserve:
+                    logger.error("Creation outcome requires inspection for %s; retaining resources", config.name)
+                    if isinstance(e, asyncio.CancelledError):
+                        raise
+                    raise HTTPException(status_code=500, detail={
+                        "code": "AGENT_CREATED_SETUP_FAILED" if registration_committed else "AGENT_CREATION_OUTCOME_UNCERTAIN",
+                        "message": "Agent creation may have completed; inspect the existing agent before retrying.",
+                    }) from e
+                if config.ephemeral and isinstance(e, asyncio.CancelledError):
+                    raise  # Keep the pre-existing ephemeral cancellation contract.
+                _rollback_failed_creation(handles)
+                # ent#313: and the container + its name-keyed Redis state, which the
+                # DB/quota rollback above deliberately left to a watchdog that only
+                # covers ephemeral agents.
+                # Before container submission, any same-name container and
+                # Redis state belong to another attempt, including when config
+                # provisioning settles after request cancellation.
+                if container_submitted:
+                    await _reclaim_failed_creation_container(
+                        handles, created_container, container_failure or e
+                    )
+                # trinity-enterprise#15: AFTER the container reclaim, so the volume
+                # this attempt pre-populated is no longer mounted and its removal
+                # keeps the #1667 guard from 409ing the retry.
+                _cleanup_copy_artifacts(handles)
+                if isinstance(e, asyncio.CancelledError):
+                    raise
+                if isinstance(e, ConfigVolumeConflict):
+                    raise HTTPException(status_code=409, detail={
+                        "code": "AGENT_CONFIG_VOLUME_CONFLICT",
+                        "message": "An agent configuration volume already exists; inspect or recover it before retrying creation.",
+                    }) from e
+                logger.error(f"Failed to create agent {config.name}: {e}")
+                raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
+        else:
+            _release_ephemeral_on_no_docker(handles)
+            raise HTTPException(
+                status_code=503,
+                detail="Docker not available - cannot create agents in demo mode"
+            )
+    finally:
+        if not config.ephemeral:
+            _cleanup_persistent_config_staging(config_path.parent)

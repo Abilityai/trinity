@@ -206,7 +206,7 @@ def _load_crud():
 def _config(name="agent-x", template=None):
     """Minimal AgentConfig stand-in for `_stage_config_files`."""
     return types.SimpleNamespace(
-        name=name, template=template, type="business-assistant",
+        name=name, template=template, type="business-assistant", ephemeral=None,
         base_image=None, resources={}, tools=[], mcp_servers=[],
         custom_instructions=None,
     )
