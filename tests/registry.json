@@ -6169,6 +6169,52 @@
         "unit"
       ],
       "description": "PUT /api/users/me/password through the real users router on real SQLite: success swaps the hash and returns a fresh token, the old session is refused at resolve_platform_user_unfloored and the fresh one kept, wrong current password 400 + its own pwchange bucket capped at 429, weak 422 with reasons, unchanged 422, an email-only account 409 never gains a password, a legacy plaintext hash 409, user/agent/system keys 403, no password in audit details, Redis down still changes and reports sessions not signed out. Boot on the raw SQLite cursor and the engine arm: an in-app change survives a restart, a new ADMIN_PASSWORD wins, an in-sync upgrade only gains a fingerprint, drift with no fingerprint re-applies as before, blank env writes nothing, padded ADMIN_USERNAME, corrupt/other-user fingerprints are absent. The env_apply_decision table. The fingerprint is omitted from GET /api/settings, absent on GET /{key}, refused on PUT/DELETE. Mutations: dropping the ENV_SKIP branch turns 4 boot tests red; dropping the cutoff check in resolve_platform_user_unfloored turns the auth-door test red. API keys: revoke_api_keys revokes the caller's user/ops keys and never an agent key or another admin's key; without it the keys stay and are counted; a refused change revokes nothing (scope-filter mutation turns 2 red). The voice socket refuses a signed-out token."
+    },
+    {
+      "file": "unit/test_3751_a2a_bearer_task_scope.py",
+      "feature": "#3751",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "a2a",
+        "auth",
+        "unit"
+      ],
+      "description": "Bearer A2A tasks/get and tasks/cancel answer only for the credential that started the task through A2A, through the real _dispatch_jsonrpc: the starter (key, JWT, agent key, shared user) reads and cancels its own (running and queued); a sibling agent key of the same owner, the owner's key, the owner signed in, a shared user, an admin and the system key get Task not found on get and cancel, with no terminate/queued-cancel/audit; the refusal is byte-identical to an unknown id; same-principal rows not triggered by a2a, rows with no starting user and a re-minted key are refused; the row _mint_a2a_execution writes is pollable by its caller only; AAuth still goes through execution_owned_by. Mutations: removing the gate turns 21 red, removing the triggered_by check turns 5 red."
+    },
+    {
+      "file": "unit/test_3813_rename_agent_name_env.py",
+      "feature": "#3813",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "unit",
+        "agent-lifecycle"
+      ],
+      "description": "recreate_container_with_updated_config re-bakes AGENT_NAME and the trinity.agent-name label from the live name beside TRINITY_AGENT_AUTH_TOKEN (driven through the real recreate, red before the fix on the replayed old name); check_agent_name_env_matches flags a present-and-different env or label, matches absent values and unreadable attrs; start_agent_internal recreates a stuck renamed agent on COLD start only and leaves never-renamed and running agents alone."
+    },
+    {
+      "file": "unit/test_ent858_event_stream_owner_state.py",
+      "feature": "trinity-enterprise#858",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "/ws/events applies the #995 account-state check the other doors apply: dependencies.owner_is_suspended truth table (executed); the handler checks it on the owner row it resolves, closes and returns before accept() (shape check, main.py is not importable in the unit island); the close is identical to an inactive key's. Mutation: removing the guard turns both placement tests red."
+    },
+    {
+      "file": "unit/test_ent860_room_wake_access.py",
+      "feature": "trinity-enterprise#860",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "rooms",
+        "auth",
+        "unit"
+      ],
+      "description": "Through the real shared_sessions._after_landing: every principal is re-checked at wake time with the room-creation rule (_assert_can_reach_agent). A platform member still shared wakes the agent; one whose access is gone does not, and the room gets the 'could not be reached' line; a Workspace principal is held to its roster, never the platform ACL; an agent reply is held to the access of the person whose turn started the chain; a deleted agent is not woken. Mutation: reverting the service turns the 3 platform/agent-chain tests red."
     }
   ]
 }

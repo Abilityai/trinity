@@ -31,7 +31,7 @@ from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services.skill_service import skill_service
-from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_pull_mode_env_matches, check_agent_mcp_key_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name
+from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_agent_name_env_matches, check_pull_mode_env_matches, check_agent_mcp_key_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name
 from services.agent_auth import derive_agent_token
 from utils.helpers import utc_now_iso
 from .file_sharing import check_public_folder_mount_matches
@@ -412,6 +412,12 @@ async def start_agent_internal(agent_name: str) -> dict:
         not check_pull_mode_env_matches(container, agent_name) or
         not mcp_key_match
     )
+
+    # #3813: name drift is cold-start only. Start-on-running is the idempotent
+    # ensure-running path (MCP chat), and a recreate there would kill a live
+    # execution of an agent that has been running under its old name for weeks.
+    if not needs_recreation and not was_already_running:
+        needs_recreation = not check_agent_name_env_matches(container, agent_name)
 
     # #1809: a rebuilt base image is picked up on COLD start only. Evaluated
     # lazily — the Docker round-trip runs only when no other predicate already
@@ -1139,6 +1145,12 @@ async def recreate_container_with_updated_config(
     # once enforcement is on). check_agent_auth_token_env_matches forces this
     # recreate whenever the running token is missing or stale.
     env_vars['TRINITY_AGENT_AUTH_TOKEN'] = derive_agent_token(agent_name)
+    # #3813: the agent's own identity follows the same rule. Replaying the old
+    # AGENT_NAME left a renamed agent's /health, heartbeat, pull workers and
+    # result callback calling in under the dead name (403).
+    # check_agent_name_env_matches repairs agents recreated before this.
+    env_vars['AGENT_NAME'] = agent_name
+    labels['trinity.agent-name'] = agent_name
 
     # #3106: this path replays the OLD Config.Env, so an agent created before
     # OTEL_SDK_DISABLED was injected at create would never gain it on restart,
@@ -1158,16 +1170,12 @@ async def recreate_container_with_updated_config(
     # #1098 TMPDIR idiom above).
     #
     # #1816: EXCEPT for the system agent. This env var is the agent-side
-    # heartbeat loop's gate, and heartbeat_service.authorize_heartbeat accepts
-    # ONLY `scope == "agent"` keys — trinity-system's key is `scope == "system"`,
-    # so arming it buys nothing and costs a permanent 5-second 403 loop
-    # (swallowed agent-side, ~17k backend log lines/day). Matters now because
-    # #1816 makes this recreate a ROUTINE path for the system agent (boot with
-    # the container stopped → base-image adoption), where before it was
-    # incidental. The system agent also has no #1083 result callback and no
-    # #1081 pull worker, so the other two consumers are moot too. Whether the
-    # orchestrator SHOULD be visible to fleet health is a separate design
-    # question (#1816 §10).
+    # heartbeat loop's gate, and #1816 makes this recreate a ROUTINE path for
+    # the system agent (boot with the container stopped → base-image
+    # adoption). Whether the orchestrator SHOULD be visible to fleet health is
+    # a separate design question (#1816 §10). A piloted system agent is the
+    # exception: its pull worker needs the URL, so apply_pull_mode_env below
+    # sets it then and removes it otherwise (#3814).
     if not is_system_agent_name(agent_name):
         env_vars.setdefault(
             'TRINITY_BACKEND_URL',

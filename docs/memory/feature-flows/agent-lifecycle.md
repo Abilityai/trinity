@@ -413,6 +413,11 @@ async def start_agent_internal(agent_name: str) -> dict:
         not mcp_key_match
     )
 
+    # #3813: name drift (AGENT_NAME env or trinity.agent-name label present and
+    # != the live name) recreates on COLD start only, like the image predicate.
+    if not needs_recreation and not was_already_running:
+        needs_recreation = not check_agent_name_env_matches(container, agent_name)
+
     # #1809: image predicate — a rebuilt trinity-agent-base is adopted on the
     # next COLD start. Lazy (the Docker round-trip runs only when no other
     # predicate already fired), gated on `not was_already_running` (a start of

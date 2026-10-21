@@ -144,8 +144,9 @@ async def rename_agent_endpoint(
         new_container_name = f"agent-{sanitized_name}"
         await container_rename(container, new_container_name)
 
-        # Update container labels (need to recreate for label changes)
-        # For now, we'll update just the database and handle labels on next start
+        # Container env and labels change only on recreate. The next start's
+        # recreate re-bakes AGENT_NAME and the trinity.agent-name label from the
+        # new name (#3813, check_agent_name_env_matches).
         #
         # #1159: the running container still carries TRINITY_AGENT_AUTH_TOKEN=
         # derive(old_name); under the new name that token is stale and would 401
